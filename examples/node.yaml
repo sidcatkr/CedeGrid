@@ -1,0 +1,48 @@
+# Generic node configuration; no connection or hardware identity is assumed.
+schema_version: 2
+node_id: example-node
+node_mode: opportunistic
+state_dir: ../.resource-manager-state
+# Strict default. See the recovery contract before selecting burst_replay_delete_extra.
+storage_profile: wal_full
+monitor:
+  interval_ms: 500
+cpu:
+  reserve_physical_cores: 2
+  nice: 10
+ram:
+  reserve_mib: 8192
+  reserve_percent: 5
+gpu:
+  execution_mode: auto
+  # best_effort_occupied requires exact independently authorized external identities.
+  best_effort_external_processes: {}
+  reserve_vram_mib: 3072
+  scale_up_cooldown_ms: 30000
+  protective_shrink_percent: 25
+  active_shrink_percent: 50
+lifecycle:
+  drain_timeout_ms: 3000
+  term_grace_ms: 2000
+  heartbeat_interval_ms: 2000
+  allocation_lease_ms: 10000
+
+# Observation and capability checks do not enable control writes.
+kernel:
+  enabled: true
+  psi: true
+  freshness_intervals: 3
+execution:
+  enabled: false
+  prepare_timeout_ms: 10000
+  admission_timeout_ms: 60000
+  release_confirm_timeout_ms: 10000
+cgroup:
+  enabled: false
+  delegated_root: null
+  authorized_controls: []
+  cpu_weight: 10
+  cpu_max: null
+  memory_high_mib: null
+  memory_max_mib: null
+  allow_kill: false

@@ -1,0 +1,23 @@
+/target/
+/.resource-manager-state/
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm
+resmgr.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+__pycache__/
+.DS_Store
+/.runtime/
+/artifacts/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# Private development evidence and retained failed test fixtures.
+/docs/work-log.md
+/.distributed-service-*/

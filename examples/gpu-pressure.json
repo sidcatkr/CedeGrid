@@ -1,0 +1,249 @@
+[
+  {
+    "elapsed_ms": 0,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 0,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 4096,
+          "utilization_percent": 95,
+          "external_process_ids": [],
+          "external_compute": "idle",
+          "compute_sample_id": null
+        }
+      ],
+      "capabilities": {}
+    },
+    "input": {
+      "allocations": [
+        {
+          "id": "worker-a",
+          "phase": "running",
+          "requested": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 8192
+            }
+          },
+          "observed": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 4096
+            }
+          }
+        }
+      ],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 31000,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 31000,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 4096,
+          "utilization_percent": 95,
+          "external_process_ids": [],
+          "external_compute": "idle",
+          "compute_sample_id": null
+        }
+      ],
+      "capabilities": {}
+    },
+    "input": {
+      "allocations": [
+        {
+          "id": "worker-a",
+          "phase": "running",
+          "requested": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 8192
+            }
+          },
+          "observed": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 4096
+            }
+          }
+        }
+      ],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 31500,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 31500,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 12288,
+          "utilization_percent": 50,
+          "external_process_ids": [
+            4242
+          ],
+          "external_compute": "active",
+          "compute_sample_id": 101
+        }
+      ],
+      "capabilities": {}
+    },
+    "input": {
+      "allocations": [
+        {
+          "id": "worker-a",
+          "phase": "running",
+          "requested": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 8192
+            }
+          },
+          "observed": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 4096
+            }
+          }
+        }
+      ],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 63000,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 63000,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 4096,
+          "utilization_percent": 95,
+          "external_process_ids": [],
+          "external_compute": "idle",
+          "compute_sample_id": null
+        }
+      ],
+      "capabilities": {}
+    },
+    "input": {
+      "allocations": [
+        {
+          "id": "worker-a",
+          "phase": "running",
+          "requested": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 8192
+            }
+          },
+          "observed": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 4096
+            }
+          }
+        }
+      ],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 94000,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 94000,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 4096,
+          "utilization_percent": 95,
+          "external_process_ids": [],
+          "external_compute": "idle",
+          "compute_sample_id": null
+        }
+      ],
+      "capabilities": {}
+    },
+    "input": {
+      "allocations": [
+        {
+          "id": "worker-a",
+          "phase": "running",
+          "requested": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 8192
+            }
+          },
+          "observed": {
+            "cpu_millicores": 1000,
+            "ram_mib": 1024,
+            "gpu_memory_mib": {
+              "example-gpu": 4096
+            }
+          }
+        }
+      ],
+      "explicit_drain": false
+    }
+  }
+]

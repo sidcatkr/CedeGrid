@@ -1,0 +1,14 @@
+{
+  "task_id": "cpu-trial",
+  "assignment_id": "cpu-trial-attempt-1",
+  "argv": ["python3", "-c", "sum(i * i for i in range(100000))"],
+  "cwd": "/",
+  "env": {},
+  "resources": {"cpu_millicores": 1000, "ram_mib": 128, "gpu_memory_mib": {}},
+  "replay_safe": true,
+  "class": "opportunistic",
+  "no_escape": true,
+  "single_process": true,
+  "required_controls": [],
+  "allow_fallback": false
+}

@@ -1,0 +1,83 @@
+[package]
+name = "cedegrid"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Portable policy-driven resource management with explicit capability and safety contracts"
+license = "Apache-2.0"
+repository = "https://github.com/sidcatkr/CedeGrid"
+publish = false
+# Keep private runtime/evidence and credentials out even when locally present.
+# Crates.io publication stays disabled; source releases use a separately reviewed export.
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/src/**/*.rs",
+    "/tests/*.rs",
+    "/tests/test_*.py",
+    "/examples/node.yaml",
+    "/examples/cpu-job.json",
+    "/examples/gpu-pressure.json",
+    "/python/pyproject.toml",
+    "/python/README.md",
+    "/python/LICENSE",
+    "/python/NOTICE",
+    "/python/resmgr/*.py",
+    "/python/tests/*.py",
+    "/python/examples/*.py",
+    "/tools/*.py",
+    "/docs/architecture.md",
+    "/docs/comparison.md",
+    "/docs/coordinator-work.md",
+    "/docs/execution-work.md",
+    "/docs/guarantees.md",
+    "/docs/kernel-assisted-delta.md",
+    "/docs/local-supervision-verification.md",
+    "/docs/milestone-1-verification.md",
+    "/docs/release.md",
+    "/docs/sdk-adapter-work.md",
+    "/docs/soak-harness.md",
+    "/docs/validation.md",
+]
+
+[lib]
+name = "resource_manager"
+
+[[bin]]
+name = "resmgr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+nvml-wrapper = "0.11"
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+# SDK metadata must retain its IEEE-754 values through spool, RPC and state parses.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+sysinfo = "0.38"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "io-util", "fs", "sync"] }
+axum = "0.8"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+sha2 = "0.10"
+hex = "0.4"
+fs2 = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
