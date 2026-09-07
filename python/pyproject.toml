@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resmgr-sdk"
+version = "0.1.0"
+description = "Authenticated CedeGrid client and cooperative worker lifecycle"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = []
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+
+[project.urls]
+Homepage = "https://github.com/sidcatkr/CedeGrid"
+Repository = "https://github.com/sidcatkr/CedeGrid"
+Issues = "https://github.com/sidcatkr/CedeGrid/issues"
+
+[tool.setuptools]
+packages = ["resmgr"]
