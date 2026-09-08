@@ -85,6 +85,8 @@ def _spawn_fields(argv, *, cwd=None, env=None, no_escape=False, single_process=F
         raise ValueError("explicit single_process/no_escape acknowledgement is required")
     directory = None if cwd is None else _cwd(cwd)
     environment = None if env is None else _environment(env)
+    if environment is not None and "CUDA_VISIBLE_DEVICES" in environment:
+        raise ValueError("managed children cannot override parent GPU visibility")
     if request_id is not None:
         _identity(request_id, "request_id")
     request_id = str(uuid.uuid4()) if request_id is None else request_id
@@ -166,11 +168,16 @@ class ManagedChild:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             result = self.status()
-            if not isinstance(result, dict) or result.get("state") not in {"reserved", "prepared", "authorized", "running", "draining", "needs_reconciliation", "released"}:
+            state = result.get("state") if isinstance(result, dict) else None
+            # child_response() maps Reserved/Prepared/Authorized to "preparing".
+            # These are wire states, not the internal journal phase enum.
+            if not isinstance(state, str) or state not in {
+                "preparing", "running", "draining", "needs_reconciliation", "released"
+            }:
                 raise _InvalidReply("invalid child status reply")
-            if result["state"] == "released":
+            if state == "released":
                 return result
-            if result["state"] == "needs_reconciliation":
+            if state == "needs_reconciliation":
                 raise RuntimeError("child remains reserved and requires reconciliation")
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("child wait expired; the child was not signaled")

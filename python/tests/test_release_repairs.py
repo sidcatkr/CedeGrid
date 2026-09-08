@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-from resmgr.process import ManagedChild, SpawnUncertain, spawn_managed
+from resmgr.process import ManagedChild, SpawnUncertain, _InvalidReply, spawn_managed
 
 
 class SpawnValidationTests(unittest.TestCase):
@@ -15,6 +15,7 @@ class SpawnValidationTests(unittest.TestCase):
             {"env": {"A": 1}}, {"env": {"A": "x\0y"}},
             {"env": {"RESMGR_SUPERVISOR_TOKEN": "x"}},
             {"env": {"CEDEGRID_SUPERVISOR_TOKEN": "x"}},
+            {"env": {"CUDA_VISIBLE_DEVICES": "0"}},
             {"request_id": ""}, {"request_id": "../x"}, {"request_id": 1},
             {"request_id": "a" * 129}, {"no_escape": 1}, {"single_process": 1},
         ]
@@ -55,6 +56,28 @@ class SpawnValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     child.wait(**args)
                 factory.return_value.request.assert_not_called()
+
+    def test_wait_accepts_rust_preparing_wire_state_until_confirmed_release(self):
+        with patch("resmgr.process._SupervisorClient") as factory, patch("resmgr.process.time.sleep"):
+            replies = [
+                {"ok": True, "child_id": "child-1", "state": state}
+                for state in ("preparing", "running", "draining", "released")
+            ]
+            factory.return_value.request.side_effect = replies
+            child = ManagedChild(factory.return_value, "child-1")
+            self.assertEqual(child.wait(), replies[-1])
+            self.assertEqual(factory.return_value.request.call_count, 4)
+            self.assertTrue(all(call.args[0] == "status" for call in factory.return_value.request.call_args_list))
+
+    def test_wait_rejects_malformed_states_without_signaling(self):
+        for response in ({"state": []}, {"state": {}}, {"state": None}, {"state": 1},
+                         {"state": "not-a-state"}, {}, [], None):
+            with self.subTest(response=response), patch("resmgr.process._SupervisorClient") as factory:
+                factory.return_value.request.return_value = response
+                child = ManagedChild(factory.return_value, "child-1")
+                with self.assertRaises(_InvalidReply):
+                    child.wait()
+                factory.return_value.request.assert_called_once_with("status", child_id="child-1")
 
 
 if __name__ == "__main__":
