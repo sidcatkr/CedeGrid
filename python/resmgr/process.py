@@ -13,7 +13,7 @@ import uuid
 
 def _text(value, name, *, empty=False):
     if not isinstance(value, str) or "\x00" in value or (not empty and not value):
-        raise ValueError(f"{name} must be a string without NUL and with the required nonempty value")
+        raise ValueError(f"{name} must be a {'possibly empty ' if empty else 'nonempty '}string without NUL")
     return value
 
 
@@ -50,7 +50,8 @@ def _interval(value, name, *, zero=False):
 def _argv(value):
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError("argv must be a nonempty list or tuple, not a string")
-    return [_text(item, "argv entry", empty=index != 0) for index, item in enumerate(value)]
+    result = [_text(item, "argv entry", empty=index != 0) for index, item in enumerate(value)]
+    return result
 
 
 def _cwd(value):
@@ -125,7 +126,8 @@ class _SupervisorClient:
         body = json.dumps({"version": 1, "token": self.token, "op": op, **fields}, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         if len(body) > 65536:
             raise ValueError("supervisor request exceeds 64 KiB")
-        # Keep RPC in this process because the supervisor verifies the socket peer.
+        # Keep this request in the workload process: the supervisor verifies the
+        # Unix socket peer identity, not an unauthenticated helper subprocess.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
             stream.settimeout(self.timeout)
             stream.connect(self.endpoint)
@@ -154,7 +156,7 @@ class ManagedChild:
         return self._client.request("status", child_id=self.child_id)
 
     def stop(self):
-        """Request verified termination; wait separately for release evidence."""
+        """Request verified termination; call wait() separately for release evidence."""
         return self._client.request("stop", child_id=self.child_id)
 
     def wait(self, timeout=None, poll_interval=0.1):
@@ -177,6 +179,7 @@ class ManagedChild:
 
 def spawn_managed(argv, *, cwd=None, env=None, no_escape=False, single_process=False, request_id=None):
     """Spawn a single managed child; ambiguous acknowledgements retain request_id."""
+    # Validate every caller-controlled field before reading supervisor credentials.
     fields = _spawn_fields(argv, cwd=cwd, env=env, no_escape=no_escape,
                            single_process=single_process, request_id=request_id)
     client = _SupervisorClient.from_env()
