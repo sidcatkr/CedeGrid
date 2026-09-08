@@ -1,13 +1,12 @@
 """Regression checks for the scoped SDK repairs, not full release qualification."""
 import hashlib
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from resmgr.client import Client, RemoteError, command_task
+from resmgr.client import Client, command_task
 from resmgr.worker import sync_directory
 
 
@@ -81,8 +80,12 @@ class ClientValidationTests(unittest.TestCase):
                 "ca_cert": "~/ca.pem", "certificate": "$HOME/cert.pem", "private_key": "${HOME}/key.pem"}}))
             with patch.object(Client, "__init__", return_value=None) as constructor:
                 Client.from_config(config)
-            self.assertEqual(constructor.call_args.kwargs["ca"], config.parent / "~/ca.pem")
-            self.assertEqual(constructor.call_args.kwargs["certificate"], config.parent / "$HOME/cert.pem")
+            # macOS temporary directories may be reached through /var -> /private/var.
+            # The contract canonicalizes the config file, but never expands its values.
+            base = config.parent.resolve()
+            self.assertEqual(constructor.call_args.kwargs["ca"], base / "~/ca.pem")
+            self.assertEqual(constructor.call_args.kwargs["certificate"], base / "$HOME/cert.pem")
+            self.assertEqual(constructor.call_args.kwargs["private_key"], base / "${HOME}/key.pem")
 
     def test_unknown_and_duplicate_config_fields_fail_before_constructor(self):
         with tempfile.TemporaryDirectory() as temporary:
