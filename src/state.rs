@@ -6,6 +6,7 @@
 //! or make a workload's external side effects idempotent.
 
 use crate::model::{Decision, Snapshot};
+use crate::namespace::{Namespace, NamespaceGuard};
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -17,12 +18,10 @@ use std::time::Duration;
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
 #[cfg(unix)]
 const INITIALIZATION_LOCK_FILENAME: &str = ".storage-profile.lock";
-/// Default WAL schema stays readable by previous compatible releases.
-pub const SCHEMA_VERSION: i64 = 2;
-/// DELETE/EXTRA uses version 3 to make old binaries refuse before journal changes.
-pub const DELETE_EXTRA_SCHEMA_VERSION: i64 = 3;
-/// Replayable local state uses version 4 to fence previous strong-only readers.
-pub const MAX_SCHEMA_VERSION: i64 = 4;
+/// Unified 0.2 schema fence. Legacy 0.1 databases require explicit offline upgrade.
+pub const SCHEMA_VERSION: i64 = 5;
+pub const DELETE_EXTRA_SCHEMA_VERSION: i64 = 5;
+pub const MAX_SCHEMA_VERSION: i64 = 5;
 
 /// SQLite transaction and storage-assurance profile. The replayable variant is
 /// an explicit deployment opt-in for non-authoritative, replay-safe local state.
@@ -327,6 +326,8 @@ pub struct StateStore {
     pub(crate) connection: Connection,
     path: PathBuf,
     profile: StorageProfile,
+    // Last field: SQLite must close before the final lifecycle reference.
+    namespace_guard: NamespaceGuard,
 }
 
 impl StateStore {
@@ -349,6 +350,17 @@ impl StateStore {
     /// legacy profile, or migrates schemas. SQLite may maintain its own normal
     /// WAL/rollback bookkeeping for an already initialized database.
     pub fn open_existing_with_profile(state_dir: &Path, profile: StorageProfile) -> Result<Self> {
+        ensure_existing_state(state_dir)?;
+        let guard = Namespace::new(state_dir)?.acquire(None, Duration::from_secs(30))?;
+        Self::open_existing_with_profile_guarded(state_dir, profile, guard)
+    }
+
+    pub fn open_existing_with_profile_guarded(
+        state_dir: &Path,
+        profile: StorageProfile,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
+        namespace_guard.validate_root(state_dir)?;
         ensure!(
             runtime_sqlite_supported(),
             "SQLite {} is unsupported: require >=3.51.3",
@@ -407,6 +419,7 @@ impl StateStore {
             connection,
             path,
             profile,
+            namespace_guard,
         };
         store.verify_durability()?;
         ensure!(
@@ -432,6 +445,30 @@ impl StateStore {
         profile: StorageProfile,
         busy_timeout: Duration,
     ) -> Result<Self> {
+        let guard = Namespace::new(state_dir)?.acquire(None, busy_timeout)?;
+        Self::open_with_profile_timeout_guarded(state_dir, profile, busy_timeout, guard)
+    }
+
+    pub fn open_with_profile_guarded(
+        state_dir: &Path,
+        profile: StorageProfile,
+        guard: NamespaceGuard,
+    ) -> Result<Self> {
+        Self::open_with_profile_timeout_guarded(state_dir, profile, Duration::from_secs(5), guard)
+    }
+
+    fn open_with_profile_timeout_guarded(
+        state_dir: &Path,
+        profile: StorageProfile,
+        busy_timeout: Duration,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
+        namespace_guard.validate_root(state_dir)?;
+        validate_private_state_leaf(state_dir)?;
+        if state_dir.exists() {
+            reject_database_links(&state_dir.canonicalize()?)?;
+        }
+        reject_legacy_before_mutation(state_dir)?;
         ensure!(
             busy_timeout.as_millis() <= i32::MAX as u128,
             "SQLite busy timeout exceeds supported range"
@@ -476,6 +513,10 @@ impl StateStore {
         connection.busy_timeout(busy_timeout)?;
         let existing_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        ensure!(
+            existing_version == 0 || existing_version == SCHEMA_VERSION,
+            "state upgrade required: schema {existing_version}; use offline state upgrade"
+        );
         ensure!(
             existing_version >= 0,
             "invalid negative database schema {existing_version}"
@@ -532,6 +573,7 @@ impl StateStore {
             connection,
             path,
             profile,
+            namespace_guard,
         };
         store.migrate()?;
         store.verify_durability()?;
@@ -554,6 +596,36 @@ impl StateStore {
     }
 
     fn open_read_only_checked(state_dir: &Path, expected: Option<StorageProfile>) -> Result<Self> {
+        ensure_existing_state(state_dir)?;
+        let guard = Namespace::new(state_dir)?.acquire(None, Duration::from_secs(30))?;
+        Self::open_read_only_guarded(state_dir, expected, guard)
+    }
+
+    pub fn open_read_only_guarded(
+        state_dir: &Path,
+        expected: Option<StorageProfile>,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
+        Self::open_read_only_format_guarded(state_dir, expected, namespace_guard, false)
+    }
+    pub(crate) fn open_legacy_read_only_guarded(
+        state_dir: &Path,
+        profile: StorageProfile,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
+        ensure!(
+            namespace_guard.is_exclusive(),
+            "legacy state inspection requires exclusive namespace protection"
+        );
+        Self::open_read_only_format_guarded(state_dir, Some(profile), namespace_guard, true)
+    }
+    fn open_read_only_format_guarded(
+        state_dir: &Path,
+        expected: Option<StorageProfile>,
+        namespace_guard: NamespaceGuard,
+        allow_legacy: bool,
+    ) -> Result<Self> {
+        namespace_guard.validate_root(state_dir)?;
         ensure!(
             runtime_sqlite_supported(),
             "SQLite {} is unsupported: require >=3.51.3",
@@ -589,9 +661,35 @@ impl StateStore {
             connection,
             path,
             profile,
+            namespace_guard,
         };
-        store.verify_durability()?;
+        if allow_legacy {
+            let settings = store.durability_settings()?;
+            let legacy = match profile {
+                StorageProfile::WalFull => 2,
+                StorageProfile::DeleteExtra => 3,
+                StorageProfile::BurstReplayDeleteExtra => 4,
+            };
+            ensure!(
+                !profile.is_replayable()
+                    && matches!(settings.schema_version, version if version == legacy || version == SCHEMA_VERSION),
+                "unsupported legacy snapshot schema"
+            );
+            ensure!(
+                settings
+                    .journal_mode
+                    .eq_ignore_ascii_case(profile.journal_mode()),
+                "legacy snapshot storage profile mismatch"
+            );
+            verify_assurance(&store.connection, profile)?;
+        } else {
+            store.verify_durability()?;
+        }
         Ok(store)
+    }
+
+    pub fn namespace_guard(&self) -> NamespaceGuard {
+        self.namespace_guard.clone()
     }
 
     pub fn storage_profile(&self) -> StorageProfile {
@@ -738,11 +836,8 @@ impl StateStore {
             )?;
         }
         verify_assurance(&transaction, self.profile)?;
-        if self.profile != StorageProfile::WalFull {
-            // Earlier strong-only readers refuse the replayable schema before
-            // journal configuration, including DELETE/EXTRA readers.
-            transaction.pragma_update(None, "user_version", self.profile.schema_version())?;
-        }
+        // Every profile fences all 0.1 writable readers.
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
     }
@@ -965,6 +1060,279 @@ impl StateStore {
     pub fn status(&self, task_id: &str) -> Result<TaskStatus> {
         Ok(self.task(task_id)?.status)
     }
+}
+
+fn ensure_existing_state(state_dir: &Path) -> Result<()> {
+    let directory =
+        std::fs::symlink_metadata(state_dir).context("existing state directory is missing")?;
+    ensure!(
+        directory.is_dir() && !directory.file_type().is_symlink(),
+        "existing state must be a real directory"
+    );
+    let database = std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME))
+        .context("existing state database is missing")?;
+    ensure!(
+        database.is_file() && !database.file_type().is_symlink(),
+        "existing database must be a regular file"
+    );
+    Ok(())
+}
+
+fn reject_legacy_before_mutation(state_dir: &Path) -> Result<()> {
+    let path = state_dir.join(DATABASE_FILENAME);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "database must be a regular file"
+    );
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+    // Use SQLite's own inode bookkeeping. Opening and closing an independent
+    // std::fs::File for the header could discard another connection's POSIX locks.
+    let probe = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let version: i64 = match probe.pragma_query_value(None, "user_version", |r| r.get(0)) {
+        Ok(version) => version,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK =>
+        {
+            inspect_hot_rollback_schema(&probe, state_dir)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    require_current_schema(version)
+}
+
+fn require_current_schema(version: i64) -> Result<()> {
+    ensure!(
+        version <= SCHEMA_VERSION,
+        "database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+    );
+    ensure!(
+        version == 0 || version == SCHEMA_VERSION,
+        "state upgrade required: database schema {version}; supported schema is {SCHEMA_VERSION}; unsupported future schemas must not be modified"
+    );
+    Ok(())
+}
+
+/// A read-only PRAGMA cannot inspect a hot DELETE journal: it would need to
+/// restore database pages first. Recover a private copy under the original
+/// SQLite VFS's shared lock, then authorize ordinary recovery only after both
+/// the on-disk header and the recovered schema pass the fence.
+///
+/// In particular, do not copy the main database through std::fs::File. Closing
+/// an independent descriptor can discard POSIX locks held by other SQLite
+/// connections in this process. xRead uses SQLite's existing managed handle.
+fn inspect_hot_rollback_schema(probe: &Connection, state_dir: &Path) -> Result<i64> {
+    use rusqlite::ffi;
+    use std::io::{Read, Write};
+
+    const INSPECTION_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
+    const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+
+    struct SharedVfsFile<'a> {
+        file: *mut ffi::sqlite3_file,
+        methods: &'a ffi::sqlite3_io_methods,
+        _connection: &'a Connection,
+    }
+    impl SharedVfsFile<'_> {
+        fn read(&self, offset: i64, bytes: &mut [u8]) -> Result<()> {
+            let read = self
+                .methods
+                .xRead
+                .context("SQLite VFS has no read method")?;
+            // The connection owns file and its method table for this guard's
+            // lifetime. The destination is valid for exactly bytes.len() bytes.
+            let code = unsafe {
+                read(
+                    self.file,
+                    bytes.as_mut_ptr().cast(),
+                    i32::try_from(bytes.len())?,
+                    offset,
+                )
+            };
+            ensure!(code == ffi::SQLITE_OK, "cannot inspect SQLite file: {code}");
+            Ok(())
+        }
+        fn size(&self) -> Result<i64> {
+            let size = self
+                .methods
+                .xFileSize
+                .context("SQLite VFS has no size method")?;
+            let mut bytes = 0;
+            let code = unsafe { size(self.file, &mut bytes) };
+            ensure!(code == ffi::SQLITE_OK, "cannot size SQLite file: {code}");
+            Ok(bytes)
+        }
+    }
+    impl Drop for SharedVfsFile<'_> {
+        fn drop(&mut self) {
+            if let Some(unlock) = self.methods.xUnlock {
+                // This read-only connection has no active transaction after
+                // READONLY_ROLLBACK. Release only its manually acquired lock.
+                unsafe { unlock(self.file, ffi::SQLITE_LOCK_NONE) };
+            }
+        }
+    }
+    struct InspectionDirectory(std::path::PathBuf);
+    impl Drop for InspectionDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    // FILE_POINTER returns the sqlite3_file owned by this live connection.
+    // No SQLite calls use the connection while the VFS lock is held.
+    let code = unsafe {
+        ffi::sqlite3_file_control(
+            probe.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            std::ptr::from_mut(&mut file).cast(),
+        )
+    };
+    ensure!(
+        code == ffi::SQLITE_OK && !file.is_null(),
+        "SQLite VFS cannot safely inspect hot rollback state"
+    );
+    let methods = unsafe { (*file).pMethods.as_ref() }.context("missing SQLite VFS methods")?;
+    let lock = methods.xLock.context("SQLite VFS has no lock method")?;
+    ensure!(methods.xUnlock.is_some(), "SQLite VFS has no unlock method");
+    let code = unsafe { lock(file, ffi::SQLITE_LOCK_SHARED) };
+    ensure!(
+        code == ffi::SQLITE_OK,
+        "cannot lock hot rollback state for schema inspection: {code}"
+    );
+    let locked = SharedVfsFile {
+        file,
+        methods,
+        _connection: probe,
+    };
+    let check_reserved = methods
+        .xCheckReservedLock
+        .context("SQLite VFS cannot verify writer exclusion")?;
+    let mut reserved = 0;
+    let code = unsafe { check_reserved(file, &mut reserved) };
+    ensure!(
+        code == ffi::SQLITE_OK && reserved == 0,
+        "active writer prevents hot rollback schema inspection"
+    );
+    let size = locked.size()?;
+    ensure!(
+        size >= 100 && u64::try_from(size)? <= INSPECTION_LIMIT,
+        "hot rollback schema inspection requires a database within the 16 GiB inspection bound"
+    );
+    let mut header = [0; 100];
+    locked.read(0, &mut header)?;
+    ensure!(
+        &header[..16] == b"SQLite format 3\0" && header[18] == 1 && header[19] == 1,
+        "hot rollback schema inspection requires a valid rollback database header"
+    );
+    require_current_schema(i64::from(i32::from_be_bytes(
+        header[60..64].try_into().expect("four-byte schema field"),
+    )))?;
+
+    let directory = std::env::temp_dir().join(format!(
+        "cedegrid-schema-inspection-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory)?;
+    let directory = InspectionDirectory(directory.canonicalize()?);
+    let copied_path = directory.0.join(DATABASE_FILENAME);
+    let mut destination = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&copied_path)?;
+    let mut buffer = vec![0; 1024 * 1024];
+    let mut offset = 0;
+    while offset < size {
+        let count = usize::try_from((size - offset).min(buffer.len() as i64))?;
+        locked.read(offset, &mut buffer[..count])?;
+        destination.write_all(&buffer[..count])?;
+        offset += count as i64;
+    }
+    drop(destination);
+    ensure!(
+        locked.size()? == size,
+        "database changed during schema inspection"
+    );
+
+    let journal_name = format!("{DATABASE_FILENAME}-journal");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    match options.open(state_dir.join(&journal_name)) {
+        Ok(mut source) => {
+            let metadata = source.metadata()?;
+            ensure!(
+                metadata.is_file() && metadata.len() <= INSPECTION_LIMIT,
+                "hot rollback journal exceeds inspection bound or is not regular"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                ensure!(
+                    metadata.nlink() == 1 && metadata.uid() == unsafe { libc::geteuid() },
+                    "rollback journal must be owned and singly linked"
+                );
+            }
+            // Production state never uses ATTACH/multi-database transactions.
+            // A super-journal tail could refer outside this private copy; do
+            // not let inspection follow or remove an external super-journal.
+            if metadata.len() >= JOURNAL_MAGIC.len() as u64 {
+                use std::io::{Seek, SeekFrom};
+                source.seek(SeekFrom::End(-(JOURNAL_MAGIC.len() as i64)))?;
+                let mut tail = [0; 8];
+                source.read_exact(&mut tail)?;
+                ensure!(
+                    tail != JOURNAL_MAGIC,
+                    "super-journal requires explicit offline inspection"
+                );
+                source.seek(SeekFrom::Start(0))?;
+            }
+            let mut target = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.0.join(journal_name))?;
+            let copied = std::io::copy(
+                &mut Read::by_ref(&mut source).take(INSPECTION_LIMIT + 1),
+                &mut target,
+            )?;
+            ensure!(
+                copied == metadata.len() && source.metadata()?.len() == metadata.len(),
+                "rollback journal changed during schema inspection"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // The original stays locked and unchanged while SQLite interprets and
+    // recovers its own journal format on this isolated copy.
+    let recovered = Connection::open_with_flags(
+        &copied_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let version: i64 = recovered.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    require_current_schema(version)?;
+    Ok(version)
 }
 
 fn read_task(connection: &Connection, task_id: &str) -> Result<TaskRecord> {
@@ -1245,11 +1613,22 @@ fn reject_database_links(directory: &Path) -> Result<()> {
     ] {
         let path = directory.join(name);
         match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => ensure!(
-                metadata.file_type().is_file(),
-                "database and WAL files must be regular files, not links: {}",
-                path.display()
-            ),
+            Ok(metadata) => {
+                ensure!(
+                    metadata.file_type().is_file(),
+                    "database and sidecars must be regular files: {}",
+                    path.display()
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    ensure!(
+                        metadata.nlink() == 1 && metadata.uid() == unsafe { libc::geteuid() },
+                        "database and sidecars must be owned and singly linked: {}",
+                        path.display()
+                    );
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("cannot inspect database file"),
         }

@@ -1,7 +1,7 @@
 //! Explicit operator-owned GPU runtime test; never runs in the default suite.
 #![cfg(target_os = "linux")]
 use anyhow::Result;
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     model::Resources,
     rootless::RootlessBackend,
@@ -43,9 +43,9 @@ impl SupervisorControl for GpuReadyDrain {
 #[test]
 #[ignore = "requires approved Linux GPU UUID, Python CUDA environment and bounded runtime authorization"]
 fn owned_cuda_context_is_observed_then_released_after_drain() {
-    let uuid = std::env::var("RESMGR_TEST_GPU_UUID").expect("explicit approved GPU UUID");
-    let python = std::env::var("RESMGR_TEST_PYTHON").expect("qualified isolated Python");
-    let evidence = std::env::var_os("RESMGR_GPU_EVIDENCE")
+    let uuid = std::env::var("CEDEGRID_TEST_GPU_UUID").expect("explicit approved GPU UUID");
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").expect("qualified isolated Python");
+    let evidence = std::env::var_os("CEDEGRID_GPU_EVIDENCE")
         .map(PathBuf::from)
         .expect("retained evidence path required");
     let home = PathBuf::from(std::env::var("HOME").unwrap())
@@ -118,7 +118,7 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         &options,
         &store,
         &mut backend,
-        &PathBuf::from(env!("CARGO_BIN_EXE_resmgr")),
+        &PathBuf::from(env!("CARGO_BIN_EXE_cedegrid")),
         &mut control,
     )
     .unwrap();

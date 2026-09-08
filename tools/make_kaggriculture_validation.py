@@ -8,11 +8,11 @@ import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
-from resmgr import command_task, sha256_file
+from cedegrid import command_task, sha256_file
 from validation_runtime import atomic_json, inside_home, home_executable
 
 IMPLEMENTATION_FILES = ('training/self_play.py', 'training/train.py',
-                        'integration/resmgr/workflow.py', 'integration/resmgr/worker.py')
+                        'integration/cedegrid/workflow.py', 'integration/cedegrid/worker.py')
 
 
 def generate(root, run_id, python, candidate, gpu_uuid, client_config, node_id='anchor', games=12, device='cuda:0', seed_id=None):
@@ -32,13 +32,13 @@ def generate(root, run_id, python, candidate, gpu_uuid, client_config, node_id='
     manager = inside_home(root / 'source/ResourceManager')
     python=home_executable(python)
     candidate, client_config = map(inside_home, (candidate, client_config))
-    for path in (python, candidate, client_config, application / 'training/self_play.py', manager / 'python/resmgr/__init__.py'):
+    for path in (python, candidate, client_config, application / 'training/self_play.py', manager / 'python/cedegrid/__init__.py'):
         if not path.is_file():
             raise ValueError(f'required installed path missing: {path}')
     snapshot = candidate.parent / 'snapshot_manifest.json'
     model = candidate.parent / 'weights/policy_value.ts'
     from importlib.util import spec_from_file_location, module_from_spec
-    worker_spec = spec_from_file_location('validation_adapter_worker', application / 'integration/resmgr/worker.py')
+    worker_spec = spec_from_file_location('validation_adapter_worker', application / 'integration/cedegrid/worker.py')
     worker = module_from_spec(worker_spec)
     worker_spec.loader.exec_module(worker)
     worker.verify_snapshot(candidate, sha256_file(snapshot), sha256_file(model))
@@ -82,16 +82,16 @@ def generate(root, run_id, python, candidate, gpu_uuid, client_config, node_id='
         'gpu_uuid': gpu_uuid, 'device': device, 'model_sha256': profile['model_sha256'], 'snapshot_sha256': profile['snapshot_sha256'],
         'league_sha256': sha256_file(league), 'games': games, 'workers': 1,
         'implementation_files': {name: sha256_file(application / name) for name in IMPLEMENTATION_FILES},
-        'executed': False, 'commands': {'pool': ['resmgr', 'pool', '--deployment', str(client_config), '--spec', str(output / 'command-pool.json')],
-            'submit': ['resmgr', 'submit', '--deployment', str(client_config), '--job', str(output / 'command-job.json')],
-            'cooperative': [str(python), '-m', 'integration.resmgr', 'run', '--config', str(output / 'cooperative.json')]}}
+        'executed': False, 'commands': {'pool': ['cedegrid', 'pool', '--deployment', str(client_config), '--spec', str(output / 'command-pool.json')],
+            'submit': ['cedegrid', 'submit', '--deployment', str(client_config), '--job', str(output / 'command-job.json')],
+            'cooperative': [str(python), '-m', 'integration.cedegrid', 'run', '--config', str(output / 'cooperative.json')]}}
     atomic_json(output / 'manifest.json', manifest)
     return manifest
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', default=str(Path.home() / '.local/share/resmgr-validation'))
+    parser.add_argument('--root', default=str(Path.home() / '.local/share/cedegrid-validation'))
     for name in ('run-id', 'python', 'candidate', 'client-config'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--gpu-uuid')

@@ -1,4 +1,4 @@
-use resource_manager::kernel::{
+use cedegrid::kernel::{
     CpuUsageStatus, CpuUsageTracker, KernelCollector, KernelConfig, PressureResource,
     PressureScope, PressureStatus, PressureTracker, ProbeRoots, inspect_control,
     parse_cgroup_mounts, parse_cpu_list, parse_cpu_max, parse_cpu_stat, parse_psi,

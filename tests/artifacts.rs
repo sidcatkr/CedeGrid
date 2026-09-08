@@ -1,4 +1,4 @@
-use resource_manager::{artifacts::ArtifactStore, protocol::ArtifactRef};
+use cedegrid::{artifacts::ArtifactStore, protocol::ArtifactRef};
 use sha2::{Digest, Sha256};
 fn dir() -> tempfile::TempDir {
     tempfile::Builder::new()

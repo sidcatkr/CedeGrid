@@ -12,11 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'tools'))
 import connection_proxy as proxy
+from runtime_config import runtime_toml
 
 
 class PublicProxyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='.resmgr-proxy-test-', dir=Path.home())
+        temporary = tempfile.TemporaryDirectory(prefix='.cedegrid-proxy-test-', dir=Path.home())
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         for name in ('ca.pem', 'server.pem'):
@@ -24,7 +25,7 @@ class PublicProxyTests(unittest.IsolatedAsyncioTestCase):
         self.deployment = {'listen': '127.0.0.1:19002',
                            'tls': {'ca_cert': str(self.root / 'ca.pem'), 'certificate': str(self.root / 'server.pem')},
                            'clients': {'a' * 64: {'role': 'operator'}, 'b' * 64: {'role': 'node', 'node_id': 'burst'}}}
-        self.path = self.root / 'coordinator.json'; self.path.write_text(json.dumps(self.deployment))
+        self.path = self.root / 'coordinator.toml'; self.path.write_text(runtime_toml(self.deployment, 'coordinator'))
         self.config = {'execution_approved': True, 'listen': ['192.0.2.10', 19001],
                        'target': ['127.0.0.1', 19002], 'duration_seconds': 1, 'max_connections': 2,
                        'max_forward_bytes': 4, 'output': str(self.root / 'output'),
@@ -54,7 +55,7 @@ class PublicProxyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'pin changed'): proxy.validate(self.config)
         (self.root / 'server.pem').write_text('server.pem')
         self.deployment['clients'] = {}
-        self.path.write_text(json.dumps(self.deployment))
+        self.path.write_text(runtime_toml(self.deployment, 'coordinator'))
         with self.assertRaisesRegex(ValueError, 'pin changed'): proxy.validate(self.config)
         self.config['public_listener']['coordinator_sha256'] = self.digest(self.path)
         with self.assertRaisesRegex(ValueError, 'authenticated'): proxy.validate(self.config)

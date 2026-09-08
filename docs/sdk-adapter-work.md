@@ -1,9 +1,13 @@
 # Python SDK and Kaggriculture integration work log
 
+The dated evidence below describes earlier development snapshots. CedeGrid 0.2.0
+qualification is tracked separately in the [current release record](release-0.2-gates.json);
+older runs do not qualify the new source or package bytes.
+
 ## Implemented interfaces
 
-`python/resmgr` is a dependency-free Python 3.10+ SDK. Install with
-`python -m pip install /home/USER/ResourceManager/python` in the approved
+`python/cedegrid` is a dependency-free Python 3.10+ SDK. Install with
+`python -m pip install /home/USER/CedeGrid/python` in the approved
 isolated environment, or set `PYTHONPATH` to that `python` directory.
 
 `Client.from_config(path)` reads `{endpoint, tls:{ca_cert,certificate,private_key}}`.
@@ -19,7 +23,7 @@ rootless contract and defaults to replay-unsafe. The application adapter makes
 these declarations for its verified in-process actor/learner structure.
 
 Workers receive no operator credentials. `WorkerContext.from_env()` reads the
-agent's private `RESMGR_CONTEXT`, `RESMGR_OUTPUT_DIR`, and `RESMGR_DRAIN_FILE`.
+agent's private `CEDEGRID_CONTEXT`, `CEDEGRID_OUTPUT_DIR`, and `CEDEGRID_DRAIN_FILE`.
 `safe_point()` raises `DrainRequested`; `draining()` permits an application to
 finish its own bounded safe operation; `on_drain()` runs callbacks once.
 `artifact()`, `checkpoint()`, and `complete()` publish synced immutable blobs and
@@ -37,7 +41,7 @@ cooperative work, drain, checkpoint cursor, and completion without Kaggriculture
 
 ## Separate application integration
 
-The application code is in Kaggriculture's `integration/resmgr`, not the generic
+The application code is in Kaggriculture's `integration/cedegrid`, not the generic
 manager. Its example `examples/deployment.json` contains explicit per-node paths,
 stable configured node IDs, class, worker ceiling, GPU UUID, immutable snapshot
 hash, model hash, and opponent hash. Replace placeholders using verified private
@@ -47,17 +51,17 @@ paths are deliberately local to that host, not assumed shared across machines.
 With `PYTHONPATH=<RM>/python:<Kaggriculture>`:
 
 ```sh
-python -m integration.resmgr prepare-dataset --source /home/USER/source-dataset --output /home/USER/validation/bootstrap-dataset
+python -m integration.cedegrid prepare-dataset --source /home/USER/source-dataset --output /home/USER/validation/bootstrap-dataset
 python training/train.py --dataset /home/USER/validation/bootstrap-dataset --output /home/USER/validation/bootstrap --workers 0 --device cuda:0 --batch-size 32 --epochs 2 --max-steps 100 --experiment-id RUN-ID
 python training/export.py --checkpoint /home/USER/validation/bootstrap/latest.pt --output /home/USER/validation/model.ts --manifest /home/USER/validation/model.json
 python training/snapshot_policy.py --output /home/USER/validation/snapshots --cycle 0 --source-root /home/USER/validation/source --torchscript /home/USER/validation/model.ts --model-manifest /home/USER/validation/model.json --fallback /home/USER/validation/source/weights/fallback.npz
-python -m integration.resmgr run --config /home/USER/validation/deployment.json
-python -m integration.resmgr cycle --config /home/USER/validation/deployment.json --bootstrap /home/USER/validation/bootstrap/latest.pt --steps 50 --device cuda:0
+python -m integration.cedegrid run --config /home/USER/validation/deployment.json
+python -m integration.cedegrid cycle --config /home/USER/validation/deployment.json --bootstrap /home/USER/validation/bootstrap/latest.pt --steps 50 --device cuda:0
 ```
 
 These commands require their approved execution envelope. They do not grant
 shared-server authorization. Bootstrap is bounded preparation; `cycle` schedules
-its two learner operations through ResourceManager, including checkpoint resume.
+its two learner operations through CedeGrid, including checkpoint resume.
 No command invokes the legacy unbounded application supervisor or writes its
 shared `weights` directory.
 
@@ -76,7 +80,7 @@ The controller queues at most twice the sum of worker ceilings. Jobs contain one
 game so timeout/cancellation can fence an individual logical result. An expired
 opportunistic task is cancelled and its replay-safe logical game reissued on the
 anchor with a new transport task ID. Only the current logical owner is ingested;
-the old allocation remains charged until ResourceManager proves release. The
+the old allocation remains charged until CedeGrid proves release. The
 configured timeout is not evidence that a process stopped. Repeated or stale
 transport results cannot create duplicate accepted replay inputs.
 
@@ -126,7 +130,7 @@ continuation. Legacy checkpoints keep their older epoch resume behavior.
 Tests must set `TMPDIR` and pytest `--basetemp` inside the user's home. Example:
 
 ```sh
-TMPDIR="$PWD/.runtime/tmp" PYTHONPATH="$PWD/python:/home/USER/Kaggriculture" python -m pytest python/tests /home/USER/Kaggriculture/tests/resmgr --basetemp "$PWD/.runtime/tmp/sdk-tests"
+TMPDIR="$PWD/.runtime/tmp" PYTHONPATH="$PWD/python:/home/USER/Kaggriculture" python -m pytest python/tests /home/USER/Kaggriculture/tests/cedegrid --basetemp "$PWD/.runtime/tmp/sdk-tests"
 ```
 
 ## Remaining operational gates
@@ -157,7 +161,7 @@ spawn. Handles are supervisor child IDs; numeric-PID signaling is not an SDK API
 A lost spawn acknowledgement raises `SpawnUncertain` with the request ID; retry
 that same request ID. A wait timeout never signals. The root supervisor's death
 still requires reconciliation; its child registry is not a promise of postmortem
-deadline enforcement. See `python/resmgr/process.py` and native execution evidence.
+deadline enforcement. See `python/cedegrid/process.py` and native execution evidence.
 
 `Client` paces serialized request/reply bodies, including hex expansion, at a
 configurable default 10MiB/s with 10% framing headroom. Set
@@ -178,7 +182,7 @@ uncertain manager allocations or authoritative checkpoint metadata.
 The real application loop is now available:
 
 ```sh
-python -m integration.resmgr soak --config APPROVED_HOME_CONFIG.json \
+python -m integration.cedegrid soak --config APPROVED_HOME_CONFIG.json \
   --bootstrap ORIGINAL_READ_ONLY_CHECKPOINT.pt --steps 50 --device cuda:0
 ```
 

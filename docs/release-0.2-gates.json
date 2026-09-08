@@ -1,0 +1,431 @@
+{
+  "manifest_version": 1,
+  "target_release": "0.2.0",
+  "specification": "release-0.2-spec.md",
+  "candidate": {
+    "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+    "source_sha256": "76a767ef585e7dbc99c5a7dbd021b1d95aacb34966cbbfa3e4323d13a12da5a6",
+    "artifacts": [
+      {
+        "path": "npm/cedegrid-0.2.0.tgz",
+        "sha256": "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "size": 37689,
+        "scan": {
+          "file_count": 22,
+          "expanded_bytes": 127528
+        }
+      },
+      {
+        "path": "npm/cedegrid-darwin-arm64-0.2.0.tgz",
+        "sha256": "0f60efe057ee773d6f66be7ef74ced83a19d2bc5a02799d57951ce34f4b399a3",
+        "size": 5921563,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 15516307
+        }
+      },
+      {
+        "path": "npm/cedegrid-darwin-x64-0.2.0.tgz",
+        "sha256": "70cc6de71bbcdd051c35ae0c9c90def20394db0496dfb73785a6e1e216b86396",
+        "size": 6345640,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 16484685
+        }
+      },
+      {
+        "path": "npm/cedegrid-linux-arm64-gnu-0.2.0.tgz",
+        "sha256": "bc2b25ab5af0c7562c906150e0a1b373f48844fbc471d015f17d594b7f0c569a",
+        "size": 6891587,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 20953981
+        }
+      },
+      {
+        "path": "npm/cedegrid-linux-x64-gnu-0.2.0.tgz",
+        "sha256": "30de03d6f2cfc24575b5418a0267c78262a23a5eeb0f32775db53206bed1b9a4",
+        "size": 7042110,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 21223151
+        }
+      },
+      {
+        "path": "npm/cedegrid-win32-x64-0.2.0.tgz",
+        "sha256": "2e5dcc6bbaf3c2dcd7d44cc0831da996134acfd15b04f8f03d50065bf061d31b",
+        "size": 6028379,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 17154666
+        }
+      },
+      {
+        "path": "pypi/cedegrid-0.2.0-py3-none-any.whl",
+        "sha256": "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "size": 23905,
+        "scan": {
+          "file_count": 14,
+          "expanded_bytes": 63894
+        }
+      },
+      {
+        "path": "pypi/cedegrid-0.2.0.tar.gz",
+        "sha256": "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "size": 31905,
+        "scan": {
+          "file_count": 26,
+          "expanded_bytes": 110401
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-darwin-arm64.tar.gz",
+        "sha256": "b477cbab0aab679c762b8fabf42f7c98f0ee72075ca5bc157dcf3ddff6bca27e",
+        "size": 5717655,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 15515923
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-darwin-x64.tar.gz",
+        "sha256": "22474a5f6c88e1edfb031f4f8e446302f9dd722779c1f83341aefbc679012b3a",
+        "size": 6230430,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 16484307
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-linux-arm64-gnu.tar.gz",
+        "sha256": "7d9f4c95c9029aabaee8d628bedbe03d3b90e70b194f0ae5dd0de649998805ab",
+        "size": 6677538,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 20953563
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-linux-x64-gnu.tar.gz",
+        "sha256": "108bff6ca71f876b55105f291867ee9718b8a7c1a929ab22a27909bdb23fdc9f",
+        "size": 6899723,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 21222739
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-win32-x64.zip",
+        "sha256": "ace47061f59784f9f2eb4d130e54de4a50b6cf016319d7c3919dd4a33e163e64",
+        "size": 5869415,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 17154291
+        }
+      },
+      {
+        "path": "source/cedegrid-0.2.0-source.tar.gz",
+        "sha256": "6ba42c003b58b6b81acd7065e4209d757d86be1e9e631dc6d157f8a8ac8e4ff1",
+        "size": 771440,
+        "scan": {
+          "reviewed_exact_source_allowlist": true,
+          "privacy": "PASS"
+        }
+      }
+    ]
+  },
+  "allowed_statuses": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "NOT_RUN"
+  ],
+  "stable_readiness": false,
+  "readiness_rule": "All listed required qualification gates must be PASS with verified source/artifact hashes matching one frozen candidate and complete evidence; missing or mismatched evidence is never PASS.",
+  "required_gates": [
+    {
+      "id": "SOURCE-RUST",
+      "description": "Rust fmt/clippy/tests and MSRV1.88",
+      "targets": [
+        "linux",
+        "macos"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "CONTRACTS",
+      "description": "All shared contracts and deterministic fault interleavings",
+      "targets": [
+        "rust",
+        "python",
+        "typescript",
+        "native-c"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "SDK-PYTHON",
+      "description": "Installed Python3.10..3.14 wheel and independent sdist-rebuild integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "SDK-TYPESCRIPT",
+      "description": "Installed Node22/24/26 ESM/CJS/type/transport/native-worker integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PLATFORM-LINUX-X64",
+      "description": "Final Linux x64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PLATFORM-LINUX-ARM64",
+      "description": "Final Linux ARM64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "aarch64-unknown-linux-gnu"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PLATFORM-MACOS-X64",
+      "description": "Final Intel binary on macOS14 minimum",
+      "targets": [
+        "x86_64-apple-darwin"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PLATFORM-MACOS-ARM64",
+      "description": "Final Apple Silicon binary on macOS14 minimum",
+      "targets": [
+        "aarch64-apple-darwin"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PLATFORM-WIN",
+      "description": "Final Windows11 24H2 x64 client, no NVIDIA; execution refusal before mutation",
+      "targets": [
+        "x86_64-pc-windows-msvc"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PACKAGES-NPM",
+      "description": "Unmodified original tarballs through isolated no-uplink registry, local/global/ignore-scripts/omit-optional",
+      "targets": [
+        "all-five-native-packages"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PACKAGES-PYPI",
+      "description": "Original wheel/sdist contents, clean installs, pip-check and metadata",
+      "targets": [
+        "python"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "RENAME-CONFIG-UPGRADE",
+      "description": "Clean public rename, separated loaders, converter equivalence and offline-state compatibility",
+      "targets": [
+        "all"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "RECOVERY-MACOS",
+      "description": "Deterministic namespace/recovery faults and repeated complete native suite",
+      "targets": [
+        "macos"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PHYSICAL-THREE-HOST",
+      "description": "Useful work, checkpoints, faults and confirmed release on all three roles",
+      "targets": [
+        "durable-coordinator",
+        "durable-agent",
+        "replay-agent"
+      ],
+      "status": "BLOCKED",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [
+        "Private host-access preflight retained with the qualification workspace; no credentials or host details are included in public evidence."
+      ],
+      "reason": "Existing SSH sessions disconnected or stopped responding. Fresh connections reached authentication and returned Permission denied (publickey,password). Restore authenticated sessions or an authorized SSH key/agent; no remote test ran."
+    },
+    {
+      "id": "GPU-RTX5060TI",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "rtx-5060-ti"
+      ],
+      "status": "BLOCKED",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [
+        "Private host-access preflight retained with the qualification workspace; no credentials or host details are included in public evidence."
+      ],
+      "reason": "Existing SSH sessions disconnected or stopped responding. Fresh connections reached authentication and returned Permission denied (publickey,password). Restore authenticated sessions or an authorized SSH key/agent; no remote test ran."
+    },
+    {
+      "id": "GPU-L4",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "l4"
+      ],
+      "status": "BLOCKED",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [
+        "Private host-access preflight retained with the qualification workspace; no credentials or host details are included in public evidence."
+      ],
+      "reason": "Existing SSH sessions disconnected or stopped responding. Fresh connections reached authentication and returned Permission denied (publickey,password). Restore authenticated sessions or an authorized SSH key/agent; no remote test ran."
+    },
+    {
+      "id": "ARTIFACT-CONTROL",
+      "description": "Three concurrent256MiB unique uploads with per-op p99 and exact result/download validation",
+      "targets": [
+        "three-agent"
+      ],
+      "status": "BLOCKED",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [
+        "Private host-access preflight retained with the qualification workspace; no credentials or host details are included in public evidence."
+      ],
+      "reason": "Existing SSH sessions disconnected or stopped responding. Fresh connections reached authentication and returned Permission denied (publickey,password). Restore authenticated sessions or an authorized SSH key/agent; no remote test ran."
+    },
+    {
+      "id": "SUPPLY-CHAIN",
+      "description": "Artifact notices/licenses/advisories/secrets and candidate provenance",
+      "targets": [
+        "all-artifacts"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    },
+    {
+      "id": "PUBLIC-EVIDENCE",
+      "description": "Allowlisted public summaries and extracted-archive privacy scan",
+      "targets": [
+        "all-public-archives"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Final 0.2.0 candidate has not been built or qualified."
+    }
+  ],
+  "publication_readiness": {
+    "name_ownership": "NOT_RUN",
+    "trusted_publisher_configuration": "NOT_RUN",
+    "artifact_publish_readiness": "NOT_RUN",
+    "live_registry_publication": "NOT_RUN",
+    "live_upload_authorized": false
+  },
+  "numeric_limits": {
+    "descriptor_bytes": 1048576,
+    "status_page_bytes": 7340032,
+    "status_client_bytes": 8388608,
+    "node_report_bytes": 2097152,
+    "node_report_allocations": 2048,
+    "lease_ms": 10000,
+    "control_deadline_ms": 10000,
+    "control_p99_ms_strictly_less_than": 2500
+  },
+  "gpu_limits": {
+    "scenario_seconds": 60,
+    "cleanup_seconds": 30,
+    "observed_owned_vram_bytes": 1073741824,
+    "sample_interval_ms": 100
+  },
+  "load_limits": {
+    "repetitions": 3,
+    "concurrent_lanes": 3,
+    "artifact_bytes_per_lane": 268435456,
+    "chunk_bytes": 1048576,
+    "serialized_wire_bytes_per_second_per_lane": 10485760,
+    "minimum_samples_per_operation_per_repetition": 300,
+    "operations": [
+      "heartbeat",
+      "renew",
+      "status"
+    ],
+    "scenario_seconds": 240,
+    "cleanup_seconds": 30
+  }
+}

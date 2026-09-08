@@ -17,7 +17,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'python'))
-from resmgr import Client
+from cedegrid import Client
 from validation_runtime import OwnedProcess, atomic_json, inside_home, local_guard
 
 

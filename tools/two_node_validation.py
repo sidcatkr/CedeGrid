@@ -18,7 +18,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
-from resmgr import Client, sha256_file
+from cedegrid import Client, sha256_file
 from connection_proxy import validate as validate_proxy
 from soak import AllocationLedger, StatusJournal, anchor_fresh
 from validation_runtime import OwnedProcess, atomic_json, home_executable, inside_home, local_guard
@@ -326,7 +326,7 @@ def review_application(output, application, status, ledger):
     result = json.loads((root / 'cycle/result.json').read_text())
     if result['experiment_id'] != application['experiment_id'] or result['accepted_games'] != application['games'] or result['continuation'] != 'optimizer_step_cursor_v2':
         raise ValueError('real cycle identity, game count, or checkpoint continuation mismatch')
-    from integration.resmgr.workflow import logical_identity
+    from integration.cedegrid.workflow import logical_identity
     planned = {logical_identity(application['experiment_id'], application.get('generation', 0), index,
                                 application['run_seed'])['logical_task_id']:
                logical_identity(application['experiment_id'], application.get('generation', 0), index, application['run_seed'])
@@ -449,7 +449,7 @@ def run(config):
             if time.monotonic() > deadline:
                 raise TimeoutError('two agents did not register through their approved transports')
             time.sleep(.5)
-        argv = [str(python), '-m', 'integration.resmgr', 'cycle', '--config', str(output / 'application.json'),
+        argv = [str(python), '-m', 'integration.cedegrid', 'cycle', '--config', str(output / 'application.json'),
                 '--bootstrap', str(inside_home(config['bootstrap'])), '--steps', '2', '--device', 'cpu']
         report['cycle_argv'] = argv
         cycle = OwnedProcess(argv, source, output / 'cycle.log', env)

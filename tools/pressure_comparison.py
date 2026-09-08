@@ -17,12 +17,13 @@ import time
 import uuid
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python'))
-from resmgr import command_task,sha256_file
+from cedegrid import command_task,sha256_file
 from anchor_validation import deployment,manager_samples,manager_metrics
 from native_validation import physical_cpus
 from pressure import Nvml,quantile
 from soak import AllocationLedger,StatusJournal
 from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executable,local_guard
+from runtime_config import atomic_runtime_config, read_runtime_config
 
 TARGETS={'matched_idle_throughput_ratio_min':.90,'decision_p95_seconds_max':1.,
     'release_p95_seconds_max':10.,'post_yield_p99_ratio_max':1.20,
@@ -102,7 +103,7 @@ def run(args):
     if args.mode not in {'cpu','gpu'} or not args.gpu_uuid.startswith('GPU-'):raise ValueError('explicit mode and GPU UUID required')
     root=inside_home(args.root);manager=Path(__file__).resolve().parents[1]
     output=inside_home(args.output);output.mkdir(mode=0o700,parents=True,exist_ok=False)
-    python=home_executable(root/'venv-isolated/bin/python');binary=inside_home(manager/'target/release/resmgr')
+    python=home_executable(root/'venv-isolated/bin/python');binary=inside_home(manager/'target/release/cedegrid')
     cpus=physical_cpus(2 if args.mode=='cpu' else 3)
     if len(cpus)!=(2 if args.mode=='cpu' else 3):raise RuntimeError('required physical CPU scope unavailable')
     os.sched_setaffinity(0,cpus)
@@ -137,23 +138,23 @@ def run(args):
         time.sleep(.2)
     try:
         client=deployment(output,binary,cpus,node_id,args.gpu_uuid,1200,env)
-        node=json.loads((output/'node.json').read_text());node['cpu']['reserve_physical_cores']=1
+        node=read_runtime_config(output/'node.toml');node['cpu']['reserve_physical_cores']=1
         node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000
-        atomic_json(output/'node.json',node)
-        agent=json.loads((output/'agent.json').read_text());agent.update(max_workers=1,
+        atomic_runtime_config(output/'node.toml',node, 'node')
+        agent=read_runtime_config(output/'agent.toml');agent.update(max_workers=1,
             capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096,'gpu_memory_mib':{args.gpu_uuid:1024} if args.mode=='gpu' else {}})
-        atomic_json(output/'agent.json',agent)
-        doctor=subprocess.run([str(binary),'--config',str(output/'node.json'),'doctor'],capture_output=True,text=True,timeout=30,check=True,env=env)
+        atomic_runtime_config(output/'agent.toml',agent, 'agent')
+        doctor=subprocess.run([str(binary),'--config',str(output/'node.toml'),'doctor'],capture_output=True,text=True,timeout=30,check=True,env=env)
         atomic_json(output/'doctor.json',json.loads(doctor.stdout))
         observations=(output/'observations.jsonl').open('x')
-        services['coordinator']=OwnedProcess([str(binary),'coordinator','--deployment',str(output/'coordinator.json')],manager,output/'coordinator.log',env)
+        services['coordinator']=OwnedProcess([str(binary),'coordinator','--deployment',str(output/'coordinator.toml')],manager,output/'coordinator.log',env)
         deadline=time.monotonic()+15
         while True:
             try:client.status();break
             except Exception:
                 if time.monotonic()>deadline:raise
                 time.sleep(.1)
-        services['agent']=OwnedProcess([str(binary),'--config',str(output/'node.json'),'agent','--deployment',str(output/'agent.json')],manager,output/'agent.log',env)
+        services['agent']=OwnedProcess([str(binary),'--config',str(output/'node.toml'),'agent','--deployment',str(output/'agent.toml')],manager,output/'agent.log',env)
         deadline=time.monotonic()+30
         while not latest or not latest.get('nodes'):
             if time.monotonic()>deadline:raise TimeoutError('agent did not register')

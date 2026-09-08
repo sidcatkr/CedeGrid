@@ -3,177 +3,169 @@
 CedeGrid source distribution. See [LICENSE](LICENSE), [release scope](docs/release.md) and [guarantees](docs/guarantees.md).
 
 
-CedeGrid is a standalone resource manager for guaranteed and opportunistic compute. Rust owns
-the core; the Python SDK provides authenticated submission and cooperative lifecycle hooks. Node roles and resource policy are
-configuration, not assumptions about a particular project, server, transport, or GPU.
+CedeGrid runs explicitly selected compute jobs on spare CPU, RAM, and NVIDIA GPU
+capacity. A standalone Rust coordinator and native node agents own scheduling,
+leases, process supervision, checkpoints, artifacts, and result receipts. Python
+and TypeScript SDKs submit work and provide cooperative worker hooks. Any executable
+that meets the process contract can run; no application framework is required.
 
-**Current implementation: authenticated coordinator/agent services, local supervision,
-durable artifacts and results, elastic pools, and the Python SDK.** Observation
-remains the default. Execution requires `execution.enabled: true` and an explicit
-workload contract. The launch barrier verifies preparation and persists authority
-before user code runs. Linux-native hardware, real distributed workload, and bounded
-stress acceptance are separate from local tests; consult the [validation record](docs/validation.md)
-for their actual status. Optional Linux controls require verified runtime capability.
+Version **0.2.0** introduces the clean `cedegrid` name and TOML configuration.
+The release is being qualified: [required gates](docs/release-0.2-gates.json) are
+mandatory, and stable readiness remains false until every platform and both GPU
+gates pass. Packages are prepared locally; registry uploads have not been performed.
+Historical measurements in [validation](docs/validation.md) are scoped to their
+recorded versions and do not qualify these new binaries.
 
-Physical two-Linux-host mTLS, artifact transfer and connection reconnect have passed.
-Useful two-node application work, GPU protection and applied optional cgroup controls
-remain separate pending gates; see the [validation record](docs/validation.md).
-`tools/pack_source_review.py` creates private reviews or public source candidates.
-It preserves source and the chosen Apache-2.0 license while excluding private
-runtime/evidence. It does not publish automatically.
+## Install
 
-CedeGrid retains the `resmgr` executable, `resource_manager` Rust library and
-`resmgr` Python import for compatibility. Repository names and installation paths
-never become node, task or experiment identifiers.
+Once 0.2.0 is published, install the CLI and TypeScript SDK with:
+
+```sh
+npm install --global cedegrid@0.2.0
+# Or add the SDK and CLI to a project:
+npm install cedegrid@0.2.0
+```
+
+Installation works with `--ignore-scripts`. Native binaries are supplied by exact
+version platform packages, without an install-time download or compiler. The SDK
+can also be imported when optional native packages are omitted. Node 22.14+ is
+required by the npm package.
+
+The Python distribution contains the SDK only:
+
+```sh
+python -m pip install cedegrid==0.2.0
+```
+
+Python 3.10+ is supported; Python 3.10 uses `tomli`. Standalone release binaries
+require neither Python nor Node. Source builds need Rust 1.88+ and a C compiler:
+
+```sh
+cargo build --release --locked
+./target/release/cedegrid --version
+```
+
+Unpublished candidate files can be installed directly from their wheel/tarball.
+See [release preparation](docs/release.md) for checksums and the isolated npm
+registry check, which uses the original tarball bytes.
 
 ## Build and use
 
-Requires Rust 1.88 or later and a C compiler for bundled SQLite. The lockfile pins
-dependencies. NVIDIA driver libraries are optional and loaded at runtime.
-
 ```sh
-cargo build --locked
-cargo run --locked -- config-example
-cargo run --locked -- --config examples/node.yaml validate
-cargo run --locked -- --config examples/node.yaml doctor
-cargo run --locked -- --config examples/node.yaml observe --samples 10 --no-state
-cargo run --locked -- --config examples/node.yaml observe --samples 10
-cargo run --locked -- --config examples/node.yaml history --limit 10
-cargo run --locked -- --config examples/node.yaml replay examples/gpu-pressure.json
+cedegrid config-example --kind node > cedegrid.toml
+cedegrid --config cedegrid.toml validate
+cedegrid --config cedegrid.toml doctor
+cedegrid --config cedegrid.toml observe --samples 2 --no-state
 ```
 
-Commands print JSON, one record per observation. `observe --samples 0` continues
-until Ctrl-C or SIGTERM. Without `--no-state`, observation and decision records are
-committed together to the configured database. Other than that state and logs
-redirected by the operator, observation does not alter the system.
+Observation is the default. Enable `execution.enabled = true` only for the work
+and resource envelope you intend to manage. `doctor` reports strict durability
+support separately from admission for the selected storage profile.
 
-Relative `state_dir` values resolve relative to the configuration file. No SSH
-configuration, host address, root access, or online service is required. Rename or
-move this repository freely; the configured node ID remains stable. Example node
-IDs are placeholders and GPU identity comes from telemetry UUIDs.
-
-The first CPU reading may be unknown until a measurement interval has elapsed.
-The live collector does not adopt arbitrary processes. Stateful observation includes
-retained local execution reservations; unknown surviving usage blocks expansion.
-`--no-state` observes without loading the ledger. To inspect hypothetical worker
-reductions with attributed usage, use `replay`.
+Node, coordinator, agent, and client configuration are TOML 1.0 with
+`config_version = 1`. Generate each kind with `config-example --kind KIND` or use
+[the node](examples/node.toml), [coordinator](examples/coordinator.toml),
+[agent](examples/agent.toml), and [client](examples/client.toml) examples.
+Relative paths resolve against the canonical configuration file directory.
+Configuration performs no environment interpolation or shell expansion. Jobs,
+RPC messages, worker context, checkpoint metadata, and results remain JSON.
 
 ## Select which work is managed
 
-Submit only the work you want ResourceManager to control. You choose explicit pool,
-job and task IDs, such as `selected-workers` and `selected-analysis`. These labels
-identify submitted work; they are not process-name filters. Agents supervise the
-verified processes launched for those assignments. Other processes, including
-those owned by the same user, remain external demand: the manager observes their
-resource impact and yields its own work without adopting or signaling them.
-
-The Rust services and Python SDK are reusable for ordinary commands and other
-applications that meet the [execution contract](#local-execution-boundary).
-Kaggriculture uses a separate application adapter for simulator, replay and learner
-boundaries; its models and training logic are not part of the generic core.
-
-After the [coordinator and agent are running](#distributed-services-and-python-workers),
-this existing SDK API submits the [ordinary counter example](python/examples/counter.py)
-to one configured node. Set the worker paths to existing absolute paths on that
-node, and replace `burst` with its configured node ID:
+Pool, job, and task IDs select submitted work. They are not process-name filters.
+CedeGrid supervises the verified processes it starts. Other processes, including
+those owned by the same account, remain external demand; CedeGrid yields its own
+work without adopting or signaling them. Repository names and installation paths
+do not become durable node, task, or job identities.
 
 ```python
-from pathlib import Path
-from resmgr import Client, command_task
+from cedegrid import Client, command_task
 
-client = Client.from_config(Path.home() / ".config/resmgr/operator.json")
-worker_root = "/home/USER/ResourceManager"
-worker_python = "/home/USER/.venvs/resmgr/bin/python"
-
-client.put_pool("selected-workers", ["burst"], max_workers=1,
+client = Client.from_config("/absolute/config/client.toml")
+client.put_pool("selected-workers", ["worker-a"], max_workers=1,
                 allocation_class="opportunistic")
 task = command_task(
-    "selected-analysis-task-001",
-    [worker_python, f"{worker_root}/python/examples/counter.py",
-     "--steps", "20", "--delay", "0.1"],
-    worker_root,
-    env={"PYTHONPATH": f"{worker_root}/python"},
-    cpu_millicores=1000, ram_mib=128,
-    allocation_class="opportunistic", replay_safe=True,
-    single_process=True, no_escape=True, max_attempts=3,
+    "counter-001", ["/opt/work/counter", "1000000"], "/opt/work",
+    cpu_millicores=1000, ram_mib=128, allocation_class="opportunistic",
+    replay_safe=True, single_process=True, no_escape=True, max_attempts=3,
 )
 client.submit("selected-analysis", "selected-workers", [task])
-print(client.status("selected-analysis"))
+for row in client.iter_status("tasks", job_id="selected-analysis"):
+    print(row)
 ```
 
-Use `client.cancel("selected-analysis")` to cancel that submitted job alone.
-A node drain applies to all manager assignments on the selected node. The
-[start/status/drain/resume/reconcile commands](#distributed-services-and-python-workers)
-and [offline backup/recovery procedure](docs/coordinator-work.md#offline-coordinator-backup-and-restore)
-use the same durable identities. Retries require confirmed release and the declared
-replay contract; choose new job/task IDs for a separate run. Directory names never
-become runtime IDs.
+The command can be the [compiled C counter](examples/counter.c), a
+[Python worker](python/examples/counter.py), or a
+[TypeScript worker](npm/examples/counter.ts). Worker publication goes through the
+native supervisor socket in the calling process. Plain commands need no SDK:
+a successful exit produces a native result with bounded stdout/stderr artifacts.
+See [Python](python/README.md), [TypeScript](npm/README.md), and the
+[language-independent protocol](docs/worker-protocol.md).
 
-## What is implemented
+## Distributed services and Python workers
 
-- Strict YAML validation with effective settings and configurable timeouts.
-- Deterministic CPU/RAM/per-GPU accounting, pending reservations, conservative
-  external-activity handling, cooldowns, and hypothetical drain selection.
-- Portable CPU/RAM telemetry and an optional NVIDIA NVML adapter. Missing sensors
-  are explicit, not free resources. Configured reserves are policy, not kernel limits.
-- Strict WAL/FULL or DELETE/EXTRA state, plus explicit replayable burst storage
-  with authenticated recovery and retained uncertain reservations. Coordinator
-  result authority always requires strict durable storage.
-- Optional Linux capability diagnostics: pidfd, effective CPU sets/topology, visible
-  cgroup hierarchy/limits, and scoped PSI with freshness and availability.
-- Local CPU supervision with a durable launch barrier, generation-bound process
-  identity, preferred Linux pidfds and an explicitly weaker direct-child fallback.
-- Opt-in delegated cgroup v2 membership, CPU weight/bandwidth and memory settings,
-  readback evidence, accounting, and confirmed-empty cleanup. No unrestricted kill.
-- Retained uncertain allocations, reconciliation, fault tests, and a plan-by-default comparison harness.
-- A single durable coordinator and authenticated node agents, priority/FIFO jobs,
-  pending reservations, elastic pools, cancellation, scoped leases, and reconnect.
-- Checksummed bounded artifact uploads, crash-safe publication, fenced checkpoint
-  records, and idempotent final result receipts.
-- A dependency-free Python SDK with private worker spools and drain/checkpoint/resume
-  hooks. A separate Kaggriculture client demonstrates real simulator/learner integration.
+Configure distinct mTLS identities and explicit client roles. The server verifies
+client certificates and roles; clients verify its CA and hostname, reject redirects,
+and ignore proxy environment settings. Client endpoints must be HTTPS origins.
+The default request timeout is 15 seconds, including pacing and response decoding.
+The default aggregate transfer rate is 10 MiB/s with framing headroom.
 
-GPU sharing is **best-effort opportunistic sharing**. It does not guarantee zero
-interference, an external allocation's success, or consistent external performance.
-Aggregate GPU utilization is a kernel-busy-time indicator, not a measure of spare
-compute capacity. See [guarantees](docs/guarantees.md).
+```sh
+cedegrid coordinator --deployment /absolute/config/coordinator.toml
+cedegrid --config /absolute/config/node.toml agent --deployment /absolute/config/agent.toml
+cedegrid submit --deployment /absolute/config/client.toml --job /absolute/work/job.json
+cedegrid status --deployment /absolute/config/client.toml --collection tasks --job-id selected-analysis --all
+cedegrid cancel --deployment /absolute/config/client.toml --job-id selected-analysis
+cedegrid drain --deployment /absolute/config/client.toml --node-id worker-a
+cedegrid drain --deployment /absolute/config/client.toml --node-id worker-a --resume
+```
+
+`status --all` streams finite pages as NDJSON. Each traversal has an initial upper
+key bound; record contents remain live. Restart expires cursors explicitly. Pages
+contain 100 items by default, at most 1000 and 7 MiB including the response envelope.
+Tasks, jobs, nodes, pools, allocations, and inventories are separate collections;
+summary records contain counts instead of nested inventory arrays.
+
+`tools/make_test_pki.py` creates isolated short-lived credentials for tests. Keep
+keys private and transfer only each node's own identity and the public CA. SSH may
+help deploy or tunnel the service, but is not part of job semantics.
 
 ## Portability and capability reporting
 
-| Component | Support boundary |
-|---|---|
-| Configuration, policy, protocol models | OS- and transport-independent Rust |
-| CPU/RAM observation | Supported `sysinfo` platforms, capability dependent |
-| GPU observation | NVIDIA through optional NVML; other vendor adapters are future work |
-| Durable state preflight | Recognized local durable filesystems on Linux and macOS |
-| Weaker local storage | Explicit replayable burst-agent profile; no local durability claim; [contract](docs/guarantees.md#replayable-burst-storage) |
-| Other storage platforms/filesystems | Explicit refusal until a supported adapter exists |
-| Local CPU execution | Linux implementation; macOS direct-child fallback tested; Windows unavailable |
-| pidfd, cgroup v2, PSI | Optional Linux capabilities; actual pidfd runtime verified, delegated controls remain authorization-dependent; see [current evidence](docs/validation.md) |
-| Network transport and Python SDK | Versioned mTLS RPC and credential-free cooperative workers; no SSH dependency |
+| Target | Declared 0.2 support | Minimum qualification baseline |
+|---|---|---|
+| Linux GNU x86_64 / ARM64 | Coordinator, execution, CLI, SDKs | glibc 2.35, kernel 5.15 |
+| macOS Intel / Apple Silicon | Coordinator, native execution, CLI, SDKs | macOS 14 |
+| Windows x86_64 | Client CLI and SDKs | Windows 11 24H2 |
+| NVIDIA GPU | Optional NVML observation and controlled execution | RTX 5060 Ti and L4 gates required |
 
-Linux containers must mount a supported local volume for state when the container
-root uses an unverified overlay filesystem. Network homes, RAM-backed volumes,
-unknown filesystems, and database symlinks are not silently accepted. The explicit
-`burst_replay_delete_extra` exception is described in the
-[recovery contract](docs/guarantees.md#replayable-burst-storage). `--no-state`
-allows observation without durable storage. Availability is separate from enforcement
-in every capability record.
+This is the target matrix; consult the gate manifest for actual qualification.
+Windows execution, agents, recovery, and storage mutation are refused before
+initialization. macOS uses a verified direct-child fallback. Linux pidfd, delegated
+cgroup v2 controls, CPU affinity, and PSI require runtime capability evidence.
+
+Durable coordinator storage requires a qualified local filesystem. An explicitly
+selected replayable burst-agent profile can use weaker storage with authenticated
+recovery and retained uncertain reservations. `doctor` never treats that as strict
+durability. GPU sharing is best effort and does not guarantee an external allocation
+or performance. Hostile-code isolation, arbitrary descendants, hard VRAM partitioning,
+and unqualified optional controls are outside the support claim. See
+[guarantees](docs/guarantees.md).
 
 ## Local execution boundary
 
 Start with `doctor` and `observe`. For a controlled local CPU trial, copy
-`examples/node.yaml`, explicitly enable `execution.enabled`, set reserves appropriate
+`examples/node.toml`, explicitly enable `execution.enabled`, set reserves appropriate
 to the test host, and edit `examples/cpu-job.json` to name your own command and
 absolute working directory. Then run:
 
 ```sh
-resmgr --config /path/to/test-node.yaml supervise /path/to/job.json
-resmgr --config /path/to/test-node.yaml executions
+cedegrid --config /path/to/test-node.toml supervise /path/to/job.json
+cedegrid --config /path/to/test-node.toml executions
 ```
 
 Rootless v1 supports a single-process command with `single_process: true` and
-`no_escape: true`, or explicitly mediated children created through the Python SDK's
+`no_escape: true`, or explicitly mediated children created through the Python or TypeScript SDK's
 `spawn_managed` with a configured `managed_child_limit`. Arbitrary forks, background
 children and daemonization are outside the contract. Every mediated child has its
 own verified handle and durable launch barrier; a leader handle is not containment.
@@ -244,65 +236,37 @@ The deployment's actual verification status is recorded in
 [validation](docs/validation.md); no installation or policy change is implied by
 this example.
 
-## Distributed services and Python workers
+## Upgrading from 0.1
 
-Private deployment files configure TLS identities, client certificate roles, node
-resource ceilings, and state paths. The API always requires mTLS; do not expose a
-plaintext or unauthenticated listener. Existing SSH access may bootstrap a deployment
-or tunnel transport but is not part of job semantics.
-
-```sh
-resmgr coordinator --deployment /home/USER/.config/resmgr/coordinator.json
-resmgr --config /home/USER/.config/resmgr/node.yaml agent --deployment /home/USER/.config/resmgr/agent.json
-resmgr pool --deployment /home/USER/.config/resmgr/operator.json --spec /home/USER/validation/pool.json
-resmgr submit --deployment /home/USER/.config/resmgr/operator.json --job /home/USER/validation/job.json
-resmgr status --deployment /home/USER/.config/resmgr/operator.json
-resmgr drain --deployment /home/USER/.config/resmgr/operator.json --node-id burst
-resmgr drain --deployment /home/USER/.config/resmgr/operator.json --node-id burst --resume
-resmgr resume --deployment /home/USER/.config/resmgr/operator.json --task-id TASK-ID
-resmgr --config /home/USER/.config/resmgr/node.yaml reconcile
-```
-
-Resume requires proven release; replay-unsafe work additionally requires explicit
-side-effect reconciliation. These commands do not authorize host installation or
-shared-server load. The [SDK and adapter work log](docs/sdk-adapter-work.md) documents
-the real RPC schema, worker examples, bounded application pipeline, and validation
-commands. Use the coordinator and execution work records for process-level evidence.
-
-`tools/make_test_pki.py --output /home/USER/validation/pki --node-id anchor --node-id burst`
-generates separate short-lived identities and the exact certificate-fingerprint role
-map for a private test deployment. Keep the CA private key on the orchestration/anchor
-host; transfer only each node's own key/certificate and the public CA certificate.
+There are no old executable, import, or environment aliases. Drain and stop old
+coordinators, agents, supervisors, and workload writers before changing binaries.
+Use the [configuration and offline-state migration guide](docs/migration-0.2.md).
+Keep the immutable upgrade bundle for rollback; running 0.1 against changed 0.2
+state is unsupported. Explicit state paths, durable identities, historical receipt
+bytes, and hashes are preserved.
 
 ## Verification
 
 ```sh
-mkdir -p "$HOME/.cache/resmgr-tests"
-export TMPDIR="$HOME/.cache/resmgr-tests"
-export PYTHONDONTWRITEBYTECODE=1
+mkdir -p "$HOME/.cache/cedegrid-tests"
+export TMPDIR="$HOME/.cache/cedegrid-tests"
+export CEDEGRID_TEST_PYTHON="$(command -v python3)"
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-PYTHONPATH="$PWD/python" python3 -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH="$PWD/python" python3 -m unittest discover -s python/tests -p 'test_*.py'
+cd npm
+npm ci --ignore-scripts
+npm run build
+npm test
 ```
 
-Use an existing Python 3.10+ environment. Test temporary files must be under your
-home directory because the deployment fixtures enforce that storage boundary.
+Use Python 3.10+ for process fixtures, including `tomli` on 3.10. Native process
+identity checks require ordinary host process visibility. Test fixture state must
+be on supported storage under the test account's home. Installed-artifact checks
+run outside the checkout and do not import its SDK sources.
 
-CI is configured for Linux and macOS, plus portable policy/telemetry checks on Windows.
-Hardware GPU checks, bounded stress and real two-node runs are separate acceptance
-gates, not implied by unit tests. The long-soak harness remains optional after the
-user's duration waiver. See [validation](docs/validation.md) and the
-[remaining implementation](docs/architecture.md).
-
-The [local-supervision verification record](docs/local-supervision-verification.md)
-records the earlier 129-test increment; it is historical evidence, not the current
-implementation inventory. The initial [verification record](docs/milestone-1-verification.md) distinguishes
-native tests from cross-target type checks and outstanding server validation.
-
-CedeGrid is licensed under [Apache-2.0](LICENSE). See the [release scope](docs/release.md),
-[contribution guide](CONTRIBUTING.md) and [security reporting policy](SECURITY.md).
-Application code, personal deployment credentials and private raw evidence are
-excluded from source distributions. GitHub publication does not imply that every
-optional backend or deployment has passed operational acceptance.
+CedeGrid is [Apache-2.0](LICENSE). Preserve [NOTICE](NOTICE) and dependency license
+texts. Read [release scope](docs/release.md), [contributing](CONTRIBUTING.md), and
+[security reporting](SECURITY.md). Private deployment credentials, application
+assets, and raw host evidence are excluded from public packages.

@@ -1,4 +1,4 @@
-use resource_manager::{
+use cedegrid::{
     backup::{self, Limits},
     coordinator::Coordinator,
     protocol::*,
@@ -254,7 +254,7 @@ fn symlinked_files_and_nonhome_destinations_are_refused() {
     assert!(
         backup::create(
             &source,
-            Path::new("/tmp/resmgr-forbidden-snapshot"),
+            Path::new("/tmp/cedegrid-forbidden-snapshot"),
             limits()
         )
         .is_err()
@@ -274,7 +274,7 @@ fn cli_requires_no_deployment_config_and_round_trips_offline() {
     seed(&source);
     let snapshot = d.path().join("cli-snapshot");
     let target = d.path().join("cli-restored");
-    let command = env!("CARGO_BIN_EXE_resmgr");
+    let command = env!("CARGO_BIN_EXE_cedegrid");
     let output = std::process::Command::new(command)
         .args(["backup", "--state-dir"])
         .arg(&source)
@@ -379,6 +379,7 @@ fn rollback_snapshot_restore_preserves_profile_publications_and_uncertain_reserv
 
 #[test]
 fn legacy_snapshot_manifest_without_profile_remains_wal_compatible() {
+    use sha2::{Digest, Sha256};
     let d = dir();
     let source = d.path().join("source");
     seed(&source);
@@ -387,6 +388,30 @@ fn legacy_snapshot_manifest_without_profile_remains_wal_compatible() {
     let manifest_path = snapshot.join(backup::MANIFEST_FILENAME);
     let mut legacy: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    // Exercise an actual format-1/schema-2 offline import, including the old
+    // distributed ledger marker. Changing only JSON defaults misses migration.
+    let db = rusqlite::Connection::open(snapshot.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
+    db.pragma_update(None, "user_version", 2).unwrap();
+    db.execute("UPDATE distributed_meta SET value=1 WHERE key='schema'", [])
+        .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(db);
+    legacy["schema_version"] = json!(1);
+    let bytes = fs::read(snapshot.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
+    for entry in legacy["files"].as_array_mut().unwrap() {
+        if entry["path"] == cedegrid::state::DATABASE_FILENAME {
+            entry["size"] = json!(bytes.len());
+            entry["sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+        }
+    }
+    legacy["total_bytes"] = json!(
+        legacy["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["size"].as_u64().unwrap())
+            .sum::<u64>()
+    );
     legacy.as_object_mut().unwrap().remove("storage_profile");
     fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let restored = d.path().join("restored");
@@ -396,6 +421,21 @@ fn legacy_snapshot_manifest_without_profile_remains_wal_compatible() {
             .unwrap()
             .storage_profile(),
         StorageProfile::WalFull
+    );
+    let db = rusqlite::Connection::open(restored.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM distributed_meta WHERE key='schema'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3
     );
 }
 
@@ -432,8 +472,7 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
     let d = dir();
     let source = d.path().join("source");
     seed(&source);
-    let db = rusqlite::Connection::open(source.join(resource_manager::state::DATABASE_FILENAME))
-        .unwrap();
+    let db = rusqlite::Connection::open(source.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
     db.execute("UPDATE distributed_meta SET value=2 WHERE key='schema'", [])
         .unwrap();
     drop(db);
@@ -442,8 +481,7 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
     let restored = d.path().join("restored-v2");
     let report = backup::restore(&snapshot, &restored, limits(), true).unwrap();
     assert!(report.fenced_allocations > 0);
-    let db = rusqlite::Connection::open(restored.join(resource_manager::state::DATABASE_FILENAME))
-        .unwrap();
+    let db = rusqlite::Connection::open(restored.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
     let schema: i64 = db
         .query_row(
             "SELECT value FROM distributed_meta WHERE key='schema'",
@@ -451,7 +489,7 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema, 2);
+    assert_eq!(schema, 3);
     let unfenced: i64 = db
         .query_row(
             "SELECT count(*) FROM reservations WHERE phase!='released' AND phase!='uncertain'",
@@ -462,9 +500,8 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
     assert_eq!(unfenced, 0);
     drop(db);
     // A future distributed schema still fails closed before any snapshot output.
-    let db = rusqlite::Connection::open(source.join(resource_manager::state::DATABASE_FILENAME))
-        .unwrap();
-    db.execute("UPDATE distributed_meta SET value=3 WHERE key='schema'", [])
+    let db = rusqlite::Connection::open(source.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
+    db.execute("UPDATE distributed_meta SET value=4 WHERE key='schema'", [])
         .unwrap();
     drop(db);
     let forbidden = d.path().join("future-schema-snapshot");

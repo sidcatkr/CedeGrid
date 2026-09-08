@@ -1,0 +1,4 @@
+include README.md LICENSE NOTICE pyproject.toml
+recursive-include cedegrid *.py
+recursive-include examples *.py
+recursive-include tests *.py

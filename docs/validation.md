@@ -4,6 +4,10 @@ Source distribution: linked private deployment evidence is withheld.
 All reported failures, unsupported capabilities and pending gates remain applicable.
 
 
+The dated evidence below describes earlier development snapshots. CedeGrid 0.2.0
+qualification is tracked separately in the [current release record](release-0.2-gates.json);
+older runs do not qualify the new source or package bytes.
+
 ## Current evidence — source034, 2026-09-07
 
 Source034 adds explicit replayable burst storage, authenticated session fencing,
@@ -600,7 +604,7 @@ GPU sharing or useful physical two-host application evidence.
   direction passed, reaching direct UDP at approximately 1ms. Private directories
   and sockets remain beneath each user's home; the existing burst system service
   was unchanged. This is the explicitly authorized Tailscale installation exception.
-  Authenticated ResourceManager API validation020 timed out with ShieldsUp
+  Authenticated CedeGrid API validation020 timed out with ShieldsUp
   preserved; no remote authentication pass is claimed. Peer pings do not establish application authentication or distributed
   correctness. Installation and peer status (private evidence retained outside this source review).
 - **CedeGrid023 metadata and installed SDK packaging passed:** the user selected
@@ -610,8 +614,8 @@ GPU sharing or useful physical two-host application evidence.
   was too broad. The separate source exporter excluded that worklog and nothing
   was published. Offline SDK source distribution, a wheel rebuilt from it, and 14
   existing tests against the installed wheel passed. The runtime binary remains
-  `resmgr`, Rust library `resource_manager`, Python distribution `resmgr-sdk`, and
-  import `resmgr`; no runtime API rename or dependency upgrade occurred. Crates.io
+  `cedegrid`, Rust library `cedegrid`, Python distribution `cedegrid`, and
+  import `cedegrid`; no runtime API rename or dependency upgrade occurred. Crates.io
   publication remains disabled. Public source publication is deferred pending the required testing gate; no
   repository or public push exists yet. Packaging does not establish operational completion. Final package and SDK review (private evidence retained outside this source review).
 - **Cargo boundary correction024 passed one offline check:** an explicit document
@@ -623,7 +627,7 @@ GPU sharing or useful physical two-host application evidence.
   Packaging024 review (private evidence retained outside this source review).
 
 The completed validation runs, including physical-fault023, native024 and GPU025/026, left no
-workload or ResourceManager service active. Native024 confirmed all eight allocations
+workload or CedeGrid service active. Native024 confirmed all eight allocations
 Released and no unrecognized allocations; physical-fault023 retained only its
 single committed artifact and two Released unexecuted offers.
 The separate API diagnostic020 also finished with verified cleanup; its physical
@@ -639,7 +643,7 @@ agent, CUDA context or application workload was started there. Diagnostic copies
 and run-specific mTLS credentials stayed in its private home; exported reports
 contain no private keys. Subsequently authorized Tailscale019 installed only
 home-local binaries and intentionally left the two private daemons running.
-There is no persistent autostart or unattended ResourceManager monitoring.
+There is no persistent autostart or unattended CedeGrid monitoring.
 
 The user replaced required 24-hour acceptance with bounded stress. The actual
 bounded CPU stress above passed; the long-soak harness is optional and unstarted.
@@ -648,7 +652,7 @@ There is no 24-hour endurance or unattended monitoring claim.
 ## Requirement, code and evidence matrix
 
 Paths prefixed `Kaggriculture:` belong to the separate application's checkout,
-`integration/resmgr`; no application imports or server identities enter the core.
+`integration/cedegrid`; no application imports or server identities enter the core.
 Each row applies only to its stated evidence scope.
 
 | Requirement | Implementation and executable tests | Current evidence or gate |
@@ -658,7 +662,7 @@ Each row applies only to its stated evidence scope.
 | CPU/RAM matching scopes and per-UUID GPU capability/freshness | `src/kernel.rs`, `src/telemetry.rs`, `src/policy.rs`; corresponding tests | Source031 native regressions and eight no-state samples per role passed; activity stayed unknown and no empty device was eligible.  Native004/source008 CPU and pressure evidence preserved. Diagnostic025/026 fresh own-process GPU activity/release observed on both roles; other contexts remain unknown. Managed GPU admission/protection and GPU pressure benefit remain unverified |
 | Scoped PSI and capability/enforcement reporting | `src/kernel.rs`, `src/cgroup.rs`; `tests/kernel.rs`, `tests/cgroup.rs` | Native system CPU/memory/IO PSI baseline and fresh deltas verified; applied delegated controls, workload PSI and external attribution unverified |
 | Durable launch barrier, verified identity, stable signaling/reaping | `src/supervision.rs`, `src/rootless.rs`, `src/execution_state.rs`; `tests/supervision.rs`, `tests/agent.rs` | Source032 and source033 passed affected child authorization and lease/deadline regressions with injected GPU observations and CPU child gates. Native004 runtime/fault and separate CUDA-release evidence, and Docker ARM64 supervision coverage, retain their original scopes |
-| Mediated descendants, common deadlines, no unrelated same-UID signals | `src/child_supervision.rs`, `src/managed_children.rs`, `python/resmgr/process.py`; `tests/managed_supervision.rs`, `tests/managed_children.rs`, `tests/family_contract.rs` | Source032 and source033 passed affected managed-child deadline, fresh-authority, cancellation and CPU runtime checks. Native004 supported-family history remains valid; arbitrary forks/daemonization remain unsupported |
+| Mediated descendants, common deadlines, no unrelated same-UID signals | `src/child_supervision.rs`, `src/managed_children.rs`, `python/cedegrid/process.py`; `tests/managed_supervision.rs`, `tests/managed_children.rs`, `tests/family_contract.rs` | Source032 and source033 passed affected managed-child deadline, fresh-authority, cancellation and CPU runtime checks. Native004 supported-family history remains valid; arbitrary forks/daemonization remain unsupported |
 | Pending/live/uncertain resource accounting | `src/execution_state.rs`, `src/coordinator.rs`; `tests/execution_state.rs`, `tests/coordinator.rs` | Source031 transactional/profile/per-UUID placement regressions passed. Source032 and source033 passed the local reservation-isolation regressions while retaining uncertain charges. Physical two-node application remains pending |
 | One coordinator, versioned mTLS, operator/node role isolation | `src/coordinator.rs`, `src/protocol.rs`; `tests/coordinator.rs`, `tests/tls_transport.rs` | Native004 real services and SDK transport passed; server017 local role checks passed but burst remote request timed out before authentication. Tailscale019 peer checks passed; mTLS020 timeout preserved; physical API021 mTLS/role/certificate/hostname checks passed |
 | Priority/FIFO, pool bounds/minimum protection, cancellation | `src/coordinator.rs`, `src/agent.rs`; `tests/coordinator.rs`, `tests/agent.rs` | Native004 correctness passed; source008 real workload stress and three matched CPU application pairs passed |
@@ -666,15 +670,15 @@ Each row applies only to its stated evidence scope.
 | Distinct disconnect/agent/supervisor failure and selected-profile recovery contracts | `src/agent.rs`, `src/supervision.rs`; `tests/agent.rs`, `tests/agent_reconciliation.rs`, `tests/distributed_service.rs` | Native004/Docker fault coverage preserved; native024 guaranteed task progressed7-to 33 during a five-second coordinator outage and completed after manual same-state restart. Physical burst loss/rejoin remains pending; no supervisor-death enforcement claim |
 | Attempt fencing, bounded retries/yield backoff, idempotent acceptance | `src/coordinator.rs`, `src/state.rs`; `tests/coordinator.rs`, `tests/state.rs` | Source033 exact protocol/legacy accepted-result/checkpoint regressions passed, preserving canonical old bytes and refusing conflicting retries. Native004 passed; physical-fault023 rejected three stale operations and replayed one committed artifact ACK after application-response discard. No accepted workload-result ACK fault was injected; external side effects remain workload responsibility |
 | Checksummed uploads, atomic publication, checkpoints and results | `src/artifacts.rs`, `src/coordinator.rs`; `tests/artifacts.rs`, `tests/coordinator.rs` | Source033 strict application review verified six SDK hashes, six coordinator receipt hashes and four real replay hashes; native checkpoint2-to4 continuation and DB integrity passed. Native004/real application history preserved; physical API021 resumable artifacts passed and fault023 offline audit verified one 4,032-byte publication after lost-response retry. Native024 checkpoint2-to 4 and database integrity passed; not power-loss testing |
-| Python lifecycle, drain, resume, completion, immutable inputs and spool cleanup | `python/resmgr/worker.py`, `python/resmgr/client.py`, `src/agent.rs`; `python/tests`, `tests/agent.rs`, `tests/tls_transport.rs` | Source033 both-profile connected SDK hash/restart checks and strict six-submission real application review passed. Historical Native004 SDK and Python repaired tests retain their scopes |
+| Python lifecycle, drain, resume, completion, immutable inputs and spool cleanup | `python/cedegrid/worker.py`, `python/cedegrid/client.py`, `src/agent.rs`; `python/tests`, `tests/agent.rs`, `tests/tls_transport.rs` | Source033 both-profile connected SDK hash/restart checks and strict six-submission real application review passed. Historical Native004 SDK and Python repaired tests retain their scopes |
 | CLI start/submit/status/drain/resume/reconcile, raw storage diagnostic and offline backup/restore | `src/main.rs`, `src/backup.rs`; `tests/cli.rs`, `tests/backup.rs`, `tests/storage_qualification.rs` | Source031 selected-profile operations, history and backup/restore passed; local connected DELETE/EXTRA recovery passed.  Native004 passed; native024 manual start, idle drain/resume, ordinary command, real application and same-state restart passed with eight Released allocations. Snapshot RPO/source retirement and uncertainty retained |
 | Generic non-application command example | `python/examples/counter.py`; `tests/agent.rs` | Native004 ordinary-command/SDK execution passed |
-| Real Kaggriculture command and finite cooperative learning continuation | `tools/local_smoke.py`, `tools/review_local_smoke.py`; `Kaggriculture:integration/resmgr/worker.py`, `workflow.py`; application `tests/resmgr/test_resume.py`, `test_workflow.py` | Source033 repeated four real720-step/719-inference CPU games and checkpoint2-to4 continuation, with six exact SDK/coordinator hashes, four replay hashes and all6allocations/records Released. Native008/Docker015/native024 evidence retains its scope. One host contributed; no useful two-node claim |
-| One experiment across anchor+burst, anchor continuity, rejoin/current model | `Kaggriculture:integration/resmgr/workflow.py`, `src/agent.rs`, `src/coordinator.rs`, `tools/two_node_validation.py`, `tools/two_node_bootstrap.py`; `tests/distributed_service.rs` | Source033 passed both selected-profile connected scenarios with exact SDK hashes and restart/checkpoint checks using two local agents on one kernel. Physical source staging and 21 automatic-demand tooling tests passed; no useful physical run is claimed. Historical startup failures retained. API021 physical mTLS/artifacts/owned-connection reconnect passed with zero accepted workload results. Physical useful work remains blocked by burst unsupported home state storage; the Docker alternative lacks Mac peer visibility. Bounded test limits are delegated to the agent |
+| Real Kaggriculture command and finite cooperative learning continuation | `tools/local_smoke.py`, `tools/review_local_smoke.py`; `Kaggriculture:integration/cedegrid/worker.py`, `workflow.py`; application `tests/cedegrid/test_resume.py`, `test_workflow.py` | Source033 repeated four real720-step/719-inference CPU games and checkpoint2-to4 continuation, with six exact SDK/coordinator hashes, four replay hashes and all6allocations/records Released. Native008/Docker015/native024 evidence retains its scope. One host contributed; no useful two-node claim |
+| One experiment across anchor+burst, anchor continuity, rejoin/current model | `Kaggriculture:integration/cedegrid/workflow.py`, `src/agent.rs`, `src/coordinator.rs`, `tools/two_node_validation.py`, `tools/two_node_bootstrap.py`; `tests/distributed_service.rs` | Source033 passed both selected-profile connected scenarios with exact SDK hashes and restart/checkpoint checks using two local agents on one kernel. Physical source staging and 21 automatic-demand tooling tests passed; no useful physical run is claimed. Historical startup failures retained. API021 physical mTLS/artifacts/owned-connection reconnect passed with zero accepted workload results. Physical useful work remains blocked by burst unsupported home state storage; the Docker alternative lacks Mac peer visibility. Bounded test limits are delegated to the agent |
 | Matched throughput, protected latency, manager overhead and release timing | `tools/compare.py`, `tools/pressure_comparison.py`, `tools/pressure_probe.py`, `tools/anchor_validation.py`; corresponding tests | Native008 synthetic15-case and three real CPU pairs passed; original overhead segment retains gaps. Unmatched GPU025/026 diagnostic units/samples do not establish speedup or protected latency; GPU comparison remains pending |
 | Required bounded real-workload stress | `tools/local_smoke.py`, `tools/pressure.py`, application `workflow.py`; `tests/test_local_smoke_stress.py`, application workflow tests | Actual native008 passed in 230.77s; all eight managed allocations released; independent artifact review passed |
 | Optional long-duration soak | `tools/soak.py`, `tools/make_soak_config.py`, `tools/pressure_schedule.py`; `tests/test_operations.py`, `tests/test_validation_tools.py` | Required:false after user waiver; actual run not started |
-| Portable core and optional backends | `Cargo.toml`, `src/lib.rs`; source031 portability and tool reports, historical Docker013 review | Integrated source033 Rust 1.88 all-target check, formatting and strict Mac/Windows GNU Clippy passed; actual source-matched burst hash/ELF/version readback is recorded separately from state/workload evidence. Historical ARM64 container runtime retains its scope. No Windows runtime, NVIDIA-on-Mac or applied ResourceManager cgroup claim |
+| Portable core and optional backends | `Cargo.toml`, `src/lib.rs`; source031 portability and tool reports, historical Docker013 review | Integrated source033 Rust 1.88 all-target check, formatting and strict Mac/Windows GNU Clippy passed; actual source-matched burst hash/ELF/version readback is recorded separately from state/workload evidence. Historical ARM64 container runtime retains its scope. No Windows runtime, NVIDIA-on-Mac or applied CedeGrid cgroup claim |
 
 ## Remaining operational gates
 
@@ -766,7 +770,7 @@ invalidate the independent burst-to-anchor API021 pass. These observations used
 aggregate GPU data only; no shared-server per-process GPU query was performed.
 
 No delegated cgroup subtree is authorized. Rootless validation proceeds
-independently; ResourceManager cgroup weight/quota/memory application remains
+independently; CedeGrid cgroup weight/quota/memory application remains
 unverified. Docker's observed outer container quotas are not backend application
 evidence. Weights
 are relative hierarchical controls, GPU budgets are admission policies, and no

@@ -3,7 +3,7 @@
 The latest user instruction replaces the required24-hour acceptance run with a
 bounded stress test. Existing long-duration tools below are retained as optional
 future tools; no24-hour completion, schedule or monitoring is claimed. The current
-required test runs the real selected Kaggriculture workload under ResourceManager,
+required test runs the real selected Kaggriculture workload under CedeGrid,
 introduces a separately owned same-UID external CPU process, verifies that the
 external process receives resources without being signaled by the manager, and
 verifies the same experiment continues through a fresh accepted attempt and

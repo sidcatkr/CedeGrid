@@ -1,4 +1,4 @@
-use resource_manager::config::Config;
+use cedegrid::config::{Config, RuntimeConfigKind, serialize_runtime};
 use serde_json::Value;
 use std::{
     fs,
@@ -7,7 +7,7 @@ use std::{
 };
 
 fn run(config: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_resmgr"))
+    Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("--config")
         .arg(config)
         .args(args)
@@ -21,8 +21,12 @@ fn setup(directory: &Path) -> std::path::PathBuf {
         state_dir: "state".into(),
         ..Config::default()
     };
-    let path = directory.join("node.yaml");
-    fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let path = directory.join("node.toml");
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
     path
 }
 
@@ -54,8 +58,36 @@ fn invalid_config_and_missing_history_never_initialize_database() {
     let path = setup(dir.path());
     let output = run(&path, &["history"]);
     assert!(!output.status.success());
-    fs::write(&path, "node_id: test-node\nmonitor:\n  interval_ms: 0\n").unwrap();
+    fs::write(
+        &path,
+        "config_version = 1\nnode_id = 'test-node'\n[monitor]\ninterval_ms = 0\n",
+    )
+    .unwrap();
     assert!(!run(&path, &["observe"]).status.success());
+    assert!(!dir.path().join("state").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn doctor_separates_selected_profile_from_requested_role_without_creating_state() {
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let path = setup(dir.path());
+    let mut config = Config::load(&path).unwrap();
+    config.storage_profile = cedegrid::state::StorageProfile::BurstReplayDeleteExtra;
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let agent = success_json(run(&path, &["doctor", "--role", "agent"]));
+    assert_eq!(agent["requested_role"], "agent");
+    assert_eq!(agent["selected_profile_admitted"], true);
+    assert_eq!(agent["role_admitted"], true);
+    let coordinator = run(&path, &["doctor", "--role", "coordinator"]);
+    assert!(!coordinator.status.success());
+    let coordinator: Value = serde_json::from_slice(&coordinator.stdout).unwrap();
+    assert_eq!(coordinator["selected_profile_admitted"], true);
+    assert_eq!(coordinator["role_admitted"], false);
     assert!(!dir.path().join("state").exists());
 }
 
@@ -94,9 +126,9 @@ fn observation_is_persisted_and_history_round_trips() {
 #[test]
 fn synthetic_replay_explains_pressure_without_affecting_live_system() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("node.yaml");
+    let config = dir.path().join("node.toml");
     fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/node.yaml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/node.toml"),
         &config,
     )
     .unwrap();
@@ -127,7 +159,7 @@ fn synthetic_replay_explains_pressure_without_affecting_live_system() {
 
 #[test]
 fn legacy_run_subcommand_is_rejected() {
-    let output = Command::new(env!("CARGO_BIN_EXE_resmgr"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("run")
         .output()
         .unwrap();
@@ -143,13 +175,70 @@ fn disabled_supervision_refuses_before_creating_state() {
     fs::write(&job, "{}").unwrap();
     let output = run(&config, &["supervise", job.to_str().unwrap()]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("execution is disabled"));
+    let expected = if cfg!(windows) {
+        "ERR_CEDEGRID_UNSUPPORTED_PLATFORM"
+    } else {
+        "execution is disabled"
+    };
+    assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
     assert!(!dir.path().join("state").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_execution_and_recovery_refuse_before_reading_inputs_or_mutating_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_config = dir.path().join("missing.toml");
+    for args in [
+        vec!["agent", "--deployment", "missing.toml"],
+        vec!["coordinator", "--deployment", "missing.toml"],
+        vec!["supervise", "missing.json"],
+        vec!["reconcile"],
+        vec!["observe"],
+        vec!["history"],
+        vec!["executions"],
+        vec!["backup", "--state-dir", "state", "--destination", "backup"],
+        vec![
+            "restore",
+            "--snapshot",
+            "backup",
+            "--destination",
+            "state",
+            "--confirm-source-stopped",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .current_dir(dir.path())
+            .arg("--config")
+            .arg(&missing_config)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ERR_CEDEGRID_UNSUPPORTED_PLATFORM"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+    for command in ["__worker-gate", "__assignment-supervisor"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .current_dir(dir.path())
+            .arg(command)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ERR_CEDEGRID_UNSUPPORTED_PLATFORM")
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    use resource_manager::{
+    use cedegrid::{
         config::{CpuConfig, ExecutionConfig, GpuConfig, MonitorConfig, NodeMode, RamConfig},
         kernel::KernelConfig,
     };
@@ -181,8 +270,12 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
         },
         ..Default::default()
     };
-    let config_path = directory.join("node.yaml");
-    fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let config_path = directory.join("node.toml");
+    fs::write(
+        &config_path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
     let job_path = directory.join("job.json");
     let job = serde_json::json!({
         "task_id": "cli-task", "assignment_id": "assignment-one",
@@ -199,7 +292,7 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn enabled_supervision_commits_exit_receipt_and_releases_capacity() {
-    use resource_manager::state::{StateStore, TaskStatus};
+    use cedegrid::state::{StateStore, TaskStatus};
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let (config, job) = execution_setup(dir.path());
     let outcome = success_json(run(&config, &["supervise", job.to_str().unwrap()]));
@@ -224,7 +317,7 @@ fn enabled_supervision_commits_exit_receipt_and_releases_capacity() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn missing_required_control_never_executes_and_safe_resubmission_uses_new_attempt() {
-    use resource_manager::state::{StateStore, TaskStatus};
+    use cedegrid::state::{StateStore, TaskStatus};
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let (config, job) = execution_setup(dir.path());
     let mut request: Value = serde_json::from_slice(&fs::read(&job).unwrap()).unwrap();
@@ -274,12 +367,16 @@ fn local_gpu_execution_refuses_before_state_or_workload_creation() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn configured_rollback_profile_is_used_through_execution_history_and_restart() {
-    use resource_manager::state::{StateStore, StorageProfile};
+    use cedegrid::state::{StateStore, StorageProfile};
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let (config_path, job) = execution_setup(dir.path());
-    let mut config: Config = serde_yaml::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let mut config = Config::load(&config_path).unwrap();
     config.storage_profile = StorageProfile::DeleteExtra;
-    fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
     let outcome = success_json(run(&config_path, &["supervise", job.to_str().unwrap()]));
     assert_eq!(outcome["record"]["phase"], "released");
     let rows = success_json(run(&config_path, &["executions"]));
@@ -291,7 +388,11 @@ fn configured_rollback_profile_is_used_through_execution_history_and_restart() {
     assert!(!dir.path().join("state/state.sqlite3-wal").exists());
     drop(store);
     config.storage_profile = StorageProfile::WalFull;
-    fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
     assert!(!run(&config_path, &["executions"]).status.success());
     assert_eq!(
         fs::read_to_string(dir.path().join("marker")).unwrap(),

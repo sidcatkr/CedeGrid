@@ -1,5 +1,5 @@
-use resource_manager::model::{CapabilityStatus, Decision, Resources, Snapshot};
-use resource_manager::state::{
+use cedegrid::model::{CapabilityStatus, Decision, Resources, Snapshot};
+use cedegrid::state::{
     DATABASE_FILENAME, SCHEMA_VERSION, StateStore, StorageProfile, TaskStatus,
     filesystem_supported, preflight, runtime_sqlite_supported, sqlite_version_supported,
 };
@@ -466,7 +466,7 @@ fn committed_state_survives_exit_without_connection_cleanup() {
     let directory = storage_dir();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "state_exit_fixture", "--nocapture"])
-        .env("RESMGR_TEST_EXIT_STATE_DIR", directory.path())
+        .env("CEDEGRID_TEST_EXIT_STATE_DIR", directory.path())
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(17));
@@ -478,7 +478,7 @@ fn committed_state_survives_exit_without_connection_cleanup() {
 
 #[test]
 fn state_exit_fixture() {
-    let Some(directory) = std::env::var_os("RESMGR_TEST_EXIT_STATE_DIR") else {
+    let Some(directory) = std::env::var_os("CEDEGRID_TEST_EXIT_STATE_DIR") else {
         return;
     };
     let store = StateStore::open(Path::new(&directory)).unwrap();
@@ -513,8 +513,8 @@ fn live_agent_and_observe_only_decisions_preserve_their_actual_mode_without_laun
 #[ignore = "owned subprocess fixture with an isolated permissive umask"]
 fn private_state_permission_fixture() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::var_os("RESMGR_PERMISSION_TEST_DIRECTORY").unwrap();
-    if std::env::var_os("RESMGR_PERMISSION_LOCK_PROBE").is_some() {
+    let root = std::env::var_os("CEDEGRID_PERMISSION_TEST_DIRECTORY").unwrap();
+    if std::env::var_os("CEDEGRID_PERMISSION_LOCK_PROBE").is_some() {
         let connection = Connection::open(Path::new(&root).join(DATABASE_FILENAME)).unwrap();
         connection
             .busy_timeout(std::time::Duration::from_millis(20))
@@ -561,7 +561,7 @@ fn private_state_creation_ignores_permissive_umask_without_changing_ancestors() 
             "--ignored",
             "--test-threads=1",
         ])
-        .env("RESMGR_PERMISSION_TEST_DIRECTORY", directory.path())
+        .env("CEDEGRID_PERMISSION_TEST_DIRECTORY", directory.path())
         .env("TMPDIR", directory.path())
         .output()
         .unwrap();
@@ -761,8 +761,8 @@ fn privacy_preparation_does_not_cancel_another_live_sqlite_connections_os_locks(
             "--ignored",
             "--test-threads=1",
         ])
-        .env("RESMGR_PERMISSION_TEST_DIRECTORY", directory.path())
-        .env("RESMGR_PERMISSION_LOCK_PROBE", "1")
+        .env("CEDEGRID_PERMISSION_TEST_DIRECTORY", directory.path())
+        .env("CEDEGRID_PERMISSION_LOCK_PROBE", "1")
         .env("TMPDIR", directory.path())
         .output()
         .unwrap();
@@ -798,10 +798,10 @@ fn rollback_profile_persists_effective_settings_and_receipts_without_wal() {
     assert_eq!(settings.synchronous, 3);
     assert_eq!(
         settings.schema_version,
-        resource_manager::state::DELETE_EXTRA_SCHEMA_VERSION
+        cedegrid::state::DELETE_EXTRA_SCHEMA_VERSION
     );
     assert!(
-        settings.schema_version > SCHEMA_VERSION,
+        settings.schema_version > 4,
         "previous binaries must refuse before changing journal mode"
     );
     assert_eq!(settings.busy_timeout_ms, 321);
@@ -897,22 +897,34 @@ fn profile_mismatch_is_rejected_live_and_offline_without_changing_database() {
 }
 
 #[test]
-fn legacy_wal_migration_preserves_rows_and_refuses_profile_adoption() {
+fn legacy_wal_startup_requires_explicit_upgrade_without_profile_adoption() {
     let directory = storage_dir();
     let store = StateStore::open(directory.path()).unwrap();
     store.submit("legacy", true).unwrap();
     drop(store);
     let db = Connection::open(directory.path().join(DATABASE_FILENAME)).unwrap();
-    db.execute_batch("DROP TABLE state_storage_profile; DROP TABLE execution_events; DROP TABLE executions; PRAGMA user_version=1;").unwrap();
+    db.execute_batch("DROP TABLE state_storage_profile; DROP TABLE execution_events; DROP TABLE executions; PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
     drop(db);
+    let before = std::fs::read(directory.path().join(DATABASE_FILENAME)).unwrap();
     assert!(StateStore::open_with_profile(directory.path(), StorageProfile::DeleteExtra).is_err());
-    let reopened = StateStore::open(directory.path()).unwrap();
-    assert_eq!(reopened.status("legacy").unwrap(), TaskStatus::Queued);
-    assert_eq!(
-        reopened.durability_settings().unwrap().schema_version,
-        SCHEMA_VERSION
+    assert!(
+        StateStore::open(directory.path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("upgrade required")
     );
-    assert_eq!(reopened.storage_profile(), StorageProfile::WalFull);
+    assert_eq!(
+        std::fs::read(directory.path().join(DATABASE_FILENAME)).unwrap(),
+        before
+    );
+    let db = Connection::open(directory.path().join(DATABASE_FILENAME)).unwrap();
+    assert_eq!(
+        db.query_row("SELECT status FROM tasks WHERE task_id='legacy'", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "queued"
+    );
 }
 
 #[test]
@@ -992,11 +1004,64 @@ fn first_open_profile_selection_is_serialized_across_threads() {
 #[test]
 #[ignore = "child process fixture, invoked by rollback profile crash/concurrency tests"]
 fn storage_profile_process_fixture() {
-    let directory = std::path::PathBuf::from(std::env::var_os("RESMGR_PROFILE_DIRECTORY").unwrap());
-    let mode = std::env::var("RESMGR_PROFILE_FIXTURE").unwrap();
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("CEDEGRID_PROFILE_DIRECTORY").unwrap());
+    let mode = std::env::var("CEDEGRID_PROFILE_FIXTURE").unwrap();
     let profile: StorageProfile =
-        serde_json::from_str(&std::env::var("RESMGR_PROFILE").unwrap()).unwrap();
+        serde_json::from_str(&std::env::var("CEDEGRID_PROFILE").unwrap()).unwrap();
     let store = StateStore::open_with_profile(&directory, profile).unwrap();
+    if let Some(versions) = mode.strip_prefix("hot-rollback-") {
+        store.submit("hot-journal-acknowledged", true).unwrap();
+        let (original, pending) = versions.split_once('-').unwrap();
+        let original: i64 = original.parse().unwrap();
+        let pending: i64 = pending.parse().unwrap();
+        let db = Connection::open(store.database_path()).unwrap();
+        db.execute_batch("CREATE TABLE hot_journal_spill(value BLOB); WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<256) INSERT INTO hot_journal_spill SELECT zeroblob(4000) FROM n;").unwrap();
+        db.pragma_update(None, "user_version", original).unwrap();
+        db.pragma_update(None, "synchronous", "EXTRA").unwrap();
+        db.execute_batch("PRAGMA cache_size=5; PRAGMA cache_spill=ON; BEGIN IMMEDIATE;")
+            .unwrap();
+        db.pragma_update(None, "user_version", pending).unwrap();
+        // Spill dirty pages before the crash; a small unspilled transaction
+        // leaves a cold journal and would not exercise READONLY_ROLLBACK.
+        db.execute_batch("UPDATE hot_journal_spill SET value=randomblob(4000);")
+            .unwrap();
+        // Force the exact hot-journal crash point independently of SQLite's
+        // cache-spill heuristics and allocator/cache size on this platform.
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_db_cacheflush(db.handle()) },
+            rusqlite::ffi::SQLITE_OK
+        );
+        // cacheflush intentionally retains page one. Reproduce the later
+        // commit crash point where that page is written but the synced journal
+        // still contains its previous schema, using the same live VFS handle.
+        let mut file: *mut rusqlite::ffi::sqlite3_file = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                rusqlite::ffi::sqlite3_file_control(
+                    db.handle(),
+                    c"main".as_ptr(),
+                    rusqlite::ffi::SQLITE_FCNTL_FILE_POINTER,
+                    std::ptr::from_mut(&mut file).cast()
+                ),
+                rusqlite::ffi::SQLITE_OK
+            );
+            assert!(!file.is_null());
+            let methods = &*(*file).pMethods;
+            let version = (pending as i32).to_be_bytes();
+            assert_eq!(
+                methods.xWrite.unwrap()(file, version.as_ptr().cast(), 4, 60),
+                rusqlite::ffi::SQLITE_OK
+            );
+            assert_eq!(
+                methods.xSync.unwrap()(file, rusqlite::ffi::SQLITE_SYNC_FULL),
+                rusqlite::ffi::SQLITE_OK
+            );
+        }
+        std::fs::write(directory.join("crash-ready"), b"hot rollback journal").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        panic!("parent did not interrupt bounded hot-journal fixture");
+    }
     if mode == "crash-before-commit" {
         store.submit("acknowledged", true).unwrap();
         let generation = store.assign("acknowledged", "durable-attempt").unwrap();
@@ -1049,9 +1114,9 @@ fn profile_child(directory: &Path, profile: StorageProfile, mode: &str) -> Profi
                 "--ignored",
                 "--test-threads=1",
             ])
-            .env("RESMGR_PROFILE_DIRECTORY", directory)
-            .env("RESMGR_PROFILE", serde_json::to_string(&profile).unwrap())
-            .env("RESMGR_PROFILE_FIXTURE", mode)
+            .env("CEDEGRID_PROFILE_DIRECTORY", directory)
+            .env("CEDEGRID_PROFILE", serde_json::to_string(&profile).unwrap())
+            .env("CEDEGRID_PROFILE_FIXTURE", mode)
             .env("TMPDIR", directory)
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -1106,6 +1171,104 @@ fn both_profiles_preserve_acknowledged_receipts_and_uncertainty_after_process_lo
 }
 
 #[test]
+fn hot_rollback_recovery_checks_current_and_rolled_back_schema_before_mutation() {
+    for (original, pending, allowed) in [(5, 5, true), (3, 5, false), (6, 5, false), (5, 6, false)]
+    {
+        let directory = storage_dir();
+        let mode = format!("hot-rollback-{original}-{pending}");
+        let mut child = profile_child(directory.path(), StorageProfile::DeleteExtra, &mode);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !directory.path().join("crash-ready").exists() {
+            assert!(
+                std::time::Instant::now() < until,
+                "hot-journal fixture readiness deadline"
+            );
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "hot-journal fixture exited early"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
+        let database = directory.path().join(DATABASE_FILENAME);
+        let journal = directory
+            .path()
+            .join(format!("{DATABASE_FILENAME}-journal"));
+        let before_database = std::fs::read(&database).unwrap();
+        let before_journal = std::fs::read(&journal).unwrap();
+        assert_eq!(
+            &before_journal[..8],
+            &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7],
+            "expected a synced hot journal for {mode}; length {}",
+            before_journal.len()
+        );
+        assert_eq!(
+            i32::from_be_bytes(before_database[60..64].try_into().unwrap()),
+            pending
+        );
+        let probe =
+            Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let error = probe
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error().unwrap().extended_code,
+            rusqlite::ffi::SQLITE_READONLY_ROLLBACK
+        );
+        drop(probe);
+        let result = StateStore::open_with_profile(directory.path(), StorageProfile::DeleteExtra);
+        if allowed {
+            let recovered = result.unwrap();
+            assert_eq!(
+                recovered.task("hot-journal-acknowledged").unwrap().status,
+                TaskStatus::Queued
+            );
+            assert_eq!(
+                recovered.durability_settings().unwrap().schema_version,
+                SCHEMA_VERSION
+            );
+            let db = Connection::open(recovered.database_path()).unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM hot_journal_spill WHERE value=zeroblob(4000)",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                256
+            );
+            assert_eq!(
+                db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            assert!(!journal.exists());
+        } else {
+            let error = result
+                .err()
+                .expect("unsupported hot-journal schema must be refused")
+                .to_string();
+            assert!(
+                error.contains("state upgrade required") || error.contains("newer than supported"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(&database).unwrap(),
+                before_database,
+                "refusal changed the original database"
+            );
+            assert_eq!(
+                std::fs::read(&journal).unwrap(),
+                before_journal,
+                "refusal changed the original journal"
+            );
+        }
+    }
+}
+
+#[test]
 fn rollback_profile_serializes_real_process_writers_without_losing_receipts() {
     let directory = storage_dir();
     let profile = StorageProfile::DeleteExtra;
@@ -1148,15 +1311,13 @@ fn rollback_schema_fence_corruption_is_refused_without_repair() {
     // Simulate only this isolated test database's malformed persisted fence.
     let path = directory.path().join(DATABASE_FILENAME);
     let database = Connection::open(&path).unwrap();
-    database
-        .pragma_update(None, "user_version", SCHEMA_VERSION)
-        .unwrap();
+    database.pragma_update(None, "user_version", 4).unwrap();
     drop(database);
     let before = std::fs::read(&path).unwrap();
     let error = StateStore::open_with_profile(directory.path(), profile)
         .err()
         .unwrap();
-    assert!(error.to_string().contains("schema fence"));
+    assert!(error.to_string().contains("upgrade required"));
     assert!(StateStore::open_read_only_with_profile(directory.path(), profile).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
     let database = Connection::open(&path).unwrap();
@@ -1231,7 +1392,7 @@ fn replayable_profile_is_explicit_persisted_and_fenced_from_strict_openers() {
     assert_eq!(settings["assurance"], "replayable_local");
     assert_eq!(settings["journal_mode"], "delete");
     assert_eq!(settings["synchronous"], 3);
-    assert_eq!(settings["schema_version"], 4);
+    assert_eq!(settings["schema_version"], 5);
     store.submit("replayable", true).unwrap();
     let generation = store.assign("replayable", "attempt-one").unwrap();
     assert!(
@@ -1307,7 +1468,7 @@ fn replayable_profile_cannot_adopt_existing_strong_state_or_repair_invalid_assur
 
 #[test]
 fn replayable_filesystem_admission_is_explicit_and_does_not_change_strict_preflight() {
-    use resource_manager::state::StoragePreflight;
+    use cedegrid::state::StoragePreflight;
     let mut capability = StoragePreflight {
         requested_path: "/example/state".into(),
         inspected_path: "/example".into(),

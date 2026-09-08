@@ -1,0 +1,9 @@
+CedeGrid
+Copyright 2026 sidcatkr and contributors.
+
+CedeGrid is licensed under the Apache License, Version 2.0.
+
+Third-party dependencies retain their own licenses and attribution notices.
+This source distribution does not vendor those dependencies. Cargo.lock records
+Rust dependency versions; the Python SDK has no third-party runtime dependencies.
+Distributors of compiled binaries must preserve the applicable upstream notices.

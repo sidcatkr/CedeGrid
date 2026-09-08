@@ -144,7 +144,7 @@ class SourceReviewTests(unittest.TestCase):
             'Cargo.toml': b'[package]\nname="cedegrid"\nlicense = "Apache-2.0"\npublish = false\n',
             'LICENSE': license_bytes,
             'python/LICENSE': license_bytes,
-            'python/pyproject.toml': b'[project]\nname="resmgr-sdk"\nlicense = "Apache-2.0"\n',
+            'python/pyproject.toml': b'[project]\nname="cedegrid"\nlicense = "Apache-2.0"\n',
             'docs/release.md': b'# Release scope\nHardware validation remains separate.\n',
         })
         for name, data in self.files.items():

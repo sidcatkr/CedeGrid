@@ -18,14 +18,15 @@ import time
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
-from resmgr import Client, sha256_file
+from cedegrid import Client, sha256_file
 from make_test_pki import generate as generate_pki
 from soak import AllocationLedger
 from validation_runtime import OwnedProcess, atomic_json, home_executable, inside_home, local_guard
+from runtime_config import atomic_runtime_config
 
 SERVICE_SECONDS = 1400
 WORK_SECONDS = 1200
-DEFAULT_DOCKER_ROOT = '/home/resmgr/validation'
+DEFAULT_DOCKER_ROOT = '/home/cedegrid/validation'
 STORAGE_PROFILES = ('wal_full', 'delete_extra')
 
 
@@ -42,7 +43,7 @@ def required(path):
     return path
 
 
-def remote_path(root, *parts, home='/home/resmgr'):
+def remote_path(root, *parts, home='/home/cedegrid'):
     """Lexical remote bounds only; the burst owner must verify canonical paths."""
     values = [str(home), str(root), *map(str, parts)]
     if any(not value or any(ord(char) < 32 for char in value) for value in values):
@@ -123,9 +124,9 @@ def burst_settings(args):
                       reserve_ram_mib=16384)
     else:
         root = remote_path(getattr(args, 'docker_root', DEFAULT_DOCKER_ROOT))
-        result = {'kind': 'docker', 'home': '/home/resmgr', 'root': root, 'cpus': [0, 1], 'reserve_ram_mib': 1024,
+        result = {'kind': 'docker', 'home': '/home/cedegrid', 'root': root, 'cpus': [0, 1], 'reserve_ram_mib': 1024,
                   'python': remote_path(root, 'venv-isolated/bin/python'),
-                  'binary': remote_path(root, 'source/ResourceManager/target/release/resmgr'),
+                  'binary': remote_path(root, 'source/ResourceManager/target/release/cedegrid'),
                   'source_root': remote_path(root, 'source/Kaggriculture'),
                   'sdk_root': remote_path(root, 'source/ResourceManager/python')}
     result['storage_profile'] = storage_profile(getattr(args, 'burst_storage_profile', 'wal_full'))
@@ -168,10 +169,10 @@ def prepare(args):
     coordinator_profile = storage_profile(getattr(args, 'coordinator_storage_profile', 'wal_full'))
     candidate, bootstrap = required(args.candidate), required(args.bootstrap)
     dataset = inside_home(args.dataset)
-    for path in (dataset / 'manifest.json', source / 'integration/resmgr/workflow.py',
-                 sdk / 'resmgr/__init__.py', source / 'training/self_play.py'):
+    for path in (dataset / 'manifest.json', source / 'integration/cedegrid/workflow.py',
+                 sdk / 'cedegrid/__init__.py', source / 'training/self_play.py'):
         required(path)
-    spec = importlib.util.spec_from_file_location('two_node_snapshot_verifier', required(source / 'integration/resmgr/worker.py'))
+    spec = importlib.util.spec_from_file_location('two_node_snapshot_verifier', required(source / 'integration/cedegrid/worker.py'))
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     snapshot_hash = sha256_file(required(candidate.parent / 'snapshot_manifest.json'))
     model_hash = sha256_file(required(candidate.parent / 'weights/policy_value.ts'))
@@ -220,28 +221,28 @@ def prepare(args):
                 'private_key': folder + '/' + name + '.key'}
     endpoint = 'https://127.0.0.1:45671'
     configs = {
-        'coordinator.json': {'listen': '127.0.0.1:45671', 'state_dir': str(output / 'coordinator-state'),
+        'coordinator.toml': {'listen': '127.0.0.1:45671', 'state_dir': str(output / 'coordinator-state'),
                              **({'storage_profile': coordinator_profile} if coordinator_profile != 'wal_full' else {}),
                              'tls': tls('server'), 'clients': pki['clients'], 'lease_ms': 10000,
                              'telemetry_ttl_ms': 3000, 'retry_limit': 3, 'max_artifact_bytes': 256 * 1024**2,
                              'artifact_quota_bytes': 4 * 1024**3},
-        'operator.json': {'endpoint': endpoint, 'tls': tls('operator')},
-        'anchor-agent.json': agent_settings(endpoint, tls('node-0'), cpus),
-        'anchor-node.json': node_settings(anchor, 'guaranteed', str(output / 'anchor-state'), 16384, 1, anchor_profile),
-        'burst-agent.json': agent_settings(burst_endpoint, tls('node-1', burst_bootstrap), placement['cpus'], ram_mib=2048),
+        'operator.toml': {'endpoint': endpoint, 'tls': tls('operator')},
+        'anchor-agent.toml': agent_settings(endpoint, tls('node-0'), cpus),
+        'anchor-node.toml': node_settings(anchor, 'guaranteed', str(output / 'anchor-state'), 16384, 1, anchor_profile),
+        'burst-agent.toml': agent_settings(burst_endpoint, tls('node-1', burst_bootstrap), placement['cpus'], ram_mib=2048),
         # Docker retains its outer 2-CPU cap. A physical owner must instead
         # verify two physical cores of affinity for one actor plus manager
         # headroom; rootless affinity/accounting is not an enforced CPU quota.
-        'burst-node.json': node_settings(burst, 'opportunistic', burst_path(burst_bootstrap, 'agent-state'),
+        'burst-node.toml': node_settings(burst, 'opportunistic', burst_path(burst_bootstrap, 'agent-state'),
                                          placement['reserve_ram_mib'], 0,
                                          placement['storage_profile']),
     }
     for name, value in configs.items():
-        atomic_json(output / name, value)
+        atomic_runtime_config(output / name, value, 'client' if name == 'operator.toml' else name.removesuffix('.toml').split('-')[-1])
     common = {'max_workers': 1, 'max_attempts': 4, 'snapshot_sha256': snapshot_hash,
               'model_sha256': model_hash, 'device': 'cpu'}
     application = {'experiment_id': run_id, 'generation': 0, 'run_seed': run_id, 'games': 12,
-                   'output': str(harness_output / 'application'), 'client_config': str(output / 'operator.json'),
+                   'output': str(harness_output / 'application'), 'client_config': str(output / 'operator.toml'),
                    'validation_dataset': str(dataset), 'learner_ram_mib': 4096,
                    'nodes': [{**common, 'node_id': anchor, 'class': 'guaranteed', 'python': str(python),
                               'source_root': str(source), 'sdk_root': str(sdk), 'candidate': str(candidate),
@@ -262,8 +263,8 @@ def prepare(args):
     if listen_host:
         harness['proxy_config'].update(listen=[listen_host, 45670], max_forward_bytes=2 * 1024**3,
             public_listener={'enabled': True, 'source_ips': [source_ip],
-                             'coordinator_deployment': str(output / 'coordinator.json'),
-                             'coordinator_sha256': sha256_file(output / 'coordinator.json'),
+                             'coordinator_deployment': str(output / 'coordinator.toml'),
+                             'coordinator_sha256': sha256_file(output / 'coordinator.toml'),
                              'ca_certificate_sha256': sha256_file(output / 'pki/ca.pem'),
                              'server_certificate_sha256': sha256_file(output / 'pki/server.pem')})
     from two_node_validation import validate
@@ -272,7 +273,7 @@ def prepare(args):
     transfer = []
     for name in ('ca.pem', 'node-1.pem', 'node-1.key'):
         transfer.append({'source': str(output / 'pki' / name), 'destination': burst_path(burst_bootstrap, 'pki', name)})
-    for name in ('burst-node.json', 'burst-agent.json'):
+    for name in ('burst-node.toml', 'burst-agent.toml'):
         transfer.append({'source': str(output / name), 'destination': burst_path(burst_bootstrap, name)})
     for name in sorted(snapshot_files):
         path = required(candidate.parent / name)
@@ -300,8 +301,8 @@ def prepare(args):
                               'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONPATH': placement['sdk_root'] + ':' + placement['source_root'],
                               'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'CUDA_VISIBLE_DEVICES': ''},
                 'burst_preflight_required': 'Verify runtime HOME, canonical paths, executable and source integrity, CPU affinity and qualified storage profile on the burst host before launch.',
-                'burst_argv': [placement['binary'], '--config', burst_path(burst_bootstrap, 'burst-node.json'), 'agent',
-                               '--deployment', burst_path(burst_bootstrap, 'burst-agent.json')],
+                'burst_argv': [placement['binary'], '--config', burst_path(burst_bootstrap, 'burst-node.toml'), 'agent',
+                               '--deployment', burst_path(burst_bootstrap, 'burst-agent.toml')],
                 'transport': {'coordinator_loopback_port': 45671, 'owned_proxy_listen': harness['proxy_config']['listen'],
                               'owned_proxy_loopback_port': None if listen_host else 45670,
                               'mac_tunnel_loopback_port': None if listen_host or getattr(args, 'burst_endpoint', None) else 45672,
@@ -350,7 +351,7 @@ def run(manifest_path, execute=False):
     started = time.monotonic(); limit = started + SERVICE_SECONDS
     report = {'status': 'starting', 'started_unix': time.time(), 'services': {}, 'cleanup': [],
               'max_seconds': SERVICE_SECONDS, 'unresolved_allocations': [], 'operational_completion': False}
-    services = {}; driver = None; client = Client.from_config(output / 'operator.json')
+    services = {}; driver = None; client = Client.from_config(output / 'operator.toml')
     # This controller uses small local status/control RPCs; artifact transfer
     # retains the SDK's ordinary timeout in the separate application controller.
     client.timeout = 3
@@ -369,10 +370,10 @@ def run(manifest_path, execute=False):
             if process.poll() is not None:
                 raise RuntimeError('owned service exited: ' + name)
     try:
-        doctor = subprocess.run([str(binary), '--config', str(output / 'anchor-node.json'), 'doctor'],
+        doctor = subprocess.run([str(binary), '--config', str(output / 'anchor-node.toml'), 'doctor'],
                                 env=env, text=True, capture_output=True, check=True, timeout=30)
         atomic_json(output / 'anchor-doctor.json', json.loads(doctor.stdout))
-        services['coordinator'] = OwnedProcess([str(binary), 'coordinator', '--deployment', str(output / 'coordinator.json')],
+        services['coordinator'] = OwnedProcess([str(binary), 'coordinator', '--deployment', str(output / 'coordinator.toml')],
                                                manager, output / 'coordinator.log', env)
         until = time.monotonic() + 20
         while True:
@@ -383,8 +384,8 @@ def run(manifest_path, execute=False):
                 time.sleep(.2)
         if latest.get('tasks') or latest.get('jobs') or latest.get('allocations'):
             raise RuntimeError('prepared coordinator is not a fresh private deployment')
-        services['anchor'] = OwnedProcess([str(binary), '--config', str(output / 'anchor-node.json'), 'agent', '--deployment',
-                                         str(output / 'anchor-agent.json')], manager, output / 'anchor.log', env)
+        services['anchor'] = OwnedProcess([str(binary), '--config', str(output / 'anchor-node.toml'), 'agent', '--deployment',
+                                         str(output / 'anchor-agent.toml')], manager, output / 'anchor.log', env)
         report.update(status='waiting_for_start', services={name: process.identity for name, process in services.items()})
         atomic_json(output / 'runtime-report.json', report)
         # A bounded setup interval reserves the full workload and cleanup budget.
@@ -437,7 +438,7 @@ def run(manifest_path, execute=False):
                 try: latest = client.status(); ledger.observe(latest)
                 except Exception as error: report['cleanup'].append({'stage': 'final_status', 'error': str(error)})
         try:
-            result = subprocess.run([str(binary), '--config', str(output / 'anchor-node.json'), 'executions'],
+            result = subprocess.run([str(binary), '--config', str(output / 'anchor-node.toml'), 'executions'],
                                     env=env, text=True, capture_output=True, check=True, timeout=10)
             records = json.loads(result.stdout); atomic_json(output / 'anchor-executions.json', records)
             report['local_execution_phases'] = [item['phase'] for item in records]

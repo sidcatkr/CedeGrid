@@ -1,0 +1,1 @@
+{"compilerOptions":{"target":"ES2022","lib":["ES2024"],"module":"CommonJS","moduleResolution":"Node","baseUrl":".","paths":{"cedegrid":["./src/index.ts"]},"strict":true,"declaration":true,"outDir":"build","rootDir":".","esModuleInterop":true,"skipLibCheck":true,"forceConsistentCasingInFileNames":true},"include":["src/**/*.ts","tests/**/*.ts","scripts/**/*.ts","examples/**/*.ts"]}

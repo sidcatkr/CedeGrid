@@ -13,7 +13,7 @@ import anchor_validation as anchor
 
 class ComparisonContinuationTests(unittest.TestCase):
     def setUp(self):
-        temporary_root = Path.home() / '.local/share/resmgr-test-tmp'
+        temporary_root = Path.home() / '.local/share/cedegrid-test-tmp'
         temporary_root.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=temporary_root)
         self.addCleanup(self.temporary.cleanup)
@@ -23,7 +23,7 @@ class ComparisonContinuationTests(unittest.TestCase):
         self.application = self.root / 'source/Kaggriculture'
         self.sources = {}
         for name in ('training/self_play.py', 'training/train.py',
-                     'integration/resmgr/workflow.py', 'integration/resmgr/worker.py'):
+                     'integration/cedegrid/workflow.py', 'integration/cedegrid/worker.py'):
             source = self.application / name
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_text('# immutable fixture ' + name)
@@ -222,7 +222,7 @@ class ComparisonContinuationTests(unittest.TestCase):
 
 class PriorProcessAbsenceTests(unittest.TestCase):
     def setUp(self):
-        temporary_root = Path.home() / '.local/share/resmgr-test-tmp'
+        temporary_root = Path.home() / '.local/share/cedegrid-test-tmp'
         temporary_root.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=temporary_root)
         self.addCleanup(self.temporary.cleanup)
