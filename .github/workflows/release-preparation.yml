@@ -1,0 +1,30 @@
+name: release preparation snapshot
+on:
+  push:
+    branches: ['release/0.2.0-preparation-20260908']
+    paths: ['.github/workflows/release-preparation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive only tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p capture
+          git archive --format=tar.gz --prefix=source/ "$GITHUB_SHA" > capture/source.tar.gz
+          printf '%s\n' "$GITHUB_SHA" > capture/source-commit.txt
+          (cd capture && sha256sum source.tar.gz source-commit.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preparation-source-${{ github.sha }}
+          path: capture/
+          if-no-files-found: error
+          retention-days: 7
