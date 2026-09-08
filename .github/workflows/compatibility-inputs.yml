@@ -1,0 +1,59 @@
+name: compatibility verification inputs
+on:
+  push:
+    branches: ['release/0.2.0-preparation-20260908']
+    paths: ['.github/workflows/compatibility-inputs.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-inputs:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Capture runtimes without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cedegrid-compat/node
+          cp "$(command -v node)" /tmp/cedegrid-compat/node/node
+          PYTHON_PREFIX=$(python -c 'import sys; print(sys.prefix)')
+          cp -a "$PYTHON_PREFIX" /tmp/cedegrid-compat/python
+          node --version > /tmp/cedegrid-compat/node-version.txt
+          python --version > /tmp/cedegrid-compat/python-version.txt
+          python - <<'PY'
+          import json, urllib.request, urllib.error
+          names=['cedegrid','cedegrid-linux-x64-gnu','cedegrid-linux-arm64-gnu','cedegrid-darwin-x64','cedegrid-darwin-arm64','cedegrid-win32-x64']
+          observations=[]
+          for registry,base,packages in [('npm','https://registry.npmjs.org/',names),('pypi','https://pypi.org/pypi/',['cedegrid'])]:
+              for name in packages:
+                  url=base+name+('/json' if registry=='pypi' else '')
+                  item={'registry':registry,'package':name,'ownership_verified':False,'trusted_publisher_verified':False}
+                  try:
+                      with urllib.request.urlopen(url,timeout=20) as response:
+                          data=json.load(response)
+                          item.update(http_status=response.status,present=True)
+                          if registry=='npm':item.update(maintainers=[m.get('name') for m in data.get('maintainers',[])],versions=sorted(data.get('versions',{})))
+                          else:item['versions']=sorted(data.get('releases',{}))
+                  except urllib.error.HTTPError as error:item.update(http_status=error.code,present=False if error.code==404 else None)
+                  except Exception as error:item.update(error=type(error).__name__,present=None)
+                  observations.append(item)
+          with open('/tmp/cedegrid-compat/registry-observations.json','w') as stream:json.dump({'schema_version':1,'read_only':True,'observations':observations,'limitation':'Public existence is not ownership or publisher verification; no publication attempted.'},stream,indent=2)
+          PY
+          tar -czf /tmp/cedegrid-compatibility-inputs.tar.gz -C /tmp cedegrid-compat
+          sha256sum /tmp/cedegrid-compatibility-inputs.tar.gz > /tmp/cedegrid-compatibility-inputs.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-inputs-${{ github.sha }}
+          path: |
+            /tmp/cedegrid-compatibility-inputs.tar.gz
+            /tmp/cedegrid-compatibility-inputs.sha256
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
