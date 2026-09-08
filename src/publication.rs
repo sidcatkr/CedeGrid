@@ -895,7 +895,8 @@ impl CaptureCharge {
     }
 }
 
-#[cfg(test)]
+// These fixtures require the Unix-protected local execution namespace.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn publisher() -> (tempfile::TempDir, NativePublisher) {

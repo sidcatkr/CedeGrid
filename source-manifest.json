@@ -144,10 +144,10 @@
       "source_sha256": "3a6389e2f20b38e942d9b6999245748fe9aa1f56fcdf5ea63af4ea6b482b4776"
     },
     "docs/release-0.2-evidence.md": {
-      "bytes": 4379,
+      "bytes": 6008,
       "curated": false,
-      "sha256": "ee3a62501ffaff0dc11a3fab195f6e4307f064af04aef1e2522cfdf4a0c9ff4d",
-      "source_sha256": "ee3a62501ffaff0dc11a3fab195f6e4307f064af04aef1e2522cfdf4a0c9ff4d"
+      "sha256": "5e77fd160133db9f11c0c87952fb2cc88806c724a02dccee733e9a82d3504992",
+      "source_sha256": "5e77fd160133db9f11c0c87952fb2cc88806c724a02dccee733e9a82d3504992"
     },
     "docs/release-0.2-gates.json": {
       "bytes": 39701,
@@ -486,10 +486,10 @@
       "source_sha256": "eedfcf93f5beb554a60102db5fb45f850b9fe792916d98396e59cee2bbe939fd"
     },
     "src/agent.rs": {
-      "bytes": 142948,
+      "bytes": 142999,
       "curated": false,
-      "sha256": "94b6307414889f46e55c042dcc1382fb7aafe020d42b13cd11dc590795cb9740",
-      "source_sha256": "94b6307414889f46e55c042dcc1382fb7aafe020d42b13cd11dc590795cb9740"
+      "sha256": "9fe0ab6e7a92ff3f5f37604b6328da9ccf4df6141f12e89d99819a61d3123d2e",
+      "source_sha256": "9fe0ab6e7a92ff3f5f37604b6328da9ccf4df6141f12e89d99819a61d3123d2e"
     },
     "src/artifacts.rs": {
       "bytes": 24171,
@@ -612,10 +612,10 @@
       "source_sha256": "3f7d9303b5c7caf8712fd7e8e326c411b5dae24debcbd7fac305d66734075aeb"
     },
     "src/publication.rs": {
-      "bytes": 55913,
+      "bytes": 55996,
       "curated": false,
-      "sha256": "e14700e5c20a002b98103cc67edec02dd028353ba5a0f5e38ad7b2e079336d4f",
-      "source_sha256": "e14700e5c20a002b98103cc67edec02dd028353ba5a0f5e38ad7b2e079336d4f"
+      "sha256": "58118f909ba145a37797a4e485c5cc6c68c25835f23baa0452b25a89959597da",
+      "source_sha256": "58118f909ba145a37797a4e485c5cc6c68c25835f23baa0452b25a89959597da"
     },
     "src/publication_gc.rs": {
       "bytes": 19055,
@@ -786,10 +786,10 @@
       "source_sha256": "97abdf76f26f36c790e889759f688b2b1a580f0b038a22c431a48e2c46ca93f1"
     },
     "tests/state.rs": {
-      "bytes": 64052,
+      "bytes": 64733,
       "curated": false,
-      "sha256": "8ed8b248f25d3763d62fa14513a091b911bf3c2131bd94bb9dd48aa7c695d7e7",
-      "source_sha256": "8ed8b248f25d3763d62fa14513a091b911bf3c2131bd94bb9dd48aa7c695d7e7"
+      "sha256": "9dd5e1d7588c1195ac442451aeb0cccc9f51d21c8e91a26ca4245e50dc142678",
+      "source_sha256": "9dd5e1d7588c1195ac442451aeb0cccc9f51d21c8e91a26ca4245e50dc142678"
     },
     "tests/storage_qualification.rs": {
       "bytes": 4889,
