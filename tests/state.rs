@@ -734,10 +734,11 @@ fn privacy_preparation_does_not_cancel_another_live_sqlite_connections_os_locks(
         )
         .unwrap();
     }
-    assert!(
+    let reopened =
         StateStore::open_with_busy_timeout(directory.path(), std::time::Duration::from_millis(20))
-            .is_err()
-    );
+            .unwrap();
+    assert!(reopened.task("lock-holder").unwrap().replay_safe);
+    assert!(reopened.submit("blocked-by-live-writer", true).is_err());
     for suffix in ["", "-wal", "-shm"] {
         assert_eq!(
             std::fs::metadata(
@@ -1107,7 +1108,7 @@ fn storage_profile_process_fixture() {
     }
 }
 
-struct ProfileChild(std::process::Child, std::path::PathBuf);
+struct ProfileChild(std::process::Child, tempfile::NamedTempFile);
 impl Drop for ProfileChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -1115,8 +1116,12 @@ impl Drop for ProfileChild {
     }
 }
 fn profile_child(directory: &Path, profile: StorageProfile, mode: &str) -> ProfileChild {
-    let log_path = directory.join(format!("profile-fixture-{mode}.log"));
-    let log = std::fs::File::create_new(&log_path).unwrap();
+    // Fresh state must remain empty until the child initializes it. Keep this
+    // owned diagnostic file beside the state directory, not inside it.
+    let log = tempfile::Builder::new()
+        .prefix(&format!(".profile-fixture-{mode}-"))
+        .tempfile_in(directory.parent().unwrap())
+        .unwrap();
     ProfileChild(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1129,11 +1134,15 @@ fn profile_child(directory: &Path, profile: StorageProfile, mode: &str) -> Profi
             .env("CEDEGRID_PROFILE", serde_json::to_string(&profile).unwrap())
             .env("CEDEGRID_PROFILE_FIXTURE", mode)
             .env("TMPDIR", directory)
-            .stdout(std::process::Stdio::from(log.try_clone().unwrap()))
-            .stderr(std::process::Stdio::from(log))
+            .stdout(std::process::Stdio::from(
+                log.as_file().try_clone().unwrap(),
+            ))
+            .stderr(std::process::Stdio::from(
+                log.as_file().try_clone().unwrap(),
+            ))
             .spawn()
             .unwrap(),
-        log_path,
+        log,
     )
 }
 
@@ -1150,7 +1159,8 @@ fn both_profiles_preserve_acknowledged_receipts_and_uncertainty_after_process_lo
             );
             assert!(
                 child.0.try_wait().unwrap().is_none(),
-                "fixture exited before crash point"
+                "fixture exited before crash point; diagnostics:\n{}",
+                std::fs::read_to_string(child.1.path()).unwrap_or_else(|error| error.to_string())
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -1198,7 +1208,8 @@ fn hot_rollback_recovery_checks_current_and_rolled_back_schema_before_mutation()
             );
             assert!(
                 child.0.try_wait().unwrap().is_none(),
-                "hot-journal fixture exited early"
+                "hot-journal fixture exited early; diagnostics:\n{}",
+                std::fs::read_to_string(child.1.path()).unwrap_or_else(|error| error.to_string())
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -1297,7 +1308,8 @@ fn rollback_profile_serializes_real_process_writers_without_losing_receipts() {
                 assert!(
                     status.success(),
                     "writer failed: {status}; diagnostics:\n{}",
-                    std::fs::read_to_string(&child.1).unwrap_or_else(|error| error.to_string())
+                    std::fs::read_to_string(child.1.path())
+                        .unwrap_or_else(|error| error.to_string())
                 );
                 break;
             }

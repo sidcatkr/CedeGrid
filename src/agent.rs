@@ -3099,6 +3099,7 @@ impl RateLimiter {
 #[cfg(test)]
 mod agent_transport_tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn reconciliation_preserves_a_preparation_between_reserve_and_prepared() {
         let temporary = tempfile::tempdir().unwrap();
@@ -3220,6 +3221,7 @@ mod agent_transport_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn accepted_receipt_reserves_complete_utf8_bytes_before_writing_and_retains_uncertainty() {
         let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -3313,6 +3315,7 @@ mod agent_transport_tests {
         receipt.receipt_hash = "00".repeat(32);
         assert!(verify_publication_receipt(&Response::Receipt { receipt }, &submission).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn corrupt_and_missing_replay_state_are_preserved_or_absent() {
         let tmp = tempfile::tempdir().unwrap();
