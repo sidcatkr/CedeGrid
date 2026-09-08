@@ -33,6 +33,16 @@ version platform packages, without an install-time download or compiler. The SDK
 can also be imported when optional native packages are omitted. Node 22.14+ is
 required by the npm package.
 
+The same SDK and native payloads are also available in [GitHub Packages](https://github.com/users/sidcatkr/packages?repo_name=CedeGrid) under `@sidcatkr`. Configure the scope and authenticate to GitHub Packages before installing:
+
+```sh
+npm config set @sidcatkr:registry https://npm.pkg.github.com
+npm install @sidcatkr/cedegrid@0.2.0
+```
+
+GitHub Packages requires authentication even for public npm packages; see the
+[GitHub authentication instructions](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages).
+
 The Python distribution contains the SDK only:
 
 ```sh
