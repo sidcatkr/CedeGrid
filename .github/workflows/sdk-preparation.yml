@@ -2,9 +2,17 @@ name: SDK preparation checks
 on:
   push:
     branches: ['release/0.2.0-preparation-20260908']
-    paths: ['python/**', '.github/workflows/sdk-preparation.yml']
+    paths:
+      - 'python/**'
+      - '.github/workflows/sdk-preparation.yml'
+      - 'tools/pack_source_review.py'
+      - 'docs/release-0.2.0-preparation.md'
   pull_request:
-    paths: ['python/**', '.github/workflows/sdk-preparation.yml']
+    paths:
+      - 'python/**'
+      - '.github/workflows/sdk-preparation.yml'
+      - 'tools/pack_source_review.py'
+      - 'docs/release-0.2.0-preparation.md'
 permissions:
   contents: read
 jobs:
@@ -59,6 +67,17 @@ jobs:
           LOG="$PWD/evidence/installed-sdist.log"
           cd "$RUNNER_TEMP/cedegrid-consumer"
           "$RUNNER_TEMP/cedegrid-rebuilt/bin/python" -I -m unittest discover -s "$TESTS" -v 2>&1 | tee "$LOG"
+      - name: Verify source export and regenerate its evidence manifest
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_source_review.py' -v 2>&1 | tee evidence/source-export-tests.log
+          python tools/pack_source_review.py --source "$PWD" --output "$RUNNER_TEMP/cedegrid-source" --public-candidate 2>&1 | tee evidence/source-export.log
+          cp "$RUNNER_TEMP/cedegrid-source/source/source-manifest.json" evidence/source-manifest.json
+          cp "$RUNNER_TEMP/cedegrid-source/review.json" evidence/source-review.json
+          cp "$RUNNER_TEMP/cedegrid-source/cedegrid-source.tar.gz" evidence/cedegrid-preparation-source.tar.gz
       - name: Record artifact hashes
         if: always()
         shell: bash
@@ -66,8 +85,15 @@ jobs:
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
-          result = {'source_commit': os.environ['GITHUB_SHA'], 'artifacts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('dist').glob('*') if p.is_file()}, 'scope': 'SDK preparation only; not stable-release approval'}
-          Path('evidence/artifacts.json').write_text(json.dumps(result, indent=2) + '\n')
+          evidence = Path('evidence')
+          evidence.mkdir(exist_ok=True)
+          paths = list(Path('dist').glob('*')) + [p for p in evidence.glob('*') if p.name != 'artifacts.json']
+          result = {
+              'source_commit': os.environ['GITHUB_SHA'],
+              'artifacts': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()},
+              'scope': 'SDK preparation only; not stable-release approval',
+          }
+          (evidence / 'artifacts.json').write_text(json.dumps(result, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@v4
         if: always()
