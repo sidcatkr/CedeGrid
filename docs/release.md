@@ -1,4 +1,4 @@
-# CedeGrid 0.2.0 release preparation
+# CedeGrid 0.2.0 release
 
 CedeGrid 0.2.0 contains a standalone native CLI, a TypeScript SDK and launcher in
 npm `cedegrid`, and a Python-only SDK in PyPI `cedegrid`. The executable, Rust
@@ -6,12 +6,13 @@ library, Python import, and environment prefix are `cedegrid`/`CEDEGRID_` withou
 old-name aliases. Runtime configuration is TOML 1.0. Rust 1.88, Python 3.10, and
 Node 22.14 are the compatibility floors.
 
-**Stable readiness is false until every required gate in the
-[qualification manifest](release-0.2-gates.json) is PASS for the same source and
-artifact hashes.** Build success, local package installation, and historical
-hardware tests do not replace minimum-OS or physical GPU qualification. Nothing
-has been uploaded to npm, PyPI, or GitHub by this preparation work. Crates.io
-publication remains disabled.
+Version 0.2.0 is published on npm, PyPI, and GitHub using the original checked
+archives. Publication was explicitly requested before qualification finished;
+the [qualification manifest](release-0.2-gates.json) retains incomplete and failed
+checks. The Windows native npm package was rejected by npm's spam filter.
+Fresh public-registry installation passed on macOS arm64 with npm scripts
+disabled. The release used the owner's npm login and PyPI token, without an
+OIDC provenance attestation. Crates.io publication remains disabled.
 
 ## Artifacts and support boundary
 
@@ -90,7 +91,7 @@ Only reviewed manifest members and hashed public evidence enter the resulting
 The build matrix is for compilation. Dedicated baseline and physical-host evidence
 is still required, following [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
-Publishing uses GitHub-hosted OIDC, Node 24.14.0 and npm 11.16.0, following
+The prepared qualified-release workflow uses GitHub-hosted OIDC, Node 24.14.0 and npm 11.16.0, following
 [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) and
 [PyPI trusted publishing](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/).
 Configure the exact repository, release workflow filename, environment, and

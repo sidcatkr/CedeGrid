@@ -10,15 +10,17 @@ and TypeScript SDKs submit work and provide cooperative worker hooks. Any execut
 that meets the process contract can run; no application framework is required.
 
 Version **0.2.0** introduces the clean `cedegrid` name and TOML configuration.
-The release is being qualified: [required gates](docs/release-0.2-gates.json) are
-mandatory, and stable readiness remains false until every platform and both GPU
-gates pass. Packages are prepared locally; registry uploads have not been performed.
+Packages are available on [npm](https://www.npmjs.com/package/cedegrid)
+and [PyPI](https://pypi.org/project/cedegrid/), with standalone files in the
+[GitHub release](https://github.com/sidcatkr/CedeGrid/releases/tag/v0.2.0).
+Publication preceded completion of the [qualification checks](docs/release-0.2-gates.json);
+the release notes record known limitations and follow-up fixes.
 Historical measurements in [validation](docs/validation.md) are scoped to their
 recorded versions and do not qualify these new binaries.
 
 ## Install
 
-Once 0.2.0 is published, install the CLI and TypeScript SDK with:
+Install the CLI and TypeScript SDK with:
 
 ```sh
 npm install --global cedegrid@0.2.0
@@ -132,14 +134,19 @@ help deploy or tunnel the service, but is not part of job semantics.
 
 ## Portability and capability reporting
 
-| Target | Declared 0.2 support | Minimum qualification baseline |
+| Target | Intended functionality | Runtime requirements |
 |---|---|---|
 | Linux GNU x86_64 / ARM64 | Coordinator, execution, CLI, SDKs | glibc 2.35, kernel 5.15 |
 | macOS Intel / Apple Silicon | Coordinator, native execution, CLI, SDKs | macOS 14 |
 | Windows x86_64 | Client CLI and SDKs | Windows 11 24H2 |
-| NVIDIA GPU | Optional NVML observation and controlled execution | RTX 5060 Ti and L4 gates required |
+| NVIDIA GPU | Optional NVML observation and controlled execution | Compatible NVIDIA driver/NVML, fresh activity and memory evidence, and verified release of owned contexts |
 
 This is the target matrix; consult the gate manifest for actual qualification.
+GPU admission depends on detected capabilities and current activity. Specific
+GPU models used in validation are recorded in the evidence rather than defining
+minimum hardware requirements. The Windows native npm package is currently
+unavailable because npm rejected its name through spam detection; the SDK and
+standalone release files remain separate distribution options.
 Windows execution, agents, recovery, and storage mutation are refused before
 initialization. macOS uses a verified direct-child fallback. Linux pidfd, delegated
 cgroup v2 controls, CPU affinity, and PSI require runtime capability evidence.

@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 struct Owned(Child);
 impl Drop for Owned {
@@ -22,6 +22,22 @@ impl Drop for Owned {
         let _ = self.0.wait();
     }
 }
+
+fn monotonic_now() -> Duration {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) },
+        0
+    );
+    Duration::new(
+        value.tv_sec.try_into().unwrap(),
+        value.tv_nsec.try_into().unwrap(),
+    )
+}
+
 #[test]
 fn family_termination_deadline_is_shared_and_unrelated_same_uid_child_survives() {
     let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
@@ -44,7 +60,7 @@ for index in range(8):
  code="import signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path('ready-%d').write_text('ready');time.sleep(30)"%index
  spawn_managed([sys.executable,'-c',code],single_process=True,no_escape=True,request_id='child-%d'%index)
 while len(list(Path('.').glob('ready-*')))!=8: time.sleep(.01)
-Path('leader-exit-time').write_text(str(time.monotonic()))
+Path('leader-exit-time').write_text(str(time.clock_gettime_ns(time.CLOCK_MONOTONIC)))
 "#;
     let request = LaunchRequest {
         task_id: "family-deadline".into(),
@@ -81,7 +97,7 @@ Path('leader-exit-time').write_text(str(time.monotonic()))
         prepare_timeout_ms: 3000,
         release_confirm_timeout_ms: 1000,
     };
-    let start = Instant::now();
+    let start = monotonic_now();
     let outcome = supervision::supervise(
         &request,
         &request.resources,
@@ -92,10 +108,22 @@ Path('leader-exit-time').write_text(str(time.monotonic()))
     )
     .unwrap();
     assert_eq!(outcome.exit_code, Some(0));
+    let finished = monotonic_now();
+    let leader_exit = Duration::from_nanos(
+        std::fs::read_to_string(dir.path().join("leader-exit-time"))
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
     assert!(
-        start.elapsed() < Duration::from_secs(3),
+        (start..=finished).contains(&leader_exit),
+        "leader exit marker must belong to this successful startup"
+    );
+    let termination_elapsed = finished - leader_exit;
+    assert!(
+        termination_elapsed < Duration::from_secs(3),
         "termination grace multiplied by child count: {:?}",
-        start.elapsed()
+        termination_elapsed
     );
     let children = store.managed_children(&request.assignment_id).unwrap();
     assert_eq!(children.len(), 8);

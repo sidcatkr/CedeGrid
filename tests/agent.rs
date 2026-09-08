@@ -764,6 +764,43 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    if !all_short || std::env::var_os("CEDEGRID_TEST_CAPACITY_DIAGNOSTICS").is_some() {
+        let captured_ms = cedegrid::coordinator::now_ms();
+        let node_report = StateStore::open_read_only(&dir.path().join("coordinator"))
+            .and_then(|store| {
+                let connection = rusqlite::Connection::open_with_flags(
+                    store.database_path(),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let (received, report): (i64, String) = connection.query_row(
+                    "SELECT received_ms,report_json FROM nodes WHERE node_id='node'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let report: serde_json::Value = serde_json::from_str(&report)?;
+                Ok(serde_json::json!({
+                    "received_age_ms": captured_ms.saturating_sub(u64::try_from(received)?),
+                    "observed_age_ms": captured_ms.saturating_sub(report["observed_at_unix_ms"].as_u64().unwrap_or(0)),
+                    "expansion_allowed": report["expansion_allowed"],
+                    "launch_slots": report["launch_slots"],
+                    "managed_budget": report["managed_budget"],
+                }))
+            });
+        let observations = StateStore::open_read_only(&local.config.state_dir)
+            .and_then(|store| store.observations(20))
+            .map(|rows| {
+                rows.into_iter().map(|row| serde_json::json!({
+                "id": row["id"],
+                "observed_at_unix_ms": row["snapshot"]["observed_at_unix_ms"],
+                "cpu_busy_millicores": row["snapshot"]["cpu_busy_millicores"],
+                "cpu_telemetry": row["snapshot"]["capabilities"]["cpu_telemetry"],
+                "expansion_allowed": row["decision"]["expansion_allowed"],
+                "cpu_ram_expansion_allowed": row["decision"]["cpu_ram_expansion_allowed"],
+                "reasons": row["decision"]["reasons"],
+            })).collect::<Vec<_>>()
+            });
+        eprintln!("short-task diagnostic: node={node_report:?} observations={observations:?}");
+    }
     assert!(
         all_short,
         "55 bounded short tasks did not complete: {}",
