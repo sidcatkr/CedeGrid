@@ -677,7 +677,7 @@ mod unix {
                     })
                     .map_err(|_| anyhow::anyhow!("drain directory sequence exhausted"))?;
                 Ok(parent.join(format!(
-                    "resmgr-drain-{}-{nonce}-{sequence}",
+                    "cedegrid-drain-{}-{nonce}-{sequence}",
                     std::process::id()
                 )))
             })
@@ -725,6 +725,8 @@ mod unix {
             output: impl Read + Send + 'static,
             error: impl Read + Send + 'static,
             directory: &Path,
+            guard: Option<crate::namespace::NamespaceGuard>,
+            publication: Option<crate::publication::NativePublisherSettings>,
         ) -> Result<Self> {
             use std::os::unix::fs::OpenOptionsExt;
             let capture = |mut reader: Box<dyn Read + Send>, name: &str| -> Result<_> {
@@ -734,9 +736,21 @@ mod unix {
                     .create_new(true)
                     .mode(0o600)
                     .open(path)?;
+                let guard = guard.clone();
+                let charge = publication
+                    .as_ref()
+                    .map(|settings| {
+                        crate::publication::CaptureCharge::new(
+                            settings,
+                            guard.clone().context("capture namespace missing")?,
+                            &directory.join(name),
+                        )
+                    })
+                    .transpose()?;
                 Ok(std::thread::Builder::new()
-                    .name("resmgr-log-drain".into())
+                    .name("cedegrid-log-drain".into())
                     .spawn(move || -> io::Result<()> {
+                        let _guard = guard;
                         const LIMIT: usize = 4 * 1024 * 1024;
                         let mut retained = 0;
                         let mut buffer = [0; 16384];
@@ -747,6 +761,9 @@ mod unix {
                             }
                             let keep = n.min(LIMIT.saturating_sub(retained));
                             if keep > 0 {
+                                if let Some(charge) = &charge {
+                                    charge.reserve(keep as u64).map_err(io::Error::other)?;
+                                }
                                 file.write_all(&buffer[..keep])?;
                                 retained += keep;
                             }
@@ -763,12 +780,17 @@ mod unix {
             })
         }
         fn finish(self) -> Result<()> {
+            let mut failure = None;
             for reader in self.readers {
-                reader
+                let result = reader
                     .join()
-                    .map_err(|_| anyhow::anyhow!("log drain thread panicked"))??;
+                    .map_err(|_| anyhow::anyhow!("log drain thread panicked"))
+                    .and_then(|result| result.map_err(anyhow::Error::from));
+                if failure.is_none() {
+                    failure = result.err();
+                }
             }
-            Ok(())
+            failure.map_or(Ok(()), Err)
         }
     }
     include!("child_supervision.rs");
@@ -859,12 +881,12 @@ mod unix {
             if request.class == AllocationClass::Opportunistic && setup.nice.is_none() {
                 setup.nice = Some(options.nice);
             }
-            children = ChildServer::new(request, record.generation, setup.clone())?;
+            children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
             let mut gated_request = request.clone();
-            if request.env.contains_key("RESMGR_OUTPUT_DIR") {
+            if request.env.contains_key("CEDEGRID_OUTPUT_DIR") {
                 gated_request
                     .env
-                    .insert("RESMGR_CAPTURE_OUTPUT".into(), "1".into());
+                    .insert("CEDEGRID_CAPTURE_OUTPUT".into(), "1".into());
             }
             if let Some(server) = &children {
                 server.expose(&mut gated_request);
@@ -886,7 +908,7 @@ mod unix {
                 .arg("__worker-gate")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(if request.env.contains_key("RESMGR_OUTPUT_DIR") {
+                .stderr(if request.env.contains_key("CEDEGRID_OUTPUT_DIR") {
                     Stdio::piped()
                 } else {
                     Stdio::inherit()
@@ -912,7 +934,7 @@ mod unix {
             record.backend = backend.name().into();
             record.evidence = backend.verify(&actual)?;
             record.evidence.extend(journal.storage_control_evidence()?);
-            if let Some(cpus) = request.env.get("RESMGR_CPU_AFFINITY") {
+            if let Some(cpus) = request.env.get("CEDEGRID_CPU_AFFINITY") {
                 let mut requested: Vec<u32> = serde_json::from_str(cpus)?;
                 requested.sort_unstable();
                 #[cfg(target_os = "linux")]
@@ -955,7 +977,7 @@ mod unix {
                     "required control {required} has not been successfully applied"
                 );
             }
-            if let Some(directory) = request.env.get("RESMGR_OUTPUT_DIR") {
+            if let Some(directory) = request.env.get("CEDEGRID_OUTPUT_DIR") {
                 // Identity is fully consumed before this reader takes the gate stdout pipe.
                 // Reset O_NONBLOCK for the dedicated drain thread; no process reaping there.
                 clear_nonblocking(output.as_raw_fd())?;
@@ -966,7 +988,21 @@ mod unix {
                         .stderr
                         .take()
                         .context("missing workload stderr pipe")?,
-                    Path::new(directory),
+                    &request
+                        .env
+                        .get("CEDEGRID_PUBLICATION_SPEC")
+                        .map(|raw| {
+                            serde_json::from_str::<crate::publication::NativePublisherSettings>(raw)
+                                .map(|s| s.output_dir)
+                        })
+                        .transpose()?
+                        .unwrap_or_else(|| PathBuf::from(directory)),
+                    journal.namespace_guard(),
+                    request
+                        .env
+                        .get("CEDEGRID_PUBLICATION_SPEC")
+                        .map(|raw| serde_json::from_str(raw))
+                        .transpose()?,
                 )?);
             } else {
                 drop(output);
@@ -1223,7 +1259,7 @@ mod unix {
                 io::Error::last_os_error()
             );
         }
-        if let Some(cpus) = gate.request.env.get("RESMGR_CPU_AFFINITY") {
+        if let Some(cpus) = gate.request.env.get("CEDEGRID_CPU_AFFINITY") {
             apply_current_cpu_affinity(&serde_json::from_str::<Vec<u32>>(cpus)?)?;
         }
         let id = identity(
@@ -1246,16 +1282,20 @@ mod unix {
             .args(&gate.request.argv[1..])
             .current_dir(&gate.request.cwd)
             .envs(&gate.request.env)
-            .env("RESMGR_ASSIGNMENT_ID", &gate.request.assignment_id)
-            .env("RESMGR_TASK_ID", &gate.request.task_id)
-            .env("RESMGR_ATTEMPT_GENERATION", gate.generation.to_string())
-            .env("RESMGR_DRAIN_FILE", &gate.drain_file)
+            .env_remove("CEDEGRID_PUBLICATION_SPEC")
+            .env_remove("CEDEGRID_SUPERVISOR_STATE_ROOT")
+            .env_remove("CEDEGRID_SUPERVISOR_NAMESPACE")
+            .env_remove("CEDEGRID_LAUNCHER_PID")
+            .env("CEDEGRID_ASSIGNMENT_ID", &gate.request.assignment_id)
+            .env("CEDEGRID_TASK_ID", &gate.request.task_id)
+            .env("CEDEGRID_ATTEMPT_GENERATION", gate.generation.to_string())
+            .env("CEDEGRID_DRAIN_FILE", &gate.drain_file)
             .stdin(Stdio::from(File::open("/dev/null")?))
             .stdout(
                 if gate
                     .request
                     .env
-                    .get("RESMGR_CAPTURE_OUTPUT")
+                    .get("CEDEGRID_CAPTURE_OUTPUT")
                     .is_some_and(|v| v == "1")
                 {
                     Stdio::inherit()

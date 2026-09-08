@@ -25,10 +25,11 @@ _bootstrap.add_argument('--manager-root',default=str(Path(__file__).resolve().pa
 _manager_root=Path(_bootstrap.parse_known_args()[0].manager_root).expanduser().resolve()
 sys.path.insert(0,str(_manager_root/'tools'))
 sys.path.insert(0,str(_manager_root/'python'))
-from resmgr import Client,sha256_file,command_task
+from cedegrid import Client,sha256_file,command_task
 from make_test_pki import generate as generate_pki
 from soak import AllocationLedger
 from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executable,local_guard
+from runtime_config import atomic_runtime_config
 
 
 def stress_cpu_scope():
@@ -59,7 +60,7 @@ def external_pressure(output,cpus,seconds=45):
         try:
             os.sched_setaffinity(0,{cpu})
             while not stopped.is_set() and time.monotonic()<deadline:
-                hashlib.pbkdf2_hmac('sha256',b'resmgr-external',b'bounded-stress',1500);counts[index]+=1
+                hashlib.pbkdf2_hmac('sha256',b'cedegrid-external',b'bounded-stress',1500);counts[index]+=1
         except BaseException as error:errors.append(str(error));stopped.set()
     threads=[threading.Thread(target=work,args=(index,cpu)) for index,cpu in enumerate(cpus)]
     report={'identity':linux_identity(os.getpid()),'uid':os.getuid(),'cpu_ids':cpus,'requested_seconds':seconds,
@@ -162,7 +163,7 @@ def run(args):
     output.mkdir(mode=0o700,parents=True,exist_ok=False)
     (output/'tmp').mkdir()
     (output/'bin').mkdir()
-    frozen=output/'bin/resmgr'
+    frozen=output/'bin/cedegrid'
     shutil.copyfile(binary,frozen)
     frozen.chmod(0o700)
     with frozen.open('rb') as file:os.fsync(file.fileno())
@@ -182,9 +183,9 @@ def run(args):
             'minimum_external_cpu_after_release':1.0 if stress else None},
         'actual_24_hour_soak':False,'linux_runtime_verified':False,'cuda_or_mps_used':False,
         'binary_sha256':sha256_file(binary),'source_hashes':{name:sha256_file(application/name) for name in
-            ['training/self_play.py','training/train.py','integration/resmgr/worker.py','integration/resmgr/workflow.py']},
+            ['training/self_play.py','training/train.py','integration/cedegrid/worker.py','integration/cedegrid/workflow.py']},
         'dataset_manifest_sha256':sha256_file(dataset/'manifest.json'),'manager_root':str(manager),
-        'harness_sha256':sha256_file(Path(__file__)),'sdk_sha256':sha256_file(manager/'python/resmgr/__init__.py')}
+        'harness_sha256':sha256_file(Path(__file__)),'sdk_sha256':sha256_file(manager/'python/cedegrid/__init__.py')}
     services={};owned=None;client=None;last_status=None;stop=[];ledger=AllocationLedger([node]);start=time.monotonic()
     pressure_child=None;stress_state={'status':'pending','running_since':{}} if stress else None
     def stress_tick():
@@ -267,32 +268,32 @@ def run(args):
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
         endpoint=f'https://127.0.0.1:{port}'
-        atomic_json(output/'coordinator.json',{'listen':f'127.0.0.1:{port}','state_dir':str(output/'coordinator-state'),
+        atomic_runtime_config(output/'coordinator.toml',{'listen':f'127.0.0.1:{port}','state_dir':str(output/'coordinator-state'),
             'tls':tls('server'),'clients':pki['clients'],'lease_ms':10000,'telemetry_ttl_ms':3000,'retry_limit':3,
-            'max_artifact_bytes':256*1024**2,'artifact_quota_bytes':2*1024**3})
-        atomic_json(output/'operator.json',{'endpoint':endpoint,'tls':tls('operator')})
+            'max_artifact_bytes':256*1024**2,'artifact_quota_bytes':2*1024**3}, 'coordinator')
+        atomic_runtime_config(output/'operator.toml',{'endpoint':endpoint,'tls':tls('operator')}, 'client')
         agent_config={'coordinator_url':endpoint,'tls':tls('node-0'),
             'capacity':{'cpu_millicores':1000,'ram_mib':profile['allocation_ram_mib'],'gpu_memory_mib':{}},'max_workers':1,
             'max_transfer_bytes_per_second':10*1024**2,'max_spool_bytes':1024**3,'max_runtime_seconds':wall_seconds+20}
         if stress:agent_config['cpu_affinity']=cpus
-        atomic_json(output/'agent.json',agent_config)
-        atomic_json(output/'node.json',{'schema_version':2,'node_id':node,'node_mode':'guaranteed','state_dir':str(output/'agent-state'),
+        atomic_runtime_config(output/'agent.toml',agent_config, 'agent')
+        atomic_runtime_config(output/'node.toml',{'schema_version':2,'node_id':node,'node_mode':'guaranteed','state_dir':str(output/'agent-state'),
             'execution':{'enabled':True,'prepare_timeout_ms':10000,'admission_timeout_ms':30000},
             'monitor':{'interval_ms':500},'cpu':{'reserve_physical_cores':0 if profile['name']=='docker-cpu' else 1,'nice':10},
             'ram':{'reserve_mib':16384 if stress else 1024,'reserve_percent':10},'gpu':{'scale_up_cooldown_ms':3000 if stress else 0},
             'lifecycle':{'drain_timeout_ms':3000,'term_grace_ms':2000,'heartbeat_interval_ms':2000,'allocation_lease_ms':10000},
-            'cgroup':{'enabled':False}})
-        doctor=subprocess.run([str(binary),'--config',str(output/'node.json'),'doctor'],capture_output=True,text=True,check=True,timeout=30,env=env)
+            'cgroup':{'enabled':False}}, 'node')
+        doctor=subprocess.run([str(binary),'--config',str(output/'node.toml'),'doctor'],capture_output=True,text=True,check=True,timeout=30,env=env)
         atomic_json(output/'doctor.json',json.loads(doctor.stdout))
-        services['coordinator']=OwnedProcess([str(binary),'coordinator','--deployment',str(output/'coordinator.json')],manager,output/'coordinator.log',env)
-        client=Client.from_config(output/'operator.json')
+        services['coordinator']=OwnedProcess([str(binary),'coordinator','--deployment',str(output/'coordinator.toml')],manager,output/'coordinator.log',env)
+        client=Client.from_config(output/'operator.toml')
         deadline=time.monotonic()+15
         while True:
             try:client.status();break
             except Exception:
                 if time.monotonic()>deadline:raise
                 time.sleep(.1)
-        services['agent']=OwnedProcess([str(binary),'--config',str(output/'node.json'),'agent','--deployment',str(output/'agent.json')],manager,output/'agent.log',env)
+        services['agent']=OwnedProcess([str(binary),'--config',str(output/'node.toml'),'agent','--deployment',str(output/'agent.toml')],manager,output/'agent.log',env)
         deadline=time.monotonic()+30
         while not (last_status and last_status.get('nodes')):
             if time.monotonic()>deadline:raise TimeoutError('local CPU agent registration missing')
@@ -325,7 +326,7 @@ def run(args):
             report['ordinary_command']={'argv':command_argv,'task_id':command_id,'receipt':receipt,
                 'released_allocation':allocation,'elapsed_seconds':time.monotonic()-began,**verify_ordinary_game(command_output)}
         config={'experiment_id':run_id,'generation':0,'run_seed':run_id,'games':4,'output':str(output/'application'),
-            'client_config':str(output/'operator.json'),'validation_dataset':str(dataset),'learner_ram_mib':profile['allocation_ram_mib'],
+            'client_config':str(output/'operator.toml'),'validation_dataset':str(dataset),'learner_ram_mib':profile['allocation_ram_mib'],
             'wall_time_seconds':wall_seconds-100,'learning_wall_time_seconds':120,'stop_deadline_unix':report['started_unix']+wall_seconds,
             'poll_seconds':.5,'max_output_bytes':1024**3,
             'nodes':[{'node_id':node,'class':'guaranteed','max_workers':1,'python':str(python),
@@ -334,11 +335,11 @@ def run(args):
                 'model_sha256':sha256_file(candidate.parent/'weights/policy_value.ts'),'device':'cpu','opponents':opponents}]}
         if stress:config.update(actor_class='opportunistic',opportunistic_task_timeout_seconds=wall_seconds)
         sys.path.insert(0,str(application))
-        from integration.resmgr.workflow import logical_identity
+        from integration.cedegrid.workflow import logical_identity
         report['planned_cohort']=[logical_identity(run_id,0,index,run_id) for index in range(4)]
         report['split_provenance']='Existing builder hashes actual normalized action families; train membership cannot be guaranteed before execution.'
         atomic_json(output/'application.json',config)
-        command('cycle',[str(python),'-m','integration.resmgr','cycle','--config',str(output/'application.json'),
+        command('cycle',[str(python),'-m','integration.cedegrid','cycle','--config',str(output/'application.json'),
             '--bootstrap',str(checkpoint),'--steps','2','--device','cpu'])
         result=json.loads((output/'application/cycle/result.json').read_text())
         if result['accepted_games']!=4 or result['contributing_nodes']!=[node] or result['continuation']!='optimizer_step_cursor_v2':

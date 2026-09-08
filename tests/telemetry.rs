@@ -1,5 +1,5 @@
-use resource_manager::model::{CapabilityStatus, SCHEMA_VERSION, Snapshot};
-use resource_manager::telemetry::Collector;
+use cedegrid::model::{CapabilityStatus, SCHEMA_VERSION, Snapshot};
+use cedegrid::telemetry::Collector;
 
 #[test]
 fn empty_node_identity_is_rejected() {

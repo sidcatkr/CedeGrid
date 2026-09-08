@@ -148,7 +148,7 @@ def cpu_work(cpu, deadline, stop, output, protected, failures, iterations=1500):
             if stop.is_set() or time.monotonic() >= deadline:
                 break
             began = time.monotonic()
-            hashlib.pbkdf2_hmac('sha256', b'resmgr-owned-pressure', b'fixed-work', iterations)
+            hashlib.pbkdf2_hmac('sha256', b'cedegrid-owned-pressure', b'fixed-work', iterations)
             ended = time.monotonic()
             if ended <= deadline:
                 completed += 1

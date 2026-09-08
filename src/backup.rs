@@ -1,5 +1,6 @@
 //! Offline coordinator snapshots. Local agent outboxes are deliberately excluded
 //! and cause refusal, rather than producing an incomplete recovery archive.
+use crate::namespace::Namespace;
 use crate::state::{self, DATABASE_FILENAME, StateStore};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
@@ -17,19 +18,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Explicitly ends lock ownership when the service/operation guard drops, even
-/// if a concurrent fork temporarily retains a duplicate file description.
+/// Owns a service lock until its final open-file-description reference closes.
 pub struct StateLock {
-    file: File,
+    _file: File,
 }
 impl StateLock {
     pub(crate) fn from_locked(file: File) -> Self {
-        Self { file }
-    }
-}
-impl Drop for StateLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.file);
+        Self { _file: file }
     }
 }
 
@@ -144,13 +139,15 @@ pub fn create(source: &Path, destination: &Path, limits: Limits) -> Result<Manif
         source.join(DATABASE_FILENAME).is_file(),
         "source coordinator database does not exist"
     );
+    let (guard, _destination_guard) = exclusive_roots(&source, destination)?;
     let _locks = offline_locks(&source, true)?;
-    let profile = StateStore::open_read_only(&source)?.storage_profile();
+    let profile =
+        StateStore::open_read_only_guarded(&source, None, guard.clone())?.storage_profile();
     ensure!(
         !profile.is_replayable(),
         "offline snapshots require strong storage assurance; replayable local state is not a recovery authority"
     );
-    let store = StateStore::open_with_profile(&source, profile)?;
+    let store = StateStore::open_with_profile_guarded(&source, profile, guard.clone())?;
     require_coordinator_only(&store, &source)?;
     checkpoint(&store.connection)?;
     integrity(&store.connection)?;
@@ -267,7 +264,7 @@ pub fn create(source: &Path, destination: &Path, limits: Limits) -> Result<Manif
     }
     verify_publications(&store.connection, &files)?;
     let manifest = Manifest {
-        schema_version: 1,
+        schema_version: 2,
         kind: "coordinator_offline_snapshot".into(),
         created_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -303,6 +300,7 @@ pub fn restore(
     );
     let mut budget = Budget::new(limits)?;
     let snapshot = home_local_path(snapshot, true)?;
+    let (guard, destination_guard) = exclusive_roots(&snapshot, destination)?;
     let _locks = offline_locks(&snapshot, false)?;
     ensure!(
         !snapshot.join(INCOMPLETE_FILENAME).exists(),
@@ -321,7 +319,7 @@ pub fn restore(
         "offline restore requires strong storage assurance; replayable local state requires authoritative reconciliation"
     );
     ensure!(
-        manifest.schema_version == 1 && manifest.kind == "coordinator_offline_snapshot",
+        matches!(manifest.schema_version, 1 | 2) && manifest.kind == "coordinator_offline_snapshot",
         "unsupported snapshot format"
     );
     ensure!(
@@ -352,7 +350,25 @@ pub fn restore(
         "snapshot database/byte count missing or inconsistent"
     );
     // Verify schema/version/storage without changing the archived database.
-    let original = StateStore::open_read_only_with_profile(&snapshot, manifest.storage_profile)?;
+    let original = if manifest.schema_version == 1 {
+        StateStore::open_legacy_read_only_guarded(
+            &snapshot,
+            manifest.storage_profile,
+            guard.clone(),
+        )?
+    } else {
+        StateStore::open_read_only_guarded(
+            &snapshot,
+            Some(manifest.storage_profile),
+            guard.clone(),
+        )?
+    };
+    let original_schema = original.durability_settings()?.schema_version;
+    let original_distributed: i64 = original.connection.query_row(
+        "SELECT value FROM distributed_meta WHERE key='schema'",
+        [],
+        |r| r.get(0),
+    )?;
     require_coordinator_only(&original, &snapshot)?;
     integrity(&original.connection)?;
     verify_publications(&original.connection, &manifest.files)?;
@@ -381,7 +397,18 @@ pub fn restore(
         )?;
         ensure!(actual == entry.sha256, "snapshot changed during restore");
     }
-    let mut restored = StateStore::open_with_profile(&destination, manifest.storage_profile)?;
+    if original_schema < crate::state::SCHEMA_VERSION || original_distributed < 3 {
+        crate::upgrade::migrate_database(
+            &destination,
+            manifest.storage_profile,
+            &destination_guard,
+        )?;
+    }
+    let mut restored = StateStore::open_with_profile_guarded(
+        &destination,
+        manifest.storage_profile,
+        destination_guard.clone(),
+    )?;
     require_coordinator_only(&restored, &destination)?;
     let tx = restored
         .connection
@@ -438,7 +465,7 @@ fn require_coordinator_only(store: &StateStore, root: &Path) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    ensure!(matches!(schema, 1 | 2), "unsupported distributed schema");
+    ensure!(matches!(schema, 1..=3), "unsupported distributed schema");
     let local: i64 = store
         .connection
         .query_row("SELECT count(*) FROM executions", [], |r| r.get(0))?;
@@ -542,6 +569,41 @@ fn new_destination(path: &Path) -> Result<PathBuf> {
     )?;
     Ok(path)
 }
+/// Complete namespace bundles always use canonical-path order, independently of
+/// which root is the source. Each returned exclusive guard retains its bundle.
+fn exclusive_roots(
+    source: &Path,
+    destination: &Path,
+) -> Result<(
+    crate::namespace::NamespaceGuard,
+    crate::namespace::NamespaceGuard,
+)> {
+    let destination = home_local_path(destination, false)?;
+    ensure!(
+        destination.parent().is_some_and(Path::is_dir),
+        "destination parent must already exist"
+    );
+    ensure!(
+        !source.starts_with(&destination) && !destination.starts_with(source),
+        "offline source and destination must be separate namespace trees"
+    );
+    let source_namespace = Namespace::new(source)?;
+    let destination_namespace = Namespace::new(&destination)?;
+    let (first, second) = if source_namespace.root() < destination_namespace.root() {
+        (&source_namespace, &destination_namespace)
+    } else {
+        (&destination_namespace, &source_namespace)
+    };
+    let first_maintenance = first.begin_maintenance(Duration::ZERO)?;
+    let first_guard = first_maintenance.exclusive(Duration::ZERO)?;
+    let second_maintenance = second.begin_maintenance(Duration::ZERO)?;
+    let second_guard = second_maintenance.exclusive(Duration::ZERO)?;
+    if source_namespace.root() < destination_namespace.root() {
+        Ok((first_guard, second_guard))
+    } else {
+        Ok((second_guard, first_guard))
+    }
+}
 fn make_dir_new(path: &Path) -> Result<()> {
     let builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -589,7 +651,8 @@ fn service_lock(root: &Path, name: &str, create: bool) -> Result<StateLock> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        o.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let f = o.open(root.join(name))?;
     ensure!(f.metadata()?.is_file(), "invalid service lock file");
@@ -622,7 +685,8 @@ fn create_file(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        o.mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     Ok(o.open(path)?)
 }
@@ -632,7 +696,7 @@ fn open_regular(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW);
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let f = o.open(path)?;
     ensure!(
@@ -732,7 +796,7 @@ fn sync_dir(path: &Path) -> Result<()> {
 mod lock_tests {
     use super::*;
     #[test]
-    fn duplicate_description_does_not_prolong_finished_service_ownership() {
+    fn duplicate_description_retains_service_ownership_until_final_close() {
         let directory = tempfile::Builder::new()
             .prefix(".lock-test-")
             .tempdir_in(std::env::current_dir().unwrap())
@@ -749,8 +813,9 @@ mod lock_tests {
         let owner = StateLock::from_locked(file);
         assert!(service_lock(directory.path(), "coordinator.lock", false).is_err());
         drop(owner);
+        assert!(service_lock(directory.path(), "coordinator.lock", false).is_err());
+        drop(inherited_description);
         let successor = service_lock(directory.path(), "coordinator.lock", false).unwrap();
-        assert!(inherited_description.metadata().unwrap().is_file());
         drop(successor);
     }
 }

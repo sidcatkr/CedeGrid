@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use resource_manager::{
+use cedegrid::{
     agent::SupervisorSpec,
     config::{Config, NodeMode},
     execution_model::*,
@@ -12,7 +12,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
     time::{Duration, Instant},
@@ -90,12 +90,17 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
     }
 }
 fn start(spec: &SupervisorSpec) -> (Child, ChildStdin, mpsc::Receiver<serde_json::Value>) {
+    let bootstrap_store =
+        StateStore::open_with_profile(&spec.config.state_dir, spec.config.storage_profile).unwrap();
+    let namespace = serde_json::to_string(bootstrap_store.namespace_guard().identity()).unwrap();
     let path = spec.output_dir.join("spec.json");
     fs::write(&path, serde_json::to_vec(spec).unwrap()).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_resmgr"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("__assignment-supervisor")
         .arg(path)
         .env("TMPDIR", &spec.output_dir)
+        .env("CEDEGRID_SUPERVISOR_STATE_ROOT", &spec.config.state_dir)
+        .env("CEDEGRID_SUPERVISOR_NAMESPACE", namespace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -240,7 +245,7 @@ fn delayed_authorization_cannot_extend_its_remote_deadline() {
 #[ignore = "owned subprocess fixture"]
 fn full_single_cpu_fixture() {
     let until = Instant::now() + Duration::from_secs(3);
-    let threads: usize = std::env::var("RESMGR_TEST_BUSY_THREADS")
+    let threads: usize = std::env::var("CEDEGRID_TEST_BUSY_THREADS")
         .ok()
         .map(|v| v.parse().unwrap())
         .unwrap_or(1);
@@ -276,7 +281,7 @@ fn real_extra_cpu_threads_still_trigger_the_unchanged_envelope() {
     spec.assignment
         .request
         .env
-        .insert("RESMGR_TEST_BUSY_THREADS".into(), "3".into());
+        .insert("CEDEGRID_TEST_BUSY_THREADS".into(), "3".into());
     spec.assignment.request.resources.cpu_millicores = 1000;
     spec.capacity.cpu_millicores = 1000;
     spec.config.monitor.interval_ms = 500;
@@ -305,7 +310,7 @@ fn full_single_cpu_does_not_yield_from_counter_rounding() {
         dir.path(),
         AllocationClass::Guaranteed,
         vec![
-            std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_| "python3".into()),
+            std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into()),
             "-c".into(),
             "import time\nend=time.monotonic()+3\nwhile time.monotonic()<end: pass".into(),
         ],
@@ -356,7 +361,7 @@ fn short_single_process_fixture() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
-    use resource_manager::{agent::AgentConfig, coordinator::serve, protocol::*};
+    use cedegrid::{agent::AgentConfig, coordinator::serve, protocol::*};
     let dir = directory();
     let root = std::env::current_dir().unwrap();
     let pki = dir.path().join("pki");
@@ -431,14 +436,22 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         vec![
             "/bin/sh".into(),
             "-c".into(),
-            "printf managed > \"$RESMGR_OUTPUT_DIR/marker\"".into(),
+            "printf managed > \"$CEDEGRID_OUTPUT_DIR/marker\"".into(),
         ],
     );
     local.config.gpu.scale_up_cooldown_ms = 0;
     local.config.lifecycle.heartbeat_interval_ms = 200;
     local.config.monitor.interval_ms = 200;
-    let config_file = dir.path().join("node.yaml");
-    fs::write(&config_file, serde_yaml::to_string(&local.config).unwrap()).unwrap();
+    let config_file = dir.path().join("node.toml");
+    fs::write(
+        &config_file,
+        cedegrid::config::serialize_runtime(
+            &local.config,
+            cedegrid::config::RuntimeConfigKind::Node,
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let deployment = AgentConfig {
         coordinator_url: endpoint,
         tls: tls("node"),
@@ -449,8 +462,16 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         max_spool_bytes: 10 * 1024 * 1024,
         max_runtime_seconds: 60,
     };
-    let deployment_file = dir.path().join("agent.json");
-    fs::write(&deployment_file, serde_json::to_vec(&deployment).unwrap()).unwrap();
+    let deployment_file = dir.path().join("agent.toml");
+    fs::write(
+        &deployment_file,
+        cedegrid::config::serialize_runtime(
+            &deployment,
+            cedegrid::config::RuntimeConfigKind::Agent,
+        )
+        .unwrap(),
+    )
+    .unwrap();
     operator
         .request(&Request::PutPool {
             pool: PoolSpec {
@@ -468,9 +489,9 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
     sdk_request.task_id = "sdk-task".into();
     sdk_request.cwd = root.clone();
     sdk_request.argv = vec![
-        std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_|"python3".into()),
+        std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_|"python3".into()),
         "-c".into(),
-        "from resmgr import WorkerContext; c=WorkerContext.from_env(); p=c.output/'payload'; p.write_bytes(b'bounded real SDK artifact'); a=c.artifact('payload',p); q=c.output/'checkpoint-payload'; q.write_bytes(b'x'*262144); c.checkpoint({'completed_steps':2},[a,c.artifact('checkpoint-payload',q)]); c.complete({'completed_steps':4},[a])".into(),
+        "from cedegrid import WorkerContext; c=WorkerContext.from_env(); p=c.output/'payload'; p.write_bytes(b'bounded real SDK artifact'); a=c.artifact('payload',p); q=c.output/'checkpoint-payload'; q.write_bytes(b'x'*262144); c.checkpoint({'completed_steps':2},[a,c.artifact('checkpoint-payload',q)]); c.complete({'completed_steps':4},[a])".into(),
     ];
     sdk_request.env.insert(
         "PYTHONPATH".into(),
@@ -482,7 +503,7 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
     let mut input_request = sdk_request.clone();
     let mut resume_request = sdk_request.clone();
     resume_request.task_id = "resume-task".into();
-    resume_request.argv[2]="from resmgr import WorkerContext\nfrom pathlib import Path\nimport time\nc=WorkerContext.from_env()\nif c.resume:\n p=Path(c.resume['artifacts'][0]['path']); assert p.read_bytes()==b'resume-payload'; c.complete({'continued_from':c.resume['metadata']['cursor']},[c.artifact('payload',p)])\nelse:\n p=c.output/'payload'; p.write_bytes(b'resume-payload'); c.checkpoint({'cursor':3},[c.artifact('payload',p)])\n while not c.draining(): time.sleep(0.02)\n raise SystemExit(75)\n".into();
+    resume_request.argv[2]="from cedegrid import WorkerContext\nfrom pathlib import Path\nimport time\nc=WorkerContext.from_env()\nif c.resume:\n p=Path(c.resume['artifacts'][0]['path']); assert p.read_bytes()==b'resume-payload'; c.complete({'continued_from':c.resume['metadata']['cursor']},[c.artifact('payload',p)])\nelse:\n p=c.output/'payload'; p.write_bytes(b'resume-payload'); c.checkpoint({'cursor':3},[c.artifact('payload',p)])\n while not c.draining(): time.sleep(0.02)\n raise SystemExit(75)\n".into();
     operator
         .request(&Request::Submit {
             job: JobSpec {
@@ -496,7 +517,7 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         .unwrap();
     let log = dir.path().join("agent.log");
     let err = dir.path().join("agent.err");
-    let mut process = Command::new(env!("CARGO_BIN_EXE_resmgr"))
+    let mut process = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("--config")
         .arg(config_file)
         .arg("agent")
@@ -567,9 +588,10 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         else {
             panic!("status missing");
         };
-        if tasks.iter().any(|t| {
-            t.task_id == "resume-task" && t.status == resource_manager::state::TaskStatus::Queued
-        }) {
+        if tasks
+            .iter()
+            .any(|t| t.task_id == "resume-task" && t.status == cedegrid::state::TaskStatus::Queued)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -605,14 +627,37 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         .await
         .unwrap()
     else {
-        panic!("input source result missing")
+        let attempts: Vec<_> = fs::read_dir(local.config.state_dir.join("attempts"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| {
+                let directory = entry.path();
+                (
+                    directory.display().to_string(),
+                    fs::read_to_string(directory.join("supervisor.stderr")).unwrap_or_default(),
+                    fs::read_to_string(directory.join("stderr.log")).unwrap_or_default(),
+                    fs::read_to_string(directory.join("execution-outcome.json"))
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        let records = StateStore::open_read_only(&local.config.state_dir)
+            .and_then(|store| store.executions());
+        let _ = process.kill();
+        let _ = process.wait();
+        panic!(
+            "input source result missing; agent stdout={} stderr={} attempts={attempts:?} records={records:?}",
+            fs::read_to_string(&log).unwrap_or_default(),
+            fs::read_to_string(&err).unwrap_or_default()
+        )
     };
-    input_request.input_artifacts = vec![resource_manager::execution_model::NamedArtifact {
+    input_request.input_artifacts = vec![cedegrid::execution_model::NamedArtifact {
         name: "published-model".into(),
         sha256: source.artifacts[0].sha256.clone(),
         size: source.artifacts[0].size,
     }];
-    input_request.argv[2]="from resmgr import WorkerContext\nimport os,json\nfrom pathlib import Path\nc=WorkerContext.from_env()\ni=json.loads(Path(os.environ['RESMGR_CONTEXT']).read_text())['inputs'][0]\nassert Path(i['path']).read_bytes()==b'bounded real SDK artifact'\nc.complete({'verified_input':i['sha256']})".into();
+    input_request.argv[2]="from cedegrid import WorkerContext\nimport os,json\nfrom pathlib import Path\nc=WorkerContext.from_env()\ni=json.loads(Path(os.environ['CEDEGRID_CONTEXT']).read_text())['inputs'][0]\nassert Path(i['path']).read_bytes()==b'bounded real SDK artifact'\nc.complete({'verified_input':i['sha256']})".into();
     input_request.task_id = "input-task-a".into();
     let mut second = input_request.clone();
     second.task_id = "input-task-b".into();
@@ -712,7 +757,7 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         };
         if tasks
             .iter()
-            .all(|t| t.status == resource_manager::state::TaskStatus::Completed)
+            .all(|t| t.status == cedegrid::state::TaskStatus::Completed)
         {
             all_short = true;
             break;
@@ -750,8 +795,11 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         .state_dir
         .join("attempts")
         .join(&result.assignment_id);
+    let saved_spec: SupervisorSpec =
+        serde_json::from_slice(&fs::read(output.join("supervisor-spec.json")).unwrap()).unwrap();
+    let workspace_output = PathBuf::from(&saved_spec.assignment.request.env["CEDEGRID_OUTPUT_DIR"]);
     assert_eq!(
-        fs::read_to_string(output.join("marker")).unwrap(),
+        fs::read_to_string(workspace_output.join("marker")).unwrap(),
         "managed"
     );
     assert!(output.join("result.receipt.json").is_file());

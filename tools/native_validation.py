@@ -69,7 +69,7 @@ def execute(argv,cwd,output,env,seconds,ram_mib=24576,gpu_mib=6144):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--root',default=str(Path.home()/'.local/share/resmgr-validation'))
+    p.add_argument('--root',default=str(Path.home()/'.local/share/cedegrid-validation'))
     p.add_argument('--stage',choices=['tests','sdk-tests','build','gpu-release','bootstrap','cpu-integration'],required=True)
     p.add_argument('--run-id',required=True)
     p.add_argument('--gpu-uuid')
@@ -79,7 +79,7 @@ def main():
     cpus=physical_cpus();os.sched_setaffinity(0,cpus)
     env=dict(os.environ,TMPDIR=str(root/'tmp'),XDG_CACHE_HOME=str(root/'cache'),
         CARGO_HOME=str(root/'tools/cargo'),RUSTUP_HOME=str(root/'tools/rustup'),CARGO_BUILD_JOBS='2',
-        RESMGR_TEST_PYTHON=str(root/'venv-isolated/bin/python'),
+        CEDEGRID_TEST_PYTHON=str(root/'venv-isolated/bin/python'),
         PYTHONPATH=str(rm/'python')+os.pathsep+str(kg),PYTHONDONTWRITEBYTECODE='1',
         OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
         CUDA_VISIBLE_DEVICES='')
@@ -94,12 +94,12 @@ def main():
     elif a.stage=='cpu-integration':
         result=execute([str(root/'venv-isolated/bin/python'),str(rm/'tools/local_smoke.py'),
             '--application',str(kg),'--dataset',str(root/'bootstrap-dataset'),
-            '--binary',str(rm/'target/release/resmgr'),'--python',str(root/'venv-isolated/bin/python'),
+            '--binary',str(rm/'target/release/cedegrid'),'--python',str(root/'venv-isolated/bin/python'),
             '--output',str(root/'runs'/a.run_id),'--execute'],rm,out,env,650,ram_mib=4096,gpu_mib=0)
     elif a.stage=='gpu-release':
         if not a.gpu_uuid or not a.gpu_uuid.startswith('GPU-'):raise SystemExit('explicit approved GPU UUID required')
-        env['RESMGR_TEST_GPU_UUID']=a.gpu_uuid
-        env['RESMGR_GPU_EVIDENCE']=str(root/'evidence'/(a.run_id+'-gpu.json'))
+        env['CEDEGRID_TEST_GPU_UUID']=a.gpu_uuid
+        env['CEDEGRID_GPU_EVIDENCE']=str(root/'evidence'/(a.run_id+'-gpu.json'))
         result=execute([str(root/'tools/cargo/bin/cargo'),'test','--locked','--test','gpu_native','--','--ignored','--test-threads=1'],rm,out,env,120,ram_mib=4096,gpu_mib=1024)
     else:
         if not a.gpu_uuid or not a.gpu_uuid.startswith('GPU-'):raise SystemExit('explicit approved GPU UUID required')

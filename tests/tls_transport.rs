@@ -1,5 +1,9 @@
 //! Real loopback TLS, private ephemeral CA, and certificate-bound RPC authorization.
-use resource_manager::{coordinator::serve, protocol::*};
+use cedegrid::{
+    config::{RuntimeClientConfig, RuntimeConfigKind, load_runtime, serialize_runtime},
+    coordinator::serve,
+    protocol::*,
+};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, process::Command};
 fn openssl(dir: &Path, args: &[&str]) -> Vec<u8> {
@@ -32,7 +36,7 @@ fn identity(dir: &Path, name: &str, server: bool) -> TlsIdentity {
             &format!("{name}.csr"),
         ],
     );
-    std::fs::write(dir.join(format!("{name}.ext")),if server{"basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n"}else{"basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=clientAuth\n"}).unwrap();
+    std::fs::write(dir.join(format!("{name}.ext")),if server{"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=IP:127.0.0.1\n"}else{"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n"}).unwrap();
     openssl(
         dir,
         &[
@@ -72,6 +76,7 @@ async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
         .tempdir_in(std::env::current_dir().unwrap())
         .unwrap();
     let dir = directory.path();
+    std::fs::write(dir.join("ca.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n").unwrap();
     openssl(
         dir,
         &[
@@ -83,7 +88,9 @@ async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
             "-days",
             "1",
             "-subj",
-            "/CN=ResourceManager-Test-CA",
+            "/CN=Cedegrid-Test-CA",
+            "-config",
+            "ca.cnf",
             "-keyout",
             "ca.key",
             "-out",
@@ -121,8 +128,33 @@ async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
         yield_retry_backoff_ms: 1000,
         yield_retry_backoff_max_ms: 30000,
     };
-    let server = tokio::spawn(serve(config));
+    let deployment = dir.join("coordinator.toml");
+    std::fs::write(
+        &deployment,
+        serialize_runtime(&config, RuntimeConfigKind::Coordinator).unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(serve(
+        load_runtime(&deployment, RuntimeConfigKind::Coordinator).unwrap(),
+    ));
     let endpoint = format!("https://{address}");
+    for name in ["operator", "node"] {
+        let settings = RuntimeClientConfig {
+            endpoint: endpoint.clone(),
+            tls: TlsIdentity {
+                ca_cert: "ca.pem".into(),
+                certificate: format!("{name}.pem").into(),
+                private_key: format!("{name}.key").into(),
+            },
+            timeout_seconds: 15.0,
+            max_transfer_bytes_per_second: 10 * 1024 * 1024,
+        };
+        std::fs::write(
+            dir.join(format!("{name}.toml")),
+            serialize_runtime(&settings, RuntimeConfigKind::Client).unwrap(),
+        )
+        .unwrap();
+    }
     let client = RpcClient::new(&endpoint, &operator).unwrap();
     let mut ready = false;
     for _ in 0..50 {
@@ -137,7 +169,7 @@ async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(ready, "TLS server failed startup");
-    let python = std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
     let sdk = Command::new(python)
         .arg("-c")
         .arg(include_str!("test_sdk_client_transport.py"))

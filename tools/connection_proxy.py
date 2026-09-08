@@ -24,6 +24,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 from validation_runtime import atomic_json, inside_home
+from runtime_config import read_runtime_config
 
 
 def public_ip(value):
@@ -58,7 +59,7 @@ def validate_public(config):
 
 def validate_authenticated_target(config, contract):
     """Pin the authenticated final endpoint, including opaque command transports."""
-    deployment = json.loads(pinned(contract['coordinator_deployment'], contract['coordinator_sha256']).read_text())
+    deployment = read_runtime_config(pinned(contract['coordinator_deployment'], contract['coordinator_sha256']))
     endpoint = urlsplit('tcp://' + deployment['listen'])
     if [endpoint.hostname, endpoint.port] != config['target']:
         raise ValueError('proxy target differs from pinned coordinator listen address')

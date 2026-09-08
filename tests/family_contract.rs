@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     managed_children::ManagedChildPhase,
     model::Resources,
@@ -24,7 +24,7 @@ impl Drop for Owned {
 }
 #[test]
 fn family_termination_deadline_is_shared_and_unrelated_same_uid_child_survives() {
-    let python = std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
     let mut unrelated = Owned(
         Command::new(&python)
             .args(["-c", "import time;time.sleep(30)"])
@@ -39,7 +39,7 @@ fn family_termination_deadline_is_shared_and_unrelated_same_uid_child_survives()
     let code = r#"
 import sys,time
 from pathlib import Path
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 for index in range(8):
  code="import signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path('ready-%d').write_text('ready');time.sleep(30)"%index
  spawn_managed([sys.executable,'-c',code],single_process=True,no_escape=True,request_id='child-%d'%index)
@@ -88,7 +88,7 @@ Path('leader-exit-time').write_text(str(time.monotonic()))
         &options,
         &store,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
     .unwrap();
     assert_eq!(outcome.exit_code, Some(0));

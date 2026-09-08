@@ -1,0 +1,60 @@
+{
+  "name": "cedegrid",
+  "version": "0.2.0",
+  "description": "CedeGrid TypeScript SDK and native CLI launcher",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "bin": {
+    "cedegrid": "dist/launcher.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "build": "tsc && node build/scripts/build.js",
+    "test": "npm run build && node --test build/tests/*.test.js",
+    "pack:release": "npm run build && npm pack --ignore-scripts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sidcatkr/CedeGrid.git",
+    "directory": "npm"
+  },
+  "dependencies": {
+    "@ltd/j-toml": "1.38.0",
+    "lossless-json": "4.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.2",
+    "typescript": "5.9.3",
+    "verdaccio": "6.10.3"
+  },
+  "optionalDependencies": {
+    "cedegrid-darwin-arm64": "0.2.0",
+    "cedegrid-darwin-x64": "0.2.0",
+    "cedegrid-linux-arm64-gnu": "0.2.0",
+    "cedegrid-linux-x64-gnu": "0.2.0",
+    "cedegrid-win32-x64": "0.2.0"
+  }
+}

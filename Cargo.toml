@@ -1,6 +1,6 @@
 [package]
 name = "cedegrid"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Portable policy-driven resource management with explicit capability and safety contracts"
@@ -10,6 +10,7 @@ publish = false
 # Keep private runtime/evidence and credentials out even when locally present.
 # Crates.io publication stays disabled; source releases use a separately reviewed export.
 include = [
+    "/.github/workflows/*.yml",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
@@ -20,14 +21,29 @@ include = [
     "/src/**/*.rs",
     "/tests/*.rs",
     "/tests/test_*.py",
-    "/examples/node.yaml",
+    "/examples/*.toml",
+    "/examples/*.c",
+    "/examples/*.rs",
+    "/tests/contracts/*.json",
+    "/npm/src/**/*.ts",
+    "/npm/tests/**/*.ts",
+    "/npm/scripts/*",
+    "/npm/examples/*",
+    "/npm/package.json",
+    "/npm/package-lock.json",
+    "/npm/tsconfig.json",
+    "/npm/LICENSE",
+    "/npm/NOTICE",
+    "/npm/README.md",
+    "/npm/THIRD_PARTY_NOTICES.md",
     "/examples/cpu-job.json",
     "/examples/gpu-pressure.json",
     "/python/pyproject.toml",
+    "/python/MANIFEST.in",
     "/python/README.md",
     "/python/LICENSE",
     "/python/NOTICE",
-    "/python/resmgr/*.py",
+    "/python/cedegrid/*.py",
     "/python/tests/*.py",
     "/python/examples/*.py",
     "/tools/*.py",
@@ -40,16 +56,21 @@ include = [
     "/docs/local-supervision-verification.md",
     "/docs/milestone-1-verification.md",
     "/docs/release.md",
+    "/docs/release-0.2-spec.md",
+    "/docs/release-0.2-gates.json",
+    "/docs/release-0.2-evidence.md",
+    "/docs/migration-0.2.md",
+    "/docs/worker-protocol.md",
     "/docs/sdk-adapter-work.md",
     "/docs/soak-harness.md",
     "/docs/validation.md",
 ]
 
 [lib]
-name = "resource_manager"
+name = "cedegrid"
 
 [[bin]]
-name = "resmgr"
+name = "cedegrid"
 path = "src/main.rs"
 
 [dependencies]
@@ -60,7 +81,8 @@ nvml-wrapper = "0.11"
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 # SDK metadata must retain its IEEE-754 values through spool, RPC and state parses.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+toml = "0.8"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sysinfo = "0.38"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "io-util", "fs", "sync"] }

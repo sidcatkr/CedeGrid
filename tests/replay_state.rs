@@ -1,4 +1,4 @@
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     model::Resources,
     state::{StateStore, StorageProfile},
@@ -73,9 +73,9 @@ fn recovery(
     task: &str,
     assignment: &str,
     generation: u64,
-) -> resource_manager::protocol::ReplayRecoveryAllocation {
-    resource_manager::protocol::ReplayRecoveryAllocation {
-        assignment: resource_manager::protocol::Assignment {
+) -> cedegrid::protocol::ReplayRecoveryAllocation {
+    cedegrid::protocol::ReplayRecoveryAllocation {
+        assignment: cedegrid::protocol::Assignment {
             node_id: "owner".into(),
             generation,
             coordinator_epoch: 42,
@@ -88,7 +88,7 @@ fn recovery(
     }
 }
 fn preparation(
-    recovery: &resource_manager::protocol::ReplayRecoveryAllocation,
+    recovery: &cedegrid::protocol::ReplayRecoveryAllocation,
     boot: &str,
 ) -> ExecutionRecord {
     let request = &recovery.assignment.request;
@@ -115,7 +115,7 @@ fn marker(record: &ExecutionRecord, control: &str) -> bool {
     record.evidence.iter().any(|e| e.control == control)
 }
 fn current_boot() -> Option<String> {
-    resource_manager::supervision::process_identity(std::process::id(), "self-test", 0)
+    cedegrid::supervision::process_identity(std::process::id(), "self-test", 0)
         .ok()
         .map(|identity| identity.boot_id)
 }

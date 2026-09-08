@@ -1,0 +1,17 @@
+# Replace the example certificate fingerprint with an authorized client's SHA256.
+config_version = 1
+state_dir = "../.cedegrid-coordinator-state"
+storage_profile = "wal_full"
+listen = "127.0.0.1:7443"
+lease_ms = 10000
+telemetry_ttl_ms = 3000
+max_artifact_bytes = 268435456
+artifact_quota_bytes = 21474836480
+
+[tls]
+ca_cert = "tls/ca.pem"
+certificate = "tls/coordinator.pem"
+private_key = "tls/coordinator.key"
+
+[clients."0000000000000000000000000000000000000000000000000000000000000000"]
+role = "operator"

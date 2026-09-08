@@ -1,4 +1,4 @@
-use resource_manager::{
+use cedegrid::{
     agent, config::Config, execution_model::*, model::Resources, state::StateStore, supervision,
     telemetry::ManagedCollector,
 };

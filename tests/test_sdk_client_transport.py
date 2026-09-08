@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import time
 
-from resmgr import Client, RemoteError, command_task
+from cedegrid import Client, RemoteError, command_task
 
 
 def main():
@@ -16,8 +16,7 @@ def main():
 
 
     def client(name):
-        return Client(endpoint, ca=root / 'ca.pem', certificate=root / (name + '.pem'),
-                      private_key=root / (name + '.key'))
+        return Client.from_config(root / (name + '.toml'))
 
 
     operator, node = client('operator'), client('node')

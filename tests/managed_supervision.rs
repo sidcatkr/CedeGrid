@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     managed_children::ManagedChildPhase,
     model::Resources,
@@ -9,7 +9,8 @@ use resource_manager::{
 };
 use std::{collections::BTreeMap, fs, path::Path};
 fn request(dir: &Path, code: &str) -> LaunchRequest {
-    let python = std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_| "/usr/bin/python3".into());
+    let python =
+        std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "/usr/bin/python3".into());
     LaunchRequest {
         task_id: "family-task".into(),
         assignment_id: "family-attempt".into(),
@@ -92,10 +93,9 @@ impl supervision::SupervisorControl for ChangingChildPolicy {
                     "fresh_after_baseline":false,"freshness_decision":"fixture_without_new_samples"}}],
             "capabilities":{}
         }))?;
-        let mut config = resource_manager::config::Config::default();
-        config.gpu.execution_mode =
-            resource_manager::config::GpuExecutionMode::ConservativeNonSharing;
-        resource_manager::policy::validate_gpu_launch_contract(
+        let mut config = cedegrid::config::Config::default();
+        config.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ConservativeNonSharing;
+        cedegrid::policy::validate_gpu_launch_contract(
             &config,
             &snapshot,
             &Resources {
@@ -127,7 +127,7 @@ fn run_with_child_policy(
         r#"
 import sys,json
 from pathlib import Path
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 try:
     child=spawn_managed([sys.executable,'-c',"from pathlib import Path;Path('child-user-executed').write_text('executed')"],single_process=True,no_escape=True)
 except RuntimeError as error:
@@ -144,7 +144,7 @@ else:
         options,
         &store,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
         control,
     )
     .unwrap();
@@ -335,9 +335,9 @@ fn guaranteed_child_final_gpu_check_is_not_superseded_by_parent_policy_poll() {
                         "fresh_after_baseline":true,"freshness_decision":"fixture_fresh"}}],
                 "capabilities":{}
             }))?;
-            let mut config = resource_manager::config::Config::default();
-            config.gpu.execution_mode = resource_manager::config::GpuExecutionMode::ContentionAware;
-            resource_manager::policy::validate_gpu_launch_contract(
+            let mut config = cedegrid::config::Config::default();
+            config.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ContentionAware;
+            cedegrid::policy::validate_gpu_launch_contract(
                 &config,
                 &snapshot,
                 &Resources {
@@ -396,7 +396,7 @@ fn sdk_mediated_child_executes_once_and_parent_waits_for_verified_release() {
     let code = r#"
 import sys,json
 from pathlib import Path
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 argv=[sys.executable,'-c',"from pathlib import Path; Path('child-result').write_text('useful output')"]
 a=spawn_managed(argv,single_process=True,no_escape=True,request_id='same-request')
 b=spawn_managed(argv,single_process=True,no_escape=True,request_id='same-request')
@@ -412,7 +412,7 @@ Path('family-result').write_text(json.dumps(result))
         &options(),
         &store,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
     .unwrap();
     assert_eq!(outcome.exit_code, Some(0));
@@ -436,7 +436,7 @@ fn leader_exit_drains_and_reaps_each_registered_child_before_parent_release() {
         r#"
 import sys,time
 from pathlib import Path
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 child=spawn_managed([sys.executable,'-c',"import time;from pathlib import Path;Path('child-ready').write_text('ready');time.sleep(30)"],single_process=True,no_escape=True)
 while not Path('child-ready').exists(): time.sleep(.01)
 "#,
@@ -448,7 +448,7 @@ while not Path('child-ready').exists(): time.sleep(.01)
         &options(),
         &store,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
     .unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
@@ -492,7 +492,7 @@ fn managed_child_preparation_failure_never_executes_child_code() {
         dir.path(),
         r#"
 import sys
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 child=spawn_managed([sys.executable,'-c',"from pathlib import Path;Path('forbidden').write_text('executed')"],single_process=True,no_escape=True)
 result=child.wait(timeout=4,poll_interval=.01)
 assert result['exit_code'] is None
@@ -504,7 +504,7 @@ assert result['exit_code'] is None
         &options(),
         &store,
         &mut RejectChild { count: 0 },
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
     .unwrap();
     assert_eq!(outcome.exit_code, Some(0));
@@ -528,16 +528,17 @@ fn workload_stdout_and_stderr_are_retained_with_bounded_size() {
     );
     request.single_process = true;
     request.managed_child_limit = 0;
-    request
-        .env
-        .insert("RESMGR_OUTPUT_DIR".into(), dir.path().display().to_string());
+    request.env.insert(
+        "CEDEGRID_OUTPUT_DIR".into(),
+        dir.path().display().to_string(),
+    );
     let outcome = supervision::supervise(
         &request,
         &request.resources,
         &options(),
         &store,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
     .unwrap();
     assert_eq!(outcome.exit_code, Some(0));
@@ -570,7 +571,7 @@ impl ExecutionJournal for InjectJournal {
         c: &str,
         r: &str,
         q: &LaunchRequest,
-    ) -> anyhow::Result<resource_manager::managed_children::ManagedChildRecord> {
+    ) -> anyhow::Result<cedegrid::managed_children::ManagedChildRecord> {
         anyhow::ensure!(self.stage != 0, "injected child reservation failure");
         self.store.reserve_managed_child(a, g, c, r, q)
     }
@@ -578,13 +579,13 @@ impl ExecutionJournal for InjectJournal {
         &self,
         a: &str,
         r: &str,
-    ) -> anyhow::Result<Option<resource_manager::managed_children::ManagedChildRecord>> {
+    ) -> anyhow::Result<Option<cedegrid::managed_children::ManagedChildRecord>> {
         self.store.managed_child(a, r)
     }
     fn managed_children(
         &self,
         a: &str,
-    ) -> anyhow::Result<Vec<resource_manager::managed_children::ManagedChildRecord>> {
+    ) -> anyhow::Result<Vec<cedegrid::managed_children::ManagedChildRecord>> {
         self.store.managed_children(a)
     }
     fn prepare_managed_child(
@@ -637,7 +638,7 @@ fn every_mediated_child_persistence_barrier_failure_prevents_execution() {
             dir.path(),
             r#"
 import sys
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 try:
  child=spawn_managed([sys.executable,'-c',"from pathlib import Path;Path('forbidden').write_text('executed')"],single_process=True,no_escape=True)
  child.wait(timeout=4,poll_interval=.01)
@@ -650,7 +651,7 @@ except RuntimeError: pass
             &options(),
             &journal,
             &mut RootlessBackend::new(10),
-            Path::new(env!("CARGO_BIN_EXE_resmgr")),
+            Path::new(env!("CARGO_BIN_EXE_cedegrid")),
         )
         .unwrap();
         assert_eq!(outcome.exit_code, Some(0));
@@ -662,7 +663,7 @@ except RuntimeError: pass
 #[test]
 #[ignore = "launched only by the bounded supervisor-loss harness"]
 fn mediated_child_supervisor_loss_fixture() {
-    let dir = std::path::PathBuf::from(std::env::var("RESMGR_FAMILY_FIXTURE_DIR").unwrap());
+    let dir = std::path::PathBuf::from(std::env::var("CEDEGRID_FAMILY_FIXTURE_DIR").unwrap());
     let journal = InjectJournal {
         store: StateStore::open(&dir.join("state")).unwrap(),
         stage: 3,
@@ -672,7 +673,7 @@ fn mediated_child_supervisor_loss_fixture() {
         &dir,
         r#"
 import sys
-from resmgr import spawn_managed
+from cedegrid import spawn_managed
 try:
  child=spawn_managed([sys.executable,'-c',"from pathlib import Path;Path('forbidden').write_text('executed')"],single_process=True,no_escape=True)
  child.wait(timeout=3,poll_interval=.01)
@@ -685,7 +686,7 @@ except (RuntimeError,OSError): pass
         &options(),
         &journal,
         &mut RootlessBackend::new(10),
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     );
 }
 #[cfg(target_os = "linux")]
@@ -713,7 +714,7 @@ fn supervisor_loss_before_child_authorization_retains_then_reconciles_family() {
             "--exact",
             "mediated_child_supervisor_loss_fixture",
         ])
-        .env("RESMGR_FAMILY_FIXTURE_DIR", dir.path())
+        .env("CEDEGRID_FAMILY_FIXTURE_DIR", dir.path())
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -772,10 +773,10 @@ fn supervisor_loss_before_child_authorization_retains_then_reconciles_family() {
         "owned fixture cleanup handles retained; no claim of supervisor self-enforcement"
     );
     assert!(!dir.path().join("forbidden").exists());
-    let config = resource_manager::config::Config {
+    let config = cedegrid::config::Config {
         state_dir: dir.path().join("state"),
         ..Default::default()
     };
-    let records = resource_manager::agent::reconcile(&config).unwrap();
+    let records = cedegrid::agent::reconcile(&config).unwrap();
     assert_eq!(records[0].phase, ExecutionPhase::Released);
 }

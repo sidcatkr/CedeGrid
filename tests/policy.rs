@@ -1,11 +1,11 @@
-use proptest::prelude::*;
-use resource_manager::{
+use cedegrid::{
     config::*,
     execution_model::AllocationClass,
     kernel::{CpuCore, CpuTopology, CpuUsageStatus, KernelSnapshot},
     model::*,
     policy::PolicyEngine,
 };
+use proptest::prelude::*;
 use std::collections::BTreeMap;
 
 fn config() -> Config {
@@ -504,14 +504,21 @@ fn configuration_rejects_invalid_ranges_and_deadline_overflow() {
 }
 
 #[test]
-fn configuration_load_validates_and_preserves_relative_paths() {
+fn configuration_load_validates_and_resolves_relative_paths() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.yaml");
-    std::fs::write(&path, "state_dir: state\nnode_mode: guaranteed\n").unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "config_version = 1\nstate_dir = 'state'\nnode_mode = 'guaranteed'\n",
+    )
+    .unwrap();
     let result = Config::load(&path).unwrap();
-    assert_eq!(result.state_dir.to_str(), Some("state"));
+    assert_eq!(
+        result.state_dir,
+        dir.path().canonicalize().unwrap().join("state")
+    );
     assert_eq!(result.node_mode, NodeMode::Guaranteed);
-    std::fs::write(&path, "schema_version: 2000").unwrap();
+    std::fs::write(&path, "config_version = 2000").unwrap();
     assert!(Config::load(&path).is_err());
 }
 
@@ -1311,7 +1318,7 @@ fn gpu_observation(snap: &Snapshot, capability: GpuExecutionCapability) -> GpuOb
 #[test]
 fn non_sharing_admits_empty_then_fully_yields_and_recovers_after_confirmed_release() {
     let mut cfg = config();
-    cfg.gpu.execution_mode = resource_manager::config::GpuExecutionMode::ConservativeNonSharing;
+    cfg.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ConservativeNonSharing;
     cfg.gpu.scale_up_cooldown_ms = 137;
     let mut snap = gpu_snapshot();
     snap.gpus[0].used_memory_mib = Some(0);
@@ -1438,7 +1445,7 @@ fn one_unobservable_device_does_not_block_another_qualified_device() {
     assert!(d.admission_headroom.gpu_memory_mib["GPU-test"] > 0);
     assert!(!d.admission_headroom.gpu_memory_mib.contains_key("GPU-bad"));
     assert_eq!(
-        resource_manager::policy::schedulable_budget(&d).gpu_memory_mib["GPU-bad"],
+        cedegrid::policy::schedulable_budget(&d).gpu_memory_mib["GPU-bad"],
         0
     );
 }
@@ -1466,14 +1473,14 @@ fn coordinator_budget_never_reuses_an_ineligible_device_protection_cap() {
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
     assert!(d.managed_budget.gpu_memory_mib["GPU-bad"] > 0);
-    let offered = resource_manager::policy::schedulable_budget(&d);
+    let offered = cedegrid::policy::schedulable_budget(&d);
     assert_eq!(offered.gpu_memory_mib["GPU-bad"], 0);
     assert!(offered.gpu_memory_mib["GPU-test"] > 0);
 }
 
 #[test]
 fn explicit_sharing_needs_recent_process_capability_and_never_infers_from_utilization() {
-    use resource_manager::config::GpuExecutionMode;
+    use cedegrid::config::GpuExecutionMode;
     let mut cfg = config();
     cfg.gpu.execution_mode = GpuExecutionMode::ContentionAware;
     let mut snap = gpu_snapshot();
@@ -1526,8 +1533,8 @@ fn stale_gpu_observation_blocks_only_that_device() {
 
 #[test]
 fn guaranteed_gpu_rejects_conflicting_non_sharing_contract_before_launch() {
-    use resource_manager::config::GpuExecutionMode;
-    use resource_manager::execution_model::AllocationClass;
+    use cedegrid::config::GpuExecutionMode;
+    use cedegrid::execution_model::AllocationClass;
     let mut cfg = config();
     let snap = gpu_snapshot();
     for mode in [
@@ -1536,7 +1543,7 @@ fn guaranteed_gpu_rejects_conflicting_non_sharing_contract_before_launch() {
     ] {
         cfg.gpu.execution_mode = mode;
         assert!(
-            resource_manager::policy::validate_gpu_launch_contract(
+            cedegrid::policy::validate_gpu_launch_contract(
                 &cfg,
                 &snap,
                 &resources(1, 1, 1),
@@ -1545,7 +1552,7 @@ fn guaranteed_gpu_rejects_conflicting_non_sharing_contract_before_launch() {
             .is_err()
         );
         assert!(
-            resource_manager::policy::validate_gpu_launch_contract(
+            cedegrid::policy::validate_gpu_launch_contract(
                 &cfg,
                 &snap,
                 &resources(1, 1, 0),
@@ -1554,7 +1561,7 @@ fn guaranteed_gpu_rejects_conflicting_non_sharing_contract_before_launch() {
             .is_ok()
         );
         assert!(
-            resource_manager::policy::validate_gpu_launch_contract(
+            cedegrid::policy::validate_gpu_launch_contract(
                 &cfg,
                 &snap,
                 &resources(1, 1, 1),
@@ -1574,17 +1581,14 @@ fn legacy_gpu_record_and_config_readers_remain_compatible() {
         .remove("observation");
     let old: Snapshot = serde_json::from_value(json).unwrap();
     assert!(old.gpus[0].observation.is_none());
-    let cfg: resource_manager::config::GpuConfig = serde_json::from_str("{}").unwrap();
-    assert_eq!(
-        cfg.execution_mode,
-        resource_manager::config::GpuExecutionMode::Auto
-    );
+    let cfg: cedegrid::config::GpuConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(cfg.execution_mode, cedegrid::config::GpuExecutionMode::Auto);
     assert!(cfg.process_sample_max_age_ms > 0);
 }
 
 #[test]
 fn launch_recheck_refuses_an_external_context_appearing_after_empty_device_offer() {
-    use resource_manager::config::GpuExecutionMode;
+    use cedegrid::config::GpuExecutionMode;
     let mut cfg = config();
     let mut snap = gpu_snapshot();
     snap.gpus[0].used_memory_mib = Some(0);
@@ -1599,7 +1603,7 @@ fn launch_recheck_refuses_an_external_context_appearing_after_empty_device_offer
         cfg.gpu.execution_mode = mode;
         snap.gpus[0].external_process_ids = Some(vec![]);
         assert!(
-            resource_manager::policy::validate_gpu_launch_contract(
+            cedegrid::policy::validate_gpu_launch_contract(
                 &cfg,
                 &snap,
                 &resources(1, 1, 500),
@@ -1609,7 +1613,7 @@ fn launch_recheck_refuses_an_external_context_appearing_after_empty_device_offer
         );
         // Even a contradictory Idle flag cannot overrule the non-sharing inventory contract.
         snap.gpus[0].external_process_ids = Some(vec![987]);
-        let error = resource_manager::policy::validate_gpu_launch_contract(
+        let error = cedegrid::policy::validate_gpu_launch_contract(
             &cfg,
             &snap,
             &resources(1, 1, 500),
@@ -1634,7 +1638,7 @@ fn launch_recheck_does_not_admit_new_work_during_fresh_external_compute_activity
     observation.fresh_after_baseline = true;
     observation.newest_sample_timestamp_us = Some(101);
     snap.gpus[0].observation = Some(observation);
-    let error = resource_manager::policy::validate_gpu_launch_contract(
+    let error = cedegrid::policy::validate_gpu_launch_contract(
         &cfg,
         &snap,
         &resources(1, 1, 500),
@@ -1672,11 +1676,7 @@ fn best_effort_fixture() -> (Config, Snapshot) {
 fn best_effort_occupied_is_explicit_and_unknown_activity_remains_unknown() {
     let (mut cfg, snap) = best_effort_fixture();
     assert_eq!(
-        resource_manager::policy::effective_gpu_capability(
-            &cfg,
-            snap.observed_at_unix_ms,
-            &snap.gpus[0]
-        ),
+        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]),
         Some(GpuExecutionCapability::BestEffortOccupied)
     );
     let mut engine = PolicyEngine::new();
@@ -1714,7 +1714,7 @@ fn best_effort_occupied_is_explicit_and_unknown_activity_remains_unknown() {
             .unwrap();
         assert!(strict.admission_headroom.gpu_memory_mib.is_empty());
         assert_ne!(
-            resource_manager::policy::effective_gpu_capability(
+            cedegrid::policy::effective_gpu_capability(
                 &cfg,
                 snap.observed_at_unix_ms,
                 &snap.gpus[0]
@@ -1726,7 +1726,7 @@ fn best_effort_occupied_is_explicit_and_unknown_activity_remains_unknown() {
 
 #[test]
 fn best_effort_launch_recheck_accepts_only_scoped_verified_opportunistic_contract() {
-    use resource_manager::policy::validate_gpu_launch_contract;
+    use cedegrid::policy::validate_gpu_launch_contract;
     let (cfg, mut snap) = best_effort_fixture();
     for activity in [
         ComputeActivity::Unknown,

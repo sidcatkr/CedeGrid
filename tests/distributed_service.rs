@@ -1,14 +1,17 @@
 //! Two actual local node services over mTLS; this is not two-machine Linux evidence.
 #![cfg(unix)]
-use resource_manager::{
+use cedegrid::{
     agent::AgentConfig,
-    config::{Config, NodeMode},
+    config::{Config, NodeMode, RuntimeConfigKind, serialize_runtime},
     coordinator::Coordinator,
-    execution_model::{AllocationClass, ExecutionPhase, LaunchRequest, NamedArtifact},
+    execution_model::{
+        AllocationClass, ExecutionPhase, ExecutionRecord, LaunchRequest, NamedArtifact,
+    },
     model::Resources,
     protocol::*,
     state::{StateStore, StorageProfile},
 };
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -43,7 +46,7 @@ struct OwnedService {
 impl OwnedService {
     fn start(args: &[&str], directory: &Path, name: &str) -> Self {
         let log = directory.join(format!("{name}.stderr.log"));
-        let child = Command::new(env!("CARGO_BIN_EXE_resmgr"))
+        let child = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
             .args(args)
             .env("TMPDIR", directory)
             .stdout(Stdio::from(
@@ -103,6 +106,20 @@ async fn result(client: &RpcClient, task: &str, deadline: Instant) -> ResultSubm
             .await
             .unwrap()
         {
+            let Response::Status { tasks, .. } = client
+                .request(&Request::Status {
+                    job_id: Some(format!("job-{task}")),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!("result receipt status missing");
+            };
+            let receipt = tasks.iter().find(|record| record.task_id == task).unwrap();
+            assert_eq!(
+                receipt.receipt_hash.as_deref(),
+                Some(hex::encode(Sha256::digest(serde_json::to_vec(&value).unwrap())).as_str())
+            );
             return value;
         }
         assert!(Instant::now() < deadline, "result timeout: {task}");
@@ -127,24 +144,67 @@ async fn local_phase(state: &Path, task: &str, phase: ExecutionPhase, deadline: 
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
-async fn checkpoint(state: &Path, profile: StorageProfile, task: &str, deadline: Instant) {
+async fn checkpoint(
+    client: &RpcClient,
+    state: &Path,
+    profile: StorageProfile,
+    task: &str,
+    deadline: Instant,
+) -> ExecutionRecord {
     loop {
+        let Response::Status {
+            tasks, allocations, ..
+        } = client
+            .request(&Request::Status {
+                job_id: Some(format!("job-{task}")),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("checkpoint status missing")
+        };
+        let current = tasks.iter().find(|r| r.task_id == task);
         if let Ok(store) = StateStore::open_read_only_with_profile(state, profile) {
             for record in store
                 .executions()
                 .unwrap()
                 .iter()
-                .filter(|r| r.task_id == task)
+                .filter(|r| r.task_id == task && r.phase == ExecutionPhase::Running)
             {
+                if !current.is_some_and(|task| {
+                    task.assignment_id.as_deref() == Some(&record.assignment_id)
+                        && task.generation == record.generation
+                }) || !allocations.iter().any(|a| {
+                    a["assignment_id"] == record.assignment_id
+                        && a["generation"] == record.generation
+                        && a["phase"] != "released"
+                        && a["phase"] != "uncertain"
+                        && a["lease_sequence"].as_u64().is_some_and(|s| s > 0)
+                }) {
+                    continue;
+                }
                 let output = state.join("attempts").join(&record.assignment_id);
                 if fs::read_dir(output).is_ok_and(|entries| {
                     entries.filter_map(Result::ok).any(|entry| {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
-                        name.starts_with("checkpoint-") && name.ends_with(".receipt.json")
+                        if !name.starts_with("checkpoint-") || !name.ends_with(".receipt.json") {
+                            return false;
+                        }
+                        let receipt: serde_json::Value =
+                            serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+                        let submission: ResultSubmission =
+                            serde_json::from_value(receipt["submission"].clone()).unwrap();
+                        assert_eq!(submission.assignment_id, record.assignment_id);
+                        assert_eq!(submission.generation, record.generation);
+                        assert_eq!(
+                            receipt["response"]["receipt"]["receipt_hash"],
+                            hex::encode(Sha256::digest(serde_json::to_vec(&submission).unwrap()))
+                        );
+                        true
                     })
                 }) {
-                    return;
+                    return record.clone();
                 }
             }
         }
@@ -172,6 +232,99 @@ async fn released(client: &RpcClient, node: &str, deadline: Instant) {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 }
+
+async fn lose_running_journal_row(
+    client: &RpcClient,
+    state: &Path,
+    profile: StorageProfile,
+    task: &str,
+    deadline: Instant,
+) -> ExecutionRecord {
+    use std::os::unix::fs::MetadataExt;
+    loop {
+        let record = checkpoint(client, state, profile, task, deadline).await;
+        let database = state.join(cedegrid::state::DATABASE_FILENAME);
+        let before = fs::metadata(&database).unwrap();
+        let deleted = {
+            let mut db = rusqlite::Connection::open_with_flags(
+                &database,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .unwrap();
+            db.busy_timeout(Duration::from_secs(2)).unwrap();
+            db.pragma_update(None, "foreign_keys", "ON").unwrap();
+            let tx = db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let live: Option<String> = tx
+                .query_row(
+                    "SELECT record_json FROM executions WHERE assignment_id=?1",
+                    [&record.assignment_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            let live = live.map(|value| serde_json::from_str::<ExecutionRecord>(&value).unwrap());
+            if live.is_some_and(|value| {
+                value.phase == ExecutionPhase::Running
+                    && value.generation == record.generation
+                    && value.identity == record.identity
+            }) {
+                // Recheck under the actual SQLite write transaction. A naturally
+                // released historical attempt is never the rollback target.
+                tx.execute(
+                    "DELETE FROM execution_events WHERE assignment_id=?1",
+                    [&record.assignment_id],
+                )
+                .unwrap();
+                assert_eq!(
+                    tx.execute(
+                        "DELETE FROM executions WHERE assignment_id=?1",
+                        [&record.assignment_id]
+                    )
+                    .unwrap(),
+                    1
+                );
+                tx.commit().unwrap();
+                true
+            } else {
+                false
+            }
+        };
+        if deleted {
+            let after = fs::metadata(&database).unwrap();
+            assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+            return record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no current running checkpointed attempt to roll back"
+        );
+    }
+}
+
+async fn new_recovery_snapshot(
+    state: &Path,
+    old_session: &str,
+    deadline: Instant,
+) -> ReplayRecoverySnapshot {
+    loop {
+        // This startup evidence file is written before the ready event. Its
+        // existence alone does not establish that serialization has completed.
+        if let Ok(bytes) = fs::read(state.join("replay-recovery.json"))
+            && let Ok(snapshot) = serde_json::from_slice::<ReplayRecoverySnapshot>(&bytes)
+            && snapshot.session_id != old_session
+        {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fresh authenticated replay recovery snapshot missing"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
 fn node_config(
     root: &Path,
     id: &str,
@@ -196,7 +349,7 @@ fn node_config(
     // The 50ms fixture default leaves only 150ms before a sample is stale; an
     // ARM VM's synchronous launch preparation can exceed that interval. Keep
     // unknown/stale yielding and the whole-test 50-second deadline unchanged.
-    let monitor_ms = std::env::var("RESMGR_SERVICE_TEST_MONITOR_MS")
+    let monitor_ms = std::env::var("CEDEGRID_SERVICE_TEST_MONITOR_MS")
         .map(|value| {
             value
                 .parse::<u64>()
@@ -212,11 +365,15 @@ fn node_config(
     config.lifecycle.allocation_lease_ms = 3000;
     config.lifecycle.drain_timeout_ms = 150;
     config.lifecycle.term_grace_ms = 100;
-    let file = root.join(format!("{id}.yaml"));
-    fs::write(&file, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let file = root.join(format!("{id}.toml"));
+    fs::write(
+        &file,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
     (config, file)
 }
-const WORKER: &str = r#"from resmgr import WorkerContext
+const WORKER: &str = r#"from cedegrid import WorkerContext
 from pathlib import Path
 import json, os, time
 c=WorkerContext.from_env()
@@ -226,7 +383,7 @@ observations=[18.400785964971874,31.859559996519238]
 if c.inputs:
     model=json.loads(Path(c.inputs[0]['path']).read_text())
     assert model['experiment_id']=='local-sdk-experiment'
-if mode=='hold' and not c.resume:
+if mode=='hold' and not Path(os.environ['TEST_RESUME_ALLOWED']).is_file():
     score=sum(i*i for i in range(seed,seed+128))
     p=c.output/'partial.json'; p.write_text(json.dumps({'score':score}))
     c.checkpoint({'experiment_id':'local-sdk-experiment','next':128,'seed':seed,'observations':observations},[c.artifact('partial.json',p)])
@@ -248,7 +405,7 @@ c.complete(metadata,[c.artifact('result.json.data',p)])
 "#;
 fn request(root: &Path, node: &str, id: &str, seed: u64, mode: &str, delay: f64) -> LaunchRequest {
     let repo = std::env::current_dir().unwrap();
-    serde_json::from_value(json!({"task_id":id,"assignment_id":"","argv":[std::env::var("RESMGR_TEST_PYTHON").unwrap_or_else(|_|"python3".into()),"-c",WORKER],"cwd":root,"env":{"PYTHONPATH":repo.join("python"),"PYTHONDONTWRITEBYTECODE":"1","TEST_NODE":node,"TEST_SEED":seed.to_string(),"TEST_MODE":mode,"TEST_DELAY":delay.to_string()},"resources":{"cpu_millicores":100,"ram_mib":128,"gpu_memory_mib":{}},"class":if node=="anchor"{"guaranteed"}else{"opportunistic"},"replay_safe":true,"single_process":true,"no_escape":true,"allow_fallback":true})).unwrap()
+    serde_json::from_value(json!({"task_id":id,"assignment_id":"","argv":[std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_|"python3".into()),"-c",WORKER],"cwd":root,"env":{"PYTHONPATH":repo.join("python"),"PYTHONDONTWRITEBYTECODE":"1","TEST_NODE":node,"TEST_SEED":seed.to_string(),"TEST_MODE":mode,"TEST_DELAY":delay.to_string(),"TEST_RESUME_ALLOWED":root.join("allow-explicit-resume")},"resources":{"cpu_millicores":100,"ram_mib":128,"gpu_memory_mib":{}},"class":if node=="anchor"{"guaranteed"}else{"opportunistic"},"replay_safe":true,"single_process":true,"no_escape":true,"allow_fallback":true})).unwrap()
 }
 async fn submit(client: &RpcClient, node: &str, request: LaunchRequest) {
     client
@@ -273,18 +430,13 @@ fn check_result(value: &ResultSubmission, node: &str, seed: u64) {
     {
         assert_eq!(actual.as_f64().unwrap().to_bits(), expected.to_bits());
     }
-    // This ASCII fixture uses the SDK's sorted, compact JSON representation.
-    // Verify its embedded hash after the actual spool/agent/RPC/storage path.
-    let mut payload = value.result.clone();
-    let expected_hash = payload
-        .as_object_mut()
-        .unwrap()
-        .remove("result_hash")
-        .unwrap();
-    assert_eq!(
-        expected_hash.as_str().unwrap(),
-        hex::encode(Sha256::digest(serde_json::to_vec(&payload).unwrap()))
-    );
+    // Version 2 commits an immutable native descriptor; result() checks the
+    // coordinator's durable receipt hash over the exact returned submission.
+    assert_eq!(value.result["schema_version"], 2);
+    assert_eq!(value.result["kind"], "result");
+    assert_eq!(value.result["task_id"], value.task_id);
+    assert_eq!(value.result["assignment_id"], value.assignment_id);
+    assert_eq!(value.result["generation"], value.generation);
     assert_eq!(metadata["experiment_id"], "local-sdk-experiment");
     assert_eq!(metadata["node"], node);
     assert_eq!(metadata["seed"], seed);
@@ -384,8 +536,12 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
     drop(listener);
     let endpoint = format!("https://{address}");
     let cc:CoordinatorConfig=serde_json::from_value(json!({"state_dir":root.join("coordinator"),"storage_profile":authority_profile,"listen":address,"tls":tls("server"),"clients":info["clients"],"lease_ms":3000,"max_artifact_bytes":1048576,"artifact_quota_bytes":10485760})).unwrap();
-    let coordinator_config = root.join("coordinator.json");
-    fs::write(&coordinator_config, serde_json::to_vec(&cc).unwrap()).unwrap();
+    let coordinator_config = root.join("coordinator.toml");
+    fs::write(
+        &coordinator_config,
+        serialize_runtime(&cc, RuntimeConfigKind::Coordinator).unwrap(),
+    )
+    .unwrap();
     let mut coordinator = OwnedService::start(
         &[
             "coordinator",
@@ -407,7 +563,7 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
         gpu_memory_mib: BTreeMap::new(),
     };
     let deployment = |name: &str, cert: &str| {
-        let file = root.join(format!("{name}-agent.json"));
+        let file = root.join(format!("{name}-agent.toml"));
         let cfg = AgentConfig {
             coordinator_url: endpoint.clone(),
             tls: tls(cert),
@@ -418,7 +574,11 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
             max_spool_bytes: 10 * 1024 * 1024,
             max_runtime_seconds: 45,
         };
-        fs::write(&file, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        fs::write(
+            &file,
+            serialize_runtime(&cfg, RuntimeConfigKind::Agent).unwrap(),
+        )
+        .unwrap();
         file
     };
     let anchor_deployment = deployment("anchor", "node-0");
@@ -492,6 +652,7 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
     )
     .await;
     checkpoint(
+        &client,
         &burst_config.state_dir,
         storage_profile,
         "burst-resume",
@@ -509,51 +670,20 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
         // Its independent supervisor still owns cleanup; this test never adopts
         // a numeric worker PID for signaling. Authoritative preparation and the
         // accepted checkpoint were committed before the injected cache loss.
-        let records =
-            StateStore::open_read_only_with_profile(&burst_config.state_dir, storage_profile)
-                .unwrap()
-                .executions()
-                .unwrap();
-        let record = records
-            .into_iter()
-            .find(|r| r.task_id == "burst-resume")
-            .unwrap();
+        let old_snapshot: ReplayRecoverySnapshot = serde_json::from_slice(
+            &fs::read(burst_config.state_dir.join("replay-recovery.json")).unwrap(),
+        )
+        .unwrap();
+        let record;
         if in_place_rollback {
-            use std::os::unix::fs::MetadataExt;
-            let database = burst_config
-                .state_dir
-                .join(resource_manager::state::DATABASE_FILENAME);
-            let before = fs::metadata(&database).unwrap();
-            // Logical loss on this test-owned weak journal, preserving its inode.
-            // No raw page edits, foreign processes, or physical failure claims.
-            let mut db = rusqlite::Connection::open_with_flags(
-                &database,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            record = lose_running_journal_row(
+                &client,
+                &burst_config.state_dir,
+                storage_profile,
+                "burst-resume",
+                deadline,
             )
-            .unwrap();
-            db.busy_timeout(Duration::from_secs(2)).unwrap();
-            db.pragma_update(None, "foreign_keys", "ON").unwrap();
-            let tx = db
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .unwrap();
-            tx.execute(
-                "DELETE FROM execution_events WHERE assignment_id=?1",
-                [&record.assignment_id],
-            )
-            .unwrap();
-            assert_eq!(
-                tx.execute(
-                    "DELETE FROM executions WHERE assignment_id=?1",
-                    [&record.assignment_id]
-                )
-                .unwrap(),
-                1
-            );
-            tx.commit().unwrap();
-            drop(db);
-            let after = fs::metadata(&database).unwrap();
-            assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+            .await;
             let failure_deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let Response::Status { allocations, .. } = client
@@ -581,18 +711,30 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         } else {
+            record = checkpoint(
+                &client,
+                &burst_config.state_dir,
+                storage_profile,
+                "burst-resume",
+                deadline,
+            )
+            .await;
             burst.stop();
             fs::rename(&burst_config.state_dir, root.join("owned-lost-cache")).unwrap();
             fs::create_dir(&burst_config.state_dir).unwrap();
             fs::write(
                 burst_config
                     .state_dir
-                    .join(resource_manager::state::DATABASE_FILENAME),
+                    .join(cedegrid::state::DATABASE_FILENAME),
                 b"injected owned corrupt cache",
             )
             .unwrap();
         }
-        Some((record.assignment_id, record.generation))
+        Some((
+            record.assignment_id,
+            record.generation,
+            old_snapshot.session_id,
+        ))
     } else {
         None
     };
@@ -616,12 +758,8 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
             "burst-corrupt-recovery",
         );
     }
-    released(&client, "burst", deadline).await;
-    if let Some((id, generation)) = &lost_attempt {
-        let snapshot: ReplayRecoverySnapshot = serde_json::from_slice(
-            &fs::read(burst_config.state_dir.join("replay-recovery.json")).unwrap(),
-        )
-        .unwrap();
+    if let Some((id, generation, old_session)) = &lost_attempt {
+        let snapshot = new_recovery_snapshot(&burst_config.state_dir, old_session, deadline).await;
         assert!(
             snapshot
                 .allocations
@@ -640,7 +778,7 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
                     .to_string_lossy()
                     .starts_with(".burst-state.quarantine-")
                     && (in_place_rollback
-                        || fs::read(p.join(resource_manager::state::DATABASE_FILENAME))
+                        || fs::read(p.join(cedegrid::state::DATABASE_FILENAME))
                             .is_ok_and(|bytes| bytes == b"injected owned corrupt cache"))
             });
         assert!(
@@ -653,6 +791,7 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
             serde_json::to_value(&burst_initial).unwrap()
         );
     }
+    released(&client, "burst", deadline).await;
     let continuity = result(&client, "anchor-continuity", deadline).await;
     check_result(&continuity, "anchor", 4000);
     assert!(
@@ -715,6 +854,12 @@ async fn connected_lifecycle_with_fault(storage_profile: StorageProfile, in_plac
         root,
         "burst-rejoined",
     );
+    // Retried hold workers remain checkpointed until the explicit rejoin stage.
+    fs::write(
+        root.join("allow-explicit-resume"),
+        b"resume after verified recovery and drain",
+    )
+    .unwrap();
     client
         .request(&Request::DrainNode {
             node_id: "burst".into(),

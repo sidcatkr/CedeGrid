@@ -234,6 +234,10 @@ pub enum Request {
     Status {
         job_id: Option<String>,
     },
+    StatusPage {
+        #[serde(flatten)]
+        query: crate::pagination::PageQuery,
+    },
     GetResult {
         task_id: String,
     },
@@ -302,6 +306,10 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
+    StatusPage {
+        #[serde(flatten)]
+        page: crate::pagination::Page,
+    },
     ReplayRecovery {
         snapshot: ReplayRecoverySnapshot,
     },
@@ -345,13 +353,29 @@ pub enum Response {
 pub struct RpcClient {
     client: reqwest::Client,
     endpoint: String,
+    timeout: std::time::Duration,
+    rate: u64,
+    next_wire: tokio::sync::Mutex<tokio::time::Instant>,
 }
 impl RpcClient {
     pub fn new(endpoint: &str, tls: &TlsIdentity) -> anyhow::Result<Self> {
+        Self::with_settings(endpoint, tls, 15.0, 10 * 1024 * 1024)
+    }
+    pub fn with_settings(
+        endpoint: &str,
+        tls: &TlsIdentity,
+        timeout_seconds: f64,
+        rate: u64,
+    ) -> anyhow::Result<Self> {
+        let origin = crate::config::normalize_https_origin(endpoint)?;
         anyhow::ensure!(
-            endpoint.starts_with("https://"),
-            "RPC endpoint requires HTTPS"
+            timeout_seconds.is_finite()
+                && timeout_seconds > 0.0
+                && timeout_seconds <= 86400.0
+                && rate <= i64::MAX as u64,
+            "ERR_CEDEGRID_CONFIG: invalid transport settings"
         );
+        let timeout = std::time::Duration::try_from_secs_f64(timeout_seconds)?;
         let ca = reqwest::Certificate::from_pem(&std::fs::read(&tls.ca_cert)?)?;
         let mut identity = std::fs::read(&tls.certificate)?;
         identity.extend_from_slice(&std::fs::read(&tls.private_key)?);
@@ -363,51 +387,175 @@ impl RpcClient {
             .add_root_certificate(ca)
             .identity(identity)
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(3))
-            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(timeout)
+            .timeout(timeout)
             .build()?;
         Ok(Self {
             client,
-            endpoint: format!("{}/v1/rpc", endpoint.trim_end_matches('/')),
+            endpoint: format!("{origin}/v1/rpc"),
+            timeout,
+            rate,
+            next_wire: tokio::sync::Mutex::new(tokio::time::Instant::now()),
         })
     }
+    async fn pace(&self, bytes: usize) -> anyhow::Result<()> {
+        if self.rate == 0 || bytes == 0 {
+            return Ok(());
+        }
+        let charge = (bytes as u64)
+            .checked_mul(11)
+            .and_then(|n| n.checked_add(9))
+            .ok_or_else(|| anyhow::anyhow!("wire charge overflow"))?
+            / 10;
+        let delay = std::time::Duration::from_secs_f64(charge as f64 / self.rate as f64);
+        let until = {
+            let mut next = self.next_wire.lock().await;
+            let until = (*next)
+                .max(tokio::time::Instant::now())
+                .checked_add(delay)
+                .ok_or_else(|| anyhow::anyhow!("pacing deadline overflow"))?;
+            *next = until;
+            until
+        };
+        tokio::time::sleep_until(until).await;
+        Ok(())
+    }
     pub async fn request(&self, request: &Request) -> anyhow::Result<Response> {
-        let mut response = self
-            .client
-            .post(&self.endpoint)
-            .json(request)
-            .send()
-            .await?;
-        anyhow::ensure!(
-            response.status().is_success(),
-            "RPC HTTP status {}",
-            response.status()
-        );
-        anyhow::ensure!(
-            response
-                .content_length()
-                .is_none_or(|s| s <= 8 * 1024 * 1024),
-            "RPC response too large"
-        );
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
+        tokio::time::timeout(self.timeout, async {
+            let payload = serde_json::to_vec(request)?;
             anyhow::ensure!(
-                body.len()
-                    .checked_add(chunk.len())
-                    .is_some_and(|len| len <= 8 * 1024 * 1024),
+                payload.len() <= 3 * 1024 * 1024,
+                "ERR_CEDEGRID_REQUEST_TOO_LARGE: RPC request exceeds 3 MiB"
+            );
+            self.pace(payload.len()).await?;
+            let mut response = self
+                .client
+                .post(&self.endpoint)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload)
+                .send()
+                .await?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "RPC HTTP status {}",
+                response.status()
+            );
+            anyhow::ensure!(
+                response
+                    .content_length()
+                    .is_none_or(|s| s <= 8 * 1024 * 1024),
                 "RPC response too large"
             );
-            body.extend_from_slice(&chunk);
-        }
-        let response: Response = serde_json::from_slice(&body)?;
-        if let Response::Error { message } = &response {
-            anyhow::bail!("coordinator rejected request: {message}");
-        }
-        Ok(response)
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                anyhow::ensure!(
+                    body.len()
+                        .checked_add(chunk.len())
+                        .is_some_and(|len| len <= 8 * 1024 * 1024),
+                    "RPC response too large"
+                );
+                self.pace(chunk.len()).await?;
+                body.extend_from_slice(&chunk);
+            }
+            let response: Response = crate::numeric::from_slice(&body)?;
+            if let Response::Error { message } = &response {
+                anyhow::bail!("coordinator rejected request: {message}");
+            }
+            Ok(response)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("ERR_CEDEGRID_DEADLINE: RPC end-to-end deadline exceeded"))?
     }
 }
+
 pub async fn rpc(endpoint: &str, tls: &TlsIdentity, request: &Request) -> anyhow::Result<Response> {
     RpcClient::new(endpoint, tls)?.request(request).await
+}
+
+impl NodeReport {
+    pub fn validate_bounds(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.allocations.len() <= 2048,
+            "ERR_CEDEGRID_INVENTORY_LIMIT: maximum 2048 allocation entries; reservations remain retained"
+        );
+        anyhow::ensure!(
+            self.available_controls.len() <= 64
+                && self.available_controls.iter().all(|c| !c.is_empty()
+                    && c.len() <= 128
+                    && c.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))),
+            "ERR_CEDEGRID_INVENTORY_LIMIT: invalid controls"
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for a in &self.allocations {
+            anyhow::ensure!(
+                !a.assignment_id.is_empty()
+                    && a.assignment_id.len() <= 256
+                    && !a.assignment_id.chars().any(char::is_control)
+                    && a.detail.len() <= 1024
+                    && a.generation <= i64::MAX as u64
+                    && ids.insert(&a.assignment_id),
+                "ERR_CEDEGRID_INVENTORY_LIMIT: invalid or duplicate allocation detail"
+            );
+        }
+        anyhow::ensure!(
+            serde_json::to_vec(self)?.len() <= 2 * 1024 * 1024,
+            "ERR_CEDEGRID_INVENTORY_LIMIT: report exceeds 2 MiB; reservations remain retained"
+        );
+        Ok(())
+    }
+}
+
+/// Submission validation is independent of the client's OS or local filesystem.
+pub fn validate_launch_request(request: &LaunchRequest) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !request.task_id.is_empty()
+            && request.task_id.len() <= 256
+            && !request.task_id.chars().any(char::is_control),
+        "ERR_CEDEGRID_ARGUMENT: invalid task ID"
+    );
+    anyhow::ensure!(
+        !request.argv.is_empty()
+            && !request.argv[0].is_empty()
+            && request.argv.iter().all(|a| !a.contains('\0')),
+        "ERR_CEDEGRID_ARGUMENT: invalid argv"
+    );
+    let cwd = request
+        .cwd
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("ERR_CEDEGRID_ARGUMENT: cwd must be UTF-8"))?;
+    anyhow::ensure!(
+        cwd.starts_with('/') && !cwd.contains('\0'),
+        "ERR_CEDEGRID_ARGUMENT: execution cwd must be an absolute POSIX path"
+    );
+    anyhow::ensure!(
+        request.env.iter().all(|(k, v)| !k.is_empty()
+            && !k.contains(['=', '\0'])
+            && !v.contains('\0')
+            && (!k.starts_with("CEDEGRID_") || k == "CEDEGRID_METADATA")),
+        "ERR_CEDEGRID_ARGUMENT: invalid or reserved environment"
+    );
+    if let Some(metadata) = request.env.get("CEDEGRID_METADATA") {
+        let _: serde_json::Value = crate::numeric::from_slice(metadata.as_bytes())?;
+    }
+    anyhow::ensure!(
+        request.resources.cpu_millicores > 0
+            && request.resources.ram_mib > 0
+            && request.resources.cpu_millicores <= i64::MAX as u64
+            && request.resources.ram_mib <= i64::MAX as u64
+            && request
+                .resources
+                .gpu_memory_mib
+                .values()
+                .all(|n| *n > 0 && *n <= i64::MAX as u64),
+        "ERR_CEDEGRID_ARGUMENT: invalid resource amount"
+    );
+    anyhow::ensure!(
+        request.managed_child_limit <= 8
+            && (request.managed_child_limit == 0 || (!request.single_process && request.no_escape)),
+        "ERR_CEDEGRID_ARGUMENT: invalid managed-child contract"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

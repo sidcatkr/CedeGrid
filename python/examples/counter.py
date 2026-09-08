@@ -1,7 +1,7 @@
 """Ordinary cooperative command: bounded counting with durable continuation."""
 import argparse
 import time
-from resmgr import WorkerContext
+from cedegrid import WorkerContext
 
 p = argparse.ArgumentParser()
 p.add_argument("--steps", type=int, default=20)
