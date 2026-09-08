@@ -15,6 +15,7 @@ from urllib.parse import unquote
 # Deliberately exact: additions require review; no recursive copying or Git history.
 ALLOWLIST = (
     '.github/workflows/ci.yml',
+    '.github/workflows/github-packages.yml',
     '.github/workflows/release-candidate.yml',
     '.github/workflows/release.yml',
     '.gitignore',
@@ -184,6 +185,7 @@ ALLOWLIST = (
     'tools/pressure_probe.py',
     'tools/pressure_schedule.py',
     'tools/publish_packages.py',
+    'tools/publish_github_packages.py',
     'tools/release_manifest.py',
     'tools/review_local_smoke.py',
     'tools/runtime_config.py',

@@ -1,4 +1,10 @@
 //! Immutable bounded artifact publication. Database publication follows directory sync.
+//!
+//! Immutability covers serialized mutations through the managed artifact API.
+//! Unix publication seals the inode read-only before hashing; metadata proofs then
+//! avoid rehashing while that mutation lane remains held. Hostile same-UID writes,
+//! permission changes, and write descriptors opened before sealing are outside
+//! this contract: portable filesystem metadata cannot prove their absence.
 use crate::protocol::ArtifactRef;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -24,6 +30,7 @@ pub struct ArtifactStore {
 
 /// A short-lived integrity proof retaining the exact inode that was hashed.
 /// Callers serialize artifact mutations until the final database acknowledgement.
+/// This is not a proof against hostile same-UID or preopened-descriptor writes.
 pub(crate) struct VerifiedArtifact {
     file: File,
     artifact: ArtifactRef,
@@ -42,6 +49,8 @@ struct VerifiedMetadata {
     modified: (i64, i64),
     #[cfg(unix)]
     changed: (i64, i64),
+    #[cfg(unix)]
+    mode: u32,
     #[cfg(not(unix))]
     modified: std::time::SystemTime,
     #[cfg(not(unix))]
@@ -59,12 +68,15 @@ impl VerifiedMetadata {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let mode = metadata.mode() & 0o7777;
+            ensure!(mode & 0o222 == 0, "verified artifact must not be writable");
             Ok(Self {
                 size: metadata.len(),
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 modified: (metadata.mtime(), metadata.mtime_nsec()),
                 changed: (metadata.ctime(), metadata.ctime_nsec()),
+                mode,
             })
         }
         #[cfg(not(unix))]
@@ -214,18 +226,21 @@ impl ArtifactStore {
                 <= meta.artifact.size,
             "upload exceeds declared size"
         );
-        let mut file = open_regular(&p, true)?;
-        if offset < len {
+        if offset < len || data.is_empty() {
             ensure!(
                 offset + data.len() as u64 <= len,
                 "overlapping upload retry"
             );
+            // Published partials share the sealed blob inode. An identical retry
+            // needs only read access, including an empty retry at EOF.
+            let mut file = open_regular(&p, false)?;
             let mut existing = vec![0; data.len()];
             file.seek(SeekFrom::Start(offset))?;
             file.read_exact(&mut existing)?;
             ensure!(existing == data, "upload retry has different bytes");
             return Ok(len);
         }
+        let mut file = open_regular(&p, true)?;
         file.seek(SeekFrom::End(0))?;
         file.write_all(data)?;
         file.sync_all()?;
@@ -240,6 +255,7 @@ impl ArtifactStore {
             file.metadata()?.len() == meta.artifact.size,
             "incomplete upload"
         );
+        seal_read_only(&file)?;
         let mut digest = Sha256::new();
         let mut buf = [0u8; 65536];
         loop {
@@ -284,6 +300,7 @@ impl ArtifactStore {
     }
     pub fn verify(&self, artifact: &ArtifactRef) -> Result<()> {
         let mut file = open_regular(&self.blob(&artifact.sha256)?, false)?;
+        seal_read_only(&file)?;
         ensure!(
             file.metadata()?.len() == artifact.size,
             "published artifact size mismatch"
@@ -316,6 +333,7 @@ impl ArtifactStore {
         #[cfg(not(any(unix, windows)))]
         anyhow::bail!("pinned artifact identity is unsupported on this platform");
         let mut file = options.open(&path)?;
+        seal_read_only(&file)?;
         let identity = VerifiedMetadata::capture(&file.metadata()?)?;
         ensure!(
             identity.size == artifact.size,
@@ -447,6 +465,27 @@ fn open_regular(p: &Path, write: bool) -> Result<File> {
     }
     Ok(o.open(p)?)
 }
+fn seal_read_only(file: &File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let metadata = file.metadata()?;
+        ensure!(metadata.is_file(), "sealed artifact must be a regular file");
+        // fchmod acts on the descriptor that will be hashed, including an older
+        // writable blob. Avoid changing ctime when an already sealed blob is
+        // verified again while another proof still retains that inode.
+        if metadata.mode() & 0o7777 != 0o400
+            && unsafe { libc::fchmod(file.as_raw_fd(), 0o400) } != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("seal artifact read-only");
+        }
+        file.sync_all()
+            .context("sync sealed artifact permissions")?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
 fn create_new(p: &Path) -> Result<File> {
     let mut o = OpenOptions::new();
     o.write(true).create_new(true);
@@ -516,10 +555,51 @@ mod proof_tests {
 
     #[cfg(unix)]
     #[test]
-    fn pinned_proof_rejects_same_size_write_even_with_restored_mtime() {
+    fn pinned_proof_seals_inode_without_invalidating_an_existing_proof() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_directory, store, artifact, path) = fixture();
+        let proof = store.verify_pinned(&artifact).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o400
+        );
+        // Privileged users can bypass DAC; that is outside the managed API
+        // contract. Ordinary owner writes must be denied by the filesystem.
+        if unsafe { libc::geteuid() } != 0 {
+            let error = OpenOptions::new().write(true).open(&path).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        let second = store.verify_pinned(&artifact).unwrap();
+        proof.check(&artifact).unwrap();
+        second.check(&artifact).unwrap();
+        store.verify(&artifact).unwrap();
+        proof.check(&artifact).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_proof_rejects_permission_changes_without_content_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        // Cover every writable class and a read-only permission change, without
+        // relying on filesystem timestamp resolution or sleeping between writes.
+        for mode in [0o600, 0o420, 0o402, 0o440] {
+            let (_directory, store, artifact, path) = fixture();
+            let proof = store.verify_pinned(&artifact).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(proof.check(&artifact).is_err(), "changed mode {mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_hash_rejects_same_size_corruption_with_restored_mtime() {
+        use std::os::unix::fs::PermissionsExt;
         let (_directory, store, artifact, path) = fixture();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         let proof = store.verify_pinned(&artifact).unwrap();
+        // Deliberately bypass the managed API's seal. A fresh full hash must
+        // reject corruption even when size and modification time are restored.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let mut writer = OpenOptions::new().write(true).open(&path).unwrap();
         writer.write_all(b"modified content").unwrap();
         writer
@@ -529,7 +609,16 @@ mod proof_tests {
         assert_eq!(fs::metadata(&path).unwrap().len(), artifact.size);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
         assert!(proof.check(&artifact).is_err());
-        assert!(store.verify_pinned(&artifact).is_err());
+        drop(writer);
+        let error = store.verify_pinned(&artifact).err().unwrap();
+        assert!(error.to_string().contains("digest mismatch"));
+        assert!(
+            store
+                .verify(&artifact)
+                .unwrap_err()
+                .to_string()
+                .contains("digest mismatch")
+        );
     }
 
     #[cfg(unix)]

@@ -1,0 +1,52 @@
+name: Mirror published CedeGrid payloads to GitHub Packages
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/cedegrid-release]
+    paths:
+      - .github/workflows/github-packages.yml
+      - tools/publish_github_packages.py
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: cedegrid-github-packages-0.2.0
+  cancel-in-progress: false
+jobs:
+  mirror:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.14.0'
+          registry-url: https://npm.pkg.github.com
+          scope: '@sidcatkr'
+      - name: Download the original published release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.2.0 --repo sidcatkr/CedeGrid --dir originals --pattern '*.tgz' --pattern manifest.json
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected='2c1bff906e981cdb37fff55d6d8b3343089ae8975ef9dac8a518c3ebc17ba149'
+          assert hashlib.sha256(Path('originals/manifest.json').read_bytes()).hexdigest()==expected, 'original release manifest changed'
+          PY
+      - name: Prepare separate scoped archives and verify unchanged payload bytes
+        run: python3 tools/publish_github_packages.py prepare --assets originals --mirror mirror
+      - name: Publish native mirrors before the scoped SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: python3 tools/publish_github_packages.py publish --mirror mirror
+      - name: Verify installed aliases, SDK payloads, and native launcher outside checkout
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: python3 tools/publish_github_packages.py verify-install --mirror mirror
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cedegrid-github-mirror-0.2.0
+          path: mirror/mirror-manifest.json

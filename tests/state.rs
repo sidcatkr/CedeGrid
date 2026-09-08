@@ -943,13 +943,22 @@ fn rollback_profile_retains_busy_bound_and_does_not_release_other_connection_loc
         StorageProfile::DeleteExtra,
         std::time::Duration::from_millis(20),
     );
-    assert!(attempt.is_err());
+    let reopened = attempt.unwrap();
+    let settings = reopened.durability_settings().unwrap();
+    assert_eq!(settings.busy_timeout_ms, 20);
+    assert_eq!(settings.journal_mode, "delete");
+    assert_eq!(settings.synchronous, 3);
+    assert!(reopened.task("committed").unwrap().replay_safe);
+    // Opening current state needs no writer reservation. Real writes still
+    // honor the same busy bound, without discarding the first writer's lock.
+    assert!(reopened.submit("blocked-by-writer", true).is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     let rival = Connection::open(store.database_path()).unwrap();
     rival.busy_timeout(std::time::Duration::ZERO).unwrap();
     assert!(rival.execute_batch("BEGIN IMMEDIATE").is_err());
     writer.execute_batch("ROLLBACK").unwrap();
     assert!(store.task("committed").unwrap().replay_safe);
+    reopened.submit("after-release", true).unwrap();
 }
 
 #[test]
@@ -1098,7 +1107,7 @@ fn storage_profile_process_fixture() {
     }
 }
 
-struct ProfileChild(std::process::Child);
+struct ProfileChild(std::process::Child, std::path::PathBuf);
 impl Drop for ProfileChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -1106,6 +1115,8 @@ impl Drop for ProfileChild {
     }
 }
 fn profile_child(directory: &Path, profile: StorageProfile, mode: &str) -> ProfileChild {
+    let log_path = directory.join(format!("profile-fixture-{mode}.log"));
+    let log = std::fs::File::create_new(&log_path).unwrap();
     ProfileChild(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1118,9 +1129,11 @@ fn profile_child(directory: &Path, profile: StorageProfile, mode: &str) -> Profi
             .env("CEDEGRID_PROFILE", serde_json::to_string(&profile).unwrap())
             .env("CEDEGRID_PROFILE_FIXTURE", mode)
             .env("TMPDIR", directory)
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log.try_clone().unwrap()))
+            .stderr(std::process::Stdio::from(log))
             .spawn()
             .unwrap(),
+        log_path,
     )
 }
 
@@ -1281,7 +1294,11 @@ fn rollback_profile_serializes_real_process_writers_without_losing_receipts() {
     for child in &mut children {
         loop {
             if let Some(status) = child.0.try_wait().unwrap() {
-                assert!(status.success());
+                assert!(
+                    status.success(),
+                    "writer failed: {status}; diagnostics:\n{}",
+                    std::fs::read_to_string(&child.1).unwrap_or_else(|error| error.to_string())
+                );
                 break;
             }
             assert!(

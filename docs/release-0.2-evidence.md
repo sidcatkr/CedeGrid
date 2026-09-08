@@ -3,7 +3,7 @@
 This record accompanies the actual 0.2.0 binaries, npm archives and Python wheel
 and source distribution. The [gate manifest](release-0.2-gates.json) is the
 machine-readable authority for source hashes, artifact hashes and qualification.
-Publication is disabled while any required stable gate is unqualified.
+Version 0.2.0 was published at the owner’s explicit request before all qualification gates passed. Native and SDK follow-up fixes remain separate from the frozen published archives.
 
 ## Audit corrections and regression coverage
 
@@ -28,11 +28,8 @@ native binary. Failed intermediate candidates remain retained in the private
 qualification workspace. Public evidence includes only reviewed summaries and
 hashes; it excludes private endpoints, TLS credentials, user paths and raw workloads.
 
-Physical three-host work, RTX 5060 Ti and L4 scenarios require authenticated access
-to the approved hosts. The access preflight reached SSH authentication, but no
-authenticated session remained available for these runs. Cross compilation does
-not establish Linux kernel, macOS 14 or Windows 11 24H2 runtime qualification.
+The published candidate’s Linux run recorded **373 passed, 8 failed, and 8 ignored**. Full macOS suites also exposed an agent preparation/admission race. Focused follow-up fixes address CPU sampling cadence, pending preparation ownership, read-only artifact sealing, and unnecessary migration writes during reopen. These fixes are not part of the published 0.2.0 bytes.
 
-Actual npm/PyPI upload and trusted-publisher authentication are separate from local
-package validation. Registry name availability is advisory and does not establish
-ownership. See [release operations](release.md) for the exact-byte publish workflow.
+GPU models in the qualification records identify test equipment. GPU runtime requirements are capability based. Available devices did not meet native admission prerequisites during these runs. Minimum-OS/remaining architecture checks and final timed artifact-load qualification remain incomplete.
+
+npm and PyPI publication succeeded for the main package, four Linux/macOS native packages, wheel and sdist. npm rejected the Windows native package with HTTP 403 spam detection. Downloaded published bytes matched their original hashes; a fresh public-registry installation passed on macOS arm64 with npm scripts disabled. The GitHub release contains 17 hash-verified assets. Publication used the owner’s registry credentials and has no OIDC provenance attestation.

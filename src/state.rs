@@ -575,7 +575,12 @@ impl StateStore {
             profile,
             namespace_guard,
         };
-        store.migrate()?;
+        // A current, explicitly profiled database needs only connection-local
+        // settings and validation. Re-entering migration would take a write
+        // reservation and rewrite schema metadata on every concurrent reopen.
+        if existing_version != SCHEMA_VERSION || persisted.is_none() {
+            store.migrate()?;
+        }
         store.verify_durability()?;
         // Request the strongest available namespace sync under both assurances.
         // Replayable storage does not claim that this supplies a backing barrier.

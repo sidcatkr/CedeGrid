@@ -843,6 +843,18 @@ fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec
     let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
     reconcile_guarded(config, exclude, guard)
 }
+fn reconcile_agent_owned<'a>(
+    config: &Config,
+    running: impl Iterator<Item = &'a String>,
+    preparing: impl Iterator<Item = &'a String>,
+    guard: NamespaceGuard,
+) -> Result<Vec<ExecutionRecord>> {
+    // A preparation owns its durable reservation before it returns a ChildSlot.
+    // Retain that ownership until the JoinHandle is harvested, including when a
+    // completed preparation is waiting for the next service-loop iteration.
+    let owned = running.chain(preparing).cloned().collect();
+    reconcile_guarded(config, &owned, guard)
+}
 fn reconcile_guarded(
     config: &Config,
     exclude: &BTreeSet<String>,
@@ -2357,6 +2369,13 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 }
             }
         }
+        // Absolute monitor cadence can arrive just before the OS CPU sampling
+        // interval. Wait for fresh evidence after pending control/reaping work;
+        // do not substitute cached utilization or extend control deadlines.
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            collector.next_cpu_sample_at(),
+        ))
+        .await;
         let (mut snapshot, allocations) =
             collector.sample_with_children(&records, &store.all_unreleased_managed_children()?)?;
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
@@ -2408,12 +2427,15 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 >= Duration::from_millis(config.lifecycle.heartbeat_interval_ms)
         {
             let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
-            let owned = slots
-                .iter()
-                .filter(|(_, slot)| !slot.exited)
-                .map(|(id, _)| id.clone())
-                .collect();
-            let _ = reconcile_guarded(config, &owned, namespace_guard.clone())?;
+            let _ = reconcile_agent_owned(
+                config,
+                slots
+                    .iter()
+                    .filter(|(_, slot)| !slot.exited)
+                    .map(|(id, _)| id),
+                preparations.keys(),
+                namespace_guard.clone(),
+            )?;
             let boot_id = supervision::process_identity(std::process::id(), "agent", 0)?.boot_id;
             let reconciled_records = store.executions()?;
             let mut reports: Vec<AllocationReport> = reconciled_records
@@ -3077,6 +3099,78 @@ impl RateLimiter {
 #[cfg(test)]
 mod agent_transport_tests {
     use super::*;
+    #[test]
+    fn reconciliation_preserves_a_preparation_between_reserve_and_prepared() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config = Config {
+            state_dir: temporary.path().canonicalize().unwrap().join("state"),
+            ..Config::default()
+        };
+        let store = StateStore::open(&config.state_dir).unwrap();
+        let resources = Resources {
+            cpu_millicores: 100,
+            ram_mib: 32,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        let request = crate::execution_model::LaunchRequest {
+            task_id: "preparing-task".into(),
+            assignment_id: "preparing".into(),
+            argv: vec!["unused".into()],
+            cwd: temporary.path().into(),
+            env: BTreeMap::new(),
+            resources: resources.clone(),
+            replay_safe: true,
+            class: AllocationClass::Guaranteed,
+            no_escape: true,
+            single_process: true,
+            managed_child_limit: 0,
+            max_attempts: None,
+            input_artifacts: vec![],
+            required_controls: vec![],
+            allow_fallback: true,
+        };
+        let capacity = Resources {
+            cpu_millicores: 200,
+            ram_mib: 64,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        let mut preparing = store.reserve(&request, &capacity).unwrap();
+        let mut orphan = request.clone();
+        orphan.task_id = "orphan-task".into();
+        orphan.assignment_id = "orphan".into();
+        store.reserve(&orphan, &capacity).unwrap();
+        let pending = [request.assignment_id.clone()];
+        let records = reconcile_agent_owned(
+            &config,
+            std::iter::empty(),
+            pending.iter(),
+            store.namespace_guard().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r.assignment_id == "preparing")
+                .unwrap()
+                .phase,
+            ExecutionPhase::Reserved
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r.assignment_id == "orphan")
+                .unwrap()
+                .phase,
+            ExecutionPhase::NeedsReconciliation
+        );
+        preparing.backend = "rootless".into();
+        preparing.identity = Some(
+            supervision::process_identity(std::process::id(), "preparing", preparing.generation)
+                .unwrap(),
+        );
+        preparing.phase = ExecutionPhase::Prepared;
+        store.transition(&preparing).unwrap();
+    }
     #[test]
     fn observation_cadence_does_not_accumulate_control_processing_time() {
         let start = Instant::now();

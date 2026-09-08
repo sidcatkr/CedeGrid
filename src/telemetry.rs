@@ -84,6 +84,12 @@ impl Collector {
         Ok(collector)
     }
 
+    /// Earliest time a new aggregate CPU sample can satisfy the OS interval.
+    /// Sampling earlier still reports unknown usage; callers may wait instead.
+    pub(crate) fn next_cpu_sample_at(&self) -> Instant {
+        self.last_cpu_refresh + sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
+    }
+
     /// Only identities independently verified by the allocation registry belong here.
     /// Callers must verify them again after sampling before trusting attribution.
     pub fn set_managed_pids(&mut self, pids: BTreeSet<u32>) {
@@ -808,6 +814,9 @@ impl ManagedCollector {
             previous: BTreeMap::new(),
         })
     }
+    pub(crate) fn next_cpu_sample_at(&self) -> Instant {
+        self.collector.next_cpu_sample_at()
+    }
     pub fn prime(&mut self, records: &[crate::execution_model::ExecutionRecord]) {
         let ids: Vec<_> = records
             .iter()
@@ -1311,6 +1320,24 @@ mod tests {
             assert!(!cpu_sample_ready(Duration::ZERO));
         }
         assert!(cpu_sample_ready(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_cpu_eligibility_produces_fresh_usage_without_reusing_early_samples() {
+        if !sysinfo::IS_SUPPORTED_SYSTEM || sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.is_zero() {
+            return;
+        }
+        let mut managed = ManagedCollector::new(&crate::config::Config::default()).unwrap();
+        managed.collector.last_cpu_refresh = Instant::now();
+        let early = managed.collector.sample().unwrap();
+        assert!(early.cpu_busy_millicores.is_none());
+        let eligible = managed.next_cpu_sample_at();
+        tokio::time::sleep_until(tokio::time::Instant::from_std(eligible)).await;
+        let (fresh, allocations) = managed.sample_with_children(&[], &[]).unwrap();
+        assert!(fresh.cpu_busy_millicores.is_some());
+        assert!(allocations.is_empty());
+        assert!(managed.next_cpu_sample_at() > eligible);
+        assert!(fresh.observed_at_unix_ms >= early.observed_at_unix_ms);
     }
 
     #[test]
