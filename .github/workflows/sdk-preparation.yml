@@ -1,0 +1,106 @@
+name: SDK preparation checks
+on:
+  push:
+    branches: ['release/0.2.0-preparation-20260908']
+    paths:
+      - 'python/**'
+      - '.github/workflows/sdk-preparation.yml'
+      - 'tools/pack_source_review.py'
+      - 'docs/release-0.2.0-preparation.md'
+  pull_request:
+    paths:
+      - 'python/**'
+      - '.github/workflows/sdk-preparation.yml'
+      - 'tools/pack_source_review.py'
+      - 'docs/release-0.2.0-preparation.md'
+permissions:
+  contents: read
+jobs:
+  sdk:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+        python: ['3.10', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build wheel and sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python --version | tee evidence/python-version.txt
+          python -m venv .build-venv
+          .build-venv/bin/python -m pip install build
+          .build-venv/bin/python -m build python --outdir "$PWD/dist" 2>&1 | tee evidence/build.log
+      - name: Install and test outside the checkout without PYTHONPATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/cedegrid-wheel"
+          "$RUNNER_TEMP/cedegrid-wheel/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/cedegrid-wheel/bin/python" -m pip check
+          mkdir -p "$RUNNER_TEMP/cedegrid-consumer"
+          TESTS="$PWD/python/tests"
+          LOG="$PWD/evidence/installed-wheel.log"
+          cd "$RUNNER_TEMP/cedegrid-consumer"
+          "$RUNNER_TEMP/cedegrid-wheel/bin/python" -I -m unittest discover -s "$TESTS" -v 2>&1 | tee "$LOG"
+      - name: Rebuild from sdist and independently reinstall
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cedegrid-sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/cedegrid-sdist"
+          SOURCE=$(find "$RUNNER_TEMP/cedegrid-sdist" -mindepth 1 -maxdepth 1 -type d)
+          .build-venv/bin/python -m build --wheel "$SOURCE" --outdir "$RUNNER_TEMP/rebuilt-wheel" 2>&1 | tee evidence/sdist-rebuild.log
+          python -m venv "$RUNNER_TEMP/cedegrid-rebuilt"
+          "$RUNNER_TEMP/cedegrid-rebuilt/bin/python" -m pip install "$RUNNER_TEMP/rebuilt-wheel/"*.whl
+          "$RUNNER_TEMP/cedegrid-rebuilt/bin/python" -m pip check
+          TESTS="$PWD/python/tests"
+          LOG="$PWD/evidence/installed-sdist.log"
+          cd "$RUNNER_TEMP/cedegrid-consumer"
+          "$RUNNER_TEMP/cedegrid-rebuilt/bin/python" -I -m unittest discover -s "$TESTS" -v 2>&1 | tee "$LOG"
+      - name: Verify source export and regenerate its evidence manifest
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_source_review.py' -v 2>&1 | tee evidence/source-export-tests.log
+          python tools/pack_source_review.py --source "$PWD" --output "$RUNNER_TEMP/cedegrid-source" --public-candidate 2>&1 | tee evidence/source-export.log
+          cp "$RUNNER_TEMP/cedegrid-source/source/source-manifest.json" evidence/source-manifest.json
+          cp "$RUNNER_TEMP/cedegrid-source/review.json" evidence/source-review.json
+          cp "$RUNNER_TEMP/cedegrid-source/cedegrid-source.tar.gz" evidence/cedegrid-preparation-source.tar.gz
+      - name: Record artifact hashes
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          evidence = Path('evidence')
+          evidence.mkdir(exist_ok=True)
+          paths = list(Path('dist').glob('*')) + [p for p in evidence.glob('*') if p.name != 'artifacts.json']
+          result = {
+              'source_commit': os.environ['GITHUB_SHA'],
+              'artifacts': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()},
+              'scope': 'SDK preparation only; not stable-release approval',
+          }
+          (evidence / 'artifacts.json').write_text(json.dumps(result, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sdk-preparation-${{ matrix.os }}-${{ matrix.python }}-${{ github.sha }}
+          path: |
+            evidence/
+            dist/
+          if-no-files-found: error
+          retention-days: 14
