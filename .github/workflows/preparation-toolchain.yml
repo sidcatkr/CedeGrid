@@ -1,0 +1,48 @@
+name: preparation build inputs
+on:
+  push:
+    branches: ['release/0.2.0-preparation-20260908']
+    paths: ['.github/workflows/preparation-toolchain.yml']
+permissions:
+  contents: read
+jobs:
+  inputs:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare Rust 1.88 and locked dependency sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          mkdir -p support/rust support/npm
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Cargo.toml')
+          p.write_text(p.read_text().replace('[dependencies]', '[dependencies]\ntoml = "=0.8.23"'))
+          PY
+          cargo +1.88.0 vendor --versioned-dirs support/rust/vendor > support/rust/vendor-config.toml
+          cp Cargo.lock support/rust/Cargo.lock
+          tar -C "$HOME/.rustup/toolchains" -czf support/rust-toolchain.tar.gz 1.88.0-x86_64-unknown-linux-gnu
+          tar -C support/rust -czf support/rust-dependencies.tar.gz vendor vendor-config.toml Cargo.lock
+          rm -rf support/rust
+      - name: Fetch pinned JavaScript build inputs without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd support/npm
+          npm init -y
+          npm install --ignore-scripts --save-exact lossless-json@4.3.0 @ltd/j-toml@1.38.0 typescript@5.9.3 @types/node@22
+          cd ..
+          tar -czf node-dependencies.tar.gz npm
+          rm -rf npm
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preparation-build-inputs-${{ github.sha }}
+          path: support/
+          if-no-files-found: error
+          retention-days: 7
