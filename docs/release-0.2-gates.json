@@ -1,0 +1,824 @@
+{
+  "manifest_version": 1,
+  "target_release": "0.2.0",
+  "specification": "release-0.2-spec.md",
+  "candidate": {
+    "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+    "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef",
+    "artifacts": [
+      {
+        "path": "npm/cedegrid-0.2.0.tgz",
+        "sha256": "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "size": 37689,
+        "scan": {
+          "file_count": 22,
+          "expanded_bytes": 127528
+        }
+      },
+      {
+        "path": "npm/cedegrid-darwin-arm64-0.2.0.tgz",
+        "sha256": "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "size": 5933545,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 15518259
+        }
+      },
+      {
+        "path": "npm/cedegrid-darwin-x64-0.2.0.tgz",
+        "sha256": "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "size": 6354933,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 16494685
+        }
+      },
+      {
+        "path": "npm/cedegrid-linux-arm64-gnu-0.2.0.tgz",
+        "sha256": "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "size": 6904001,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 21017373
+        }
+      },
+      {
+        "path": "npm/cedegrid-linux-x64-gnu-0.2.0.tgz",
+        "sha256": "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "size": 7061581,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 21306815
+        }
+      },
+      {
+        "path": "npm/cedegrid-win32-x64-0.2.0.tgz",
+        "sha256": "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "size": 6038389,
+        "scan": {
+          "file_count": 5,
+          "expanded_bytes": 17188458
+        }
+      },
+      {
+        "path": "pypi/cedegrid-0.2.0-py3-none-any.whl",
+        "sha256": "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "size": 23905,
+        "scan": {
+          "file_count": 14,
+          "expanded_bytes": 63894
+        }
+      },
+      {
+        "path": "pypi/cedegrid-0.2.0.tar.gz",
+        "sha256": "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "size": 31905,
+        "scan": {
+          "file_count": 26,
+          "expanded_bytes": 110401
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-darwin-arm64.tar.gz",
+        "sha256": "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "size": 5729014,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 15517875
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-darwin-x64.tar.gz",
+        "sha256": "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "size": 6240838,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 16494307
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-linux-arm64-gnu.tar.gz",
+        "sha256": "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "size": 6686594,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 21016955
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-linux-x64-gnu.tar.gz",
+        "sha256": "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "size": 6917975,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 21306403
+        }
+      },
+      {
+        "path": "standalone/cedegrid-0.2.0-win32-x64.zip",
+        "sha256": "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "size": 5878829,
+        "scan": {
+          "file_count": 4,
+          "expanded_bytes": 17188083
+        }
+      },
+      {
+        "path": "source/cedegrid-0.2.0-source.tar.gz",
+        "sha256": "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd",
+        "size": 776307,
+        "scan": {
+          "file_count": 185,
+          "expanded_bytes": 3144698
+        }
+      }
+    ]
+  },
+  "allowed_statuses": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "NOT_RUN"
+  ],
+  "stable_readiness": false,
+  "readiness_rule": "All listed required qualification gates must be PASS with verified source/artifact hashes matching one frozen candidate and complete evidence; missing or mismatched evidence is never PASS.",
+  "required_gates": [
+    {
+      "id": "SOURCE-RUST",
+      "description": "Rust fmt/clippy/tests and MSRV1.88",
+      "targets": [
+        "linux",
+        "macos"
+      ],
+      "status": "FAIL",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Native8 Linux had eight test failures; macOS full suite failed its many-short-task scenario.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "CONTRACTS",
+      "description": "All shared contracts and deterministic fault interleavings",
+      "targets": [
+        "rust",
+        "python",
+        "typescript",
+        "native-c"
+      ],
+      "status": "FAIL",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Linux exposed the metadata-only same-size artifact mutation gap.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "SDK-PYTHON",
+      "description": "Installed Python3.10..3.14 wheel and independent sdist-rebuild integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "SDK-TYPESCRIPT",
+      "description": "Installed Node22/24/26 ESM/CJS/type/transport/native-worker integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PLATFORM-LINUX-X64",
+      "description": "Final Linux x64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PLATFORM-LINUX-ARM64",
+      "description": "Final Linux ARM64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "aarch64-unknown-linux-gnu"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PLATFORM-MACOS-X64",
+      "description": "Final Intel binary on macOS14 minimum",
+      "targets": [
+        "x86_64-apple-darwin"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PLATFORM-MACOS-ARM64",
+      "description": "Final Apple Silicon binary on macOS14 minimum",
+      "targets": [
+        "aarch64-apple-darwin"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PLATFORM-WIN",
+      "description": "Final Windows11 24H2 x64 client, no NVIDIA; execution refusal before mutation",
+      "targets": [
+        "x86_64-pc-windows-msvc"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PACKAGES-NPM",
+      "description": "Unmodified original tarballs through isolated no-uplink registry, local/global/ignore-scripts/omit-optional",
+      "targets": [
+        "all-five-native-packages"
+      ],
+      "status": "PASS",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Original packages passed Node22/24/26 isolated registry installations, type checks, interop and PTY checks.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PACKAGES-PYPI",
+      "description": "Original wheel/sdist contents, clean installs, pip-check and metadata",
+      "targets": [
+        "python"
+      ],
+      "status": "PASS",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Original wheel and independent sdist rebuilds passed on Python3.10..3.14; both public uploaded files hash-verified.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "RENAME-CONFIG-UPGRADE",
+      "description": "Clean public rename, separated loaders, converter equivalence and offline-state compatibility",
+      "targets": [
+        "all"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "RECOVERY-MACOS",
+      "description": "Deterministic namespace/recovery faults and repeated complete native suite",
+      "targets": [
+        "macos"
+      ],
+      "status": "FAIL",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Repeated complete final-candidate macOS suites did not pass.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PHYSICAL-THREE-HOST",
+      "description": "Useful work, checkpoints, faults and confirmed release on all three roles",
+      "targets": [
+        "durable-coordinator",
+        "durable-agent",
+        "replay-agent"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "All three authenticated hosts were used independently; direct coordinator reachability was unavailable.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "GPU-RTX5060TI",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "rtx-5060-ti"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Native admission refused current graphics-context/telemetry prerequisites.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "GPU-L4",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "l4"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Native admission refused active external compute on the available devices.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "ARTIFACT-CONTROL",
+      "description": "Three concurrent256MiB unique uploads with per-op p99 and exact result/download validation",
+      "targets": [
+        "three-agent"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Final native8 timed load was not run after publication-first steering.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "SUPPLY-CHAIN",
+      "description": "Artifact notices/licenses/advisories/secrets and candidate provenance",
+      "targets": [
+        "all-artifacts"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    },
+    {
+      "id": "PUBLIC-EVIDENCE",
+      "description": "Allowlisted public summaries and extracted-archive privacy scan",
+      "targets": [
+        "all-public-archives"
+      ],
+      "status": "BLOCKED",
+      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "artifact_sha256": [
+        "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
+        "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
+        "fdeef436e8f34e4d2cefeb1b4bd6394a7cd0dafb891574ead110d1b0792974ff",
+        "0c37a27879e680ba590924bdb11999b1f37078b6c9b24c7a5ff5a334dc2f2a5f",
+        "fb5d41ef4642dc43e260817206066d020b0df1fcc2efb52a3a864bf3881eedc4",
+        "abce91c487f85785c83c810cfe293be49a5ceb608a0525674b3e639d64a85df0",
+        "ae0053b993e1591fec760b1ba7f24890d3e98bc44cd81c42925b544eebcbdcac",
+        "bb68fc5fb32bae226b68c5a3d6b0e8c0f96bd9c7d1ccad5a2fce3a33c29f9cb5",
+        "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
+        "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
+        "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
+        "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
+        "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd"
+      ],
+      "evidence": [
+        {
+          "path": "evidence/qualification-summary.json",
+          "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
+        }
+      ],
+      "reason": "Full declared-platform qualification remains incomplete; see the scoped evidence summary.",
+      "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
+    }
+  ],
+  "publication_readiness": {
+    "name_ownership": "BLOCKED",
+    "trusted_publisher_configuration": "NOT_RUN",
+    "artifact_publish_readiness": "FAIL",
+    "live_registry_publication": "BLOCKED",
+    "live_upload_authorized": true,
+    "reason": "Main npm, four native npm packages, PyPI wheel/sdist, and GitHub release are published; npm blocked the Windows native name. Owner explicitly requested publication before full qualification."
+  },
+  "numeric_limits": {
+    "descriptor_bytes": 1048576,
+    "status_page_bytes": 7340032,
+    "status_client_bytes": 8388608,
+    "node_report_bytes": 2097152,
+    "node_report_allocations": 2048,
+    "lease_ms": 10000,
+    "control_deadline_ms": 10000,
+    "control_p99_ms_strictly_less_than": 2500
+  },
+  "gpu_limits": {
+    "scenario_seconds": 60,
+    "cleanup_seconds": 30,
+    "observed_owned_vram_bytes": 1073741824,
+    "sample_interval_ms": 100
+  },
+  "load_limits": {
+    "repetitions": 3,
+    "concurrent_lanes": 3,
+    "artifact_bytes_per_lane": 268435456,
+    "chunk_bytes": 1048576,
+    "serialized_wire_bytes_per_second_per_lane": 10485760,
+    "minimum_samples_per_operation_per_repetition": 300,
+    "operations": [
+      "heartbeat",
+      "renew",
+      "status"
+    ],
+    "scenario_seconds": 240,
+    "cleanup_seconds": 30
+  },
+  "published_release_commit": "1ab3fc6db420c8767f06d6f217b1e1c571c43882"
+}

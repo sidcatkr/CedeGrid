@@ -15,7 +15,7 @@ class Client:
 
 class Operations(unittest.TestCase):
     def test_outside_home_rejected(self):
-        with self.assertRaises(ValueError): inside_home('/var/tmp/resmgr-not-allowed')
+        with self.assertRaises(ValueError): inside_home('/var/tmp/cedegrid-not-allowed')
     def test_soak_window_required(self):
         with self.assertRaises(ValueError): soak.validate({'duration_seconds':86400})
     def test_owned_cleanup_does_not_signal_unrelated_child(self):
@@ -31,7 +31,7 @@ class Operations(unittest.TestCase):
             c=Client()
             r=soak.run({'duration_seconds':.02,'execution_approved':True,'two_node_window_approved':True,
                 'isolated_validation_deployment':True,'node_ids':['a','b'],'anchor_node_id':'a',
-                'experiment_id':'test','task_prefix':'test.','job_prefix':'test.','connection':str(Path(root)/'client.json'),
+                'experiment_id':'test','task_prefix':'test.','job_prefix':'test.','connection':str(Path(root)/'client.toml'),
                 'output':str(Path(root)/'case'),'sample_seconds':.01,'events':[]},client=c)
             self.assertFalse(r['actual_24_hour_soak'])
             self.assertEqual(r['operational_acceptance'],'pending_review')

@@ -1,4 +1,4 @@
-use resource_manager::cgroup::{CgroupBackend, CgroupConfig, CpuMax};
+use cedegrid::cgroup::{CgroupBackend, CgroupConfig, CpuMax};
 use std::path::PathBuf;
 
 fn authorized() -> CgroupConfig {
@@ -144,10 +144,10 @@ fn ordinary_filesystem_is_rejected_even_with_explicit_path() {
 /// reported as a passed Linux runtime validation.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "not tested: requires explicit authorized Linux cgroup delegation in RESMGR_TEST_CGROUP_ROOT"]
+#[ignore = "not tested: requires explicit authorized Linux cgroup delegation in CEDEGRID_TEST_CGROUP_ROOT"]
 fn authorized_native_empty_leaf_preparation_and_cleanup() {
-    use resource_manager::execution_model::{AllocationClass, LaunchBackend, LaunchRequest};
-    let root = std::env::var_os("RESMGR_TEST_CGROUP_ROOT")
+    use cedegrid::execution_model::{AllocationClass, LaunchBackend, LaunchRequest};
+    let root = std::env::var_os("CEDEGRID_TEST_CGROUP_ROOT")
         .expect("explicit authorized delegated subtree is required");
     let config = CgroupConfig {
         delegated_root: Some(root.into()),

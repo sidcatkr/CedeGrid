@@ -1,6 +1,4 @@
-use resource_manager::{
-    execution_model::*, managed_children::*, model::Resources, state::StateStore,
-};
+use cedegrid::{execution_model::*, managed_children::*, model::Resources, state::StateStore};
 use std::{collections::BTreeMap, path::PathBuf};
 fn dir() -> tempfile::TempDir {
     tempfile::Builder::new()

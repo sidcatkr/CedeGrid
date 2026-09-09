@@ -83,7 +83,7 @@ class SessionTransferTests(unittest.TestCase):
             source.write_bytes(b'x' * 4000)
             with patch.object(session_transfer.subprocess, 'run') as run, \
                     patch.object(session_transfer.time, 'sleep'):
-                session_transfer.transfer('existing-pane', source, '.local/share/resmgr/test-file')
+                session_transfer.transfer('existing-pane', source, '.local/share/cedegrid/test-file')
         lines = [call.args[0][-1] for call in run.call_args_list if '-l' in call.args[0]]
         self.assertEqual(len(lines), 6)  # Begin, four chunks, immutable publication.
         self.assertTrue(all(len(line.encode()) <= session_transfer.MAX_COMMAND_BYTES for line in lines))

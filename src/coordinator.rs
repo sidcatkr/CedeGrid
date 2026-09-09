@@ -19,10 +19,16 @@ use std::{
 pub struct Coordinator {
     store: StateStore,
     artifacts: ArtifactStore,
+    artifact_io: Arc<Mutex<()>>,
+    prepared_artifacts: Option<PreparedArtifacts>,
     config: CoordinatorConfig,
     epoch: u64,
     last_clock_ms: u64,
     _lock: crate::backup::StateLock,
+}
+struct PreparedArtifacts {
+    commit: Option<(String, crate::artifacts::UploadMetadata)>,
+    proofs: Vec<crate::artifacts::VerifiedArtifact>,
 }
 impl Coordinator {
     pub fn open(config: CoordinatorConfig) -> Result<Self> {
@@ -78,7 +84,7 @@ impl Coordinator {
  CREATE TABLE IF NOT EXISTS publications(assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),generation INTEGER NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(assignment_id,sha256)) STRICT;
  CREATE TABLE IF NOT EXISTS result_payloads(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),submission_json TEXT NOT NULL) STRICT;
  CREATE TABLE IF NOT EXISTS checkpoints(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),submission_json TEXT NOT NULL,receipt_hash TEXT NOT NULL) STRICT;
- INSERT OR IGNORE INTO distributed_meta(key,value) VALUES ('schema',1),('epoch',0),('last_clock_ms',0);")?;
+ INSERT OR IGNORE INTO distributed_meta(key,value) VALUES ('schema',3),('epoch',0),('last_clock_ms',0);")?;
         let mut columns = tx.prepare("PRAGMA table_info(retry_state)")?;
         let has_yield_count = columns
             .query_map([], |r| r.get::<_, String>(1))?
@@ -96,7 +102,17 @@ impl Coordinator {
             [],
             |r| r.get(0),
         )?;
-        ensure!(matches!(schema, 1 | 2), "unsupported distributed schema");
+        ensure!(
+            schema == 3,
+            "ERR_CEDEGRID_UPGRADE_REQUIRED: distributed schema requires offline state upgrade"
+        );
+        crate::pagination::initialize(&tx)?;
+        let old_epoch: i64 = tx.query_row(
+            "SELECT value FROM distributed_meta WHERE key='epoch'",
+            [],
+            |r| r.get(0),
+        )?;
+        ensure!(old_epoch < i64::MAX, "coordinator epoch exhausted");
         tx.execute(
             "UPDATE distributed_meta SET value=value+1 WHERE key='epoch'",
             [],
@@ -122,6 +138,8 @@ impl Coordinator {
         Ok(Self {
             store,
             artifacts,
+            artifact_io: Arc::new(Mutex::new(())),
+            prepared_artifacts: None,
             config,
             epoch: epoch as u64,
             last_clock_ms,
@@ -134,16 +152,121 @@ impl Coordinator {
     pub fn handle(&mut self, principal: &Principal, request: Request) -> Result<Response> {
         self.handle_at(principal, request, now_ms())
     }
-    pub fn handle_at(
-        &mut self,
+    /// File verification runs on its own serialized lane. Authorization, fencing
+    /// and the durable receipt transaction are rechecked after the file barriers.
+    fn dispatch(
+        state: &Arc<Mutex<Self>>,
         principal: &Principal,
         request: Request,
-        now: u64,
     ) -> Result<Response> {
-        // Check the durable session before any clock update, expiration, upload,
-        // or receipt operation. An old agent cannot regain authority by omitting
-        // the wrapper, and a new session never conveys operator privileges.
-        let request = self.validate_node_session(principal, request)?;
+        let inner = match &request {
+            Request::NodeSession { request, .. } => request.as_ref(),
+            other => other,
+        };
+        if !matches!(
+            inner,
+            Request::BeginUpload { .. }
+                | Request::UploadChunk { .. }
+                | Request::AbortUpload { .. }
+                | Request::CommitUpload { .. }
+                | Request::Complete { .. }
+                | Request::PublishCheckpoint { .. }
+                | Request::Submit { .. }
+        ) {
+            return state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("coordinator state lock poisoned"))?
+                .handle(principal, request);
+        }
+        let lane = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator state lock poisoned"))?
+            .artifact_io
+            .clone();
+        let _lane = lane
+            .lock()
+            .map_err(|_| anyhow::anyhow!("artifact lane lock poisoned"))?;
+        let (artifacts, inner, mut references) = {
+            let mut coordinator = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("coordinator state lock poisoned"))?;
+            let inner = coordinator.validate_node_session(principal, request.clone())?;
+            coordinator.advance_clock(now_ms())?;
+            let mut references = Vec::new();
+            match &inner {
+                Request::CommitUpload { upload_id } => {
+                    let metadata = coordinator.artifacts.metadata(upload_id)?;
+                    coordinator.authorize_assignment(
+                        principal,
+                        &metadata.assignment_id,
+                        metadata.generation,
+                    )?;
+                    coordinator.current_attempt(&metadata.assignment_id, metadata.generation)?;
+                }
+                Request::Complete { submission } | Request::PublishCheckpoint { submission } => {
+                    coordinator.authorize_assignment(
+                        principal,
+                        &submission.assignment_id,
+                        submission.generation,
+                    )?;
+                    references.extend(submission.artifacts.iter().cloned());
+                }
+                Request::Submit { job } => {
+                    operator(principal)?;
+                    for task in &job.tasks {
+                        references.extend(task.input_artifacts.iter().map(|input| ArtifactRef {
+                            sha256: input.sha256.clone(),
+                            size: input.size,
+                        }));
+                    }
+                }
+                _ => return coordinator.handle(principal, request),
+            }
+            (coordinator.artifacts.clone(), inner, references)
+        };
+        references.sort_by(|a, b| (&a.sha256, a.size).cmp(&(&b.sha256, b.size)));
+        references.dedup_by(|a, b| a.sha256 == b.sha256 && a.size == b.size);
+        ensure!(
+            references.len() <= 64,
+            "one request may pin at most 64 distinct artifacts; submit larger jobs in smaller batches"
+        );
+        let mut prepared = PreparedArtifacts {
+            commit: None,
+            proofs: Vec::new(),
+        };
+        if let Request::CommitUpload { upload_id } = inner {
+            let (metadata, proof) = artifacts.publish_pinned(&upload_id)?;
+            prepared.commit = Some((upload_id, metadata));
+            prepared.proofs.push(proof);
+        } else {
+            for artifact in references {
+                prepared.proofs.push(artifacts.verify_pinned(&artifact)?);
+            }
+        }
+        let mut coordinator = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator state lock poisoned"))?;
+        coordinator.prepared_artifacts = Some(prepared);
+        let result = coordinator.handle(principal, request);
+        coordinator.prepared_artifacts = None;
+        result
+    }
+    fn verify_artifact(&self, artifact: &ArtifactRef) -> Result<()> {
+        if let Some(prepared) = &self.prepared_artifacts {
+            let proof = prepared
+                .proofs
+                .iter()
+                .find(|proof| {
+                    proof.artifact().sha256 == artifact.sha256
+                        && proof.artifact().size == artifact.size
+                })
+                .context("artifact has no pinned verification for this request")?;
+            proof.check(artifact)
+        } else {
+            self.artifacts.verify(artifact)
+        }
+    }
+    fn advance_clock(&mut self, now: u64) -> Result<()> {
         ensure!(
             now >= self.last_clock_ms,
             "coordinator wall clock moved backwards; refusing new authorization until its durable clock watermark is reached"
@@ -155,7 +278,19 @@ impl Coordinator {
             )?;
             self.last_clock_ms = now;
         }
-        self.expire(now)?;
+        self.expire(now)
+    }
+    pub fn handle_at(
+        &mut self,
+        principal: &Principal,
+        request: Request,
+        now: u64,
+    ) -> Result<Response> {
+        // Check the durable session before any clock update, expiration, upload,
+        // or receipt operation. An old agent cannot regain authority by omitting
+        // the wrapper, and a new session never conveys operator privileges.
+        let request = self.validate_node_session(principal, request)?;
+        self.advance_clock(now)?;
         match request {
             Request::OpenReplaySession {
                 node_id,
@@ -201,6 +336,12 @@ impl Coordinator {
             Request::Status { job_id } => {
                 operator(principal)?;
                 self.status(job_id.as_deref())
+            }
+            Request::StatusPage { query } => {
+                operator(principal)?;
+                Ok(Response::StatusPage {
+                    page: crate::pagination::read(&self.store.connection, &query, self.epoch, now)?,
+                })
             }
             Request::GetResult { task_id } => {
                 operator(principal)?;
@@ -258,6 +399,11 @@ impl Coordinator {
                 )?;
                 tx.execute(
                     "UPDATE tasks SET status='queued' WHERE task_id=?1",
+                    [&task_id],
+                )?;
+                crate::protocol::validate_launch_request(&request)?;
+                tx.execute(
+                    "DELETE FROM upgrade_task_holds WHERE task_id=?1",
                     [&task_id],
                 )?;
                 tx.execute("DELETE FROM retry_state WHERE task_id=?1", [&task_id])?;
@@ -412,7 +558,24 @@ impl Coordinator {
                 let m = self.artifacts.metadata(&upload_id)?;
                 self.authorize_assignment(principal, &m.assignment_id, m.generation)?;
                 self.current_attempt(&m.assignment_id, m.generation)?;
-                let m = self.artifacts.publish(&upload_id)?;
+                let m = if let Some(prepared) = &self.prepared_artifacts {
+                    let (id, published) = prepared
+                        .commit
+                        .as_ref()
+                        .context("upload has no prepared publication")?;
+                    ensure!(
+                        id == &upload_id
+                            && published.assignment_id == m.assignment_id
+                            && published.generation == m.generation
+                            && published.artifact.sha256 == m.artifact.sha256
+                            && published.artifact.size == m.artifact.size,
+                        "upload metadata changed during publication"
+                    );
+                    self.verify_artifact(&published.artifact)?;
+                    published.clone()
+                } else {
+                    self.artifacts.publish(&upload_id)?
+                };
                 self.store.connection.execute("INSERT OR IGNORE INTO publications(assignment_id,generation,sha256,size) VALUES (?1,?2,?3,?4)",params![m.assignment_id,db(m.generation)?,m.artifact.sha256,db(m.artifact.size)?])?;
                 Ok(Response::Artifact {
                     artifact: m.artifact,
@@ -540,7 +703,7 @@ impl Coordinator {
         } else {
             // Commit session replacement and allocation fencing together. The
             // distributed schema bump prevents older binaries bypassing this fence.
-            tx.execute("UPDATE distributed_meta SET value=2 WHERE key='schema'", [])?;
+            tx.execute("UPDATE distributed_meta SET value=3 WHERE key='schema'", [])?;
             if let Some((old_session, _)) = old {
                 tx.execute(
                     "INSERT INTO replay_retired_sessions(node_id,session_id) VALUES (?1,?2)",
@@ -647,6 +810,7 @@ impl Coordinator {
         }
         tx.execute("INSERT INTO jobs(job_id,pool_id,priority,submitted_ms,spec_json) VALUES (?1,?2,?3,?4,?5)",params![job.job_id,job.pool_id,job.priority,db(now)?,serialized])?;
         for request in &job.tasks {
+            crate::protocol::validate_launch_request(request)?;
             valid_id(&request.task_id)?;
             ensure!(
                 request.assignment_id.is_empty(),
@@ -700,7 +864,7 @@ impl Coordinator {
                     |r| r.get(0),
                 )?;
                 ensure!(published, "input artifact has no durable publication");
-                self.artifacts.verify(&ArtifactRef {
+                self.verify_artifact(&ArtifactRef {
                     sha256: input.sha256.clone(),
                     size: input.size,
                 })?;
@@ -728,6 +892,7 @@ impl Coordinator {
         Ok(serde_json::from_str(&json)?)
     }
     fn heartbeat(&mut self, report: NodeReport, now: u64) -> Result<Response> {
+        report.validate_bounds()?;
         valid_id(&report.node_id)?;
         ensure!(!report.boot_id.is_empty(), "node boot identity absent");
         ensure!(
@@ -1055,7 +1220,7 @@ impl Coordinator {
         )?;
         let mut remaining_slots = report.launch_slots.saturating_sub(unstarted);
         let mut charge = self.node_charge(&report.node_id)?;
-        let mut stmt=tx.prepare("SELECT t.task_id,t.generation,s.request_json,j.pool_id FROM tasks t JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE t.status='queued' AND j.cancelled=0 ORDER BY j.priority DESC,s.sequence ASC")?;
+        let mut stmt=tx.prepare("SELECT t.task_id,t.generation,s.request_json,j.pool_id FROM tasks t JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE t.status='queued' AND j.cancelled=0 AND NOT EXISTS(SELECT 1 FROM upgrade_task_holds h WHERE h.task_id=t.task_id) ORDER BY j.priority DESC,s.sequence ASC")?;
         let queued = stmt
             .query_map([], |r| {
                 Ok((
@@ -1347,7 +1512,7 @@ impl Coordinator {
         Ok(r)
     }
     fn reservation_rows(&self, node_id: &str) -> Result<Vec<(String, u64, String, String)>> {
-        let mut s=self.store.connection.prepare("SELECT assignment_id,generation,phase,task_id FROM reservations JOIN assignments USING(assignment_id) WHERE node_id=?1")?;
+        let mut s=self.store.connection.prepare("SELECT assignment_id,generation,phase,task_id FROM reservations JOIN assignments USING(assignment_id) JOIN task_specs USING(task_id) WHERE node_id=?1 ORDER BY task_specs.sequence,assignment_id")?;
         Ok(s.query_map([node_id], |r| {
             Ok((r.get(0)?, row_u64(r, 1)?, r.get(2)?, r.get(3)?))
         })?
@@ -1530,7 +1695,7 @@ impl Coordinator {
         for artifact in &submission.artifacts {
             let published:bool=self.store.connection.query_row("SELECT EXISTS(SELECT 1 FROM publications WHERE assignment_id=?1 AND generation=?2 AND sha256=?3 AND size=?4)",params![submission.assignment_id,db(submission.generation)?,artifact.sha256,db(artifact.size)?],|r|r.get(0))?;
             ensure!(published, "result references unpublished artifact");
-            self.artifacts.verify(artifact)?;
+            self.verify_artifact(artifact)?;
         }
         let serialized = serde_json::to_string(&submission)?;
         let hash = hex::encode(Sha256::digest(serialized.as_bytes()));
@@ -1658,40 +1823,108 @@ impl Coordinator {
         Ok(())
     }
     fn status(&self, job_id: Option<&str>) -> Result<Response> {
-        let mut statement = self.store.connection.prepare(
-            "SELECT task_id FROM task_specs WHERE (?1 IS NULL OR job_id=?1) ORDER BY sequence",
-        )?;
-        let ids = statement
-            .query_map([job_id], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let tasks = ids
-            .iter()
-            .map(|id| self.store.task(id))
-            .collect::<Result<Vec<_>>>()?;
-        let jobs=self.json_rows("SELECT json_object('job_id',job_id,'pool_id',pool_id,'priority',priority,'cancelled',json(CASE cancelled WHEN 1 THEN 'true' ELSE 'false' END),'submitted_ms',submitted_ms,'task_ids',json((SELECT json_group_array(task_id) FROM (SELECT s.task_id FROM task_specs s WHERE s.job_id=jobs.job_id ORDER BY s.sequence)))) FROM jobs")?;
-        let pools = self
-            .json_rows("SELECT spec_json FROM pools")?
+        use crate::pagination::{Collection, PageQuery};
+        let mut total = 0usize;
+        let mut load = |collection,
+                        node_id: Option<String>,
+                        pool_id: Option<String>,
+                        scoped: bool|
+         -> Result<Vec<serde_json::Value>> {
+            let page = crate::pagination::read(
+                &self.store.connection,
+                &PageQuery {
+                    collection,
+                    job_id: if scoped {
+                        job_id.map(str::to_owned)
+                    } else {
+                        None
+                    },
+                    node_id,
+                    pool_id,
+                    limit: 1000,
+                    cursor: None,
+                },
+                self.epoch,
+                self.last_clock_ms,
+            )?;
+            ensure!(
+                page.next_cursor.is_none(),
+                "ERR_CEDEGRID_PAGINATION_REQUIRED: use status_page"
+            );
+            total += serde_json::to_vec(&page.items)?.len();
+            ensure!(
+                total + 65536 <= crate::pagination::PAGE_BYTES,
+                "ERR_CEDEGRID_PAGINATION_REQUIRED: use status_page"
+            );
+            Ok(page.items)
+        };
+        let tasks = load(Collection::Tasks, None, None, true)?
             .into_iter()
             .map(serde_json::from_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let nodes=self.json_rows("SELECT json_object('report',json(report_json),'received_ms',received_ms,'drain',json(CASE drain WHEN 1 THEN 'true' ELSE 'false' END),'unrecognized_allocations',json((SELECT json_group_array(json(u.report_json)) FROM unrecognized_allocations u WHERE u.node_id=nodes.node_id))) FROM nodes")?;
-        let allocations=self.json_rows("SELECT json_object('assignment_id',assignment_id,'node_id',node_id,'phase',phase,'resources',json(resources_json),'lease_sequence',lease_sequence,'lease_deadline_ms',lease_deadline_ms,'epoch',epoch,'detail',detail) FROM reservations")?;
-        Ok(Response::Status {
+        let mut jobs = load(Collection::Jobs, None, None, true)?;
+        for job in &mut jobs {
+            let mut stmt = self.store.connection.prepare(
+                "SELECT task_id FROM task_specs WHERE job_id=?1 ORDER BY sequence LIMIT 1001",
+            )?;
+            let ids = stmt
+                .query_map([job["job_id"].as_str().unwrap()], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ensure!(
+                ids.len() <= 1000,
+                "ERR_CEDEGRID_PAGINATION_REQUIRED: job tasks"
+            );
+            job["task_ids"] = serde_json::to_value(ids)?;
+        }
+        let mut pool_values = load(Collection::Pools, None, None, true)?;
+        for pool in &mut pool_values {
+            let nodes = load(
+                Collection::PoolNodes,
+                None,
+                Some(pool["pool_id"].as_str().unwrap().into()),
+                true,
+            )?;
+            pool["node_ids"] =
+                serde_json::json!(nodes.iter().map(|n| &n["node_id"]).collect::<Vec<_>>());
+            pool.as_object_mut().unwrap().remove("node_count");
+        }
+        let pools = pool_values
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut nodes = load(Collection::Nodes, None, None, true)?;
+        for node in &mut nodes {
+            let id = node["node_id"].as_str().unwrap().to_owned();
+            node["report"]["allocations"] = serde_json::json!(load(
+                Collection::ReportedAllocations,
+                Some(id.clone()),
+                None,
+                true
+            )?);
+            node["unrecognized_allocations"] = if job_id.is_none() {
+                serde_json::json!(load(
+                    Collection::UnrecognizedAllocations,
+                    Some(id),
+                    None,
+                    false
+                )?)
+            } else {
+                serde_json::json!([])
+            };
+        }
+        let allocations = load(Collection::Allocations, None, None, true)?;
+        let response = Response::Status {
             tasks,
             jobs,
             pools,
             nodes,
             allocations,
-        })
-    }
-    fn json_rows(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
-        let mut s = self.store.connection.prepare(sql)?;
-        let rows = s.query_map([], |r| r.get::<_, String>(0))?;
-        let mut output = Vec::new();
-        for row in rows {
-            output.push(serde_json::from_str(&row?)?);
-        }
-        Ok(output)
+        };
+        ensure!(
+            serde_json::to_vec(&response)?.len() <= crate::pagination::PAGE_BYTES,
+            "ERR_CEDEGRID_PAGINATION_REQUIRED: response envelope"
+        );
+        Ok(response)
     }
 }
 fn operator(p: &Principal) -> Result<()> {
@@ -1779,9 +2012,9 @@ pub fn now_ms() -> u64 {
 
 /// Mandatory mTLS before HTTP. The leaf fingerprint binds every request to its role.
 pub async fn serve(config: CoordinatorConfig) -> Result<()> {
-    use axum::{Extension, Json, Router, extract::DefaultBodyLimit, routing::post};
+    use axum::{Extension, Json, Router, body::Bytes, extract::DefaultBodyLimit, routing::post};
     use hyper_util::{
-        rt::{TokioExecutor, TokioIo},
+        rt::{TokioExecutor, TokioIo, TokioTimer},
         server::conn::auto::Builder,
         service::TowerToHyperService,
     };
@@ -1843,12 +2076,10 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
                     post(
                         |Extension(state): Extension<Arc<Mutex<Coordinator>>>,
                          Extension(principal): Extension<Principal>,
-                         Json(request): Json<Request>| async move {
+                         body: Bytes| async move {
                             let response = tokio::task::spawn_blocking(move || {
-                                let mut state = state.lock().map_err(|_| {
-                                    anyhow::anyhow!("coordinator state lock poisoned")
-                                })?;
-                                state.handle(&principal, request)
+                                let request = crate::numeric::from_slice::<Request>(&body)?;
+                                Coordinator::dispatch(&state, &principal, request)
                             })
                             .await;
                             Json(match response {
@@ -1867,12 +2098,20 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
                 .layer(Extension(principal))
                 .layer(DefaultBodyLimit::max(3 * 1024 * 1024));
             let io = TokioIo::new(tls);
-            let builder = Builder::new(TokioExecutor::new());
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                builder.serve_connection(io, TowerToHyperService::new(app)),
-            )
-            .await;
+            let mut builder = Builder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_secs(15));
+            let connection = builder.serve_connection(io, TowerToHyperService::new(app));
+            tokio::pin!(connection);
+            tokio::select! {
+                _ = &mut connection => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                    connection.as_mut().graceful_shutdown();
+                    let _ = connection.await;
+                }
+            }
         });
     }
 }

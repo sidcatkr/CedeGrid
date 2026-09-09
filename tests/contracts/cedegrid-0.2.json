@@ -1,0 +1,726 @@
+{
+  "fixture_version": 1,
+  "target_release": "0.2.0",
+  "status": "DECLARATIVE_NOT_EXECUTED",
+  "specification": "../../docs/release-0.2-spec.md",
+  "conventions": {
+    "purpose": "Normative shared test inputs and outcomes, not evidence that implementations passed.",
+    "paths": "Fixture paths are POSIX-relative to a harness-created root unless absolute syntax is under test; the harness performs path substitution, never the runtime config loader.",
+    "expected_numbers": "Expected exact integers are decimal strings with explicit kind; input JSON is raw text to avoid fixture-loader precision loss.",
+    "config_stage": "Parse, normalize and validate config semantics; certificate authenticity/loading is exercised separately by TLS-01.",
+    "runtime_data_format": "RPC/job/pool/replay/result inputs remain JSON; runtime config files are TOML."
+  },
+  "config_cases": [
+    {
+      "id": "CFG-01-version-required",
+      "kind": "node",
+      "toml": "node_id = \"test\"\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-01-future-version",
+      "kind": "node",
+      "toml": "config_version = 2\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-01-unknown-field",
+      "kind": "node",
+      "toml": "config_version = 1\nnot_a_setting = true\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-01-duplicate-field",
+      "kind": "node",
+      "toml": "config_version = 1\nconfig_version = 1\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-02-weight-omitted",
+      "kind": "node",
+      "toml": "config_version = 1\n",
+      "expected": {
+        "cpu_weight": {
+          "kind": "integer",
+          "decimal": "10"
+        }
+      }
+    },
+    {
+      "id": "CFG-02-weight-off",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"off\"\n",
+      "expected": {
+        "cpu_weight": {
+          "kind": "none"
+        }
+      }
+    },
+    {
+      "id": "CFG-02-weight-set",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"set\"\nvalue = 10\n",
+      "expected": {
+        "cpu_weight": {
+          "kind": "integer",
+          "decimal": "10"
+        }
+      }
+    },
+    {
+      "id": "CFG-02-off-with-value",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"off\"\nvalue = 10\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-02-set-without-value",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"set\"\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-02-weight-bool",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"set\"\nvalue = true\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-02-weight-range",
+      "kind": "node",
+      "toml": "config_version = 1\n[cgroup.cpu_weight]\nmode = \"set\"\nvalue = 10001\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-03-symlink-config",
+      "kind": "node",
+      "config_path": "links/config.toml",
+      "canonical_config_path": "real/配置/node.toml",
+      "toml": "config_version = 1\nstate_dir = \"../new state\"\n",
+      "expected": {
+        "state_path_relative_to_fixture_root": "real/new state",
+        "state_need_not_exist": true
+      }
+    },
+    {
+      "id": "CFG-04-moved-legacy-default",
+      "kind": "node",
+      "legacy_path": "old/node.yaml",
+      "output_path": "new/配置/node.toml",
+      "legacy_text": "schema_version: 2\nnode_id: example\n",
+      "expected": {
+        "state_path_relative_to_fixture_root": "old/.resource-manager-state",
+        "emits_absolute_state_path": true,
+        "input_unchanged": true
+      }
+    },
+    {
+      "id": "CFG-05-client-origin-required",
+      "kind": "client",
+      "legacy_text": "{\"endpoint\":\"https://example.test\",\"tls\":{\"ca_cert\":\"tls/ca.pem\",\"certificate\":\"tls/client.pem\",\"private_key\":\"tls/client.key\"}}",
+      "options": {},
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-05-python-base-required",
+      "kind": "client",
+      "options": {
+        "legacy_client_semantics": "python"
+      },
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-05-python-base-explicit",
+      "kind": "client",
+      "legacy_path": "old/operator.json",
+      "output_path": "new/operator.toml",
+      "options": {
+        "legacy_client_semantics": "python",
+        "legacy_cwd_relative_to_fixture_root": "consumer"
+      },
+      "legacy_tls_path": "tls/ca.pem",
+      "expected": {
+        "tls_path_relative_to_fixture_root": "consumer/tls/ca.pem",
+        "emits_absolute_tls_paths": true
+      }
+    },
+    {
+      "id": "CFG-05-rust-base-explicit",
+      "kind": "client",
+      "legacy_path": "old/operator.json",
+      "output_path": "new/operator.toml",
+      "options": {
+        "legacy_client_semantics": "rust"
+      },
+      "legacy_tls_path": "tls/ca.pem",
+      "expected": {
+        "tls_path_relative_to_fixture_root": "old/tls/ca.pem",
+        "emits_absolute_tls_paths": true
+      }
+    },
+    {
+      "id": "CFG-06-toml-integer-exact",
+      "kind": "client_scalar",
+      "field": "max_transfer_bytes_per_second",
+      "toml_value": "9007199254740993",
+      "expected": {
+        "kind": "integer",
+        "decimal": "9007199254740993"
+      }
+    },
+    {
+      "id": "CFG-06-toml-signed-overflow",
+      "kind": "client_scalar",
+      "field": "max_transfer_bytes_per_second",
+      "toml_value": "9223372036854775808",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-06-timeout-nan",
+      "kind": "client_scalar",
+      "field": "timeout_seconds",
+      "toml_value": "nan",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-06-timeout-inf",
+      "kind": "client_scalar",
+      "field": "timeout_seconds",
+      "toml_value": "inf",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-06-timeout-bool",
+      "kind": "client_scalar",
+      "field": "timeout_seconds",
+      "toml_value": "true",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-06-timeout-negative",
+      "kind": "client_scalar",
+      "field": "timeout_seconds",
+      "toml_value": "-1",
+      "error": "ERR_CEDEGRID_CONFIG"
+    }
+  ],
+  "origin_cases": [
+    {
+      "input": "https://example.test",
+      "accepted": true,
+      "rpc_url": "https://example.test/v1/rpc"
+    },
+    {
+      "input": "https://example.test/",
+      "accepted": true,
+      "rpc_url": "https://example.test/v1/rpc"
+    },
+    {
+      "input": "https://[::1]:8443/",
+      "accepted": true,
+      "rpc_url": "https://[::1]:8443/v1/rpc"
+    },
+    {
+      "input": "http://example.test",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://user:pass@example.test",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://@example.test",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test/a",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test/?q=1",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test/#part",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test:0",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test:65536",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test?",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "input": "https://example.test#",
+      "accepted": false,
+      "error": "ERR_CEDEGRID_CONFIG"
+    }
+  ],
+  "metadata_cases": [
+    {
+      "id": "NUM-u53-plus-one",
+      "json": "9007199254740993",
+      "expected": {
+        "kind": "integer",
+        "decimal": "9007199254740993"
+      }
+    },
+    {
+      "id": "NUM-u64-max",
+      "json": "18446744073709551615",
+      "expected": {
+        "kind": "integer",
+        "decimal": "18446744073709551615"
+      }
+    },
+    {
+      "id": "NUM-u64-overflow",
+      "json": "18446744073709551616",
+      "error": "ERR_CEDEGRID_ARGUMENT"
+    },
+    {
+      "id": "NUM-i64-min",
+      "json": "-9223372036854775808",
+      "expected": {
+        "kind": "integer",
+        "decimal": "-9223372036854775808"
+      }
+    },
+    {
+      "id": "NUM-i64-underflow",
+      "json": "-9223372036854775809",
+      "error": "ERR_CEDEGRID_ARGUMENT"
+    },
+    {
+      "id": "NUM-one-integer",
+      "json": "1",
+      "expected": {
+        "kind": "integer",
+        "decimal": "1"
+      }
+    },
+    {
+      "id": "NUM-one-float",
+      "json": "1.0",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "3ff0000000000000"
+      }
+    },
+    {
+      "id": "NUM-minus-zero-integer-token",
+      "json": "-0",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "8000000000000000",
+        "canonical_float_token": "-0.0"
+      }
+    },
+    {
+      "id": "NUM-minus-zero-float",
+      "json": "-0.0",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "8000000000000000"
+      }
+    },
+    {
+      "id": "NUM-tenth",
+      "json": "0.1",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "3fb999999999999a"
+      }
+    },
+    {
+      "id": "NUM-min-subnormal",
+      "json": "5e-324",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "0000000000000001"
+      }
+    },
+    {
+      "id": "NUM-nonzero-underflow",
+      "json": "1e-400",
+      "error": "ERR_CEDEGRID_ARGUMENT"
+    },
+    {
+      "id": "NUM-overflow-float",
+      "json": "1e309",
+      "error": "ERR_CEDEGRID_ARGUMENT"
+    },
+    {
+      "id": "NUM-max-finite",
+      "json": "1.7976931348623157e308",
+      "expected": {
+        "kind": "binary64",
+        "bits_hex": "7fefffffffffffff"
+      }
+    },
+    {
+      "id": "NUM-nested-unicode",
+      "json": "{\"메타\":[9007199254740993,18446744073709551615,0.1,-0.0,{\"text\":\"한글 🚀\"}]}",
+      "expected": {
+        "integer_paths": {
+          "/메타/0": "9007199254740993",
+          "/메타/1": "18446744073709551615"
+        },
+        "float_bits": {
+          "/메타/2": "3fb999999999999a",
+          "/메타/3": "8000000000000000"
+        },
+        "string_paths": {
+          "/메타/4/text": "한글 🚀"
+        }
+      }
+    }
+  ],
+  "protocol_integer_cases": [
+    {
+      "id": "NUM-protocol-safe-number",
+      "field_kind": "u64",
+      "input": {
+        "kind": "number",
+        "literal": "9007199254740991"
+      },
+      "accepted": true
+    },
+    {
+      "id": "NUM-protocol-unsafe-number",
+      "field_kind": "u64",
+      "input": {
+        "kind": "number",
+        "literal": "9007199254740992"
+      },
+      "accepted": false
+    },
+    {
+      "id": "NUM-protocol-u64-bigint",
+      "field_kind": "u64",
+      "input": {
+        "kind": "bigint",
+        "decimal": "18446744073709551615"
+      },
+      "accepted": true
+    },
+    {
+      "id": "NUM-persisted-counter-limit",
+      "field_kind": "sqlite_counter",
+      "input": {
+        "kind": "bigint",
+        "decimal": "9223372036854775808"
+      },
+      "accepted": false,
+      "original_state_unchanged": true
+    }
+  ],
+  "scenario_contracts": [
+    {
+      "id": "PUB-01",
+      "scenario": "Final native descriptor UTF-8 size boundary",
+      "cases": [
+        1048575,
+        1048576,
+        1048577
+      ],
+      "accepted": [
+        true,
+        true,
+        false
+      ],
+      "include_unicode": true,
+      "old_head_unchanged_on_rejection": true
+    },
+    {
+      "id": "PUB-02",
+      "scenario": "Concurrent quota reservations, previous generations, interrupted files",
+      "assertions": [
+        "Atomic node-wide reservation",
+        "No overspend",
+        "Predecessor remains charged until safe GC",
+        "Uncertain orphan charge retained"
+      ]
+    },
+    {
+      "id": "PUB-03",
+      "scenario": "Precommit validation/write failure",
+      "assertions": [
+        "Previous head/bytes/hash unchanged",
+        "Unused charge released only after verified cleanup"
+      ]
+    },
+    {
+      "id": "PUB-04",
+      "scenario": "Directory-sync or DB commit uncertainty",
+      "error": "ERR_CEDEGRID_PUBLICATION_UNCERTAIN",
+      "assertions": [
+        "Original publication ID retained",
+        "Previous valid generation recoverable",
+        "Candidate retained",
+        "Retry never creates another generation"
+      ]
+    },
+    {
+      "id": "PUB-05",
+      "scenario": "Local/coordinator acknowledgement loss and restart",
+      "assertions": [
+        "Query/retry original identity",
+        "Existing committed outcome returned",
+        "No duplicate acceptance",
+        "No new execution"
+      ]
+    },
+    {
+      "id": "IO-01",
+      "scenario": "FIFO/device/intermediate symlink descriptor",
+      "assertions": [
+        "Open does not wait for FIFO writer",
+        "Rejected before regular-file read",
+        "No path escape"
+      ]
+    },
+    {
+      "id": "IO-02",
+      "scenario": "Growing descriptor",
+      "assertions": [
+        "Read count <=1048577 bytes",
+        "Hash/parse same bytes",
+        "Oversize rejected"
+      ]
+    },
+    {
+      "id": "IO-03",
+      "scenario": "Publication/polling/reclamation bounded read coverage",
+      "assertions": [
+        "No unbounded fallback reader",
+        "Only NotFound permits plain result"
+      ]
+    },
+    {
+      "id": "IO-04",
+      "scenario": "Concurrent descriptor replacement or pinned blob GC",
+      "assertions": [
+        "New generation not deleted based on old read",
+        "Pinned inode survives verification and commit"
+      ]
+    },
+    {
+      "id": "IO-05",
+      "scenario": "Download nested-directory sync and replacement uncertainty",
+      "assertions": [
+        "Created directories and parent entries synchronized",
+        "Pre-replace failure preserves destination",
+        "Post-replace sync uncertainty is explicit",
+        "No false strong Windows directory-durability claim"
+      ]
+    },
+    {
+      "id": "REC-01",
+      "scenario": "Pause old supervisor with DB connections/output/capture thread",
+      "assertions": [
+        "No rename before all guards close",
+        "No resource charge release",
+        "No new execution"
+      ]
+    },
+    {
+      "id": "REC-02",
+      "scenario": "Two recovery contenders and arriving reader",
+      "assertions": [
+        "One maintenance owner",
+        "Admission blocks new readers",
+        "No lock conversion assumption",
+        "Nested old access completes"
+      ]
+    },
+    {
+      "id": "REC-03",
+      "scenario": "Delayed old supervisor and stale Python/TS/C publication request",
+      "assertions": [
+        "Old identity rejected after guard acquisition",
+        "No new namespace data access"
+      ]
+    },
+    {
+      "id": "REC-04",
+      "scenario": "Duplicate/CLOEXEC descriptors and capture lifetime",
+      "assertions": [
+        "No early unlock",
+        "No authoritative descriptor inherited by worker",
+        "Guard retained until final native handle closes"
+      ]
+    },
+    {
+      "id": "REC-05",
+      "scenario": "Lost fencing acknowledgement or coordinator connection",
+      "assertions": [
+        "No cached snapshot treated as fresh authority",
+        "Reservations retained",
+        "Placement remains disabled"
+      ]
+    },
+    {
+      "id": "REC-06",
+      "scenario": "Crash at each persisted recovery phase",
+      "assertions": [
+        "Quarantines retained",
+        "Partial state non-runnable",
+        "Fresh authenticated session on process restart",
+        "No automatic rerun"
+      ]
+    },
+    {
+      "id": "SDK-01",
+      "scenario": "String/bytes argv, bad cwd/env, bool/overflow resources",
+      "assertions": [
+        "Validation before environment/transport access",
+        "Remote cwd not checked on submission host"
+      ]
+    },
+    {
+      "id": "SDK-02",
+      "scenario": "Malformed or lost spawn success reply",
+      "assertions": [
+        "SpawnUncertain retains generated request ID",
+        "No helper subprocess proxy"
+      ]
+    },
+    {
+      "id": "SDK-03",
+      "scenario": "Mixed ESM/CJS runtime and declaration consumers",
+      "assertions": [
+        "Same constructors",
+        "Stable error.code",
+        "Typechecks both entrypoints"
+      ]
+    },
+    {
+      "id": "TLS-01",
+      "scenario": "CA/hostname/role/identity/redirect/proxy negatives",
+      "assertions": [
+        "Unauthorized peers rejected",
+        "No credential redirect",
+        "Environment proxies unused"
+      ]
+    },
+    {
+      "id": "PAGE-01",
+      "scenario": "Page count/full-envelope byte bounds",
+      "limits": {
+        "default_items": 100,
+        "max_items": 1000,
+        "max_response_bytes": 7340032,
+        "client_read_bound_bytes": 8388608
+      }
+    },
+    {
+      "id": "PAGE-02",
+      "scenario": "Single oversized item",
+      "error": "ERR_CEDEGRID_ITEM_TOO_LARGE",
+      "assertions": [
+        "Small explicit error",
+        "No unchanged-cursor loop"
+      ]
+    },
+    {
+      "id": "PAGE-03",
+      "scenario": "Continuous insertion with high-water cursor",
+      "assertions": [
+        "Traversal terminates at original high-water",
+        "No silent snapshot promise"
+      ]
+    },
+    {
+      "id": "PAGE-04",
+      "scenario": "Filter tampering or coordinator restart",
+      "assertions": [
+        "Mismatched cursor rejected",
+        "Cursor-expired explicit",
+        "SDK never silently restarts"
+      ]
+    },
+    {
+      "id": "PAGE-05",
+      "scenario": "Shared pool/node job filtering",
+      "assertions": [
+        "Only scoped reservations/reports counted",
+        "Global node telemetry labeled",
+        "Unknown inventory rejects job filter"
+      ]
+    },
+    {
+      "id": "PAGE-06",
+      "scenario": "NodeReport limit",
+      "limits": {
+        "max_items": 2048,
+        "max_bytes": 2097152
+      },
+      "assertions": [
+        "No truncation",
+        "Reservations retained on overflow",
+        "No new placement"
+      ]
+    },
+    {
+      "id": "PAGE-07",
+      "scenario": "Indexed first-page scaling",
+      "limits": {
+        "datasets_tasks": [
+          100000,
+          1000000
+        ],
+        "measurements_per_dataset": 30,
+        "sqlite_cache_mib": 16,
+        "max_incremental_rss_mib": 64,
+        "p95_ms_strictly_less_than": 1000
+      }
+    },
+    {
+      "id": "DOCTOR-01",
+      "scenario": "Strict durability unavailable but selected replay profile admitted",
+      "assertions": [
+        "Both statuses reported separately",
+        "Readiness follows selected profile",
+        "Coordinator still requires strict storage"
+      ]
+    },
+    {
+      "id": "UPGRADE-01",
+      "scenario": "Offline legacy format/byte-preserving migration",
+      "assertions": [
+        "WAL2/DELETE3 migrate to schema5",
+        "Replay4 requires authenticated recovery",
+        "Original hashes/IDs preserved",
+        "Upgrade holds prevent retries",
+        "Future versions refused before original mutation"
+      ]
+    },
+    {
+      "id": "UPGRADE-02",
+      "scenario": "Legacy outbox/backup/interrupted upgrade/downgrade",
+      "assertions": [
+        "Full private bundle includes sidecars and outboxes",
+        "Unresolved/corrupt records retained",
+        "No old supervisor spec execution",
+        "No in-place downgrade"
+      ]
+    }
+  ]
+}
+

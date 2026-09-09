@@ -11,21 +11,22 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'tools'))
 import two_node_bootstrap as bootstrap
+from runtime_config import read_runtime_config
 
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='.resmgr-bootstrap-test-', dir=Path.home())
+        self.temporary = tempfile.TemporaryDirectory(prefix='.cedegrid-bootstrap-test-', dir=Path.home())
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.source = self.root / 'source/Kaggriculture'
         manager = self.root / 'source/ResourceManager'
         for path, contents in {
-            manager / 'python/resmgr/__init__.py': '',
+            manager / 'python/cedegrid/__init__.py': '',
             self.source / 'training/self_play.py': '',
-            self.source / 'integration/resmgr/workflow.py': '',
-            self.source / 'integration/resmgr/worker.py': '''from pathlib import Path
-from resmgr import sha256_file
+            self.source / 'integration/cedegrid/workflow.py': '',
+            self.source / 'integration/cedegrid/worker.py': '''from pathlib import Path
+from cedegrid import sha256_file
 import json
 def verify_snapshot(candidate, expected, model):
     root = candidate.parent
@@ -47,12 +48,12 @@ def verify_snapshot(candidate, expected, model):
         league = self.source / 'config/league_bases_r004.json'; league.parent.mkdir()
         league.write_text(json.dumps({'opponents': [{'name': 'existing', 'path': '../opponents/baseline.py',
             'weight': 1, 'sha256': bootstrap.sha256_file(self.source / 'opponents/baseline.py')}]}))
-        for name in ('python', 'resmgr'):
+        for name in ('python', 'cedegrid'):
             path = self.root / name; path.write_text('test executable never invoked'); path.chmod(0o700)
         self.args = argparse.Namespace(root=str(self.root), run_id='private-run', anchor_node_id='anchor-stable',
-            burst_node_id='burst-stable', anchor_cpus='0,1', python=str(self.root / 'python'), binary=str(self.root / 'resmgr'),
+            burst_node_id='burst-stable', anchor_cpus='0,1', python=str(self.root / 'python'), binary=str(self.root / 'cedegrid'),
             candidate=str(self.root / 'snapshot/main.py'), bootstrap=str(self.root / 'bootstrap.pt'),
-            dataset=str(self.root / 'dataset'), docker_root='/home/resmgr/validation')
+            dataset=str(self.root / 'dataset'), docker_root='/home/cedegrid/validation')
         def fake_pki(output, hosts, nodes):
             output.mkdir()
             for name in ('ca.pem', 'server.pem', 'node-1.pem', 'node-1.key'):
@@ -69,7 +70,7 @@ def verify_snapshot(candidate, expected, model):
         self.args.burst_home = home
         self.args.burst_root = home + '/validation/frozen-source-identifier'
         self.args.burst_python = home + '/environments/isolated/bin/python'
-        self.args.burst_binary = home + '/binaries/frozen/resmgr'
+        self.args.burst_binary = home + '/binaries/frozen/cedegrid'
         self.args.burst_source_root = home + '/bundles/source/Kaggriculture'
         self.args.burst_sdk_root = home + '/bundles/source/ResourceManager/python'
         self.args.burst_cpus = '22,54'
@@ -89,30 +90,30 @@ def verify_snapshot(candidate, expected, model):
         self.assertEqual(application['games'], 12)
         self.assertEqual(anchor['model_sha256'], burst['model_sha256'])
         self.assertEqual(anchor['snapshot_sha256'], burst['snapshot_sha256'])
-        self.assertEqual(burst['candidate'], '/home/resmgr/validation/runs/private-run/bootstrap/snapshot/main.py')
+        self.assertEqual(burst['candidate'], '/home/cedegrid/validation/runs/private-run/bootstrap/snapshot/main.py')
         self.assertEqual({Path(item['source']).name for item in result['burst_transfer'] if '/pki/' in item['source']},
                          {'ca.pem', 'node-1.pem', 'node-1.key'})
         self.assertIn('DNS:host.docker.internal', self.sans)
         self.assertIn('IP:127.0.0.1', self.sans)
         self.assertEqual(output.stat().st_mode & 0o777, 0o700)
         self.assertFalse(Path(result['harness_output']).exists())
-        node = json.loads((output / 'burst-node.json').read_text())
-        agent = json.loads((output / 'burst-agent.json').read_text())
+        node = read_runtime_config(output / 'burst-node.toml')
+        agent = read_runtime_config(output / 'burst-agent.toml')
         self.assertEqual(node['ram']['reserve_mib'], 1024)
         self.assertEqual(node['cpu']['reserve_physical_cores'], 0)
-        self.assertEqual(json.loads((output / 'anchor-node.json').read_text())['cpu']['reserve_physical_cores'], 1)
+        self.assertEqual(read_runtime_config(output / 'anchor-node.toml')['cpu']['reserve_physical_cores'], 1)
         self.assertEqual(agent['max_workers'], 1)
         self.assertEqual(agent['capacity']['gpu_memory_mib'], {})
         self.assertEqual(agent['capacity']['cpu_millicores'], 1000)
         self.assertEqual(agent['capacity']['ram_mib'], 2048)
-        self.assertEqual(json.loads((output / 'anchor-agent.json').read_text())['capacity']['ram_mib'], 4096)
+        self.assertEqual(read_runtime_config(output / 'anchor-agent.toml')['capacity']['ram_mib'], 4096)
         self.assertEqual(agent['coordinator_url'], 'https://host.docker.internal:45672')
         self.assertEqual(agent['max_runtime_seconds'], 1400)
         self.assertEqual(result['docker_bootstrap'], result['burst_bootstrap'])
         self.assertEqual(result['burst_placement']['kind'], 'docker')
-        self.assertEqual(result['burst_argv'][0], '/home/resmgr/validation/source/ResourceManager/target/release/resmgr')
+        self.assertEqual(result['burst_argv'][0], '/home/cedegrid/validation/source/ResourceManager/target/release/cedegrid')
         for name in ('anchor-node', 'burst-node', 'coordinator'):
-            self.assertNotIn('storage_profile', json.loads((output / (name + '.json')).read_text()))
+            self.assertNotIn('storage_profile', read_runtime_config(output / (name + '.toml')))
         self.assertEqual(result['storage_profiles'], dict(anchor='wal_full', burst='wal_full', coordinator='wal_full'))
 
     def test_physical_preparation_wires_explicit_paths_cpu_profile_and_existing_workflow(self):
@@ -120,8 +121,8 @@ def verify_snapshot(candidate, expected, model):
         with patch.object(bootstrap.subprocess, 'Popen', side_effect=AssertionError('no service launch')):
             result = bootstrap.prepare(self.args)
         output = Path(result['services_output'])
-        read = lambda name: json.loads((output / (name + '.json')).read_text())
-        anchor, burst = read('application')['nodes']
+        read = lambda name: read_runtime_config(output / (name + '.toml'))
+        anchor, burst = json.loads((output / 'application.json').read_text())['nodes']
         self.assertEqual([anchor['node_id'], burst['node_id']], ['anchor-stable', 'burst-stable'])
         self.assertEqual(result['burst_placement']['home'], home)
         self.assertEqual(result['burst_placement']['kind'], 'physical')
@@ -139,20 +140,21 @@ def verify_snapshot(candidate, expected, model):
         self.assertEqual(read('burst-agent')['cpu_affinity'], [22, 54])
         self.assertEqual(read('burst-agent')['coordinator_url'], self.args.burst_endpoint)
         self.assertEqual(read('burst-agent')['tls']['private_key'], result['burst_bootstrap'] + '/pki/node-1.key')
-        self.assertEqual(result['burst_argv'], [self.args.burst_binary, '--config', result['burst_bootstrap'] + '/burst-node.json',
-                                             'agent', '--deployment', result['burst_bootstrap'] + '/burst-agent.json'])
+        self.assertEqual(result['burst_argv'], [self.args.burst_binary, '--config', result['burst_bootstrap'] + '/burst-node.toml',
+                                             'agent', '--deployment', result['burst_bootstrap'] + '/burst-agent.toml'])
         self.assertEqual(result['burst_env']['TMPDIR'], result['burst_bootstrap'])
         self.assertNotIn('HOME', result['burst_env'])
         self.assertEqual(result['transport']['owned_proxy_listen'], ['127.0.0.1', 45670])
         self.assertIsNone(result['transport']['mac_tunnel_loopback_port'])
-        self.assertEqual(read('harness')['proxy_config']['target'], ['127.0.0.1', 45671])
-        self.assertEqual(read('harness')['application_config'], str(output / 'application.json'))
+        harness = json.loads((output / 'harness.json').read_text())
+        self.assertEqual(harness['proxy_config']['target'], ['127.0.0.1', 45671])
+        self.assertEqual(harness['application_config'], str(output / 'application.json'))
         self.assertNotIn('container', result['burst_cpu_policy'])
         self.assertIn('No enforced CPU quota', result['burst_cpu_policy'])
         for item in result['burst_transfer']:
             self.assertTrue(Path(item['destination']).is_relative_to(home))
             self.assertEqual(item['sha256'], bootstrap.sha256_file(Path(item['source'])))
-            self.assertNotIn('/home/resmgr', item['destination'])
+            self.assertNotIn('/home/cedegrid', item['destination'])
         self.assertEqual({Path(item['source']).name for item in result['burst_transfer'] if '/pki/' in item['source']},
                          {'ca.pem', 'node-1.pem', 'node-1.key'})
 
@@ -170,8 +172,8 @@ def verify_snapshot(candidate, expected, model):
         self.assertEqual(application['nodes'][0]['source_root'], self.args.source_root)
         self.assertEqual(result['sdk_root'], self.args.sdk_root)
         for name in ('anchor-node', 'coordinator'):
-            self.assertEqual(json.loads((output / (name + '.json')).read_text())['storage_profile'], 'delete_extra')
-        self.assertEqual(json.loads((output / 'burst-node.json').read_text()).get('storage_profile', 'wal_full'), 'wal_full')
+            self.assertEqual(read_runtime_config(output / (name + '.toml'))['storage_profile'], 'delete_extra')
+        self.assertEqual(read_runtime_config(output / 'burst-node.toml').get('storage_profile', 'wal_full'), 'wal_full')
 
     def test_physical_mode_requires_complete_explicit_configuration_before_credentials(self):
         self.physical_burst()
@@ -181,7 +183,7 @@ def verify_snapshot(candidate, expected, model):
                 setattr(self.args, field, None)
                 with self.assertRaises(ValueError): bootstrap.prepare(self.args)
                 setattr(self.args, field, value)
-        self.args.docker_root = '/home/resmgr/custom'
+        self.args.docker_root = '/home/cedegrid/custom'
         with self.assertRaisesRegex(ValueError, 'choose'): bootstrap.prepare(self.args)
         self.pki.assert_not_called()
         self.assertFalse((self.root / 'evidence').exists())
@@ -227,7 +229,7 @@ def verify_snapshot(candidate, expected, model):
         self.args.burst_endpoint = 'https://existing-route.example:45673/'
         result = bootstrap.prepare(self.args)
         output = Path(result['services_output'])
-        agent = json.loads((output / 'burst-agent.json').read_text())
+        agent = read_runtime_config(output / 'burst-agent.toml')
         self.assertEqual(agent['coordinator_url'], 'https://existing-route.example:45673')
         self.assertEqual(result['transport']['tls_name'], 'existing-route.example')
         self.assertEqual(result['transport']['owned_proxy_listen'], ['127.0.0.1', 45670])
@@ -252,7 +254,7 @@ def verify_snapshot(candidate, expected, model):
                       'anchor_cpus', 'anchor_node_id', 'burst_node_id'):
             required.extend(['--' + field.replace('_', '-'), getattr(self.args, field)])
         defaults = bootstrap.argument_parser().parse_args(required)
-        self.assertEqual(defaults.docker_root, '/home/resmgr/validation')
+        self.assertEqual(defaults.docker_root, '/home/cedegrid/validation')
         self.assertEqual(defaults.burst_storage_profile, 'wal_full')
         self.assertIsNone(defaults.burst_home)
         self.physical_burst()
@@ -278,7 +280,7 @@ def verify_snapshot(candidate, expected, model):
         self.args.burst_source_ip = '198.51.100.20'
         result = bootstrap.prepare(self.args)
         output = Path(result['services_output'])
-        agent = json.loads((output / 'burst-agent.json').read_text())
+        agent = read_runtime_config(output / 'burst-agent.toml')
         harness = json.loads((output / 'harness.json').read_text())
         self.assertEqual(agent['coordinator_url'], 'https://192.0.2.10:45670')
         self.assertIn('IP:192.0.2.10', self.sans)
@@ -286,7 +288,7 @@ def verify_snapshot(candidate, expected, model):
         self.assertEqual(proxy['public_listener']['source_ips'], ['198.51.100.20'])
         self.assertEqual(proxy['target'], ['127.0.0.1', 45671])
         self.assertEqual(proxy['max_forward_bytes'], 2 * 1024**3)
-        self.assertEqual(proxy['public_listener']['coordinator_sha256'], bootstrap.sha256_file(output / 'coordinator.json'))
+        self.assertEqual(proxy['public_listener']['coordinator_sha256'], bootstrap.sha256_file(output / 'coordinator.toml'))
         self.assertIsNone(result['transport']['mac_tunnel_loopback_port'])
 
     def test_missing_checkpoint_fails_without_any_deployment(self):
@@ -302,7 +304,7 @@ def verify_snapshot(candidate, expected, model):
         self.assertEqual(self.pki.call_count, 1)
 
     def test_home_boundary_and_explicit_distinct_ids(self):
-        for value in ('/tmp/validation', '/home/resmgr/../root/validation', '/home/resmgr/validation/../../root'):
+        for value in ('/tmp/validation', '/home/cedegrid/../root/validation', '/home/cedegrid/validation/../../root'):
             with self.assertRaises(ValueError): bootstrap.remote_path(value)
         self.args.burst_node_id = self.args.anchor_node_id
         with self.assertRaisesRegex(ValueError, 'distinct'):

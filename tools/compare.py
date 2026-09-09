@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from runtime_config import atomic_runtime_config
 import subprocess
 import sys
 import tempfile
@@ -338,8 +339,8 @@ def run_case(args, directory, profile, profile_name, cpu, scenario, seed):
     config["state_dir"] = str(directory / "state")
     original_cooldown = config["gpu"]["scale_up_cooldown_ms"]
     config["gpu"]["scale_up_cooldown_ms"] = 0
-    config_path, job_path = directory / "config.json", directory / "job.json"
-    write_json(config_path, config)
+    config_path, job_path = directory / "config.toml", directory / "job.json"
+    atomic_runtime_config(config_path, config, 'node')
     case = {
         "scenario": scenario, "profile": profile_name, "artifact_directory": str(directory),
         "execution_id": execution_id,
@@ -473,7 +474,7 @@ def execute(args, report):
     output = Path(args.output).expanduser().resolve()
     output.relative_to(Path.home().resolve())
     output.parent.mkdir(parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix="resmgr-comparison-", dir=output.parent))
+    directory = Path(tempfile.mkdtemp(prefix="cedegrid-comparison-", dir=output.parent))
     report.update(mode="executed", execution_authorized=True, artifact_directory=str(directory), profiles=profiles,
                   preflight=doctors, allowed_cpus=allowed, selected_cpu=cpu, cases=[], status="running")
     # A successful harness run is local evidence only, not broad kernel verification.
@@ -514,7 +515,7 @@ def execute(args, report):
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--binary", default="resmgr")
+    result.add_argument("--binary", default="cedegrid")
     result.add_argument("--baseline-config")
     result.add_argument("--cgroup-config")
     result.add_argument("--output", default="-")

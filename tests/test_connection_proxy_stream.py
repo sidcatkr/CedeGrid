@@ -12,11 +12,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'tools'))
 import connection_proxy as proxy
+from runtime_config import runtime_toml
 
 
 class StreamProxyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='.resmgr-stream-test-', dir=Path.home())
+        temporary = tempfile.TemporaryDirectory(prefix='.cedegrid-stream-test-', dir=Path.home())
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.root.chmod(0o700)
@@ -24,10 +25,10 @@ class StreamProxyTests(unittest.IsolatedAsyncioTestCase):
         self.write_program('import os\nwhile data := os.read(0, 65536): os.write(1, data)\n')
         for name in ('ca.pem', 'server.pem'):
             (self.root / name).write_text(name)
-        self.deployment = self.root / 'coordinator.json'
-        self.deployment.write_text(json.dumps({'listen': '127.0.0.1:19002',
+        self.deployment = self.root / 'coordinator.toml'
+        self.deployment.write_text(runtime_toml({'listen': '127.0.0.1:19002',
             'tls': {'ca_cert': str(self.root / 'ca.pem'), 'certificate': str(self.root / 'server.pem')},
-            'clients': {'a' * 64: {'role': 'operator'}, 'b' * 64: {'role': 'node', 'node_id': 'burst'}}}))
+            'clients': {'a' * 64: {'role': 'operator'}, 'b' * 64: {'role': 'node', 'node_id': 'burst'}}}, 'coordinator'))
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0)); port = reservation.getsockname()[1]
         self.config = {'execution_approved': True, 'listen': ['127.0.0.1', port],

@@ -112,6 +112,9 @@ pub struct GateSetup {
 }
 
 pub trait ExecutionJournal {
+    fn namespace_guard(&self) -> Option<crate::namespace::NamespaceGuard> {
+        None
+    }
     /// Verified journal assurance, supplied by the opened store at the launch barrier.
     fn storage_control_evidence(&self) -> Result<Vec<ControlEvidence>> {
         Ok(Vec::new())

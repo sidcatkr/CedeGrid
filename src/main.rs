@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, Subcommand};
-use resource_manager::{
+use cedegrid::{
     config::Config,
     model::{PolicyInput, Snapshot},
     policy::PolicyEngine,
     state::{self, StateStore},
     telemetry::Collector,
 };
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -21,10 +21,17 @@ use std::{
     about = "Durable resource scheduling, authenticated node services, and explicit workload supervision."
 )]
 struct Cli {
-    #[arg(long, global = true, default_value = "resmgr.yaml")]
+    #[arg(long, global = true, default_value = "cedegrid.toml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRole {
+    Agent,
+    Coordinator,
 }
 
 #[derive(Subcommand)]
@@ -106,6 +113,18 @@ enum Command {
         deployment: PathBuf,
         #[arg(long)]
         job_id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, value_enum)]
+        collection: Option<cedegrid::pagination::Collection>,
+        #[arg(long)]
+        node_id: Option<String>,
+        #[arg(long)]
+        pool_id: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Create or update an elastic pool specification.
     Pool {
@@ -147,11 +166,25 @@ enum Command {
     /// Inspect retained local execution reservations; never reattach or signal a PID.
     Executions,
     /// Print a portable example configuration to stdout.
-    ConfigExample,
+    ConfigExample {
+        #[arg(long, value_enum, default_value_t = cedegrid::config::RuntimeConfigKind::Node)]
+        kind: cedegrid::config::RuntimeConfigKind,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    State {
+        #[command(subcommand)]
+        command: StateCommand,
+    },
     /// Validate configuration and show effective settings, without writing state.
     Validate,
     /// Inspect platform, telemetry, and actual storage filesystem without writing state.
-    Doctor,
+    Doctor {
+        #[arg(long, value_enum, default_value = "agent")]
+        role: DoctorRole,
+    },
     /// Sample resources, explain policy, and optionally persist observations.
     Observe {
         /// Number of samples; 0 continues until Ctrl-C or SIGTERM.
@@ -167,6 +200,31 @@ enum Command {
     History {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Migrate {
+        #[arg(long, value_enum)]
+        kind: cedegrid::config::RuntimeConfigKind,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum)]
+        legacy_client_semantics: Option<cedegrid::config_migration::LegacyClientSemantics>,
+        #[arg(long)]
+        legacy_cwd: Option<PathBuf>,
+    },
+}
+#[derive(Subcommand)]
+enum StateCommand {
+    Upgrade {
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        confirm_legacy_stopped: bool,
     },
 }
 
@@ -208,9 +266,21 @@ fn emit(value: &impl Serialize) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let _foreground = cedegrid::launcher_terminal::Foreground::enter()?;
+    #[cfg(windows)]
+    ensure!(
+        !matches!(
+            std::env::args_os()
+                .nth(1)
+                .and_then(|v| v.into_string().ok())
+                .as_deref(),
+            Some("__worker-gate" | "__assignment-supervisor")
+        ),
+        "ERR_CEDEGRID_UNSUPPORTED_PLATFORM: Windows supports client commands only"
+    );
     // Preparation code starts before any runtime/worker threads or child reaper.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__worker-gate")) {
-        return resource_manager::supervision::worker_gate();
+        return cedegrid::supervision::worker_gate();
     }
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("__assignment-supervisor"))
@@ -218,13 +288,33 @@ fn main() -> Result<()> {
         let spec = std::env::args_os()
             .nth(2)
             .context("missing supervisor spec")?;
-        return resource_manager::agent::assignment_supervisor(Path::new(&spec));
+        return cedegrid::agent::assignment_supervisor(Path::new(&spec));
     }
     let cli = Cli::parse();
+    #[cfg(windows)]
+    ensure!(
+        matches!(
+            &cli.command,
+            Command::Rpc { .. }
+                | Command::Submit { .. }
+                | Command::Status { .. }
+                | Command::Pool { .. }
+                | Command::Cancel { .. }
+                | Command::Resume { .. }
+                | Command::Drain { .. }
+                | Command::ConfigExample { .. }
+                | Command::Config { .. }
+                | Command::Validate
+                | Command::Doctor { .. }
+                | Command::Observe { no_state: true, .. }
+                | Command::Replay { .. }
+        ),
+        "ERR_CEDEGRID_UNSUPPORTED_PLATFORM: Windows supports client commands only"
+    );
     match &cli.command {
         Command::StorageQualify { directory, profile } => {
             let profile = serde_json::from_value(serde_json::Value::String(profile.clone()))?;
-            let report = resource_manager::storage_qualification::run(
+            let report = cedegrid::storage_qualification::run(
                 directory,
                 profile,
                 &std::env::current_exe()?,
@@ -243,9 +333,7 @@ fn main() -> Result<()> {
             token,
         } => {
             let profile = serde_json::from_value(serde_json::Value::String(profile.clone()))?;
-            return resource_manager::storage_qualification::child_main(
-                directory, profile, stage, token,
-            );
+            return cedegrid::storage_qualification::child_main(directory, profile, stage, token);
         }
         _ => {}
     }
@@ -259,11 +347,51 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
-    if matches!(cli.command, Command::ConfigExample) {
-        print!("{}", serde_yaml::to_string(&Config::default())?);
+    if let Command::ConfigExample { kind } = &cli.command {
+        print!("{}", cedegrid::config::example(*kind)?);
         return Ok(());
     }
     match &cli.command {
+        Command::Config {
+            command:
+                ConfigCommand::Migrate {
+                    kind,
+                    input,
+                    output,
+                    legacy_client_semantics,
+                    legacy_cwd,
+                },
+        } => {
+            return emit(&cedegrid::config_migration::migrate(
+                &cedegrid::config_migration::MigrationOptions {
+                    kind: *kind,
+                    input: input.clone(),
+                    output: output.clone(),
+                    legacy_client_semantics: *legacy_client_semantics,
+                    legacy_cwd: legacy_cwd.clone(),
+                },
+            )?);
+        }
+        Command::State {
+            command:
+                StateCommand::Upgrade {
+                    backup,
+                    confirm_legacy_stopped,
+                },
+        } => {
+            let config = read_config(&cli.config)?;
+            let backup = if backup.is_absolute() {
+                backup.clone()
+            } else {
+                std::env::current_dir()?.join(backup)
+            };
+            return emit(&cedegrid::upgrade::upgrade(
+                &config.state_dir,
+                &backup,
+                config.storage_profile,
+                *confirm_legacy_stopped,
+            )?);
+        }
         Command::Backup {
             state_dir,
             destination,
@@ -271,10 +399,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             max_files,
             timeout_seconds,
         } => {
-            return emit(&resource_manager::backup::create(
+            return emit(&cedegrid::backup::create(
                 state_dir,
                 destination,
-                resource_manager::backup::Limits {
+                cedegrid::backup::Limits {
                     max_bytes: *max_bytes,
                     max_files: *max_files,
                     timeout: Duration::from_secs(*timeout_seconds),
@@ -289,10 +417,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             max_files,
             timeout_seconds,
         } => {
-            return emit(&resource_manager::backup::restore(
+            return emit(&cedegrid::backup::restore(
                 snapshot,
                 destination,
-                resource_manager::backup::Limits {
+                cedegrid::backup::Limits {
                     max_bytes: *max_bytes,
                     max_files: *max_files,
                     timeout: Duration::from_secs(*timeout_seconds),
@@ -301,42 +429,82 @@ async fn async_main(cli: Cli) -> Result<()> {
             )?);
         }
         Command::Coordinator { deployment } => {
-            let mut settings: resource_manager::protocol::CoordinatorConfig =
-                read_deployment(deployment)?;
-            resolve_deployment_path(deployment, &mut settings.state_dir)?;
-            resolve_tls(deployment, &mut settings.tls)?;
-            return resource_manager::coordinator::serve(settings).await;
+            let settings = cedegrid::config::load_runtime(
+                deployment,
+                cedegrid::config::RuntimeConfigKind::Coordinator,
+            )?;
+            return cedegrid::coordinator::serve(settings).await;
         }
         Command::Rpc {
             deployment,
             request,
         } => {
-            let request = read_deployment(request)?;
+            let request = read_json_data(request)?;
             return remote(deployment, request).await;
         }
         Command::Submit { deployment, job } => {
             return remote(
                 deployment,
-                resource_manager::protocol::Request::Submit {
-                    job: read_deployment(job)?,
+                cedegrid::protocol::Request::Submit {
+                    job: read_json_data(job)?,
                 },
             )
             .await;
         }
-        Command::Status { deployment, job_id } => {
-            return remote(
+        Command::Status {
+            deployment,
+            job_id,
+            all,
+            collection,
+            node_id,
+            pool_id,
+            limit,
+            cursor,
+        } => {
+            let settings: cedegrid::config::RuntimeClientConfig = cedegrid::config::load_runtime(
                 deployment,
-                resource_manager::protocol::Request::Status {
-                    job_id: job_id.clone(),
-                },
-            )
-            .await;
+                cedegrid::config::RuntimeConfigKind::Client,
+            )?;
+            let client = cedegrid::protocol::RpcClient::with_settings(
+                &settings.endpoint,
+                &settings.tls,
+                settings.timeout_seconds,
+                settings.max_transfer_bytes_per_second,
+            )?;
+            let mut query = cedegrid::pagination::PageQuery {
+                collection: collection.clone().unwrap_or(if job_id.is_some() {
+                    cedegrid::pagination::Collection::Tasks
+                } else {
+                    cedegrid::pagination::Collection::Jobs
+                }),
+                job_id: job_id.clone(),
+                node_id: node_id.clone(),
+                pool_id: pool_id.clone(),
+                limit: *limit,
+                cursor: cursor.clone(),
+            };
+            loop {
+                let response = client
+                    .request(&cedegrid::protocol::Request::StatusPage {
+                        query: query.clone(),
+                    })
+                    .await?;
+                emit(&response)?;
+                let cedegrid::protocol::Response::StatusPage { page } = response else {
+                    anyhow::bail!("unexpected status page response")
+                };
+                if !all || page.next_cursor.is_none() {
+                    break;
+                }
+                query.cursor = page.next_cursor;
+            }
+            return Ok(());
         }
         Command::Pool { deployment, spec } => {
             return remote(
                 deployment,
-                resource_manager::protocol::Request::PutPool {
-                    pool: read_deployment(spec)?,
+                cedegrid::protocol::Request::PutPool {
+                    pool: read_json_data(spec)?,
                 },
             )
             .await;
@@ -344,7 +512,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Cancel { deployment, job_id } => {
             return remote(
                 deployment,
-                resource_manager::protocol::Request::Cancel {
+                cedegrid::protocol::Request::Cancel {
                     job_id: job_id.clone(),
                 },
             )
@@ -357,7 +525,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         } => {
             return remote(
                 deployment,
-                resource_manager::protocol::Request::Retry {
+                cedegrid::protocol::Request::Retry {
                     task_id: task_id.clone(),
                     confirm_side_effects_reconciled: *side_effects_reconciled,
                 },
@@ -371,7 +539,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         } => {
             return remote(
                 deployment,
-                resource_manager::protocol::Request::DrainNode {
+                cedegrid::protocol::Request::DrainNode {
                     node_id: node_id.clone(),
                     drain: !resume,
                 },
@@ -393,11 +561,13 @@ async fn async_main(cli: Cli) -> Result<()> {
         | Command::Drain { .. }
         | Command::Resume { .. } => unreachable!(),
         Command::Agent { deployment } => {
-            let mut settings: resource_manager::agent::AgentConfig = read_deployment(&deployment)?;
-            resolve_tls(&deployment, &mut settings.tls)?;
-            resource_manager::agent::run(&config, &settings, &std::env::current_exe()?).await
+            let settings = cedegrid::config::load_runtime(
+                &deployment,
+                cedegrid::config::RuntimeConfigKind::Agent,
+            )?;
+            cedegrid::agent::run(&config, &settings, &std::env::current_exe()?).await
         }
-        Command::Reconcile => emit(&resource_manager::agent::reconcile(&config)?),
+        Command::Reconcile => emit(&cedegrid::agent::reconcile(&config)?),
         Command::Supervise { .. }
         | Command::StorageQualify { .. }
         | Command::StorageQualificationChild { .. } => unreachable!(),
@@ -406,21 +576,30 @@ async fn async_main(cli: Cli) -> Result<()> {
                 StateStore::open_read_only_with_profile(&config.state_dir, config.storage_profile)?;
             emit(&store.executions()?)
         }
-        Command::ConfigExample => unreachable!(),
+        Command::ConfigExample { .. } | Command::Config { .. } | Command::State { .. } => {
+            unreachable!()
+        }
         Command::Validate => emit(&json!({"valid": true, "config": config})),
-        Command::Doctor => {
+        Command::Doctor { role } => {
             let storage = state::preflight(&config.state_dir)?;
+            let role_admitted = storage.admitted_by(config.storage_profile)
+                && (role != DoctorRole::Coordinator
+                    || config.storage_profile != state::StorageProfile::BurstReplayDeleteExtra);
             let mut collector = Collector::for_config(&config)?;
             let snapshot = sample_with_intent(&mut collector, &config)?;
             emit(&json!({
-                "schema_version": resource_manager::model::SCHEMA_VERSION,
+                "schema_version": cedegrid::model::SCHEMA_VERSION,
                 "mode": "observe_only",
                 "os": std::env::consts::OS,
                 "architecture": std::env::consts::ARCH,
                 "sqlite_version": rusqlite::version(),
                 "sqlite_wal_fix_present": state::runtime_sqlite_supported(),
                 "storage": storage,
+                "strict_durability_supported": storage.supported,
+                "selected_profile_admitted": storage.admitted_by(config.storage_profile),
                 "configured_storage_profile": config.storage_profile,
+                "requested_role": role,
+                "role_admitted": role_admitted,
                 "requested_journal_mode": config.storage_profile.journal_mode(),
                 "requested_synchronous": config.storage_profile.synchronous(),
                 "snapshot": snapshot,
@@ -429,8 +608,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "kernel_controls_applied": false
             }))?;
             ensure!(
-                storage.supported,
-                "storage preflight failed: {}",
+                role_admitted,
+                "storage or requested-role preflight failed: {}",
                 storage.detail
             );
             ensure!(
@@ -545,8 +724,8 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         !config.storage_profile.is_replayable(),
         "replayable storage requires an authenticated coordinator agent session"
     );
-    resource_manager::backup::ensure_runnable_state(&config.state_dir)?;
-    use resource_manager::{
+    cedegrid::backup::ensure_runnable_state(&config.state_dir)?;
+    use cedegrid::{
         cgroup::CgroupBackend,
         execution_model::*,
         rootless::RootlessBackend,
@@ -562,7 +741,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         "local supervise supports CPU-only commands; GPU workloads require the continuously observing agent service"
     );
     ensure!(
-        config.node_mode == resource_manager::config::NodeMode::Guaranteed
+        config.node_mode == cedegrid::config::NodeMode::Guaranteed
             || request.class == AllocationClass::Opportunistic,
         "opportunistic nodes cannot host a guaranteed allocation"
     );
@@ -605,13 +784,13 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         Box::new(RootlessBackend::new(config.cpu.nice))
     };
     let store = StateStore::open_with_profile(&config.state_dir, config.storage_profile)?;
-    let _execution_lock = resource_manager::backup::execution_lock(&config.state_dir)?;
+    let _execution_lock = cedegrid::backup::execution_lock(&config.state_dir)?;
     let mut collector = Collector::for_config(config)?;
     let mut engine = PolicyEngine::new();
     let start = Instant::now();
     let capacity = loop {
         let mut snapshot = sample_with_intent(&mut collector, config)?;
-        resource_manager::agent::restrict_gpu_scope(&mut snapshot, &request.resources);
+        cedegrid::agent::restrict_gpu_scope(&mut snapshot, &request.resources);
         let input = PolicyInput {
             allocations: store.execution_allocations()?,
             explicit_drain: false,
@@ -709,31 +888,24 @@ fn sample_with_intent(collector: &mut Collector, config: &Config) -> Result<Snap
     Ok(snapshot)
 }
 
-fn read_deployment<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_yaml::from_slice(
+fn read_json_data<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    cedegrid::numeric::from_slice(
         &std::fs::read(path)
-            .with_context(|| format!("cannot read deployment {}", path.display()))?,
+            .with_context(|| format!("cannot read JSON data {}", path.display()))?,
     )
-    .with_context(|| format!("invalid deployment {}", path.display()))
+    .with_context(|| format!("invalid JSON data {}", path.display()))
 }
-fn resolve_deployment_path(deployment: &Path, path: &mut PathBuf) -> Result<()> {
-    if path.is_relative() {
-        *path = deployment
-            .canonicalize()?
-            .parent()
-            .context("deployment has no parent")?
-            .join(&*path);
-    }
-    Ok(())
-}
-fn resolve_tls(deployment: &Path, tls: &mut resource_manager::protocol::TlsIdentity) -> Result<()> {
-    for path in [&mut tls.ca_cert, &mut tls.certificate, &mut tls.private_key] {
-        resolve_deployment_path(deployment, path)?;
-    }
-    Ok(())
-}
-async fn remote(deployment: &Path, request: resource_manager::protocol::Request) -> Result<()> {
-    let mut client: resource_manager::protocol::ClientConfig = read_deployment(deployment)?;
-    resolve_tls(deployment, &mut client.tls)?;
-    emit(&resource_manager::protocol::rpc(&client.endpoint, &client.tls, &request).await?)
+async fn remote(deployment: &Path, request: cedegrid::protocol::Request) -> Result<()> {
+    let client: cedegrid::config::RuntimeClientConfig =
+        cedegrid::config::load_runtime(deployment, cedegrid::config::RuntimeConfigKind::Client)?;
+    emit(
+        &cedegrid::protocol::RpcClient::with_settings(
+            &client.endpoint,
+            &client.tls,
+            client.timeout_seconds,
+            client.max_transfer_bytes_per_second,
+        )?
+        .request(&request)
+        .await?,
+    )
 }

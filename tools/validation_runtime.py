@@ -26,13 +26,16 @@ def home_executable(path):
 
 
 def atomic_json(path, value):
+    atomic_text(path, json.dumps(value, indent=2, allow_nan=False) + '\n')
+
+
+def atomic_text(path, value):
     path = inside_home(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
     try:
-        with temporary.open('x') as out:
-            json.dump(value, out, indent=2, allow_nan=False)
-            out.write('\n')
+        with temporary.open('x', encoding='utf-8') as out:
+            out.write(value)
             out.flush()
             os.fsync(out.fileno())
         os.replace(temporary, path)

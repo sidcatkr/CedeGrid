@@ -50,9 +50,12 @@ agents own execution journals; independent supervisors enforce authorized deadli
 and local policy while alive. Supervisor death retains uncertain reservations.
 SSH is only an optional operator bootstrap/tunnel mechanism, never job semantics.
 
-The Python SDK implements readiness, draining, artifact/checkpoint publication,
-resume metadata and completion without embedding scheduler policy. Workloads
+The Python and TypeScript SDKs implement readiness, draining, native artifact and
+checkpoint publication, resume metadata and completion without scheduler policy.
+The version-two local protocol also supports C and other languages. Workloads
 receive private local lifecycle descriptors, not coordinator operator credentials.
+The native publisher owns immutable bytes, global quota, and transactional heads;
+SDK processes stream data through the authenticated local socket.
 The separate Kaggriculture adapter resides in the application checkout and uses
 the real simulator, dataset builder, learner and exporter. Generic core code has
 no application imports or model knowledge. See [SDK contracts](sdk-adapter-work.md).

@@ -1,5 +1,5 @@
-use resource_manager::state::StorageProfile;
-use resource_manager::storage_qualification::{child_main, run};
+use cedegrid::state::StorageProfile;
+use cedegrid::storage_qualification::{child_main, run};
 use std::path::Path;
 
 fn home_test_parent() -> tempfile::TempDir {
@@ -26,7 +26,12 @@ fn all_linked_profiles_preserve_exact_commits_across_owned_process_interruptions
         StorageProfile::BurstReplayDeleteExtra,
     ] {
         let directory = parent.path().join(profile.name());
-        let report = run(&directory, profile, Path::new(env!("CARGO_BIN_EXE_resmgr"))).unwrap();
+        let report = run(
+            &directory,
+            profile,
+            Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        )
+        .unwrap();
         assert!(report.process_crash_compatibility_passed, "{report:#?}");
         assert!(report.cleanup_confirmed);
         assert_eq!(report.children.len(), 5);
@@ -49,7 +54,7 @@ fn all_linked_profiles_preserve_exact_commits_across_owned_process_interruptions
             assert!(report.strict_store_refusal.is_some());
             assert!(!directory.join("strict-store-must-not-exist").exists());
         }
-        let retained: resource_manager::storage_qualification::QualificationReport =
+        let retained: cedegrid::storage_qualification::QualificationReport =
             serde_json::from_reader(std::fs::File::open(directory.join("report.json")).unwrap())
                 .unwrap();
         assert_eq!(
@@ -70,7 +75,7 @@ fn refuses_reuse_without_modifying_existing_files() {
         run(
             &directory,
             StorageProfile::WalFull,
-            Path::new(env!("CARGO_BIN_EXE_resmgr"))
+            Path::new(env!("CARGO_BIN_EXE_cedegrid"))
         )
         .is_err()
     );
@@ -130,7 +135,7 @@ fn refuses_parent_symlink_without_writing_through_alias() {
         run(
             &alias.join("new"),
             StorageProfile::WalFull,
-            Path::new(env!("CARGO_BIN_EXE_resmgr"))
+            Path::new(env!("CARGO_BIN_EXE_cedegrid"))
         )
         .is_err()
     );

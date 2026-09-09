@@ -1,4 +1,4 @@
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     model::Resources,
     state::{DATABASE_FILENAME, StateStore, TaskStatus},
@@ -62,7 +62,7 @@ fn pending_and_uncertain_reservations_survive_reopen_and_block_replacement() {
     );
     assert_eq!(
         store.execution_allocations().unwrap()[0].phase,
-        resource_manager::model::AllocationPhase::Pending
+        cedegrid::model::AllocationPhase::Pending
     );
     row.phase = ExecutionPhase::NeedsReconciliation;
     store.transition(&row).unwrap();
@@ -124,7 +124,7 @@ fn observe_allocations_retain_durable_class_across_pending_and_uncertain_states(
     assert_eq!(uncertain[0].class, AllocationClass::Guaranteed);
     assert_eq!(
         uncertain[0].phase,
-        resource_manager::model::AllocationPhase::Running
+        cedegrid::model::AllocationPhase::Running
     );
     assert_eq!(uncertain[0].requested, resources(1000));
     assert!(uncertain[0].observed.is_none());
@@ -238,29 +238,67 @@ fn capacity_reservation_is_atomic_across_connections() {
 }
 
 #[test]
-fn v1_database_migration_preserves_tasks_and_observations() {
+fn offline_schema_two_upgrade_preserves_tasks_and_observations() {
     let (dir, store) = store();
     store.submit("existing-task", false).unwrap();
     let original = rusqlite::Connection::open(store.database_path()).unwrap();
     original.execute("INSERT INTO observations(observed_at_unix_ms,node_id,snapshot_json,decision_json) VALUES(7,'existing-node','{}','{}')",[]).unwrap();
     drop(original);
     drop(store);
-    // Remove only the new extension to reproduce the original v1 schema.
+    // Audited 0.1 WAL state is schema 2. Startup cannot migrate it implicitly.
     let db = rusqlite::Connection::open(dir.path().join(DATABASE_FILENAME)).unwrap();
-    db.execute_batch("DROP TABLE execution_events; DROP TABLE executions; PRAGMA user_version=1;")
+    db.execute_batch("PRAGMA user_version=2; PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
     drop(db);
+    assert!(StateStore::open(dir.path()).is_err());
+    let backup_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    cedegrid::upgrade::upgrade(
+        dir.path(),
+        &backup_root.path().join("bundle"),
+        cedegrid::state::StorageProfile::WalFull,
+        true,
+    )
+    .unwrap();
     let upgraded = StateStore::open(dir.path()).unwrap();
     assert_eq!(
         upgraded.status("existing-task").unwrap(),
-        TaskStatus::Queued
+        TaskStatus::NeedsReconciliation
     );
     assert!(upgraded.executions().unwrap().is_empty());
     assert_eq!(upgraded.observations(10).unwrap().len(), 1);
-    assert_eq!(upgraded.durability_settings().unwrap().schema_version, 2);
+    assert_eq!(upgraded.durability_settings().unwrap().schema_version, 5);
+    assert!(upgraded.assign("existing-task", "forbidden-retry").is_err());
     upgraded
         .reserve(&request("new-task", "new-attempt"), &resources(1000))
         .unwrap();
+}
+
+#[test]
+fn unaudited_schema_one_requires_external_legacy_recovery_without_mutation() {
+    let (dir, store) = store();
+    store.submit("retained", false).unwrap();
+    drop(store);
+    let db = rusqlite::Connection::open(dir.path().join(DATABASE_FILENAME)).unwrap();
+    db.execute_batch("DROP TABLE execution_events; DROP TABLE executions; PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    drop(db);
+    let before = std::fs::read(dir.path().join(DATABASE_FILENAME)).unwrap();
+    assert!(StateStore::open(dir.path()).is_err());
+    let backup_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let backup = backup_root.path().join("bundle");
+    assert!(
+        cedegrid::upgrade::upgrade(
+            dir.path(),
+            &backup,
+            cedegrid::state::StorageProfile::WalFull,
+            true
+        )
+        .is_err()
+    );
+    assert!(!backup.exists());
+    assert_eq!(
+        before,
+        std::fs::read(dir.path().join(DATABASE_FILENAME)).unwrap()
+    );
 }
 
 #[test]
@@ -426,7 +464,7 @@ fn local_and_remote_reservations_cannot_exceed_or_change_task_attempt_cap() {
 
 #[test]
 fn rollback_profile_preserves_launch_barrier_and_uncertain_capacity_across_reopen() {
-    use resource_manager::state::StorageProfile;
+    use cedegrid::state::StorageProfile;
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store =
         StateStore::open_with_profile(directory.path(), StorageProfile::DeleteExtra).unwrap();

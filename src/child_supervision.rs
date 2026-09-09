@@ -8,6 +8,8 @@ struct ChildConnection {
     bytes: Vec<u8>,
     deadline: Instant,
     peer: Option<u32>,
+    reply: Option<std::sync::mpsc::Receiver<serde_json::Value>>,
+    end_deadline: Instant,
 }
 struct MediatedChild {
     id: String,
@@ -42,17 +44,24 @@ struct ChildServer {
     parent: LaunchRequest,
     generation: u64,
     setup: GateSetup,
+    publisher: Option<crate::publication::PublisherService>,
+    namespace_id: String,
+    session_id: String,
 }
 impl ChildServer {
-    fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup) -> Result<Option<Self>> {
-        if parent.managed_child_limit == 0 {
-            return Ok(None);
-        }
+    fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup, journal: &dyn ExecutionJournal) -> Result<Option<Self>> {
         ensure!(
-            !parent.single_process && parent.no_escape && parent.managed_child_limit <= 8,
+            parent.managed_child_limit == 0 || (!parent.single_process && parent.no_escape && parent.managed_child_limit <= 8),
             "mediated children require explicit no-escape family contract and limit 1..=8"
         );
-        let directory = std::env::temp_dir().join(format!(
+        let guard = journal.namespace_guard();
+        let namespace_id = guard.as_ref().map(|g| g.identity().namespace_id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session_id = guard.as_ref().and_then(|g| g.identity().session_id.clone()).unwrap_or_else(|| namespace_id.clone());
+        let publisher = parent.env.get("CEDEGRID_PUBLICATION_SPEC").map(|raw| -> Result<_> {
+            let settings = serde_json::from_str(raw)?;
+            crate::publication::PublisherService::new(settings, guard.clone().context("publication requires a protected native namespace")?)
+        }).transpose()?;
+        let directory = Path::new("/tmp").canonicalize()?.join(format!(
             "rmc-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..16]
         ));
@@ -76,16 +85,20 @@ impl ChildServer {
             parent: parent.clone(),
             generation,
             setup,
+            publisher, namespace_id, session_id,
         }))
     }
     fn expose(&self, request: &mut LaunchRequest) {
+        request.env.remove("CEDEGRID_PUBLICATION_SPEC");
+        request.env.insert("CEDEGRID_NAMESPACE_ID".into(), self.namespace_id.clone());
+        request.env.insert("CEDEGRID_SESSION_ID".into(), self.session_id.clone());
         request.env.insert(
-            "RESMGR_SUPERVISOR_SOCKET".into(),
+            "CEDEGRID_SUPERVISOR_SOCKET".into(),
             self.path.to_string_lossy().into(),
         );
         request
             .env
-            .insert("RESMGR_SUPERVISOR_TOKEN".into(), self.token.clone());
+            .insert("CEDEGRID_SUPERVISOR_TOKEN".into(), self.token.clone());
     }
     fn all_released(&self) -> bool {
         self.children
@@ -121,8 +134,8 @@ impl ChildServer {
                     self.connections.push(ChildConnection {
                         stream,
                         bytes: vec![],
-                        deadline: Instant::now() + Duration::from_secs(1),
-                        peer,
+                        deadline: Instant::now() + Duration::from_secs(5),
+                        peer, reply: None, end_deadline: Instant::now() + Duration::from_secs(15),
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -131,11 +144,20 @@ impl ChildServer {
         }
         let mut remaining = Vec::new();
         for mut connection in std::mem::take(&mut self.connections) {
-            if Instant::now() >= connection.deadline {
+            if let Some(reply) = &connection.reply {
+                match reply.try_recv() {
+                    Ok(response) => { let mut encoded = serde_json::to_vec(&response)?; encoded.push(b'\n'); let _ = connection.stream.write_all(&encoded); }
+                    Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < connection.end_deadline => remaining.push(connection),
+                    _ => {}
+                }
+                continue;
+            }
+            if Instant::now() >= connection.deadline || Instant::now() >= connection.end_deadline {
                 continue;
             }
             let mut bytes = [0; 4096];
             let mut closed = false;
+            let mut read_this_tick = 0;
             loop {
                 match connection.stream.read(&mut bytes) {
                     Ok(0) => {
@@ -144,7 +166,9 @@ impl ChildServer {
                     }
                     Ok(n) => {
                         connection.bytes.extend_from_slice(&bytes[..n]);
-                        if connection.bytes.len() > 65_536 || connection.bytes.contains(&b'\n') {
+                        read_this_tick += n;
+                        connection.deadline = Instant::now() + Duration::from_secs(5);
+                        if connection.bytes.len() > crate::publication::LOCAL_FRAME_LIMIT || connection.bytes.contains(&b'\n') || read_this_tick >= 128 * 1024 {
                             break;
                         }
                     }
@@ -155,7 +179,7 @@ impl ChildServer {
                     }
                 }
             }
-            if connection.bytes.len() > 65_536 {
+            if connection.bytes.len() > crate::publication::LOCAL_FRAME_LIMIT {
                 continue;
             }
             if let Some(end) = connection.bytes.iter().position(|b| *b == b'\n') {
@@ -165,9 +189,9 @@ impl ChildServer {
                         "trailing child protocol data"
                     );
                     let value: serde_json::Value =
-                        serde_json::from_slice(&connection.bytes[..end])?;
+                        crate::numeric::from_slice(&connection.bytes[..end])?;
                     ensure!(
-                        value["version"] == 1 && value["token"] == self.token,
+                        value["version"] == 2 && value["token"] == self.token && value["namespace_id"] == self.namespace_id && value["session_id"] == self.session_id && value["assignment_id"] == self.parent.assignment_id && value["generation"] == self.generation,
                         "child protocol authentication failed"
                     );
                     ensure!(connection.peer.is_some(), "cannot verify socket peer");
@@ -185,6 +209,10 @@ impl ChildServer {
                         "allocation leader identity is no longer verified"
                     );
                     match value["op"].as_str() {
+                        Some("artifact_begin" | "artifact_chunk" | "artifact_finish" | "publication_commit" | "publication_status" | "publication_abort") => {
+                            connection.reply = Some(self.publisher.as_ref().context("publication is unavailable for this invocation")?.submit(value)?);
+                            Ok(serde_json::Value::Null)
+                        }
                         Some("spawn") => {
                             ensure!(accepting, "allocation is draining; child launch refused");
                             let request_id = value["request_id"]
@@ -216,13 +244,13 @@ impl ChildServer {
                                 "child cwd must be an existing absolute directory"
                             );
                             request.env.retain(|key, _| {
-                                !key.starts_with("RESMGR_") || key == "RESMGR_CPU_AFFINITY"
+                                !key.starts_with("CEDEGRID_") || key == "CEDEGRID_CPU_AFFINITY"
                             });
                             if let Some(env) = value.get("env") {
                                 let env: BTreeMap<String, String> =
                                     serde_json::from_value(env.clone())?;
                                 ensure!(
-                                    env.keys().all(|k| !k.starts_with("RESMGR_")
+                                    env.keys().all(|k| !k.starts_with("CEDEGRID_")
                                         && k != "CUDA_VISIBLE_DEVICES"),
                                     "reserved managed-child environment key"
                                 );
@@ -291,7 +319,8 @@ impl ChildServer {
                         _ => bail!("unsupported child operation"),
                     }
                 })()
-                .unwrap_or_else(|e| serde_json::json!({"ok":false,"error":format!("{e:#}")}));
+                .unwrap_or_else(|e| serde_json::json!({"ok":false,"code":"ERR_CEDEGRID_SUPERVISOR","message":format!("{e:#}"),"error":format!("{e:#}")}));
+                if connection.reply.is_some() { remaining.push(connection); continue; }
                 let mut encoded = serde_json::to_vec(&response)?;
                 encoded.push(b'\n');
                 // Replies are small. If a peer cannot receive them, request_id makes retry safe.
@@ -342,12 +371,14 @@ impl ChildServer {
         // Every fallible preparation before spawn is completed first. After spawn,
         // ownership is installed immediately; acquisition/verification happens in tick.
         let drain = DrainDirectory::new()?;
-        let log_dir = if let Some(parent) = self.parent.env.get("RESMGR_OUTPUT_DIR") {
-            let path = Path::new(parent).join(format!("child-{id}"));
+        if let Some(settings) = self.parent.env.get("CEDEGRID_PUBLICATION_SPEC") { request.env.insert("CEDEGRID_PUBLICATION_SPEC".into(),settings.clone()); }
+        let log_dir = if let Some(parent) = self.parent.env.get("CEDEGRID_OUTPUT_DIR") {
+            let base = self.parent.env.get("CEDEGRID_PUBLICATION_SPEC").map(|raw| serde_json::from_str::<crate::publication::NativePublisherSettings>(raw).map(|s| s.output_dir)).transpose()?.unwrap_or_else(|| PathBuf::from(parent));
+            let path = base.join(format!("child-{id}"));
             fs::DirBuilder::new().mode(0o700).create(&path)?;
             request
                 .env
-                .insert("RESMGR_CAPTURE_OUTPUT".into(), "1".into());
+                .insert("CEDEGRID_CAPTURE_OUTPUT".into(), "1".into());
             Some(path)
         } else {
             None
@@ -602,7 +633,7 @@ impl MediatedChild {
             ensure!(claimed == actual, "mediated child identity mismatch");
             let mut evidence = backend.verify(&actual)?;
             evidence.push(ControlEvidence{control:"process_handle".into(),available:Some(true),permitted:Some(true),configured:true,applied:true,fallback:self.owned.pidfd.is_none(),scope:format!("mediated_child:{}",actual.pid),requested:Some("stable owned handle".into()),effective:Some(self.owned.handle_detail.clone()),detail:"Supervisor-created direct child with exclusive reaping; no arbitrary descendant adoption".into()});
-            if let Some(cpus) = self.request.env.get("RESMGR_CPU_AFFINITY") {
+            if let Some(cpus) = self.request.env.get("CEDEGRID_CPU_AFFINITY") {
                 #[cfg(target_os = "linux")]
                 {
                     let mut expected: Vec<u32> = serde_json::from_str(cpus)?;
@@ -670,6 +701,8 @@ impl MediatedChild {
                         .take()
                         .context("missing mediated child stderr")?,
                     directory,
+                    journal.namespace_guard(),
+                    self.request.env.get("CEDEGRID_PUBLICATION_SPEC").map(|raw| serde_json::from_str(raw)).transpose()?,
                 )?);
             }
             journal.prepare_managed_child(&self.id, &actual, &evidence)?;

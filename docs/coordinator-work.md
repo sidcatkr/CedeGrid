@@ -1,5 +1,9 @@
 # Coordinator, protocol, and artifact implementation record
 
+The dated evidence below describes earlier development snapshots. CedeGrid 0.2.0
+qualification is tracked separately in the [current release record](release-0.2-gates.json);
+older runs do not qualify the new source or package bytes.
+
 ## Replayable burst storage
 
 `storage_profile: burst_replay_delete_extra` is an explicit weaker local-storage
@@ -72,8 +76,9 @@ work stream. Files and test fixtures were created under the Mac home directory.
 A node configuration and a coordinator deployment configuration each accept the
 optional top-level `storage_profile` field. Omission retains `wal_full`:
 
-```yaml
-storage_profile: wal_full
+```toml
+config_version = 1
+storage_profile = "wal_full"
 ```
 
 `wal_full` requires effective `journal_mode=wal`, `synchronous=2` (FULL) and enabled
@@ -85,10 +90,16 @@ Choose `delete_extra` only when that profile has passed the relevant deployment'
 qualification and its filesystem satisfies the required synchronization contract.
 It is not a mergerfs permission switch.
 
+`cedegrid --config node.toml doctor --role agent` reports both strict filesystem
+support and admission under the selected profile. Use `--role coordinator` when
+checking a coordinator state location: replay storage cannot pass that role even
+when it is admitted for an agent. Doctor reads metadata without initializing state.
+
 Initialization is serialized. An existing database's persisted profile cannot be
-changed by editing configuration or while another process is active. Legacy WAL
-state remains compatible; DELETE/EXTRA uses schema version 3 so older binaries
-refuse it before altering its journal. Current read-only operations, offline backup
+changed by editing configuration or while another process is active. Version 0.2
+requires state schema 5 for all profiles; old WAL schema 2, DELETE schema 3 and
+replay schema 4 require the explicit [offline upgrade](migration-0.2.md).
+Current read-only operations, offline backup
 and restore preserve the stored profile. Backup automatically detects it; existing
 `backup` and `restore` commands keep their normal stop, integrity, fencing and
 new-destination requirements. No in-place profile conversion is implemented. Keep
@@ -102,7 +113,7 @@ are refused. For example:
 
 ```sh
 mkdir -p "$HOME/cedegrid-validation"
-resmgr storage-qualify --directory "$HOME/cedegrid-validation/delete-extra-001" --profile delete_extra
+cedegrid storage-qualify --directory "$HOME/cedegrid-validation/delete-extra-001" --profile delete_extra
 ```
 
 Run a separate fresh directory with `--profile wal_full` for the default profile.
@@ -129,10 +140,10 @@ synchronization semantics. See [guarantee boundaries](guarantees.md).
 
 Configure the existing node policy; execution still requires explicit opt-in:
 
-```yaml
-gpu:
-  execution_mode: conservative_non_sharing
-  process_sample_max_age_ms: 2000
+```toml
+[gpu]
+execution_mode = "conservative_non_sharing"
+process_sample_max_age_ms = 2000
 ```
 
 `auto` is the default and chooses only observed capabilities. `contention_aware`
@@ -454,8 +465,8 @@ source publication until the required testing gate is satisfied; no GitHub
 repository or public push exists yet. At023/026 the 24 production core/SDK files and241
 dependency lock entries were unchanged, with only the root package name changed
 in Cargo.lock plus package/license metadata. Source027 supersedes that runtime
-equivalence, and the old026 candidate is stale. Existing interfaces remain `resmgr`
-(binary/import), `resource_manager` (Rust library) and `resmgr-sdk` (Python
+equivalence, and the old026 candidate is stale. Existing interfaces remain `cedegrid`
+(binary/import), `cedegrid` (Rust library) and `cedegrid` (Python
 distribution). Offline SDK source/wheel packaging and 14 existing installed tests
 passed; this is packaging evidence, not a new Linux or distributed runtime pass.
 Final metadata and SDK review (private evidence retained outside this source review).
@@ -520,62 +531,64 @@ Packaging correction (private evidence retained outside this source review).
 
 ## Wire/configuration contracts
 
-Coordinator deployment JSON or YAML:
+Coordinator deployment TOML:
 
-```json
-{
-  "state_dir": "/home/USER/.local/state/resmgr/coordinator",
-  "listen": "127.0.0.1:7443",
-  "tls": {"ca_cert": "pki/ca.pem", "certificate": "pki/server.pem", "private_key": "pki/server.key"},
-  "clients": {
-    "OPERATOR_CERTIFICATE_SHA256": {"role": "operator"},
-    "NODE_CERTIFICATE_SHA256": {"role": "node", "node_id": "anchor"}
-  },
-  "lease_ms": 10000,
-  "telemetry_ttl_ms": 3000,
-  "max_artifact_bytes": 268435456,
-  "artifact_quota_bytes": 21474836480
-}
+```toml
+config_version = 1
+state_dir = "/home/USER/.local/state/cedegrid/coordinator"
+listen = "127.0.0.1:7443"
+lease_ms = 10000
+telemetry_ttl_ms = 3000
+max_artifact_bytes = 268435456
+artifact_quota_bytes = 21474836480
+[tls]
+ca_cert = "pki/ca.pem"
+certificate = "pki/server.pem"
+private_key = "pki/server.key"
+[clients.OPERATOR_CERTIFICATE_SHA256]
+role = "operator"
+[clients.NODE_CERTIFICATE_SHA256]
+role = "node"
+node_id = "anchor"
 ```
 
 The fingerprint placeholders must be replaced with actual lowercase SHA256 values;
-this illustrative JSON is not executable as-is. TLS paths and coordinator state
+this illustrative TOML is not executable as-is. TLS paths and coordinator state
 paths resolve relative to their deployment file. Use a certificate SAN matching the
 chosen endpoint. Keep the private CA key off shared servers. `tools/make_test_pki.py`
 creates short-lived validation credentials under home; these are TLS identities,
 not SSH authentication changes. Production credential rotation is an operator task.
 
-Operator client configuration is `{ "endpoint": "https://127.0.0.1:7443",
-"tls": {"ca_cert": "...", "certificate": "...", "private_key": "..."} }`.
-A minimal bounded CPU-only `agent.json`, matching `AgentConfig` in `src/agent.rs`:
+Operator clients use [client.toml](../examples/client.toml). A minimal bounded
+CPU-only `agent.toml`, matching `AgentConfig` in `src/agent.rs`:
 
-```json
-{
-  "coordinator_url": "https://127.0.0.1:7443",
-  "tls": {
-    "ca_cert": "pki/ca.pem",
-    "certificate": "pki/node-0.pem",
-    "private_key": "pki/node-0.key"
-  },
-  "capacity": {"cpu_millicores": 1000, "ram_mib": 128, "gpu_memory_mib": {}},
-  "max_workers": 1,
-  "max_spool_bytes": 134217728,
-  "max_transfer_bytes_per_second": 1048576,
-  "max_runtime_seconds": 300
-}
+```toml
+config_version = 1
+coordinator_url = "https://127.0.0.1:7443"
+max_workers = 1
+max_spool_bytes = 134217728
+max_transfer_bytes_per_second = 1048576
+max_runtime_seconds = 300
+[tls]
+ca_cert = "pki/ca.pem"
+certificate = "pki/node-0.pem"
+private_key = "pki/node-0.key"
+[capacity]
+cpu_millicores = 1000
+ram_mib = 128
 ```
 
 `tools/make_test_pki.py --output /home/USER/validation/pki --node-id anchor --node-id burst`
 maps `node-0` to `anchor` and `node-1` to `burst`; use the returned `node_identities`
 and `clients` mappings when preparing each agent and the coordinator. Transfer only
 the matching node key/certificate and public CA to a remote agent. These TLS paths
-resolve relative to `agent.json`. The loopback URL is for an agent on the coordinator
+resolve relative to `agent.toml`. The loopback URL is for an agent on the coordinator
 host; for a remote node, set its authenticated reachable endpoint with a matching
 server certificate SAN.
 
-Copy `examples/node.yaml` to the same private deployment directory and set its
+Copy `examples/node.toml` to the same private deployment directory and set its
 `node_id` to the certificate's mapped node ID, its own home-local `state_dir`, the
-appropriate node mode/reserves, and `execution.enabled: true` after preflight. The
+appropriate node mode/reserves, and `execution.enabled = true` after preflight. The
 separate `--config` node policy is required. This example admits at most one worker
 inside a one-logical-CPU/128 MiB aggregate policy ceiling and makes no GPU reservation;
 it does not enforce hard kernel CPU/RAM limits. Adjust these explicitly chosen
@@ -587,17 +600,17 @@ bound traffic and local staging. A runtime of zero would require an explicit sto
 Actual CLI entry points:
 
 ```sh
-resmgr coordinator --deployment coordinator.json
-resmgr --config node.yaml agent --deployment agent.json
-resmgr pool --deployment operator.json --spec pool.json
-resmgr submit --deployment operator.json --job job.json
-resmgr status --deployment operator.json --job-id experiment-job
-resmgr drain --deployment operator.json --node-id opportunistic-node
-resmgr drain --deployment operator.json --node-id opportunistic-node --resume
-resmgr cancel --deployment operator.json --job-id experiment-job
-resmgr --config node.yaml reconcile
-resmgr resume --deployment operator.json --task-id released-task
-resmgr rpc --deployment operator.json --request request.json
+cedegrid coordinator --deployment coordinator.toml
+cedegrid --config node.toml agent --deployment agent.toml
+cedegrid pool --deployment operator.toml --spec pool.json
+cedegrid submit --deployment operator.toml --job job.json
+cedegrid status --deployment operator.toml --job-id experiment-job
+cedegrid drain --deployment operator.toml --node-id opportunistic-node
+cedegrid drain --deployment operator.toml --node-id opportunistic-node --resume
+cedegrid cancel --deployment operator.toml --job-id experiment-job
+cedegrid --config node.toml reconcile
+cedegrid resume --deployment operator.toml --task-id released-task
+cedegrid rpc --deployment operator.toml --request request.json
 ```
 
 `resume` cannot override retained uncertainty. An unsafe task additionally requires
@@ -623,7 +636,7 @@ checksum failures, exact retries, incomplete uploads and symlink refusal.
 certificates, verifies positive RPC, and rejects missing/unlisted/wrong-role client
 certificates, plaintext requests and wrong server names. It invokes the real Python
 SDK against that live server for status/result retrieval. No mock HTTP server is
-used. `RESMGR_TEST_PYTHON` can select a Python >=3.10 interpreter.
+used. `CEDEGRID_TEST_PYTHON` can select a Python >=3.10 interpreter.
 
 Run from the checkout with `TMPDIR` set to a private directory under home:
 
@@ -710,14 +723,14 @@ also cannot be used directly as live state.
 ```sh
 # Drain test jobs if they should finish before the snapshot; stop the coordinator
 # using its verified foreground/process handle. Keep unrelated services untouched.
-resmgr backup --state-dir "$HOME/validation/coordinator-state" --destination "$HOME/validation/snapshot-001"
+cedegrid backup --state-dir "$HOME/validation/coordinator-state" --destination "$HOME/validation/snapshot-001"
 
 # Restore only after retiring the original coordinator; no simultaneous old/new
 # coordinator is supported. Use a new destination, then update the private deployment
 # state_dir to this output while retaining separately stored TLS credentials.
-resmgr restore --snapshot "$HOME/validation/snapshot-001" --destination "$HOME/validation/restored-state" --confirm-source-stopped
-resmgr coordinator --deployment "$HOME/validation/restored-coordinator.json"
-resmgr status --deployment "$HOME/validation/operator.json"
+cedegrid restore --snapshot "$HOME/validation/snapshot-001" --destination "$HOME/validation/restored-state" --confirm-source-stopped
+cedegrid coordinator --deployment "$HOME/validation/restored-coordinator.toml"
+cedegrid status --deployment "$HOME/validation/operator.toml"
 ```
 
 Restore checks every manifest hash before creating the target and checks hashes

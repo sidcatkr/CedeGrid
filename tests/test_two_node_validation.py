@@ -92,7 +92,7 @@ class EnvelopeTests(unittest.TestCase):
                 'model_sha256': 'a' * 64, 'snapshot_sha256': 'b' * 64, 'python': '/home/example/bin/python',
                 'source_root': '/home/example/source', 'sdk_root': '/home/example/sdk', 'candidate': '/home/example/main.py'}
         self.application = {'experiment_id': 'exp', 'run_seed': 'seed', 'games': 12,
-                            'output': str(root / 'application'), 'client_config': str(root / 'operator.json'),
+                            'output': str(root / 'application'), 'client_config': str(root / 'operator.toml'),
                             'nodes': [node, {**node, 'node_id': 'burst', 'class': 'opportunistic'}]}
 
     def test_valid_profile_preserves_one_actor_per_node(self):

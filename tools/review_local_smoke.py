@@ -13,7 +13,7 @@ import sys
 import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python'))
-from resmgr import sha256_file
+from cedegrid import sha256_file
 from validation_runtime import atomic_json,inside_home
 
 
@@ -51,7 +51,7 @@ def review(output):
             raise ValueError('ordinary command output or accepted task identity mismatch')
     if len(status['tasks'])!=len(planned)+2+expected_ordinary or any(item['status']!='completed' for item in status['tasks']):
         raise ValueError('managed games and two learner tasks did not all complete')
-    checked_file(root,root/'bin/resmgr',report['binary_sha256'])
+    checked_file(root,root/'bin/cedegrid',report['binary_sha256'])
     games=[]
     for path in sorted((root/'application/receipts').glob('*.json')):
         receipt=json.loads(path.read_text());submission=receipt['submission']

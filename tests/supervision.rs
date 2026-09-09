@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use anyhow::{Result, bail};
-use resource_manager::{
+use cedegrid::{
     execution_model::*,
     model::Resources,
     supervision::{self, SupervisorOptions},
@@ -196,7 +196,7 @@ fn run(
         options,
         journal,
         backend,
-        Path::new(env!("CARGO_BIN_EXE_resmgr")),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
     )
 }
 
@@ -306,7 +306,7 @@ fn every_preparation_failure_keeps_user_code_behind_barrier() {
 
 #[test]
 fn spawn_failure_and_identity_protocol_failure_do_not_authorize() {
-    for executable in ["/resmgr-test-missing-gate", "/bin/false"] {
+    for executable in ["/cedegrid-test-missing-gate", "/bin/false"] {
         let temp = TempDir::new().unwrap();
         let req = request(temp.path());
         let journal = Journal::new();
@@ -399,7 +399,7 @@ fn cooperative_drain_file_allows_exit_before_term() {
     req.argv = vec![
         "/bin/sh".into(),
         "-c".into(),
-        "while [ ! -f \"$RESMGR_DRAIN_FILE\" ]; do :; done".into(),
+        "while [ ! -f \"$CEDEGRID_DRAIN_FILE\" ]; do :; done".into(),
     ];
     let opts = SupervisorOptions {
         drain_timeout_ms: 200,
@@ -415,7 +415,7 @@ fn cooperative_drain_file_allows_exit_before_term() {
 fn gate_eof_before_authorization_never_executes_workload() {
     let temp = TempDir::new().unwrap();
     let req = request(temp.path());
-    let mut gate = Command::new(env!("CARGO_BIN_EXE_resmgr"))
+    let mut gate = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("__worker-gate")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -444,13 +444,13 @@ fn gate_eof_before_authorization_never_executes_workload() {
 /// Runs only in a helper process selected by supervisor_loss_before_authorization.
 #[test]
 fn supervisor_loss_fixture() {
-    let Some(dir) = std::env::var_os("RESMGR_TEST_SUPERVISOR_LOSS_DIR") else {
+    let Some(dir) = std::env::var_os("CEDEGRID_TEST_SUPERVISOR_LOSS_DIR") else {
         return;
     };
     let path = PathBuf::from(dir);
     let mut journal = Journal::new();
     journal.ready = Some(path.join("ready"));
-    if std::env::var("RESMGR_TEST_PAUSE_PHASE").as_deref() == Ok("authorized") {
+    if std::env::var("CEDEGRID_TEST_PAUSE_PHASE").as_deref() == Ok("authorized") {
         journal.pause_phase = ExecutionPhase::Authorized;
     }
     let _ = run(&request(&path), &options(), &journal, &mut Backend::new());
@@ -462,8 +462,8 @@ fn supervisor_loss_before_authorization_closes_gate_without_running_user_code() 
         let temp = TempDir::new().unwrap();
         let mut supervisor = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "supervisor_loss_fixture", "--nocapture"])
-            .env("RESMGR_TEST_SUPERVISOR_LOSS_DIR", temp.path())
-            .env("RESMGR_TEST_PAUSE_PHASE", pause_phase)
+            .env("CEDEGRID_TEST_SUPERVISOR_LOSS_DIR", temp.path())
+            .env("CEDEGRID_TEST_PAUSE_PHASE", pause_phase)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -527,7 +527,7 @@ fn malformed_identity_and_unresponsive_gate_fail_closed() {
 
 #[test]
 fn incompatible_reaping_policy_fixture() {
-    if std::env::var_os("RESMGR_TEST_IGNORE_SIGCHLD").is_none() {
+    if std::env::var_os("CEDEGRID_TEST_IGNORE_SIGCHLD").is_none() {
         return;
     }
     // This exact test runs alone in a disposable helper process. Never alter
@@ -552,7 +552,7 @@ fn incompatible_reaping_policy_fixture() {
 fn inherited_auto_reaping_is_rejected_before_reservation() {
     let result = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "incompatible_reaping_policy_fixture"])
-        .env("RESMGR_TEST_IGNORE_SIGCHLD", "1")
+        .env("CEDEGRID_TEST_IGNORE_SIGCHLD", "1")
         .output()
         .unwrap();
     assert!(
@@ -620,7 +620,7 @@ fn external_authorization_refusal_never_runs_user_code() {
             &SupervisorOptions::default(),
             &journal,
             &mut backend,
-            Path::new(env!("CARGO_BIN_EXE_resmgr")),
+            Path::new(env!("CARGO_BIN_EXE_cedegrid")),
             &mut Refuse
         )
         .is_err()
@@ -638,7 +638,7 @@ fn explicit_cpu_affinity_is_verified_or_refused_before_execution() {
     #[cfg(target_os = "linux")]
     let cpus = {
         let status = fs::read_to_string("/proc/self/status").unwrap();
-        let ids = resource_manager::kernel::parse_cpu_list(
+        let ids = cedegrid::kernel::parse_cpu_list(
             status
                 .lines()
                 .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
@@ -651,7 +651,7 @@ fn explicit_cpu_affinity_is_verified_or_refused_before_execution() {
     #[cfg(not(target_os = "linux"))]
     let cpus = vec![0u32];
     request.env.insert(
-        "RESMGR_CPU_AFFINITY".into(),
+        "CEDEGRID_CPU_AFFINITY".into(),
         serde_json::to_string(&cpus).unwrap(),
     );
     request.required_controls.push("cpu.affinity".into());
