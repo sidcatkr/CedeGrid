@@ -1,6 +1,6 @@
 //! Bounded component-cost experiment. Does not claim whole-daemon overhead.
 #![cfg(unix)]
-use resource_manager::{execution_model::*, model::Resources, protocol::*, state::StateStore};
+use cedegrid::{execution_model::*, model::Resources, protocol::*, state::StateStore};
 use rusqlite::params;
 use std::{collections::BTreeMap, fs, time::Instant};
 
@@ -60,7 +60,7 @@ fn four_thousand_released_records_component_cost() {
     let started = Instant::now();
     let mut rounds = vec![];
     let mut wire_bytes = 0;
-    let revised = std::env::var_os("RESMGR_BENCH_REVISED_RELEASE_FILTERS").is_some();
+    let revised = std::env::var_os("CEDEGRID_BENCH_REVISED_RELEASE_FILTERS").is_some();
     for index in 0..16 {
         let round = Instant::now();
         let cpu = usage().0;

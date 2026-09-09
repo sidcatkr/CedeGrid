@@ -1,0 +1,10 @@
+config_version = 1
+endpoint = "https://coordinator.example.test:7443"
+timeout_seconds = 15.0
+# Aggregate serialized RPC bytes, with 10% framing headroom. Zero disables pacing.
+max_transfer_bytes_per_second = 10485760
+
+[tls]
+ca_cert = "tls/ca.pem"
+certificate = "tls/operator.pem"
+private_key = "tls/operator.key"

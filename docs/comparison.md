@@ -23,32 +23,31 @@ synthetic workers; unrelated users' jobs are not experimental subjects.
 The unmanaged/rootless comparison works without delegated controls. Optionally
 prepare a cgroup profile with identical CPU, RAM, monitoring,
 GPU, lifecycle and execution settings. The harness rejects differences in these
-sections. The rootless profile must have `cgroup.enabled: false`; the cgroup profile
+sections. The rootless profile must have `cgroup.enabled = false`; the cgroup profile
 must already enable and explicitly authorize the selected controls. For example,
 these are configuration fragments to merge into otherwise matching profiles:
 
-```yaml
+```toml
 # Both profiles: explicitly opted-in local experiment.
-execution:
-  enabled: true
-  prepare_timeout_ms: 10000
-  admission_timeout_ms: 60000
-node_mode: opportunistic
-lifecycle:
-  allocation_lease_ms: 600000
+config_version = 1
+node_mode = "opportunistic"
+[execution]
+enabled = true
+prepare_timeout_ms = 10000
+admission_timeout_ms = 60000
+[lifecycle]
+allocation_lease_ms = 600000
 ```
 
-```yaml
+```toml
 # Only the cgroup profile. Replace with an actually delegated, authorized subtree.
-cgroup:
-  enabled: true
-  delegated_root: /sys/fs/cgroup/my-authorized-subtree
-  authorized_controls: [cgroup.procs, cpu.weight]
-  cpu_weight: 10
-  cpu_max: null
-  memory_high_mib: null
-  memory_max_mib: null
-  allow_kill: false
+[cgroup]
+enabled = true
+delegated_root = "/sys/fs/cgroup/my-authorized-subtree"
+authorized_controls = ["cgroup.procs", "cpu.weight"]
+cpu_weight = 10
+allow_kill = false
+# Omitted cpu_max and memory limits remain disabled.
 ```
 
 `cgroup.procs` authorizes only the new gate's self-join. The manager creates its own
@@ -70,8 +69,8 @@ For example, a single effective CPU with any observed use may have less than 1,0
 millicores available and reject admission. This is reported as blocked, not fixed
 by inventing capacity or suppressing resource accounting.
 
-The harness reads effective configuration through `resmgr validate` and runs
-`resmgr doctor` on each supplied profile. No YAML dependency is required. Source profiles
+The harness reads effective configuration through `cedegrid validate` and runs
+`cedegrid doctor` on each supplied profile. Runtime profiles use TOML. Source profiles
 remain unchanged. Each case gets a retained configuration copy with exactly these
 recorded overrides:
 
@@ -84,9 +83,9 @@ Build the native Linux binary first, then run on that authorized Linux host:
 
 ```sh
 python3 tools/compare.py \
-  --binary ./target/release/resmgr \
-  --baseline-config ./rootless-benchmark.yaml \
-  --cgroup-config ./cgroup-benchmark.yaml \
+  --binary ./target/release/cedegrid \
+  --baseline-config ./rootless-benchmark.toml \
+  --cgroup-config ./cgroup-benchmark.toml \
   --output ./results/comparison.json \
   --repetitions 3 --warmup 2 --measure 5 \
   --execute
@@ -182,7 +181,7 @@ The future eBPF/sched_ext research gate remains unchanged.
 
 Omit `--cgroup-config` to compare equivalent unmanaged and rootless runs. The
 unmanaged worker has the same arithmetic, seed, CPU affinity and niceness. Only
-the managed cases run under ResourceManager. Runtime task IDs are generated UUIDs,
+the managed cases run under CedeGrid. Runtime task IDs are generated UUIDs,
 not artifact-directory names. Optional cgroup absence is reported as unverified,
 not as a successful kernel-control check.
 
@@ -209,12 +208,12 @@ remain a separate required measurement. These commands are for the already
 authorized Linux anchor after native installation/testing, using its actual UUID:
 
 ```sh
-resmgr_validation_root="$HOME/.local/share/resmgr-validation"
-"$resmgr_validation_root/venv-isolated/bin/python" \
-  "$resmgr_validation_root/source/ResourceManager/tools/pressure_comparison.py" \
-  --root "$resmgr_validation_root" \
-  --output "$resmgr_validation_root/evidence/pressure-cpu-UNIQUE-RUN-ID" \
-  --mode cpu --gpu-uuid "$RESMGR_VALIDATION_GPU_UUID" --execute
+cedegrid_validation_root="$HOME/.local/share/cedegrid-validation"
+"$cedegrid_validation_root/venv-isolated/bin/python" \
+  "$cedegrid_validation_root/source/CedeGrid/tools/pressure_comparison.py" \
+  --root "$cedegrid_validation_root" \
+  --output "$cedegrid_validation_root/evidence/pressure-cpu-UNIQUE-RUN-ID" \
+  --mode cpu --gpu-uuid "$CEDEGRID_VALIDATION_GPU_UUID" --execute
 ```
 
 For a separately authorized GPU trial, use a new output directory and `--mode gpu`
@@ -270,13 +269,13 @@ with no GPU UUID or GPU reservation. After the native stress produces a verified
 snapshot, use the active verified source/binary under the private anchor root:
 
 ```sh
-resmgr_validation_root="$HOME/.local/share/resmgr-validation"
-"$resmgr_validation_root/venv-isolated/bin/python" \
-  "$resmgr_validation_root/source/ResourceManager/tools/anchor_validation.py" \
-  --root "$resmgr_validation_root" --run-id UNIQUE-MATCHED-RUN \
+cedegrid_validation_root="$HOME/.local/share/cedegrid-validation"
+"$cedegrid_validation_root/venv-isolated/bin/python" \
+  "$cedegrid_validation_root/source/CedeGrid/tools/anchor_validation.py" \
+  --root "$cedegrid_validation_root" --run-id UNIQUE-MATCHED-RUN \
   --node-id YOUR-CONFIGURED-VALIDATION-NODE \
-  --candidate "$resmgr_validation_root/runs/YOUR-STRESS-RUN/snapshots/cycle-00000/main.py" \
-  --binary "$resmgr_validation_root/source/ResourceManager/target/release/resmgr" \
+  --candidate "$cedegrid_validation_root/runs/YOUR-STRESS-RUN/snapshots/cycle-00000/main.py" \
+  --binary "$cedegrid_validation_root/source/CedeGrid/target/release/cedegrid" \
   --stage command --device cpu --execute
 ```
 

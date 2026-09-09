@@ -19,7 +19,8 @@ def generate(output, hosts, node_ids=None):
     def run(*args):
         subprocess.run(['openssl', *map(str,args)], cwd=output, env=env, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    run('req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.pem','-days','7','-subj','/CN=resmgr-validation-ca')
+    (output / 'ca.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n')
+    run('req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.pem','-days','7','-subj','/CN=cedegrid-validation-ca','-config','ca.cnf')
     clients = {}
     roles = {}
     node_identities = {}
@@ -27,9 +28,9 @@ def generate(output, hosts, node_ids=None):
         ('node' if node_ids == ['node'] else f'node-{index}', node_id)
         for index, node_id in enumerate(node_ids)]
     for name, node_id in names:
-        run('req','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN=resmgr-validation-'+name)
+        run('req','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN=cedegrid-validation-'+name)
         extension = output/(name+'.ext')
-        extension.write_text('basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+('serverAuth' if name=='server' else 'clientAuth')+'\n'+('subjectAltName='+','.join(hosts)+'\n' if name=='server' else ''))
+        extension.write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nextendedKeyUsage='+('serverAuth' if name=='server' else 'clientAuth')+'\n'+('subjectAltName='+','.join(hosts)+'\n' if name=='server' else ''))
         run('x509','-req','-in',name+'.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-out',name+'.pem','-days','7','-extfile',name+'.ext')
         os.chmod(output/(name+'.key'),0o600)
         if name != 'server':

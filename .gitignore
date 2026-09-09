@@ -1,4 +1,7 @@
 /target/
+/.cedegrid-state/
+cedegrid.toml
+.*.cedegrid-control/
 /.resource-manager-state/
 **/*.sqlite3
 **/*.sqlite3-wal
@@ -21,3 +24,7 @@ dist/
 # Private development evidence and retained failed test fixtures.
 /docs/work-log.md
 /.distributed-service-*/
+
+# SDK build dependencies and package archives.
+/npm/node_modules/
+/npm/*.tgz

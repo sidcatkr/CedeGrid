@@ -19,13 +19,14 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
-from resmgr import Client, sha256_file
+from cedegrid import Client, sha256_file
 from make_test_pki import generate as generate_pki
 from make_kaggriculture_validation import generate as generate_application, IMPLEMENTATION_FILES
 from native_validation import physical_cpus
 from local_smoke import family_memory
 from soak import AllocationLedger
 from validation_runtime import OwnedProcess, atomic_json, inside_home, local_guard, home_executable
+from runtime_config import atomic_runtime_config, read_runtime_config
 
 
 TARGETS = {'matched_throughput_ratio_min': .90, 'manager_peak_rss_bytes_max': 512 * 1024**2,
@@ -341,19 +342,19 @@ def deployment(output, binary, cpus, node_id, gpu_uuid, seconds, env=None, devic
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
     endpoint = f'https://127.0.0.1:{port}'
-    atomic_json(output / 'coordinator.json', {'listen': f'127.0.0.1:{port}',
+    atomic_runtime_config(output / 'coordinator.toml', {'listen': f'127.0.0.1:{port}',
         'state_dir': str(output / 'coordinator-state'), 'tls': tls('server'), 'clients': pki['clients'],
         'lease_ms': 10000, 'telemetry_ttl_ms': 3000, 'max_artifact_bytes': 256 * 1024**2,
-        'artifact_quota_bytes': 20 * 1024**3, 'retry_limit': 3})
-    atomic_json(output / 'operator.json', {'endpoint': endpoint, 'tls': tls('operator')})
-    atomic_json(output / 'agent.json', {'coordinator_url': endpoint, 'tls': tls('node-0'),
+        'artifact_quota_bytes': 20 * 1024**3, 'retry_limit': 3}, 'coordinator')
+    atomic_runtime_config(output / 'operator.toml', {'endpoint': endpoint, 'tls': tls('operator')}, 'client')
+    atomic_runtime_config(output / 'agent.toml', {'coordinator_url': endpoint, 'tls': tls('node-0'),
         'cpu_affinity': cpus, 'max_transfer_bytes_per_second': 10 * 1024**2,
         'capacity': {'cpu_millicores': len(cpus) * 1000 if device == 'cpu' else 6000,
                      'ram_mib': 4096 if device == 'cpu' else 24576,
                      'gpu_memory_mib': {} if device == 'cpu' else {gpu_uuid: 6144}},
         'max_workers': 1 if device == 'cpu' else 3, 'max_spool_bytes': 2 * 1024**3,
-        'max_runtime_seconds': seconds if device == 'cpu' else seconds + 120})
-    atomic_json(output / 'node.json', {'schema_version': 2, 'node_id': node_id,
+        'max_runtime_seconds': seconds if device == 'cpu' else seconds + 120}, 'agent')
+    atomic_runtime_config(output / 'node.toml', {'schema_version': 2, 'node_id': node_id,
         'node_mode': 'guaranteed', 'state_dir': str(output / 'agent-state'),
         'execution': {'enabled': True, 'prepare_timeout_ms': 10000, 'admission_timeout_ms': 60000,
                       'release_confirm_timeout_ms': 10000},
@@ -365,11 +366,11 @@ def deployment(output, binary, cpus, node_id, gpu_uuid, seconds, env=None, devic
                 'protective_shrink_percent': 25, 'active_shrink_percent': 50},
         'lifecycle': {'drain_timeout_ms': 3000, 'term_grace_ms': 2000,
                       'heartbeat_interval_ms': 2000, 'allocation_lease_ms': 10000},
-        'cgroup': {'enabled': False}})
-    checked = subprocess.run([str(binary), '--config', str(output / 'node.json'), 'doctor'],
+        'cgroup': {'enabled': False}}, 'node')
+    checked = subprocess.run([str(binary), '--config', str(output / 'node.toml'), 'doctor'],
                              check=True, capture_output=True, text=True, timeout=30, env=env)
     atomic_json(output / 'doctor.json', json.loads(checked.stdout))
-    return Client.from_config(output / 'operator.json')
+    return Client.from_config(output / 'operator.toml')
 
 
 def run(args):
@@ -384,7 +385,7 @@ def run(args):
     root = inside_home(args.root)
     application, manager = root / 'source/Kaggriculture', root / 'source/ResourceManager'
     python = home_executable(root / 'venv-isolated/bin/python')
-    binary = inside_home(args.binary) if getattr(args, 'binary', None) else manager / 'target/release/resmgr'
+    binary = inside_home(args.binary) if getattr(args, 'binary', None) else manager / 'target/release/cedegrid'
     bootstrap = inside_home(args.bootstrap) if args.bootstrap else None
     if bootstrap is None and device != 'cpu':
         raise ValueError('CUDA validation requires the existing bootstrap checkpoint')
@@ -473,7 +474,7 @@ def run(args):
         time.sleep(.5)
     try:
         client = deployment(output, binary, cpus, args.node_id, args.gpu_uuid, seconds, env, device)
-        services['coordinator'] = OwnedProcess([str(binary), 'coordinator', '--deployment', str(output / 'coordinator.json')], manager, output / 'coordinator.log', env)
+        services['coordinator'] = OwnedProcess([str(binary), 'coordinator', '--deployment', str(output / 'coordinator.toml')], manager, output / 'coordinator.log', env)
         deadline = time.monotonic() + 30
         while True:
             try:
@@ -482,7 +483,7 @@ def run(args):
                 if time.monotonic() > deadline or services['coordinator'].poll() is not None:
                     raise
                 time.sleep(.25)
-        services['agent'] = OwnedProcess([str(binary), '--config', str(output / 'node.json'), 'agent', '--deployment', str(output / 'agent.json')], manager, output / 'agent.log', env)
+        services['agent'] = OwnedProcess([str(binary), '--config', str(output / 'node.toml'), 'agent', '--deployment', str(output / 'agent.toml')], manager, output / 'agent.log', env)
         deadline = time.monotonic() + 60
         while not (last_status and last_status.get('nodes')):
             if time.monotonic() > deadline:
@@ -495,11 +496,11 @@ def run(args):
                     continue
                 run_id = args.run_id + f'.pair{repetition}'
                 seed_id = (prior['run_id'] if prior else args.run_id) + f'.pair{repetition}'
-                generated = generate_application(root, run_id, python, args.candidate, args.gpu_uuid, output / 'operator.json', args.node_id, TARGETS['games_per_trial'], device, seed_id)
+                generated = generate_application(root, run_id, python, args.candidate, args.gpu_uuid, output / 'operator.toml', args.node_id, TARGETS['games_per_trial'], device, seed_id)
                 case_root = Path(generated['output'])
                 if prior:
-                    original_node = json.loads((inside_home(args.resume_report).parent / 'node.json').read_text())
-                    current_node = json.loads((output / 'node.json').read_text())
+                    original_node = read_runtime_config(inside_home(args.resume_report).parent / 'node.toml')
+                    current_node = read_runtime_config(output / 'node.toml')
                     for key in original_node:
                         if key not in ('node_id', 'state_dir') and original_node[key] != current_node[key]:
                             raise ValueError('comparison policy changed: ' + key)
@@ -551,9 +552,9 @@ def run(args):
                         tick()
             report['matched_comparison'] = paired_report(report['cases'])
         else:
-            generated = generate_application(root, args.run_id + '.cycle', python, args.candidate, args.gpu_uuid, output / 'operator.json', args.node_id, 12)
+            generated = generate_application(root, args.run_id + '.cycle', python, args.candidate, args.gpu_uuid, output / 'operator.toml', args.node_id, 12)
             config = Path(generated['output']) / 'cooperative.json'
-            creator = OwnedProcess([str(python), '-m', 'integration.resmgr', 'cycle', '--config', str(config),
+            creator = OwnedProcess([str(python), '-m', 'integration.cedegrid', 'cycle', '--config', str(config),
                 '--bootstrap', str(inside_home(args.bootstrap)), '--steps', '50', '--device', 'cuda:0'], application, output / 'cycle.log', env)
             while creator.poll() is None:
                 tick()
@@ -644,12 +645,12 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', default=str(Path.home() / '.local/share/resmgr-validation'))
+    parser.add_argument('--root', default=str(Path.home() / '.local/share/cedegrid-validation'))
     for name in ('run-id', 'node-id', 'candidate'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--gpu-uuid')
     parser.add_argument('--bootstrap')
-    parser.add_argument('--binary', help='existing frozen home-local resmgr binary')
+    parser.add_argument('--binary', help='existing frozen home-local cedegrid binary')
     parser.add_argument('--device', choices=['cpu', 'cuda:0'], default='cuda:0')
     parser.add_argument('--wall-seconds', type=int,
         help='approved CPU comparison total execution budget, including any resumed segment (default 900; maximum 1800)')

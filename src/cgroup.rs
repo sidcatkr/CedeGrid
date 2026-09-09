@@ -706,7 +706,7 @@ mod linux {
             let mut random = [0_u8; 16];
             File::open("/dev/urandom")?.read_exact(&mut random)?;
             let name = format!(
-                "resmgr-{}",
+                "cedegrid-{}",
                 random
                     .iter()
                     .map(|b| format!("{b:02x}"))

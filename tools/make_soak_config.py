@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 from pathlib import Path
+from runtime_config import read_runtime_config
 import sys
 from validation_runtime import atomic_json, inside_home
 
@@ -16,7 +17,7 @@ from validation_runtime import atomic_json, inside_home
 def generate(application_config, coordinator_config, bootstrap, output, *, burst_output,
              burst_cpu_ids, proxy_listen_port, proxy_target_port):
     application=json.loads(inside_home(application_config).read_text())
-    coordinator=json.loads(inside_home(coordinator_config).read_text())
+    coordinator=read_runtime_config(inside_home(coordinator_config))
     nodes=application['nodes']
     anchors=[node for node in nodes if node['class']=='guaranteed'];bursts=[node for node in nodes if node['class']=='opportunistic']
     if len(nodes)!=2 or len(anchors)!=1 or len(bursts)!=1:
@@ -41,7 +42,7 @@ def generate(application_config, coordinator_config, bootstrap, output, *, burst
     validate_proxy({**proxy,'execution_approved':True})
     proxy_path=output/'proxy.json';atomic_json(proxy_path,proxy)
     script=Path(__file__).resolve().parent
-    controller=[anchor['python'],'-m','integration.resmgr','soak','--config',str(app_path),'--bootstrap',str(inside_home(bootstrap)),
+    controller=[anchor['python'],'-m','integration.cedegrid','soak','--config',str(app_path),'--bootstrap',str(inside_home(bootstrap)),
         '--steps','50','--device',anchor.get('device','cpu')]
     events=[];pressure_events=[]
     for hour in range(24):

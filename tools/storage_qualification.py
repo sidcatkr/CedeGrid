@@ -29,7 +29,7 @@ def qualify(root):
         proc = subprocess.run(['findmnt', '-T', str(directory), '-n', '-o', 'TARGET,FSTYPE,OPTIONS'], capture_output=True, text=True, check=False)
         result['mount'] = proc.stdout.strip()
     try:
-        payload = b'resmgr-home-only-qualification\n' * 4096
+        payload = b'cedegrid-home-only-qualification\n' * 4096
         temporary, published = directory / 'attempt.tmp', directory / 'published.bin'
         with temporary.open('xb') as stream:
             stream.write(payload)

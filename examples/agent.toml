@@ -1,0 +1,15 @@
+config_version = 1
+coordinator_url = "https://coordinator.example.test:7443"
+max_workers = 4
+max_transfer_bytes_per_second = 10485760
+max_spool_bytes = 2147483648
+max_runtime_seconds = 0
+
+[tls]
+ca_cert = "tls/ca.pem"
+certificate = "tls/node.pem"
+private_key = "tls/node.key"
+
+[capacity]
+cpu_millicores = 1000
+ram_mib = 1024

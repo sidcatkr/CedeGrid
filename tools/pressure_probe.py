@@ -15,8 +15,8 @@ def run(args):
     output=inside_home(args.output);output.mkdir(parents=True,exist_ok=False)
     os.sched_setaffinity(0,{args.cpu})
     context=None
-    if os.environ.get('RESMGR_CONTEXT'):
-        from resmgr import WorkerContext
+    if os.environ.get('CEDEGRID_CONTEXT'):
+        from cedegrid import WorkerContext
         context=WorkerContext.from_env()
     gpu=None
     if args.mode=='gpu':
@@ -43,7 +43,7 @@ def run(args):
             next_guard=time.monotonic()+.5
         began=time.monotonic()
         if args.mode=='cpu':
-            hashlib.pbkdf2_hmac('sha256',b'resmgr-matched-probe',b'fixed-seed',1500)
+            hashlib.pbkdf2_hmac('sha256',b'cedegrid-matched-probe',b'fixed-seed',1500)
             # A bounded half-core producer leaves meaningful CPU room before
             # pressure; this is identical under unmanaged and managed execution.
             time.sleep(time.monotonic()-began)

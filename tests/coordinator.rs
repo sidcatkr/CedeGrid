@@ -1,4 +1,4 @@
-use resource_manager::{
+use cedegrid::{
     coordinator::Coordinator,
     execution_model::{
         AllocationClass, ExecutionPhase, ExecutionRecord, LaunchRequest, ProcessIdentity,
@@ -1046,7 +1046,7 @@ fn failures_back_off_and_stop_after_configured_budget_without_ack_double_count()
     };
     assert_eq!(
         tasks[0].status,
-        resource_manager::state::TaskStatus::NeedsReconciliation
+        cedegrid::state::TaskStatus::NeedsReconciliation
     );
     assert!(offers(&mut c, now + 60_000).assignments.is_empty());
     c.handle_at(
@@ -1186,7 +1186,7 @@ fn delayed_node_telemetry_is_rejected_and_new_live_release_contradiction_reclaim
 
 #[test]
 fn named_inputs_require_publication_and_only_authorize_current_assignees() {
-    use resource_manager::execution_model::NamedArtifact;
+    use cedegrid::execution_model::NamedArtifact;
     use sha2::{Digest, Sha256};
     let d = dir();
     let mut c = Coordinator::open(config(d.path())).unwrap();
@@ -1461,7 +1461,7 @@ fn task_uncertain_on_one_node_cannot_preempt_another_nodes_healthy_work() {
 }
 #[test]
 fn prepared_controls_and_initial_freshness_are_checked_before_grant() {
-    use resource_manager::execution_model::ControlEvidence;
+    use cedegrid::execution_model::ControlEvidence;
     let d = dir();
     let mut c = Coordinator::open(config(d.path())).unwrap();
     c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
@@ -1575,7 +1575,7 @@ fn unknown_allocations_remain_fenced_through_omission_and_restart_until_verified
 
 #[test]
 fn published_file_without_database_commit_recovers_after_real_restart_and_ack_replay() {
-    use resource_manager::artifacts::ArtifactStore;
+    use cedegrid::artifacts::ArtifactStore;
     use sha2::{Digest, Sha256};
     let d = dir();
     let cfg = config(d.path());
@@ -1738,15 +1738,12 @@ fn published_file_without_database_commit_recovers_after_real_restart_and_ack_re
         panic!()
     };
     assert_eq!(tasks.len(), 1);
-    assert_eq!(
-        tasks[0].status,
-        resource_manager::state::TaskStatus::Completed
-    );
+    assert_eq!(tasks[0].status, cedegrid::state::TaskStatus::Completed);
     assert_eq!(allocations[0]["phase"], "uncertain");
 }
 
 #[test]
-fn four_thousand_task_soak_status_fits_bounded_transport_with_headroom() {
+fn four_thousand_historical_tasks_page_while_oversized_inventory_is_refused() {
     let d = dir();
     let cfg = config(d.path());
     let mut c = Coordinator::open(cfg.clone()).unwrap();
@@ -1768,11 +1765,8 @@ fn four_thousand_task_soak_status_fits_bounded_transport_with_headroom() {
         100,
     )
     .unwrap();
-    let mut connection = rusqlite::Connection::open(
-        cfg.state_dir
-            .join(resource_manager::state::DATABASE_FILENAME),
-    )
-    .unwrap();
+    let mut connection =
+        rusqlite::Connection::open(cfg.state_dir.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
     let tx = connection.transaction().unwrap();
     let mut r = report(101);
     for (i, request) in requests.iter().enumerate() {
@@ -1795,35 +1789,49 @@ fn four_thousand_task_soak_status_fits_bounded_transport_with_headroom() {
     }
     tx.commit().unwrap();
     drop(connection);
-    c.handle_at(&node(), Request::Heartbeat { report: r }, 101)
-        .unwrap();
-    let status = c
+    let error = c
+        .handle_at(&node(), Request::Heartbeat { report: r }, 101)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("INVENTORY_LIMIT"));
+    let error = c
         .handle_at(&Principal::Operator, Request::Status { job_id: None }, 102)
-        .unwrap();
-    let bytes = serde_json::to_vec(&status).unwrap();
-    eprintln!("status_payload_4000_tasks_bytes={}", bytes.len());
-    // Numeric budget fixed before evaluating: both clients cap status at 8 MiB;
-    // the approved bounded soak shape must leave at least 1 MiB of headroom.
-    assert!(
-        bytes.len() < 7 * 1024 * 1024,
-        "4000-task status needs pagination or a smaller approved run shape: {}",
-        bytes.len()
-    );
-    let Response::Status {
-        tasks,
-        allocations,
-        nodes,
-        ..
-    } = status
-    else {
-        panic!()
-    };
-    assert_eq!(tasks.len(), 4000);
-    assert_eq!(allocations.len(), 4000);
-    assert_eq!(
-        nodes[0]["report"]["allocations"].as_array().unwrap().len(),
-        4000
-    );
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("PAGINATION_REQUIRED"));
+    for collection in [
+        cedegrid::pagination::Collection::Tasks,
+        cedegrid::pagination::Collection::Allocations,
+    ] {
+        let mut query = cedegrid::pagination::PageQuery {
+            collection,
+            job_id: None,
+            node_id: None,
+            pool_id: None,
+            limit: 1000,
+            cursor: None,
+        };
+        let mut count = 0;
+        loop {
+            let response = c
+                .handle_at(
+                    &Principal::Operator,
+                    Request::StatusPage {
+                        query: query.clone(),
+                    },
+                    102,
+                )
+                .unwrap();
+            assert!(serde_json::to_vec(&response).unwrap().len() < 7 * 1024 * 1024);
+            let Response::StatusPage { page } = response else {
+                panic!()
+            };
+            count += page.items.len();
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            query.cursor = Some(cursor);
+        }
+        assert_eq!(count, 4000);
+    }
 }
 
 #[test]
@@ -1878,7 +1886,7 @@ fn immutable_attempt_cap_counts_yields_and_cannot_be_bypassed_by_retry_or_restar
     };
     assert_eq!(
         tasks[0].status,
-        resource_manager::state::TaskStatus::NeedsReconciliation
+        cedegrid::state::TaskStatus::NeedsReconciliation
     );
     assert_eq!(tasks[0].generation, 2);
     assert!(
@@ -1912,11 +1920,8 @@ fn yield_delay_grows_without_consuming_execution_failure_budget_and_old_state_mi
     assert_eq!(third.generation, 3);
     released_failure(&mut c, &third, 3103, FailureKind::ExecutionFailure);
     drop(c);
-    let connection = rusqlite::Connection::open(
-        cfg.state_dir
-            .join(resource_manager::state::DATABASE_FILENAME),
-    )
-    .unwrap();
+    let connection =
+        rusqlite::Connection::open(cfg.state_dir.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
     connection
         .execute_batch("ALTER TABLE retry_state DROP COLUMN yield_count")
         .unwrap();
@@ -1924,11 +1929,8 @@ fn yield_delay_grows_without_consuming_execution_failure_budget_and_old_state_mi
     let mut c = Coordinator::open(cfg.clone()).unwrap();
     assert!(offers(&mut c, 4102).assignments.is_empty());
     assert_eq!(offers(&mut c, 4103).assignments[0].generation, 4);
-    let connection = rusqlite::Connection::open(
-        cfg.state_dir
-            .join(resource_manager::state::DATABASE_FILENAME),
-    )
-    .unwrap();
+    let connection =
+        rusqlite::Connection::open(cfg.state_dir.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
     let (failures, yields): (i64, i64) = connection
         .query_row(
             "SELECT failures,yield_count FROM retry_state WHERE task_id='task'",
@@ -1994,7 +1996,7 @@ fn cpu_admission_cannot_reuse_zero_or_retained_gpu_capacity_without_gpu_evidence
                 .find(|t| t.task_id == "gpu-first")
                 .unwrap()
                 .status,
-            resource_manager::state::TaskStatus::Queued
+            cedegrid::state::TaskStatus::Queued
         );
         let mut old = serde_json::to_value(&r).unwrap();
         old.as_object_mut().unwrap().remove("gpu_expansion_allowed");
@@ -2166,7 +2168,7 @@ fn unobservable_uuid_does_not_block_cpu_or_other_gpu_but_all_uncertain_charges_r
     for id in ["bad", "excess-cpu"] {
         let task = tasks.iter().find(|t| t.task_id == id).unwrap();
         assert_eq!(task.generation, 0);
-        assert_eq!(task.status, resource_manager::state::TaskStatus::Queued);
+        assert_eq!(task.status, cedegrid::state::TaskStatus::Queued);
     }
 }
 
@@ -2434,7 +2436,7 @@ fn replay_database(path: &std::path::Path) -> rusqlite::Connection {
 fn replay_coordinator_requires_strong_storage_before_creating_any_state() {
     let d = dir();
     let mut cfg = config(d.path());
-    cfg.storage_profile = resource_manager::state::StorageProfile::BurstReplayDeleteExtra;
+    cfg.storage_profile = cedegrid::state::StorageProfile::BurstReplayDeleteExtra;
     assert!(!cfg.state_dir.exists());
     assert!(
         Coordinator::open(cfg.clone())
@@ -2654,7 +2656,7 @@ fn replay_session_retry_does_not_refence_new_work_or_reset_durable_ready() {
             |r| r.get::<_, u32>(0)
         )
         .unwrap(),
-        2
+        3
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM allocation_fences", [], |r| r

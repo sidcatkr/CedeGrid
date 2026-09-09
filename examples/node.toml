@@ -1,0 +1,51 @@
+# Generic node configuration. Relative paths use this file's canonical directory.
+config_version = 1
+node_id = "example-node"
+node_mode = "opportunistic"
+state_dir = "../.cedegrid-state"
+storage_profile = "wal_full"
+
+[monitor]
+interval_ms = 500
+
+[cpu]
+reserve_physical_cores = 2
+nice = 10
+
+[ram]
+reserve_mib = 8192
+reserve_percent = 5
+
+[gpu]
+execution_mode = "auto"
+reserve_vram_mib = 3072
+scale_up_cooldown_ms = 30000
+protective_shrink_percent = 25
+active_shrink_percent = 50
+
+[lifecycle]
+drain_timeout_ms = 3000
+term_grace_ms = 2000
+heartbeat_interval_ms = 2000
+allocation_lease_ms = 10000
+
+[kernel]
+enabled = true
+psi = true
+freshness_intervals = 3
+
+[execution]
+enabled = false
+prepare_timeout_ms = 10000
+admission_timeout_ms = 60000
+release_confirm_timeout_ms = 10000
+
+[cgroup]
+enabled = false
+authorized_controls = []
+allow_kill = false
+
+# Omission also uses weight 10; mode = "off" explicitly disables the setting.
+[cgroup.cpu_weight]
+mode = "set"
+value = 10

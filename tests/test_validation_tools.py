@@ -168,14 +168,14 @@ class BacklogAndEnvelopeTests(unittest.TestCase):
 
     def test_generator_preserves_approved_ram_headroom_and_never_approves(self):
         import make_soak_config
-        application={'experiment_id':'validation','output':str(self.root/'app'),'client_config':str(self.root/'client.json'),
+        application={'experiment_id':'validation','output':str(self.root/'app'),'client_config':str(self.root/'client.toml'),
             'run_seed':'seed','games':12,'nodes':[
                 {'node_id':'anchor','class':'guaranteed','source_root':str(self.root),'sdk_root':str(self.root/'sdk'),
                  'python':sys.executable,'device':'cuda:0'},
                 {'node_id':'burst','class':'opportunistic','source_root':'/home/test/app','sdk_root':'/home/test/ResourceManager/python',
                  'python':'/home/test/venv/bin/python','gpu_uuid':'GPU-actual'}]}
         source=self.root/'application.json';source.write_text(json.dumps(application))
-        coordinator=self.root/'coordinator.json';coordinator.write_text(json.dumps({'retry_limit':3}))
+        coordinator=self.root/'coordinator.toml';coordinator.write_text('config_version = 1\nretry_limit = 3\n')
         output=self.root/'generated'
         manifest=make_soak_config.generate(source,coordinator,self.root/'readonly.pt',output,
             burst_output='/home/test/validation/run',burst_cpu_ids=[2,4],proxy_listen_port=19001,proxy_target_port=19002)
@@ -218,7 +218,7 @@ class InterpreterPathTests(unittest.TestCase):
 class RetainedArtifactReviewTests(unittest.TestCase):
     def test_string_paths_verify_checksum_and_refuse_escapes_or_corruption(self):
         from review_local_smoke import checked_file
-        from resmgr import sha256_file
+        from cedegrid import sha256_file
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);artifact=root/'replay.json.gz';artifact.write_bytes(b'retained bytes')
             digest=sha256_file(artifact)

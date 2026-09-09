@@ -5,6 +5,7 @@ use crate::{
     config::{Config, NodeMode},
     execution_model::*,
     model::{PolicyInput, Resources},
+    namespace::{Namespace, NamespaceGuard, NamespaceIdentity, NamespaceOwner},
     policy::{PolicyEngine, schedulable_budget, validate_gpu_launch_contract},
     protocol::*,
     state::StateStore,
@@ -111,6 +112,18 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
+    write_json_new_reserved(path, value, None)
+}
+fn write_json_new_reserved(
+    path: &Path,
+    value: &impl Serialize,
+    charge: Option<&crate::publication::CaptureCharge>,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    if let Some(charge) = charge {
+        charge.reserve(bytes.len().try_into()?)?;
+    }
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -119,8 +132,7 @@ fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
         opts.mode(0o600);
     }
     let mut file = opts.open(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
+    file.write_all(&bytes)?;
     file.sync_all()?;
     File::open(path.parent().context("missing parent")?)?.sync_all()?;
     Ok(())
@@ -130,6 +142,9 @@ struct AssignedJournal {
     generation: u64,
 }
 impl ExecutionJournal for AssignedJournal {
+    fn namespace_guard(&self) -> Option<NamespaceGuard> {
+        Some(self.store.namespace_guard())
+    }
     fn storage_control_evidence(&self) -> Result<Vec<ControlEvidence>> {
         self.store.storage_control_evidence()
     }
@@ -186,7 +201,12 @@ impl ExecutionJournal for AssignedJournal {
     }
 }
 
+#[cfg(test)]
 fn open_existing_node_store(config: &Config) -> Result<StateStore> {
+    let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
+    open_existing_node_store_guarded(config, guard)
+}
+fn open_existing_node_store_guarded(config: &Config, guard: NamespaceGuard) -> Result<StateStore> {
     if config.storage_profile.is_replayable() {
         ensure!(
             fs::symlink_metadata(config.state_dir.join(crate::state::DATABASE_FILENAME))
@@ -195,9 +215,13 @@ fn open_existing_node_store(config: &Config) -> Result<StateStore> {
         );
     }
     if config.storage_profile.is_replayable() {
-        StateStore::open_existing_with_profile(&config.state_dir, config.storage_profile)
+        StateStore::open_existing_with_profile_guarded(
+            &config.state_dir,
+            config.storage_profile,
+            guard,
+        )
     } else {
-        StateStore::open_with_profile(&config.state_dir, config.storage_profile)
+        StateStore::open_with_profile_guarded(&config.state_dir, config.storage_profile, guard)
     }
 }
 
@@ -466,7 +490,21 @@ fn validate_lease(lease: &Lease, assignment: &Assignment) -> Result<()> {
 /// the main thread remains the exclusive child reaper throughout pidfd acquisition.
 pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     let lifecycle_started = Instant::now();
-    let spec: SupervisorSpec = serde_json::from_slice(&fs::read(spec_path)?)?;
+    let state_root = PathBuf::from(
+        std::env::var_os("CEDEGRID_SUPERVISOR_STATE_ROOT")
+            .context("native supervisor namespace bootstrap missing")?,
+    );
+    let expected: NamespaceIdentity = serde_json::from_str(
+        &std::env::var("CEDEGRID_SUPERVISOR_NAMESPACE")
+            .context("native supervisor identity bootstrap missing")?,
+    )?;
+    let namespace_guard =
+        Namespace::new(&state_root)?.acquire(Some(&expected), Duration::from_secs(30))?;
+    let spec: SupervisorSpec = serde_json::from_slice(&crate::publication::read_bounded(
+        spec_path,
+        3 * 1024 * 1024,
+    )?)?;
+    namespace_guard.validate_root(&spec.config.state_dir)?;
     ensure!(spec.config.execution.enabled, "execution opt-in missing");
     validate_replay_launch(&spec.config, &spec.assignment.request)?;
     let supervisor_identity = supervision::process_identity(
@@ -478,7 +516,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         &spec.output_dir.join("supervisor-identity.json"),
         &supervisor_identity,
     )?;
-    if let Some(cpus) = spec.assignment.request.env.get("RESMGR_CPU_AFFINITY") {
+    if let Some(cpus) = spec.assignment.request.env.get("CEDEGRID_CPU_AFFINITY") {
         supervision::apply_current_cpu_affinity(&serde_json::from_str::<Vec<u32>>(cpus)?)?;
     }
 
@@ -495,7 +533,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     });
     let mut backend = execution_backend(&spec.config, &spec.assignment.request)?;
     let journal = AssignedJournal {
-        store: open_existing_node_store(&spec.config)?,
+        store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
         generation: spec.assignment.generation,
     };
     let start = Instant::now();
@@ -507,7 +545,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
             .envelope
             .clone()
             .unwrap_or_else(|| spec.capacity.clone()),
-        store: open_existing_node_store(&spec.config)?,
+        store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
         collector: ManagedCollector::new(&spec.config)?,
         policy: PolicyEngine::new(),
         last_sample: start,
@@ -645,6 +683,18 @@ struct ChildSlot {
     reported: bool,
     checkpoint_hash: Option<String>,
     exited: bool,
+    capture_threads: Vec<std::thread::JoinHandle<()>>,
+}
+impl Drop for ChildSlot {
+    fn drop(&mut self) {
+        // Native output work must finish before the slot releases its namespace.
+        // Drain uses the authenticated owned control pipe and never signals a PID.
+        let _ = send(self, &Control::Drain);
+        let _ = self.child.wait();
+        for thread in self.capture_threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
 }
 fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
     serde_json::to_writer(&mut slot.input, message)?;
@@ -728,7 +778,7 @@ fn native_pid_absent(pid: u32) -> bool {
     };
     read == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
-fn identity_absent(id: &ProcessIdentity) -> bool {
+pub(crate) fn identity_absent(id: &ProcessIdentity) -> bool {
     match supervision::process_identity(id.pid, &id.assignment_id, id.generation) {
         Ok(current) => {
             if current != *id {
@@ -772,7 +822,7 @@ fn identity_absent(id: &ProcessIdentity) -> bool {
         }
     }
 }
-fn recovery_allows_release(record: &ExecutionRecord) -> bool {
+pub(crate) fn recovery_allows_release(record: &ExecutionRecord) -> bool {
     // A lost journal may have omitted a gated child or mediated descendants.
     // The leader's absence alone cannot prove that this family is gone.
     let incomplete = record.evidence.iter().any(|e| {
@@ -790,8 +840,28 @@ fn recovery_allows_release(record: &ExecutionRecord) -> bool {
     })
 }
 fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec<ExecutionRecord>> {
+    let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
+    reconcile_guarded(config, exclude, guard)
+}
+fn reconcile_agent_owned<'a>(
+    config: &Config,
+    running: impl Iterator<Item = &'a String>,
+    preparing: impl Iterator<Item = &'a String>,
+    guard: NamespaceGuard,
+) -> Result<Vec<ExecutionRecord>> {
+    // A preparation owns its durable reservation before it returns a ChildSlot.
+    // Retain that ownership until the JoinHandle is harvested, including when a
+    // completed preparation is waiting for the next service-loop iteration.
+    let owned = running.chain(preparing).cloned().collect();
+    reconcile_guarded(config, &owned, guard)
+}
+fn reconcile_guarded(
+    config: &Config,
+    exclude: &BTreeSet<String>,
+    guard: NamespaceGuard,
+) -> Result<Vec<ExecutionRecord>> {
     crate::backup::ensure_runnable_state(&config.state_dir)?;
-    let store = open_existing_node_store(config)?;
+    let store = open_existing_node_store_guarded(config, guard)?;
     for mut record in store.executions()? {
         if record.phase == ExecutionPhase::Released || exclude.contains(&record.assignment_id) {
             continue;
@@ -898,6 +968,10 @@ async fn download_checkpoint(
     )
 }
 async fn download_verified(client: &NodeClient, artifact: &ArtifactRef, path: &Path) -> Result<()> {
+    let charge = client.download_charge(path)?;
+    // Reserve the entire download before creating or extending its file. The
+    // same transaction ledger is used by concurrent native worker publishers.
+    charge.reserve(artifact.size)?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let mut offset = 0u64;
     while offset < artifact.size {
@@ -916,11 +990,6 @@ async fn download_verified(client: &NodeClient, artifact: &ArtifactRef, path: &P
             !bytes.is_empty() && offset + bytes.len() as u64 <= artifact.size,
             "invalid resumed artifact length"
         );
-        ensure!(
-            spool_size(&client.spool_root)?.saturating_add(bytes.len() as u64)
-                <= client.max_spool_bytes,
-            "node spool budget exhausted during download"
-        );
         file.write_all(&bytes)?;
         offset += bytes.len() as u64;
 
@@ -930,6 +999,7 @@ async fn download_verified(client: &NodeClient, artifact: &ArtifactRef, path: &P
     }
     ensure!(offset == artifact.size, "incomplete checkpoint artifact");
     file.sync_all()?;
+    File::open(path.parent().context("download parent missing")?)?.sync_all()?;
     ensure!(
         sha256_file(path)?.0 == artifact.sha256,
         "checkpoint integrity mismatch"
@@ -973,6 +1043,7 @@ async fn materialize_cached(
                     && name.bytes().all(|b| b.is_ascii_hexdigit())
                 {
                     fs::remove_file(entry.path())?;
+                    client.download_charge(&entry.path())?.reclaim_removed()?;
                 }
             }
         }
@@ -984,7 +1055,9 @@ async fn materialize_cached(
             .cache_dir
             .join(format!(".download-{}", uuid::Uuid::new_v4()));
         if let Err(error) = download_verified(client, artifact, &temporary).await {
-            let _ = fs::remove_file(&temporary);
+            if fs::remove_file(&temporary).is_ok() {
+                client.download_charge(&temporary)?.reclaim_removed()?;
+            }
             return Err(error);
         }
         #[cfg(unix)]
@@ -995,7 +1068,10 @@ async fn materialize_cached(
         fs::hard_link(&temporary, &cached)?;
         fs::remove_file(&temporary)?;
         File::open(&client.cache_dir)?.sync_all()?;
+        client.download_charge(&temporary)?.reclaim_removed()?;
     }
+    let charge = client.download_charge(path)?;
+    charge.reserve(artifact.size)?;
     fs::hard_link(&cached, path)?;
     File::open(path.parent().context("input parent missing")?)?.sync_all()?;
     Ok(())
@@ -1101,40 +1177,50 @@ async fn start_assignment(
         "named inputs and resume exceed remaining node spool budget"
     );
     private_dir(&output)?;
-    let inputs = download_inputs(client, &assignment, &output).await?;
-    let resume = download_checkpoint(client, &assignment, &output).await?;
+    let workspace = Namespace::new(&config.state_dir)?
+        .control_dir()
+        .join("workspaces")
+        .join(&client.namespace_guard.identity().namespace_id)
+        .join(&assignment.request.assignment_id);
+    ensure!(!workspace.exists(), "attempt workspace already exists");
+    private_dir(&workspace)?;
+    for name in ["output", "tmp", "cache"] {
+        private_dir(&workspace.join(name))?;
+    }
+    let inputs = download_inputs(client, &assignment, &workspace).await?;
+    let resume = download_checkpoint(client, &assignment, &workspace).await?;
     let metadata = assignment
         .request
         .env
-        .get("RESMGR_METADATA")
+        .get("CEDEGRID_METADATA")
         .map(|s| serde_json::from_str::<serde_json::Value>(s))
         .transpose()?
         .unwrap_or(serde_json::json!({}));
-    let context = serde_json::json!({"schema_version":1,"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":output,"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes});
-    write_json_new(&output.join("context.json"), &context)?;
+    let context = serde_json::json!({"schema_version":2,"namespace_id":client.namespace_guard.identity().namespace_id,"session_id":client.namespace_guard.identity().session_id.as_ref().unwrap_or(&client.namespace_guard.identity().namespace_id),"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":workspace.join("output"),"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes});
+    client.write_json_new(&workspace.join("context.json"), &context)?;
     assignment.request.env.insert(
-        "RESMGR_CONTEXT".into(),
-        output.join("context.json").display().to_string(),
+        "CEDEGRID_CONTEXT".into(),
+        workspace.join("context.json").display().to_string(),
+    );
+    assignment.request.env.insert(
+        "CEDEGRID_OUTPUT_DIR".into(),
+        workspace.join("output").display().to_string(),
     );
     assignment
         .request
         .env
-        .insert("RESMGR_OUTPUT_DIR".into(), output.display().to_string());
-    assignment.request.env.insert(
-        "TMPDIR".into(),
-        config.state_dir.join("tmp").display().to_string(),
-    );
+        .insert("TMPDIR".into(), workspace.join("tmp").display().to_string());
     assignment.request.env.insert(
         "XDG_CACHE_HOME".into(),
-        config.state_dir.join("cache").display().to_string(),
+        workspace.join("cache").display().to_string(),
     );
     if let Some(cpus) = &agent.cpu_affinity {
         assignment
             .request
             .env
-            .insert("RESMGR_CPU_AFFINITY".into(), serde_json::to_string(cpus)?);
+            .insert("CEDEGRID_CPU_AFFINITY".into(), serde_json::to_string(cpus)?);
     } else {
-        assignment.request.env.remove("RESMGR_CPU_AFFINITY");
+        assignment.request.env.remove("CEDEGRID_CPU_AFFINITY");
     }
     if !assignment.request.resources.gpu_memory_mib.is_empty() {
         ensure!(
@@ -1158,6 +1244,27 @@ async fn start_assignment(
             .env
             .insert("CUDA_VISIBLE_DEVICES".into(), String::new());
     }
+    let native_publication = crate::publication::NativePublisherSettings {
+        state_dir: config.state_dir.clone(),
+        storage_profile: config.storage_profile,
+        namespace_id: client.namespace_guard.identity().namespace_id.clone(),
+        session_id: client
+            .namespace_guard
+            .identity()
+            .session_id
+            .clone()
+            .unwrap_or_else(|| client.namespace_guard.identity().namespace_id.clone()),
+        output_dir: output.clone(),
+        task_id: assignment.request.task_id.clone(),
+        assignment_id: assignment.request.assignment_id.clone(),
+        generation: assignment.generation,
+        max_spool_bytes: agent.max_spool_bytes,
+        max_artifact_bytes: 256 * 1024 * 1024,
+    };
+    assignment.request.env.insert(
+        "CEDEGRID_PUBLICATION_SPEC".into(),
+        serde_json::to_string(&native_publication)?,
+    );
     let spec = SupervisorSpec {
         config: config.clone(),
         assignment: assignment.clone(),
@@ -1166,23 +1273,56 @@ async fn start_assignment(
         output_dir: output.clone(),
     };
     let path = output.join("supervisor-spec.json");
-    write_json_new(&path, &spec)?;
-    let stderr = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output.join("supervisor.stderr"))?;
+    client.write_json_new(&path, &spec)?;
     let mut child = Command::new(executable)
         .arg("__assignment-supervisor")
         .arg(path)
-        .env("TMPDIR", config.state_dir.join("tmp"))
+        .env("TMPDIR", workspace.join("tmp"))
+        .env("CEDEGRID_SUPERVISOR_STATE_ROOT", &config.state_dir)
+        .env(
+            "CEDEGRID_SUPERVISOR_NAMESPACE",
+            serde_json::to_string(client.namespace_guard.identity())?,
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::piped())
         .spawn()?;
+    let stderr = child.stderr.take().context("supervisor stderr absent")?;
+    let stderr_path = output.join("supervisor.stderr");
+    let capture_guard = client.namespace_guard.clone();
+    let capture_settings = native_publication.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        let result: Result<()> = (|| {
+            let charge = crate::publication::CaptureCharge::new(
+                &capture_settings,
+                capture_guard,
+                &stderr_path,
+            )?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(stderr_path)?;
+            let mut input = BufReader::new(stderr);
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                charge.reserve(count as u64)?;
+                file.write_all(&buffer[..count])?;
+            }
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("supervisor stderr capture failed: {error:#}");
+        }
+    });
     let input = child.stdin.take().context("supervisor input absent")?;
     let stdout = child.stdout.take().context("supervisor output absent")?;
     let (tx, events) = mpsc::channel();
-    std::thread::spawn(move || {
+    let events_thread = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let event = line
                 .map_err(|e| e.to_string())
@@ -1204,36 +1344,52 @@ async fn start_assignment(
         reported: false,
         checkpoint_hash: None,
         exited: false,
+        capture_threads: vec![stderr_thread, events_thread],
     })
 }
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
+    let mut file = crate::publication::open_regular(path, false)?;
+    let expected = file.metadata()?.len();
+    ensure!(
+        expected <= 256 * 1024 * 1024,
+        "artifact exceeds maximum supported bytes"
+    );
+    hash_open_file(&mut file, expected)
+}
+fn hash_open_file(file: &mut File, expected: u64) -> Result<(String, u64)> {
     use sha2::{Digest, Sha256};
-    let mut file = File::open(path)?;
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();
-    let mut buf = [0; 65536];
-    let mut size = 0;
+    let mut size = 0u64;
+    let mut buffer = [0u8; 65536];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
         }
-        hash.update(&buf[..n]);
-        size += n as u64;
+        size = size
+            .checked_add(n as u64)
+            .context("artifact size overflow")?;
+        ensure!(size <= expected, "artifact grew while reading");
+        hash.update(&buffer[..n]);
     }
+    ensure!(size == expected, "artifact changed length while reading");
     Ok((hex::encode(hash.finalize()), size))
 }
+
 async fn publish(
     client: &NodeClient,
     assignment: &Assignment,
     output: &Path,
     checkpoint: bool,
+    descriptor_bytes: Option<Vec<u8>>,
 ) -> Result<()> {
     let path = output.join(if checkpoint {
         "checkpoint.json"
     } else {
         "result.json"
     });
-    let descriptor_bytes = fs::read(&path).ok();
     let descriptor_hash = {
         use sha2::{Digest, Sha256};
         descriptor_bytes
@@ -1241,25 +1397,23 @@ async fn publish(
             .map(|b| hex::encode(Sha256::digest(b)))
             .unwrap_or_else(|| "command".into())
     };
-    let descriptor: serde_json::Value = if path.exists() {
-        ensure!(
-            fs::metadata(&path)?.len() <= 1024 * 1024,
-            "worker descriptor too large"
-        );
-        serde_json::from_slice(
-            descriptor_bytes
-                .as_deref()
-                .context("descriptor disappeared")?,
-        )?
+    let descriptor: serde_json::Value = if let Some(bytes) = descriptor_bytes.as_deref() {
+        crate::numeric::from_slice(bytes)?
     } else {
         ensure!(!checkpoint, "checkpoint descriptor missing");
-        let outcome: ExecutionOutcome =
-            serde_json::from_slice(&fs::read(output.join("execution-outcome.json"))?)?;
+        ensure!(
+            !path.try_exists()?,
+            "legacy outbox requires explicit reconciliation; automatic conversion refused"
+        );
+        let outcome: ExecutionOutcome = serde_json::from_slice(&crate::publication::read_bounded(
+            &output.join("execution-outcome.json"),
+            2 * 1024 * 1024,
+        )?)?;
         ensure!(
             outcome.exit_code == Some(0) && !outcome.yielded,
             "command did not complete normally"
         );
-        serde_json::json!({"schema_version":1,"kind":"result","task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"artifacts":[],"metadata":{"exit_code":0}})
+        serde_json::json!({"schema_version":2,"kind":"result","task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"artifacts":[],"metadata":{"exit_code":0}})
     };
     ensure!(
         descriptor["task_id"] == assignment.request.task_id
@@ -1280,18 +1434,15 @@ async fn publish(
             "artifact path must remain within attempt output"
         );
         let path = output.join(relative);
+        let mut file = crate::publication::open_regular(&path, false)?;
+        let expected = item["size"].as_u64().context("artifact size missing")?;
         ensure!(
-            !fs::symlink_metadata(&path)?.file_type().is_symlink(),
-            "artifact symlink refused"
+            expected <= 256 * 1024 * 1024,
+            "artifact exceeds maximum supported bytes"
         );
-        let canonical = path.canonicalize()?;
+        let (sha256, size) = hash_open_file(&mut file, expected)?;
         ensure!(
-            canonical.starts_with(output.canonicalize()?),
-            "artifact escapes attempt output"
-        );
-        let (sha256, size) = sha256_file(&canonical)?;
-        ensure!(
-            item["sha256"] == sha256 && item["size"] == size,
+            item["sha256"] == sha256,
             "worker artifact integrity mismatch"
         );
         let artifact = ArtifactRef { sha256, size };
@@ -1308,12 +1459,12 @@ async fn publish(
         else {
             bail!("unexpected upload response")
         };
-        let mut file = File::open(&canonical)?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(offset))?;
         let mut buf = vec![0; 128 * 1024];
         while offset < size {
-            let n = file.read(&mut buf)?;
+            let remaining = usize::try_from(size - offset)?.min(buf.len());
+            let n = file.read(&mut buf[..remaining])?;
             ensure!(n > 0, "artifact truncated during upload");
             let response = client
                 .request(&Request::UploadChunk {
@@ -1332,7 +1483,7 @@ async fn publish(
             offset = ack;
         }
         ensure!(
-            sha256_file(&canonical)? == (artifact.sha256.clone(), artifact.size),
+            hash_open_file(&mut file, artifact.size)? == (artifact.sha256.clone(), artifact.size),
             "artifact changed during publication"
         );
         ensure!(
@@ -1366,9 +1517,16 @@ async fn publish(
         "result.receipt.json".into()
     });
     if !receipt_path.exists() {
-        write_json_new(
+        client.write_json_new(
             &receipt_path,
             &serde_json::json!({"response":response,"submission":published}),
+        )?;
+    }
+    if std::env::var_os("CEDEGRID_PUBLICATION_EVIDENCE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        emit(
+            &serde_json::json!({"event":"publication_accepted","checkpoint":checkpoint,"submission":published,"receipt":response}),
         )?;
     }
     Ok(())
@@ -1390,7 +1548,10 @@ fn validate_replay_launch(config: &Config, request: &LaunchRequest) -> Result<()
     Ok(())
 }
 
-fn verify_publication_receipt(response: &Response, submission: &ResultSubmission) -> Result<()> {
+pub(crate) fn verify_publication_receipt(
+    response: &Response,
+    submission: &ResultSubmission,
+) -> Result<()> {
     use sha2::{Digest, Sha256};
     let Response::Receipt { receipt } = response else {
         bail!("authoritative result acceptance missing durable commit receipt")
@@ -1481,7 +1642,16 @@ fn replay_parent(config: &Config, home: &Path) -> Result<PathBuf> {
     Ok(parent.to_path_buf())
 }
 
-fn quarantine_replay_state(state: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+fn quarantine_replay_state(
+    state: &Path,
+    session_id: &str,
+    guard: &NamespaceGuard,
+) -> Result<Option<PathBuf>> {
+    guard.validate_root(state)?;
+    ensure!(
+        guard.is_exclusive(),
+        "quarantine requires exclusive namespace lifecycle"
+    );
     // Called only after the coordinator has durably fenced all older sessions.
     let meta = match fs::symlink_metadata(state) {
         Ok(meta) => meta,
@@ -1519,27 +1689,18 @@ async fn start_replay_session(
     config: &Config,
     agent: &AgentConfig,
     home: &Path,
-) -> Result<(File, String, ReplayRecoverySnapshot)> {
-    let parent = replay_parent(config, home)?;
-    let leaf = config
-        .state_dir
-        .file_name()
-        .context("replay state leaf missing")?
-        .to_string_lossy();
-    let lock = owned_agent_lock(&parent.join(format!(".{leaf}.replay-agent.lock")))?;
-    // Also refuse migration of a state directory currently owned by a strict/older agent.
-    let _old_lock = if config.state_dir.join("agent.lock").try_exists()? {
-        Some(owned_agent_lock(&config.state_dir.join("agent.lock"))?)
-    } else {
-        None
-    };
+) -> Result<(NamespaceOwner, NamespaceGuard, ReplayRecoverySnapshot)> {
+    replay_parent(config, home)?;
+    let namespace = Namespace::new(&config.state_dir)?;
+    let maintenance = namespace.begin_maintenance(Duration::ZERO)?;
     let session_id = uuid::Uuid::new_v4().to_string();
+    maintenance.record_intent(&session_id)?;
     let boot_id = supervision::process_identity(std::process::id(), "agent", 0)?.boot_id;
     let rpc = RpcClient::new(&agent.coordinator_url, &agent.tls)?;
     let Response::ReplayRecovery { snapshot } = rpc
         .request(&Request::OpenReplaySession {
             node_id: config.node_id.clone(),
-            boot_id,
+            boot_id: boot_id.clone(),
             session_id: session_id.clone(),
         })
         .await?
@@ -1557,8 +1718,72 @@ async fn start_replay_session(
             "recovery inventory node or epoch mismatch"
         );
     }
-    quarantine_replay_state(&config.state_dir, &session_id)?;
-    Ok((lock, session_id, snapshot))
+    let guard = maintenance.exclusive(Duration::from_secs(30))?;
+    crate::upgrade::require_replay_upgrade(&namespace, &guard)?;
+    // Legacy service ownership complements the new namespace locks: old binaries
+    // do not participate in namespace protection and cannot run concurrently.
+    let _old_lock = if config.state_dir.join("agent.lock").try_exists()? {
+        Some(owned_agent_lock(&config.state_dir.join("agent.lock"))?)
+    } else {
+        None
+    };
+    quarantine_replay_state(&config.state_dir, &session_id, &guard)?;
+    let guard = maintenance.initialize_session(guard, &session_id)?;
+    let store = StateStore::open_with_profile_guarded(
+        &config.state_dir,
+        config.storage_profile,
+        guard.clone(),
+    )?;
+    for allocation in &snapshot.allocations {
+        store.import_replay_reservation(allocation)?;
+    }
+    write_json_new(&config.state_dir.join("replay-recovery.json"), &snapshot)?;
+    // The first report retains every historical charge; it may not infer release
+    // while recovery is still incomplete. Later ordinary reconciliation proves it.
+    let mut allocations: Vec<AllocationReport> = snapshot
+        .allocations
+        .iter()
+        .map(|a| AllocationReport {
+            assignment_id: a.assignment.request.assignment_id.clone(),
+            generation: a.assignment.generation,
+            phase: RemotePhase::Uncertain,
+            observed: None,
+            detail: "authenticated recovery retains original reservation".into(),
+        })
+        .collect();
+    allocations.extend(snapshot.unrecognized.iter().cloned().map(|mut a| {
+        a.phase = RemotePhase::Uncertain;
+        a
+    }));
+    let report = NodeReport {
+        node_id: config.node_id.clone(),
+        boot_id,
+        observed_at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?,
+        managed_budget: Resources::default(),
+        expansion_allowed: false,
+        gpu_expansion_allowed: false,
+        gpu_guaranteed_allowed: false,
+        launch_slots: 0,
+        available_controls: vec!["storage.replayable_local".into()],
+        allocations,
+    };
+    maintenance.set_phase("awaiting_readiness")?;
+    let response = rpc
+        .request(&Request::NodeSession {
+            session_id,
+            request: Box::new(Request::Heartbeat { report }),
+        })
+        .await?;
+    ensure!(
+        matches!(response, Response::Heartbeat { ref reply } if reply.coordinator_epoch == snapshot.coordinator_epoch && reply.assignments.is_empty()),
+        "recovery readiness was not acknowledged at the fenced coordinator epoch"
+    );
+    drop(store);
+    let (owner, guard) = maintenance.activate(guard, Duration::from_secs(30))?;
+    Ok((owner, guard, snapshot))
 }
 
 /// Run a node service until shutdown or its configured finite envelope. Every
@@ -1620,20 +1845,30 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     } else {
         None
     };
+    let namespace = Namespace::new(&config.state_dir)?;
+    let _owner = if replay.is_none() {
+        Some(namespace.owner(Duration::ZERO)?)
+    } else {
+        None
+    };
+    let namespace_guard = if let Some((_, guard, _)) = &replay {
+        guard.clone()
+    } else {
+        namespace.acquire(None, Duration::from_secs(30))?
+    };
     crate::backup::ensure_runnable_state(&config.state_dir)?;
-    let store = StateStore::open_with_profile(&config.state_dir, config.storage_profile)?;
+    let store = StateStore::open_with_profile_guarded(
+        &config.state_dir,
+        config.storage_profile,
+        namespace_guard.clone(),
+    )?;
     if let Some((_, _, snapshot)) = &replay {
-        for allocation in &snapshot.allocations {
-            store.import_replay_reservation(allocation)?;
-        }
-        write_json_new(&config.state_dir.join("replay-recovery.json"), snapshot)?;
-        emit(&serde_json::json!({"event":"replay_recovery_started",
-            "session_id":snapshot.session_id,"coordinator_epoch":snapshot.coordinator_epoch,
-            "retained_allocations":snapshot.allocations.len(),
-            "unrecognized_allocations":snapshot.unrecognized.iter().map(|item|
-                serde_json::json!({"assignment_id":item.assignment_id,"generation":item.generation})).collect::<Vec<_>>(),
+        emit(
+            &serde_json::json!({"event":"replay_recovery_started", "session_id":snapshot.session_id,
+            "coordinator_epoch":snapshot.coordinator_epoch, "retained_allocations":snapshot.allocations.len(),
             "storage_assurance":config.storage_profile.assurance(),
-            "detail":"Local cache quarantined. Unverified identities retain capacity; missing preparation requires operator recovery. Committed results and checkpoints remain coordinator authority."}))?;
+            "detail":"Authenticated recovery ready; uncertain allocations remain charged."}),
+        )?;
     }
     let replay_journal = replay
         .as_ref()
@@ -1654,9 +1889,16 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         .open(config.state_dir.join("agent.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .context("another agent already owns this node state")?;
-    let _ = reconcile_unlocked(config, &BTreeSet::new())?;
-    let mut client = NodeClient::new(agent, &config.state_dir)?;
-    client.replay_session = replay.as_ref().map(|(_, session, _)| session.clone());
+    let _ = reconcile_guarded(config, &BTreeSet::new(), namespace_guard.clone())?;
+    let mut client = NodeClient::new(
+        agent,
+        &config.state_dir,
+        config.storage_profile,
+        namespace_guard.clone(),
+    )?;
+    client.replay_session = replay
+        .as_ref()
+        .map(|(_, _, snapshot)| snapshot.session_id.clone());
     let client = std::sync::Arc::new(client);
     let mut collector = ManagedCollector::new(config)?;
     let mut policy = PolicyEngine::new();
@@ -1668,7 +1910,9 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             item.file_type()?.is_file() && item.metadata()?.len() <= 2 * 1024 * 1024,
             "invalid refusal record"
         );
-        let pair: (Assignment, String) = serde_json::from_slice(&fs::read(item.path())?)?;
+        let pair: (Assignment, String) = serde_json::from_slice(
+            &crate::publication::read_bounded(&item.path(), 3 * 1024 * 1024)?,
+        )?;
         if !config
             .state_dir
             .join("failure-receipts")
@@ -1682,7 +1926,9 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     let mut publications: Vec<Publication> = Vec::new();
     let mut publishing: BTreeSet<(String, bool)> = BTreeSet::new();
     let start = Instant::now();
-    let mut last_heartbeat = start - Duration::from_secs(60);
+    let observation_interval = Duration::from_millis(config.monitor.interval_ms);
+    let mut next_observation = start;
+    let mut last_heartbeat = start - Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
     let mut stopping: Option<Instant> = None;
     let mut stop_signal = Box::pin(shutdown_signal());
     let mut last_spool_check = Instant::now();
@@ -1692,6 +1938,11 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     let mut admitted_parallelism = 0usize;
     let mut last_growth = start;
     loop {
+        // Anchor observations to their scheduled cadence. Processing and RPC
+        // time consume this interval instead of extending it. After an overrun,
+        // run once immediately and return to the original cadence.
+        next_observation =
+            next_periodic_wake(next_observation, observation_interval, Instant::now());
         if let Some(guard) = &replay_journal {
             guard.verify(config)?;
         }
@@ -1840,13 +2091,19 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                     >= Duration::from_millis(config.lifecycle.heartbeat_interval_ms)
             {
                 let requested = Instant::now();
+                let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
+                let due = next_control_due(&mut slot.last_renew, interval);
                 match client
-                    .request(&Request::Renew {
-                        assignment_id: slot.assignment.request.assignment_id.clone(),
-                        generation: slot.assignment.generation,
-                        coordinator_epoch: slot.assignment.coordinator_epoch,
-                        previous_sequence: slot.sequence,
-                    })
+                    .request_control(
+                        &Request::Renew {
+                            assignment_id: slot.assignment.request.assignment_id.clone(),
+                            generation: slot.assignment.generation,
+                            coordinator_epoch: slot.assignment.coordinator_epoch,
+                            previous_sequence: slot.sequence,
+                        },
+                        due,
+                        interval,
+                    )
                     .await
                 {
                     Ok(Response::Lease { lease }) => {
@@ -1872,7 +2129,6 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                         )?;
                     }
                 }
-                slot.last_renew = Instant::now();
             }
             for checkpoint in [true, false] {
                 let id = slot.assignment.request.assignment_id.clone();
@@ -1882,16 +2138,37 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 {
                     continue;
                 }
-                let path = slot.output_dir.join(if checkpoint {
-                    "checkpoint.json"
-                } else {
-                    "result.json"
-                });
-                let hash = if path.is_file() {
-                    sha256_file(&path)?.0
-                } else {
-                    String::new()
+                let publication_pin = crate::publication_gc::pin_attempt(&store, &slot.output_dir)?;
+                let descriptor_bytes = match crate::publication::read_head(
+                    &store,
+                    &slot.output_dir,
+                    if checkpoint { "checkpoint" } else { "result" },
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        // A publisher reserves its candidate before durable insertion.
+                        // Pending or damaged candidates must retain this attempt and
+                        // must never turn into a plain-command success or stop leases
+                        // for other workloads. A later poll can observe reconciliation.
+                        if record
+                            .as_ref()
+                            .is_some_and(|r| r.phase == ExecutionPhase::Released)
+                        {
+                            emit(
+                                &serde_json::json!({"event":"publication_retained","assignment_id":id,"detail":error.to_string()}),
+                            )?;
+                        }
+                        continue;
+                    }
                 };
+                let has_descriptor = descriptor_bytes.is_some();
+                let hash = descriptor_bytes
+                    .as_ref()
+                    .map(|bytes| {
+                        use sha2::{Digest, Sha256};
+                        hex::encode(Sha256::digest(bytes))
+                    })
+                    .unwrap_or_default();
                 if checkpoint && (hash.is_empty() || slot.checkpoint_hash.as_ref() == Some(&hash)) {
                     continue;
                 }
@@ -1921,7 +2198,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                         if publishing.contains(&(id.clone(), true)) {
                             continue;
                         }
-                        if path.is_file() { /* SDK completed before a racing drain: descriptor may be accepted once. */
+                        if has_descriptor { /* Native immutable result committed before a racing drain. */
                         } else {
                             if matches!(
                                 client
@@ -1957,7 +2234,15 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 let output = slot.output_dir.clone();
                 publishing.insert((id.clone(), checkpoint));
                 publications.push(tokio::spawn(async move {
-                    let result = publish(&task_client, &assignment, &output, checkpoint).await;
+                    let _pin = publication_pin;
+                    let result = publish(
+                        &task_client,
+                        &assignment,
+                        &output,
+                        checkpoint,
+                        descriptor_bytes,
+                    )
+                    .await;
                     (id, checkpoint, hash, result)
                 }));
             }
@@ -2022,7 +2307,13 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             {
                 continue;
             }
-            if let Ok(bytes) = fs::read(output.join("supervisor-spec.json")) {
+            if upgrade_attempt_held(&store, &record.assignment_id)? {
+                continue;
+            }
+            if let Ok(bytes) = crate::publication::read_bounded(
+                &output.join("supervisor-spec.json"),
+                3 * 1024 * 1024,
+            ) {
                 let spec: SupervisorSpec = serde_json::from_slice(&bytes)?;
                 ensure!(
                     spec.assignment.request.assignment_id == record.assignment_id
@@ -2033,12 +2324,34 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                     .ok()
                     .and_then(|v| serde_json::from_slice::<ExecutionOutcome>(&v).ok())
                     .is_some_and(|o| o.exit_code == Some(0) && !o.yielded);
-                if output.join("result.json").is_file() || normal_exit {
+                let publication_pin = crate::publication_gc::pin_attempt(&store, &output)?;
+                let descriptor_bytes = match crate::publication::read_head(
+                    &store, &output, "result",
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        emit(
+                            &serde_json::json!({"event":"publication_retained","assignment_id":record.assignment_id,"detail":error.to_string()}),
+                        )?;
+                        continue;
+                    }
+                };
+                if descriptor_bytes.is_some()
+                    || (normal_exit && !output.join("result.json").try_exists()?)
+                {
                     let task_client = client.clone();
                     let id = record.assignment_id.clone();
                     publishing.insert((id.clone(), false));
                     publications.push(tokio::spawn(async move {
-                        let result = publish(&task_client, &spec.assignment, &output, false).await;
+                        let _pin = publication_pin;
+                        let result = publish(
+                            &task_client,
+                            &spec.assignment,
+                            &output,
+                            false,
+                            descriptor_bytes,
+                        )
+                        .await;
                         (id, false, String::new(), result)
                     }));
                 } else {
@@ -2056,6 +2369,13 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 }
             }
         }
+        // Absolute monitor cadence can arrive just before the OS CPU sampling
+        // interval. Wait for fresh evidence after pending control/reaping work;
+        // do not substitute cached utilization or extend control deadlines.
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            collector.next_cpu_sample_at(),
+        ))
+        .await;
         let (mut snapshot, allocations) =
             collector.sample_with_children(&records, &store.all_unreleased_managed_children()?)?;
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
@@ -2106,13 +2426,16 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             || last_heartbeat.elapsed()
                 >= Duration::from_millis(config.lifecycle.heartbeat_interval_ms)
         {
-            last_heartbeat = Instant::now();
-            let owned = slots
-                .iter()
-                .filter(|(_, slot)| !slot.exited)
-                .map(|(id, _)| id.clone())
-                .collect();
-            let _ = reconcile_unlocked(config, &owned)?;
+            let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
+            let _ = reconcile_agent_owned(
+                config,
+                slots
+                    .iter()
+                    .filter(|(_, slot)| !slot.exited)
+                    .map(|(id, _)| id),
+                preparations.keys(),
+                namespace_guard.clone(),
+            )?;
             let boot_id = supervision::process_identity(std::process::id(), "agent", 0)?.boot_id;
             let reconciled_records = store.executions()?;
             let mut reports: Vec<AllocationReport> = reconciled_records
@@ -2208,7 +2531,13 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 available_controls,
                 allocations: reports,
             };
-            match client.request(&Request::Heartbeat { report }).await {
+            // Report preparation can cross a scheduled slot. Advance at actual
+            // enqueue so the next due time agrees with recorded lateness.
+            let due = next_control_due(&mut last_heartbeat, interval);
+            match client
+                .request_control(&Request::Heartbeat { report }, due, interval)
+                .await
+            {
                 Ok(Response::Heartbeat { reply }) => {
                     for slot in slots.values_mut() {
                         slot.assignment.coordinator_epoch = reply.coordinator_epoch;
@@ -2360,7 +2689,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 break;
             }
         }
-        tokio::select! {_ = tokio::time::sleep(Duration::from_millis(config.monitor.interval_ms))=>{}, _=&mut stop_signal,if stopping.is_none()=>{stopping=Some(Instant::now());}}
+        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if stopping.is_none()=>{stopping=Some(Instant::now());}}
     }
     for (id, (assignment, handle, _)) in preparations {
         handle.abort();
@@ -2410,99 +2739,46 @@ async fn shutdown_signal() {
     }
 }
 
+fn upgrade_attempt_held(store: &StateStore, assignment: &str) -> Result<bool> {
+    let exists: bool = store.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='upgrade_attempt_holds')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(false);
+    }
+    Ok(store.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM upgrade_attempt_holds WHERE assignment_id=?1)",
+        [assignment],
+        |r| r.get(0),
+    )?)
+}
+
 fn collect_released_spool(
     config: &Config,
     store: &StateStore,
     records: &[ExecutionRecord],
     publishing: &BTreeSet<(String, bool)>,
 ) -> Result<()> {
-    use crate::managed_children::ManagedChildPhase;
     for record in records
         .iter()
         .filter(|r| r.phase == ExecutionPhase::Released)
     {
-        if publishing.iter().any(|(id, _)| id == &record.assignment_id) {
+        if upgrade_attempt_held(store, &record.assignment_id)?
+            || publishing.iter().any(|(id, _)| id == &record.assignment_id)
+        {
             continue;
         }
         let output = config
             .state_dir
             .join("attempts")
             .join(&record.assignment_id);
-        if !output.join("result.receipt.json").is_file()
-            || output.join("spool-reclaimed.json").exists()
-        {
+        if output.join("spool-reclaimed.json").exists() {
             continue;
         }
-        if store
-            .managed_children(&record.assignment_id)?
-            .iter()
-            .any(|c| c.phase != ManagedChildPhase::Released)
-        {
-            continue;
-        }
-        let receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(output.join("result.receipt.json"))?)?;
-        let descriptor = if receipt["submission"]["result"].is_object() {
-            receipt["submission"]["result"].clone()
-        } else if output.join("result.json").is_file() {
-            serde_json::from_slice(&fs::read(output.join("result.json"))?)?
-        } else {
+        let Some(reclaimed) = crate::publication_gc::reclaim_released(store, &output)? else {
             continue;
         };
-        ensure!(
-            descriptor["assignment_id"] == record.assignment_id
-                && descriptor["generation"] == record.generation,
-            "spool reclamation identity mismatch"
-        );
-        let mut accepted = BTreeSet::new();
-        if let Some(artifacts) = descriptor["artifacts"].as_array() {
-            for artifact in artifacts {
-                if let Some(hash) = artifact["sha256"].as_str() {
-                    accepted.insert(hash.to_string());
-                }
-            }
-        }
-        for entry in fs::read_dir(&output)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("checkpoint-") && name.ends_with(".receipt.json") {
-                let receipt: serde_json::Value = serde_json::from_slice(&fs::read(entry.path())?)?;
-                if let Some(artifacts) = receipt["submission"]["artifacts"].as_array() {
-                    for artifact in artifacts {
-                        if let Some(hash) = artifact["sha256"].as_str() {
-                            accepted.insert(hash.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        let mut reclaimed = 0u64;
-        for (directory, require_acceptance) in
-            [("blobs", true), ("resume", false), ("inputs", false)]
-        {
-            let directory = output.join(directory);
-            if !directory.is_dir() {
-                continue;
-            }
-            for entry in fs::read_dir(&directory)? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.len() == 64
-                    && name.bytes().all(|b| b.is_ascii_hexdigit())
-                    && (!require_acceptance || accepted.contains(name.as_ref()))
-                    && entry.file_type()?.is_file()
-                {
-                    reclaimed = reclaimed.saturating_add(entry.metadata()?.len());
-                    fs::remove_file(entry.path())?;
-                }
-            }
-            File::open(&directory)?.sync_all()?;
-        }
         write_json_new(
             &output.join("spool-reclaimed.json"),
-            &serde_json::json!({"assignment_id":record.assignment_id,"generation":record.generation,"logical_unlinked_bytes":reclaimed,"basis":"confirmed Released, accepted final receipt, no active publication or registered child; coordinator retains published content"}),
+            &serde_json::json!({"assignment_id":record.assignment_id,"generation":record.generation,"logical_unlinked_bytes":reclaimed,"basis":"confirmed Released, exact accepted final receipt/head, absent supervisor and publication pins; coordinator retains published content"}),
         )?;
     }
     Ok(())
@@ -2641,9 +2917,16 @@ struct NodeClient {
     cache_lock: tokio::sync::Mutex<()>,
     spool_root: PathBuf,
     max_spool_bytes: u64,
+    namespace_guard: NamespaceGuard,
+    storage_profile: crate::state::StorageProfile,
 }
 impl NodeClient {
-    fn new(config: &AgentConfig, state_dir: &Path) -> Result<Self> {
+    fn new(
+        config: &AgentConfig,
+        state_dir: &Path,
+        storage_profile: crate::state::StorageProfile,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
         ensure!(
             config.max_transfer_bytes_per_second >= 10,
             "transfer budget must be at least ten bytes/second"
@@ -2652,7 +2935,7 @@ impl NodeClient {
         let cache_dir = state_dir.join("attempts").join(".input-cache");
         private_dir(&cache_dir)?;
         Ok(Self {
-            rpc: RpcClient::new(&config.coordinator_url, &config.tls)?,
+            rpc: RpcClient::with_settings(&config.coordinator_url, &config.tls, 15.0, 0)?,
             replay_session: None,
             control: RateLimiter::new(control),
             artifacts: RateLimiter::new(config.max_transfer_bytes_per_second - control),
@@ -2660,9 +2943,74 @@ impl NodeClient {
             cache_lock: tokio::sync::Mutex::new(()),
             spool_root: state_dir.join("attempts"),
             max_spool_bytes: config.max_spool_bytes,
+            namespace_guard,
+            storage_profile,
         })
     }
+    fn download_charge(&self, path: &Path) -> Result<crate::publication::CaptureCharge> {
+        crate::publication::CaptureCharge::for_download(
+            self.spool_root.parent().context("spool parent missing")?,
+            self.storage_profile,
+            self.namespace_guard.clone(),
+            path,
+            self.max_spool_bytes,
+        )
+    }
+    fn write_json_new(&self, path: &Path, value: &impl Serialize) -> Result<()> {
+        let charge = self.download_charge(path)?;
+        // Receipt/control bytes share the node ledger with artifacts and logs.
+        // After reservation, any write/sync uncertainty retains the full charge.
+        write_json_new_reserved(path, value, Some(&charge))
+    }
     async fn request(&self, request: &Request) -> Result<Response> {
+        tokio::time::timeout(Duration::from_secs(15), self.request_paced(request))
+            .await
+            .context("node RPC exceeded its end-to-end queue/pacing/transport deadline")?
+    }
+    async fn request_control(
+        &self,
+        request: &Request,
+        due: Instant,
+        interval: Duration,
+    ) -> Result<Response> {
+        let started = Instant::now();
+        let lateness = started.saturating_duration_since(due);
+        let evidence =
+            std::env::var_os("CEDEGRID_RPC_EVIDENCE").as_deref() == Some(std::ffi::OsStr::new("1"));
+        // The qualification mode supplies an explicit scheduled 10-second
+        // control deadline while preserving the normal transport and queues.
+        let result = if evidence {
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(due + Duration::from_secs(10)),
+                self.request(request),
+            )
+            .await
+            .context("scheduled control RPC deadline exceeded")
+            .and_then(|r| r)
+        } else {
+            self.request(request).await
+        };
+        if evidence {
+            let operation = match request {
+                Request::Heartbeat { .. } => "heartbeat",
+                Request::Renew { .. } => "renew",
+                _ => "other",
+            };
+            let assignment = match request {
+                Request::Renew { assignment_id, .. } => Some(assignment_id),
+                _ => None,
+            };
+            let finished = Instant::now();
+            let success = result
+                .as_ref()
+                .is_ok_and(|r| !matches!(r, Response::Error { .. }));
+            emit(
+                &serde_json::json!({"event":"control_rpc","operation":operation,"assignment_id":assignment,"scheduled_due_monotonic_ms":local_clock_ms()?.saturating_sub(finished.saturating_duration_since(due).as_millis() as u64),"enqueued_late_ms":lateness.as_secs_f64()*1000.0,"elapsed_ms":finished.saturating_duration_since(due).as_secs_f64()*1000.0,"request_elapsed_ms":finished.duration_since(started).as_secs_f64()*1000.0,"missed_schedule_slots":lateness.as_millis()/interval.as_millis().max(1),"success":success,"deadline_ms":10000}),
+            )?;
+        }
+        result
+    }
+    async fn request_paced(&self, request: &Request) -> Result<Response> {
         let artifact = matches!(
             request,
             Request::BeginUpload { .. }
@@ -2705,6 +3053,24 @@ impl NodeClient {
         Ok(response)
     }
 }
+
+fn next_control_due(last: &mut Instant, interval: Duration) -> Instant {
+    next_control_due_at(last, interval, Instant::now())
+}
+fn next_control_due_at(last: &mut Instant, interval: Duration, now: Instant) -> Instant {
+    let due = *last + interval;
+    let missed = now.saturating_duration_since(due).as_millis() / interval.as_millis().max(1);
+    *last = due + interval.saturating_mul(missed.min(u32::MAX as u128) as u32);
+    due
+}
+fn next_periodic_wake(due: Instant, interval: Duration, now: Instant) -> Instant {
+    if now < due {
+        return due;
+    }
+    let elapsed = now.saturating_duration_since(due).as_nanos();
+    let intervals = elapsed / interval.as_nanos().max(1) + 1;
+    due + interval.saturating_mul(intervals.min(u32::MAX as u128) as u32)
+}
 fn wire_charge(json_bytes: u64) -> u64 {
     json_bytes
         .saturating_add(json_bytes / 20)
@@ -2733,6 +3099,182 @@ impl RateLimiter {
 #[cfg(test)]
 mod agent_transport_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn reconciliation_preserves_a_preparation_between_reserve_and_prepared() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config = Config {
+            state_dir: temporary.path().canonicalize().unwrap().join("state"),
+            ..Config::default()
+        };
+        let store = StateStore::open(&config.state_dir).unwrap();
+        let resources = Resources {
+            cpu_millicores: 100,
+            ram_mib: 32,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        let request = crate::execution_model::LaunchRequest {
+            task_id: "preparing-task".into(),
+            assignment_id: "preparing".into(),
+            argv: vec!["unused".into()],
+            cwd: temporary.path().into(),
+            env: BTreeMap::new(),
+            resources: resources.clone(),
+            replay_safe: true,
+            class: AllocationClass::Guaranteed,
+            no_escape: true,
+            single_process: true,
+            managed_child_limit: 0,
+            max_attempts: None,
+            input_artifacts: vec![],
+            required_controls: vec![],
+            allow_fallback: true,
+        };
+        let capacity = Resources {
+            cpu_millicores: 200,
+            ram_mib: 64,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        let mut preparing = store.reserve(&request, &capacity).unwrap();
+        let mut orphan = request.clone();
+        orphan.task_id = "orphan-task".into();
+        orphan.assignment_id = "orphan".into();
+        store.reserve(&orphan, &capacity).unwrap();
+        let pending = [request.assignment_id.clone()];
+        let records = reconcile_agent_owned(
+            &config,
+            std::iter::empty(),
+            pending.iter(),
+            store.namespace_guard().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r.assignment_id == "preparing")
+                .unwrap()
+                .phase,
+            ExecutionPhase::Reserved
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|r| r.assignment_id == "orphan")
+                .unwrap()
+                .phase,
+            ExecutionPhase::NeedsReconciliation
+        );
+        preparing.backend = "rootless".into();
+        preparing.identity = Some(
+            supervision::process_identity(std::process::id(), "preparing", preparing.generation)
+                .unwrap(),
+        );
+        preparing.phase = ExecutionPhase::Prepared;
+        store.transition(&preparing).unwrap();
+    }
+    #[test]
+    fn observation_cadence_does_not_accumulate_control_processing_time() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(500);
+        let mut wake = start;
+        let mut last_control = start - interval;
+        // Sixty milliseconds of normal work used to be added to every sleep,
+        // eventually dropping slots despite every RPC completing promptly.
+        for tick in 0..300 {
+            let scheduled = start + interval * tick;
+            wake = next_periodic_wake(wake, interval, scheduled);
+            let enqueue = scheduled + Duration::from_millis(60);
+            let control_due = next_control_due_at(&mut last_control, interval, enqueue);
+            assert_eq!(control_due, scheduled);
+            assert_eq!(wake, scheduled + interval);
+            assert_eq!(wake.duration_since(enqueue), Duration::from_millis(440));
+        }
+    }
+
+    #[test]
+    fn observation_overrun_preserves_original_due_and_missed_control_slots() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(500);
+        let first_wake = next_periodic_wake(start, interval, start);
+        let late_enqueue = start + Duration::from_millis(2300);
+        let mut last_control = start;
+        let due = next_control_due_at(&mut last_control, interval, late_enqueue);
+        assert_eq!(due, start + interval);
+        assert_eq!(late_enqueue.duration_since(due).as_millis() / 500, 3);
+        assert_eq!(last_control, start + Duration::from_millis(2000));
+        assert_eq!(
+            next_periodic_wake(first_wake, interval, late_enqueue),
+            start + Duration::from_millis(2500)
+        );
+        assert_eq!(
+            next_control_due_at(
+                &mut last_control,
+                interval,
+                start + Duration::from_millis(2560)
+            ),
+            start + Duration::from_millis(2500)
+        );
+        // A shutdown signal may wake the loop early without shifting its clock.
+        assert_eq!(
+            next_periodic_wake(first_wake, interval, start + Duration::from_millis(100)),
+            first_wake
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_receipt_reserves_complete_utf8_bytes_before_writing_and_retains_uncertainty() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = temp.path().join("state");
+        let store = StateStore::open(&root).unwrap();
+        let path = root.join("attempts/attempt/result.receipt.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let charge = |quota| {
+            crate::publication::CaptureCharge::for_download(
+                &root,
+                store.storage_profile(),
+                store.namespace_guard(),
+                &path,
+                quota,
+            )
+            .unwrap()
+        };
+        drop(charge(u64::MAX));
+        let baseline: i64 = store
+            .connection
+            .query_row("SELECT SUM(bytes) FROM local_spool_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipt = serde_json::json!({"response":{"kind":"receipt","receipt_hash":"a".repeat(64)},"submission":{"result":{"metadata":{"text":"수치 값"}}}});
+        let mut expected = serde_json::to_vec(&receipt).unwrap();
+        expected.push(b'\n');
+        let required = expected.len() as u64;
+        let too_small = charge(baseline as u64 + required - 1);
+        assert!(
+            format!(
+                "{:#}",
+                write_json_new_reserved(&path, &receipt, Some(&too_small)).unwrap_err()
+            )
+            .contains("SPOOL_QUOTA")
+        );
+        assert!(!path.exists());
+        let exact = charge(baseline as u64 + required);
+        write_json_new_reserved(&path, &receipt, Some(&exact)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        let collision = charge(baseline as u64 + required * 2);
+        assert!(write_json_new_reserved(&path, &receipt, Some(&collision)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        let retained: i64 = store
+            .connection
+            .query_row(
+                "SELECT bytes FROM local_spool_entries WHERE path=?1",
+                [path.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained as u64, required * 2);
+    }
     #[test]
     fn publication_requires_matching_authoritative_commit_receipt() {
         use sha2::{Digest, Sha256};
@@ -2773,12 +3315,18 @@ mod agent_transport_tests {
         receipt.receipt_hash = "00".repeat(32);
         assert!(verify_publication_receipt(&Response::Receipt { receipt }, &submission).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn corrupt_and_missing_replay_state_are_preserved_or_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("node");
+        let maintenance = Namespace::new(&state)
+            .unwrap()
+            .begin_maintenance(Duration::ZERO)
+            .unwrap();
+        let guard = maintenance.exclusive(Duration::ZERO).unwrap();
         assert!(
-            quarantine_replay_state(&state, "missing")
+            quarantine_replay_state(&state, "missing", &guard)
                 .unwrap()
                 .is_none()
         );
@@ -2790,7 +3338,7 @@ mod agent_transport_tests {
         .unwrap();
         fs::create_dir(state.join("spool")).unwrap();
         fs::write(state.join("spool/upload"), b"uncommitted").unwrap();
-        let quarantined = quarantine_replay_state(&state, "fresh-session")
+        let quarantined = quarantine_replay_state(&state, "fresh-session", &guard)
             .unwrap()
             .unwrap();
         assert!(!state.exists());
@@ -2839,7 +3387,7 @@ mod agent_transport_tests {
         fs::create_dir(&source).unwrap();
         let link = tmp.path().join("alias");
         symlink(&source, &link).unwrap();
-        assert!(quarantine_replay_state(&link, "session").is_err());
+        assert!(Namespace::new(&link).is_err());
         let target = tmp.path().join("lock");
         let lock = owned_agent_lock(&target).unwrap();
         assert!(owned_agent_lock(&target).is_err());
