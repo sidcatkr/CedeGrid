@@ -35,15 +35,14 @@ thresholds.
   terminal interface opens on a TTY, and command-line flags provide the same choices for
   scripts, agents and non-TTY use.
 - Q: What happens when own work exceeds the operator's resource envelope, or the node's spool
-  budget is exhausted? → A (proposed default, pending maintainer confirmation):
+  budget is exhausted? → A:
   - An envelope breach is handled per resource through the yield ladder, opportunistic work
     first. Guaranteed work is lowered, capped and hinted, and drained only as floor policy A
     allows.
   - Spool exhaustion blocks new admission and drains nothing.
   - Explicit operator drain keeps draining every allocation.
-- Q: May Guaranteed allocations be paused? → A (proposed default, pending maintainer
-  confirmation): No. Guaranteed allocations may be lowered in share, capped and hinted, but not
-  paused, because a pause can break their continuity.
+- Q: May Guaranteed allocations be paused? → A: No. Guaranteed allocations may be lowered in
+  share, capped and hinted, but not paused, because a pause can break their continuity.
 
 ## Terms
 
