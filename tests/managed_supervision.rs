@@ -46,6 +46,7 @@ fn options() -> SupervisorOptions {
         lease_ms: 5000,
         prepare_timeout_ms: 3000,
         release_confirm_timeout_ms: 1000,
+        duty_period_ms: 100,
         nice: 10,
     }
 }

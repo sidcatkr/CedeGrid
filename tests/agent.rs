@@ -977,3 +977,70 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
     server.abort();
     let _ = server.await;
 }
+
+#[test]
+fn unknown_control_kinds_are_ignored_and_adjust_reports_applied_steps() {
+    let dir = directory();
+    let mut spec = spec(
+        dir.path(),
+        AllocationClass::Opportunistic,
+        vec![
+            std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into()),
+            "-c".into(),
+            "import time; time.sleep(1.5)".into(),
+        ],
+    );
+    spec.config.lifecycle.allocation_lease_ms = 10_000;
+    let (mut child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    // A newer agent's control kind is reported and ignored, never agent loss.
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"future_control","x":1})
+    )
+    .unwrap();
+    authorize(&mut input, 10_000);
+    writeln!(input, "{}", serde_json::json!({"kind":"future_control"})).unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"adjust","sequence":1,"resources":{"cpu":{"step":"pause","cause":"external_growth"}}})
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"adjust","sequence":2,"resources":{"cpu":{"step":"none","cause":"external_growth"}}})
+    )
+    .unwrap();
+    writeln!(input, "{}", serde_json::json!({"kind":"query"})).unwrap();
+    input.flush().unwrap();
+    let mut events = vec![];
+    let end = Instant::now() + Duration::from_secs(5);
+    while events.len() < 3 && Instant::now() < end {
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(200))
+            && matches!(event["event"].as_str(), Some("adjusted" | "state"))
+        {
+            events.push(event);
+        }
+    }
+    assert_eq!(events[0]["event"], "adjusted");
+    assert_eq!(events[0]["sequence"], 1);
+    assert_eq!(events[0]["applied"]["cpu"], "pause");
+    assert_eq!(events[1]["applied"]["cpu"], "none");
+    assert_eq!(events[2]["event"], "state");
+    assert_eq!(events[2]["authority"], "connected");
+    assert!(wait(&mut child).success());
+    let outcome: ExecutionOutcome =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
+            .unwrap();
+    assert!(
+        !outcome.yielded,
+        "an unknown control line is not agent loss"
+    );
+    assert_eq!(outcome.exit_code, Some(0));
+}

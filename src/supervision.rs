@@ -21,6 +21,8 @@ pub struct SupervisorOptions {
     pub lease_ms: u64,
     pub prepare_timeout_ms: u64,
     pub release_confirm_timeout_ms: u64,
+    /// Duty-cycle period of a rootless CPU cap: the monitor interval.
+    pub duty_period_ms: u64,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -31,6 +33,7 @@ impl Default for SupervisorOptions {
             lease_ms: 10_000,
             prepare_timeout_ms: 10_000,
             release_confirm_timeout_ms: 10_000,
+            duty_period_ms: 500,
         }
     }
 }
@@ -239,6 +242,34 @@ pub trait SupervisorControl {
     fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
         Ok(Vec::new())
     }
+    /// Deliver an `adjusted` or `state` report to the policy authority.
+    fn report(&mut self, _report: SupervisorReport) -> Result<()> {
+        Ok(())
+    }
+}
+/// Reports from a supervisor about the steps it applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "report", rename_all = "snake_case")]
+pub enum SupervisorReport {
+    Adjusted {
+        sequence: u64,
+        applied: std::collections::BTreeMap<
+            crate::contention::ResourceKey,
+            crate::contention::YieldStep,
+        >,
+        unavailable: std::collections::BTreeMap<
+            crate::contention::ResourceKey,
+            Vec<crate::contention::YieldStep>,
+        >,
+        detail: String,
+    },
+    State {
+        applied: std::collections::BTreeMap<
+            crate::contention::ResourceKey,
+            crate::contention::YieldStep,
+        >,
+        targets: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -251,6 +282,16 @@ pub enum SupervisorCommand {
     },
     Drain,
     AgentLost,
+    /// Apply one step per resource; older sequences are ignored.
+    Adjust {
+        sequence: u64,
+        resources: std::collections::BTreeMap<
+            crate::contention::ResourceKey,
+            crate::contention::StepRequest,
+        >,
+    },
+    /// Report the currently applied steps.
+    Query,
 }
 #[cfg(unix)]
 struct LocalControl;
@@ -808,12 +849,14 @@ mod unix {
     }
     include!("child_supervision.rs");
 
+    /// Apply lifecycle commands and return the runtime-step commands for the caller.
     fn apply_control_commands(
         commands: Vec<SupervisorCommand>,
         lifecycle: &mut Lifecycle,
         start: Instant,
         polled_at: u64,
-    ) {
+    ) -> Vec<SupervisorCommand> {
+        let mut runtime = Vec::new();
         for command in commands {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
             match command {
@@ -836,6 +879,192 @@ mod unix {
                 }
                 SupervisorCommand::Drain => lifecycle.request_drain(elapsed),
                 SupervisorCommand::AgentLost => lifecycle.agent_failed(elapsed),
+                command @ (SupervisorCommand::Adjust { .. } | SupervisorCommand::Query) => {
+                    runtime.push(command)
+                }
+            }
+        }
+        runtime
+    }
+
+    /// The owned family seen by an actuator: the leader through its owned
+    /// handle and running mediated children through theirs.
+    struct OwnedFamily<'a> {
+        leader: &'a mut OwnedChild,
+        identity: &'a ProcessIdentity,
+        children: Option<&'a mut ChildServer>,
+        meter: &'a mut crate::actuation::CpuMeter,
+    }
+    impl Family for OwnedFamily<'_> {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            let mut identities = Vec::new();
+            if !self.leader.reaped {
+                identities.push(self.identity.clone());
+            }
+            if let Some(children) = &self.children {
+                identities.extend(children.running_identities());
+            }
+            identities
+        }
+        fn signal(&mut self, signal: i32) -> Result<()> {
+            if !self.leader.reaped {
+                self.leader.signal(signal)?;
+            }
+            if let Some(children) = self.children.as_mut() {
+                children.signal_running(signal)?;
+            }
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            let pids: Vec<u32> = self.identities().iter().map(|id| id.pid).collect();
+            self.meter.read(&pids)
+        }
+    }
+
+    fn record_contention_with_retry(
+        journal: &dyn ExecutionJournal,
+        record: &ExecutionRecord,
+        contention: &crate::contention::AllocationContention,
+    ) -> Result<()> {
+        let mut delay = Duration::from_millis(10);
+        let mut attempt = 1;
+        loop {
+            match journal.record_contention(&record.assignment_id, record.generation, contention) {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt >= JOURNAL_ATTEMPTS => return Err(error),
+                Err(_) => {
+                    std::thread::sleep(delay);
+                    delay = delay.saturating_mul(2);
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Apply `adjust` and answer `query` commands. Unavailable or refused steps are
+    /// reported, never forced (FR-011); actuation errors mark the step unavailable.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_runtime_commands(
+        commands: Vec<SupervisorCommand>,
+        request: &LaunchRequest,
+        record: &ExecutionRecord,
+        lifecycle: &mut Lifecycle,
+        elapsed: u64,
+        actuator: &mut dyn Actuator,
+        family: &mut dyn Family,
+        contention: &mut crate::contention::AllocationContention,
+        journal: &dyn ExecutionJournal,
+        control: &mut dyn SupervisorControl,
+    ) {
+        use crate::contention::{StepRequest, YieldCause, YieldStep};
+        for command in commands {
+            match command {
+                SupervisorCommand::Adjust {
+                    sequence,
+                    resources,
+                } => {
+                    if sequence <= contention.sequence {
+                        continue;
+                    }
+                    let mut applied = std::collections::BTreeMap::new();
+                    let mut unavailable = std::collections::BTreeMap::new();
+                    let mut details = Vec::new();
+                    for (key, wanted) in resources {
+                        let kind = key.kind();
+                        let current = contention
+                            .applied
+                            .get(&key)
+                            .map_or(YieldStep::None, |s| s.step);
+                        if wanted.step >= YieldStep::Drain {
+                            // Guaranteed work drains only for a floor breach or an
+                            // operator drain (supervisor-control contract).
+                            let permitted = request.class == AllocationClass::Opportunistic
+                                || matches!(
+                                    wanted.cause,
+                                    YieldCause::FloorBreach | YieldCause::OperatorDrain
+                                );
+                            if permitted && lifecycle.phase == LifecyclePhase::Running {
+                                lifecycle.request_drain(elapsed);
+                                applied.insert(key.clone(), YieldStep::Drain);
+                                contention.applied.insert(key, wanted);
+                            } else {
+                                unavailable
+                                    .entry(key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(wanted.step);
+                                applied.insert(key, current);
+                            }
+                            continue;
+                        }
+                        if lifecycle.phase != LifecyclePhase::Running {
+                            details.push(format!(
+                                "{key}: drain in progress; runtime steps are released"
+                            ));
+                            applied.insert(key, current);
+                            continue;
+                        }
+                        if wanted.step != YieldStep::None
+                            && actuator.unavailable(kind).contains(&wanted.step)
+                        {
+                            unavailable
+                                .entry(key.clone())
+                                .or_insert_with(Vec::new)
+                                .push(wanted.step);
+                            applied.insert(key, current);
+                            continue;
+                        }
+                        match actuator.apply(family, kind, wanted.step, wanted.target) {
+                            Ok(step) => {
+                                applied.insert(key.clone(), step);
+                                if step == YieldStep::None {
+                                    contention.applied.remove(&key);
+                                } else {
+                                    contention.applied.insert(
+                                        key,
+                                        StepRequest {
+                                            step,
+                                            target: wanted.target,
+                                            cause: wanted.cause,
+                                        },
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                details.push(format!("{key} {:?}: {error:#}", wanted.step));
+                                unavailable
+                                    .entry(key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(wanted.step);
+                                applied.insert(key, current);
+                            }
+                        }
+                    }
+                    contention.sequence = sequence;
+                    if let Err(error) = record_contention_with_retry(journal, record, contention) {
+                        details.push(format!("journal unavailable: {error:#}"));
+                    }
+                    let _ = control.report(SupervisorReport::Adjusted {
+                        sequence,
+                        applied,
+                        unavailable,
+                        detail: details.join("; "),
+                    });
+                }
+                SupervisorCommand::Query => {
+                    let _ = control.report(SupervisorReport::State {
+                        applied: contention
+                            .applied
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.step))
+                            .collect(),
+                        targets: contention
+                            .applied
+                            .iter()
+                            .filter_map(|(k, v)| v.target.map(|t| (k.clone(), t)))
+                            .collect(),
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -951,6 +1180,9 @@ mod unix {
         let mut children: Option<ChildServer> = None;
         let mut capture: Option<OutputCapture> = None;
         let mut exec_sent = false;
+        let mut actuator: Option<Box<dyn Actuator>> = None;
+        let mut meter = crate::actuation::CpuMeter::default();
+        let mut contention = crate::contention::AllocationContention::default();
         let result = (|| -> Result<ExecutionOutcome> {
             let deadline = Instant::now()
                 .checked_add(Duration::from_millis(options.prepare_timeout_ms))
@@ -1134,6 +1366,12 @@ mod unix {
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 journal_unavailable(&mut lifecycle, elapsed, error);
             }
+            let actuator = actuator.insert(backend.actuator(&ActuatorSettings {
+                class: request.class,
+                requested: request.resources.clone(),
+                period: Duration::from_millis(options.duty_period_ms),
+            }));
+            let leader_identity = record.identity.clone().context("verified gate identity")?;
             let mut drain_started_ms = None;
             let mut drain_notified = false;
             let mut termination_started_ms = None;
@@ -1152,6 +1390,20 @@ mod unix {
                 {
                     leader_status = Some(status);
                     leader_exit_ms = Some(elapsed);
+                    // Continue any stopped mediated child so it can stop cleanly.
+                    let mut family = OwnedFamily {
+                        leader: &mut *owned,
+                        identity: &leader_identity,
+                        children: children.as_mut(),
+                        meter: &mut meter,
+                    };
+                    if let Err(error) = actuator.release(&mut family) {
+                        report(
+                            "step_release_failed",
+                            &request.assignment_id,
+                            format!("{error:#}"),
+                        );
+                    }
                     if let Some(server) = &mut children {
                         server.request_stop();
                     }
@@ -1205,7 +1457,8 @@ mod unix {
                         Vec::new()
                     }
                 };
-                apply_control_commands(commands, &mut lifecycle, start, polled_at);
+                let mut runtime =
+                    apply_control_commands(commands, &mut lifecycle, start, polled_at);
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let phase = lifecycle.tick(elapsed);
                 if let Some(server) = &mut children {
@@ -1222,7 +1475,12 @@ mod unix {
                         // final telemetry check. Do not poll telemetry again:
                         // Guaranteed continuity could ignore newer unsafe GPU
                         // observations for the parent but not for a new child.
-                        apply_control_commands(commands, &mut lifecycle, start, elapsed);
+                        runtime.extend(apply_control_commands(
+                            commands,
+                            &mut lifecycle,
+                            start,
+                            elapsed,
+                        ));
                         let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                         if let Some(status) = owned.try_wait()? {
                             leader_status = Some(status);
@@ -1247,8 +1505,58 @@ mod unix {
                     )?;
                 }
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                {
+                    let mut family = OwnedFamily {
+                        leader: &mut *owned,
+                        identity: &leader_identity,
+                        children: children.as_mut(),
+                        meter: &mut meter,
+                    };
+                    if !runtime.is_empty() {
+                        apply_runtime_commands(
+                            std::mem::take(&mut runtime),
+                            request,
+                            &record,
+                            &mut lifecycle,
+                            elapsed,
+                            actuator.as_mut(),
+                            &mut family,
+                            &mut contention,
+                            journal,
+                            control,
+                        );
+                    }
+                    if lifecycle.phase == LifecyclePhase::Running
+                        && leader_status.is_none()
+                        && let Err(error) = actuator.tick(&mut family)
+                    {
+                        // A failed actuation marks the step unavailable; it never
+                        // escalates by itself (research R3).
+                        report(
+                            "step_unavailable",
+                            &request.assignment_id,
+                            format!("{error:#}"),
+                        );
+                        let _ = actuator.release(&mut family);
+                        contention.applied.clear();
+                    }
+                }
                 let phase = lifecycle.tick(elapsed);
                 if phase != LifecyclePhase::Running && drain_started_ms.is_none() {
+                    // Runtime steps are released first so the worker can drain.
+                    let mut family = OwnedFamily {
+                        leader: &mut *owned,
+                        identity: &leader_identity,
+                        children: children.as_mut(),
+                        meter: &mut meter,
+                    };
+                    if let Err(error) = actuator.release(&mut family) {
+                        report(
+                            "step_release_failed",
+                            &request.assignment_id,
+                            format!("{error:#}"),
+                        );
+                    }
                     drain_started_ms = Some(lifecycle.drain_requested_ms().unwrap_or(elapsed));
                     record.phase = ExecutionPhase::Draining;
                     record.detail =
@@ -1338,6 +1646,24 @@ mod unix {
                 // deadlines, and running Guaranteed work is never signaled for an
                 // error. Only a verified owned child is signaled; uncertain release
                 // remains charged.
+                // Never leave a family stopped by a runtime step.
+                if let (Some(actuator), Some(owned), Some(identity)) =
+                    (actuator.as_mut(), child.as_mut(), record.identity.as_ref())
+                {
+                    let mut family = OwnedFamily {
+                        leader: owned,
+                        identity,
+                        children: children.as_mut(),
+                        meter: &mut meter,
+                    };
+                    if let Err(release_error) = actuator.release(&mut family) {
+                        report(
+                            "step_release_failed",
+                            &request.assignment_id,
+                            format!("{release_error:#}"),
+                        );
+                    }
+                }
                 let guaranteed_running = exec_sent
                     && request.class == AllocationClass::Guaranteed
                     && child.as_ref().is_some_and(|owned| !owned.reaped);

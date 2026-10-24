@@ -552,3 +552,22 @@ pub fn victim_order(candidates: &mut Vec<VictimFacts>, needed: u64) {
             ))
     });
 }
+
+/// One requested step for one resource in an `adjust` control message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepRequest {
+    pub step: YieldStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u64>,
+    pub cause: YieldCause,
+}
+
+/// The steps a supervisor applied, journaled so a restarted agent can learn them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AllocationContention {
+    /// The highest `adjust` sequence applied; older messages are ignored.
+    pub sequence: u64,
+    pub applied: std::collections::BTreeMap<ResourceKey, StepRequest>,
+}

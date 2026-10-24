@@ -31,6 +31,24 @@ impl StateStore {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Steps the supervisor journaled for an attempt, if any.
+    pub fn contention(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<crate::contention::AllocationContention>> {
+        let json: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT json_extract(record_json,'$.contention') FROM executions WHERE assignment_id=?1",
+                [assignment_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.flatten()
+            .map(|value| Ok(serde_json::from_str(&value)?))
+            .transpose()
+    }
+
     pub fn executions(&self) -> Result<Vec<ExecutionRecord>> {
         let mut stmt = self
             .connection
@@ -481,6 +499,35 @@ impl ExecutionJournal for StateStore {
         self.reserve_generation(request, capacity, None)
     }
 
+    fn record_contention(
+        &self,
+        assignment_id: &str,
+        generation: u64,
+        contention: &crate::contention::AllocationContention,
+    ) -> Result<()> {
+        // Only the live attempt of this generation carries applied steps.
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE executions SET record_json=json_set(record_json,'$.contention',json(?3))
+             WHERE assignment_id=?1 AND json_extract(record_json,'$.generation')=?2
+             AND json_extract(record_json,'$.phase') IN ('authorized','running','draining')",
+            params![
+                assignment_id,
+                i64::try_from(generation)?,
+                serde_json::to_string(contention)?
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "applied steps belong to no live attempt of this generation"
+        );
+        tx.execute(
+            "INSERT INTO execution_events(assignment_id,record_json) SELECT assignment_id,record_json FROM executions WHERE assignment_id=?1",
+            [assignment_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     fn transition(&self, record: &ExecutionRecord) -> Result<()> {
         self.ensure_managed_children_schema()?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;

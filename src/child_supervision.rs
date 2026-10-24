@@ -100,6 +100,27 @@ impl ChildServer {
             .env
             .insert("CEDEGRID_SUPERVISOR_TOKEN".into(), self.token.clone());
     }
+    /// Verified identities of mediated children that are running user code.
+    fn running_identities(&self) -> Vec<ProcessIdentity> {
+        self.children
+            .values()
+            .filter(|c| matches!(c.phase, ChildPhase::Running | ChildPhase::Draining))
+            .filter(|c| c.exit.is_none() && !c.owned.reaped)
+            .filter_map(|c| c.identity.clone())
+            .collect()
+    }
+    /// Signal running mediated children through their owned handles only.
+    fn signal_running(&mut self, signal: i32) -> Result<()> {
+        for child in self.children.values_mut().filter(|c| {
+            matches!(c.phase, ChildPhase::Running | ChildPhase::Draining)
+                && c.exit.is_none()
+                && !c.owned.reaped
+                && c.identity.is_some()
+        }) {
+            child.owned.signal(signal)?;
+        }
+        Ok(())
+    }
     fn all_released(&self) -> bool {
         self.children
             .values()

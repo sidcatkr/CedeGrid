@@ -68,9 +68,34 @@ pub struct SupervisorSpec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum Event {
-    Prepared { record: ExecutionRecord },
-    Finished { outcome: ExecutionOutcome },
-    Failed { detail: String },
+    Prepared {
+        record: ExecutionRecord,
+    },
+    Finished {
+        outcome: ExecutionOutcome,
+    },
+    Failed {
+        detail: String,
+    },
+    Adjusted {
+        sequence: u64,
+        applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+        unavailable: BTreeMap<crate::contention::ResourceKey, Vec<crate::contention::YieldStep>>,
+        detail: String,
+    },
+    State {
+        applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+        targets: BTreeMap<crate::contention::ResourceKey, u64>,
+        /// "connected" or "lost"
+        authority: String,
+    },
+}
+/// One line from the agent. A line that does not parse is reported and ignored;
+/// only EOF or a read error is agent loss (supervisor-control contract).
+enum Incoming {
+    Control(Control),
+    Unknown(String),
+    Lost,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -83,7 +108,17 @@ enum Control {
         lease: Lease,
         expires_monotonic_ms: u64,
     },
-    Drain,
+    Drain {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<crate::contention::YieldCause>,
+    },
+    /// One step per resource, from the agent's policy authority.
+    Adjust {
+        sequence: u64,
+        resources: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
+    },
+    /// Ask for the applied steps.
+    Query,
     /// The agent's latest GPU observation. Supervisors run no collector of
     /// their own; GPU launch rechecks use this (research R1).
     Observation {
@@ -156,6 +191,15 @@ impl ExecutionJournal for AssignedJournal {
     fn reserve(&self, request: &LaunchRequest, capacity: &Resources) -> Result<ExecutionRecord> {
         self.store
             .reserve_assigned(request, capacity, self.generation)
+    }
+    fn record_contention(
+        &self,
+        assignment_id: &str,
+        generation: u64,
+        contention: &crate::contention::AllocationContention,
+    ) -> Result<()> {
+        self.store
+            .record_contention(assignment_id, generation, contention)
     }
     fn transition(&self, record: &ExecutionRecord) -> Result<()> {
         self.store.transition(record)
@@ -279,7 +323,7 @@ impl ReplayJournalGuard {
     }
 }
 struct PipeControl {
-    rx: mpsc::Receiver<std::result::Result<Control, String>>,
+    rx: mpsc::Receiver<Incoming>,
     assignment: Assignment,
     config: Config,
     /// The latest agent GPU observation and when it arrived.
@@ -299,7 +343,7 @@ impl SupervisorControl for PipeControl {
             let snapshot = loop {
                 match self.recv_until(deadline)? {
                     Control::Observation { snapshot } => break *snapshot,
-                    Control::Drain => {
+                    Control::Drain { .. } => {
                         bail!("drain requested before authorization; gate stays blocked")
                     }
                     _ => {}
@@ -319,6 +363,8 @@ impl SupervisorControl for PipeControl {
                 Control::Observation { snapshot } => {
                     self.observation = Some((*snapshot, Instant::now()));
                 }
+                // Nothing runs before authorization, so there is nothing to adjust.
+                Control::Adjust { .. } | Control::Query => {}
                 Control::Authorize {
                     lease,
                     expires_monotonic_ms,
@@ -341,7 +387,7 @@ impl SupervisorControl for PipeControl {
                     self.authorized_at = Some(Instant::now());
                     return Ok(());
                 }
-                Control::Drain | Control::Renewal { .. } => {
+                Control::Drain { .. } | Control::Renewal { .. } => {
                     bail!("execution authorization absent; gate stays blocked")
                 }
             }
@@ -369,15 +415,49 @@ impl SupervisorControl for PipeControl {
     fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
         self.pending_commands()
     }
+    fn report(&mut self, report: supervision::SupervisorReport) -> Result<()> {
+        emit(&match report {
+            supervision::SupervisorReport::Adjusted {
+                sequence,
+                applied,
+                unavailable,
+                detail,
+            } => Event::Adjusted {
+                sequence,
+                applied,
+                unavailable,
+                detail,
+            },
+            supervision::SupervisorReport::State { applied, targets } => Event::State {
+                applied,
+                targets,
+                authority: if self.agent_lost { "lost" } else { "connected" }.into(),
+            },
+        })
+    }
+}
+
+/// A control line this supervisor does not understand, such as one from a newer agent.
+fn unknown_control(detail: &str) {
+    write_diagnostic(
+        std::io::stderr(),
+        format_args!(
+            "{}",
+            serde_json::json!({"event":"unknown_control","detail":detail})
+        ),
+    );
 }
 impl PipeControl {
     fn recv_until(&mut self, deadline: Instant) -> Result<Control> {
-        match self
-            .rx
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
-            Ok(Ok(control)) => Ok(control),
-            _ => bail!("agent lost or execution authorization absent; gate stays blocked"),
+        loop {
+            match self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(Incoming::Control(control)) => return Ok(control),
+                Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
+                _ => bail!("agent lost or execution authorization absent; gate stays blocked"),
+            }
         }
     }
     /// GPU launch recheck against the agent's observation, which must be fresh.
@@ -400,7 +480,7 @@ impl PipeControl {
         let mut commands = Vec::new();
         loop {
             match self.rx.try_recv() {
-                Ok(Ok(Control::Renewal {
+                Ok(Incoming::Control(Control::Renewal {
                     lease,
                     expires_monotonic_ms,
                 })) => {
@@ -422,12 +502,23 @@ impl PipeControl {
                         }
                     }
                 }
-                Ok(Ok(Control::Drain)) => commands.push(SupervisorCommand::Drain),
-                Ok(Ok(Control::Observation { snapshot })) => {
+                Ok(Incoming::Control(Control::Drain { .. })) => {
+                    commands.push(SupervisorCommand::Drain)
+                }
+                Ok(Incoming::Control(Control::Observation { snapshot })) => {
                     self.observation = Some((*snapshot, Instant::now()));
                 }
-                Ok(Ok(Control::Authorize { .. })) => {}
-                Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
+                Ok(Incoming::Control(Control::Adjust {
+                    sequence,
+                    resources,
+                })) => commands.push(SupervisorCommand::Adjust {
+                    sequence,
+                    resources,
+                }),
+                Ok(Incoming::Control(Control::Query)) => commands.push(SupervisorCommand::Query),
+                Ok(Incoming::Control(Control::Authorize { .. })) => {}
+                Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
+                Ok(Incoming::Lost) | Err(mpsc::TryRecvError::Disconnected) => {
                     if !self.agent_lost {
                         commands.push(SupervisorCommand::AgentLost);
                         self.agent_lost = true;
@@ -487,9 +578,13 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(std::io::stdin()).lines() {
-            let message = line
-                .map_err(|e| e.to_string())
-                .and_then(|l| serde_json::from_str(&l).map_err(|e| e.to_string()));
+            let message = match line {
+                Ok(line) => match serde_json::from_str(&line) {
+                    Ok(control) => Incoming::Control(control),
+                    Err(error) => Incoming::Unknown(error.to_string()),
+                },
+                Err(_) => Incoming::Lost,
+            };
             if tx.send(message).is_err() {
                 break;
             }
@@ -516,6 +611,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         lease_ms: spec.config.lifecycle.allocation_lease_ms,
         prepare_timeout_ms: spec.config.execution.prepare_timeout_ms,
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
+        duty_period_ms: spec.config.monitor.interval_ms,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,
@@ -639,12 +735,17 @@ struct ChildSlot {
     checkpoint_hash: Option<String>,
     exited: bool,
     capture_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Steps the supervisor reported unavailable, per resource.
+    unavailable: BTreeMap<crate::contention::ResourceKey, BTreeSet<crate::contention::YieldStep>>,
+    /// Steps the supervisor reported applied, and the last acknowledged sequence.
+    applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+    applied_sequence: u64,
 }
 impl Drop for ChildSlot {
     fn drop(&mut self) {
         // Native output work must finish before the slot releases its namespace.
         // Drain uses the authenticated owned control pipe and never signals a PID.
-        let _ = send(self, &Control::Drain);
+        let _ = send(self, &Control::Drain { cause: None });
         let _ = self.child.wait();
         for thread in self.capture_threads.drain(..) {
             let _ = thread.join();
@@ -1303,6 +1404,9 @@ async fn start_assignment(
         checkpoint_hash: None,
         exited: false,
         capture_threads: vec![stderr_thread, events_thread],
+        unavailable: BTreeMap::new(),
+        applied: BTreeMap::new(),
+        applied_sequence: 0,
     })
 }
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
@@ -1858,7 +1962,7 @@ impl AgentLoop<'_> {
             match handle.await.context("assignment preparation task failed")? {
                 Ok(mut slot) => {
                     if revoked || self.stopping.is_some() {
-                        let _ = send(&mut slot, &Control::Drain);
+                        let _ = send(&mut slot, &Control::Drain { cause: None });
                     }
                     self.slots.insert(id, slot);
                 }
@@ -1922,6 +2026,20 @@ impl AgentLoop<'_> {
                         slot.prepared = Some(record);
                     }
                     Ok(Event::Finished { .. }) => {}
+                    Ok(Event::Adjusted {
+                        sequence,
+                        applied,
+                        unavailable,
+                        ..
+                    }) => {
+                        // Steps the supervisor could not apply are skipped from now on.
+                        for (key, steps) in unavailable {
+                            slot.unavailable.entry(key).or_default().extend(steps);
+                        }
+                        slot.applied = applied;
+                        slot.applied_sequence = slot.applied_sequence.max(sequence);
+                    }
+                    Ok(Event::State { applied, .. }) => slot.applied = applied,
                     Ok(Event::Failed { detail }) | Err(detail) => {
                         emit(
                             &serde_json::json!({"event":"supervisor_error","assignment_id":slot.assignment.request.assignment_id,"detail":detail}),
@@ -2394,7 +2512,7 @@ impl AgentLoop<'_> {
                     || envelope_exceeded
                     || slot.assignment.request.class == AllocationClass::Opportunistic)
             {
-                let _ = send(slot, &Control::Drain);
+                let _ = send(slot, &Control::Drain { cause: None });
             }
         }
         Ok(())
@@ -2548,7 +2666,7 @@ impl AgentLoop<'_> {
                         *revoked = true;
                     }
                     if let Some(slot) = self.slots.get_mut(&id) {
-                        let _ = send(slot, &Control::Drain);
+                        let _ = send(slot, &Control::Drain { cause: None });
                     }
                 }
                 let mut acknowledged = vec![];
@@ -2708,7 +2826,7 @@ impl AgentLoop<'_> {
             handle.abort();
             match handle.await {
                 Ok(Ok(mut slot)) => {
-                    let _ = send(&mut slot, &Control::Drain);
+                    let _ = send(&mut slot, &Control::Drain { cause: None });
                     self.slots.insert(id, slot);
                 }
                 Ok(Err(_)) | Err(_) => {
@@ -2728,7 +2846,7 @@ impl AgentLoop<'_> {
         // Closing pipes is agent failure for any remaining opportunistic supervisor.
         // We deliberately never signal an uncertain supervisor/workload by PID.
         for slot in self.slots.values_mut() {
-            let _ = send(slot, &Control::Drain);
+            let _ = send(slot, &Control::Drain { cause: None });
             let _ = slot.child.try_wait()?;
         }
         let retained: Vec<_>=self.slots.iter().map(|(id,slot)|serde_json::json!({"assignment_id":id,"exited":slot.exited,"reported":slot.reported,"publishing":self.publishing.iter().filter(|(publishing_id,_)|publishing_id==id).collect::<Vec<_>>(),"result_receipt":slot.output_dir.join("result.receipt.json").is_file(),"failure_receipt":slot.output_dir.join("failure.receipt.json").is_file()})).collect();

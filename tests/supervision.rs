@@ -178,6 +178,7 @@ fn options() -> SupervisorOptions {
         term_grace_ms: 20,
         prepare_timeout_ms: 2_000,
         release_confirm_timeout_ms: 2_000,
+        duty_period_ms: 100,
     }
 }
 fn run(
@@ -843,4 +844,285 @@ fn kill_waits_a_minimum_term_grace_after_the_first_sigterm_actually_sent() {
         outcome.process_exit_ms >= sent + opts.term_grace_ms,
         "{outcome:?}"
     );
+}
+
+mod actuation {
+    use super::*;
+    use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+    use supervision::{SupervisorCommand, SupervisorReport};
+
+    fn python() -> String {
+        std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
+    }
+
+    /// A single-process worker that bumps a counter file for `seconds`.
+    fn counter_worker(dir: &Path, seconds: f64, busy: bool) -> Vec<String> {
+        let body = if busy {
+            format!(
+                "import time\nend=time.monotonic()+{seconds}\ni=0\nwhile time.monotonic()<end:\n    i+=1\n    if i%20000==0: open('counter','w').write(str(i))\n"
+            )
+        } else {
+            format!(
+                "import time\nend=time.monotonic()+{seconds}\ni=0\nwhile time.monotonic()<end:\n    i+=1\n    open('counter','w').write(str(i))\n    time.sleep(0.02)\n"
+            )
+        };
+        let _ = dir;
+        vec![python(), "-c".into(), body]
+    }
+
+    fn read_counter(path: &Path) -> u64 {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn adjust(sequence: u64, step: YieldStep, target: Option<u64>) -> SupervisorCommand {
+        SupervisorCommand::Adjust {
+            sequence,
+            resources: BTreeMap::from([(
+                ResourceKey::Cpu,
+                StepRequest {
+                    step,
+                    target,
+                    cause: YieldCause::ExternalGrowth,
+                },
+            )]),
+        }
+    }
+
+    /// Sends scripted adjustments at given times after the first poll and samples
+    /// counters at given times, recording every report.
+    struct Script {
+        started: Option<Instant>,
+        commands: Vec<(u64, SupervisorCommand)>,
+        samples: Vec<(u64, PathBuf)>,
+        sampled: Vec<(u64, u64)>,
+        reports: Vec<SupervisorReport>,
+    }
+    impl Script {
+        fn new(commands: Vec<(u64, SupervisorCommand)>, samples: Vec<(u64, PathBuf)>) -> Self {
+            Self {
+                started: None,
+                commands,
+                samples,
+                sampled: vec![],
+                reports: vec![],
+            }
+        }
+    }
+    impl supervision::SupervisorControl for Script {
+        fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
+            let elapsed = self
+                .started
+                .get_or_insert_with(Instant::now)
+                .elapsed()
+                .as_millis() as u64;
+            while self.samples.first().is_some_and(|(at, _)| *at <= elapsed) {
+                let (at, path) = self.samples.remove(0);
+                self.sampled.push((at, read_counter(&path)));
+            }
+            let mut due = vec![];
+            while self.commands.first().is_some_and(|(at, _)| *at <= elapsed) {
+                due.push(self.commands.remove(0).1);
+            }
+            Ok(due)
+        }
+        fn report(&mut self, report: SupervisorReport) -> Result<()> {
+            self.reports.push(report);
+            Ok(())
+        }
+    }
+
+    fn adjusted(
+        reports: &[SupervisorReport],
+        sequence: u64,
+    ) -> (
+        BTreeMap<ResourceKey, YieldStep>,
+        BTreeMap<ResourceKey, Vec<YieldStep>>,
+    ) {
+        reports
+            .iter()
+            .find_map(|r| match r {
+                SupervisorReport::Adjusted {
+                    sequence: s,
+                    applied,
+                    unavailable,
+                    ..
+                } if *s == sequence => Some((applied.clone(), unavailable.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no adjusted report for {sequence}: {reports:?}"))
+    }
+
+    fn long_lease() -> SupervisorOptions {
+        SupervisorOptions {
+            lease_ms: 30_000,
+            duty_period_ms: 100,
+            ..options()
+        }
+    }
+
+    #[test]
+    fn pause_stops_only_the_owned_worker_and_resume_continues_it() {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = AllocationClass::Opportunistic;
+        req.argv = counter_worker(temp.path(), 2.5, false);
+        // A same-user process outside manager ownership must never be touched.
+        let unrelated_dir = TempDir::new().unwrap();
+        let mut unrelated = Command::new(python())
+            .args(["-c", "import time\ni=0\nwhile True:\n    i+=1\n    open('counter','w').write(str(i))\n    time.sleep(0.02)\n"])
+            .current_dir(unrelated_dir.path())
+            .spawn()
+            .unwrap();
+        let mine = temp.path().join("counter");
+        let theirs = unrelated_dir.path().join("counter");
+        let mut script = Script::new(
+            vec![
+                (400, adjust(1, YieldStep::Pause, None)),
+                (1200, adjust(2, YieldStep::None, None)),
+            ],
+            vec![
+                (550, mine.clone()),
+                (1100, mine.clone()),
+                (550, theirs.clone()),
+                (1100, theirs.clone()),
+            ],
+        );
+        script.samples.sort_by_key(|(at, _)| *at);
+        let result = run_controlled(
+            &req,
+            &long_lease(),
+            &Journal::new(),
+            &mut Backend::new(),
+            &mut script,
+        );
+        let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        let outcome = result.unwrap();
+        assert!(unrelated_alive);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(!outcome.yielded);
+        let (applied, _) = adjusted(&script.reports, 1);
+        assert_eq!(applied[&ResourceKey::Cpu], YieldStep::Pause);
+        let (applied, _) = adjusted(&script.reports, 2);
+        assert_eq!(applied[&ResourceKey::Cpu], YieldStep::None);
+        // Samples were taken in time order: mine, theirs at 550 and again at 1100.
+        let values: Vec<u64> = script.sampled.iter().map(|(_, v)| *v).collect();
+        let (mine_paused, theirs_paused) = (values[0], values[1]);
+        let (mine_later, theirs_later) = (values[2], values[3]);
+        assert_eq!(
+            mine_paused, mine_later,
+            "the paused worker must not progress"
+        );
+        assert!(
+            theirs_later > theirs_paused,
+            "an unrelated process is never paused"
+        );
+    }
+
+    #[test]
+    fn pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reported() {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.argv = counter_worker(temp.path(), 1.0, false);
+        let mut script = Script::new(
+            vec![
+                (200, adjust(1, YieldStep::Pause, None)),
+                (
+                    300,
+                    SupervisorCommand::Adjust {
+                        sequence: 2,
+                        resources: BTreeMap::from([
+                            (
+                                ResourceKey::Cpu,
+                                StepRequest {
+                                    step: YieldStep::LowerShare,
+                                    target: None,
+                                    cause: YieldCause::ExternalGrowth,
+                                },
+                            ),
+                            (
+                                ResourceKey::Ram,
+                                StepRequest {
+                                    step: YieldStep::Hint,
+                                    target: Some(1),
+                                    cause: YieldCause::ExternalGrowth,
+                                },
+                            ),
+                        ]),
+                    },
+                ),
+            ],
+            vec![
+                (250, temp.path().join("counter")),
+                (700, temp.path().join("counter")),
+            ],
+        );
+        let outcome = run_controlled(
+            &req,
+            &long_lease(),
+            &Journal::new(),
+            &mut Backend::new(),
+            &mut script,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        let (applied, unavailable) = adjusted(&script.reports, 1);
+        assert_eq!(applied.get(&ResourceKey::Cpu), Some(&YieldStep::None));
+        assert_eq!(unavailable[&ResourceKey::Cpu], [YieldStep::Pause]);
+        let (_, unavailable) = adjusted(&script.reports, 2);
+        assert_eq!(unavailable[&ResourceKey::Cpu], [YieldStep::LowerShare]);
+        assert_eq!(unavailable[&ResourceKey::Ram], [YieldStep::Hint]);
+        assert!(
+            script.sampled[1].1 > script.sampled[0].1,
+            "Guaranteed work kept running"
+        );
+    }
+
+    #[test]
+    fn a_cpu_cap_throttles_a_busy_worker_by_duty_cycle_and_reverses() {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = AllocationClass::Opportunistic;
+        req.resources.cpu_millicores = 1000;
+        req.argv = counter_worker(temp.path(), 4.0, true);
+        let counter = temp.path().join("counter");
+        let mut script = Script::new(
+            vec![
+                (1000, adjust(1, YieldStep::Cap, Some(250))),
+                (3000, adjust(2, YieldStep::None, None)),
+            ],
+            vec![
+                (300, counter.clone()),
+                (900, counter.clone()),
+                (1800, counter.clone()),
+                (2900, counter.clone()),
+                (3200, counter.clone()),
+                (3800, counter.clone()),
+            ],
+        );
+        let outcome = run_controlled(
+            &req,
+            &long_lease(),
+            &Journal::new(),
+            &mut Backend::new(),
+            &mut script,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        let (applied, _) = adjusted(&script.reports, 1);
+        assert_eq!(applied[&ResourceKey::Cpu], YieldStep::Cap);
+        let rate = |a: usize, b: usize| {
+            let ((t0, v0), (t1, v1)) = (script.sampled[a], script.sampled[b]);
+            (v1.saturating_sub(v0)) as f64 / (t1 - t0) as f64
+        };
+        let free = rate(0, 1);
+        let capped = rate(2, 3);
+        let resumed = rate(4, 5);
+        assert!(capped < 0.6 * free, "free {free} capped {capped}");
+        assert!(resumed > 0.7 * free, "free {free} resumed {resumed}");
+    }
 }

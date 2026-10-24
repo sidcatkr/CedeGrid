@@ -822,6 +822,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         lease_ms: config.lifecycle.allocation_lease_ms,
         prepare_timeout_ms: config.execution.prepare_timeout_ms,
         release_confirm_timeout_ms: config.execution.release_confirm_timeout_ms,
+        duty_period_ms: config.monitor.interval_ms,
     };
     let outcome = match supervision::supervise(
         &request,

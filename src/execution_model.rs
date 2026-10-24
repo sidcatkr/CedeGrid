@@ -123,6 +123,15 @@ pub trait ExecutionJournal {
     fn reserve(&self, request: &LaunchRequest, capacity: &Resources) -> Result<ExecutionRecord>;
     /// Must commit before authorizing user code. Transitions validate assignment/generation.
     fn transition(&self, record: &ExecutionRecord) -> Result<()>;
+    /// Journal the steps applied to a running allocation without a phase change.
+    fn record_contention(
+        &self,
+        _assignment_id: &str,
+        _generation: u64,
+        _contention: &crate::contention::AllocationContention,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn reserve_managed_child(
         &self,
         _assignment_id: &str,
@@ -167,8 +176,52 @@ pub trait ExecutionJournal {
 }
 
 /// A small, statically implemented backend boundary, not a dynamic plugin framework.
+/// The verified processes one supervisor owns. Signals go through owned handles
+/// only, never a persisted or numeric PID (research R4).
+pub trait Family {
+    fn identities(&self) -> Vec<ProcessIdentity>;
+    fn signal(&mut self, signal: i32) -> Result<()>;
+    /// Cumulative CPU time of the family, when it can be read.
+    fn cpu_time(&mut self) -> Option<std::time::Duration>;
+}
+
+/// Runtime yield-step mechanisms. Steps reach only the owned family, or a
+/// delegated leaf whose membership equals the family's verified identities.
+pub trait Actuator {
+    /// Steps this mechanism cannot apply to a resource of this allocation.
+    fn unavailable(
+        &self,
+        kind: crate::contention::ResourceKind,
+    ) -> std::collections::BTreeSet<crate::contention::YieldStep>;
+    /// Apply a step and target, and return the step that reads back as applied.
+    fn apply(
+        &mut self,
+        family: &mut dyn Family,
+        kind: crate::contention::ResourceKind,
+        step: crate::contention::YieldStep,
+        target: Option<u64>,
+    ) -> Result<crate::contention::YieldStep>;
+    /// Advance time-driven mechanisms such as a duty cycle.
+    fn tick(&mut self, family: &mut dyn Family) -> Result<()>;
+    /// Undo every runtime step before drain, termination or exit.
+    fn release(&mut self, family: &mut dyn Family) -> Result<()>;
+}
+
+/// Settings a backend needs to build its actuator for one allocation.
+#[derive(Debug, Clone)]
+pub struct ActuatorSettings {
+    pub class: AllocationClass,
+    pub requested: Resources,
+    /// Duty-cycle period for a rootless CPU cap: the monitor interval.
+    pub period: std::time::Duration,
+}
+
 pub trait LaunchBackend {
     fn name(&self) -> &str;
+    /// Runtime step mechanisms. The default applies rootless signals to the family.
+    fn actuator(&self, settings: &ActuatorSettings) -> Box<dyn Actuator> {
+        Box::new(crate::actuation::RootlessActuator::new(settings))
+    }
     fn prepare(&mut self, request: &LaunchRequest) -> Result<GateSetup>;
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {
         Vec::new()

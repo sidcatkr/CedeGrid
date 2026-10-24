@@ -509,3 +509,54 @@ fn rollback_profile_preserves_launch_barrier_and_uncertain_capacity_across_reope
             .is_ok()
     );
 }
+
+#[test]
+fn applied_steps_are_journaled_for_the_running_attempt_only() {
+    use cedegrid::contention::{
+        AllocationContention, ResourceKey, StepRequest, YieldCause, YieldStep,
+    };
+    let (_dir, store) = store();
+    let row = store
+        .reserve(&request("a", "a1"), &resources(1000))
+        .unwrap();
+    let mut row = prepared(row);
+    store.transition(&row).unwrap();
+    row.phase = ExecutionPhase::Authorized;
+    store.transition(&row).unwrap();
+    row.phase = ExecutionPhase::Running;
+    store.transition(&row).unwrap();
+    let contention = AllocationContention {
+        sequence: 4,
+        applied: BTreeMap::from([(
+            ResourceKey::Cpu,
+            StepRequest {
+                step: YieldStep::Cap,
+                target: Some(250),
+                cause: YieldCause::ExternalGrowth,
+            },
+        )]),
+    };
+    assert!(store.contention("a1").unwrap().is_none());
+    store
+        .record_contention("a1", row.generation, &contention)
+        .unwrap();
+    assert_eq!(store.contention("a1").unwrap(), Some(contention.clone()));
+    // A stale generation never overwrites the live attempt's steps.
+    assert!(
+        store
+            .record_contention("a1", row.generation + 1, &contention)
+            .is_err()
+    );
+    // The record itself still reads back unchanged.
+    assert_eq!(
+        store.executions().unwrap()[0].phase,
+        ExecutionPhase::Running
+    );
+    row.phase = ExecutionPhase::Released;
+    store.transition(&row).unwrap();
+    assert!(
+        store
+            .record_contention("a1", row.generation, &contention)
+            .is_err()
+    );
+}

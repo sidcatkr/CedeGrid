@@ -96,6 +96,7 @@ Path('leader-exit-time').write_text(str(time.clock_gettime_ns(time.CLOCK_MONOTON
         lease_ms: 10000,
         prepare_timeout_ms: 3000,
         release_confirm_timeout_ms: 1000,
+        duty_period_ms: 100,
     };
     let start = monotonic_now();
     let outcome = supervision::supervise(

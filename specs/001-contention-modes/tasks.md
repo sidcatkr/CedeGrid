@@ -237,7 +237,7 @@ pause and then reverses, with no drain (quickstart §3).
   5. least progress lost;
   6. best fit;
   7. assignment ID as the tie-break.
-- [ ] T035 [P] [US2] Add supervisor control tests in `tests/supervision.rs`:
+- [X] T035 [P] [US2] Add supervisor control tests in `tests/supervision.rs`:
   - `adjust` applies only to owned pidfds;
   - an unknown `kind` is ignored and does not count as AgentLost;
   - `pause` is refused for Guaranteed work;
@@ -271,9 +271,9 @@ pause and then reverses, with no drain (quickstart §3).
   `src/contention.rs` (data-model.md YieldStep transitions).
 - [ ] T044 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
   checkpoint times from the agent's publication records in `src/agent.rs`.
-- [ ] T045 [US2] Add an `Actuator` trait to `LaunchBackend` in `src/execution_model.rs`: apply
+- [X] T045 [US2] Add an `Actuator` trait to `LaunchBackend` in `src/execution_model.rs`: apply
   a step and target, read it back, and report unavailable steps.
-- [ ] T046 [US2] Implement the rootless actuator in `src/actuation.rs`:
+- [X] T046 [US2] Implement the rootless actuator in `src/actuation.rs`:
   - SIGSTOP/SIGCONT duty-cycle cap and bounded pause through owned pidfds (`OwnedChild` in
     `src/supervision.rs`);
   - lower share reported unavailable at runtime.
@@ -285,7 +285,7 @@ pause and then reverses, with no drain (quickstart §3).
     PIDs;
   - `assert_empty` replaced for adjustable controls;
   - targets journaled.
-- [ ] T048 [US2] Add `Control::Adjust`, `Control::Query`, `Event::Adjusted` and `Event::State`:
+- [X] T048 [US2] Add `Control::Adjust`, `Control::Query`, `Event::Adjusted` and `Event::State`:
   - message types in `src/agent.rs`;
   - handling in `src/supervision.rs` and `src/child_supervision.rs`;
   - applied steps persisted as `AllocationContention` in `src/execution_state.rs`.
