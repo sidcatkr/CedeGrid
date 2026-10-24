@@ -81,16 +81,28 @@ Subtract attributed managed usage from total system usage before classifying the
 remaining usage as external; do not subtract both the usage and the entire reservation
 again from free capacity. Unknown observations prohibit optimistic admission.
 
-Automatic yielding selects only opportunistic allocations. Guaranteed allocations
-remain fully charged, including pending and uncertain reservations, and cannot
-stand in for an opportunistic allocation that must yield. Explicit node drain and
-operator-envelope violations retain their existing all-allocation stop semantics.
+Each resource runs in a contention mode. Yield First keeps 25% of schedulable capacity
+free and counts unknown activity as demand. Neutral uses idle capacity and, under
+contention, converges to its max-min fair share among principals: owner UIDs, with
+processes whose owner cannot be read counted as one principal and the account
+CedeGrid runs as counted as the owner. Performance keeps 10% free on CPU and GPU
+compute and only the floor on memory. The margins are configurable per resource.
+
+Automatic yielding releases opportunistic allocations first. Guaranteed allocations
+remain fully charged, including pending and uncertain reservations. They may be
+lowered in share or capped, are never paused, and are drained automatically only
+under floor policy A. Explicit node drain retains its all-allocation stop semantics.
+
+No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host
+RAM and `gpu.reserve_vram_mib` per GPU stay free. A breached floor blocks admission
+on that resource and releases opportunistic work holding it. Floor policy A, the
+default, may then drain Guaranteed work that holds the memory, once the hint
+deadline has passed. Floor policy B (caution) never drains Guaranteed work for a
+floor; it reports the breach and blocks admission. Neutral memory policy A, the
+default, puts floors before fair share; Neutral memory policy B (caution) keeps
+Neutral's fair share of memory while a floor is breached.
 Policy recordings without an allocation class retain the legacy opportunistic
 default; live observation copies the required class from the durable execution record.
-
-Known limitation: on a CPU-saturated host, Neutral mode assumes one external principal when it
-computes its fair share, so managed work converges to half of the schedulable CPU however many
-external owners compete.
 
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.

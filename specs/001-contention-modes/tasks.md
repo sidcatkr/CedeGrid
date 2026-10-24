@@ -342,14 +342,14 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T056 [P] [US3] Add tests in `tests/contention.rs` for Yield First: a 25% margin, a
+- [X] T056 [P] [US3] Add tests in `tests/contention.rs` for Yield First: a 25% margin, a
   3-interval response, unknown activity counted as demand, and slow scale-up.
-- [ ] T057 [US3] Add tests in `tests/contention.rs` for Neutral:
+- [X] T057 [US3] Add tests in `tests/contention.rs` for Neutral:
   - max-min fair share with 1–3 principals plus an unknown-owner principal;
   - own work converges and does not go below its share, except for floors under Neutral
     memory policy A;
   - policy B holds the share.
-- [ ] T058 [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
+- [X] T058 [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
   - a 10% margin, floors and fast scale-up;
   - floor policies A, B and C for Guaranteed work;
   - Guaranteed work is never paused.
@@ -376,10 +376,10 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   - the owner UID per external process, from sysinfo or `/proc/<pid>/status`, mapping NVML
     PIDs to UIDs;
   - processes whose owner is unreadable count as one principal.
-- [ ] T064 [US3] Implement max-min fair share in `src/contention.rs` (research R12).
-- [ ] T065 [US3] Implement the Yield First, Neutral and Performance target computations per
+- [X] T064 [US3] Implement max-min fair share in `src/contention.rs` (research R12).
+- [X] T065 [US3] Implement the Yield First, Neutral and Performance target computations per
   resource in `src/contention.rs`, from `ResourceThresholds`.
-- [ ] T066 [US3] Implement floors and policies in `src/contention.rs`:
+- [X] T066 [US3] Implement floors and policies in `src/contention.rs`:
   - RAM and VRAM floors from `ram.reserve_mib`/`ram.reserve_percent` and
     `gpu.reserve_vram_mib`;
   - floor policies A, B and C, and Neutral memory policies A and B;
@@ -643,7 +643,9 @@ each step.
   `setup.rs`.
 - [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
-- [ ] T116a Count external principals for Neutral's CPU fair share:
+- [X] T116a Count external principals for Neutral's CPU fair share (done with T063 and T064:
+  principals come from `src/telemetry.rs`, and unattributed external usage counts as one
+  principal):
   - in `src/kernel.rs`, read the distinct UIDs other than the agent's own that have CPU usage
     above the noise floor, from `/proc` and read-only;
   - in `src/contention.rs`, divide `cpu_allowance`'s saturated Neutral share by the managed

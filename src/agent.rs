@@ -2872,12 +2872,14 @@ impl AgentLoop<'_> {
             .map(|a| (a.allocation_id.as_str(), a.cause))
             .collect();
         for id in &decision.would_drain {
+            // Guaranteed work drains only for a floor breach the policy permits.
             if let Some(slot) = self.slots.get_mut(id)
                 && slot.drain_sent_at.is_none()
                 && (self.stopping.is_some()
                     || self.spool_full
                     || envelope_exceeded
-                    || slot.assignment.request.class == AllocationClass::Opportunistic)
+                    || slot.assignment.request.class == AllocationClass::Opportunistic
+                    || causes.get(id.as_str()) == Some(&crate::contention::YieldCause::FloorBreach))
             {
                 let cause = if envelope_exceeded {
                     Some(crate::contention::YieldCause::EnvelopeBreach)

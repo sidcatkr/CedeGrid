@@ -398,31 +398,440 @@ mod victims {
     }
 }
 
-mod cpu_allowance {
-    use cedegrid::contention::*;
+/// Shared builders for the mode tests.
+mod modes {
+    pub use cedegrid::contention::*;
 
-    fn allowance(mode: ContentionMode, budget: u64, saturated: bool) -> u64 {
-        cpu_allowance(
+    pub fn input(
+        kind: ResourceKind,
+        mode: ContentionMode,
+        capacity: u64,
+        external: u64,
+    ) -> ModeInput {
+        ModeInput {
+            kind,
             mode,
-            &ResourceThresholds::defaults(ResourceKind::Cpu),
-            8000,
-            budget,
-            saturated,
+            capacity,
+            external,
+            principals: None,
+            saturated: false,
+            unknown_activity: false,
+            fair_share_over_floor: false,
+        }
+    }
+
+    pub fn allowance(input: &ModeInput) -> u64 {
+        own_allowance(input, &ResourceThresholds::defaults(input.kind))
+    }
+
+    pub fn principal(uid: Option<u32>, usage: u64) -> (Principal, u64) {
+        (
+            Principal {
+                uid,
+                is_owner: uid == Some(1000),
+            },
+            usage,
         )
+    }
+}
+
+mod yield_first {
+    use super::modes::*;
+
+    #[test]
+    fn own_work_keeps_a_quarter_of_capacity_free_on_every_resource() {
+        for kind in [
+            ResourceKind::Cpu,
+            ResourceKind::Ram,
+            ResourceKind::GpuMemory,
+        ] {
+            let mut view = input(kind, ContentionMode::YieldFirst, 8000, 2000);
+            assert_eq!(allowance(&view), 4000, "{kind:?}");
+            // To zero if needed.
+            view.external = 7000;
+            assert_eq!(allowance(&view), 0, "{kind:?}");
+        }
     }
 
     #[test]
-    fn each_mode_bounds_own_cpu_as_the_spec_defines() {
-        // Unsaturated: idle capacity minus the mode's margin of schedulable capacity.
-        assert_eq!(allowance(ContentionMode::YieldFirst, 5000, false), 3000);
-        assert_eq!(allowance(ContentionMode::Performance, 5000, false), 4200);
-        assert_eq!(allowance(ContentionMode::Neutral, 5000, false), 5000);
-        // Saturated: measured external demand is suppressed. Yield First and
-        // Performance still keep their margin free; Neutral converges to the fair
-        // share and never below it.
-        assert_eq!(allowance(ContentionMode::YieldFirst, 700, true), 0);
-        assert_eq!(allowance(ContentionMode::Performance, 7000, true), 6200);
-        assert_eq!(allowance(ContentionMode::Neutral, 700, true), 4000);
-        assert_eq!(allowance(ContentionMode::Neutral, 7000, true), 4000);
+    fn unknown_activity_counts_as_external_demand() {
+        let mut view = input(
+            ResourceKind::GpuCompute,
+            ContentionMode::YieldFirst,
+            8000,
+            0,
+        );
+        assert_eq!(allowance(&view), 6000);
+        view.unknown_activity = true;
+        assert_eq!(allowance(&view), 0);
+    }
+
+    #[test]
+    fn it_responds_in_three_intervals_and_scales_up_slowly() {
+        let thresholds = ResourceThresholds::defaults(ResourceKind::Cpu);
+        let timing = |mode| LadderTiming::new(&thresholds, mode, 500);
+        assert_eq!(timing(ContentionMode::YieldFirst).response_ms, 1500);
+        assert_eq!(timing(ContentionMode::YieldFirst).scale_up_ms, 30_000);
+        assert!(
+            timing(ContentionMode::YieldFirst).scale_up_ms
+                > timing(ContentionMode::Neutral).scale_up_ms
+        );
+    }
+}
+
+mod neutral {
+    use super::modes::*;
+
+    #[test]
+    fn max_min_shares_split_contended_capacity_equally_and_conserve_work() {
+        assert_eq!(max_min_shares(9000, &[None, None]), [4500, 4500]);
+        // A principal that wants less than an equal share gets what it wants.
+        assert_eq!(
+            max_min_shares(9000, &[None, Some(1000), None]),
+            [4000, 1000, 4000]
+        );
+        assert_eq!(
+            max_min_shares(9000, &[None, Some(1000), Some(500)]),
+            [7500, 1000, 500]
+        );
+        // The remainder of an uneven split goes to the first principal.
+        assert_eq!(max_min_shares(10, &[None, None, None]), [4, 3, 3]);
+    }
+
+    #[test]
+    fn saturated_cpu_converges_to_the_fair_share_of_one_to_three_principals_and_unknown_owners() {
+        for (external, expected) in [(1, 4000), (2, 2666), (3, 2000)] {
+            let mut principals = vec![principal(Some(1000), 0)];
+            for uid in 0..external {
+                principals.push(principal(Some(2000 + uid), 3000));
+            }
+            let mut view = input(
+                ResourceKind::Cpu,
+                ContentionMode::Neutral,
+                8000,
+                3000 * u64::from(external),
+            );
+            view.saturated = true;
+            view.principals = Some(principals.clone());
+            assert!(allowance(&view).abs_diff(expected) <= 1, "{external}");
+            // Processes whose owner is unreadable are one more principal.
+            principals.push(principal(None, 900));
+            view.principals = Some(principals);
+            let with_unknown = allowance(&view);
+            assert!(with_unknown < expected, "{external}: {with_unknown}");
+        }
+    }
+
+    #[test]
+    fn own_work_keeps_its_share_and_idle_capacity_but_never_more_under_contention() {
+        // Idle capacity is own work's to use.
+        assert_eq!(
+            allowance(&input(
+                ResourceKind::Cpu,
+                ContentionMode::Neutral,
+                8000,
+                1000
+            )),
+            7000
+        );
+        // Saturated by a demanding principal: exactly the fair share, whatever own uses now.
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 6000);
+        view.saturated = true;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 6000)]);
+        assert_eq!(allowance(&view), 4000);
+        // Own work alone saturating the CPU shares only with a principal below the
+        // contention floor, which keeps what it uses.
+        view.external = 10;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 10)]);
+        assert_eq!(allowance(&view), 7990);
+        // The account's unmanaged usage comes out of own work's share.
+        view.external = 6500;
+        view.principals = Some(vec![
+            principal(Some(1000), 500),
+            principal(Some(2000), 6000),
+        ]);
+        assert_eq!(allowance(&view), 3500);
+    }
+
+    #[test]
+    fn unobserved_owners_still_count_as_one_principal_under_saturation() {
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 5000);
+        view.saturated = true;
+        assert_eq!(allowance(&view), 4000);
+        // Usage that no visible principal accounts for is one unknown principal.
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(0), 0)]);
+        assert_eq!(allowance(&view), 4000);
+    }
+
+    #[test]
+    fn memory_floors_win_under_policy_a_and_the_share_holds_under_policy_b() {
+        for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+            // Capacity is above the floor; external use leaves own work 1000.
+            let mut view = input(kind, ContentionMode::Neutral, 10_000, 9000);
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 9000)]);
+            assert_eq!(allowance(&view), 1000, "{kind:?}");
+            view.fair_share_over_floor = true;
+            assert_eq!(allowance(&view), 5000, "{kind:?}");
+        }
+    }
+}
+
+mod performance_and_guaranteed {
+    use super::modes::*;
+
+    #[test]
+    fn performance_keeps_a_small_margin_on_compute_and_the_floor_on_memory() {
+        assert_eq!(
+            allowance(&input(
+                ResourceKind::Cpu,
+                ContentionMode::Performance,
+                8000,
+                2000
+            )),
+            5200
+        );
+        assert_eq!(
+            allowance(&input(
+                ResourceKind::GpuCompute,
+                ContentionMode::Performance,
+                8000,
+                0
+            )),
+            7200
+        );
+        // Memory capacity is already above the floor; no margin is added.
+        assert_eq!(
+            allowance(&input(
+                ResourceKind::Ram,
+                ContentionMode::Performance,
+                8000,
+                2000
+            )),
+            6000
+        );
+        let thresholds = ResourceThresholds::defaults(ResourceKind::Cpu);
+        assert_eq!(
+            LadderTiming::new(&thresholds, ContentionMode::Performance, 500).scale_up_ms,
+            2000
+        );
+    }
+
+    #[test]
+    fn only_floor_policy_a_drains_guaranteed_work_and_only_after_the_hint_deadline() {
+        let rule = |floor_drain, opportunistic_left, breached_ms| {
+            guaranteed_may_drain(
+                ResourceKind::Ram,
+                YieldCause::FloorBreach,
+                floor_drain,
+                opportunistic_left,
+                breached_ms,
+                5000,
+            )
+        };
+        assert!(rule(true, false, 5000));
+        assert!(!rule(true, false, 4999), "the hint deadline has not passed");
+        assert!(!rule(true, true, 60_000), "opportunistic work goes first");
+        assert!(
+            !rule(false, false, 60_000),
+            "floor policies B and C never drain"
+        );
+        assert!(!guaranteed_may_drain(
+            ResourceKind::Ram,
+            YieldCause::ExternalGrowth,
+            true,
+            false,
+            60_000,
+            5000
+        ));
+        assert!(!guaranteed_may_drain(
+            ResourceKind::Cpu,
+            YieldCause::FloorBreach,
+            true,
+            false,
+            60_000,
+            5000
+        ));
+    }
+}
+
+/// Floors, floor policies and the Guaranteed rules through the policy engine.
+mod guaranteed_policy {
+    use super::*;
+    use cedegrid::config::FloorPolicy;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
+
+    fn ram(id: &str, class: AllocationClass, phase: AllocationPhase, mib: u64) -> Allocation {
+        let resources = Resources {
+            ram_mib: mib,
+            ..Resources::default()
+        };
+        Allocation {
+            id: id.into(),
+            class,
+            phase,
+            requested: resources.clone(),
+            observed: (phase != AllocationPhase::Pending).then_some(resources),
+            observed_upper: None,
+        }
+    }
+
+    /// 32000 MiB total, a 1000 MiB floor and 24000 MiB of external use: own
+    /// work may hold 7000 MiB before the floor is breached.
+    fn breached() -> Snapshot {
+        let mut snapshot = snapshot(1000);
+        snapshot.available_ram_mib = Some(0);
+        snapshot
+    }
+
+    fn step(decision: &Decision, id: &str) -> Option<(YieldStep, YieldCause)> {
+        decision
+            .actions
+            .iter()
+            .find(|a| a.allocation_id == id && a.resource == ResourceKey::Ram)
+            .map(|a| (a.step, a.cause))
+    }
+
+    fn run(config: &Config, allocations: Vec<Allocation>, until_ms: u64) -> Vec<(u64, Decision)> {
+        let mut engine = PolicyEngine::new();
+        let input = PolicyInput {
+            allocations,
+            ..PolicyInput::default()
+        };
+        (0..=until_ms)
+            .step_by(500)
+            .map(|now| {
+                (
+                    now,
+                    engine.evaluate(config, &breached(), &input, now).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn policy_a_drains_guaranteed_work_for_a_floor_only_after_the_hint_deadline() {
+        let decisions = run(
+            &config(),
+            vec![ram(
+                "g",
+                AllocationClass::Guaranteed,
+                AllocationPhase::Running,
+                8000,
+            )],
+            6000,
+        );
+        for (now, decision) in &decisions {
+            let drained = step(decision, "g") == Some((YieldStep::Drain, YieldCause::FloorBreach));
+            assert_eq!(drained, *now >= 5000, "at {now} ms: {:?}", decision.actions);
+            assert!(
+                decision.resources[&ResourceKey::Ram]
+                    .reasons
+                    .iter()
+                    .any(|r| r.code == "floor_breach"),
+                "at {now} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn opportunistic_work_is_released_before_guaranteed_work() {
+        let decisions = run(
+            &config(),
+            vec![
+                ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    6000,
+                ),
+                ram(
+                    "o",
+                    AllocationClass::Opportunistic,
+                    AllocationPhase::Running,
+                    2000,
+                ),
+            ],
+            10_000,
+        );
+        for (now, decision) in &decisions {
+            assert_eq!(
+                step(decision, "o").map(|s| s.0),
+                Some(YieldStep::Drain),
+                "at {now} ms"
+            );
+            assert_ne!(
+                step(decision, "g").map(|s| s.0),
+                Some(YieldStep::Drain),
+                "at {now} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_b_and_c_never_drain_guaranteed_work_and_block_admission() {
+        for policy in [FloorPolicy::B, FloorPolicy::C] {
+            let mut config = config();
+            config.contention.floor_policy = policy;
+            if policy == FloorPolicy::C {
+                config
+                    .contention
+                    .acknowledge_danger
+                    .insert("floor_policy_c".into());
+            }
+            let decisions = run(
+                &config,
+                vec![ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    8000,
+                )],
+                20_000,
+            );
+            for (now, decision) in &decisions {
+                assert_ne!(
+                    step(decision, "g").map(|s| s.0),
+                    Some(YieldStep::Drain),
+                    "{policy:?} at {now} ms"
+                );
+                assert_eq!(decision.admission_headroom.ram_mib, 0, "{policy:?}");
+                assert!(
+                    decision.resources[&ResourceKey::Ram]
+                        .reasons
+                        .iter()
+                        .any(|r| r.code == "floor_breach")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guaranteed_work_is_capped_but_never_paused_or_drained_for_cpu() {
+        let mut config = config();
+        config.contention.cpu.mode = Some(ContentionMode::YieldFirst);
+        let mut engine = PolicyEngine::new();
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "g",
+                AllocationClass::Guaranteed,
+                6000,
+                Some(6000),
+            )],
+            ..PolicyInput::default()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for now in (0..=20_000).step_by(500) {
+            let decision = engine
+                .evaluate(&config, &snapshot(8000), &input, now)
+                .unwrap();
+            for action in decision.actions.iter().filter(|a| a.allocation_id == "g") {
+                seen.insert(action.step);
+            }
+        }
+        assert!(seen.contains(&YieldStep::Cap), "{seen:?}");
+        assert!(
+            !seen.contains(&YieldStep::Pause) && !seen.contains(&YieldStep::Drain),
+            "{seen:?}"
+        );
     }
 }

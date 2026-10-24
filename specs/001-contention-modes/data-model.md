@@ -51,6 +51,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0 |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
 | `cpu_ram_scale_up_cooldown_ms` | cpu, ram | 30000 | replaces the GPU key for CPU/RAM (FR-034) |
+| `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation |
 
 Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 `gpu.reserve_vram_mib`.

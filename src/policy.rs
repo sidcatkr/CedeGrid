@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    LadderInput, LadderTiming, Measurement, ResourceKey, ResourceKind, StepState, VictimFacts,
-    YieldCause, YieldStep, plan_step, victim_order,
+    LadderInput, LadderTiming, Measurement, ModeInput, Principal, ResourceKey, ResourceKind,
+    StepState, VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
+    victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -214,6 +215,8 @@ pub struct PolicyEngine {
     unknown_since: BTreeMap<ResourceKey, u64>,
     /// When an allocation's usage became unknown (R10 window).
     allocation_unknown_since: BTreeMap<String, u64>,
+    /// When a memory floor breach began, for the Guaranteed hint deadline.
+    floor_breach_since: BTreeMap<ResourceKey, u64>,
 }
 
 impl PolicyEngine {
@@ -526,6 +529,83 @@ impl PolicyEngine {
         if cpu_held || ram_held {
             unsafe_now = true;
         }
+        // Unmanaged usage by principal for one resource (research R12).
+        let principals = |pick: &dyn Fn(&PrincipalUsage) -> u64| {
+            snapshot.principals.as_ref().map(|list| {
+                list.iter()
+                    .map(|p| {
+                        let principal = Principal {
+                            uid: p.uid,
+                            is_owner: p.is_owner,
+                        };
+                        (principal, pick(p))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let fair_share_over_floor =
+            config.contention.neutral_memory_policy == crate::config::NeutralMemoryPolicy::B;
+        // What own work may hold before the mode's target applies: for memory, what
+        // keeps the floor free.
+        let mut floor_available: BTreeMap<ResourceKey, u64> = BTreeMap::new();
+        let cpu_schedulable = cpu_capacity.saturating_sub(cpu_reserve);
+        let cpu_total = cpu_capacity.min(cpu_ceiling);
+        // A saturated host suppresses measured external usage.
+        let cpu_saturated =
+            cpu_busy.is_some_and(|busy| busy.saturating_add(cpu_total / 50) >= cpu_total);
+        if !cpu_unknown && !cpu_held {
+            floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
+            budget.cpu_millicores = own_allowance(
+                &ModeInput {
+                    kind: ResourceKind::Cpu,
+                    mode: config.contention.mode(ResourceKind::Cpu),
+                    capacity: cpu_schedulable,
+                    external: statuses
+                        .get(&ResourceKey::Cpu)
+                        .and_then(|s| s.external)
+                        .unwrap_or(0),
+                    principals: principals(&|p| p.cpu_millicores),
+                    saturated: cpu_saturated,
+                    unknown_activity: false,
+                    fair_share_over_floor: false,
+                },
+                &config.contention.thresholds(ResourceKind::Cpu),
+            )
+            // An ancestor quota bounds own work after external usage is subtracted.
+            .min(cpu_ceiling);
+        }
+        if !ram_unknown && !ram_held {
+            floor_available.insert(ResourceKey::Ram, budget.ram_mib);
+            budget.ram_mib = own_allowance(
+                &ModeInput {
+                    kind: ResourceKind::Ram,
+                    mode: config.contention.mode(ResourceKind::Ram),
+                    capacity: snapshot.total_ram_mib.saturating_sub(ram_reserve),
+                    external: statuses
+                        .get(&ResourceKey::Ram)
+                        .and_then(|s| s.external)
+                        .unwrap_or(0),
+                    principals: principals(&|p| p.ram_mib),
+                    saturated: false,
+                    unknown_activity: false,
+                    fair_share_over_floor,
+                },
+                &config.contention.thresholds(ResourceKind::Ram),
+            );
+        }
+        for (key, floor) in [
+            (ResourceKey::Cpu, cpu_reserve),
+            (ResourceKey::Ram, ram_reserve),
+        ] {
+            let status = statuses.entry(key.clone()).or_default();
+            status.floor = Some(floor);
+            if floor_available.contains_key(&key) {
+                status.target_share = Some(match key {
+                    ResourceKey::Cpu => budget.cpu_millicores,
+                    _ => budget.ram_mib,
+                });
+            }
+        }
 
         let host_capacity_safe = !input.explicit_drain
             && !cpu_unknown
@@ -690,7 +770,28 @@ impl PolicyEngine {
                         ));
                     }
                 }
-                let gpu_budget = if full_yield { 0 } else { memory_budget };
+                let gpu_budget = if full_yield || telemetry_unknown {
+                    if full_yield { 0 } else { memory_budget }
+                } else {
+                    floor_available.insert(key.clone(), memory_budget);
+                    own_allowance(
+                        &ModeInput {
+                            kind: ResourceKind::GpuMemory,
+                            mode: config.contention.mode(ResourceKind::GpuMemory),
+                            capacity: gpu
+                                .total_memory_mib
+                                .saturating_sub(config.gpu.reserve_vram_mib),
+                            external: external.unwrap_or(0),
+                            principals: principals(&|p| {
+                                p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
+                            }),
+                            saturated: false,
+                            unknown_activity: false,
+                            fair_share_over_floor,
+                        },
+                        &config.contention.thresholds(ResourceKind::GpuMemory),
+                    )
+                };
                 budget.gpu_memory_mib.insert(gpu.uuid.clone(), gpu_budget);
                 let status = statuses.entry(key).or_default();
                 status.external = external;
@@ -773,6 +874,8 @@ impl PolicyEngine {
         }
         let mut ladder = BTreeMap::new();
         let mut actions = Vec::new();
+        let mut breached: BTreeSet<ResourceKey> = BTreeSet::new();
+        let mut floor_breach_since = BTreeMap::new();
         if input.explicit_drain {
             // Explicit node drain keeps its all-allocation stop semantics.
             let mut candidates: Vec<_> = input
@@ -812,8 +915,49 @@ impl PolicyEngine {
                     && statuses
                         .get(&key)
                         .is_some_and(|s| s.measurement == Some(Measurement::Unknown));
+                let amount_of = |r: &Resources| match &key {
+                    ResourceKey::Cpu => r.cpu_millicores,
+                    ResourceKey::Ram => r.ram_mib,
+                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
+                        r.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                    }
+                };
+                // Existing drains are planned releases for choosing more victims only.
+                let draining_charge = input
+                    .allocations
+                    .iter()
+                    .filter(|a| a.phase == AllocationPhase::Draining)
+                    .map(|a| amount_of(&charges[&a.id]))
+                    .fold(0u64, u64::saturating_add);
+                let held_charge = amount_of(&charged).saturating_sub(draining_charge);
+                // Memory beyond what keeps the floor free breaches it in every mode.
+                let floor_breach = kind.is_memory()
+                    && floor_available
+                        .get(&key)
+                        .is_some_and(|available| held_charge > *available);
+                if floor_breach {
+                    breached.insert(key.clone());
+                    floor_breach_since.insert(
+                        key.clone(),
+                        self.floor_breach_since
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(now_monotonic_ms),
+                    );
+                    note(
+                        &mut statuses,
+                        key.clone(),
+                        "floor_breach",
+                        format!(
+                            "own work holds {held_charge}, above the {} that keeps the floor free",
+                            floor_available[&key]
+                        ),
+                    );
+                }
                 let cause = if held || gpu_unknown {
                     YieldCause::UnknownMeasurement
+                } else if floor_breach {
+                    YieldCause::FloorBreach
                 } else {
                     YieldCause::ExternalGrowth
                 };
@@ -823,56 +967,47 @@ impl PolicyEngine {
                     config.contention.mode(kind),
                     interval_ms,
                 );
-                let amount_of = |r: &Resources| match &key {
-                    ResourceKey::Cpu => r.cpu_millicores,
-                    ResourceKey::Ram => r.ram_mib,
-                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
-                        r.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
-                    }
-                };
                 let usage_of =
                     |a: &Allocation| -> u64 { a.observed.as_ref().map_or(0, |o| o.cpu_millicores) };
                 // Pending reservations are cancelled by their charge. CPU in use is
-                // measured by usage, since a cap lowers usage but never the request.
-                // Existing drains are planned releases for choosing more victims only.
-                let draining_charge = input
-                    .allocations
-                    .iter()
-                    .filter(|a| a.phase == AllocationPhase::Draining)
-                    .map(|a| amount_of(&charges[&a.id]))
-                    .fold(0u64, u64::saturating_add);
-                let admission_excess = amount_of(&charged)
-                    .saturating_sub(draining_charge)
-                    .saturating_sub(amount_of(&budget));
+                // measured by usage against the mode's allowance, since a cap lowers
+                // usage but never the request.
+                let admission_excess = held_charge.saturating_sub(amount_of(&budget));
                 let usage_excess = if kind == ResourceKind::Cpu {
-                    // A saturated host suppresses measured external usage, so the
-                    // mode's allowance decides what own work may keep.
-                    let ceiling = cpu_capacity.min(cpu_ceiling);
-                    let schedulable = cpu_capacity.saturating_sub(cpu_reserve).min(cpu_ceiling);
-                    let saturated =
-                        cpu_busy.is_some_and(|busy| busy.saturating_add(ceiling / 50) >= ceiling);
-                    let allowed = crate::contention::cpu_allowance(
-                        config.contention.mode(kind),
-                        &config.contention.thresholds(kind),
-                        schedulable,
-                        budget.cpu_millicores,
-                        saturated,
-                    );
                     input
                         .allocations
                         .iter()
                         .filter(|a| a.phase != AllocationPhase::Pending)
                         .map(usage_of)
                         .fold(unknown_charge.cpu_millicores, u64::saturating_add)
-                        .saturating_sub(allowed)
+                        .saturating_sub(budget.cpu_millicores)
                 } else {
                     admission_excess
                 };
-                // Automatic steps apply to opportunistic work only, until fair shares
-                // and floors bound Guaranteed steps (US3).
+                let guaranteed =
+                    |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
+                let opportunistic_left = input
+                    .allocations
+                    .iter()
+                    .any(|a| !guaranteed(a) && amount_of(&charges[&a.id]) > 0);
+                // Guaranteed work is drained only for a memory floor under floor
+                // policy A, after opportunistic work and the hint deadline (FR-024).
+                let guaranteed_drain = guaranteed_may_drain(
+                    kind,
+                    cause,
+                    config.contention.floor_policy == crate::config::FloorPolicy::A,
+                    opportunistic_left,
+                    floor_breach_since
+                        .get(&key)
+                        .map_or(0, |start| now_monotonic_ms.saturating_sub(*start)),
+                    config
+                        .contention
+                        .thresholds(kind)
+                        .hint_deadline_s
+                        .saturating_mul(1000),
+                );
                 let candidate = |a: &&Allocation| {
                     a.phase != AllocationPhase::Draining
-                        && a.class == crate::execution_model::AllocationClass::Opportunistic
                         && allocation_unknown_since.get(&a.id).is_none_or(|start| {
                             now_monotonic_ms.saturating_sub(*start) >= window(kind)
                         })
@@ -915,7 +1050,7 @@ impl PolicyEngine {
                                 controllable: !facts(&a.id).uncontrollable,
                                 frees: amount > 0,
                                 pending: pending_pass,
-                                guaranteed: false,
+                                guaranteed: guaranteed(a),
                                 progress_lost_ms: facts(&a.id).progress_lost_ms,
                                 amount,
                             }
@@ -945,10 +1080,14 @@ impl PolicyEngine {
                             state,
                             &LadderInput {
                                 kind,
-                                guaranteed: false,
+                                guaranteed: victim.guaranteed,
                                 // Running work is never drained for CPU alone (SC-002);
                                 // pause frees it completely.
-                                allow_drain: pending_pass || kind != ResourceKind::Cpu,
+                                allow_drain: if victim.guaranteed {
+                                    guaranteed_drain
+                                } else {
+                                    pending_pass || kind != ResourceKind::Cpu
+                                },
                                 unavailable,
                                 excess: if contended { remaining } else { 0 },
                                 external,
@@ -1083,6 +1222,10 @@ impl PolicyEngine {
                         now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms
                     })
         });
+        // A breached floor blocks admission on that resource in every policy (FR-041).
+        if breached.contains(&ResourceKey::Ram) {
+            headroom.ram_mib = 0;
+        }
         let expansion_allowed = legacy_expansion_allowed
             || (cpu_ram_expansion_allowed
                 && headroom.gpu_memory_mib.values().any(|amount| *amount > 0));
@@ -1107,6 +1250,7 @@ impl PolicyEngine {
         self.ladder = ladder;
         self.unknown_since = unknown_since;
         self.allocation_unknown_since = allocation_unknown_since;
+        self.floor_breach_since = floor_breach_since;
         for kind in [ResourceKind::Cpu, ResourceKind::Ram] {
             let key = if kind == ResourceKind::Cpu {
                 ResourceKey::Cpu

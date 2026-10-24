@@ -217,6 +217,9 @@ pub struct ResourceThresholds {
     pub noise_tolerance_mib: u64,
     pub quiet_window_intervals: u32,
     pub cpu_ram_scale_up_cooldown_ms: u64,
+    /// Usage, in percent of capacity, from which a principal contends for a
+    /// fair share; smaller usage is counted as it is.
+    pub principal_min_percent: u8,
 }
 
 impl ResourceThresholds {
@@ -240,6 +243,7 @@ impl ResourceThresholds {
             noise_tolerance_mib: 256,
             quiet_window_intervals: 20,
             cpu_ram_scale_up_cooldown_ms: 30_000,
+            principal_min_percent: 1,
         }
     }
 
@@ -572,26 +576,142 @@ pub struct AllocationContention {
     pub applied: std::collections::BTreeMap<ResourceKey, StepRequest>,
 }
 
-/// What own work may use of CPU in a mode (FR-020 to FR-022), from the idle
-/// budget. On a saturated host measured external usage is suppressed, so Neutral
-/// converges to its fair share instead; until T116a counts principals, one
-/// external principal is assumed.
-pub fn cpu_allowance(
-    mode: ContentionMode,
-    thresholds: &ResourceThresholds,
-    schedulable: u64,
-    budget: u64,
-    saturated: bool,
-) -> u64 {
-    let margin = |percent: u8| schedulable.saturating_mul(u64::from(percent)) / 100;
-    match mode {
+/// One interval's view of a resource for the mode targets (FR-020 to FR-022).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeInput {
+    pub kind: ResourceKind,
+    pub mode: ContentionMode,
+    /// Schedulable capacity after operator reserves and, for memory, the floor.
+    pub capacity: u64,
+    /// Usage within that capacity that is not own work.
+    pub external: u64,
+    /// Unmanaged usage per principal, the owner included; `None` when unobserved.
+    pub principals: Option<Vec<(Principal, u64)>>,
+    /// Usage at capacity hides how much more external work wants (CPU).
+    pub saturated: bool,
+    /// Activity of unknown amount, such as unsampled GPU compute.
+    pub unknown_activity: bool,
+    /// Neutral memory policy B: memory keeps its fair share over the floor.
+    pub fair_share_over_floor: bool,
+}
+
+/// Work-conserving max-min shares over current demand (research R12). `None`
+/// demands without bound. The remainder of an uneven split goes to the first
+/// principals in order.
+pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
+    let mut shares = vec![0; demands.len()];
+    let mut open: Vec<usize> = (0..demands.len()).collect();
+    let mut remaining = capacity;
+    while !open.is_empty() {
+        let level = remaining / open.len() as u64;
+        let (satisfied, rest): (Vec<usize>, Vec<usize>) = open
+            .iter()
+            .partition(|i| demands[**i].is_some_and(|demand| demand <= level));
+        if satisfied.is_empty() {
+            let extra = remaining % open.len() as u64;
+            for (n, i) in open.iter().enumerate() {
+                shares[*i] = level + u64::from((n as u64) < extra);
+            }
+            break;
+        }
+        for i in satisfied {
+            let demand = demands[i].unwrap_or(0);
+            shares[i] = demand;
+            remaining -= demand;
+        }
+        open = rest;
+    }
+    shares
+}
+
+/// What a mode lets own work hold on one resource this interval. Yield First
+/// keeps its generous margin free and counts unknown activity as demand.
+/// Performance keeps a small margin on compute and only the floor on memory.
+/// Neutral uses idle capacity and converges to its fair share under
+/// contention; memory floors win unless Neutral memory policy B is chosen.
+pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+    let margin = |percent: u8| input.capacity.saturating_mul(u64::from(percent)) / 100;
+    let available = input.capacity.saturating_sub(input.external);
+    match input.mode {
+        ContentionMode::YieldFirst if input.unknown_activity => 0,
         ContentionMode::YieldFirst => {
-            budget.saturating_sub(margin(thresholds.yield_first_margin_percent))
+            available.saturating_sub(margin(thresholds.yield_first_margin_percent))
         }
         ContentionMode::Performance => {
-            budget.saturating_sub(margin(thresholds.performance_margin_percent))
+            let held = if input.kind.is_memory() {
+                available
+            } else {
+                available.saturating_sub(margin(thresholds.performance_margin_percent))
+            };
+            // Never more aggressive than Neutral while the amount is unknown.
+            if input.unknown_activity {
+                held.min(neutral_share(input, thresholds))
+            } else {
+                held
+            }
         }
-        ContentionMode::Neutral if saturated => schedulable / 2,
-        ContentionMode::Neutral => budget,
+        ContentionMode::Neutral if input.kind.is_memory() => {
+            if input.fair_share_over_floor {
+                available.max(neutral_share(input, thresholds))
+            } else {
+                available
+            }
+        }
+        ContentionMode::Neutral if input.saturated || input.unknown_activity => {
+            neutral_share(input, thresholds)
+        }
+        ContentionMode::Neutral => available,
     }
+}
+
+/// Own work's max-min share: the owner principal's share minus the account's
+/// unmanaged usage. Under saturation a principal above the contention floor
+/// wants without bound; external usage no visible principal accounts for, such
+/// as unreadable owners, is one more principal (research R12).
+fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+    let floor = (input
+        .capacity
+        .saturating_mul(u64::from(thresholds.principal_min_percent))
+        / 100)
+        .max(1);
+    let demand = |usage: u64| (!(input.saturated && usage >= floor)).then_some(usage);
+    let mut demands = vec![None];
+    let mut owner_unmanaged = 0u64;
+    let mut attributed = 0u64;
+    for (principal, usage) in input.principals.iter().flatten() {
+        if principal.is_owner {
+            owner_unmanaged = owner_unmanaged.saturating_add(*usage);
+        } else {
+            attributed = attributed.saturating_add(*usage);
+            demands.push(demand(*usage));
+        }
+    }
+    let unattributed = input
+        .external
+        .saturating_sub(attributed.saturating_add(owner_unmanaged));
+    if unattributed >= floor {
+        demands.push(demand(unattributed));
+    }
+    if input.unknown_activity {
+        demands.push(None);
+    }
+    max_min_shares(input.capacity, &demands)[0].saturating_sub(owner_unmanaged)
+}
+
+/// Whether Guaranteed work may be drained (FR-024, FR-041): only for a memory
+/// floor breach, only under floor policy A, only after all opportunistic work on
+/// the resource is released and a hint's deadline has passed.
+pub fn guaranteed_may_drain(
+    kind: ResourceKind,
+    cause: YieldCause,
+    floor_policy_a: bool,
+    opportunistic_left: bool,
+    breached_for_ms: u64,
+    hint_deadline_ms: u64,
+) -> bool {
+    kind.is_memory()
+        && cause == YieldCause::FloorBreach
+        && floor_policy_a
+        && !opportunistic_left
+        && breached_for_ms >= hint_deadline_ms
 }

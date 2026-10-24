@@ -734,9 +734,6 @@ times assume the default 500 ms monitor interval.
   owner cannot be determined counts as one additional principal.
 - The account running CedeGrid is one principal. Own work's fair share is that principal's share
   minus the account's unmanaged usage.
-- Known limitation: on a CPU-saturated host, Neutral currently assumes one external principal, so
-  own work converges to half of the schedulable capacity however many external owners compete.
-  Counting external owners is follow-up task T116a.
 - Mode settings take effect when the agent restarts or reloads its configuration. A job's
   effective mode is fixed when it is admitted.
 - Interactive setup targets Linux and macOS terminals. On Windows, setup configures client

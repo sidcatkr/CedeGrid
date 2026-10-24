@@ -584,6 +584,8 @@ pub struct ResourceContentionConfig {
     pub quiet_window_intervals: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal_min_percent: Option<u8>,
 }
 
 impl ContentionConfig {
@@ -653,6 +655,9 @@ impl ContentionConfig {
             cpu_ram_scale_up_cooldown_ms: set
                 .cpu_ram_scale_up_cooldown_ms
                 .unwrap_or(defaults.cpu_ram_scale_up_cooldown_ms),
+            principal_min_percent: set
+                .principal_min_percent
+                .unwrap_or(defaults.principal_min_percent),
         }
     }
 
@@ -814,6 +819,10 @@ impl ContentionConfig {
             ensure!(
                 (1..=99).contains(&t.hysteresis_percent),
                 "contention.{name}.hysteresis_percent must be between 1 and 99"
+            );
+            ensure!(
+                (1..=50).contains(&t.principal_min_percent),
+                "contention.{name}.principal_min_percent must be between 1 and 50"
             );
             if kind.is_memory() {
                 ensure!(
