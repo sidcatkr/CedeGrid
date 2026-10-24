@@ -53,6 +53,7 @@ fn observation() -> (Snapshot, Decision) {
         resources: Default::default(),
         actions: vec![],
         exceptions: vec![],
+        allocation_modes: Default::default(),
     };
     (snapshot, decision)
 }

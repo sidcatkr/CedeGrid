@@ -15,6 +15,7 @@ fn config() -> Config {
     result.ram.reserve_percent = 0;
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.scale_up_cooldown_ms = 0;
+    cpu_ram_cooldown(&mut result, 0);
     result
 }
 
@@ -300,6 +301,12 @@ fn gpu_snapshot() -> Snapshot {
     result
 }
 
+/// The CPU/RAM scale-up cooldown, independent of the GPU one since audit M1.
+fn cpu_ram_cooldown(config: &mut Config, ms: u64) {
+    config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(ms);
+    config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(ms);
+}
+
 fn resources(cpu: u64, ram: u64, gpu: u64) -> Resources {
     Resources {
         cpu_millicores: cpu,
@@ -342,6 +349,7 @@ fn allocation(
         requested,
         observed,
         observed_upper: None,
+        modes: Default::default(),
     }
 }
 
@@ -1264,6 +1272,7 @@ proptest! {
 fn cpu_ram_stability_survives_gpu_uncertainty_without_reusing_retained_gpu_cap() {
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = 137;
+    cpu_ram_cooldown(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
     snap.gpus[0].used_memory_mib = Some(6000);
@@ -1339,6 +1348,7 @@ fn cpu_ram_fallback_fails_closed_for_missing_stale_excess_and_drain_evidence() {
     }
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = 137;
+    cpu_ram_cooldown(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
     let mut policy = PolicyEngine::new();
@@ -2532,4 +2542,102 @@ fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
         }
     }
     assert_eq!(steps, [Some(YieldStep::Cap), Some(YieldStep::Pause)]);
+}
+
+/// CPU/RAM admission waits its own cooldown, whose default follows the mode's
+/// scale-up interval; the GPU cooldown never gates it (audit M1).
+#[test]
+fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
+    use cedegrid::contention::ContentionMode;
+    let mut cfg = config();
+    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    for set in [&mut cfg.contention.cpu, &mut cfg.contention.ram] {
+        set.cpu_ram_scale_up_cooldown_ms = Some(5000);
+    }
+    let over_budget = PolicyInput {
+        allocations: vec![allocation(
+            "pending",
+            AllocationPhase::Pending,
+            resources(50_000, 0, 0),
+            None,
+        )],
+        ..PolicyInput::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let mut allowed = |input: &PolicyInput, now: u64| {
+        let decision = engine.evaluate(&cfg, &snapshot(), input, now).unwrap();
+        (
+            decision.cpu_ram_expansion_allowed,
+            decision.expansion_allowed,
+        )
+    };
+    let idle = PolicyInput::default();
+    assert_eq!(allowed(&idle, 0), (false, false));
+    assert_eq!(allowed(&idle, 4999), (false, false));
+    assert_eq!(allowed(&idle, 5000), (true, false));
+    // Instability restarts the CPU/RAM cooldown.
+    assert!(!allowed(&over_budget, 6000).0);
+    assert!(!allowed(&idle, 7000).0);
+    assert!(!allowed(&idle, 11_999).0);
+    assert_eq!(allowed(&idle, 12_000), (true, false));
+    // The GPU cooldown still gates GPU expansion on its own.
+    assert!(!allowed(&idle, 66_999).1);
+    assert!(allowed(&idle, 67_000).1);
+    // Unset, the cooldown is the mode's scale-up interval: 2 s in Performance.
+    let mut cfg = config();
+    cfg.contention.default_mode = ContentionMode::Performance;
+    cfg.contention.cpu.cpu_ram_scale_up_cooldown_ms = None;
+    cfg.contention.ram.cpu_ram_scale_up_cooldown_ms = None;
+    let mut engine = PolicyEngine::new();
+    let mut allowed = |now: u64| {
+        engine
+            .evaluate(&cfg, &snapshot(), &PolicyInput::default(), now)
+            .unwrap()
+            .cpu_ram_expansion_allowed
+    };
+    assert!(!allowed(0));
+    assert!(!allowed(1999));
+    assert!(allowed(2000));
+}
+
+/// A job runs at the less aggressive of its requested mode and the node cap,
+/// and the effective mode is reported per allocation (FR-030).
+#[test]
+fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
+    use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind};
+    let mut cfg = config();
+    cfg.contention.max_mode = ContentionMode::Neutral;
+    let with_modes = |id: &str, modes: &[(ResourceKind, ContentionMode)]| {
+        let mut allocation = allocation(
+            id,
+            AllocationPhase::Running,
+            resources(500, 100, 0),
+            Some(resources(500, 100, 0)),
+        );
+        allocation.modes = modes.iter().copied().collect();
+        allocation
+    };
+    let input = PolicyInput {
+        allocations: vec![
+            with_modes("fast", &[(ResourceKind::Cpu, ContentionMode::Performance)]),
+            with_modes("gentle", &[(ResourceKind::Cpu, ContentionMode::YieldFirst)]),
+            with_modes("plain", &[]),
+        ],
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snapshot(), &input, 0)
+        .unwrap();
+    let mode = |id: &str, kind| decision.allocation_modes[id][&kind];
+    assert_eq!(mode("fast", ResourceKind::Cpu), ContentionMode::Neutral);
+    assert_eq!(
+        mode("gentle", ResourceKind::Cpu),
+        ContentionMode::YieldFirst
+    );
+    assert_eq!(mode("plain", ResourceKind::Cpu), ContentionMode::Neutral);
+    assert_eq!(mode("fast", ResourceKind::Ram), ContentionMode::Neutral);
+    // The least aggressive effective mode on a resource governs its target.
+    let cpu = &decision.resources[&ResourceKey::Cpu];
+    assert_eq!(cpu.mode, Some(ContentionMode::Neutral));
+    assert_eq!(cpu.effective_mode, Some(ContentionMode::YieldFirst));
 }

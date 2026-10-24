@@ -43,7 +43,7 @@ def installed_run(args, env):
     source = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(source / 'tools'))
     from make_test_pki import generate
-    from runtime_config import atomic_runtime_config
+    from runtime_config import atomic_runtime_config, cpu_ram_cooldown
 
     candidate = args.candidate.resolve()
     installation = args.npm_install.resolve()
@@ -95,7 +95,7 @@ def installed_run(args, env):
         'execution': {'enabled': True, 'prepare_timeout_ms': 10000, 'admission_timeout_ms': 30000},
         'monitor': {'interval_ms': 500}, 'cpu': {'reserve_physical_cores': 1, 'nice': 10},
         'ram': {'reserve_mib': 1024, 'reserve_percent': 10},
-        'gpu': {'scale_up_cooldown_ms': 0},
+        'gpu': {'scale_up_cooldown_ms': 0}, 'contention': cpu_ram_cooldown(0),
         'lifecycle': {'drain_timeout_ms': 3000, 'term_grace_ms': 2000,
                       'heartbeat_interval_ms': 1000, 'allocation_lease_ms': 10000},
         'cgroup': {'enabled': False}}, 'node')

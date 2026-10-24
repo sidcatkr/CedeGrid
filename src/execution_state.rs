@@ -74,6 +74,7 @@ impl StateStore {
                 requested: e.resources,
                 observed: None,
                 observed_upper: None,
+                modes: Default::default(),
             })
             .collect())
     }

@@ -81,6 +81,11 @@ def runtime_toml(settings, kind):
     return result
 
 
+def cpu_ram_cooldown(ms):
+    """The [contention] CPU/RAM scale-up cooldown, independent of the GPU one."""
+    return {kind: {'cpu_ram_scale_up_cooldown_ms': ms} for kind in ('cpu', 'ram')}
+
+
 def atomic_runtime_config(path, settings, kind):
     atomic_text(path, runtime_toml(settings, kind))
 

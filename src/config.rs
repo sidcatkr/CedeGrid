@@ -654,7 +654,7 @@ impl ContentionConfig {
                 .unwrap_or(defaults.quiet_window_intervals),
             cpu_ram_scale_up_cooldown_ms: set
                 .cpu_ram_scale_up_cooldown_ms
-                .unwrap_or(defaults.cpu_ram_scale_up_cooldown_ms),
+                .or(defaults.cpu_ram_scale_up_cooldown_ms),
             principal_min_percent: set
                 .principal_min_percent
                 .unwrap_or(defaults.principal_min_percent),

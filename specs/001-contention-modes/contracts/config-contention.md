@@ -26,7 +26,7 @@ unknown_window_intervals = 3
 hysteresis_percent = 50
 min_step_dwell_intervals = 3
 pause_bound_s = 10
-cpu_ram_scale_up_cooldown_ms = 30000  # cpu and ram only
+cpu_ram_scale_up_cooldown_ms = 30000  # cpu and ram only; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends for a fair share
 
 [contention.gpu_memory]

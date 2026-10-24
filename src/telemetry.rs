@@ -1398,6 +1398,7 @@ impl ManagedCollector {
                 requested: record.resources.clone(),
                 observed: if pending { None } else { observed },
                 observed_upper: if pending { None } else { observed_upper },
+                modes: Default::default(),
             });
         }
         if !cpu_diagnostics.is_empty()

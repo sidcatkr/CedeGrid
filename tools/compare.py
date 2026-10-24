@@ -14,7 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
-from runtime_config import atomic_runtime_config
+from runtime_config import atomic_runtime_config, cpu_ram_cooldown
 import subprocess
 import sys
 import tempfile
@@ -78,7 +78,7 @@ def protocol(args):
         ],
         "configuration_overrides": [
             "state_dir points to a fresh retained case directory",
-            "gpu.scale_up_cooldown_ms=0 for controlled CPU admission; explicitly recorded per case",
+            "gpu.scale_up_cooldown_ms=0 and contention CPU/RAM cooldown 0 for controlled CPU admission; explicitly recorded per case",
         ],
         "pre_registered_targets": {"idle_managed_throughput_ratio_min": .9, "protected_p99_ratio_max": 1.2,
             "manager_mean_cpu_cores_max": .5, "manager_peak_rss_bytes_max": 512*1024**2},
@@ -339,12 +339,15 @@ def run_case(args, directory, profile, profile_name, cpu, scenario, seed):
     config["state_dir"] = str(directory / "state")
     original_cooldown = config["gpu"]["scale_up_cooldown_ms"]
     config["gpu"]["scale_up_cooldown_ms"] = 0
+    for kind, value in cpu_ram_cooldown(0).items():
+        config.setdefault("contention", {}).setdefault(kind, {}).update(value)
     config_path, job_path = directory / "config.toml", directory / "job.json"
     atomic_runtime_config(config_path, config, 'node')
     case = {
         "scenario": scenario, "profile": profile_name, "artifact_directory": str(directory),
         "execution_id": execution_id,
-        "config_overrides": {"state_dir": config["state_dir"], "gpu.scale_up_cooldown_ms": {"before": original_cooldown, "after": 0}},
+        "config_overrides": {"state_dir": config["state_dir"], "gpu.scale_up_cooldown_ms": {"before": original_cooldown, "after": 0},
+                             "contention.cpu_ram_scale_up_cooldown_ms": {"after": 0}},
         "doctor_before": checked_json([args.binary, "--config", str(config_path), "doctor"]),
         "commands": [], "status": "running", "manager_samples": [],
         "yield_decision_latency_ms": None,

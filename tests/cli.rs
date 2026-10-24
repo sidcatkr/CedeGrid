@@ -264,6 +264,17 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
             scale_up_cooldown_ms: 0,
             ..Default::default()
         },
+        contention: cedegrid::config::ContentionConfig {
+            cpu: cedegrid::config::ResourceContentionConfig {
+                cpu_ram_scale_up_cooldown_ms: Some(0),
+                ..Default::default()
+            },
+            ram: cedegrid::config::ResourceContentionConfig {
+                cpu_ram_scale_up_cooldown_ms: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         kernel: KernelConfig {
             enabled: false,
             ..Default::default()

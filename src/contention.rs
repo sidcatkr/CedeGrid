@@ -216,7 +216,9 @@ pub struct ResourceThresholds {
     pub pause_bound_s: u64,
     pub noise_tolerance_mib: u64,
     pub quiet_window_intervals: u32,
-    pub cpu_ram_scale_up_cooldown_ms: u64,
+    /// How long CPU and RAM must stay stable before own work grows on them;
+    /// `None` uses the mode's scale-up interval.
+    pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
     /// Usage, in percent of capacity, from which a principal contends for a
     /// fair share; smaller usage is counted as it is.
     pub principal_min_percent: u8,
@@ -242,7 +244,7 @@ impl ResourceThresholds {
             pause_bound_s: 10,
             noise_tolerance_mib: 256,
             quiet_window_intervals: 20,
-            cpu_ram_scale_up_cooldown_ms: 30_000,
+            cpu_ram_scale_up_cooldown_ms: None,
             principal_min_percent: 1,
         }
     }
@@ -254,6 +256,13 @@ impl ResourceThresholds {
             ContentionMode::Neutral => 10,
             ContentionMode::Performance => 2,
         })
+    }
+
+    /// The CPU/RAM scale-up cooldown for a mode (FR-034), independent of GPU
+    /// settings: 30 s in Yield First, as 0.2's cooldown, and faster otherwise.
+    pub fn cpu_ram_cooldown_ms(&self, mode: ContentionMode) -> u64 {
+        self.cpu_ram_scale_up_cooldown_ms
+            .unwrap_or_else(|| self.scale_up_interval_s(mode).saturating_mul(1000))
     }
 }
 
@@ -714,4 +723,14 @@ pub fn guaranteed_may_drain(
         && floor_policy_a
         && !opportunistic_left
         && breached_for_ms >= hint_deadline_ms
+}
+
+/// A job runs at the less aggressive of its requested mode and the node cap
+/// (FR-030); without a request it runs at the node's mode.
+pub fn effective_mode(
+    node: ContentionMode,
+    requested: Option<ContentionMode>,
+    max_mode: ContentionMode,
+) -> ContentionMode {
+    requested.unwrap_or(node).min(max_mode)
 }

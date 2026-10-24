@@ -50,7 +50,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `pause_bound_s` | cpu, gpu_compute | 10 | ≥ 1 |
 | `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0 |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
-| `cpu_ram_scale_up_cooldown_ms` | cpu, ram | 30000 | replaces the GPU key for CPU/RAM (FR-034) |
+| `cpu_ram_scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | replaces the GPU key for CPU/RAM (FR-034): CPU and RAM must stay stable this long before own work grows on them |
 | `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation |
 
 Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and

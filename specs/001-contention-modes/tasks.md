@@ -365,7 +365,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   - the worker gate sets `oom_score_adj = 1000` before EXEC;
   - it skips this for Guaranteed work under floor policy C;
   - managed children inherit the value.
-- [ ] T062 [P] [US3] Add tests in `tests/policy.rs`:
+- [X] T062 [P] [US3] Add tests in `tests/policy.rs`:
   - CPU/RAM expansion follows `cpu_ram_scale_up_cooldown_ms`, independently of
     `gpu.scale_up_cooldown_ms`;
   - the effective mode is min(requested, `max_mode`) and is reported per allocation.
@@ -390,10 +390,10 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 - [ ] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
-- [ ] T069 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
+- [X] T069 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
   `cpu_ram_scale_up_cooldown_ms`, in `src/policy.rs` and in the launch-slot ramp in
   `src/agent.rs` (audit M1).
-- [ ] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
+- [X] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
   `max_mode`), in `src/contention.rs` and `src/agent.rs`.
 - [ ] T071 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
   and SC-004 with the provisional defaults.

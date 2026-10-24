@@ -22,7 +22,7 @@ from cedegrid import Client, sha256_file
 from make_test_pki import generate as generate_pki
 from soak import AllocationLedger
 from validation_runtime import OwnedProcess, atomic_json, home_executable, inside_home, local_guard
-from runtime_config import atomic_runtime_config
+from runtime_config import atomic_runtime_config, cpu_ram_cooldown
 
 SERVICE_SECONDS = 1400
 WORK_SECONDS = 1200
@@ -141,7 +141,7 @@ def node_settings(node_id, mode, state, reserve_ram, reserve_cpu, profile='wal_f
                           'release_confirm_timeout_ms': 10000},
             'monitor': {'interval_ms': 500}, 'cpu': {'reserve_physical_cores': reserve_cpu, 'nice': 10},
             'ram': {'reserve_mib': reserve_ram, 'reserve_percent': 5},
-            'gpu': {'scale_up_cooldown_ms': 3000},
+            'gpu': {'scale_up_cooldown_ms': 3000}, 'contention': cpu_ram_cooldown(3000),
             'lifecycle': {'drain_timeout_ms': 3000, 'term_grace_ms': 2000,
                           'heartbeat_interval_ms': 2000, 'allocation_lease_ms': 10000},
             'cgroup': {'enabled': False}}

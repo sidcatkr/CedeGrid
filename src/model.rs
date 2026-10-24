@@ -127,6 +127,9 @@ pub struct Allocation {
     /// Upper bound of attributed usage (schema 3). Missing means no bound is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_upper: Option<Resources>,
+    /// Modes the job requested per resource; the node cap still applies (FR-030).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
 }
 
 fn legacy_policy_allocation_class() -> crate::execution_model::AllocationClass {
@@ -311,6 +314,12 @@ pub struct Decision {
     /// Active opt-in exceptions with their risk marker (schema 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exceptions: Vec<ExceptionNotice>,
+    /// The effective mode of each allocation per resource (FR-030).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub allocation_modes: BTreeMap<
+        String,
+        BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
+    >,
 }
 
 /// A stable machine-readable code plus one sentence for people. Tests and tools

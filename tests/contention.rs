@@ -49,6 +49,7 @@ pub fn allocation(
         requested: resources(cpu),
         observed: observed_cpu.map(resources),
         observed_upper: None,
+        modes: Default::default(),
     }
 }
 
@@ -672,6 +673,7 @@ mod guaranteed_policy {
             requested: resources.clone(),
             observed: (phase != AllocationPhase::Pending).then_some(resources),
             observed_upper: None,
+            modes: Default::default(),
         }
     }
 

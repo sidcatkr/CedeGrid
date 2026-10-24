@@ -305,6 +305,36 @@ impl PolicyEngine {
             charged.add_checked(&charge)?;
             charges.insert(allocation.id.clone(), charge);
         }
+        // Each allocation runs at min(requested, node cap); the least aggressive
+        // effective mode among running work governs a resource's target.
+        let allocation_modes: BTreeMap<
+            String,
+            BTreeMap<ResourceKind, crate::contention::ContentionMode>,
+        > = input
+            .allocations
+            .iter()
+            .map(|a| {
+                let modes = ResourceKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        let mode = crate::contention::effective_mode(
+                            config.contention.mode(kind),
+                            a.modes.get(&kind).copied(),
+                            config.contention.max_mode,
+                        );
+                        (kind, mode)
+                    })
+                    .collect();
+                (a.id.clone(), modes)
+            })
+            .collect();
+        let governing = |kind: ResourceKind| {
+            allocation_modes
+                .values()
+                .map(|modes| modes[&kind])
+                .min()
+                .unwrap_or_else(|| config.contention.mode(kind))
+        };
         let mut cpu_held = unknown_charge.cpu_millicores > 0;
         let mut ram_held = unknown_charge.ram_mib > 0;
         for (key, held) in [(ResourceKey::Cpu, cpu_held), (ResourceKey::Ram, ram_held)] {
@@ -558,7 +588,7 @@ impl PolicyEngine {
             budget.cpu_millicores = own_allowance(
                 &ModeInput {
                     kind: ResourceKind::Cpu,
-                    mode: config.contention.mode(ResourceKind::Cpu),
+                    mode: governing(ResourceKind::Cpu),
                     capacity: cpu_schedulable,
                     external: statuses
                         .get(&ResourceKey::Cpu)
@@ -579,7 +609,7 @@ impl PolicyEngine {
             budget.ram_mib = own_allowance(
                 &ModeInput {
                     kind: ResourceKind::Ram,
-                    mode: config.contention.mode(ResourceKind::Ram),
+                    mode: governing(ResourceKind::Ram),
                     capacity: snapshot.total_ram_mib.saturating_sub(ram_reserve),
                     external: statuses
                         .get(&ResourceKey::Ram)
@@ -777,7 +807,7 @@ impl PolicyEngine {
                     own_allowance(
                         &ModeInput {
                             kind: ResourceKind::GpuMemory,
-                            mode: config.contention.mode(ResourceKind::GpuMemory),
+                            mode: governing(ResourceKind::GpuMemory),
                             capacity: gpu
                                 .total_memory_mib
                                 .saturating_sub(config.gpu.reserve_vram_mib),
@@ -964,7 +994,7 @@ impl PolicyEngine {
                 let external = statuses.get(&key).and_then(|s| s.external).unwrap_or(0);
                 let timing = LadderTiming::new(
                     &config.contention.thresholds(kind),
-                    config.contention.mode(kind),
+                    governing(kind),
                     interval_ms,
                 );
                 let usage_of =
@@ -1204,10 +1234,21 @@ impl PolicyEngine {
             && snapshot.total_ram_mib > 0
             && charged.cpu_millicores <= budget.cpu_millicores
             && charged.ram_mib <= budget.ram_mib;
+        // CPU/RAM admission waits its own cooldown, never the GPU one (M1).
         let cpu_ram_stable_since =
             cpu_ram_safe.then_some(self.cpu_ram_stable_since.unwrap_or(now_monotonic_ms));
+        let cpu_ram_cooldown_ms = [ResourceKind::Cpu, ResourceKind::Ram]
+            .into_iter()
+            .map(|kind| {
+                config
+                    .contention
+                    .thresholds(kind)
+                    .cpu_ram_cooldown_ms(governing(kind))
+            })
+            .max()
+            .unwrap_or(0);
         let cpu_ram_expansion_allowed = cpu_ram_stable_since
-            .is_some_and(|since| now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms);
+            .is_some_and(|since| now_monotonic_ms - since >= cpu_ram_cooldown_ms);
         let mut headroom = budget.clone();
         // Recommendations are not release confirmation: subtract ALL allocations,
         // including existing draining work and everything just recommended for drain.
@@ -1261,6 +1302,7 @@ impl PolicyEngine {
         }
         for (key, status) in &mut statuses {
             status.mode = Some(config.contention.mode(key.kind()));
+            status.effective_mode = Some(governing(key.kind()));
             status.measurement.get_or_insert(Measurement::Known);
         }
         Ok(Decision {
@@ -1276,6 +1318,7 @@ impl PolicyEngine {
             resources: statuses,
             actions,
             exceptions: config.contention.exceptions(),
+            allocation_modes,
         })
     }
 }

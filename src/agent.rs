@@ -3065,8 +3065,30 @@ impl AgentLoop<'_> {
                 .min(active_workers.saturating_sub(draining_workers));
             self.last_growth = Instant::now();
         }
-        let may_grow =
-            self.last_growth.elapsed() >= Duration::from_millis(config.gpu.scale_up_cooldown_ms);
+        // Parallelism grows at the CPU/RAM scale-up cooldown, never the GPU one
+        // (audit M1); GPU admission keeps its own cooldown in the policy.
+        let grow_after_ms = [
+            (
+                crate::contention::ResourceKind::Cpu,
+                crate::contention::ResourceKey::Cpu,
+            ),
+            (
+                crate::contention::ResourceKind::Ram,
+                crate::contention::ResourceKey::Ram,
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, key)| {
+            let mode = decision
+                .resources
+                .get(&key)
+                .and_then(|s| s.effective_mode)
+                .unwrap_or_else(|| config.contention.mode(kind));
+            config.contention.thresholds(kind).cpu_ram_cooldown_ms(mode)
+        })
+        .max()
+        .unwrap_or(0);
+        let may_grow = self.last_growth.elapsed() >= Duration::from_millis(grow_after_ms);
         let admission_safe = decision.expansion_allowed || decision.cpu_ram_expansion_allowed;
         let launch_slots = if admission_safe && self.stopping.is_none() && !self.spool_full {
             agent.max_workers.saturating_sub(active_workers).min(
@@ -4257,6 +4279,8 @@ mod agent_transport_tests {
         use crate::model::*;
         let mut config = Config::default();
         config.gpu.scale_up_cooldown_ms = 0;
+        config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(0);
+        config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(0);
         config.cpu.reserve_physical_cores = 0;
         config.ram.reserve_mib = 0;
         config.ram.reserve_percent = 0;
@@ -4313,6 +4337,7 @@ mod agent_transport_tests {
                 gpu_memory_mib: BTreeMap::new(),
             }),
             observed_upper: None,
+            modes: Default::default(),
         };
         let used = allocation_charge(std::slice::from_ref(&allocation));
         assert_eq!(used.cpu_millicores, 1000);

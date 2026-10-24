@@ -23,7 +23,7 @@ from native_validation import physical_cpus
 from pressure import Nvml,quantile
 from soak import AllocationLedger,StatusJournal
 from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executable,local_guard
-from runtime_config import atomic_runtime_config, read_runtime_config
+from runtime_config import atomic_runtime_config, cpu_ram_cooldown, read_runtime_config
 
 TARGETS={'matched_idle_throughput_ratio_min':.90,'decision_p95_seconds_max':1.,
     'release_p95_seconds_max':10.,'post_yield_p99_ratio_max':1.20,
@@ -139,7 +139,7 @@ def run(args):
     try:
         client=deployment(output,binary,cpus,node_id,args.gpu_uuid,1200,env)
         node=read_runtime_config(output/'node.toml');node['cpu']['reserve_physical_cores']=1
-        node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000
+        node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000;node['contention']=cpu_ram_cooldown(3000)
         atomic_runtime_config(output/'node.toml',node, 'node')
         agent=read_runtime_config(output/'agent.toml');agent.update(max_workers=1,
             capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096,'gpu_memory_mib':{args.gpu_uuid:1024} if args.mode=='gpu' else {}})

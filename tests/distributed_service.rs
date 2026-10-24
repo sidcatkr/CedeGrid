@@ -345,6 +345,8 @@ fn node_config(
     config.ram.reserve_mib = 0;
     config.ram.reserve_percent = 0;
     config.gpu.scale_up_cooldown_ms = 0;
+    config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(0);
+    config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(0);
     // Constrained Linux validation can use the normal 500ms observation cadence.
     // The 50ms fixture default leaves only 150ms before a sample is stale; an
     // ARM VM's synchronous launch preparation can exceed that interval. Keep
