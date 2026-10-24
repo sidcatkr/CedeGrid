@@ -412,7 +412,7 @@ after the hint deadline (quickstart §6).
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T072 [P] [US4] Add TypeScript drain, hook and managed-child tests mirroring the Python
+- [X] T072 [P] [US4] Add TypeScript drain, hook and managed-child tests mirroring the Python
   ones, in `npm/tests/worker-drain.test.ts` (audit M22).
 - [ ] T073 [P] [US4] Add Python tests in `python/tests/test_worker.py`:
   - `resource_targets()`;

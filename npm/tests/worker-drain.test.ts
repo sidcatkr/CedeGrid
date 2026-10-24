@@ -1,0 +1,121 @@
+/** Drain hooks and managed children, mirroring the Python SDK tests. */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, Socket } from 'node:net';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { WorkerContext, ManagedChild, spawnManaged, DrainRequested, SpawnUncertain, RemoteError, DeadlineExceeded, ValidationError, parseJson, stringifyJson } from 'cedegrid';
+import type { RpcReply, SupervisorTransport } from 'cedegrid';
+
+const descriptor = { schema_version: 2n, namespace_id: 'namespace', session_id: 'session', task_id: 'task', assignment_id: 'assignment', generation: 2n };
+
+class FakeTransport implements SupervisorTransport {
+    readonly calls: Array<[string, Record<string, unknown>]> = [];
+    constructor(private readonly replies: RpcReply[]) { }
+    async request(op: string, fields: Record<string, unknown> = {}): Promise<RpcReply> {
+        this.calls.push([op, fields]);
+        const reply = this.replies.shift();
+        if (!reply) throw new Error('no scripted reply');
+        return reply;
+    }
+}
+
+/** Serve scripted supervisor replies on a private socket; `null` drops the reply. */
+async function withSupervisor(replies: Array<RpcReply | null>, body: (requests: any[]) => Promise<void>): Promise<void> {
+    const socketPath = join('/tmp', `cg-${randomUUID().slice(0, 12)}.sock`);
+    const requests: any[] = [];
+    const server = createServer({ allowHalfOpen: true }, (socket: Socket) => {
+        let input = '';
+        socket.on('data', chunk => {
+            input += chunk.toString();
+            if (!input.endsWith('\n')) return;
+            requests.push(parseJson(input));
+            const reply = replies.shift();
+            if (reply === null || reply === undefined) socket.end();
+            else socket.end(stringifyJson(reply) + '\n');
+        });
+        socket.on('error', () => { });
+    });
+    const environment = { CEDEGRID_SUPERVISOR_SOCKET: socketPath, CEDEGRID_SUPERVISOR_TOKEN: 'private-token', CEDEGRID_NAMESPACE_ID: 'namespace', CEDEGRID_SESSION_ID: 'session', CEDEGRID_ASSIGNMENT_ID: 'assignment', CEDEGRID_ATTEMPT_GENERATION: '9007199254740993', CEDEGRID_CONTEXT: undefined };
+    const previous = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
+    await new Promise<void>(done => server.listen(socketPath, done));
+    try {
+        for (const [key, value] of Object.entries(environment))
+            value === undefined ? delete process.env[key] : process.env[key] = value;
+        await body(requests);
+    }
+    finally {
+        for (const [key, value] of Object.entries(previous))
+            value === undefined ? delete process.env[key] : process.env[key] = value;
+        await new Promise<void>(done => server.close(() => done()));
+    }
+}
+
+test('drain hooks run once', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
+    try {
+        const context = new WorkerContext({ ...descriptor, drain_file: join(root, 'drain') }, new FakeTransport([]));
+        const calls: number[] = [];
+        context.onDrain(() => calls.push(1));
+        assert.equal(context.draining(), false);
+        writeFileSync(join(root, 'drain'), '');
+        assert.throws(() => context.safePoint(), DrainRequested);
+        assert.equal(context.draining(), true);
+        assert.deepEqual(calls, [1]);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('spawning requires the child contract and a supervisor endpoint', async () => {
+    await assert.rejects(spawnManaged(['child'], { noEscape: false, singleProcess: true }), ValidationError);
+    await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true, cwd: 'relative' }), ValidationError);
+    for (const argv of [[], [''], ['bad\0arg']])
+        await assert.rejects(spawnManaged(argv, { noEscape: true, singleProcess: true }), ValidationError);
+    const previous = process.env.CEDEGRID_SUPERVISOR_SOCKET;
+    delete process.env.CEDEGRID_SUPERVISOR_SOCKET;
+    try {
+        await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true }), ValidationError);
+    }
+    finally {
+        if (previous !== undefined) process.env.CEDEGRID_SUPERVISOR_SOCKET = previous;
+    }
+});
+
+test('a lost spawn reply preserves the deduplication identity', async () => {
+    await withSupervisor([null, { ok: true, child_id: 'c', state: 'running' }], async requests => {
+        const error = await spawnManaged(['child'], { noEscape: true, singleProcess: true }).then(() => undefined, caught => caught);
+        assert(error instanceof SpawnUncertain);
+        const child = await spawnManaged(['child'], { noEscape: true, singleProcess: true, requestId: error.requestId });
+        assert.equal(child.childId, 'c');
+        assert.equal(requests[0].request_id, requests[1].request_id);
+        assert.equal('pid' in requests[0], false);
+        assert.equal(requests[0].generation, 9007199254740993n);
+    });
+});
+
+test('a spawn reply without a child ID is uncertain and a rejection stays definite', async () => {
+    await withSupervisor([{ ok: true, state: 'running' }, { ok: false, message: 'supervisor rejected request', code: 'ERR_CEDEGRID_REJECTED' }], async () => {
+        await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true }), SpawnUncertain);
+        await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true }), (error: unknown) => error instanceof RemoteError && !(error instanceof SpawnUncertain));
+    });
+});
+
+test('timeouts and reconciliation never signal a child', async () => {
+    for (const [reply, expected] of [[{ state: 'running' }, DeadlineExceeded], [{ state: 'needs_reconciliation' }, RemoteError]] as const) {
+        const transport = new FakeTransport([reply]);
+        await assert.rejects(new ManagedChild(transport, 'c').wait({ timeoutSeconds: 0 }), expected);
+        assert.deepEqual(transport.calls.map(([op]) => op), ['status']);
+    }
+});
+
+test('stop is a request and wait requires release', async () => {
+    const transport = new FakeTransport([{ state: 'draining' }, { state: 'released', exit_code: 0n }]);
+    const child = new ManagedChild(transport, 'c');
+    assert.equal((await child.stop()).state, 'draining');
+    assert.equal((await child.wait({ timeoutSeconds: 1 })).exit_code, 0n);
+    assert.deepEqual(transport.calls, [['stop', { child_id: 'c' }], ['status', { child_id: 'c' }]]);
+});

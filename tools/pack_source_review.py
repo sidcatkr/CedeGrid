@@ -72,6 +72,7 @@ ALLOWLIST = (
     'npm/tests/numeric-interop.ts',
     'npm/tests/sdk.test.ts',
     'npm/tests/transport.test.ts',
+    'npm/tests/worker-drain.test.ts',
     'npm/tests/worker-socket.test.ts',
     'npm/tsconfig.json',
     'python/LICENSE',
