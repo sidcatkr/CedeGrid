@@ -84,14 +84,14 @@ fn scoped_cpu_busy_is_never_replaced_by_whole_host_busy() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
+    assert_eq!(decision.managed_budget.cpu_millicores, 1700);
     assert!(decision.expansion_allowed);
     // A missing host aggregate does not invalidate independently complete scope telemetry.
     snap.cpu_busy_millicores = None;
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
+    assert_eq!(decision.managed_budget.cpu_millicores, 1700);
 }
 
 #[test]
@@ -138,8 +138,8 @@ fn scoped_observed_usage_and_reservations_are_not_double_charged() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 2750);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1750);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2450);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1450);
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn physical_core_reserve_uses_effective_smt_groups_not_host_average() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 1000);
+    assert_eq!(decision.managed_budget.cpu_millicores, 900);
     cpu_missing_topology_blocks_unless_no_physical_reserve(snap);
 }
 
@@ -172,7 +172,7 @@ fn cpu_missing_topology_blocks_unless_no_physical_reserve(mut snap: Snapshot) {
     let decision = PolicyEngine::new()
         .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 3000);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2700);
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn non_linux_and_explicitly_disabled_diagnostics_preserve_legacy_scope() {
             .unwrap()
             .managed_budget
             .cpu_millicores,
-        4000
+        3400
     );
     snap.kernel.as_mut().unwrap().runtime_os = "linux".into();
     let mut cfg = config();
@@ -278,7 +278,7 @@ fn non_linux_and_explicitly_disabled_diagnostics_preserve_legacy_scope() {
             .unwrap()
             .managed_budget
             .cpu_millicores,
-        4000
+        3400
     );
 }
 
@@ -428,16 +428,16 @@ fn cpu_yield_does_not_plan_an_ignored_guaranteed_release() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 1000);
-    // CPU excess caps running work instead of draining it; Guaranteed is not planned.
+    assert_eq!(decision.managed_budget.cpu_millicores, 400);
+    // CPU excess pauses running work, since its cap target is zero, instead of
+    // draining it; Guaranteed work within its request is not planned.
     assert!(decision.would_drain.is_empty());
     assert_eq!(decision.actions.len(), 1);
     assert_eq!(decision.actions[0].allocation_id, "b-opportunistic");
     assert_eq!(
         decision.actions[0].step,
-        cedegrid::contention::YieldStep::Cap
+        cedegrid::contention::YieldStep::Pause
     );
-    assert_eq!(decision.actions[0].target, Some(0));
     assert_eq!(decision.admission_headroom.cpu_millicores, 0);
 }
 
@@ -457,7 +457,7 @@ fn guaranteed_pending_and_uncertain_capacity_is_never_free_headroom() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 3000);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2400);
     assert_eq!(decision.admission_headroom.ram_mib, 23000);
     assert!(decision.would_drain.is_empty());
     input.allocations[0].phase = AllocationPhase::Running;
@@ -589,9 +589,9 @@ fn running_reservation_and_observation_are_charged_once() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    // CPU external = 2000 - 1000, SMT reserve = 2000, budget = 5000.
-    assert_eq!(decision.managed_budget.cpu_millicores, 5000);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
+    // CPU external = 2000 - 1000, SMT reserve = 2000, Neutral margin = 10% of 6000, budget = 4400.
+    assert_eq!(decision.managed_budget.cpu_millicores, 4400);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1400);
     // Used RAM 6000 - own 4000 = external 2000; budget 29000 - charge 5000.
     assert_eq!(decision.managed_budget.ram_mib, 29_000);
     assert_eq!(decision.admission_headroom.ram_mib, 24_000);
@@ -612,7 +612,7 @@ fn observed_usage_above_reservation_is_fully_charged() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 4000);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 3400);
     assert_eq!(decision.admission_headroom.ram_mib, 25_000);
 }
 
@@ -630,7 +630,7 @@ fn pending_reservations_reduce_headroom_before_launch() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2500);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1900);
     assert_eq!(decision.admission_headroom.ram_mib, 23_000);
 }
 
@@ -648,7 +648,7 @@ fn already_draining_resources_are_not_released_by_recommendation() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1400);
     assert!(decision.would_drain.is_empty());
 }
 
@@ -1142,7 +1142,7 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         planned,
         [
             ("z", YieldStep::Drain, None),
-            ("a", YieldStep::Cap, Some(2000))
+            ("a", YieldStep::Cap, Some(1400))
         ]
         .into()
     );
@@ -1258,13 +1258,13 @@ proptest! {
         snap.cpu_busy_millicores = Some(observed + external);
         let input = PolicyInput { allocations: vec![allocation("worker", AllocationPhase::Running, resources(reserved, 0, 0), Some(resources(observed, 0, 0)))], ..PolicyInput::default() };
         let decision = PolicyEngine::new().evaluate(&config(), &snap, &input, 0).unwrap();
-        let budget = 6000 - external;
+        let budget = 6000 - 600 - external;
         prop_assert_eq!(decision.managed_budget.cpu_millicores, budget);
         prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget - reserved.max(observed));
     }
 
     #[test]
-    fn pending_admission_conserves_capacity(a in 0u64..2000, b in 0u64..2000) {
+    fn pending_admission_conserves_capacity(a in 0u64..1700, b in 0u64..1700) {
         let input = PolicyInput { allocations: vec![allocation("a", AllocationPhase::Pending, resources(a, 0, 0), None), allocation("b", AllocationPhase::Pending, resources(b, 0, 0), None)], ..PolicyInput::default() };
         let decision = PolicyEngine::new().evaluate(&config(), &snapshot(), &input, 0).unwrap();
         prop_assert_eq!(decision.admission_headroom.cpu_millicores + a + b, decision.managed_budget.cpu_millicores);
@@ -2277,11 +2277,11 @@ fn d4_cpu_contention_caps_instead_of_draining() {
     snap.cpu_busy_millicores = Some(4000);
     let alone = engine.evaluate(&config(), &snap, &input, 0).unwrap();
     assert!(alone.would_drain.is_empty() && alone.actions.is_empty());
-    assert_eq!(alone.managed_budget.cpu_millicores, 6000);
+    assert_eq!(alone.managed_budget.cpu_millicores, 5400);
     // Another workload starts using three cores.
     snap.cpu_busy_millicores = Some(7000);
     let contended = engine.evaluate(&config(), &snap, &input, 1000).unwrap();
-    assert_eq!(contended.managed_budget.cpu_millicores, 3000);
+    assert_eq!(contended.managed_budget.cpu_millicores, 2400);
     assert!(contended.would_drain.is_empty());
     assert_eq!(
         contended.actions,
@@ -2289,7 +2289,7 @@ fn d4_cpu_contention_caps_instead_of_draining() {
             allocation_id: "mine".into(),
             resource: cedegrid::contention::ResourceKey::Cpu,
             step: cedegrid::contention::YieldStep::Cap,
-            target: Some(3000),
+            target: Some(2400),
             cause: cedegrid::contention::YieldCause::ExternalGrowth,
             code: "yield_step_cap".into(),
         }]
@@ -2336,9 +2336,9 @@ fn d5_sampling_skew_between_own_and_host_cpu_keeps_the_budget() {
         .evaluate(&config(), &snap, &two(2000, Some(2050)), 0)
         .unwrap();
     assert!(consistent.would_drain.is_empty() && consistent.actions.is_empty());
-    // 8000 - 2000 reserve - (4100 host upper - 4000 own lower).
-    assert_eq!(consistent.managed_budget.cpu_millicores, 5900);
-    assert_eq!(consistent.admission_headroom.cpu_millicores, 1900);
+    // 8000 - 2000 reserve - (4100 host upper - 4000 own lower) - the 600 margin.
+    assert_eq!(consistent.managed_budget.cpu_millicores, 5300);
+    assert_eq!(consistent.admission_headroom.cpu_millicores, 1300);
     assert!(codes(&consistent, "cpu").contains(&"inconsistent_within_tolerance".into()));
 }
 

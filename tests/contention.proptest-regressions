@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 30d93d2a1549015b8b2efbf2a0b7ae48106f27ad6bd960182ddea924843f32e8 # shrinks to kind = Cpu, capacity = 1, external_share = 100, observed = false, usages = [], owner_unmanaged = 0, saturated = true, unknown_activity = false

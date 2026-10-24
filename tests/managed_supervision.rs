@@ -992,13 +992,14 @@ child.wait(timeout=6,poll_interval=.01)
 /// gate file exists, and stops the job after the last report.
 struct TargetScript {
     dir: std::path::PathBuf,
+    key: cedegrid::contention::ResourceKey,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
     sent: usize,
     reports: Vec<supervision::SupervisorReport>,
 }
 impl supervision::SupervisorControl for TargetScript {
     fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
-        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};
+        use cedegrid::contention::{StepRequest, YieldCause};
         if self.sent == self.reports.len() && self.sent == self.steps.len() {
             fs::write(self.dir.join("stop"), "").unwrap();
             return Ok(vec![]);
@@ -1013,7 +1014,7 @@ impl supervision::SupervisorControl for TargetScript {
         Ok(vec![supervision::SupervisorCommand::Adjust {
             sequence: self.sent as u64,
             resources: BTreeMap::from([(
-                ResourceKey::Ram,
+                self.key.clone(),
                 StepRequest {
                     step,
                     target,
@@ -1032,11 +1033,20 @@ fn run_targets(
     code: &str,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
 ) -> (tempfile::TempDir, TargetScript) {
+    run_targets_on(cedegrid::contention::ResourceKey::Ram, code, steps)
+}
+
+fn run_targets_on(
+    key: cedegrid::contention::ResourceKey,
+    code: &str,
+    steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
+) -> (tempfile::TempDir, TargetScript) {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(dir.path(), code);
     let mut script = TargetScript {
         dir: dir.path().to_owned(),
+        key,
         steps,
         sent: 0,
         reports: vec![],
@@ -1125,6 +1135,31 @@ while not (d/'stop').exists():
             serde_json::json!([3, "none", null])
         ]
     );
+}
+
+/// The request helper is Guaranteed with 1000m of CPU: a CPU target never goes
+/// below the request, whatever the agent asks (FR-024).
+#[test]
+fn a_guaranteed_cpu_target_never_goes_below_the_request() {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    let (dir, _script) = run_targets_on(
+        ResourceKey::Cpu,
+        r#"
+import time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env();seen=None
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    t=signals.resource_targets()
+    if t is not None: seen=t.cpu_millicores
+    time.sleep(0.005)
+(d/'seen').write_text(str(seen))
+"#,
+        vec![("ready", YieldStep::Hint, Some(0))],
+    );
+    assert_eq!(fs::read_to_string(dir.path().join("seen")).unwrap(), "1000");
 }
 
 #[test]

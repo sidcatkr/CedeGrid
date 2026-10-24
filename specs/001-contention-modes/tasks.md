@@ -475,7 +475,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
     are validated.
 - [X] T123 [P] Add a test in `tests/supervision.rs` (B2): the gate sets `oom_score_adj = 1000`
   for Guaranteed work too, with no option to skip it.
-- [ ] T124 [P] Add tests in `tests/contention.rs` (B4, B10):
+- [X] T124 [P] Add tests in `tests/contention.rs` (B4, B10):
   - a proptest over generated `ModeInput`s on every resource: target(YF) ≤ target(N) ≤
     target(P) (SC-013);
   - the contended targets from data-model.md, including unknown activity;
@@ -523,7 +523,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   the implicit node cap in `src/config.rs`; `guaranteed_oom_victim` in
   `src/supervision.rs` and its callers; exceptions and markers in `src/model.rs`;
   `NodeContentionReport` in `src/protocol.rs`; `docs/guarantees.md`.
-- [ ] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU
+- [X] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU
   rule in `src/contention.rs` and `src/policy.rs` (B4, B10).
 - [ ] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
   report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path and

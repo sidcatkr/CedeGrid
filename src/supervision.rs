@@ -1016,8 +1016,17 @@ mod unix {
                     let mut unavailable = std::collections::BTreeMap::new();
                     let mut details = Vec::new();
                     let mut hints_changed = false;
-                    for (key, wanted) in resources {
+                    for (key, mut wanted) in resources {
                         let kind = key.kind();
+                        // A Guaranteed CPU cap never goes below the request (FR-024).
+                        if kind == ResourceKind::Cpu
+                            && request.class == AllocationClass::Guaranteed
+                            && matches!(wanted.step, YieldStep::Cap | YieldStep::Hint)
+                        {
+                            wanted.target = wanted
+                                .target
+                                .map(|target| target.max(request.resources.cpu_millicores));
+                        }
                         let current = contention
                             .applied
                             .get(&key)

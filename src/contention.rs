@@ -321,8 +321,11 @@ pub struct LadderInput {
     pub external: u64,
     pub measurement_known: bool,
     pub cause: YieldCause,
-    /// The cap target the policy computed this interval, in resource units.
+    /// What the allocation may use this interval, in resource units: the cap or
+    /// hint target while contended, and the level a held cap may rise to while calm.
     pub target: Option<u64>,
+    /// The allocation's measured usage of the resource, when known.
+    pub usage: Option<u64>,
 }
 
 /// Mode-dependent ladder timing in milliseconds.
@@ -400,6 +403,16 @@ impl LadderInput {
                 skipped.push(step);
                 continue;
             }
+            // A cap to zero for external demand still runs at the minimum duty; a
+            // pause frees it all. Unknown measurement keeps the gentler cap first.
+            if step == YieldStep::Cap
+                && self.cause == YieldCause::ExternalGrowth
+                && self.target == Some(0)
+                && self.applies(YieldStep::Pause)
+                && !self.unavailable.contains(&YieldStep::Pause)
+            {
+                continue;
+            }
             return (Some(step), skipped);
         }
         (None, skipped)
@@ -458,12 +471,19 @@ pub fn plan_step(
         // not freed the contended amount within the response time, a pause its
         // bound or a hint its deadline. A step the supervisor reported it cannot
         // apply moves on at once.
+        // A held cap whose target drops to zero becomes a pause at once.
+        let cap_to_zero = current == YieldStep::Cap
+            && input.cause == YieldCause::ExternalGrowth
+            && input.target == Some(0)
+            && input.applies(YieldStep::Pause)
+            && !input.unavailable.contains(&YieldStep::Pause);
         let due = since_change >= timing.dwell_ms
             && (current == YieldStep::None
                 || persisted >= timing.response_ms
                 || current == YieldStep::Pause && persisted >= timing.pause_bound_ms
                 || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
-            || input.unavailable.contains(&current);
+            || input.unavailable.contains(&current)
+            || cap_to_zero;
         if due {
             let (next, skipped) = input.next_step(current);
             if let Some(next) = next {
@@ -482,6 +502,8 @@ pub fn plan_step(
         let mut held = state.clone();
         held.calm_since_ms = None;
         held.contended_since_ms = Some(contended_since);
+        // A step held from earlier, such as a margin cap, now answers this demand.
+        held.trigger_external = held.trigger_external.max(input.external);
         if matches!(held.step, YieldStep::Cap | YieldStep::Hint) && input.target.is_some() {
             held.target = input.target;
         }
@@ -499,6 +521,44 @@ pub fn plan_step(
         / 100;
     let mut held = state.clone();
     held.contended_since_ms = None;
+    // While nothing is contended, a held cap rises toward what the mode allows now,
+    // one move per scale-up interval, and a pause becomes such a cap.
+    if let Some(allowed) = input.target
+        && since_change >= timing.dwell_ms.max(timing.scale_up_ms)
+    {
+        let raise = match current {
+            YieldStep::Cap => held.target.is_some_and(|target| allowed > target),
+            YieldStep::Pause => {
+                allowed > 0
+                    && input.applies(YieldStep::Cap)
+                    && !input.unavailable.contains(&YieldStep::Cap)
+            }
+            _ => false,
+        };
+        if raise {
+            held.step = YieldStep::Cap;
+            held.target = Some(allowed);
+            held.entered_at_ms = now_ms;
+            held.calm_since_ms = None;
+            return LadderDecision {
+                state: Some(held),
+                skipped: Vec::new(),
+            };
+        }
+    }
+    // A cap that still binds is what keeps own work at the mode's target.
+    let binding = current == YieldStep::Cap
+        && held
+            .target
+            .zip(input.usage)
+            .is_some_and(|(target, usage)| usage.saturating_mul(100) >= target.saturating_mul(95));
+    if binding {
+        held.calm_since_ms = None;
+        return LadderDecision {
+            state: Some(held),
+            skipped: Vec::new(),
+        };
+    }
     if state.trigger_external > 0 && input.external >= threshold {
         held.calm_since_ms = None;
         return LadderDecision {
@@ -646,38 +706,60 @@ pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
     shares
 }
 
-/// What a mode lets own work hold on one resource this interval. Yield First
-/// keeps its generous margin free and counts unknown activity as demand.
-/// Performance keeps a small margin on compute and only the floor on memory.
-/// Neutral uses idle capacity and converges to its fair share under
-/// contention; memory floors always win.
+/// What a mode lets own work hold on one resource this interval (FR-020 to
+/// FR-022, FR-065). On contended compute, Yield First takes opportunistic work to
+/// zero and Neutral and Performance hold the fair share. Otherwise Yield First
+/// keeps its generous margin free, and Neutral and Performance keep the small
+/// Performance margin, so the targets are ordered YF ≤ N ≤ P on every resource.
+/// Memory floors are already outside `capacity`, and memory keeps no margin
+/// beyond them except Yield First's.
 pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     let margin = |percent: u8| input.capacity.saturating_mul(u64::from(percent)) / 100;
     let available = input.capacity.saturating_sub(input.external);
+    let contended = contended(input, thresholds);
     match input.mode {
-        ContentionMode::YieldFirst if input.unknown_activity => 0,
+        ContentionMode::YieldFirst if contended => 0,
         ContentionMode::YieldFirst => {
             available.saturating_sub(margin(thresholds.yield_first_margin_percent))
         }
-        ContentionMode::Performance => {
-            let held = if input.kind.is_memory() {
-                available
-            } else {
-                available.saturating_sub(margin(thresholds.performance_margin_percent))
-            };
-            // Never more aggressive than Neutral while the amount is unknown.
-            if input.unknown_activity {
-                held.min(neutral_share(input, thresholds))
-            } else {
-                held
-            }
-        }
-        ContentionMode::Neutral if input.kind.is_memory() => available,
-        ContentionMode::Neutral if input.saturated || input.unknown_activity => {
-            neutral_share(input, thresholds)
-        }
-        ContentionMode::Neutral => available,
+        _ if input.kind.is_memory() => available,
+        _ if contended => neutral_share(input, thresholds),
+        _ => available.saturating_sub(margin(thresholds.performance_margin_percent)),
     }
+}
+
+/// The contention floor: usage, in resource units, from which a principal
+/// contends for a fair share.
+fn principal_floor(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+    (input
+        .capacity
+        .saturating_mul(u64::from(thresholds.principal_min_percent))
+        / 100)
+        .max(1)
+}
+
+/// Compute is contended when external activity of unknown amount exists, or when
+/// the resource is saturated and an external principal, or the unattributed
+/// usage that stands for one, uses at least the contention floor.
+pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
+    if input.kind.is_memory() {
+        return false;
+    }
+    if input.unknown_activity {
+        return true;
+    }
+    if !input.saturated {
+        return false;
+    }
+    let floor = principal_floor(input, thresholds);
+    let mut accounted = 0u64;
+    for (principal, usage) in input.principals.iter().flatten() {
+        accounted = accounted.saturating_add(*usage);
+        if !principal.is_owner && *usage >= floor {
+            return true;
+        }
+    }
+    input.external.saturating_sub(accounted) >= floor
 }
 
 /// Own work's max-min share: the owner principal's share minus the account's
@@ -685,11 +767,7 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
 /// wants without bound; external usage no visible principal accounts for, such
 /// as unreadable owners, is one more principal (research R12).
 fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
-    let floor = (input
-        .capacity
-        .saturating_mul(u64::from(thresholds.principal_min_percent))
-        / 100)
-        .max(1);
+    let floor = principal_floor(input, thresholds);
     let demand = |usage: u64| (!(input.saturated && usage >= floor)).then_some(usage);
     let mut demands = vec![None];
     let mut owner_unmanaged = 0u64;

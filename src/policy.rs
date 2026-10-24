@@ -1096,6 +1096,35 @@ impl PolicyEngine {
                         facts
                     })
                 };
+                // A Guaranteed allocation keeps its CPU request: only usage above it
+                // can be capped (FR-024).
+                let kept_cpu = |a: &Allocation| {
+                    if kind == ResourceKind::Cpu && guaranteed(a) {
+                        a.requested.cpu_millicores
+                    } else {
+                        0
+                    }
+                };
+                // CPU the mode allows beyond current usage, shared by the caps and
+                // pauses on this resource so they can rise again while calm.
+                let held_back = self
+                    .ladder
+                    .iter()
+                    .filter(|((_, k), state)| {
+                        k == &key && matches!(state.step, YieldStep::Cap | YieldStep::Pause)
+                    })
+                    .count() as u64;
+                let spare_share = if kind == ResourceKind::Cpu && held_back > 0 {
+                    let usage = input
+                        .allocations
+                        .iter()
+                        .filter(|a| a.phase != AllocationPhase::Pending)
+                        .map(usage_of)
+                        .fold(unknown_charge.cpu_millicores, u64::saturating_add);
+                    budget.cpu_millicores.saturating_sub(usage) / held_back
+                } else {
+                    0
+                };
                 let mut planned = BTreeSet::new();
                 // Memory's running pass covers what cancelled reservations left over.
                 let mut carried = admission_excess;
@@ -1114,7 +1143,7 @@ impl PolicyEngine {
                         .filter(|a| (a.phase == AllocationPhase::Pending) == pending_pass)
                         .map(|a| {
                             let amount = if kind == ResourceKind::Cpu && !pending_pass {
-                                usage_of(a)
+                                usage_of(a).saturating_sub(kept_cpu(a))
                             } else {
                                 amount_of(&charges[&a.id])
                             };
@@ -1133,6 +1162,11 @@ impl PolicyEngine {
                     let mut remaining = needed;
                     for victim in victims {
                         planned.insert(victim.id.clone());
+                        let kept = input
+                            .allocations
+                            .iter()
+                            .find(|a| a.id == victim.id)
+                            .map_or(0, kept_cpu);
                         let state = self.ladder.get(&(victim.id.clone(), key.clone()));
                         let mut unavailable = facts(&victim.id)
                             .unavailable
@@ -1166,8 +1200,19 @@ impl PolicyEngine {
                                 external,
                                 measurement_known,
                                 cause,
-                                // What the allocation may keep: a cap or hint target.
-                                target: Some(victim.amount.saturating_sub(remaining)),
+                                usage: (kind == ResourceKind::Cpu && !pending_pass)
+                                    .then(|| victim.amount.saturating_add(kept)),
+                                // What the allocation may use: while contended, a cap
+                                // or hint target; while calm, its usage plus its share
+                                // of the spare, toward which a held cap rises.
+                                target: Some(
+                                    if contended {
+                                        victim.amount.saturating_sub(remaining)
+                                    } else {
+                                        victim.amount.saturating_add(spare_share)
+                                    }
+                                    .saturating_add(kept),
+                                ),
                             },
                             &timing,
                             now_monotonic_ms,
@@ -1189,9 +1234,9 @@ impl PolicyEngine {
                             // the next observation shows whether it did.
                             if next.step > before {
                                 let freed = match next.step {
-                                    YieldStep::Cap => victim
-                                        .amount
-                                        .saturating_sub(next.target.unwrap_or(victim.amount)),
+                                    YieldStep::Cap => (victim.amount + kept).saturating_sub(
+                                        next.target.unwrap_or(victim.amount + kept),
+                                    ),
                                     YieldStep::Pause | YieldStep::Drain | YieldStep::Terminate => {
                                         victim.amount
                                     }
@@ -1230,6 +1275,7 @@ impl PolicyEngine {
                                 && !unknown_allocations.contains(id),
                             cause,
                             target: None,
+                            usage: None,
                         },
                         &timing,
                         now_monotonic_ms,

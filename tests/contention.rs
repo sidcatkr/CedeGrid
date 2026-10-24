@@ -86,6 +86,7 @@ mod ladder {
             measurement_known: true,
             cause: YieldCause::ExternalGrowth,
             target: None,
+            usage: None,
         }
     }
 
@@ -524,7 +525,7 @@ mod neutral {
 
     #[test]
     fn own_work_keeps_its_share_and_idle_capacity_but_never_more_under_contention() {
-        // Idle capacity is own work's to use.
+        // Idle capacity is own work's to use, minus the Performance margin (FR-021).
         assert_eq!(
             allowance(&input(
                 ResourceKind::Cpu,
@@ -532,18 +533,18 @@ mod neutral {
                 8000,
                 1000
             )),
-            7000
+            6200
         );
         // Saturated by a demanding principal: exactly the fair share, whatever own uses now.
         let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 6000);
         view.saturated = true;
         view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 6000)]);
         assert_eq!(allowance(&view), 4000);
-        // Own work alone saturating the CPU shares only with a principal below the
-        // contention floor, which keeps what it uses.
+        // Own work alone saturating the CPU, with only a principal below the
+        // contention floor, is not contended: idle capacity minus the margin.
         view.external = 10;
         view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 10)]);
-        assert_eq!(allowance(&view), 7990);
+        assert_eq!(allowance(&view), 7190);
         // The account's unmanaged usage comes out of own work's share.
         view.external = 6500;
         view.principals = Some(vec![
@@ -570,6 +571,85 @@ mod neutral {
             let mut view = input(kind, ContentionMode::Neutral, 10_000, 9000);
             view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 9000)]);
             assert_eq!(allowance(&view), 1000, "{kind:?}");
+        }
+    }
+}
+
+/// Ordered targets (FR-065, SC-013) and the contended state (FR-020 to FR-022).
+mod ordered_targets {
+    use super::modes::*;
+    use proptest::prelude::*;
+
+    fn targets(view: &ModeInput) -> [u64; 3] {
+        [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ]
+        .map(|mode| {
+            allowance(&ModeInput {
+                mode,
+                ..view.clone()
+            })
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn yield_first_never_exceeds_neutral_and_neutral_never_exceeds_performance(
+            kind in prop_oneof![
+                Just(ResourceKind::Cpu),
+                Just(ResourceKind::Ram),
+                Just(ResourceKind::GpuCompute),
+                Just(ResourceKind::GpuMemory)
+            ],
+            capacity in 1u64..100_000,
+            external_share in 0u64..=150,
+            observed in any::<bool>(),
+            usages in prop::collection::vec((prop_oneof![Just(None), (0u32..3000).prop_map(Some)], 0u64..60_000), 0..5),
+            owner_unmanaged in 0u64..5000,
+            saturated in any::<bool>(),
+            unknown_activity in any::<bool>(),
+        ) {
+            let external = capacity * external_share / 100;
+            let mut principals = vec![principal(Some(1000), owner_unmanaged)];
+            principals.extend(usages.into_iter().filter(|(uid, _)| *uid != Some(1000)).map(|(uid, usage)| principal(uid, usage)));
+            let view = ModeInput {
+                principals: observed.then_some(principals),
+                saturated,
+                unknown_activity,
+                ..input(kind, ContentionMode::Neutral, capacity, external)
+            };
+            let [yield_first, neutral, performance] = targets(&view);
+            prop_assert!(yield_first <= neutral, "{view:?}: {yield_first} > {neutral}");
+            prop_assert!(neutral <= performance, "{view:?}: {neutral} > {performance}");
+        }
+    }
+
+    #[test]
+    fn contended_compute_takes_yield_first_to_zero_and_the_others_to_the_fair_share() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            // Saturated, with an external principal above the contention floor.
+            let mut view = input(kind, ContentionMode::Neutral, 8000, 6000);
+            view.saturated = true;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 6000)]);
+            assert_eq!(targets(&view), [0, 4000, 4000], "{kind:?}");
+            // Unknown activity counts as one contending principal.
+            let mut unknown = input(kind, ContentionMode::Neutral, 8000, 0);
+            unknown.unknown_activity = true;
+            assert_eq!(targets(&unknown), [0, 4000, 4000], "{kind:?}");
+            // Saturation by own work alone is not contention.
+            let mut alone = input(kind, ContentionMode::Neutral, 8000, 0);
+            alone.saturated = true;
+            assert_eq!(targets(&alone), [6000, 7200, 7200], "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn memory_floors_bound_every_mode_and_yield_first_keeps_its_margin() {
+        for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+            let view = input(kind, ContentionMode::Neutral, 8000, 2000);
+            assert_eq!(targets(&view), [4000, 6000, 6000], "{kind:?}");
         }
     }
 }
@@ -794,11 +874,12 @@ mod guaranteed_policy {
         let mut config = config();
         config.contention.cpu.mode = Some(ContentionMode::YieldFirst);
         let mut engine = PolicyEngine::new();
+        // Usage above the request may be capped; the request itself never (FR-024).
         let input = PolicyInput {
             allocations: vec![allocation(
                 "g",
                 AllocationClass::Guaranteed,
-                6000,
+                2000,
                 Some(6000),
             )],
             ..PolicyInput::default()
@@ -810,6 +891,9 @@ mod guaranteed_policy {
                 .unwrap();
             for action in decision.actions.iter().filter(|a| a.allocation_id == "g") {
                 seen.insert(action.step);
+                if action.step == YieldStep::Cap {
+                    assert!(action.target.is_some_and(|t| t >= 2000), "{action:?}");
+                }
             }
         }
         assert!(seen.contains(&YieldStep::Cap), "{seen:?}");
@@ -817,6 +901,23 @@ mod guaranteed_policy {
             !seen.contains(&YieldStep::Pause) && !seen.contains(&YieldStep::Drain),
             "{seen:?}"
         );
+        // Usage within the request is never capped, even when Yield First targets zero.
+        let within = PolicyInput {
+            allocations: vec![allocation(
+                "g",
+                AllocationClass::Guaranteed,
+                6000,
+                Some(6000),
+            )],
+            ..PolicyInput::default()
+        };
+        let mut engine = PolicyEngine::new();
+        for now in (0..=5000).step_by(500) {
+            let decision = engine
+                .evaluate(&config, &snapshot(8000), &within, now)
+                .unwrap();
+            assert!(decision.actions.is_empty(), "{:?}", decision.actions);
+        }
     }
 }
 
@@ -971,6 +1072,76 @@ mod scenarios {
             restored_at - appeared
         );
         assert!(!world.drained, "CPU contention alone never drains (SC-007)");
+    }
+
+    /// Saturation hides how much external work wants: own work with many threads
+    /// leaves a demanding external process only a sliver. In every mode the
+    /// contended target applies at once, so the CPU is back within 2 monitor
+    /// intervals: interval 1 observes the demand, interval 2 runs with the step.
+    #[test]
+    fn sc_002_contended_cpu_returns_within_two_intervals_in_every_mode() {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
+            let mut world = World::new(mode, (64, 8000));
+            let mut now = 0;
+            while now < 5000 {
+                world.tick(now);
+                now += INTERVAL;
+            }
+            world.external = (5, 5000);
+            world.tick(now);
+            // Until the pause bound, the CPU stays returned.
+            for _ in 1..18 {
+                now += INTERVAL;
+                let (own, external) = world.tick(now);
+                let returned = match mode {
+                    ContentionMode::YieldFirst => own == 0 && external == 5000,
+                    _ => own <= 4000 + CAPACITY / 100 && external + CAPACITY / 100 >= 4000,
+                };
+                assert!(returned, "{mode:?} at {now}: own {own} external {external}");
+            }
+            assert!(!world.drained, "{mode:?}");
+        }
+    }
+
+    /// While a resource is not contended, a held cap rises again toward the mode's
+    /// target at the mode's scale-up rate (FR-013, FR-020).
+    #[test]
+    fn a_held_cap_rises_again_when_external_demand_shrinks() {
+        for (mode, target) in [
+            (ContentionMode::YieldFirst, 5000),
+            (ContentionMode::Neutral, 6200),
+            (ContentionMode::Performance, 6200),
+        ] {
+            let mut world = World::new(mode, (64, 8000));
+            let mut now = 0;
+            while now < 5000 {
+                world.tick(now);
+                now += INTERVAL;
+            }
+            world.external = (5, 5000);
+            while now < 15_000 {
+                world.tick(now);
+                now += INTERVAL;
+            }
+            // Idle capacity minus the margin: 8000 - 1000 - 25% or 10% of 8000.
+            world.external = (1, 1000);
+            let shrunk = now;
+            let mut recovered = None;
+            while now < shrunk + 40_000 {
+                let (own, external) = world.tick(now);
+                assert!(own + external <= CAPACITY, "{mode:?}");
+                if recovered.is_none() && own + CAPACITY / 100 >= target {
+                    recovered = Some(now);
+                }
+                now += INTERVAL;
+            }
+            assert!(recovered.is_some(), "{mode:?} never recovered to {target}");
+            assert!(!world.drained, "{mode:?}");
+        }
     }
 
     #[test]

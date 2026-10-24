@@ -81,12 +81,21 @@ Subtract attributed managed usage from total system usage before classifying the
 remaining usage as external; do not subtract both the usage and the entire reservation
 again from free capacity. Unknown observations prohibit optimistic admission.
 
-Each resource runs in a contention mode. Yield First keeps 25% of schedulable capacity
-free and counts unknown activity as demand. Neutral uses idle capacity and, under
-contention, converges to its max-min fair share among principals: owner UIDs, with
-processes whose owner cannot be read counted as one principal and the account
-CedeGrid runs as counted as the owner. Performance keeps 10% free on CPU and GPU
-compute and only the floor on memory. The margins are configurable per resource.
+Each resource runs in a contention mode, and for every resource and observation the
+targets are ordered: Yield First ≤ Neutral ≤ Performance. CPU and GPU compute are
+*contended* when they are saturated (busy within 2% of capacity) and an external
+principal uses at least `principal_min_percent` of them, or when external activity of
+unknown amount exists. On contended compute, Yield First pauses opportunistic work,
+and Neutral and Performance hold the max-min fair share among principals: owner UIDs,
+with processes whose owner cannot be read counted as one principal and the account
+CedeGrid runs as counted as the owner. Otherwise Yield First keeps 25% of schedulable
+capacity free, and Neutral and Performance keep 10% free; they differ in how fast they
+scale up (10 s and 2 s per step). On memory, Yield First keeps 25% free beyond the floor
+and the other modes only the floor. The margins are configurable per resource. In
+every mode, contended CPU returns within 2 monitor intervals: the first step applies
+at once. While a resource is not contended, a held cap rises again toward the mode's
+target at the mode's scale-up rate. A Guaranteed allocation's CPU is never capped
+below its request, by the policy or by its supervisor.
 
 Own work grows on CPU and RAM only after both have stayed stable for
 `contention.cpu.cpu_ram_scale_up_cooldown_ms` and `contention.ram.cpu_ram_scale_up_cooldown_ms`,
