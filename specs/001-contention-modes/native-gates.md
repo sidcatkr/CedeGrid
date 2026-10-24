@@ -1,7 +1,7 @@
-# Native gates deferred from batches 1 to 3
+# Native gates deferred from batches 1 to 4
 
-Batch 1 (T001–T032), batch 2 (US2, T033–T055) and batch 3 (US3, T056–T071) were implemented and
-verified on macOS, with the Linux container check below.
+Batch 1 (T001–T032), batch 2 (US2, T033–T055), batch 3 (US3, T056–T071) and batch 4 (US4,
+T072–T082) were implemented and verified on macOS, with the Linux container check below.
 Passing tests on macOS does not establish Linux runtime behavior, and no gate below is recorded
 as qualified. Run these only on an authorized Linux host, and record results in
 `docs/validation.md`.
@@ -173,6 +173,21 @@ copied to a named volume there; Docker's overlay filesystem is refused by design
    cargo test --locked --test supervision -- --exact the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec
    cargo test --locked --test managed_supervision -- --exact managed_children_carry_the_oom_preference
    ```
+
+## US4 checks that can run now
+
+1. Quickstart §6 and the supervisor target tests on a Linux host. The Linux container check
+   already runs them:
+
+   ```sh
+   PYTHONPATH="$PWD/python" "$CEDEGRID_TEST_PYTHON" -m unittest discover -s python/tests -p 'test_worker*.py'
+   (cd npm && npm ci --ignore-scripts && npm test)
+   cargo test --locked --test managed_supervision -- hint managed_children_receive_the_target_file_and_its_targets
+   ```
+
+2. A GPU memory hint on an NVIDIA host needs US5's occupied-device scenarios and runs with T088:
+   an SDK worker holding memory on `<GPU-UUID>` receives a `gpu_memory_mib` target when external
+   memory crosses the device floor, and is drained after the hint deadline only if it ignores it.
 
 ## C. Deferred gates that need later work
 
