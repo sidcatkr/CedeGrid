@@ -7,7 +7,9 @@ use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
-use crate::contention::{ResourceKey, YieldCause, YieldStep};
+use crate::contention::{
+    ContentionMode, Measurement, ResourceKey, ResourceKind, YieldCause, YieldStep,
+};
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
@@ -43,15 +45,20 @@ pub fn effective_gpu_capability(
             && o.baseline_age_ms
                 .is_some_and(|age| age <= config.gpu.process_sample_max_age_ms)
     });
+    // A Quiet class is positive evidence from healthy observation over a window,
+    // not the absence of samples, so it qualifies like a fresh sample (research R8).
+    let evidence = fresh
+        || (gpu.external_compute == ComputeActivity::Quiet
+            && observation.is_some_and(|o| o.capability == ContentionAware));
     match config.gpu.execution_mode {
         GpuExecutionMode::Auto => observation.map(|_| {
-            if fresh {
+            if evidence {
                 ContentionAware
             } else {
                 ConservativeNonSharing
             }
         }),
-        GpuExecutionMode::ContentionAware => Some(if fresh {
+        GpuExecutionMode::ContentionAware => Some(if evidence {
             ContentionAware
         } else {
             InsufficientObservability
@@ -144,10 +151,16 @@ pub fn validate_gpu_launch_contract(
                 "GPU {uuid} conservative non-sharing launch requires a complete empty external inventory"
             );
         }
+        let mode = config.contention.mode(ResourceKind::GpuCompute);
+        let admitted = match gpu.external_compute {
+            ComputeActivity::Idle | ComputeActivity::Quiet => true,
+            ComputeActivity::Active => mode != ContentionMode::YieldFirst,
+            ComputeActivity::Unknown => false,
+        };
         ensure!(
-            capability == Some(GpuExecutionCapability::BestEffortOccupied)
-                || gpu.external_compute == ComputeActivity::Idle,
-            "GPU {uuid} has active or unknown external activity at the launch recheck"
+            capability == Some(GpuExecutionCapability::BestEffortOccupied) || admitted,
+            "GPU {uuid} external activity {:?} is not admitted by mode {mode:?} at the launch recheck",
+            gpu.external_compute
         );
     }
     Ok(())
@@ -172,10 +185,10 @@ pub fn schedulable_budget(decision: &Decision) -> Resources {
 #[derive(Debug, Clone, Default)]
 struct PreviousGpu {
     pids: BTreeSet<u32>,
+    /// External memory that growth is measured against. Changes below the noise
+    /// tolerance accumulate against it instead of moving it up.
     external_memory: Option<u64>,
     sample_id: Option<u64>,
-    /// Retain the protection cap until a full stable idle interval has elapsed.
-    protection_cap: Option<u64>,
     stable_since: Option<u64>,
 }
 
@@ -189,6 +202,9 @@ pub struct PolicyEngine {
     /// Collector-relative sample marker and the policy time it first arrived.
     /// The two monotonic clocks are never directly subtracted from one another.
     last_kernel_cpu_sample: Option<(u64, u64)>,
+    /// Last observation per allocation. Its presence also marks that the
+    /// allocation's first observation, a baseline, has already happened.
+    last_observed: BTreeMap<String, Resources>,
 }
 
 impl PolicyEngine {
@@ -219,18 +235,34 @@ impl PolicyEngine {
         let mut charged = Resources::default();
         let mut managed_observed = Resources::default();
         let mut charges = BTreeMap::new();
-        let mut missing_observations = Resources::default();
+        // Charges of running allocations whose usage is unknown this interval. Host
+        // usage includes them, so they are own work, never external demand (R10).
+        let mut unknown_charge = Resources::default();
+        let mut unknown_allocations = BTreeSet::new();
+        let mut first_observed_gpus = BTreeSet::new();
+        let mut last_observed = BTreeMap::new();
         let mut reasons = Vec::new();
+        let mut statuses: BTreeMap<ResourceKey, ResourceStatus> = BTreeMap::new();
         for allocation in &input.allocations {
             let mut charge = allocation.requested.clone();
             if allocation.phase != AllocationPhase::Pending {
                 if let Some(observed) = &allocation.observed {
                     managed_observed.add_checked(observed)?;
                     charge = Resources::charge(&charge, Some(observed));
+                    if !self.last_observed.contains_key(&allocation.id) {
+                        first_observed_gpus.extend(charge.gpu_memory_mib.keys().cloned());
+                    }
+                    last_observed.insert(allocation.id.clone(), observed.clone());
                 } else {
-                    missing_observations.add_checked(&allocation.requested)?;
+                    let last = self.last_observed.get(&allocation.id);
+                    charge = Resources::charge(&charge, last);
+                    if let Some(last) = last {
+                        last_observed.insert(allocation.id.clone(), last.clone());
+                    }
+                    unknown_charge.add_checked(&charge)?;
+                    unknown_allocations.insert(allocation.id.clone());
                     reasons.push(format!(
-                        "allocation {} has unknown managed usage; affected admission is blocked",
+                        "allocation {} has unknown managed usage; charged at max(request, last known), its step holds and affected admission is blocked",
                         allocation.id
                     ));
                 }
@@ -238,11 +270,31 @@ impl PolicyEngine {
             charged.add_checked(&charge)?;
             charges.insert(allocation.id.clone(), charge);
         }
+        let mut cpu_held = unknown_charge.cpu_millicores > 0;
+        let mut ram_held = unknown_charge.ram_mib > 0;
+        for (key, held) in [(ResourceKey::Cpu, cpu_held), (ResourceKey::Ram, ram_held)] {
+            if held {
+                note(
+                    &mut statuses,
+                    key,
+                    "allocation_unknown_hold",
+                    "an allocation's usage is unknown; it is charged at max(request, last known) and the resource holds".into(),
+                );
+            }
+        }
+        for gpu in unknown_charge.gpu_memory_mib.keys() {
+            note(
+                &mut statuses,
+                ResourceKey::GpuMemory(gpu.clone()),
+                "allocation_unknown_hold",
+                "an allocation's usage is unknown; it is charged at max(request, last known) and the device holds".into(),
+            );
+        }
 
         let mut budget = Resources::default();
         let mut unsafe_now = input.explicit_drain;
-        let mut cpu_unknown = missing_observations.cpu_millicores > 0;
-        let mut ram_unknown = missing_observations.ram_mib > 0;
+        let mut cpu_unknown = false;
+        let mut ram_unknown = false;
         if input.explicit_drain {
             reasons.push("explicit node drain requested".into());
         }
@@ -330,18 +382,65 @@ impl PolicyEngine {
             snapshot.cpu_capacity_millicores
         };
         if let Some(busy) = cpu_busy {
-            let external = busy.saturating_sub(managed_observed.cpu_millicores);
+            // Own usage is a lower bound and host busy an upper bound (schema 3 adds
+            // the host lower bound). Overlapping bounds are consistent (R9).
+            let own_lower = managed_observed.cpu_millicores;
+            let host_lower = if scoped_kernel.is_some() {
+                busy
+            } else {
+                snapshot.cpu_busy_lower_millicores.unwrap_or(busy).min(busy)
+            };
+            let external = if own_lower > busy {
+                cpu_held = true;
+                statuses.entry(ResourceKey::Cpu).or_default().measurement =
+                    Some(Measurement::Unknown);
+                reasons.push(
+                    "managed CPU observation exceeds busy observation in the selected scope beyond the known error; CPU holds and admission is blocked"
+                        .into(),
+                );
+                note(
+                    &mut statuses,
+                    ResourceKey::Cpu,
+                    "measurement_unknown_hold",
+                    format!(
+                        "own CPU lower bound {own_lower}m exceeds host busy upper bound {busy}m"
+                    ),
+                );
+                0
+            } else {
+                if own_lower > host_lower {
+                    statuses.entry(ResourceKey::Cpu).or_default().measurement =
+                        Some(Measurement::InconsistentWithinTolerance);
+                    note(
+                        &mut statuses,
+                        ResourceKey::Cpu,
+                        "inconsistent_within_tolerance",
+                        format!(
+                            "own CPU {own_lower}m exceeds host busy lower bound {host_lower}m within the known error; external clamped"
+                        ),
+                    );
+                }
+                busy.saturating_sub(own_lower.saturating_add(unknown_charge.cpu_millicores))
+            };
             budget.cpu_millicores = cpu_capacity
                 .saturating_sub(cpu_reserve)
                 .saturating_sub(external)
                 .min(cpu_ceiling);
-            if managed_observed.cpu_millicores > busy {
-                cpu_unknown = true;
-                reasons.push(
-                    "managed CPU observation exceeds busy observation in the selected scope; admission blocked"
-                        .into(),
-                );
-            }
+            let status = statuses.entry(ResourceKey::Cpu).or_default();
+            status.external = Some(external);
+            status.own = Some((
+                own_lower,
+                input
+                    .allocations
+                    .iter()
+                    .filter_map(|a| a.observed.as_ref().map(|o| (a, o)))
+                    .map(|(a, o)| {
+                        a.observed_upper
+                            .as_ref()
+                            .map_or(o.cpu_millicores, |u| u.cpu_millicores.max(o.cpu_millicores))
+                    })
+                    .fold(0u64, u64::saturating_add),
+            ));
         } else {
             cpu_unknown = true;
             reasons.push("CPU busy telemetry unavailable; CPU admission blocked".into());
@@ -353,18 +452,32 @@ impl PolicyEngine {
         ));
         if let Some(available) = snapshot.available_ram_mib {
             let used = snapshot.total_ram_mib - available;
-            let external = used.saturating_sub(managed_observed.ram_mib);
+            let own_lower = managed_observed.ram_mib;
+            let external = if own_lower > used {
+                ram_held = true;
+                statuses.entry(ResourceKey::Ram).or_default().measurement =
+                    Some(Measurement::Unknown);
+                reasons.push(
+                    "managed RAM observation exceeds system used observation; RAM holds and admission is blocked"
+                        .into(),
+                );
+                note(
+                    &mut statuses,
+                    ResourceKey::Ram,
+                    "measurement_unknown_hold",
+                    format!("own RAM lower bound {own_lower} MiB exceeds system used {used} MiB"),
+                );
+                0
+            } else {
+                used.saturating_sub(own_lower.saturating_add(unknown_charge.ram_mib))
+            };
             budget.ram_mib = snapshot
                 .total_ram_mib
                 .saturating_sub(ram_reserve)
                 .saturating_sub(external);
-            if managed_observed.ram_mib > used {
-                ram_unknown = true;
-                reasons.push(
-                    "managed RAM observation exceeds system used observation; admission blocked"
-                        .into(),
-                );
-            }
+            let status = statuses.entry(ResourceKey::Ram).or_default();
+            status.external = Some(external);
+            status.own = Some((own_lower, own_lower));
         } else {
             ram_unknown = true;
             reasons.push("RAM availability telemetry unavailable; RAM admission blocked".into());
@@ -377,10 +490,15 @@ impl PolicyEngine {
             budget.ram_mib = 0;
             unsafe_now = true;
         }
+        if cpu_held || ram_held {
+            unsafe_now = true;
+        }
 
         let host_capacity_safe = !input.explicit_drain
             && !cpu_unknown
             && !ram_unknown
+            && !cpu_held
+            && !ram_held
             && cpu_capacity > 0
             && snapshot.total_ram_mib > 0
             && charged.cpu_millicores <= budget.cpu_millicores
@@ -413,6 +531,11 @@ impl PolicyEngine {
                 if best_effort {
                     reasons.push(format!("GPU {} best_effort_occupied explicitly permits only verified external identities; external activity remains {:?}, interference and slowdown are unmeasured, no hard GPU isolation or continuity guarantee", gpu.uuid, gpu.external_compute));
                 }
+                let key = ResourceKey::GpuMemory(gpu.uuid.clone());
+                // No growth or new-PID event without a prior observation of this device
+                // by this engine; an allocation's first observation is a baseline too.
+                let device_first = !self.previous_gpus.contains_key(&gpu.uuid);
+                let baseline = device_first || first_observed_gpus.contains(&gpu.uuid);
                 let previous = self
                     .previous_gpus
                     .get(&gpu.uuid)
@@ -423,10 +546,15 @@ impl PolicyEngine {
                     .get(&gpu.uuid)
                     .copied()
                     .unwrap_or(0);
+                let unknown_own = unknown_charge
+                    .gpu_memory_mib
+                    .get(&gpu.uuid)
+                    .copied()
+                    .unwrap_or(0);
                 let current_charge = charged.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0);
                 let external = gpu
                     .used_memory_mib
-                    .map(|used| used.saturating_sub(observed));
+                    .map(|used| used.saturating_sub(observed).saturating_sub(unknown_own));
                 let memory_budget = external
                     .map(|used| {
                         gpu.total_memory_mib
@@ -440,11 +568,45 @@ impl PolicyEngine {
                     .unwrap_or_default()
                     .into_iter()
                     .collect();
-                let new_external = pids.difference(&previous.pids).next().is_some();
-                let memory_growth = match (external, previous.external_memory) {
-                    (Some(current), Some(old)) => current > old,
-                    (Some(current), None) => current > 0,
-                    _ => false,
+                let new_external =
+                    !device_first && pids.difference(&previous.pids).next().is_some();
+                // Growth must exceed the noise tolerance beyond the unattributed band (FR-005, FR-006).
+                let tolerance = config
+                    .contention
+                    .thresholds(ResourceKind::GpuMemory)
+                    .noise_tolerance_mib
+                    .saturating_add(gpu.unattributed_memory_mib.unwrap_or(0));
+                let (memory_growth, next_baseline) = match (external, previous.external_memory) {
+                    (Some(current), Some(old)) if !baseline => {
+                        if current > old.saturating_add(tolerance) {
+                            (true, Some(current))
+                        } else {
+                            if current > old {
+                                note(
+                                    &mut statuses,
+                                    key.clone(),
+                                    "vram_noise_below_tolerance",
+                                    format!(
+                                        "external memory grew {} MiB, within the {tolerance} MiB tolerance",
+                                        current - old
+                                    ),
+                                );
+                            }
+                            (false, Some(old.min(current)))
+                        }
+                    }
+                    (Some(current), _) => {
+                        note(
+                            &mut statuses,
+                            key.clone(),
+                            "first_observation_baseline",
+                            format!(
+                                "{current} MiB not attributed to own work is the baseline, not growth"
+                            ),
+                        );
+                        (false, Some(current))
+                    }
+                    (None, old) => (false, old),
                 };
                 // Distinct IDs can indicate fresh samples; repeated values never add evidence.
                 let fresh_sample = gpu.compute_sample_id.is_some_and(|sample| {
@@ -457,7 +619,7 @@ impl PolicyEngine {
                     == Some(GpuExecutionCapability::InsufficientObservability)
                     || gpu.used_memory_mib.is_none()
                     || gpu.external_process_ids.is_none()
-                    || missing_observations.gpu_memory_mib.contains_key(&gpu.uuid)
+                    || unknown_own > 0
                     || gpu.used_memory_mib.is_some_and(|used| observed > used);
                 let active = !best_effort && gpu.external_compute == ComputeActivity::Active;
                 let breached = current_charge > memory_budget;
@@ -466,11 +628,12 @@ impl PolicyEngine {
                 let non_sharing_conflict = mode
                     == Some(GpuExecutionCapability::ConservativeNonSharing)
                     && (!pids.is_empty() || gpu.external_process_ids.is_none());
-                let mut cap = previous.protection_cap;
-                if non_sharing_conflict
-                    || mode == Some(GpuExecutionCapability::InsufficientObservability)
-                {
-                    cap = Some(0);
+                // The configured non-sharing contract and missing observation yield
+                // fully; everything else blocks admission and yields only on a real
+                // budget breach.
+                let full_yield = non_sharing_conflict
+                    || mode == Some(GpuExecutionCapability::InsufficientObservability);
+                if full_yield {
                     blocked_gpus.insert(gpu.uuid.clone());
                     unsafe_now = true;
                     reasons.push(format!("GPU {} conservative non-sharing/insufficient observation: full opportunistic yield; no new GPU work until complete empty inventory and stable cooldown", gpu.uuid));
@@ -479,13 +642,13 @@ impl PolicyEngine {
                     blocked_gpus.insert(gpu.uuid.clone());
                     unsafe_now = true;
                     if protection_event {
-                        reasons.push(format!("GPU {} new external workload or external memory growth; protective yielding", gpu.uuid));
+                        reasons.push(format!("GPU {} new external workload or external memory growth beyond the noise tolerance; GPU admission blocked", gpu.uuid));
                     }
                     if active {
                         reasons.push(format!("GPU {} external compute activity; utilization percentage is not an interference measurement", gpu.uuid));
                     }
                     if unknown {
-                        reasons.push(format!("GPU {} external activity or memory attribution unknown; expansion blocked and conservative yielding", gpu.uuid));
+                        reasons.push(format!("GPU {} external activity or memory attribution unknown; expansion blocked", gpu.uuid));
                     }
                     if breached {
                         reasons.push(format!(
@@ -493,34 +656,23 @@ impl PolicyEngine {
                             gpu.uuid
                         ));
                     }
-                    let shrink = if active && fresh_sample {
-                        config.gpu.active_shrink_percent
-                    } else {
-                        config.gpu.protective_shrink_percent
-                    };
-                    // Hold the same cap on repeated uncertain/active samples. New external
-                    // evidence, fresh active evidence, or first uncertainty can tighten it.
-                    if protection_event
-                        || (active && fresh_sample)
-                        || ((unknown || active) && cap.is_none())
-                    {
-                        let target = current_charge.saturating_sub(ceil_ratio(
-                            current_charge,
-                            u64::from(shrink),
-                            100,
-                        ));
-                        cap = Some(cap.map_or(target, |old| old.min(target)));
-                    }
                 }
-                let gpu_budget = cap.map_or(memory_budget, |cap| memory_budget.min(cap));
+                let gpu_budget = if full_yield { 0 } else { memory_budget };
                 budget.gpu_memory_mib.insert(gpu.uuid.clone(), gpu_budget);
+                let status = statuses.entry(key).or_default();
+                status.external = external;
+                status.own = Some((observed, observed));
+                status.activity = Some(gpu.external_compute);
+                status.unattributed = gpu.unattributed_memory_mib;
+                if telemetry_unknown {
+                    status.measurement = Some(Measurement::Unknown);
+                }
                 next_gpus.insert(
                     gpu.uuid.clone(),
                     PreviousGpu {
                         pids,
-                        external_memory: external,
+                        external_memory: next_baseline,
                         sample_id: gpu.compute_sample_id.max(previous.sample_id),
-                        protection_cap: cap,
                         stable_since: if !blocked_gpus.contains(&gpu.uuid) && host_capacity_safe {
                             Some(previous.stable_since.unwrap_or(now_monotonic_ms))
                         } else {
@@ -551,36 +703,6 @@ impl PolicyEngine {
         };
         let cooled_down = stable_since
             .is_some_and(|since| now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms);
-        {
-            // Each UUID has independent stability. One unavailable device must
-            // not erase another device's qualified capacity or recovery clock.
-            for gpu in &snapshot.gpus {
-                let device_cooled_down = next_gpus
-                    .get(&gpu.uuid)
-                    .and_then(|p| p.stable_since)
-                    .is_some_and(|since| {
-                        now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms
-                    });
-                if !blocked_gpus.contains(&gpu.uuid) && device_cooled_down {
-                    if let Some(prior) = next_gpus.get_mut(&gpu.uuid) {
-                        prior.protection_cap = None;
-                    }
-                    if let Some(used) = gpu.used_memory_mib {
-                        let own = managed_observed
-                            .gpu_memory_mib
-                            .get(&gpu.uuid)
-                            .copied()
-                            .unwrap_or(0);
-                        budget.gpu_memory_mib.insert(
-                            gpu.uuid.clone(),
-                            gpu.total_memory_mib
-                                .saturating_sub(config.gpu.reserve_vram_mib)
-                                .saturating_sub(used.saturating_sub(own)),
-                        );
-                    }
-                }
-            }
-        }
         if input.explicit_drain {
             budget = Resources::default();
         }
@@ -598,38 +720,71 @@ impl PolicyEngine {
         // Guaranteed work stays fully charged but cannot consume a victim slot and
         // hide the need to drain opportunistic work. Explicit drain includes both.
         // Cancel eligible pending reservations before running work, then lexical ID.
+        // Allocations whose usage is unknown hold their step (FR-008).
         let mut candidates: Vec<_> = input
             .allocations
             .iter()
             .filter(|a| {
                 a.phase != AllocationPhase::Draining
                     && (input.explicit_drain
-                        || a.class == crate::execution_model::AllocationClass::Opportunistic)
+                        || (a.class == crate::execution_model::AllocationClass::Opportunistic
+                            && !unknown_allocations.contains(&a.id)))
             })
             .collect();
         candidates.sort_by_key(|a| (a.phase != AllocationPhase::Pending, a.id.as_str()));
         let mut actions = Vec::new();
         for allocation in candidates {
             let charge = &charges[&allocation.id];
-            let resource = if input.explicit_drain {
-                Some(first_charged_resource(charge))
-            } else {
-                excess_resource(&remaining, &budget, charge)
+            if input.explicit_drain {
+                actions.push(YieldAction {
+                    allocation_id: allocation.id.clone(),
+                    resource: first_charged_resource(charge),
+                    step: YieldStep::Drain,
+                    target: None,
+                    cause: YieldCause::OperatorDrain,
+                    code: "yield_step_drain".into(),
+                });
+                remaining.subtract_saturating(charge);
+                continue;
+            }
+            let Some(resource) = excess_resource(&remaining, &budget, charge, cpu_held, ram_held)
+            else {
+                continue;
             };
-            if let Some(resource) = resource {
-                let cause = if input.explicit_drain {
-                    YieldCause::OperatorDrain
-                } else if match &resource {
-                    ResourceKey::Cpu => cpu_unknown,
-                    ResourceKey::Ram => ram_unknown,
-                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
-                        blocked_gpus.contains(uuid)
-                    }
-                } {
-                    YieldCause::UnknownMeasurement
-                } else {
-                    YieldCause::ExternalGrowth
-                };
+            let cause = if match &resource {
+                ResourceKey::Cpu => cpu_unknown,
+                ResourceKey::Ram => ram_unknown,
+                ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
+                    blocked_gpus.contains(uuid)
+                        && statuses
+                            .get(&resource)
+                            .is_some_and(|s| s.measurement == Some(Measurement::Unknown))
+                }
+            } {
+                YieldCause::UnknownMeasurement
+            } else {
+                YieldCause::ExternalGrowth
+            };
+            if resource == ResourceKey::Cpu && allocation.phase != AllocationPhase::Pending {
+                // Running work shares CPU by lowering what it may use; CPU is never a
+                // reason to drain it (D4, SC-002). A pending reservation has nothing to
+                // cap and is cancelled instead. Actuation is the supervisor's.
+                let excess = remaining
+                    .cpu_millicores
+                    .saturating_sub(budget.cpu_millicores);
+                let target = charge.cpu_millicores.saturating_sub(excess);
+                actions.push(YieldAction {
+                    allocation_id: allocation.id.clone(),
+                    resource,
+                    step: YieldStep::Cap,
+                    target: Some(target),
+                    cause,
+                    code: "yield_step_cap".into(),
+                });
+                remaining.cpu_millicores = remaining
+                    .cpu_millicores
+                    .saturating_sub(charge.cpu_millicores - target);
+            } else {
                 actions.push(YieldAction {
                     allocation_id: allocation.id.clone(),
                     resource,
@@ -657,6 +812,8 @@ impl PolicyEngine {
         let cpu_ram_safe = !input.explicit_drain
             && !cpu_unknown
             && !ram_unknown
+            && !cpu_held
+            && !ram_held
             && cpu_capacity > 0
             && snapshot.total_ram_mib > 0
             && charged.cpu_millicores <= budget.cpu_millicores
@@ -699,6 +856,19 @@ impl PolicyEngine {
         self.cpu_ram_stable_since = cpu_ram_stable_since;
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;
+        self.last_observed = last_observed;
+        for kind in [ResourceKind::Cpu, ResourceKind::Ram] {
+            let key = if kind == ResourceKind::Cpu {
+                ResourceKey::Cpu
+            } else {
+                ResourceKey::Ram
+            };
+            statuses.entry(key).or_default();
+        }
+        for (key, status) in &mut statuses {
+            status.mode = Some(config.contention.mode(key.kind()));
+            status.measurement.get_or_insert(Measurement::Known);
+        }
         Ok(Decision {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
@@ -709,9 +879,9 @@ impl PolicyEngine {
             cpu_ram_expansion_allowed,
             would_drain,
             reasons,
-            resources: BTreeMap::new(),
+            resources: statuses,
             actions,
-            exceptions: Vec::new(),
+            exceptions: config.contention.exceptions(),
         })
     }
 }
@@ -886,27 +1056,40 @@ fn ceil_ratio(value: u64, numerator: u64, denominator: u64) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// The first over-budget resource this charge contributes to, if any.
+/// The over-budget resource this charge contributes to, if any. Memory comes
+/// first because only its holder can release it; held resources take no new step.
 fn excess_resource(
     total: &Resources,
     budget: &Resources,
     charge: &Resources,
+    cpu_held: bool,
+    ram_held: bool,
 ) -> Option<ResourceKey> {
-    if total.cpu_millicores > budget.cpu_millicores && charge.cpu_millicores > 0 {
-        return Some(ResourceKey::Cpu);
-    }
-    if total.ram_mib > budget.ram_mib && charge.ram_mib > 0 {
+    if !ram_held && total.ram_mib > budget.ram_mib && charge.ram_mib > 0 {
         return Some(ResourceKey::Ram);
     }
-    charge
-        .gpu_memory_mib
-        .iter()
-        .find(|(gpu, amount)| {
-            **amount > 0
-                && total.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
-                    > budget.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
-        })
-        .map(|(gpu, _)| ResourceKey::GpuMemory(gpu.clone()))
+    if let Some(gpu) = charge.gpu_memory_mib.iter().find(|(gpu, amount)| {
+        **amount > 0
+            && total.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
+                > budget.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
+    }) {
+        return Some(ResourceKey::GpuMemory(gpu.0.clone()));
+    }
+    (!cpu_held && total.cpu_millicores > budget.cpu_millicores && charge.cpu_millicores > 0)
+        .then_some(ResourceKey::Cpu)
+}
+
+fn note(
+    statuses: &mut BTreeMap<ResourceKey, ResourceStatus>,
+    key: ResourceKey,
+    code: &str,
+    text: String,
+) {
+    statuses
+        .entry(key)
+        .or_default()
+        .reasons
+        .push(ReasonCode::new(code, text));
 }
 
 fn first_charged_resource(charge: &Resources) -> ResourceKey {

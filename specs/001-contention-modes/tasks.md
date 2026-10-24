@@ -135,7 +135,7 @@ job launched with unattributed device memory is not drained.
 
 ### Tests for User Story 1 ⚠️ (write first, must fail)
 
-- [ ] T017 [US1] Invert the six `known_defect_*` tests in `tests/policy.rs` and rename them
+- [X] T017 [US1] Invert the six `known_defect_*` tests in `tests/policy.rs` and rename them
   `d1_…` to `d6_…`. They assert:
   - D1: no drain on the first observation;
   - D2: no event below 256 MiB;
@@ -174,18 +174,18 @@ job launched with unattributed device memory is not drained.
 - [ ] T024 [US1] Implement `Quiet` activity, and split observation health from fresh activity
   evidence, in `classify_activity` and `describe_gpu_observation` in `src/telemetry.rs`
   (research R8).
-- [ ] T025 [US1] Fix D1 and D2 in `src/policy.rs`:
+- [X] T025 [US1] Fix D1 and D2 in `src/policy.rs`:
   - no growth or new-PID event without a prior observation by the same authority;
   - growth must exceed `noise_tolerance_mib` beyond the unattributed band;
   - remove `protection_cap` and the shrink-percent handling.
-- [ ] T026 [US1] Fix D5 in `src/policy.rs`:
+- [X] T026 [US1] Fix D5 in `src/policy.rs`:
   - own/host inconsistency within the bounds counts as consistent: clamp external to ≥ 0
     with reason code `inconsistent_within_tolerance`;
   - beyond the bounds, mark the resource unknown and hold.
-- [ ] T027 [US1] Fix D6 in `src/policy.rs`: charge an allocation whose observation is missing
+- [X] T027 [US1] Fix D6 in `src/policy.rs`: charge an allocation whose observation is missing
   at max(request, last known), mark it unknown (`allocation_unknown_hold`), hold the resource,
   and never zero the budget.
-- [ ] T028 [US1] Fix the D3 and D4 decision paths in `src/policy.rs`:
+- [X] T028 [US1] Fix the D3 and D4 decision paths in `src/policy.rs`:
   - `validate_gpu_launch_contract` follows the effective mode, accepting Quiet or Active per
     mode instead of requiring `Idle`;
   - CPU-only excess produces `cap` actions instead of drain. Actuation follows in US2.
@@ -200,7 +200,7 @@ job launched with unattributed device memory is not drained.
     for Guaranteed work.
 - [ ] T031 [US1] Enforce a minimum TERM grace after the first SIGTERM actually sent, and record
   both the deadline anchor and the actual send time, in `src/supervision.rs` (audit M6).
-- [ ] T032 [US1] Emit the reason codes `first_observation_baseline`,
+- [X] T032 [US1] Emit the reason codes `first_observation_baseline`,
   `vram_noise_below_tolerance`, `inconsistent_within_tolerance` and `allocation_unknown_hold`
   from `src/policy.rs`. Switch the existing prose assertions in `tests/policy.rs` to these
   codes.

@@ -113,7 +113,7 @@
         {
           "uuid": "example-gpu",
           "total_memory_mib": 24576,
-          "used_memory_mib": 12288,
+          "used_memory_mib": 20480,
           "utilization_percent": 50,
           "external_process_ids": [
             4242
