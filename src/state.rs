@@ -988,25 +988,7 @@ impl StateStore {
     /// Unsafe tasks require explicit operator reconciliation in a future executor.
     pub fn mark_uncertain(&self, task_id: &str, generation: u64) -> Result<TaskStatus> {
         let transaction = self.transaction()?;
-        let current = read_task(&transaction, task_id)?;
-        ensure!(
-            current.generation == generation && generation > 0,
-            "stale or invalid attempt generation"
-        );
-        let status = if current.status == TaskStatus::Assigned {
-            let (database_status, status) = if current.replay_safe {
-                ("queued", TaskStatus::Queued)
-            } else {
-                ("needs_reconciliation", TaskStatus::NeedsReconciliation)
-            };
-            transaction.execute(
-                "UPDATE tasks SET status=?2 WHERE task_id=?1",
-                params![task_id, database_status],
-            )?;
-            status
-        } else {
-            current.status
-        };
+        let status = mark_uncertain_in(&transaction, task_id, generation)?;
         transaction.commit()?;
         Ok(status)
     }
@@ -1338,6 +1320,44 @@ fn inspect_hot_rollback_schema(probe: &Connection, state_dir: &Path) -> Result<i
     let version: i64 = recovered.pragma_query_value(None, "user_version", |r| r.get(0))?;
     require_current_schema(version)?;
     Ok(version)
+}
+
+fn mark_uncertain_in(
+    connection: &Connection,
+    task_id: &str,
+    generation: u64,
+) -> Result<TaskStatus> {
+    let current = read_task(connection, task_id)?;
+    ensure!(
+        current.generation == generation && generation > 0,
+        "stale or invalid attempt generation"
+    );
+    if current.status != TaskStatus::Assigned {
+        return Ok(current.status);
+    }
+    let (database_status, status) = if current.replay_safe {
+        ("queued", TaskStatus::Queued)
+    } else {
+        ("needs_reconciliation", TaskStatus::NeedsReconciliation)
+    };
+    connection.execute(
+        "UPDATE tasks SET status=?2 WHERE task_id=?1",
+        params![task_id, database_status],
+    )?;
+    Ok(status)
+}
+
+/// Lease expiry inside the caller's transaction. When a newer attempt already
+/// owns the task, only the old reservation is fenced and the task is unchanged.
+pub(crate) fn expire_attempt(
+    connection: &Connection,
+    task_id: &str,
+    generation: u64,
+) -> Result<()> {
+    if read_task(connection, task_id)?.generation == generation {
+        mark_uncertain_in(connection, task_id, generation)?;
+    }
+    Ok(())
 }
 
 fn read_task(connection: &Connection, task_id: &str) -> Result<TaskRecord> {

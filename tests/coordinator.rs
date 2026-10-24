@@ -3062,3 +3062,81 @@ fn replay_strong_checkpoint_and_result_commits_survive_node_loss_and_coordinator
         serde_json::to_value(result).unwrap()
     );
 }
+
+#[test]
+fn lease_expiry_is_atomic_and_retried_after_a_failed_requeue() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["task"], 100);
+    let a = offers(&mut c, 100).assignments.remove(0);
+    authorize(&mut c, &a, 100);
+    let db = replay_database(d.path());
+    db.execute_batch(
+        "CREATE TRIGGER injected_requeue_failure BEFORE UPDATE OF status ON tasks \
+         BEGIN SELECT RAISE(ABORT, 'injected requeue failure'); END;",
+    )
+    .unwrap();
+    let phase = |db: &rusqlite::Connection| -> String {
+        db.query_row(
+            "SELECT phase FROM reservations WHERE assignment_id=?1",
+            [&a.request.assignment_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    // The 10 s lease has expired, but requeueing the task fails.
+    assert!(
+        c.handle_at(
+            &node(),
+            Request::Heartbeat {
+                report: report(20_000)
+            },
+            20_000
+        )
+        .is_err()
+    );
+    assert_ne!(
+        phase(&db),
+        "uncertain",
+        "a failed sweep must not leave a half-expired reservation behind"
+    );
+    db.execute_batch("DROP TRIGGER injected_requeue_failure;")
+        .unwrap();
+    let reply = offers(&mut c, 20_001);
+    assert_eq!(reply.uncertain.len(), 1);
+    assert_eq!(phase(&db), "uncertain");
+    let status: String = db
+        .query_row("SELECT status FROM tasks WHERE task_id='task'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued");
+}
+
+#[test]
+fn lease_expiry_of_a_superseded_attempt_does_not_block_requests() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["task"], 100);
+    let a = offers(&mut c, 100).assignments.remove(0);
+    authorize(&mut c, &a, 100);
+    let db = replay_database(d.path());
+    // A newer attempt already owns the task when the old lease expires.
+    db.execute(
+        "UPDATE tasks SET generation=generation+1 WHERE task_id='task'",
+        [],
+    )
+    .unwrap();
+    for now in [20_000, 20_001] {
+        let reply = offers(&mut c, now);
+        assert_eq!(reply.uncertain.len(), 1);
+    }
+    let fenced: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM allocation_fences WHERE assignment_id=?1",
+            [&a.request.assignment_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fenced, 1);
+}

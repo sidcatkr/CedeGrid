@@ -1672,9 +1672,16 @@ impl Coordinator {
         for (id, task, generation, json) in rows {
             let req: crate::execution_model::LaunchRequest = serde_json::from_str(&json)?;
             if req.class == AllocationClass::Opportunistic {
-                self.store.connection.execute("UPDATE reservations SET phase='uncertain',detail='authorization expired; capacity retained until release confirmation' WHERE assignment_id=?1",[&id])?;
-                self.store.connection.execute("INSERT OR IGNORE INTO allocation_fences(assignment_id,reason) VALUES (?1,'lease expired')",[&id])?;
-                self.store.mark_uncertain(&task, generation)?;
+                // Commit all three writes together. A reservation left uncertain
+                // by a failed task update would be skipped by every later sweep.
+                let tx = Transaction::new_unchecked(
+                    &self.store.connection,
+                    TransactionBehavior::Immediate,
+                )?;
+                tx.execute("UPDATE reservations SET phase='uncertain',detail='authorization expired; capacity retained until release confirmation' WHERE assignment_id=?1",[&id])?;
+                tx.execute("INSERT OR IGNORE INTO allocation_fences(assignment_id,reason) VALUES (?1,'lease expired')",[&id])?;
+                crate::state::expire_attempt(&tx, &task, generation)?;
+                tx.commit()?;
             }
         }
         Ok(())
