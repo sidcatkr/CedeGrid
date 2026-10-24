@@ -3140,3 +3140,48 @@ fn lease_expiry_of_a_superseded_attempt_does_not_block_requests() {
         .unwrap();
     assert_eq!(fenced, 1);
 }
+
+#[test]
+fn operator_certificate_cannot_act_for_a_node_assignment() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["task"], 100);
+    let a = offers(&mut c, 100).assignments.remove(0);
+    let prepared_request = Request::Prepared {
+        assignment_id: a.request.assignment_id.clone(),
+        generation: a.generation,
+        coordinator_epoch: a.coordinator_epoch,
+        record: prepared(&a),
+    };
+    assert!(
+        c.handle_at(&Principal::Operator, prepared_request, 100)
+            .is_err(),
+        "an operator certificate must not authorize a node's launch"
+    );
+    let lease = authorize(&mut c, &a, 101);
+    let upload = Request::BeginUpload {
+        assignment_id: a.request.assignment_id.clone(),
+        generation: a.generation,
+        artifact: ArtifactRef {
+            sha256: "0".repeat(64),
+            size: 1,
+        },
+    };
+    assert!(
+        c.handle_at(&Principal::Operator, upload.clone(), 102)
+            .is_err()
+    );
+    let renew = Request::Renew {
+        assignment_id: a.request.assignment_id.clone(),
+        generation: a.generation,
+        coordinator_epoch: a.coordinator_epoch,
+        previous_sequence: lease.sequence,
+    };
+    assert!(
+        c.handle_at(&Principal::Operator, renew.clone(), 103)
+            .is_err()
+    );
+    // The owning node keeps every assignment-scoped operation.
+    assert!(c.handle_at(&node(), renew, 104).is_ok());
+    assert!(c.handle_at(&node(), upload, 105).is_ok());
+}

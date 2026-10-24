@@ -49,6 +49,10 @@ fn seed_with_profile(path: &Path, profile: StorageProfile) -> (String, String) {
         panic!()
     };
     let assignment = reply.assignments[0].request.assignment_id.clone();
+    // Uploads are assignment-scoped and belong to the owning node.
+    let p = Principal::Node {
+        node_id: "node".into(),
+    };
     let data = b"durable checkpoint";
     let hash = hex::encode(Sha256::digest(data));
     let Response::Upload { upload_id, .. } = c

@@ -19,6 +19,7 @@ ALLOWLIST = (
     '.github/workflows/release-candidate.yml',
     '.github/workflows/release.yml',
     '.gitignore',
+    'CHANGELOG.md',
     'CONTRIBUTING.md',
     'Cargo.lock',
     'Cargo.toml',

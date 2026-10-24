@@ -1522,7 +1522,11 @@ impl Coordinator {
         let(owner,g):(String,u64)=self.store.connection.query_row("SELECT node_id,generation FROM reservations JOIN assignments USING(assignment_id) WHERE assignment_id=?1",[id],|r|Ok((r.get(0)?,row_u64(r,1)?)))?;
         ensure!(g == generation, "assignment generation mismatch");
         match p {
-            Principal::Operator => Ok(()),
+            // Launch authorization, renewals, results and uploads are bound to
+            // the node that owns the assignment, never to an operator identity.
+            Principal::Operator => {
+                bail!("assignment-scoped requests require the owning node certificate")
+            }
             Principal::Node { node_id } => {
                 ensure!(node_id == &owner, "assignment belongs to a different node");
                 Ok(())
