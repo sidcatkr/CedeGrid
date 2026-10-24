@@ -1,4 +1,4 @@
-# Native gates deferred from batches 1 to 4
+# Native gates deferred from batches 1 to 4 and Phase 6a
 
 Batch 1 (T001–T032), batch 2 (US2, T033–T055), batch 3 (US3, T056–T071) and batch 4 (US4,
 T072–T082) were implemented and verified on macOS, with the Linux container check below.
@@ -188,6 +188,23 @@ copied to a named volume there; Docker's overlay filesystem is refused by design
 2. A GPU memory hint on an NVIDIA host needs US5's occupied-device scenarios and runs with T088:
    an SDK worker holding memory on `<GPU-UUID>` receives a `gpu_memory_mib` target when external
    memory crosses the device floor, and is drained after the hint deadline only if it ignores it.
+
+## Phase 6a (revisions before US5) checks
+
+Container evidence, not host qualification, at 8128cbf in the same Docker Desktop container
+(aarch64, kernel 7.0.12-linuxkit, Rust 1.98.1, Python 3.11): fmt and clippy passed, the serial
+suite ran 533 tests with 532 passed, 1 failed and 9 ignored, and both Python suites passed. The
+failure, `pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reported`, is a timing
+flake of the sample-at-a-time actuation tests in `tests/supervision.rs`. They sample a 1 s
+counter worker at fixed offsets, and fail about one run in four in this container. The same flake
+occurs at 0ad75e1, before these revisions, in sibling tests (2 of 8 runs). A full run at
+c710915 passed with 527 tests and 9 ignored. The readiness, terminate and target-deadline paths
+need no delegated cgroup or GPU, so they are covered here:
+
+```sh
+cargo test --locked --test managed_supervision -- readiness hint_carries guaranteed_cpu_target child_started_after
+cargo test --locked --lib terminate_sends_term_at_once_and_kill_after_the_grace
+```
 
 ## C. Deferred gates that need later work
 
