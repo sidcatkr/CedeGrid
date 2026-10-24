@@ -825,6 +825,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         prepare_timeout_ms: config.execution.prepare_timeout_ms,
         release_confirm_timeout_ms: config.execution.release_confirm_timeout_ms,
         duty_period_ms: config.monitor.interval_ms,
+        hint_deadline_ms: config.contention.hint_deadline_ms(),
         guaranteed_oom_victim: config.contention.floor_policy != cedegrid::config::FloorPolicy::C,
     };
     let outcome = match supervision::supervise(

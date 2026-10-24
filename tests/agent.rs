@@ -1837,6 +1837,16 @@ mod operator_limits {
                 ram_mib: 4000,
                 gpu_memory_mib: BTreeMap::new(),
             }),
+            // Plain commands without the SDK cannot take a hint.
+            facts: ["o", "g", "c"]
+                .map(|id| {
+                    let mut facts = AllocationFacts::default();
+                    facts
+                        .unavailable
+                        .insert(ResourceKey::Ram, [YieldStep::Hint].into());
+                    (id.to_string(), facts)
+                })
+                .into(),
             ..PolicyInput::default()
         };
         let decision = PolicyEngine::new()

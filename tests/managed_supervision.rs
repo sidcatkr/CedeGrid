@@ -47,6 +47,7 @@ fn options() -> SupervisorOptions {
         prepare_timeout_ms: 3000,
         release_confirm_timeout_ms: 1000,
         duty_period_ms: 100,
+        hint_deadline_ms: 5_000,
         nice: 10,
         guaranteed_oom_victim: true,
     }
@@ -986,4 +987,201 @@ child.wait(timeout=6,poll_interval=.01)
             "{file}"
         );
     }
+}
+
+/// Sends scripted adjustments, each once the previous report arrived and its
+/// gate file exists, and stops the job after the last report.
+struct TargetScript {
+    dir: std::path::PathBuf,
+    steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
+    sent: usize,
+    reports: Vec<supervision::SupervisorReport>,
+}
+impl supervision::SupervisorControl for TargetScript {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};
+        if self.sent == self.reports.len() && self.sent == self.steps.len() {
+            fs::write(self.dir.join("stop"), "").unwrap();
+            return Ok(vec![]);
+        }
+        let Some((gate, step, target)) = self.steps.get(self.sent).copied() else {
+            return Ok(vec![]);
+        };
+        if self.sent != self.reports.len() || !self.dir.join(gate).exists() {
+            return Ok(vec![]);
+        }
+        self.sent += 1;
+        Ok(vec![supervision::SupervisorCommand::Adjust {
+            sequence: self.sent as u64,
+            resources: BTreeMap::from([(
+                ResourceKey::Ram,
+                StepRequest {
+                    step,
+                    target,
+                    cause: YieldCause::FloorBreach,
+                },
+            )]),
+        }])
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        self.reports.push(report);
+        Ok(())
+    }
+}
+
+fn run_targets(
+    code: &str,
+    steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
+) -> (tempfile::TempDir, TargetScript) {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(dir.path(), code);
+    let mut script = TargetScript {
+        dir: dir.path().to_owned(),
+        steps,
+        sent: 0,
+        reports: vec![],
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut script,
+    )
+    .unwrap();
+    assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+    assert_eq!(outcome.exit_code, Some(0), "{:?}", script.reports);
+    (dir, script)
+}
+
+fn applied(
+    report: &supervision::SupervisorReport,
+) -> (Option<cedegrid::contention::YieldStep>, bool) {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    match report {
+        supervision::SupervisorReport::Adjusted {
+            applied,
+            unavailable,
+            ..
+        } => (
+            applied.get(&ResourceKey::Ram).copied(),
+            unavailable
+                .get(&ResourceKey::Ram)
+                .is_some_and(|steps| steps.contains(&YieldStep::Hint)),
+        ),
+        other => panic!("unexpected report {other:?}"),
+    }
+}
+
+#[test]
+fn hint_targets_are_written_atomically_with_increasing_sequences() {
+    use cedegrid::contention::YieldStep;
+    let (dir, script) = run_targets(
+        r#"
+import json,time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env();seen=[]
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    t=signals.resource_targets()
+    seen.append(None if t is None else [t.sequence,t.step,t.ram_mib])
+    time.sleep(0.005)
+(d/'seen').write_text(json.dumps(seen))
+"#,
+        vec![
+            ("ready", YieldStep::Hint, Some(100)),
+            ("ready", YieldStep::Hint, Some(50)),
+            ("ready", YieldStep::None, None),
+        ],
+    );
+    let applied: Vec<_> = script.reports.iter().map(applied).collect();
+    assert_eq!(
+        applied,
+        [
+            (Some(YieldStep::Hint), false),
+            (Some(YieldStep::Hint), false),
+            (Some(YieldStep::None), false)
+        ]
+    );
+    let seen: Vec<serde_json::Value> =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("seen")).unwrap()).unwrap();
+    let first = seen
+        .iter()
+        .position(|s| !s.is_null())
+        .expect("no target seen");
+    // A reader never sees a missing or partial file once a target exists.
+    assert!(seen[first..].iter().all(|s| !s.is_null()), "{seen:?}");
+    let mut distinct = seen[first..].to_vec();
+    distinct.dedup();
+    assert_eq!(
+        distinct,
+        [
+            serde_json::json!([1, "hint", 100]),
+            serde_json::json!([2, "hint", 50]),
+            serde_json::json!([3, "none", null])
+        ]
+    );
+}
+
+#[test]
+fn without_an_ack_the_hint_step_is_unavailable() {
+    use cedegrid::contention::YieldStep;
+    let (_dir, script) = run_targets(
+        r#"
+import time
+from pathlib import Path
+d=Path.cwd()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    time.sleep(0.01)
+"#,
+        vec![("ready", YieldStep::Hint, Some(100))],
+    );
+    assert_eq!(
+        script.reports.iter().map(applied).collect::<Vec<_>>(),
+        [(Some(YieldStep::None), true)]
+    );
+}
+
+#[test]
+fn managed_children_receive_the_target_file_and_its_targets() {
+    use cedegrid::contention::YieldStep;
+    let (dir, script) = run_targets(
+        r#"
+import os,sys
+from pathlib import Path
+from cedegrid import spawn_managed
+d=Path.cwd()
+child=spawn_managed([sys.executable,'-c',"""
+import os,time,pathlib
+from cedegrid import ResourceSignals
+d=pathlib.Path(%r);signals=ResourceSignals.from_env()
+signals.draining();(d/'child-ready').write_text(os.environ.get('CEDEGRID_RESOURCE_TARGET_FILE',''))
+while True:
+    t=signals.resource_targets()
+    if t is not None:
+        (d/'child-target').write_text(str(t.ram_mib));break
+    time.sleep(0.005)
+""" % str(d)],single_process=True,no_escape=True,env={'PYTHONPATH':os.environ['PYTHONPATH']})
+child.wait(timeout=20,poll_interval=.01)
+while not (d/'stop').exists():
+    import time;time.sleep(0.01)
+"#,
+        vec![("child-ready", YieldStep::Hint, Some(70))],
+    );
+    assert_eq!(
+        script.reports.iter().map(applied).collect::<Vec<_>>(),
+        [(Some(YieldStep::Hint), false)]
+    );
+    let path = fs::read_to_string(dir.path().join("child-ready")).unwrap();
+    assert!(path.ends_with("resource-target.json"), "{path}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("child-target")).unwrap(),
+        "70"
+    );
 }

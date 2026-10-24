@@ -328,6 +328,8 @@ pub struct LadderTiming {
     /// The mode's scale-up rate: the least time between two reversals.
     pub scale_up_ms: u64,
     pub pause_bound_ms: u64,
+    /// How long a hint waits for compliance before the next step (FR-037).
+    pub hint_deadline_ms: u64,
     pub hysteresis_percent: u8,
 }
 
@@ -347,6 +349,7 @@ impl LadderTiming {
             dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
             scale_up_ms: thresholds.scale_up_interval_s(mode).saturating_mul(1000),
             pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
+            hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,
         }
     }
@@ -432,7 +435,9 @@ pub fn plan_step(
             step,
             entered_at_ms: now_ms,
             cause: input.cause,
-            target: (step == YieldStep::Cap).then_some(input.target).flatten(),
+            target: matches!(step, YieldStep::Cap | YieldStep::Hint)
+                .then_some(input.target)
+                .flatten(),
             trigger_external: input.external,
             calm_since_ms: None,
             contended_since_ms: Some(now_ms),
@@ -444,11 +449,15 @@ pub fn plan_step(
         let anchor = state.map_or(now_ms, |s| s.entered_at_ms.max(contended_since));
         let persisted = now_ms.saturating_sub(anchor);
         // The first step applies at once; later ones only when the current step has
-        // not freed the contended amount within the response time.
+        // not freed the contended amount within the response time, a pause its
+        // bound or a hint its deadline. A step the supervisor reported it cannot
+        // apply moves on at once.
         let due = since_change >= timing.dwell_ms
             && (current == YieldStep::None
                 || persisted >= timing.response_ms
-                || current == YieldStep::Pause && persisted >= timing.pause_bound_ms);
+                || current == YieldStep::Pause && persisted >= timing.pause_bound_ms
+                || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
+            || input.unavailable.contains(&current);
         if due {
             let (next, skipped) = input.next_step(current);
             if let Some(next) = next {
@@ -467,7 +476,7 @@ pub fn plan_step(
         let mut held = state.clone();
         held.calm_since_ms = None;
         held.contended_since_ms = Some(contended_since);
-        if held.step == YieldStep::Cap && input.target.is_some() {
+        if matches!(held.step, YieldStep::Cap | YieldStep::Hint) && input.target.is_some() {
             held.target = input.target;
         }
         return LadderDecision {
@@ -507,7 +516,7 @@ pub fn plan_step(
         let step = input.previous_step(current);
         held.step = step;
         held.entered_at_ms = now_ms;
-        if step != YieldStep::Cap {
+        if !matches!(step, YieldStep::Cap | YieldStep::Hint) {
             held.target = None;
         }
     }

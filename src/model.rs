@@ -267,7 +267,8 @@ pub struct PolicyInput {
     pub allocations: Vec<Allocation>,
     pub explicit_drain: bool,
     /// Per-allocation facts for the ladder and victim selection (schema 3).
-    /// Missing facts mean a controllable allocation with every step available.
+    /// Missing facts mean a controllable allocation with every step available
+    /// except the hint, which needs a live target channel.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub facts: BTreeMap<String, AllocationFacts>,
     /// The operator's node envelope; own work beyond it yields per resource (FR-057).

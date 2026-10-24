@@ -1088,16 +1088,17 @@ impl PolicyEngine {
                             now_monotonic_ms.saturating_sub(*start) >= window(kind)
                         })
                 };
-                // No resource-target channel exists yet (US4), so the hint step is
-                // unavailable everywhere and reported as skipped.
+                // The supervisor reports the steps, the hint among them, that it cannot
+                // apply. An allocation without facts, as in recordings, has no target
+                // channel, so its hint is unavailable.
                 let facts = |id: &str| {
-                    let mut facts = input.facts.get(id).cloned().unwrap_or_default();
-                    facts
-                        .unavailable
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(YieldStep::Hint);
-                    facts
+                    input.facts.get(id).cloned().unwrap_or_else(|| {
+                        let mut facts = AllocationFacts::default();
+                        facts
+                            .unavailable
+                            .insert(key.clone(), BTreeSet::from([YieldStep::Hint]));
+                        facts
+                    })
                 };
                 let mut planned = BTreeSet::new();
                 // Memory's running pass covers what cancelled reservations left over.
@@ -1169,8 +1170,8 @@ impl PolicyEngine {
                                 external,
                                 measurement_known,
                                 cause,
-                                target: (kind == ResourceKind::Cpu)
-                                    .then(|| victim.amount.saturating_sub(remaining)),
+                                // What the allocation may keep: a cap or hint target.
+                                target: Some(victim.amount.saturating_sub(remaining)),
                             },
                             &timing,
                             now_monotonic_ms,

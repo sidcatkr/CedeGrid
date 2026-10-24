@@ -319,7 +319,8 @@ fn resources(cpu: u64, ram: u64, gpu: u64) -> Resources {
     }
 }
 
-/// Facts for rootless backends: CPU lower share is unavailable at runtime.
+/// Facts for plain commands on rootless backends: CPU lower share is unavailable
+/// at runtime, and without the SDK there is no hint.
 fn rootless(ids: &[&str]) -> BTreeMap<String, AllocationFacts> {
     use cedegrid::contention::{ResourceKey, YieldStep};
     ids.iter()
@@ -327,7 +328,7 @@ fn rootless(ids: &[&str]) -> BTreeMap<String, AllocationFacts> {
             let facts = AllocationFacts {
                 unavailable: BTreeMap::from([(
                     ResourceKey::Cpu,
-                    std::collections::BTreeSet::from([YieldStep::LowerShare]),
+                    std::collections::BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
                 )]),
                 ..Default::default()
             };

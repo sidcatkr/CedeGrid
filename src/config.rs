@@ -679,6 +679,15 @@ impl ContentionConfig {
             .max(u32::try_from(spanning).unwrap_or(u32::MAX))
     }
 
+    /// The shortest hint deadline of any resource, for the supervisor's targets.
+    pub fn hint_deadline_ms(&self) -> u64 {
+        crate::contention::ResourceKind::ALL
+            .into_iter()
+            .map(|kind| self.thresholds(kind).hint_deadline_s.saturating_mul(1000))
+            .min()
+            .unwrap_or(5000)
+    }
+
     /// Active opt-in exceptions with their risk markers (FR-043, FR-045).
     pub fn exceptions(&self) -> Vec<crate::model::ExceptionNotice> {
         use crate::model::{ExceptionNotice, RiskMarker};

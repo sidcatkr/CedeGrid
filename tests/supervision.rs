@@ -180,6 +180,7 @@ fn options() -> SupervisorOptions {
         prepare_timeout_ms: 2_000,
         release_confirm_timeout_ms: 2_000,
         duty_period_ms: 100,
+        hint_deadline_ms: 5_000,
         guaranteed_oom_victim: true,
     }
 }
@@ -961,6 +962,7 @@ mod actuation {
         SupervisorOptions {
             lease_ms: 30_000,
             duty_period_ms: 100,
+            hint_deadline_ms: 5_000,
             ..options()
         }
     }

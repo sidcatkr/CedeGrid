@@ -208,3 +208,134 @@ mod signal {
     pub const STOP: i32 = 19;
     pub const CONT: i32 = 18;
 }
+
+/// The target file and ack names inside a process's private drain directory.
+pub const TARGET_FILE: &str = "resource-target.json";
+pub const ACK_FILE: &str = "resource-target.ack";
+const TARGET_TEMPORARY: &str = ".resource-target.json.tmp";
+
+/// Per-resource amounts in a target file; unset amounts carry no target.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TargetAmounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub gpu_memory_mib: std::collections::BTreeMap<String, u64>,
+}
+
+/// A target file (contracts/resource-target-file.md).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceTarget {
+    pub version: u32,
+    pub sequence: u64,
+    pub deadline_unix_ms: u64,
+    pub step: YieldStep,
+    pub targets: TargetAmounts,
+}
+
+/// Write a target file atomically: a temporary file in the same directory,
+/// fsync, then rename over the target.
+pub fn write_target(directory: &std::path::Path, target: &ResourceTarget) -> Result<()> {
+    use std::io::Write;
+    let temporary = directory.join(TARGET_TEMPORARY);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&serde_json::to_vec(target)?)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, directory.join(TARGET_FILE))?;
+    Ok(())
+}
+
+/// The highest sequence a worker acknowledged, if any. It only shows the worker
+/// reads targets; compliance is judged from observed usage.
+pub fn read_ack(directory: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(directory.join(ACK_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Remove the target files a channel may have left in a directory; only known
+/// names, never other entries.
+pub fn remove_target_files(directory: &std::path::Path) {
+    for name in [TARGET_FILE, ACK_FILE, TARGET_TEMPORARY] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+}
+
+/// The resource-target channel of one family: current hints per resource and
+/// the file sequence, written to every member's private directory.
+#[derive(Debug, Default)]
+pub struct TargetChannel {
+    sequence: u64,
+    hints: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
+    deadline_ms: u64,
+}
+
+impl TargetChannel {
+    pub fn new(deadline_ms: u64) -> Self {
+        Self {
+            deadline_ms,
+            ..Self::default()
+        }
+    }
+
+    /// Whether any member acknowledged that it reads targets.
+    pub fn acknowledged(directories: &[std::path::PathBuf]) -> bool {
+        directories.iter().any(|d| read_ack(d).is_some())
+    }
+
+    /// Set or clear one resource's hint; true when it changed.
+    pub fn set(&mut self, key: crate::contention::ResourceKey, target: Option<u64>) -> bool {
+        match target {
+            Some(target) => self.hints.insert(key, target) != Some(target),
+            None => self.hints.remove(&key).is_some(),
+        }
+    }
+
+    /// Write the current hints with the next sequence; no hints relax them.
+    pub fn publish(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
+        use crate::contention::ResourceKey;
+        let mut targets = TargetAmounts::default();
+        for (key, amount) in &self.hints {
+            match key {
+                ResourceKey::Cpu => targets.cpu_millicores = Some(*amount),
+                ResourceKey::Ram => targets.ram_mib = Some(*amount),
+                ResourceKey::GpuMemory(uuid) => {
+                    targets.gpu_memory_mib.insert(uuid.clone(), *amount);
+                }
+                // The file has no compute target; the supervisor refuses those hints.
+                ResourceKey::GpuCompute(_) => {}
+            }
+        }
+        self.sequence += 1;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let target = ResourceTarget {
+            version: 1,
+            sequence: self.sequence,
+            deadline_unix_ms: (now.as_millis() as u64).saturating_add(self.deadline_ms),
+            step: if self.hints.is_empty() {
+                YieldStep::None
+            } else {
+                YieldStep::Hint
+            },
+            targets,
+        };
+        let mut result = Ok(());
+        for directory in directories {
+            if let Err(error) = write_target(directory, &target) {
+                result = Err(error);
+            }
+        }
+        result
+    }
+}

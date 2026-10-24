@@ -101,6 +101,14 @@ impl ChildServer {
             .insert("CEDEGRID_SUPERVISOR_TOKEN".into(), self.token.clone());
     }
     /// Verified identities of mediated children that are running user code.
+    /// Private directories of running children, for resource targets.
+    fn target_directories(&self) -> Vec<PathBuf> {
+        self.children
+            .values()
+            .filter(|c| c.phase == ChildPhase::Running && c.exit.is_none() && !c.owned.reaped)
+            .map(|c| c.drain.path.clone())
+            .collect()
+    }
     fn running_identities(&self) -> Vec<ProcessIdentity> {
         self.children
             .values()
@@ -409,6 +417,7 @@ impl ChildServer {
             generation: self.generation,
             setup: self.setup.clone(),
             drain_file: drain.file(),
+            resource_target_file: Some(drain.path.join(crate::actuation::TARGET_FILE)),
         };
         let mut payload = serde_json::to_vec(&gate)?;
         ensure!(payload.len() <= 65_536, "oversized child launch");

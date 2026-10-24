@@ -703,8 +703,20 @@ mod guaranteed_policy {
 
     fn run(config: &Config, allocations: Vec<Allocation>, until_ms: u64) -> Vec<(u64, Decision)> {
         let mut engine = PolicyEngine::new();
+        // Plain commands without the SDK cannot take a hint.
+        let facts = allocations
+            .iter()
+            .map(|a| {
+                let mut facts = AllocationFacts::default();
+                facts
+                    .unavailable
+                    .insert(ResourceKey::Ram, [YieldStep::Hint].into());
+                (a.id.clone(), facts)
+            })
+            .collect();
         let input = PolicyInput {
             allocations,
+            facts,
             ..PolicyInput::default()
         };
         (0..=until_ms)
@@ -1098,5 +1110,101 @@ mod scenarios {
             served_at - started
         );
         assert!(!world.drained);
+    }
+}
+
+/// Hints through the policy engine: compliance is judged by observed usage
+/// and the hint deadline bounds the wait (FR-037).
+mod hints {
+    use super::*;
+    use cedegrid::contention::{ResourceKey, YieldCause, YieldStep};
+
+    /// The worker's RAM action at each interval: step, target and cause.
+    type Steps = Vec<(u64, Option<(YieldStep, Option<u64>, YieldCause)>)>;
+
+    /// 32000 MiB total, a 1000 MiB floor and 24000 MiB of external use: own work
+    /// may hold 7000 MiB, so an 8000 MiB allocation must release 1000 MiB.
+    fn run(compliant: bool, hint_unavailable_after: Option<u64>) -> Steps {
+        let mut engine = PolicyEngine::new();
+        let mut held = 8000;
+        let mut steps = vec![];
+        for now in (0..=8000).step_by(500) {
+            let resources = Resources {
+                ram_mib: held,
+                ..Resources::default()
+            };
+            let mut snapshot = snapshot(1000);
+            snapshot.available_ram_mib = Some(8000 - held);
+            let mut facts = AllocationFacts::default();
+            if hint_unavailable_after.is_some_and(|after| now > after) {
+                facts
+                    .unavailable
+                    .insert(ResourceKey::Ram, [YieldStep::Hint].into());
+            }
+            let input = PolicyInput {
+                allocations: vec![Allocation {
+                    id: "worker".into(),
+                    class: AllocationClass::Opportunistic,
+                    phase: AllocationPhase::Running,
+                    requested: Resources {
+                        ram_mib: 1000,
+                        ..Resources::default()
+                    },
+                    observed: Some(resources),
+                    observed_upper: None,
+                    modes: Default::default(),
+                }],
+                facts: BTreeMap::from([("worker".into(), facts)]),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config(), &snapshot, &input, now).unwrap();
+            let action = decision
+                .actions
+                .iter()
+                .find(|a| a.allocation_id == "worker" && a.resource == ResourceKey::Ram)
+                .map(|a| (a.step, a.target, a.cause));
+            // A compliant worker shrinks to its target by the next observation.
+            if compliant && let Some((YieldStep::Hint, Some(target), _)) = action {
+                held = target;
+            }
+            steps.push((now, action));
+        }
+        steps
+    }
+
+    #[test]
+    fn memory_contention_starts_with_a_hint_and_its_target() {
+        let steps = run(false, None);
+        assert_eq!(
+            steps[0].1,
+            Some((YieldStep::Hint, Some(7000), YieldCause::FloorBreach))
+        );
+    }
+
+    #[test]
+    fn a_compliant_worker_is_not_drained() {
+        let steps = run(true, None);
+        assert!(
+            steps
+                .iter()
+                .all(|(_, action)| action.is_none_or(|a| a.0 < YieldStep::Drain)),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_compliant_worker_is_drained_at_the_hint_deadline() {
+        let steps = run(false, None);
+        let drained = steps
+            .iter()
+            .find(|(_, action)| action.is_some_and(|a| a.0 == YieldStep::Drain))
+            .map(|(now, _)| *now);
+        assert_eq!(drained, Some(5000), "{steps:?}");
+    }
+
+    #[test]
+    fn a_hint_the_supervisor_cannot_apply_escalates_at_once() {
+        let steps = run(false, Some(0));
+        assert_eq!(steps[1].1.map(|a| a.0), Some(YieldStep::Drain), "{steps:?}");
     }
 }

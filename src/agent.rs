@@ -708,6 +708,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         prepare_timeout_ms: spec.config.execution.prepare_timeout_ms,
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
         duty_period_ms: spec.config.monitor.interval_ms,
+        hint_deadline_ms: spec.config.contention.hint_deadline_ms(),
         guaranteed_oom_victim: spec.config.contention.floor_policy != crate::config::FloorPolicy::C,
     };
     let result = supervision::supervise_controlled(
@@ -1574,7 +1575,7 @@ async fn start_assignment(
         .map(|s| serde_json::from_str::<serde_json::Value>(s))
         .transpose()?
         .unwrap_or(serde_json::json!({}));
-    let context = serde_json::json!({"schema_version":2,"namespace_id":client.namespace_guard.identity().namespace_id,"session_id":client.namespace_guard.identity().session_id.as_ref().unwrap_or(&client.namespace_guard.identity().namespace_id),"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":workspace.join("output"),"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes});
+    let context = serde_json::json!({"schema_version":2,"namespace_id":client.namespace_guard.identity().namespace_id,"session_id":client.namespace_guard.identity().session_id.as_ref().unwrap_or(&client.namespace_guard.identity().namespace_id),"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":workspace.join("output"),"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes,"capabilities":["resource_targets"]});
     client.write_json_new(&workspace.join("context.json"), &context)?;
     assignment.request.env.insert(
         "CEDEGRID_CONTEXT".into(),
@@ -2387,10 +2388,7 @@ impl AgentLoop<'_> {
                         unavailable,
                         ..
                     }) => {
-                        // Steps the supervisor could not apply are skipped from now on.
-                        for (key, steps) in unavailable {
-                            slot.unavailable.entry(key).or_default().extend(steps);
-                        }
+                        merge_unavailable(&mut slot.unavailable, &applied, unavailable);
                         slot.applied = applied;
                         slot.applied_sequence = slot.applied_sequence.max(sequence);
                     }
@@ -3663,6 +3661,28 @@ fn spool_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+/// Record the steps a supervisor could not apply; they are skipped from now on.
+/// A refused hint is retried once its resource returns to none, because the
+/// worker may acknowledge the target channel later.
+fn merge_unavailable(
+    slot: &mut BTreeMap<crate::contention::ResourceKey, BTreeSet<crate::contention::YieldStep>>,
+    applied: &BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+    refused: BTreeMap<crate::contention::ResourceKey, Vec<crate::contention::YieldStep>>,
+) {
+    use crate::contention::YieldStep;
+    for (key, step) in applied {
+        if *step == YieldStep::None
+            && !refused.contains_key(key)
+            && let Some(steps) = slot.get_mut(key)
+        {
+            steps.remove(&YieldStep::Hint);
+        }
+    }
+    for (key, steps) in refused {
+        slot.entry(key).or_default().extend(steps);
+    }
+}
+
 /// The agent's operator-envelope check: cumulative charges, max(request,
 /// observed), against the explicit node envelope.
 pub fn envelope_exceeded(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
@@ -4453,6 +4473,41 @@ mod negotiation_tests {
 #[cfg(all(test, unix))]
 mod drain_tests {
     use super::*;
+
+    #[test]
+    fn a_refused_hint_is_retried_once_the_resource_returns_to_none() {
+        use crate::contention::{ResourceKey, YieldStep};
+        let mut unavailable = BTreeMap::new();
+        merge_unavailable(
+            &mut unavailable,
+            &BTreeMap::from([(ResourceKey::Ram, YieldStep::None)]),
+            BTreeMap::from([(ResourceKey::Ram, vec![YieldStep::Hint])]),
+        );
+        assert!(unavailable[&ResourceKey::Ram].contains(&YieldStep::Hint));
+        // The worker may acknowledge the channel later; a new episode tries again.
+        merge_unavailable(
+            &mut unavailable,
+            &BTreeMap::from([(ResourceKey::Ram, YieldStep::None)]),
+            BTreeMap::new(),
+        );
+        assert!(
+            unavailable
+                .get(&ResourceKey::Ram)
+                .is_none_or(|s| !s.contains(&YieldStep::Hint))
+        );
+        // Other refused steps stay skipped.
+        merge_unavailable(
+            &mut unavailable,
+            &BTreeMap::from([(ResourceKey::Cpu, YieldStep::None)]),
+            BTreeMap::from([(ResourceKey::Cpu, vec![YieldStep::Pause])]),
+        );
+        merge_unavailable(
+            &mut unavailable,
+            &BTreeMap::from([(ResourceKey::Cpu, YieldStep::None)]),
+            BTreeMap::new(),
+        );
+        assert!(unavailable[&ResourceKey::Cpu].contains(&YieldStep::Pause));
+    }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
         let (_tx, events) = mpsc::channel();

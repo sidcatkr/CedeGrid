@@ -423,7 +423,7 @@ after the hint deadline (quickstart §6).
   - the ack is written.
 - [X] T074 [P] [US4] Add TypeScript tests mirroring T073, in
   `npm/tests/worker-targets.test.ts`.
-- [ ] T075 [P] [US4] Add supervisor tests in `tests/managed_supervision.rs`:
+- [X] T075 [P] [US4] Add supervisor tests in `tests/managed_supervision.rs`:
   - the target file is written atomically with an increasing sequence;
   - managed children receive `CEDEGRID_RESOURCE_TARGET_FILE`;
   - compliance is judged by observed usage;
@@ -432,17 +432,17 @@ after the hint deadline (quickstart §6).
 
 ### Implementation for User Story 4
 
-- [ ] T076 [US4] Implement the target-file writer and the ack reader in `src/actuation.rs`, per
+- [X] T076 [US4] Implement the target-file writer and the ack reader in `src/actuation.rs`, per
   `contracts/resource-target-file.md`.
-- [ ] T077 [US4] Pass the target-file path through `GateRequest` and the environment in
+- [X] T077 [US4] Pass the target-file path through `GateRequest` and the environment in
   `src/supervision.rs`, and to managed children in `src/child_supervision.rs`.
-- [ ] T078 [US4] Handle the hint step in the agent actuation stage in `src/agent.rs`: the hint
+- [X] T078 [US4] Handle the hint step in the agent actuation stage in `src/agent.rs`: the hint
   deadline, the compliance check and escalation.
 - [X] T079 [US4] Add the Python API in `python/cedegrid/worker.py`: `ResourceTargets`,
   `resource_targets()`, `on_resource_target()`, `ResourceSignals.from_env()` and ack writing.
 - [X] T080 [US4] Add the TypeScript API in `npm/src/worker.ts` (`resourceTargets()`,
   `onResourceTarget()`, `ResourceSignals.fromEnv()`), and export it from `npm/src/index.ts`.
-- [ ] T081 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
+- [X] T081 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
   the native context builder in `src/agent.rs` and in the `supervise` path. The SDKs must keep
   accepting `schema_version == 2`.
 - [ ] T082 [US4] Document in `docs/worker-protocol.md` the target channel, the ack, deadlines,

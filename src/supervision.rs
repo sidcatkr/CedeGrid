@@ -23,6 +23,8 @@ pub struct SupervisorOptions {
     pub release_confirm_timeout_ms: u64,
     /// Duty-cycle period of a rootless CPU cap: the monitor interval.
     pub duty_period_ms: u64,
+    /// How long a worker has to comply with a resource target (FR-037).
+    pub hint_deadline_ms: u64,
     /// Guaranteed processes are preferred OOM victims too; false only under
     /// floor policy C (FR-041).
     pub guaranteed_oom_victim: bool,
@@ -37,6 +39,7 @@ impl Default for SupervisorOptions {
             prepare_timeout_ms: 10_000,
             release_confirm_timeout_ms: 10_000,
             duty_period_ms: 500,
+            hint_deadline_ms: 5_000,
             guaranteed_oom_victim: true,
         }
     }
@@ -205,6 +208,9 @@ struct GateRequest {
     generation: u64,
     setup: GateSetup,
     drain_file: std::path::PathBuf,
+    /// Exposed as CEDEGRID_RESOURCE_TARGET_FILE, next to the drain file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource_target_file: Option<std::path::PathBuf>,
 }
 
 /// Entry point for the exact hidden `__worker-gate` command, before Tokio or
@@ -808,6 +814,7 @@ mod unix {
         fn drop(&mut self) {
             // Only known owned entries; no recursive deletion or traversal.
             let _ = fs::remove_file(self.file());
+            crate::actuation::remove_target_files(&self.path);
             let _ = fs::remove_dir(&self.path);
         }
     }
@@ -994,10 +1001,12 @@ mod unix {
         actuator: &mut dyn Actuator,
         family: &mut dyn Family,
         contention: &mut crate::contention::AllocationContention,
+        targets: &mut crate::actuation::TargetChannel,
+        directories: &[PathBuf],
         journal: &dyn ExecutionJournal,
         control: &mut dyn SupervisorControl,
     ) {
-        use crate::contention::{StepRequest, YieldCause, YieldStep};
+        use crate::contention::{ResourceKind, StepRequest, YieldCause, YieldStep};
         for command in commands {
             match command {
                 SupervisorCommand::Adjust {
@@ -1010,12 +1019,17 @@ mod unix {
                     let mut applied = std::collections::BTreeMap::new();
                     let mut unavailable = std::collections::BTreeMap::new();
                     let mut details = Vec::new();
+                    let mut hints_changed = false;
                     for (key, wanted) in resources {
                         let kind = key.kind();
                         let current = contention
                             .applied
                             .get(&key)
                             .map_or(YieldStep::None, |s| s.step);
+                        // Any other step ends this resource's hint.
+                        if wanted.step != YieldStep::Hint {
+                            hints_changed |= targets.set(key.clone(), None);
+                        }
                         if wanted.step >= YieldStep::Drain {
                             // Guaranteed work drains only for a floor or envelope
                             // breach or an operator drain (supervisor-control contract).
@@ -1044,6 +1058,44 @@ mod unix {
                                 "{key}: drain in progress; runtime steps are released"
                             ));
                             applied.insert(key, current);
+                            continue;
+                        }
+                        if wanted.step == YieldStep::Hint {
+                            // Only a worker that acknowledged the channel can take a
+                            // hint; the file has no GPU compute target.
+                            if kind == ResourceKind::GpuCompute
+                                || !crate::actuation::TargetChannel::acknowledged(directories)
+                            {
+                                unavailable
+                                    .entry(key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(YieldStep::Hint);
+                                applied.insert(key, current);
+                                continue;
+                            }
+                            // A CPU hint keeps CPU capped at the target while the worker
+                            // adapts; memory has no runtime mechanism below a hint.
+                            let runtime = if kind == ResourceKind::Cpu
+                                && !actuator.unavailable(kind).contains(&YieldStep::Cap)
+                            {
+                                YieldStep::Cap
+                            } else {
+                                YieldStep::None
+                            };
+                            if let Err(error) = actuator.apply(family, kind, runtime, wanted.target)
+                            {
+                                details.push(format!("{key} Hint: {error:#}"));
+                                unavailable
+                                    .entry(key.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(YieldStep::Hint);
+                                applied.insert(key, current);
+                                continue;
+                            }
+                            hints_changed |=
+                                targets.set(key.clone(), Some(wanted.target.unwrap_or(0)));
+                            applied.insert(key.clone(), YieldStep::Hint);
+                            contention.applied.insert(key, wanted);
                             continue;
                         }
                         if wanted.step != YieldStep::None
@@ -1084,6 +1136,9 @@ mod unix {
                                 applied.insert(key, current);
                             }
                         }
+                    }
+                    if hints_changed && let Err(error) = targets.publish(directories) {
+                        details.push(format!("resource targets unavailable: {error:#}"));
                     }
                     contention.sequence = sequence;
                     if let Err(error) = record_contention_with_retry(journal, record, contention) {
@@ -1231,6 +1286,7 @@ mod unix {
         let mut actuator: Option<Box<dyn Actuator>> = None;
         let mut meter = crate::actuation::CpuMeter::default();
         let mut contention = crate::contention::AllocationContention::default();
+        let mut targets = crate::actuation::TargetChannel::new(options.hint_deadline_ms);
         let result = (|| -> Result<ExecutionOutcome> {
             let deadline = Instant::now()
                 .checked_add(Duration::from_millis(options.prepare_timeout_ms))
@@ -1262,6 +1318,7 @@ mod unix {
                 generation: record.generation,
                 setup,
                 drain_file: drain.file(),
+                resource_target_file: Some(drain.path.join(crate::actuation::TARGET_FILE)),
             };
             let mut payload = serde_json::to_vec(&gate)?;
             ensure!(
@@ -1569,6 +1626,10 @@ mod unix {
                 }
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 {
+                    let mut directories = vec![drain.path.clone()];
+                    if let Some(server) = children.as_ref() {
+                        directories.extend(server.target_directories());
+                    }
                     let mut family = OwnedFamily {
                         leader: &mut *owned,
                         identity: &leader_identity,
@@ -1585,6 +1646,8 @@ mod unix {
                             actuator.as_mut(),
                             &mut family,
                             &mut contention,
+                            &mut targets,
+                            &directories,
                             journal,
                             control,
                         );
@@ -1876,6 +1939,9 @@ mod unix {
                 },
             )
             .stderr(Stdio::inherit());
+        if let Some(path) = &gate.resource_target_file {
+            command.env("CEDEGRID_RESOURCE_TARGET_FILE", path);
+        }
         Err(command.exec()).context("authorized workload exec failed")
     }
 
