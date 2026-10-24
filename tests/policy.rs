@@ -1945,3 +1945,188 @@ fn best_effort_mode_config_rejects_empty_and_partial_authorization() {
         serde_json::from_str::<ExternalGpuProcessIdentity>(r#"{"pid":42,"uid":1000}"#).is_err()
     );
 }
+
+// Known yielding defects D1–D4. These tests pin today's behavior so the defects stay
+// reproducible; specs/001-contention-modes must invert each marked assertion.
+
+fn large_gpu_snapshot(used_mib: u64, external_pids: Vec<u32>) -> Snapshot {
+    let mut snap = gpu_snapshot();
+    snap.gpus[0].total_memory_mib = 24_576;
+    snap.gpus[0].used_memory_mib = Some(used_mib);
+    snap.gpus[0].utilization_percent = Some(0);
+    snap.gpus[0].external_process_ids = Some(external_pids);
+    snap
+}
+
+#[test]
+fn known_defect_d1_first_sample_counts_unattributed_memory_as_growth() {
+    // A fresh supervisor engine sees 300 MiB of driver/context memory on an otherwise
+    // empty device before its own task has allocated anything.
+    let snap = large_gpu_snapshot(300, vec![]);
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(0, 0, 4000),
+            Some(resources(0, 0, 0)),
+        )],
+        ..Default::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snap, &input, 0)
+        .unwrap();
+    // Defect: the task drains itself on its first observation.
+    assert_eq!(decision.would_drain, ["mine"]);
+    assert_eq!(decision.managed_budget.gpu_memory_mib["GPU-test"], 3000);
+}
+
+#[test]
+fn known_defect_d2_one_mib_of_unattributed_vram_drains_the_only_task() {
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(0, 0, 4000),
+            Some(resources(0, 0, 4000)),
+        )],
+        ..Default::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let baseline = engine
+        .evaluate(&config(), &large_gpu_snapshot(4000, vec![]), &input, 0)
+        .unwrap();
+    assert!(baseline.would_drain.is_empty());
+    // About 20 GiB stays free; one extra MiB of device memory is a protection event.
+    let noise = engine
+        .evaluate(&config(), &large_gpu_snapshot(4001, vec![]), &input, 1000)
+        .unwrap();
+    // Defect: the cap becomes charge - 25% and the whole task drains.
+    assert_eq!(noise.would_drain, ["mine"]);
+    assert_eq!(noise.managed_budget.gpu_memory_mib["GPU-test"], 3000);
+}
+
+#[test]
+fn known_defect_d3_an_idle_external_context_blocks_gpu_admission() {
+    let mut cfg = config();
+    cfg.gpu.execution_mode = GpuExecutionMode::Auto;
+    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    // One idle external process holds 2 GiB of 24 GiB.
+    let mut snap = large_gpu_snapshot(2048, vec![4242]);
+    snap.gpus[0].external_compute = ComputeActivity::Unknown;
+    // Variant A: NVML returns no new utilization samples for the idle process, so
+    // auto selects conservative non-sharing. Variant B: a fresh zero-utilization
+    // sample selects contention-aware, but telemetry still classifies it Unknown.
+    let stale = gpu_observation(&snap, GpuExecutionCapability::ContentionAware);
+    let mut fresh = stale.clone();
+    fresh.activity_api_status = "Success".into();
+    fresh.newest_sample_timestamp_us = Some(200);
+    fresh.samples_returned = 1;
+    fresh.fresh_after_baseline = true;
+    for (observation, capability) in [
+        (stale, GpuExecutionCapability::ConservativeNonSharing),
+        (fresh, GpuExecutionCapability::ContentionAware),
+    ] {
+        snap.gpus[0].observation = Some(observation);
+        assert_eq!(
+            cedegrid::policy::effective_gpu_capability(
+                &cfg,
+                snap.observed_at_unix_ms,
+                &snap.gpus[0]
+            ),
+            Some(capability)
+        );
+        let mut engine = PolicyEngine::new();
+        for now in [0, 30_000, 60_000, 120_000] {
+            snap.gpus[0].compute_sample_id = Some(now + 1);
+            let decision = engine
+                .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+                .unwrap();
+            // Defect: 22 GiB is free, but no GPU headroom is ever offered.
+            assert!(decision.admission_headroom.gpu_memory_mib.is_empty());
+        }
+    }
+}
+
+#[test]
+fn known_defect_d4_cpu_contention_drains_instead_of_sharing() {
+    // 8 logical CPUs on 4 physical cores; reserving 1 physical core holds 2000m.
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        ..Default::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(4000);
+    let alone = engine.evaluate(&config(), &snap, &input, 0).unwrap();
+    assert!(alone.would_drain.is_empty());
+    assert_eq!(alone.managed_budget.cpu_millicores, 6000);
+    // Another workload starts using three cores.
+    snap.cpu_busy_millicores = Some(7000);
+    let contended = engine.evaluate(&config(), &snap, &input, 1000).unwrap();
+    assert_eq!(contended.managed_budget.cpu_millicores, 3000);
+    // Defect: CPU is the only contended resource, yet the task is drained whole.
+    assert_eq!(contended.would_drain, ["mine"]);
+}
+
+#[test]
+fn known_defect_d5_sampling_skew_between_own_and_host_cpu_drains_everything() {
+    let input = PolicyInput {
+        allocations: vec![
+            allocation(
+                "a",
+                AllocationPhase::Running,
+                resources(2000, 0, 0),
+                Some(resources(2000, 0, 0)),
+            ),
+            allocation(
+                "b",
+                AllocationPhase::Running,
+                resources(2000, 0, 0),
+                Some(resources(2000, 0, 0)),
+            ),
+        ],
+        ..Default::default()
+    };
+    let mut snap = snapshot();
+    // Per-process and host CPU are sampled over different windows; the host reads
+    // 10m below the sum of own usage on an otherwise idle machine.
+    snap.cpu_busy_millicores = Some(3990);
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snap, &input, 0)
+        .unwrap();
+    // Defect: the inconsistency zeroes the CPU budget and drains every task.
+    assert_eq!(decision.managed_budget.cpu_millicores, 0);
+    assert_eq!(decision.would_drain, ["a", "b"]);
+}
+
+#[test]
+fn known_defect_d6_one_missing_observation_drains_unrelated_tasks() {
+    let input = PolicyInput {
+        allocations: vec![
+            allocation(
+                "a-unobserved",
+                AllocationPhase::Running,
+                resources(500, 0, 0),
+                None,
+            ),
+            allocation(
+                "b-observed",
+                AllocationPhase::Running,
+                resources(500, 0, 0),
+                Some(resources(500, 0, 0)),
+            ),
+        ],
+        ..Default::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snapshot(), &input, 0)
+        .unwrap();
+    // Defect: host busy time already includes the unobserved task and charges stay
+    // 3500m under the measured budget, yet the budget is zeroed and both tasks drain.
+    assert_eq!(decision.would_drain, ["a-unobserved", "b-observed"]);
+}
