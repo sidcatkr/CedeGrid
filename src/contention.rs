@@ -574,7 +574,7 @@ pub struct AllocationContention {
 
 /// What own work may use of CPU in a mode (FR-020 to FR-022), from the idle
 /// budget. On a saturated host measured external usage is suppressed, so Neutral
-/// converges to its fair share instead; until principals are counted (US3) one
+/// converges to its fair share instead; until T116a counts principals, one
 /// external principal is assumed.
 pub fn cpu_allowance(
     mode: ContentionMode,

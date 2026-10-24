@@ -643,6 +643,14 @@ each step.
   `setup.rs`.
 - [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
+- [ ] T116a Count external principals for Neutral's CPU fair share:
+  - in `src/kernel.rs`, read the distinct UIDs other than the agent's own that have CPU usage
+    above the noise floor, from `/proc` and read-only;
+  - in `src/contention.rs`, divide `cpu_allowance`'s saturated Neutral share by the managed
+    principal plus those external principals, falling back to one external principal when UIDs
+    cannot be read or the platform has no `/proc`;
+  - tests in `tests/contention.rs` and `tests/telemetry.rs`, then remove the known limitation
+    from `spec.md`, `plan.md` and `docs/guarantees.md`.
 - [ ] T117 Validate the provisional thresholds (SC-002–SC-004) on Linux with test-owned loads.
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with

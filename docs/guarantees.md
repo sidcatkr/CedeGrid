@@ -88,6 +88,10 @@ operator-envelope violations retain their existing all-allocation stop semantics
 Policy recordings without an allocation class retain the legacy opportunistic
 default; live observation copies the required class from the durable execution record.
 
+Known limitation: on a CPU-saturated host, Neutral mode assumes one external principal when it
+computes its fair share, so managed work converges to half of the schedulable CPU however many
+external owners compete.
+
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.
 CPU/RAM reserves without applied cgroup controls are scheduling policies, not kernel

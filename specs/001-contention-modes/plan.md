@@ -210,6 +210,13 @@ not subdirectories, because the exporter requires top-level `mod x;`. `tests/fix
 holds recorded 0.2 protocol fixtures, which must be added to the export allowlist (they are
 loaded with `include_str!`).
 
+## Known limitations
+
+- Neutral CPU fair share under saturation assumes one external principal
+  (`contention::cpu_allowance`), so own work converges to half of the schedulable capacity.
+  T116a counts distinct external UIDs with non-trivial usage from `/proc`, read-only, and
+  divides by managed plus external principals, falling back to one when UIDs cannot be read.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
