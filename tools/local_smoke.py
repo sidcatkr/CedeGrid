@@ -29,7 +29,7 @@ from cedegrid import Client,sha256_file,command_task
 from make_test_pki import generate as generate_pki
 from soak import AllocationLedger
 from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executable,local_guard
-from runtime_config import atomic_runtime_config, cpu_ram_cooldown
+from runtime_config import atomic_runtime_config, scale_up_cooldowns
 
 
 def stress_cpu_scope():
@@ -281,7 +281,7 @@ def run(args):
             'execution':{'enabled':True,'prepare_timeout_ms':10000,'admission_timeout_ms':30000},
             'monitor':{'interval_ms':500},'cpu':{'reserve_physical_cores':0 if profile['name']=='docker-cpu' else 1,'nice':10},
             'ram':{'reserve_mib':16384 if stress else 1024,'reserve_percent':10},'gpu':{'scale_up_cooldown_ms':3000 if stress else 0},
-            'contention':cpu_ram_cooldown(3000 if stress else 0),
+            'contention':scale_up_cooldowns(3000 if stress else 0),
             'lifecycle':{'drain_timeout_ms':3000,'term_grace_ms':2000,'heartbeat_interval_ms':2000,'allocation_lease_ms':10000},
             'cgroup':{'enabled':False}}, 'node')
         doctor=subprocess.run([str(binary),'--config',str(output/'node.toml'),'doctor'],capture_output=True,text=True,check=True,timeout=30,env=env)

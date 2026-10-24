@@ -26,7 +26,7 @@ import threading
 import time
 
 from make_test_pki import generate as generate_pki
-from runtime_config import atomic_runtime_config, cpu_ram_cooldown
+from runtime_config import atomic_runtime_config, scale_up_cooldowns
 from status_benchmark import digest, source_identity
 from validation_runtime import atomic_json, inside_home
 
@@ -311,7 +311,7 @@ def repetition(args, output, number):
             atomic_runtime_config(output / (node + '.toml'), {'node_id': node, 'node_mode': 'guaranteed',
                 'state_dir': str(output / (node + '-state')), 'execution': {'enabled': True},
                 'cpu': {'reserve_physical_cores': 0}, 'ram': {'reserve_mib': 0, 'reserve_percent': 0},
-                'gpu': {'scale_up_cooldown_ms': 0}, 'contention': cpu_ram_cooldown(0),
+                'gpu': {'scale_up_cooldown_ms': 0}, 'contention': scale_up_cooldowns(0),
                 'monitor': {'interval_ms': 500}, 'lifecycle': {'heartbeat_interval_ms': 500,
                     'allocation_lease_ms': 10000, 'drain_timeout_ms': 1000, 'term_grace_ms': 1000}}, 'node')
             atomic_runtime_config(output / (node + '-agent.toml'), {'coordinator_url': endpoint,

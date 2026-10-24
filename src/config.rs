@@ -531,6 +531,10 @@ pub struct ContentionConfig {
     pub critical_floor_percent: u8,
     /// The hint deadline on the critical floor path.
     pub critical_hint_deadline_s: u64,
+    /// User IDs below this are system accounts: background demand (FR-059).
+    pub uid_min: u32,
+    /// Consecutive observations a user needs to join, or leave, the principals.
+    pub principal_window_intervals: u32,
     pub cpu: ResourceContentionConfig,
     pub ram: ResourceContentionConfig,
     pub gpu_compute: ResourceContentionConfig,
@@ -548,6 +552,8 @@ impl Default for ContentionConfig {
             guaranteed_hint_deadline_s: 5,
             critical_floor_percent: 50,
             critical_hint_deadline_s: 1,
+            uid_min: 1000,
+            principal_window_intervals: 4,
             cpu: Default::default(),
             ram: Default::default(),
             gpu_compute: Default::default(),
@@ -602,11 +608,17 @@ pub struct ResourceContentionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quiet_window_intervals: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
+    pub scale_up_cooldown_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal_min_percent: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guaranteed_breach_window_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_peak_window_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaim_backoff_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaim_backoff_max_ms: Option<u64>,
 }
 
 impl ContentionConfig {
@@ -673,15 +685,22 @@ impl ContentionConfig {
             quiet_window_intervals: set
                 .quiet_window_intervals
                 .unwrap_or(defaults.quiet_window_intervals),
-            cpu_ram_scale_up_cooldown_ms: set
-                .cpu_ram_scale_up_cooldown_ms
-                .or(defaults.cpu_ram_scale_up_cooldown_ms),
+            scale_up_cooldown_ms: set.scale_up_cooldown_ms.or(defaults.scale_up_cooldown_ms),
             principal_min_percent: set
                 .principal_min_percent
                 .unwrap_or(defaults.principal_min_percent),
             guaranteed_breach_window_s: set
                 .guaranteed_breach_window_s
                 .unwrap_or(defaults.guaranteed_breach_window_s),
+            memory_peak_window_s: set
+                .memory_peak_window_s
+                .unwrap_or(defaults.memory_peak_window_s),
+            reclaim_backoff_ms: set
+                .reclaim_backoff_ms
+                .unwrap_or(defaults.reclaim_backoff_ms),
+            reclaim_backoff_max_ms: set
+                .reclaim_backoff_max_ms
+                .unwrap_or(defaults.reclaim_backoff_max_ms),
         }
     }
 
@@ -764,6 +783,10 @@ impl ContentionConfig {
             (10..=90).contains(&self.critical_floor_percent),
             "contention.critical_floor_percent must be between 10 and 90"
         );
+        ensure!(
+            self.principal_window_intervals >= 1,
+            "contention.principal_window_intervals must be at least 1"
+        );
         let shortest_hint = [Ram, GpuMemory]
             .into_iter()
             .map(|kind| self.thresholds(kind).hint_deadline_s)
@@ -810,15 +833,25 @@ impl ContentionConfig {
                 set.quiet_window_intervals.is_some(),
             )?;
             applies(
-                "cpu_ram_scale_up_cooldown_ms",
+                "scale_up_cooldown_ms",
                 &[Cpu, Ram],
-                set.cpu_ram_scale_up_cooldown_ms.is_some(),
+                set.scale_up_cooldown_ms.is_some(),
             )?;
             applies(
                 "guaranteed_breach_window_s",
                 &[Ram],
                 set.guaranteed_breach_window_s.is_some(),
             )?;
+            for (field, present) in [
+                ("memory_peak_window_s", set.memory_peak_window_s.is_some()),
+                ("reclaim_backoff_ms", set.reclaim_backoff_ms.is_some()),
+                (
+                    "reclaim_backoff_max_ms",
+                    set.reclaim_backoff_max_ms.is_some(),
+                ),
+            ] {
+                applies(field, &[Ram, GpuMemory], present)?;
+            }
             ensure!(
                 self.mode(kind) <= self.max_mode(),
                 "contention.{name}.mode cannot be more aggressive than contention.max_mode"
@@ -886,6 +919,14 @@ impl ContentionConfig {
             ensure!(
                 t.guaranteed_breach_window_s <= 60,
                 "contention.{name}.guaranteed_breach_window_s must be between 0 and 60"
+            );
+            ensure!(
+                t.memory_peak_window_s >= 1 && t.reclaim_backoff_ms >= 1,
+                "contention.{name}.memory_peak_window_s and reclaim_backoff_ms must be at least 1"
+            );
+            ensure!(
+                t.reclaim_backoff_max_ms >= t.reclaim_backoff_ms,
+                "contention.{name}.reclaim_backoff_max_ms must be at least reclaim_backoff_ms"
             );
             if let Some(window) = set.quiet_window_intervals {
                 ensure!(

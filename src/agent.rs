@@ -3193,7 +3193,7 @@ impl AgentLoop<'_> {
                 .get(&key)
                 .and_then(|s| s.effective_mode)
                 .unwrap_or_else(|| config.contention.mode(kind));
-            config.contention.thresholds(kind).cpu_ram_cooldown_ms(mode)
+            config.contention.thresholds(kind).cooldown_ms(mode)
         })
         .max()
         .unwrap_or(0);
@@ -4389,8 +4389,8 @@ mod agent_transport_tests {
         use crate::model::*;
         let mut config = Config::default();
         config.gpu.scale_up_cooldown_ms = 0;
-        config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(0);
-        config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(0);
+        config.contention.cpu.scale_up_cooldown_ms = Some(0);
+        config.contention.ram.scale_up_cooldown_ms = Some(0);
         config.cpu.reserve_physical_cores = 0;
         config.ram.reserve_mib = 0;
         config.ram.reserve_percent = 0;

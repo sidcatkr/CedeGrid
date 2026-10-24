@@ -220,13 +220,19 @@ pub struct ResourceThresholds {
     pub quiet_window_intervals: u32,
     /// How long CPU and RAM must stay stable before own work grows on them;
     /// `None` uses the mode's scale-up interval.
-    pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
+    pub scale_up_cooldown_ms: Option<u64>,
     /// Usage, in percent of capacity, from which a principal contends for a
     /// fair share; smaller usage is counted as it is.
     pub principal_min_percent: u8,
     /// RAM only: how long a floor breach must last before Guaranteed work is
     /// drained for it (FR-024).
     pub guaranteed_breach_window_s: u64,
+    /// Memory: admission headroom uses the external peak over this window (FR-060).
+    pub memory_peak_window_s: u64,
+    /// Memory: the extra cooldown after a repeated reclaim episode, doubling up to
+    /// the maximum (FR-061).
+    pub reclaim_backoff_ms: u64,
+    pub reclaim_backoff_max_ms: u64,
 }
 
 impl ResourceThresholds {
@@ -249,9 +255,12 @@ impl ResourceThresholds {
             pause_bound_s: 10,
             noise_tolerance_mib: 256,
             quiet_window_intervals: 20,
-            cpu_ram_scale_up_cooldown_ms: None,
+            scale_up_cooldown_ms: None,
             principal_min_percent: 1,
             guaranteed_breach_window_s: if kind == ResourceKind::Ram { 10 } else { 0 },
+            memory_peak_window_s: 300,
+            reclaim_backoff_ms: 1000,
+            reclaim_backoff_max_ms: 30_000,
         }
     }
 
@@ -264,10 +273,10 @@ impl ResourceThresholds {
         })
     }
 
-    /// The CPU/RAM scale-up cooldown for a mode (FR-034), independent of GPU
+    /// A resource's scale-up cooldown for a mode (FR-034), independent of GPU
     /// settings: 30 s in Yield First, as 0.2's cooldown, and faster otherwise.
-    pub fn cpu_ram_cooldown_ms(&self, mode: ContentionMode) -> u64 {
-        self.cpu_ram_scale_up_cooldown_ms
+    pub fn cooldown_ms(&self, mode: ContentionMode) -> u64 {
+        self.scale_up_cooldown_ms
             .unwrap_or_else(|| self.scale_up_interval_s(mode).saturating_mul(1000))
     }
 }
@@ -670,7 +679,11 @@ pub struct ModeInput {
     /// Usage within that capacity that is not own work.
     pub external: u64,
     /// Unmanaged usage per principal, the owner included; `None` when unobserved.
+    /// Users that are not principals yet are left out and count as unattributed.
     pub principals: Option<Vec<(Principal, u64)>>,
+    /// Usage by system accounts (below `uid_min`): background demand that comes
+    /// off the capacity and never contends (FR-059).
+    pub background: u64,
     /// Usage at capacity hides how much more external work wants (CPU).
     pub saturated: bool,
     /// Activity of unknown amount, such as unsampled GPU compute.
@@ -752,7 +765,7 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
         return false;
     }
     let floor = principal_floor(input, thresholds);
-    let mut accounted = 0u64;
+    let mut accounted = input.background;
     for (principal, usage) in input.principals.iter().flatten() {
         accounted = accounted.saturating_add(*usage);
         if !principal.is_owner && *usage >= floor {
@@ -780,16 +793,19 @@ fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
             demands.push(demand(*usage));
         }
     }
-    let unattributed = input
-        .external
-        .saturating_sub(attributed.saturating_add(owner_unmanaged));
+    let unattributed = input.external.saturating_sub(
+        attributed
+            .saturating_add(owner_unmanaged)
+            .saturating_add(input.background),
+    );
     if unattributed >= floor {
         demands.push(demand(unattributed));
     }
     if input.unknown_activity {
         demands.push(None);
     }
-    max_min_shares(input.capacity, &demands)[0].saturating_sub(owner_unmanaged)
+    max_min_shares(input.capacity.saturating_sub(input.background), &demands)[0]
+        .saturating_sub(owner_unmanaged)
 }
 
 /// Whether Guaranteed work may be drained (FR-024, FR-057): only for a memory

@@ -85,7 +85,14 @@ Each resource runs in a contention mode, and for every resource and observation 
 targets are ordered: Yield First ≤ Neutral ≤ Performance. CPU and GPU compute are
 *contended* when they are saturated (busy within 2% of capacity) and an external
 principal uses at least `principal_min_percent` of them, or when external activity of
-unknown amount exists. On contended compute, Yield First pauses opportunistic work,
+unknown amount exists. Principals are the account CedeGrid runs as, whatever its UID,
+and users at or above `contention.uid_min` (1000) that have used at least
+`principal_min_percent` for `contention.principal_window_intervals` (4) observations;
+they leave after the same number of observations below half of it. Until a user
+joins, its usage counts toward one unattributed principal, together with processes
+whose owner cannot be read, so contention is seen at once. A host that mounts `/proc`
+with `hidepid=2` always takes this path for other accounts. Usage by lower UIDs is
+background demand: it comes off the capacity and never contends. On contended compute, Yield First pauses opportunistic work,
 and Neutral and Performance hold the max-min fair share among principals: owner UIDs,
 with processes whose owner cannot be read counted as one principal and the account
 CedeGrid runs as counted as the owner. Otherwise Yield First keeps 25% of schedulable
@@ -97,10 +104,16 @@ at once. While a resource is not contended, a held cap rises again toward the mo
 target at the mode's scale-up rate. A Guaranteed allocation's CPU is never capped
 below its request, by the policy or by its supervisor.
 
-Own work grows on CPU and RAM only after both have stayed stable for
-`contention.cpu.cpu_ram_scale_up_cooldown_ms` and `contention.ram.cpu_ram_scale_up_cooldown_ms`,
-whichever is longer. Unset, each is its mode's scale-up interval: 30 s in Yield First, 10 s in
-Neutral and 2 s in Performance. `gpu.scale_up_cooldown_ms` applies to GPU work only.
+CPU and RAM each wait for their own cooldown, counted from the time each became stable:
+`contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
+each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2 s in
+Performance. CPU/RAM admission opens once both have cooled. `gpu.scale_up_cooldown_ms`
+applies to GPU memory only. On RAM and GPU memory, the n-th reclaim episode (any own
+allocation at the hint step or above) within `memory_peak_window_s` adds
+`reclaim_backoff_ms` × 2^(n−1) to the cooldown, at most `reclaim_backoff_max_ms`
+(1 s doubling to 30 s by default). Admission headroom for memory subtracts the peak of
+external usage over `memory_peak_window_s` (300 s), including the memory of quiet GPU
+contexts; yielding follows current usage.
 
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the

@@ -200,7 +200,9 @@ struct PreviousGpu {
 pub struct PolicyEngine {
     previous_gpus: BTreeMap<String, PreviousGpu>,
     stable_since: Option<u64>,
-    cpu_ram_stable_since: Option<u64>,
+    /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
+    cpu_stable_since: Option<u64>,
+    ram_stable_since: Option<u64>,
     last_now: Option<u64>,
     node_id: Option<String>,
     /// Collector-relative sample marker and the policy time it first arrived.
@@ -217,6 +219,23 @@ pub struct PolicyEngine {
     allocation_unknown_since: BTreeMap<String, u64>,
     /// When a floor or envelope breach began, for the Guaranteed hint deadline.
     floor_breach_since: BTreeMap<ResourceKey, u64>,
+    /// Users on their way into or out of the principals, per resource (FR-059).
+    principal_counts: BTreeMap<(ResourceKey, u32), PrincipalCount>,
+    /// External memory usage over the peak window, as a decreasing deque (FR-060).
+    external_peaks: BTreeMap<ResourceKey, std::collections::VecDeque<(u64, u64)>>,
+    /// Starts of recent reclaim episodes per memory resource, and the resources
+    /// with one in progress (FR-061).
+    reclaim_episodes: BTreeMap<ResourceKey, Vec<u64>>,
+    reclaiming: BTreeSet<ResourceKey>,
+}
+
+/// Consecutive observations of one user on one resource at or above the
+/// principal threshold, or below half of it (FR-059).
+#[derive(Debug, Clone, Copy, Default)]
+struct PrincipalCount {
+    admitted: bool,
+    above: u32,
+    below: u32,
 }
 
 impl PolicyEngine {
@@ -568,18 +587,67 @@ impl PolicyEngine {
             unsafe_now = true;
         }
         // Unmanaged usage by principal for one resource (research R12).
-        let principals = |pick: &dyn Fn(&PrincipalUsage) -> u64| {
-            snapshot.principals.as_ref().map(|list| {
-                list.iter()
-                    .map(|p| {
-                        let principal = Principal {
-                            uid: p.uid,
-                            is_owner: p.is_owner,
-                        };
-                        (principal, pick(p))
-                    })
-                    .collect::<Vec<_>>()
-            })
+        // The owner is always a principal; system accounts are background; other
+        // users join and leave after the principal window (FR-059).
+        let mut principal_counts = BTreeMap::new();
+        let mut principals = |key: ResourceKey,
+                              capacity: u64,
+                              pick: &dyn Fn(&PrincipalUsage) -> u64|
+         -> (Option<Vec<(Principal, u64)>>, u64) {
+            let Some(list) = snapshot.principals.as_ref() else {
+                return (None, 0);
+            };
+            let floor = (capacity.saturating_mul(u64::from(
+                config
+                    .contention
+                    .thresholds(key.kind())
+                    .principal_min_percent,
+            )) / 100)
+                .max(1);
+            let window = config.contention.principal_window_intervals;
+            let mut members = Vec::new();
+            let mut background = 0u64;
+            let mut seen = BTreeSet::new();
+            for p in list {
+                let usage = pick(p);
+                let principal = Principal {
+                    uid: p.uid,
+                    is_owner: p.is_owner,
+                };
+                match p.uid {
+                    _ if p.is_owner => members.push((principal, usage)),
+                    None => {}
+                    Some(uid) if uid < config.contention.uid_min => {
+                        background = background.saturating_add(usage);
+                    }
+                    Some(uid) => {
+                        seen.insert(uid);
+                        let mut count = self
+                            .principal_counts
+                            .get(&(key.clone(), uid))
+                            .copied()
+                            .unwrap_or_default();
+                        count.observe(usage, floor, window);
+                        if count.admitted {
+                            members.push((principal, usage));
+                        }
+                        if count.admitted || count.above > 0 {
+                            principal_counts.insert((key.clone(), uid), count);
+                        }
+                    }
+                }
+            }
+            // A member no longer seen has no usage.
+            for ((k, uid), count) in &self.principal_counts {
+                if k == &key && count.admitted && !seen.contains(uid) {
+                    let mut count = *count;
+                    count.observe(0, floor, window);
+                    if count.admitted {
+                        principal_counts.insert((key.clone(), *uid), count);
+                    }
+                }
+            }
+            (Some(members), background)
         };
         // What own work may hold before the mode's target applies: for memory, what
         // keeps the floor free.
@@ -591,6 +659,8 @@ impl PolicyEngine {
             cpu_busy.is_some_and(|busy| busy.saturating_add(cpu_total / 50) >= cpu_total);
         if !cpu_unknown && !cpu_held {
             floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
+            let (members, background) =
+                principals(ResourceKey::Cpu, cpu_schedulable, &|p| p.cpu_millicores);
             budget.cpu_millicores = own_allowance(
                 &ModeInput {
                     kind: ResourceKind::Cpu,
@@ -600,7 +670,8 @@ impl PolicyEngine {
                         .get(&ResourceKey::Cpu)
                         .and_then(|s| s.external)
                         .unwrap_or(0),
-                    principals: principals(&|p| p.cpu_millicores),
+                    principals: members,
+                    background,
                     saturated: cpu_saturated,
                     unknown_activity: false,
                 },
@@ -611,16 +682,19 @@ impl PolicyEngine {
         }
         if !ram_unknown && !ram_held {
             floor_available.insert(ResourceKey::Ram, budget.ram_mib);
+            let capacity = snapshot.total_ram_mib.saturating_sub(ram_reserve);
+            let (members, background) = principals(ResourceKey::Ram, capacity, &|p| p.ram_mib);
             budget.ram_mib = own_allowance(
                 &ModeInput {
                     kind: ResourceKind::Ram,
                     mode: governing(ResourceKind::Ram),
-                    capacity: snapshot.total_ram_mib.saturating_sub(ram_reserve),
+                    capacity,
                     external: statuses
                         .get(&ResourceKey::Ram)
                         .and_then(|s| s.external)
                         .unwrap_or(0),
-                    principals: principals(&|p| p.ram_mib),
+                    principals: members,
+                    background,
                     saturated: false,
                     unknown_activity: false,
                 },
@@ -826,15 +900,18 @@ impl PolicyEngine {
                     }) {
                         critical_keys.insert(key.clone());
                     }
+                    let capacity = gpu.total_memory_mib.saturating_sub(config.vram_floor_mib());
+                    let (members, background) = principals(key.clone(), capacity, &|p| {
+                        p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
+                    });
                     own_allowance(
                         &ModeInput {
                             kind: ResourceKind::GpuMemory,
                             mode: governing(ResourceKind::GpuMemory),
-                            capacity: gpu.total_memory_mib.saturating_sub(config.vram_floor_mib()),
+                            capacity,
                             external: external.unwrap_or(0),
-                            principals: principals(&|p| {
-                                p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
-                            }),
+                            principals: members,
+                            background,
                             saturated: false,
                             unknown_activity: false,
                         },
@@ -1369,30 +1446,110 @@ impl PolicyEngine {
             reasons.push("managed RAM charges exceed scheduling budget".into());
         }
         let legacy_expansion_allowed = !unsafe_now && cooled_down && would_drain.is_empty();
-        let cpu_ram_safe = !input.explicit_drain
+        // A reclaim episode on a memory resource starts when any allocation on it
+        // enters the hint step or above; recent episodes lengthen the memory
+        // cooldown by exponential backoff (FR-061).
+        let reclaiming: BTreeSet<ResourceKey> = ladder
+            .iter()
+            .filter(|((_, key), state)| key.kind().is_memory() && state.step >= YieldStep::Hint)
+            .map(|((_, key), _)| key.clone())
+            .collect();
+        let mut reclaim_episodes: BTreeMap<ResourceKey, Vec<u64>> = BTreeMap::new();
+        for key in self.reclaim_episodes.keys().chain(reclaiming.iter()) {
+            let window_ms = config
+                .contention
+                .thresholds(key.kind())
+                .memory_peak_window_s
+                .saturating_mul(1000);
+            let mut starts: Vec<u64> = self
+                .reclaim_episodes
+                .get(key)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|start| now_monotonic_ms.saturating_sub(*start) < window_ms)
+                .collect();
+            if reclaiming.contains(key) && !self.reclaiming.contains(key) {
+                starts.push(now_monotonic_ms);
+            }
+            if !starts.is_empty() {
+                reclaim_episodes.insert(key.clone(), starts);
+            }
+        }
+        let backoff_ms = |key: &ResourceKey| {
+            let episodes = reclaim_episodes.get(key).map_or(0, Vec::len) as u32;
+            let thresholds = config.contention.thresholds(key.kind());
+            if episodes == 0 {
+                0
+            } else {
+                thresholds
+                    .reclaim_backoff_ms
+                    .saturating_mul(1u64.checked_shl(episodes - 1).unwrap_or(u64::MAX))
+                    .min(thresholds.reclaim_backoff_max_ms)
+            }
+        };
+        // Each resource waits for its own cooldown, never the GPU one (M1, FR-034).
+        let cpu_safe = !input.explicit_drain
             && !cpu_unknown
-            && !ram_unknown
             && !cpu_held
-            && !ram_held
             && cpu_capacity > 0
+            && charged.cpu_millicores <= budget.cpu_millicores;
+        let ram_safe = !input.explicit_drain
+            && !ram_unknown
+            && !ram_held
             && snapshot.total_ram_mib > 0
-            && charged.cpu_millicores <= budget.cpu_millicores
             && charged.ram_mib <= budget.ram_mib;
-        // CPU/RAM admission waits its own cooldown, never the GPU one (M1).
-        let cpu_ram_stable_since =
-            cpu_ram_safe.then_some(self.cpu_ram_stable_since.unwrap_or(now_monotonic_ms));
-        let cpu_ram_cooldown_ms = [ResourceKind::Cpu, ResourceKind::Ram]
-            .into_iter()
-            .map(|kind| {
-                config
-                    .contention
-                    .thresholds(kind)
-                    .cpu_ram_cooldown_ms(governing(kind))
+        let cpu_stable_since =
+            cpu_safe.then_some(self.cpu_stable_since.unwrap_or(now_monotonic_ms));
+        let ram_stable_since =
+            ram_safe.then_some(self.ram_stable_since.unwrap_or(now_monotonic_ms));
+        let cooled = |since: Option<u64>, kind: ResourceKind, extra_ms: u64| {
+            since.is_some_and(|since| {
+                now_monotonic_ms - since
+                    >= config
+                        .contention
+                        .thresholds(kind)
+                        .cooldown_ms(governing(kind))
+                        .saturating_add(extra_ms)
             })
-            .max()
-            .unwrap_or(0);
-        let cpu_ram_expansion_allowed = cpu_ram_stable_since
-            .is_some_and(|since| now_monotonic_ms - since >= cpu_ram_cooldown_ms);
+        };
+        let cpu_allowed = cooled(cpu_stable_since, ResourceKind::Cpu, 0);
+        let ram_allowed = cooled(
+            ram_stable_since,
+            ResourceKind::Ram,
+            backoff_ms(&ResourceKey::Ram),
+        );
+        // Until per-resource admission is placed on (US5), CPU/RAM admission opens
+        // only once both have cooled, each from its own stable time.
+        let cpu_ram_expansion_allowed = cpu_allowed && ram_allowed;
+        // Memory admission uses the external peak over its window; yielding uses
+        // current usage (FR-060).
+        let mut external_peaks = BTreeMap::new();
+        let mut peak_excess = BTreeMap::new();
+        for (key, status) in &statuses {
+            let (true, Some(external)) = (key.kind().is_memory(), status.external) else {
+                continue;
+            };
+            let window_ms = config
+                .contention
+                .thresholds(key.kind())
+                .memory_peak_window_s
+                .saturating_mul(1000);
+            let mut samples = self.external_peaks.get(key).cloned().unwrap_or_default();
+            while samples
+                .front()
+                .is_some_and(|(at, _)| now_monotonic_ms.saturating_sub(*at) >= window_ms)
+            {
+                samples.pop_front();
+            }
+            while samples.back().is_some_and(|(_, usage)| *usage <= external) {
+                samples.pop_back();
+            }
+            samples.push_back((now_monotonic_ms, external));
+            let peak = samples.front().map_or(external, |(_, usage)| *usage);
+            peak_excess.insert(key.clone(), peak.saturating_sub(external));
+            external_peaks.insert(key.clone(), samples);
+        }
         let mut headroom = budget.clone();
         // Recommendations are not release confirmation: subtract ALL allocations,
         // including existing draining work and everything just recommended for drain.
@@ -1404,9 +1561,20 @@ impl PolicyEngine {
                     .get(uuid)
                     .and_then(|p| p.stable_since)
                     .is_some_and(|since| {
-                        now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms
+                        now_monotonic_ms - since
+                            >= config
+                                .gpu
+                                .scale_up_cooldown_ms
+                                .saturating_add(backoff_ms(&ResourceKey::GpuMemory(uuid.clone())))
                     })
         });
+        headroom.ram_mib = headroom
+            .ram_mib
+            .saturating_sub(peak_excess.get(&ResourceKey::Ram).copied().unwrap_or(0));
+        for (uuid, amount) in headroom.gpu_memory_mib.iter_mut() {
+            let key = ResourceKey::GpuMemory(uuid.clone());
+            *amount = amount.saturating_sub(peak_excess.get(&key).copied().unwrap_or(0));
+        }
         // A breached floor blocks admission on that resource in every policy (FR-041).
         if breached.contains(&ResourceKey::Ram) {
             headroom.ram_mib = 0;
@@ -1424,6 +1592,13 @@ impl PolicyEngine {
             && (legacy_expansion_allowed
                 || (cpu_ram_expansion_allowed
                     && headroom.gpu_memory_mib.values().any(|amount| *amount > 0)));
+        // CPU and RAM headroom open only after their own cooldowns.
+        if !cpu_allowed {
+            headroom.cpu_millicores = 0;
+        }
+        if !ram_allowed {
+            headroom.ram_mib = 0;
+        }
         if !expansion_allowed {
             if !cpu_ram_expansion_allowed {
                 headroom.cpu_millicores = 0;
@@ -1438,7 +1613,12 @@ impl PolicyEngine {
         self.last_now = Some(now_monotonic_ms);
         self.node_id = Some(snapshot.node_id.clone());
         self.stable_since = stable_since;
-        self.cpu_ram_stable_since = cpu_ram_stable_since;
+        self.cpu_stable_since = cpu_stable_since;
+        self.ram_stable_since = ram_stable_since;
+        self.principal_counts = principal_counts;
+        self.external_peaks = external_peaks;
+        self.reclaim_episodes = reclaim_episodes;
+        self.reclaiming = reclaiming;
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;
         self.last_observed = last_observed;
@@ -1681,5 +1861,27 @@ fn first_charged_resource(charge: &Resources) -> ResourceKey {
         ResourceKey::GpuMemory(gpu.clone())
     } else {
         ResourceKey::Cpu
+    }
+}
+
+impl PrincipalCount {
+    /// Count one observation; join after `window` at or above the threshold,
+    /// leave after `window` below half of it.
+    fn observe(&mut self, usage: u64, floor: u64, window: u32) {
+        if usage >= floor {
+            self.above = self.above.saturating_add(1);
+            self.below = 0;
+        } else if usage.saturating_mul(2) < floor {
+            self.below = self.below.saturating_add(1);
+            self.above = 0;
+        } else {
+            self.above = 0;
+            self.below = 0;
+        }
+        if !self.admitted && self.above >= window {
+            self.admitted = true;
+        } else if self.admitted && self.below >= window {
+            *self = Self::default();
+        }
     }
 }

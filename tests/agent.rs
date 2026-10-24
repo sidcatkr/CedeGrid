@@ -490,8 +490,8 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         ],
     );
     local.config.gpu.scale_up_cooldown_ms = 0;
-    local.config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(0);
-    local.config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(0);
+    local.config.contention.cpu.scale_up_cooldown_ms = Some(0);
+    local.config.contention.ram.scale_up_cooldown_ms = Some(0);
     local.config.lifecycle.heartbeat_interval_ms = 200;
     local.config.monitor.interval_ms = 200;
     let config_file = dir.path().join("node.toml");
@@ -1138,8 +1138,8 @@ impl Service {
         }
         let mut local = spec(dir.path(), class, argv);
         local.config.gpu.scale_up_cooldown_ms = 0;
-        local.config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(0);
-        local.config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(0);
+        local.config.contention.cpu.scale_up_cooldown_ms = Some(0);
+        local.config.contention.ram.scale_up_cooldown_ms = Some(0);
         local.config.lifecycle.heartbeat_interval_ms = 400;
         local.config.monitor.interval_ms = 400;
         configure(&mut local);

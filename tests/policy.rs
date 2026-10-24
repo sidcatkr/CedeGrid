@@ -15,7 +15,7 @@ fn config() -> Config {
     result.ram.reserve_percent = 0;
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.scale_up_cooldown_ms = 0;
-    cpu_ram_cooldown(&mut result, 0);
+    scale_up_cooldowns(&mut result, 0);
     result
 }
 
@@ -302,9 +302,9 @@ fn gpu_snapshot() -> Snapshot {
 }
 
 /// The CPU/RAM scale-up cooldown, independent of the GPU one since audit M1.
-fn cpu_ram_cooldown(config: &mut Config, ms: u64) {
-    config.contention.cpu.cpu_ram_scale_up_cooldown_ms = Some(ms);
-    config.contention.ram.cpu_ram_scale_up_cooldown_ms = Some(ms);
+fn scale_up_cooldowns(config: &mut Config, ms: u64) {
+    config.contention.cpu.scale_up_cooldown_ms = Some(ms);
+    config.contention.ram.scale_up_cooldown_ms = Some(ms);
 }
 
 fn resources(cpu: u64, ram: u64, gpu: u64) -> Resources {
@@ -1275,7 +1275,7 @@ proptest! {
 fn cpu_ram_stability_survives_gpu_uncertainty_without_reusing_retained_gpu_cap() {
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = 137;
-    cpu_ram_cooldown(&mut cfg, 137);
+    scale_up_cooldowns(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
     snap.gpus[0].used_memory_mib = Some(6000);
@@ -1351,7 +1351,7 @@ fn cpu_ram_fallback_fails_closed_for_missing_stale_excess_and_drain_evidence() {
     }
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = 137;
-    cpu_ram_cooldown(&mut cfg, 137);
+    scale_up_cooldowns(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
     let mut policy = PolicyEngine::new();
@@ -1473,15 +1473,16 @@ fn non_sharing_admits_empty_then_fully_yields_and_recovers_after_confirmed_relea
     assert!(released.admission_headroom.gpu_memory_mib.is_empty());
     assert!(
         policy
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 276)
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 1276)
             .unwrap()
             .admission_headroom
             .gpu_memory_mib
-            .is_empty()
+            .is_empty(),
+        "the cooldown plus 1 s of reclaim backoff (FR-061)"
     );
     assert!(
         policy
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 277)
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 1277)
             .unwrap()
             .admission_headroom
             .gpu_memory_mib["GPU-test"]
@@ -2555,7 +2556,7 @@ fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = 60_000;
     for set in [&mut cfg.contention.cpu, &mut cfg.contention.ram] {
-        set.cpu_ram_scale_up_cooldown_ms = Some(5000);
+        set.scale_up_cooldown_ms = Some(5000);
     }
     let over_budget = PolicyInput {
         allocations: vec![allocation(
@@ -2592,8 +2593,8 @@ fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
     cfg.contention
         .acknowledge_danger
         .insert("performance_mode".into());
-    cfg.contention.cpu.cpu_ram_scale_up_cooldown_ms = None;
-    cfg.contention.ram.cpu_ram_scale_up_cooldown_ms = None;
+    cfg.contention.cpu.scale_up_cooldown_ms = None;
+    cfg.contention.ram.scale_up_cooldown_ms = None;
     let mut engine = PolicyEngine::new();
     let mut allowed = |now: u64| {
         engine
@@ -2705,4 +2706,216 @@ fn lost_cpu_telemetry_holds_for_the_unknown_window_then_escalates() {
         (YieldStep::Cap, YieldCause::UnknownMeasurement)
     );
     assert!(after.would_drain.is_empty());
+}
+
+/// One CPU principal for the snapshot.
+fn cpu_principal(uid: u32, is_owner: bool, cpu_millicores: u64) -> PrincipalUsage {
+    PrincipalUsage {
+        uid: Some(uid),
+        is_owner,
+        cpu_millicores,
+        ..PrincipalUsage::default()
+    }
+}
+
+/// Principals (FR-059): system accounts are background demand; a new user joins
+/// only after the principal window and leaves only after the same window below
+/// half the threshold. Until it joins, its usage counts toward the unattributed
+/// principal, so contention is still seen at once.
+#[test]
+fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
+    let own = PolicyInput {
+        allocations: vec![allocation(
+            "own",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["own"]),
+        ..Default::default()
+    };
+    let mut engine = PolicyEngine::new();
+    // Saturated: own 4000m, root 1000m, two users. Schedulable capacity is 6000m.
+    let mut share = |owner: PrincipalUsage, users: &[(u32, u64)], now: u64| {
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(8000);
+        let mut principals = vec![owner, cpu_principal(0, false, 1000)];
+        principals.extend(
+            users
+                .iter()
+                .map(|(uid, usage)| cpu_principal(*uid, false, *usage)),
+        );
+        snap.principals = Some(principals);
+        engine
+            .evaluate(&config(), &snap, &own, now)
+            .unwrap()
+            .resources[&cedegrid::contention::ResourceKey::Cpu]
+            .target_share
+            .unwrap()
+    };
+    let owner = || cpu_principal(1000, true, 0);
+    let both = [(2001, 1500), (2002, 1500)];
+    // Root's 1000m comes off the capacity; the new users form one principal at first.
+    for now in [0, 500, 1000] {
+        assert_eq!(share(owner(), &both, now), 2500, "at {now}");
+    }
+    // After four observations each user is its own principal.
+    // 5000m among three principals; the remainder goes to the owner.
+    assert_eq!(share(owner(), &both, 1500), 1667);
+    // A short drop does not end membership.
+    let dropped = [(2001, 0), (2002, 0)];
+    share(owner(), &dropped, 2000);
+    share(owner(), &dropped, 2500);
+    assert_eq!(share(owner(), &both, 3000), 1667);
+    // Four observations below half the threshold do: back to one pooled principal.
+    for now in [3500, 4000, 4500, 5000] {
+        share(owner(), &dropped, now);
+    }
+    assert_eq!(share(owner(), &both, 5500), 2500);
+    // The account CedeGrid runs as stays the owner principal below uid_min.
+    let mut engine = PolicyEngine::new();
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(8000);
+    snap.principals = Some(vec![
+        cpu_principal(999, true, 500),
+        cpu_principal(2001, false, 3500),
+    ]);
+    let mut decision = None;
+    for now in [0, 500, 1000, 1500] {
+        decision = Some(engine.evaluate(&config(), &snap, &own, now).unwrap());
+    }
+    // Two principals share 6000m; the account's unmanaged 500m comes off its share.
+    assert_eq!(
+        decision.unwrap().resources[&cedegrid::contention::ResourceKey::Cpu].target_share,
+        Some(2500)
+    );
+}
+
+/// Admission headroom for memory uses the external peak over the peak window,
+/// while yielding follows current usage (FR-060).
+#[test]
+fn memory_headroom_uses_the_external_peak_over_its_window() {
+    let mut cfg = config();
+    cfg.contention.ram.memory_peak_window_s = Some(10);
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |available: u64, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(available);
+        engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .ram_mib
+    };
+    // 32000 MiB total, a 1000 MiB floor and no own work.
+    assert_eq!(headroom(26_000, 0), 25_000);
+    assert_eq!(headroom(16_000, 500), 15_000);
+    assert_eq!(headroom(26_000, 1000), 15_000);
+    assert_eq!(headroom(26_000, 10_000), 15_000);
+    assert_eq!(headroom(26_000, 10_500), 25_000);
+}
+
+/// A quiet GPU context's memory counts toward the device's external peak.
+#[test]
+fn a_quiet_gpu_context_counts_toward_the_device_peak() {
+    let mut cfg = config();
+    cfg.contention.gpu_memory.memory_peak_window_s = Some(10);
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |used: u64, now: u64| {
+        // A healthy observation of one quiet external context, as in D3.
+        let mut snap = large_gpu_snapshot(used, vec![4242]);
+        snap.gpus[0].external_compute = ComputeActivity::Quiet;
+        snap.gpus[0].compute_sample_id = Some(now + 1);
+        snap.gpus[0].observation = Some(gpu_observation(
+            &snap,
+            GpuExecutionCapability::ContentionAware,
+        ));
+        engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .gpu_memory_mib
+            .get("GPU-test")
+            .copied()
+    };
+    // 24576 MiB with a 1000 MiB floor; the quiet context holds 6000 MiB, then frees
+    // 4000 MiB, which stay reserved for it until the window passes.
+    headroom(6000, 0);
+    assert_eq!(headroom(6000, 500), Some(17_576));
+    assert_eq!(headroom(2000, 1000), Some(17_576));
+    assert_eq!(headroom(2000, 10_500), Some(21_576));
+}
+
+/// CPU and RAM each wait for their own scale-up cooldown, from their own stable
+/// time (FR-034): RAM instability does not restart CPU's cooldown. Admission
+/// opens once both have cooled.
+#[test]
+fn cpu_and_ram_cool_down_independently() {
+    let mut cfg = config();
+    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    cfg.contention.cpu.scale_up_cooldown_ms = Some(6000);
+    cfg.contention.ram.scale_up_cooldown_ms = Some(2000);
+    let mut engine = PolicyEngine::new();
+    let mut allowed = |available: Option<u64>, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = available;
+        engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .cpu_ram_expansion_allowed
+    };
+    assert!(!allowed(Some(26_000), 0));
+    // RAM telemetry missing at 3 s restarts only RAM's 2 s cooldown.
+    assert!(!allowed(None, 3000));
+    assert!(!allowed(Some(26_000), 3500));
+    assert!(!allowed(Some(26_000), 5499));
+    // CPU's 6 s ran from 0, and RAM's 2 s from 3.5 s, so both are cool at 6 s.
+    assert!(allowed(Some(26_000), 6000));
+}
+
+/// Each further RAM reclaim episode within the peak window doubles an extra
+/// delay before own work may grow on RAM again: 1 s, 2 s, 4 s (FR-061).
+#[test]
+fn repeated_ram_reclaim_episodes_back_off_exponentially() {
+    let cfg = config();
+    let mut engine = PolicyEngine::new();
+    let mut breached = snapshot();
+    breached.available_ram_mib = Some(700);
+    let mut now = 0;
+    let mut delays = vec![];
+    for episode in 1..=3 {
+        // A plain command holding RAM is drained for the floor: the episode starts.
+        let id = format!("a{episode}");
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                &id,
+                AllocationPhase::Running,
+                resources(0, 8000, 0),
+                Some(resources(0, 8000, 0)),
+            )],
+            facts: rootless(&[id.as_str()]),
+            ..Default::default()
+        };
+        let drained = engine.evaluate(&cfg, &breached, &input, now).unwrap();
+        assert!(drained.would_drain.contains(&id), "episode {episode}");
+        // The allocation is released; RAM is safe again from the next interval.
+        now += 500;
+        let calm = now;
+        loop {
+            let decision = engine
+                .evaluate(&cfg, &snapshot(), &PolicyInput::default(), now)
+                .unwrap();
+            if decision.admission_headroom.ram_mib > 0 {
+                delays.push(now - calm);
+                break;
+            }
+            now += 500;
+            assert!(
+                now < calm + 60_000,
+                "episode {episode} never allowed RAM again"
+            );
+        }
+        now += 500;
+    }
+    assert_eq!(delays, [1000, 2000, 4000]);
 }

@@ -153,7 +153,13 @@ fn synthetic_replay_explains_pressure_without_affecting_live_system() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(rows[4]["decision"]["expansion_allowed"], true);
+    // The external GPU memory peak at 31.5 s holds GPU headroom back for the
+    // 300 s peak window (FR-060), so GPU admission stays closed at 94 s.
+    assert_eq!(rows[4]["decision"]["expansion_allowed"], false);
+    assert_eq!(
+        rows[4]["decision"]["admission_headroom"]["gpu_memory_mib"]["example-gpu"],
+        0
+    );
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
@@ -266,11 +272,11 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
         },
         contention: cedegrid::config::ContentionConfig {
             cpu: cedegrid::config::ResourceContentionConfig {
-                cpu_ram_scale_up_cooldown_ms: Some(0),
+                scale_up_cooldown_ms: Some(0),
                 ..Default::default()
             },
             ram: cedegrid::config::ResourceContentionConfig {
-                cpu_ram_scale_up_cooldown_ms: Some(0),
+                scale_up_cooldown_ms: Some(0),
                 ..Default::default()
             },
             ..Default::default()

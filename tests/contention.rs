@@ -416,6 +416,7 @@ mod modes {
             capacity,
             external,
             principals: None,
+            background: 0,
             saturated: false,
             unknown_activity: false,
         }
@@ -552,6 +553,26 @@ mod neutral {
             principal(Some(2000), 6000),
         ]);
         assert_eq!(allowance(&view), 3500);
+    }
+
+    #[test]
+    fn system_accounts_are_background_that_never_contends() {
+        // External usage of 6000: 3000 by a principal, 3000 by system accounts,
+        // which come off the capacity and do not share it.
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 6000);
+        view.saturated = true;
+        view.background = 3000;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 3000)]);
+        assert_eq!(allowance(&view), 2500);
+        // System usage alone on a saturated host is not contention.
+        view.external = 3000;
+        view.principals = Some(vec![principal(Some(1000), 0)]);
+        assert!(!contended(
+            &view,
+            &ResourceThresholds::defaults(ResourceKind::Cpu)
+        ));
+        view.mode = ContentionMode::YieldFirst;
+        assert_eq!(allowance(&view), 3000);
     }
 
     #[test]
@@ -1421,7 +1442,7 @@ mod scenarios {
             let cooldown = config
                 .contention
                 .thresholds(cedegrid::contention::ResourceKind::Cpu)
-                .cpu_ram_cooldown_ms(ContentionMode::Performance);
+                .cooldown_ms(ContentionMode::Performance);
             if decision.cpu_ram_expansion_allowed
                 && decision.admission_headroom.cpu_millicores >= 1000
                 && now - last_growth >= cooldown

@@ -14,7 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
-from runtime_config import atomic_runtime_config, cpu_ram_cooldown
+from runtime_config import atomic_runtime_config, scale_up_cooldowns
 import subprocess
 import sys
 import tempfile
@@ -339,7 +339,7 @@ def run_case(args, directory, profile, profile_name, cpu, scenario, seed):
     config["state_dir"] = str(directory / "state")
     original_cooldown = config["gpu"]["scale_up_cooldown_ms"]
     config["gpu"]["scale_up_cooldown_ms"] = 0
-    for kind, value in cpu_ram_cooldown(0).items():
+    for kind, value in scale_up_cooldowns(0).items():
         config.setdefault("contention", {}).setdefault(kind, {}).update(value)
     config_path, job_path = directory / "config.toml", directory / "job.json"
     atomic_runtime_config(config_path, config, 'node')
@@ -347,7 +347,7 @@ def run_case(args, directory, profile, profile_name, cpu, scenario, seed):
         "scenario": scenario, "profile": profile_name, "artifact_directory": str(directory),
         "execution_id": execution_id,
         "config_overrides": {"state_dir": config["state_dir"], "gpu.scale_up_cooldown_ms": {"before": original_cooldown, "after": 0},
-                             "contention.cpu_ram_scale_up_cooldown_ms": {"after": 0}},
+                             "contention.scale_up_cooldown_ms": {"after": 0}},
         "doctor_before": checked_json([args.binary, "--config", str(config_path), "doctor"]),
         "commands": [], "status": "running", "manager_samples": [],
         "yield_decision_latency_ms": None,

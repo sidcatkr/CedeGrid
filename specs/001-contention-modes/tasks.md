@@ -497,13 +497,13 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
     file gets `terminate`;
   - in `src/agent.rs` tests: readiness reaches `AllocationFacts` and the negotiated
     `AllocationReport`.
-- [ ] T127 [P] Add principal tests in `tests/contention.rs` and `tests/policy.rs` (B6):
+- [X] T127 [P] Add principal tests in `tests/contention.rs` and `tests/policy.rs` (B6):
   - a user ID below `uid_min` is background and never a principal;
   - a new user joins only after `principal_window_intervals`, and counts toward the unattributed
     principal meanwhile;
   - a principal leaves only after the window below half the threshold;
   - the owner stays a principal below `uid_min`; unreadable owners stay one principal.
-- [ ] T128 [P] Add memory tests in `tests/policy.rs` (B7):
+- [X] T128 [P] Add memory tests in `tests/policy.rs` (B7):
   - RAM and GPU memory headroom use the external peak over `memory_peak_window_s`, including a
     quiet GPU context;
   - CPU expansion waits only for `contention.cpu.scale_up_cooldown_ms` and RAM only for its own;
@@ -528,9 +528,9 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
   report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path and
   `terminate` in `src/policy.rs` and `src/contention.rs`; remove the refused-hint retry.
-- [ ] T134 Implement principal classification in `src/policy.rs`, `src/contention.rs` and
+- [X] T134 Implement principal classification in `src/policy.rs`, `src/contention.rs` and
   `src/config.rs` (B6), and document the `hidepid=2` fallback in `docs/guarantees.md`.
-- [ ] T135 Implement the memory peak window, the per-resource cooldowns and the reclaim backoff
+- [X] T135 Implement the memory peak window, the per-resource cooldowns and the reclaim backoff
   in `src/policy.rs`, `src/config.rs` and `src/agent.rs` (B7), and rename the tools helper in
   `tools/runtime_config.py`.
 - [ ] T136 Implement the legacy GPU interpretation and warnings in `src/config.rs`, and print it
