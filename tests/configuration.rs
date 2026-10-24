@@ -70,7 +70,7 @@ fn shared_node_toml_contracts_execute() {
             assert!(!result.state_dir.exists());
         }
     }
-    assert_eq!(executed, 11);
+    assert_eq!(executed, 13);
 }
 
 #[test]
@@ -670,31 +670,42 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     let load = |body: &str| {
         Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location).unwrap()
     };
-    let raised =
-        load("[ram]\nreserve_mib = 100\nreserve_percent = 0\n[gpu]\nreserve_vram_mib = 100");
-    assert_eq!(raised.config.ram_floor_mib(32_000), 512);
-    assert_eq!(raised.config.vram_floor_mib(), 256);
-    assert!(
-        raised
+    // Below the minimum, a floor is raised to it; near the minimum and unconfirmed,
+    // to twice the minimum, so a caution option is never active unconfirmed.
+    let small_floors =
+        "[ram]\nreserve_mib = 100\nreserve_percent = 0\n[gpu]\nreserve_vram_mib = 100";
+    let raised = load(small_floors);
+    assert_eq!(raised.config.ram_floor_mib(32_000), 1024);
+    assert_eq!(raised.config.vram_floor_mib(), 512);
+    let warned = |loaded: &cedegrid::config::LoadedConfig, words: &[&str]| {
+        loaded
             .warnings
             .iter()
-            .any(|w| w.contains("ram.reserve_mib") && w.contains("512"))
-    );
+            .any(|w| words.iter().all(|word| w.contains(word)))
+    };
+    assert!(warned(&raised, &["ram.reserve_mib", "512"]));
+    assert!(warned(&raised, &["gpu.reserve_vram_mib", "256"]));
+    assert!(warned(&raised, &["acknowledge_danger = [\"small_floor\"]"]));
+    assert!(raised.config.caution_options().is_empty());
+    let acknowledged = load(&format!(
+        "{small_floors}\n[contention]\nacknowledge_danger = [\"small_floor\"]"
+    ));
+    assert_eq!(acknowledged.config.ram_floor_mib(32_000), 512);
+    assert_eq!(acknowledged.config.vram_floor_mib(), 256);
+    assert!(!warned(
+        &acknowledged,
+        &["acknowledge_danger = [\"small_floor\"]"]
+    ));
     assert!(
-        raised
-            .warnings
+        acknowledged
+            .config
+            .caution_options()
             .iter()
-            .any(|w| w.contains("gpu.reserve_vram_mib") && w.contains("256"))
+            .any(|option| option.name == "small_floor")
     );
-    // A floor below twice its minimum still loads, so 0.2 files keep loading.
+    // A floor near the minimum still loads, so 0.2 files keep loading.
     let small = load("[ram]\nreserve_mib = 800\nreserve_percent = 0");
-    assert_eq!(small.config.ram_floor_mib(32_000), 800);
-    let confirm = |w: &String| w.contains("acknowledge_danger = [\"small_floor\"]");
-    assert!(small.warnings.iter().any(confirm));
-    let acknowledged = load(
-        "[ram]\nreserve_mib = 800\nreserve_percent = 0\n[contention]\nacknowledge_danger = [\"small_floor\"]",
-    );
-    assert!(!acknowledged.warnings.iter().any(confirm));
+    assert_eq!(small.config.ram_floor_mib(32_000), 1024);
     // A percentage floor can exceed the minimum on a large host.
     let percent = load("[ram]\nreserve_mib = 0\nreserve_percent = 5");
     assert_eq!(percent.config.ram_floor_mib(32_000), 1600);
@@ -713,6 +724,10 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention]\ncritical_hint_deadline_s = 0",
         "[contention]\ncritical_hint_deadline_s = 6",
         "[contention]\nguaranteed_hint_deadline_s = 2\ncritical_hint_deadline_s = 3",
+        "[contention.ram]\nhint_deadline_s = 31",
+        "[contention.cpu]\nunknown_window_intervals = 21",
+        "[contention.cpu]\nsaturation_percent = 49",
+        "[contention.ram]\nsaturation_percent = 90",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

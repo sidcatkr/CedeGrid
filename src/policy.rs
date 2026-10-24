@@ -655,8 +655,14 @@ impl PolicyEngine {
         let cpu_schedulable = cpu_capacity.saturating_sub(cpu_reserve);
         let cpu_total = cpu_capacity.min(cpu_ceiling);
         // A saturated host suppresses measured external usage.
-        let cpu_saturated =
-            cpu_busy.is_some_and(|busy| busy.saturating_add(cpu_total / 50) >= cpu_total);
+        let saturation = u64::from(
+            config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .saturation_percent,
+        );
+        let cpu_saturated = cpu_busy
+            .is_some_and(|busy| busy.saturating_mul(100) >= cpu_total.saturating_mul(saturation));
         if !cpu_unknown && !cpu_held {
             floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
             let (members, background) =

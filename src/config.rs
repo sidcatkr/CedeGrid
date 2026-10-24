@@ -620,6 +620,8 @@ pub struct ResourceContentionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_peak_window_s: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturation_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_backoff_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_backoff_max_ms: Option<u64>,
@@ -699,6 +701,9 @@ impl ContentionConfig {
             memory_peak_window_s: set
                 .memory_peak_window_s
                 .unwrap_or(defaults.memory_peak_window_s),
+            saturation_percent: set
+                .saturation_percent
+                .unwrap_or(defaults.saturation_percent),
             reclaim_backoff_ms: set
                 .reclaim_backoff_ms
                 .unwrap_or(defaults.reclaim_backoff_ms),
@@ -846,6 +851,11 @@ impl ContentionConfig {
                 &[Ram],
                 set.guaranteed_breach_window_s.is_some(),
             )?;
+            applies(
+                "saturation_percent",
+                &[Cpu, GpuCompute],
+                set.saturation_percent.is_some(),
+            )?;
             for (field, present) in [
                 ("memory_peak_window_s", set.memory_peak_window_s.is_some()),
                 ("reclaim_backoff_ms", set.reclaim_backoff_ms.is_some()),
@@ -861,6 +871,19 @@ impl ContentionConfig {
                 "contention.{name}.mode cannot be more aggressive than contention.max_mode"
             );
             let t = self.thresholds(kind);
+            ensure!(
+                (50..=100).contains(&t.saturation_percent),
+                "contention.{name}.saturation_percent must be between 50 and 100"
+            );
+            // Bounded deadlines and windows keep escalation bounded in time (III).
+            ensure!(
+                t.hint_deadline_s <= 30,
+                "contention.{name}.hint_deadline_s must be at most 30"
+            );
+            ensure!(
+                t.unknown_window_intervals <= 20,
+                "contention.{name}.unknown_window_intervals must be at most 20"
+            );
             ensure!(
                 (1..=90).contains(&t.yield_first_margin_percent),
                 "contention.{name}.yield_first_margin_percent must be between 1 and 90"
@@ -1128,10 +1151,11 @@ impl Config {
             ));
         }
         if self.small_floor() && !self.contention.acknowledge_danger.contains("small_floor") {
-            warnings.push(
-                "a no-harm floor is near its minimum; confirm it with acknowledge_danger = [\"small_floor\"]"
-                    .into(),
-            );
+            warnings.push(format!(
+                "a no-harm floor near its minimum is raised to twice the minimum ({} MiB of RAM, {} MiB per GPU); keep it with acknowledge_danger = [\"small_floor\"]",
+                2 * MIN_RAM_FLOOR_MIB,
+                2 * MIN_VRAM_FLOOR_MIB
+            ));
         }
         for option in self.caution_options() {
             warnings.push(format!(
@@ -1202,12 +1226,28 @@ impl Config {
         let percent = total_mib
             .saturating_mul(u64::from(self.ram.reserve_percent))
             .div_ceil(100);
-        self.ram.reserve_mib.max(percent).max(MIN_RAM_FLOOR_MIB)
+        self.confirmed_floor(
+            self.ram.reserve_mib.max(percent).max(MIN_RAM_FLOOR_MIB),
+            MIN_RAM_FLOOR_MIB,
+        )
     }
 
     /// The per-device GPU memory floor, never below the minimum.
     pub fn vram_floor_mib(&self) -> u64 {
-        self.gpu.reserve_vram_mib.max(MIN_VRAM_FLOOR_MIB)
+        self.confirmed_floor(
+            self.gpu.reserve_vram_mib.max(MIN_VRAM_FLOOR_MIB),
+            MIN_VRAM_FLOOR_MIB,
+        )
+    }
+
+    /// A floor near its minimum is a caution option: without its acknowledgement
+    /// it is raised to twice the minimum, so it is never active unconfirmed.
+    fn confirmed_floor(&self, floor: u64, minimum: u64) -> u64 {
+        if self.contention.acknowledge_danger.contains("small_floor") {
+            floor
+        } else {
+            floor.max(2 * minimum)
+        }
     }
 
     /// A floor below twice its minimum, judged from the settings alone.
@@ -1226,7 +1266,7 @@ impl Config {
                 marker: RiskMarker::Caution,
             });
         }
-        if self.small_floor() {
+        if self.small_floor() && self.contention.acknowledge_danger.contains("small_floor") {
             result.push(ExceptionNotice {
                 name: "small_floor".into(),
                 marker: RiskMarker::Caution,

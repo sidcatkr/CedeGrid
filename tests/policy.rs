@@ -13,6 +13,11 @@ fn config() -> Config {
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
+    // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
+    result
+        .contention
+        .acknowledge_danger
+        .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.scale_up_cooldown_ms = 0;
     scale_up_cooldowns(&mut result, 0);

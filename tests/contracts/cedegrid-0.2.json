@@ -92,6 +92,18 @@
       "error": "ERR_CEDEGRID_CONFIG"
     },
     {
+      "id": "CFG-07-removed-floor-policy",
+      "kind": "node",
+      "toml": "config_version = 1\n[contention]\nfloor_policy = \"c\"\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-07-performance-unacknowledged",
+      "kind": "node",
+      "toml": "config_version = 1\n[contention]\ndefault_mode = \"performance\"\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
       "id": "CFG-03-symlink-config",
       "kind": "node",
       "config_path": "links/config.toml",

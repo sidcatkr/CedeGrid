@@ -83,7 +83,8 @@ again from free capacity. Unknown observations prohibit optimistic admission.
 
 Each resource runs in a contention mode, and for every resource and observation the
 targets are ordered: Yield First ≤ Neutral ≤ Performance. CPU and GPU compute are
-*contended* when they are saturated (busy within 2% of capacity) and an external
+*contended* when they are saturated (busy at or above `saturation_percent`, 98% by
+default, of capacity) and an external
 principal uses at least `principal_min_percent` of them, or when external activity of
 unknown amount exists. Principals are the account CedeGrid runs as, whatever its UID,
 and users at or above `contention.uid_min` (1000) that have used at least
@@ -157,8 +158,9 @@ failed GPU allocation. The former floor policies `b` and `c` and Neutral memory 
 names the replacement settings. Two options are marked *caution* because they let own
 work hold more capacity within the floors: Performance mode and a floor below twice its
 minimum. Performance needs `contention.acknowledge_danger = ["performance_mode"]` to
-load; a small floor without `"small_floor"` loads with a warning, so 0.2 files keep
-loading. `doctor`, `status` and node reports list active caution options. Without
+load. A floor below twice its minimum without `"small_floor"` loads, so 0.2 files keep
+loading, but is raised to twice the minimum with a warning; it applies as configured
+only once confirmed. `doctor`, `status` and node reports list active caution options. Without
 `contention.max_mode`, a job may request at most the node's most aggressive configured
 mode, so no job runs in Performance unless the operator chose it.
 Policy recordings without an allocation class retain the legacy opportunistic

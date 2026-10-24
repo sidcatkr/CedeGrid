@@ -229,6 +229,8 @@ pub struct ResourceThresholds {
     pub guaranteed_breach_window_s: u64,
     /// Memory: admission headroom uses the external peak over this window (FR-060).
     pub memory_peak_window_s: u64,
+    /// CPU, GPU compute: busy at or above this share of capacity is saturated.
+    pub saturation_percent: u8,
     /// Memory: the extra cooldown after a repeated reclaim episode, doubling up to
     /// the maximum (FR-061).
     pub reclaim_backoff_ms: u64,
@@ -259,6 +261,7 @@ impl ResourceThresholds {
             principal_min_percent: 1,
             guaranteed_breach_window_s: if kind == ResourceKind::Ram { 10 } else { 0 },
             memory_peak_window_s: 300,
+            saturation_percent: 98,
             reclaim_backoff_ms: 1000,
             reclaim_backoff_max_ms: 30_000,
         }
