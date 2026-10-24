@@ -44,6 +44,13 @@ thresholds.
 - Q: May Guaranteed allocations be paused? → A: No. Guaranteed allocations may be lowered in
   share, capped and hinted, but not paused, because a pause can break their continuity.
 
+### Session 2026-10-25
+
+- Q: How does Performance treat external activity whose amount is unknown, such as unsampled GPU
+  compute? → A: While the amount is unknown, Performance holds own work to at most Neutral's fair
+  share, counting that activity as one active principal. It is never more aggressive than
+  Neutral under unknown activity.
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -463,7 +470,9 @@ node reports with the expected per-resource values at each step.
   - let own work use all capacity external demand is not using, minus a small safety margin;
   - scale up quickly;
   - when external demand grows, yield what is needed to restore the margin and floors within the
-    mode's response time.
+    mode's response time;
+  - while external activity of unknown amount exists, hold own work to at most Neutral's fair
+    share, counting that activity as one active principal.
 - **FR-023**: No-harm floors MUST apply in every mode:
   - a minimum available host RAM;
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;

@@ -210,6 +210,12 @@ not subdirectories, because the exporter requires top-level `mod x;`. `tests/fix
 holds recorded 0.2 protocol fixtures, which must be added to the export allowlist (they are
 loaded with `include_str!`).
 
+## Interim rules
+
+- **Mixed modes.** Until jobs can request a mode (T093), the least aggressive effective mode among
+  the running allocations on a resource governs that resource's target. T093a replaces this with
+  per-allocation targets.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

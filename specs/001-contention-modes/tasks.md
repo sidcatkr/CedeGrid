@@ -530,6 +530,10 @@ workers behave unchanged (quickstart §8).
 - [ ] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
   `src/execution_model.rs`. In `src/coordinator.rs`, strip it for agents without
   `contention/1`, and place tasks with overrides only on capable agents.
+- [ ] T093a [US6] Replace the interim mixed-mode rule, where the least aggressive effective mode
+  on a resource governs its target, with per-allocation targets once jobs can request a mode
+  (T093), in `src/contention.rs` and `src/policy.rs`. Add a regression test in `tests/policy.rs`
+  with two jobs in different modes on the same resource, each held to its own mode's target.
 - [ ] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
 - [ ] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.

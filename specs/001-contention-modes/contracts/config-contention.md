@@ -36,6 +36,17 @@ noise_tolerance_mib = 256
 quiet_window_intervals = 20
 ```
 
+## CPU/RAM scale-up cooldown
+
+`contention.cpu.cpu_ram_scale_up_cooldown_ms` and `contention.ram.cpu_ram_scale_up_cooldown_ms`
+set how long CPU and RAM must stay stable before own work grows on them, at startup and after
+either was unsafe. The longer of the two applies.
+
+- Unset, each takes its resource's mode scale-up interval: 30000 in Yield First, 10000 in Neutral
+  and 2000 in Performance, or `scale_up_step_interval_s` × 1000 when that is set.
+- `gpu.scale_up_cooldown_ms` no longer affects CPU or RAM (FR-034). Set this key to keep a 0.2
+  timing.
+
 ## Load-time rules
 
 - **Missing `[contention]`.** Every resource runs in Neutral, with policies A.

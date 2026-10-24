@@ -88,6 +88,11 @@ processes whose owner cannot be read counted as one principal and the account
 CedeGrid runs as counted as the owner. Performance keeps 10% free on CPU and GPU
 compute and only the floor on memory. The margins are configurable per resource.
 
+Own work grows on CPU and RAM only after both have stayed stable for
+`contention.cpu.cpu_ram_scale_up_cooldown_ms` and `contention.ram.cpu_ram_scale_up_cooldown_ms`,
+whichever is longer. Unset, each is its mode's scale-up interval: 30 s in Yield First, 10 s in
+Neutral and 2 s in Performance. `gpu.scale_up_cooldown_ms` applies to GPU work only.
+
 Automatic yielding releases opportunistic allocations first. Guaranteed allocations
 remain fully charged, including pending and uncertain reservations. They may be
 lowered in share or capped, are never paused, and are drained automatically only
