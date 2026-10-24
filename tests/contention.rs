@@ -636,6 +636,14 @@ mod performance_and_guaranteed {
             !rule(false, false, 60_000),
             "floor policies B and C never drain"
         );
+        assert!(guaranteed_may_drain(
+            ResourceKind::Ram,
+            YieldCause::EnvelopeBreach,
+            true,
+            false,
+            5000,
+            5000
+        ));
         assert!(!guaranteed_may_drain(
             ResourceKind::Ram,
             YieldCause::ExternalGrowth,

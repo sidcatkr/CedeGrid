@@ -490,6 +490,7 @@ fn explicit_node_drain_includes_guaranteed_and_opportunistic_work() {
         ],
         explicit_drain: true,
         facts: Default::default(),
+        ..PolicyInput::default()
     };
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
@@ -1167,6 +1168,7 @@ fn explicit_drain_covers_all_pending_and_running_allocations() {
         ],
         explicit_drain: true,
         facts: Default::default(),
+        ..PolicyInput::default()
     };
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)

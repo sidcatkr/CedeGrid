@@ -1748,3 +1748,168 @@ async fn a_cancelled_task_stays_cancelled_across_an_agent_restart() {
     let assignment = service.record().unwrap().assignment_id;
     assert!(service.outcome(&assignment).yielded);
 }
+
+/// Operator limits through the policy authority (FR-057, FR-058).
+mod operator_limits {
+    use cedegrid::{
+        config::Config,
+        contention::{ResourceKey, YieldCause, YieldStep},
+        execution_model::AllocationClass,
+        model::*,
+        policy::PolicyEngine,
+    };
+    use std::collections::BTreeMap;
+
+    fn config() -> Config {
+        let mut config = Config::default();
+        config.cpu.reserve_physical_cores = 0;
+        config.ram.reserve_mib = 1000;
+        config.ram.reserve_percent = 0;
+        config
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            schema_version: SCHEMA_VERSION,
+            node_id: "local".into(),
+            observed_at_unix_ms: 100,
+            cpu_capacity_millicores: 8000,
+            physical_cores: Some(4),
+            cpu_busy_millicores: Some(3500),
+            cpu_busy_lower_millicores: None,
+            total_ram_mib: 32_000,
+            available_ram_mib: Some(26_000),
+            gpu_inventory: CapabilityStatus::Unsupported,
+            gpus: vec![],
+            capabilities: BTreeMap::new(),
+            kernel: None,
+            principals: None,
+        }
+    }
+
+    fn allocation(
+        id: &str,
+        class: AllocationClass,
+        requested: (u64, u64),
+        observed: (u64, u64),
+    ) -> Allocation {
+        let resources = |(cpu, ram): (u64, u64)| Resources {
+            cpu_millicores: cpu,
+            ram_mib: ram,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        Allocation {
+            id: id.into(),
+            class,
+            phase: AllocationPhase::Running,
+            requested: resources(requested),
+            observed: Some(resources(observed)),
+            observed_upper: None,
+            modes: Default::default(),
+        }
+    }
+
+    fn step(decision: &Decision, id: &str, key: ResourceKey) -> Option<(YieldStep, YieldCause)> {
+        decision
+            .actions
+            .iter()
+            .find(|a| a.allocation_id == id && a.resource == key)
+            .map(|a| (a.step, a.cause))
+    }
+
+    #[test]
+    fn an_envelope_breach_is_restored_per_resource_opportunistic_first_without_an_all_stop() {
+        let input = PolicyInput {
+            allocations: vec![
+                // Over its RAM request: together the work exceeds the 4000 MiB envelope.
+                allocation(
+                    "o",
+                    AllocationClass::Opportunistic,
+                    (500, 1000),
+                    (500, 3000),
+                ),
+                allocation("g", AllocationClass::Guaranteed, (500, 2000), (500, 2000)),
+                // Over its CPU request: the 2000m envelope is exceeded by usage.
+                allocation("c", AllocationClass::Opportunistic, (500, 0), (2500, 0)),
+            ],
+            envelope: Some(Resources {
+                cpu_millicores: 2000,
+                ram_mib: 4000,
+                gpu_memory_mib: BTreeMap::new(),
+            }),
+            ..PolicyInput::default()
+        };
+        let decision = PolicyEngine::new()
+            .evaluate(&config(), &snapshot(), &input, 0)
+            .unwrap();
+        assert_eq!(
+            step(&decision, "o", ResourceKey::Ram),
+            Some((YieldStep::Drain, YieldCause::EnvelopeBreach)),
+            "{:?}",
+            decision.actions
+        );
+        assert_eq!(step(&decision, "g", ResourceKey::Ram), None);
+        let cpu = step(&decision, "c", ResourceKey::Cpu).unwrap();
+        assert!(
+            cpu.0 < YieldStep::Drain && cpu.0 > YieldStep::None,
+            "{cpu:?}"
+        );
+        assert_eq!(cpu.1, YieldCause::EnvelopeBreach);
+        assert_eq!(decision.would_drain, ["o"]);
+    }
+
+    #[test]
+    fn spool_exhaustion_blocks_admission_and_drains_nothing() {
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "o",
+                    AllocationClass::Opportunistic,
+                    (500, 1000),
+                    (500, 1000),
+                ),
+                allocation("g", AllocationClass::Guaranteed, (500, 1000), (500, 1000)),
+            ],
+            spool_full: true,
+            ..PolicyInput::default()
+        };
+        let decision = PolicyEngine::new()
+            .evaluate(&config(), &snapshot(), &input, 0)
+            .unwrap();
+        assert!(decision.actions.is_empty(), "{:?}", decision.actions);
+        assert!(decision.would_drain.is_empty());
+        assert!(!decision.expansion_allowed && !decision.cpu_ram_expansion_allowed);
+        assert_eq!(decision.admission_headroom.cpu_millicores, 0);
+        assert_eq!(decision.admission_headroom.ram_mib, 0);
+        assert!(decision.reasons.iter().any(|r| r.contains("spool")));
+    }
+
+    #[test]
+    fn an_explicit_operator_drain_still_drains_every_allocation() {
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "o",
+                    AllocationClass::Opportunistic,
+                    (500, 1000),
+                    (500, 1000),
+                ),
+                allocation("g", AllocationClass::Guaranteed, (500, 1000), (500, 1000)),
+            ],
+            explicit_drain: true,
+            ..PolicyInput::default()
+        };
+        let decision = PolicyEngine::new()
+            .evaluate(&config(), &snapshot(), &input, 0)
+            .unwrap();
+        let mut drained = decision.would_drain.clone();
+        drained.sort();
+        assert_eq!(drained, ["g", "o"]);
+        assert!(
+            decision
+                .actions
+                .iter()
+                .all(|a| a.cause == YieldCause::OperatorDrain)
+        );
+    }
+}

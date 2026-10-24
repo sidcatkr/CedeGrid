@@ -270,6 +270,12 @@ pub struct PolicyInput {
     /// Missing facts mean a controllable allocation with every step available.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub facts: BTreeMap<String, AllocationFacts>,
+    /// The operator's node envelope; own work beyond it yields per resource (FR-057).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<Resources>,
+    /// The node spool budget is exhausted: admission is blocked and nothing drains (FR-058).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub spool_full: bool,
 }
 
 /// What the agent knows about an allocation that observation does not show.

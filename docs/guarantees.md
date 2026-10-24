@@ -93,6 +93,12 @@ remain fully charged, including pending and uncertain reservations. They may be
 lowered in share or capped, are never paused, and are drained automatically only
 under floor policy A. Explicit node drain retains its all-allocation stop semantics.
 
+When own work exceeds the operator's node envelope, the policy restores the envelope per
+resource through the yield ladder, releasing opportunistic work first. Guaranteed work is
+drained for it only as floor policy A allows, and a breach never stops every allocation at
+once. An exhausted node spool budget blocks admission and is reported; nothing is drained
+because of it.
+
 No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host
 RAM and `gpu.reserve_vram_mib` per GPU stay free. A breached floor blocks admission
 on that resource and releases opportunistic work holding it. Floor policy A, the

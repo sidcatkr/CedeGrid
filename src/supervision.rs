@@ -980,12 +980,14 @@ mod unix {
                             .get(&key)
                             .map_or(YieldStep::None, |s| s.step);
                         if wanted.step >= YieldStep::Drain {
-                            // Guaranteed work drains only for a floor breach or an
-                            // operator drain (supervisor-control contract).
+                            // Guaranteed work drains only for a floor or envelope
+                            // breach or an operator drain (supervisor-control contract).
                             let permitted = request.class == AllocationClass::Opportunistic
                                 || matches!(
                                     wanted.cause,
-                                    YieldCause::FloorBreach | YieldCause::OperatorDrain
+                                    YieldCause::FloorBreach
+                                        | YieldCause::EnvelopeBreach
+                                        | YieldCause::OperatorDrain
                                 );
                             if permitted && lifecycle.phase == LifecyclePhase::Running {
                                 lifecycle.request_drain(elapsed);

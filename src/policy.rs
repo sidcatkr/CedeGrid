@@ -215,7 +215,7 @@ pub struct PolicyEngine {
     unknown_since: BTreeMap<ResourceKey, u64>,
     /// When an allocation's usage became unknown (R10 window).
     allocation_unknown_since: BTreeMap<String, u64>,
-    /// When a memory floor breach began, for the Guaranteed hint deadline.
+    /// When a floor or envelope breach began, for the Guaranteed hint deadline.
     floor_breach_since: BTreeMap<ResourceKey, u64>,
 }
 
@@ -623,6 +623,11 @@ impl PolicyEngine {
                 &config.contention.thresholds(ResourceKind::Ram),
             );
         }
+        // The operator envelope bounds own work per resource (FR-057).
+        if let Some(envelope) = &input.envelope {
+            budget.cpu_millicores = budget.cpu_millicores.min(envelope.cpu_millicores);
+            budget.ram_mib = budget.ram_mib.min(envelope.ram_mib);
+        }
         for (key, floor) in [
             (ResourceKey::Cpu, cpu_reserve),
             (ResourceKey::Ram, ram_reserve),
@@ -800,6 +805,10 @@ impl PolicyEngine {
                         ));
                     }
                 }
+                let envelope_gpu = input
+                    .envelope
+                    .as_ref()
+                    .map(|e| e.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0));
                 let gpu_budget = if full_yield || telemetry_unknown {
                     if full_yield { 0 } else { memory_budget }
                 } else {
@@ -822,6 +831,7 @@ impl PolicyEngine {
                         &config.contention.thresholds(ResourceKind::GpuMemory),
                     )
                 };
+                let gpu_budget = envelope_gpu.map_or(gpu_budget, |limit| gpu_budget.min(limit));
                 budget.gpu_memory_mib.insert(gpu.uuid.clone(), gpu_budget);
                 let status = statuses.entry(key).or_default();
                 status.external = external;
@@ -984,10 +994,46 @@ impl PolicyEngine {
                         ),
                     );
                 }
+                // Own work beyond the operator envelope: usage for CPU, charges otherwise.
+                let envelope_breach = input.envelope.as_ref().is_some_and(|envelope| {
+                    let held = if kind == ResourceKind::Cpu {
+                        input
+                            .allocations
+                            .iter()
+                            .filter(|a| a.phase != AllocationPhase::Pending)
+                            .map(|a| a.observed.as_ref().map_or(0, |o| o.cpu_millicores))
+                            .fold(unknown_charge.cpu_millicores, u64::saturating_add)
+                    } else {
+                        held_charge
+                    };
+                    held > amount_of(envelope)
+                });
+                if envelope_breach {
+                    note(
+                        &mut statuses,
+                        key.clone(),
+                        "envelope_breach",
+                        format!(
+                            "own work exceeds the operator envelope of {}",
+                            amount_of(input.envelope.as_ref().unwrap_or(&Resources::default()))
+                        ),
+                    );
+                    if !floor_breach {
+                        floor_breach_since.insert(
+                            key.clone(),
+                            self.floor_breach_since
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(now_monotonic_ms),
+                        );
+                    }
+                }
                 let cause = if held || gpu_unknown {
                     YieldCause::UnknownMeasurement
                 } else if floor_breach {
                     YieldCause::FloorBreach
+                } else if envelope_breach {
+                    YieldCause::EnvelopeBreach
                 } else {
                     YieldCause::ExternalGrowth
                 };
@@ -1267,9 +1313,19 @@ impl PolicyEngine {
         if breached.contains(&ResourceKey::Ram) {
             headroom.ram_mib = 0;
         }
-        let expansion_allowed = legacy_expansion_allowed
-            || (cpu_ram_expansion_allowed
-                && headroom.gpu_memory_mib.values().any(|amount| *amount > 0));
+        // An exhausted spool blocks admission only; nothing drains for it (FR-058).
+        let cpu_ram_expansion_allowed = cpu_ram_expansion_allowed && !input.spool_full;
+        if input.spool_full {
+            headroom = Resources::default();
+            reasons.push(
+                "node spool budget exhausted; admission is blocked and no allocation is drained"
+                    .into(),
+            );
+        }
+        let expansion_allowed = !input.spool_full
+            && (legacy_expansion_allowed
+                || (cpu_ram_expansion_allowed
+                    && headroom.gpu_memory_mib.values().any(|amount| *amount > 0)));
         if !expansion_allowed {
             if !cpu_ram_expansion_allowed {
                 headroom.cpu_millicores = 0;

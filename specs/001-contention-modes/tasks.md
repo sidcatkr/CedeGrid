@@ -353,7 +353,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   - a 10% margin, floors and fast scale-up;
   - floor policies A, B and C for Guaranteed work;
   - Guaranteed work is never paused.
-- [ ] T059 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
+- [X] T059 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
   - an envelope breach is restored per resource, opportunistic work first, with no all-stop
     (FR-057);
   - spool exhaustion blocks admission and drains nothing (FR-058);
@@ -387,7 +387,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 - [ ] T067 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
   `src/supervision.rs`, skipping it for Guaranteed work under floor policy C, and verify that
   managed children inherit it.
-- [ ] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
+- [X] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
 - [X] T069 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using

@@ -2812,8 +2812,10 @@ impl AgentLoop<'_> {
             &snapshot,
             &PolicyInput {
                 allocations: allocations.clone(),
-                explicit_drain: self.stopping.is_some() || self.spool_full,
+                explicit_drain: self.stopping.is_some(),
                 facts: self.allocation_facts(records, &allocations),
+                envelope: Some(agent.capacity.clone()),
+                spool_full: self.spool_full,
             },
             self.start.elapsed().as_millis() as u64,
         )?;
@@ -2852,17 +2854,14 @@ impl AgentLoop<'_> {
         allocations: &[crate::model::Allocation],
     ) -> Result<()> {
         let agent = self.agent;
-        // Re-evaluate victims against the explicit operator envelope by cumulative
-        // reservation/actual charges, independent of a larger idle host budget.
-        let envelope_exceeded = envelope_exceeded(allocations, &agent.capacity);
-        if envelope_exceeded {
+        // The policy restores the operator envelope per resource (FR-057); an
+        // exceeded envelope only blocks admission here, never stops everything.
+        if envelope_exceeded(allocations, &agent.capacity) {
             decision.expansion_allowed = false;
             decision.cpu_ram_expansion_allowed = false;
-            decision.would_drain.extend(self.slots.keys().cloned());
             decision.reasons.push(format!(
-                "operator-approved node envelope exceeded: capacity={} allocations={}",
-                serde_json::to_string(&agent.capacity)?,
-                serde_json::to_string(&allocations)?
+                "operator-approved node envelope exceeded: capacity={}; restoring it per resource",
+                serde_json::to_string(&agent.capacity)?
             ));
         }
         let causes: BTreeMap<&str, crate::contention::YieldCause> = decision
@@ -2872,21 +2871,20 @@ impl AgentLoop<'_> {
             .map(|a| (a.allocation_id.as_str(), a.cause))
             .collect();
         for id in &decision.would_drain {
-            // Guaranteed work drains only for a floor breach the policy permits.
+            // Guaranteed work drains only for a breach the policy permits.
             if let Some(slot) = self.slots.get_mut(id)
                 && slot.drain_sent_at.is_none()
                 && (self.stopping.is_some()
-                    || self.spool_full
-                    || envelope_exceeded
                     || slot.assignment.request.class == AllocationClass::Opportunistic
-                    || causes.get(id.as_str()) == Some(&crate::contention::YieldCause::FloorBreach))
+                    || matches!(
+                        causes.get(id.as_str()),
+                        Some(
+                            crate::contention::YieldCause::FloorBreach
+                                | crate::contention::YieldCause::EnvelopeBreach
+                        )
+                    ))
             {
-                let cause = if envelope_exceeded {
-                    Some(crate::contention::YieldCause::EnvelopeBreach)
-                } else {
-                    causes.get(id.as_str()).copied()
-                };
-                drain(slot, cause);
+                drain(slot, causes.get(id.as_str()).copied());
             }
         }
         // Runtime steps go to the supervisors, which apply them to their own

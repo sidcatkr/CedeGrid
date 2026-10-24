@@ -707,9 +707,9 @@ fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     max_min_shares(input.capacity, &demands)[0].saturating_sub(owner_unmanaged)
 }
 
-/// Whether Guaranteed work may be drained (FR-024, FR-041): only for a memory
-/// floor breach, only under floor policy A, only after all opportunistic work on
-/// the resource is released and a hint's deadline has passed.
+/// Whether Guaranteed work may be drained (FR-024, FR-041, FR-057): only for a
+/// memory floor or envelope breach, only under floor policy A, only after all
+/// opportunistic work on the resource is released and a hint's deadline has passed.
 pub fn guaranteed_may_drain(
     kind: ResourceKind,
     cause: YieldCause,
@@ -719,7 +719,7 @@ pub fn guaranteed_may_drain(
     hint_deadline_ms: u64,
 ) -> bool {
     kind.is_memory()
-        && cause == YieldCause::FloorBreach
+        && matches!(cause, YieldCause::FloorBreach | YieldCause::EnvelopeBreach)
         && floor_policy_a
         && !opportunistic_left
         && breached_for_ms >= hint_deadline_ms
