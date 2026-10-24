@@ -1,8 +1,9 @@
-# Native gates deferred from batch 1
+# Native gates deferred from batches 1 and 2
 
-Batch 1 (T001–T032) was implemented and verified on macOS only. Passing tests on macOS does
-not establish Linux runtime behavior, and no gate below is recorded as qualified. Run these
-only on an authorized Linux host, and record results in `docs/validation.md`.
+Batch 1 (T001–T032) and batch 2 (US2, T033–T055) were implemented and verified on macOS only.
+Passing tests on macOS does not establish Linux runtime behavior, and no gate below is recorded
+as qualified. Run these only on an authorized Linux host, and record results in
+`docs/validation.md`.
 
 ## Environment
 
@@ -72,10 +73,50 @@ export CEDEGRID_SERVICE_TEST_MONITOR_MS=500
 
    `gpu_native` needs PyTorch with CUDA in `CEDEGRID_TEST_PYTHON`.
 
-## B. Deferred gates that need later batches
+## B. Batch 2 (US2) checks that can run now
+
+1. Compile and lint the Linux-only paths. `CgroupActuator` over the pinned leaf descriptors
+   (`LeafHandle`) and `CgroupBackend::actuator` have never been compiled, because macOS has no
+   Linux C toolchain for the dependencies:
+
+   ```sh
+   cargo clippy --locked --all-targets -- -D warnings
+   cargo test --locked --test cgroup --test supervision --test managed_supervision --test agent -- --test-threads=1
+   ```
+
+2. Rootless CPU contention (quickstart §3) and the actuation audit (T036). On Linux, signals go
+   through pidfds; the macOS runs used the verified direct-child fallback:
+
+   ```sh
+   cargo test --locked --test agent -- --exact rootless_cpu_contention_caps_the_job_and_reverses_without_drain
+   cargo test --locked --test managed_supervision -- --exact runtime_steps_reach_only_the_verified_family
+   cargo test --locked --test agent -- --exact a_reconnected_controller_still_reaches_only_the_verified_family
+   cargo test --locked --test agent -- --exact a_restarted_agent_refuses_a_reused_supervisor_pid
+   ```
+
+   Expected: all pass, with no `T` (stopped) state on the unmanaged fork or the foreign process.
+
+3. Whether the delegated subtree permits runtime `cgroup.freeze` (research R4). This uses a
+   test-created leaf and a test-owned `sleep` only:
+
+   ```sh
+   leaf=<delegated-subtree>/cedegrid-freeze-check
+   mkdir "$leaf"
+   sh -c 'echo $$ > "$1/cgroup.procs"; exec sleep 30' _ "$leaf" &
+   sleep 0.2
+   echo 1 > "$leaf/cgroup.freeze"; grep frozen "$leaf/cgroup.events"   # frozen 1
+   echo 0 > "$leaf/cgroup.freeze"; grep frozen "$leaf/cgroup.events"   # frozen 0
+   kill %1; wait; rmdir "$leaf"
+   ```
+
+   If the write is refused, authorize only `cpu.weight` and `cpu.max`; pause then uses the
+   rootless SIGSTOP fallback.
+
+## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
 |---|---|---|
-| T054 cgroup gate | US2 (T038–T053) | `CEDEGRID_TEST_CGROUP_ROOT=<delegated-subtree> cargo test --locked --test cgroup -- --ignored --exact runtime_adjust_requires_verified_membership` |
+| T054 cgroup gate | The native test `runtime_adjust_requires_verified_membership`, which T054 adds to `tests/cgroup.rs` | `CEDEGRID_TEST_CGROUP_ROOT=<delegated-subtree> cargo test --locked --test cgroup -- --ignored --exact runtime_adjust_requires_verified_membership`, then quickstart §4 |
+| GPU compute pause | US5 (T083–T087) | With T088: pause a test-owned CUDA job and record that submissions stop and its VRAM stays allocated (research R4). |
 | T088 GPU gate | US5 (T083–T087) | Quickstart §5 with `CEDEGRID_TEST_GPU_UUID=<GPU-UUID>` and an idle external context, in Neutral and in Performance, including 100 consecutive launches. T083–T087 add the exact tests. |
 | T117 thresholds | US2 and US3 | Validate SC-002–SC-004 with test-owned loads, and change defaults in `src/config.rs` only with that evidence. |
