@@ -17,7 +17,8 @@ uid_min = 1000                      # lower user IDs are background demand
 principal_window_intervals = 4      # sustained intervals to join or leave as a principal
 never_share_occupied_gpus = false   # true: no new own GPU work on devices with external contexts
 
-[contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory]
+[contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
+                                    # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode
 yield_first_margin_percent = 25
 yield_first_response_intervals = 3
@@ -27,12 +28,14 @@ neutral_tolerance_points = 15
 performance_ramp_s = 30
 performance_ramp_percent = 80
 reclaim_s = 5                       # 15 for ram and gpu_memory: Neutral and Performance escalation time
-hint_deadline_s = 5
-unknown_window_intervals = 3
+hint_deadline_s = 5                 # 1-30
+unknown_window_intervals = 3        # 1-20
+saturation_percent = 98             # cpu and gpu_compute only
 hysteresis_percent = 50
 min_step_dwell_intervals = 3
 pause_bound_s = 10
-scale_up_cooldown_ms = 30000        # cpu and ram only; unset, the mode's scale-up interval
+scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
+scale_up_cooldown_ms = 10000        # cpu and ram only; admission wait; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends for a fair share
 
 [contention.ram]                    # also [contention.gpu_memory], except the breach window
@@ -81,7 +84,10 @@ quiet_window_intervals = 20
 - **Performance without `acknowledge_danger` containing `performance_mode`.** Loading fails with
   `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`.
 - **Floors.** A floor below its minimum (512 MiB of RAM, 256 MiB per GPU) is raised to it with a
-  warning. A floor below twice its minimum without `small_floor` loads with a warning.
+  warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
+  the minimum with a warning.
+- **Performance.** `max_mode = "performance"`, `default_mode = "performance"` or any
+  per-resource Performance mode needs `performance_mode`.
 - **An active caution option.** `doctor` and `status` show it with its marker (FR-043).
 - **Negative `cpu.nice`.** Warns, and is treated as 0.
 - **Modes.** Any per-resource `mode` above `max_mode` fails validation.

@@ -22,10 +22,10 @@ Serialization contracts are in [contracts/](contracts/).
 | `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_danger` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource without `performance_mode` fails to load; a floor near its minimum without `small_floor` warns (FR-051, FR-054) |
+| `acknowledge_danger` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). The key keeps its name, as the maintainer asked; it now confirms caution options |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
-| `critical_floor_percent` | u8 | 50 | 1–99 (FR-063) |
-| `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` (FR-063) |
+| `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
+| `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
 | `uid_min` | u32 | 1000 | FR-059 |
 | `principal_window_intervals` | u32 | 4 | ≥ 1 (FR-059) |
 | `never_share_occupied_gpus` | bool | false | FR-064 |
@@ -36,7 +36,8 @@ Serialization contracts are in [contracts/](contracts/).
   `gpu.best_effort_external_processes` warns that the list is unused. `doctor` shows the
   interpretation.
 - Floors below the minimum (512 MiB host RAM, 256 MiB per GPU device) are raised to it with a
-  warning. A floor below twice its minimum is "near" it.
+  warning. A floor below twice its minimum is "near" it and, without `small_floor`, applies as
+  twice the minimum.
 - A negative `cpu.nice` warns and is treated as 0 (R5).
 
 ## ResourceThresholds (`src/config.rs`)
@@ -54,17 +55,18 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `neutral_tolerance_points` | all | 15 | 1–50 |
 | `performance_ramp_s`, `performance_ramp_percent` | all | 30, 80 | percent 1–100 |
 | `reclaim_s` | all | 5 (cpu, gpu_compute), 15 (ram, gpu_memory) | ≥ 1; how long a Neutral or Performance step has to free the contended amount before the next step |
-| `hint_deadline_s` | all | 5 | ≥ 1 |
-| `unknown_window_intervals` | all | 3 | ≥ 1 |
+| `hint_deadline_s` | all | 5 | 1–30 |
+| `unknown_window_intervals` | all | 3 | 1–20 |
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99 |
 | `pause_bound_s` | cpu, gpu_compute | 10 | ≥ 1 |
 | `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0 |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
-| `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work grows on it; independent per resource (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms` |
+| `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms`. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
 | `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060) |
 | `guaranteed_breach_window_s` | ram | 10 | 0–60 (FR-024) |
 | `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation |
+| `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated |
 
 Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 `gpu.reserve_vram_mib`.
@@ -123,8 +125,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 ### Transitions (pure, in `contention::plan_steps`)
 
 - **Escalate.**
-  - Move to the next available step when the contended amount is not freed within the mode's
-    response time and `min_step_dwell_intervals` has passed.
+  - The first step applies at once. Move to the next available step when the contended amount is
+    not freed within the mode's response time and `min_step_dwell_intervals` has passed; on the
+    critical floor path the dwell is at most the critical hint deadline.
+  - A cap whose target is zero for external demand is a pause instead, at once.
   - Memory resources skip steps 1–3 (FR-011). `hint` is available only when the allocation is
     hint-ready.
   - Guaranteed allocations never enter `pause`, and their CPU cap never goes below their

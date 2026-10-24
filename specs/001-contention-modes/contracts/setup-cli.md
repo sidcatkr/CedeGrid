@@ -38,7 +38,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource; a floor below twice its minimum |
+  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain.
@@ -51,8 +51,9 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 
 ## Writes
 
-- Setup edits only `[contention]` and the `role`-related tables, and preserves everything else
-  byte for byte.
+- Setup edits only `[contention]`, the `role`-related tables, `ram.reserve_mib` and
+  `gpu.reserve_vram_mib`, and preserves everything else byte for byte. `ram.reserve_percent` is
+  left as it is; the summary shows the resulting floor on this host.
 - It validates the result through the normal config load, then renames atomically.
 
 ## Exit status and JSON

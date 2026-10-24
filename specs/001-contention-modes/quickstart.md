@@ -48,11 +48,15 @@ cargo test --locked --test supervision -- --test-threads=1
 2. Start a test-owned external CPU load.
 
 **Expected:**
-- Within the Yield First response time (default 3 intervals), `observe` shows step `cap`
-  (duty cycle) or `lower_share` (cgroup).
-- Own CPU falls within the margin.
-- No drain or termination occurs (SC-002, SC-007).
-- After the load stops, the steps reverse.
+- A load that fits in the 25% margin leaves own work running, with any cap at most keeping the
+  margin free.
+- A load that saturates the CPU (contended) pauses the opportunistic job within 2 monitor
+  intervals (SC-002); in Neutral or Performance, `observe` shows a `cap` at the fair share
+  instead.
+- No drain or termination occurs (SC-007). After the pause bound, the job resumes at the 5%
+  minimum duty while the load lasts.
+- After the load shrinks, a held cap rises again at the mode's rate; after it stops, the steps
+  reverse.
 
 ## 4. Delegated cgroup actuation (Linux, authorized only)
 

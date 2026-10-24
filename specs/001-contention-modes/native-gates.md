@@ -196,4 +196,6 @@ copied to a named volume there; Docker's overlay filesystem is refused by design
 | T054 cgroup gate | The native test `runtime_adjust_requires_verified_membership`, which T054 adds to `tests/cgroup.rs` | `CEDEGRID_TEST_CGROUP_ROOT=<delegated-subtree> cargo test --locked --test cgroup -- --ignored --exact runtime_adjust_requires_verified_membership`, then quickstart §4 |
 | GPU compute pause | US5 (T083–T087) | With T088: pause a test-owned CUDA job and record that submissions stop and its VRAM stays allocated (research R4). |
 | T088 GPU gate | US5 (T083–T087) | Quickstart §5 with `CEDEGRID_TEST_GPU_UUID=<GPU-UUID>` and an idle external context, in Neutral and in Performance, including 100 consecutive launches. T083–T087 add the exact tests. |
-| T117 thresholds | US2 and US3 | Validate SC-002–SC-004 with test-owned loads, and change defaults in `src/config.rs` only with that evidence. |
+| T117 thresholds | US2 and US3 | Validate SC-002–SC-004 and the SC-012 reclaim bounds with test-owned loads, and change defaults in `src/config.rs` only with that evidence. |
+| GPU compute duty cycle | T087d | Duty-cycle a test-owned CUDA job and record the share's granularity against the monitor interval and the longest kernel. |
+| Runtime `memory.high` | T138 | With `CEDEGRID_TEST_CGROUP_ROOT`, apply a RAM cap step to a test-owned leaf and read it back. |

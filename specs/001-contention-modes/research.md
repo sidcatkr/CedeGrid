@@ -279,3 +279,15 @@ membership equals the verified PID set.
 - **Rationale.** FR-025 and the maintainer decision. Hardware validation (quickstart §5)
   replaces them.
 - **Alternatives considered.** Constants. Rejected by the maintainer.
+
+## Revisions after US4 (2026-10-25)
+
+The maintainer decisions B1–B14 (plan.md, "Revisions before US5") supersede parts of this
+research:
+
+- **R4.** GPU compute gets a share through the rootless SIGSTOP/SIGCONT duty cycle (T087d), and
+  a runtime RAM cap through `memory.high` is planned on delegated cgroups (T138).
+- **R11.** Victim order puts pending before class, as FR-016 and `victim_order` do.
+- **R12.** Principals need `uid_min` and the principal window; lower user IDs are background
+  demand (FR-059).
+- **R13.** The legacy GPU keys are interpreted with a warning, not ignored (FR-031).

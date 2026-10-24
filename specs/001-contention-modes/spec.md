@@ -92,8 +92,10 @@ thresholds.
   principals. Capacity a principal does not use is available to the others.
 - **Margin**: capacity own work leaves unused for external demand to grow into. Margins are set
   per mode and per resource.
-- **Contended**: a CPU or GPU compute resource is contended when it is saturated and an active
-  external principal wants it, or when it has external activity of unknown amount.
+- **Saturated**: busy at or above `saturation_percent` of capacity (default 98%).
+- **Contended**: a CPU or GPU compute resource is contended when it is saturated and an external
+  principal, or the unattributed principal, uses at least `principal_min_percent` of it, or when
+  it has external activity of unknown amount.
 - **No-harm floor**: a hard limit that applies in every mode, such as minimum available host RAM
   or minimum free memory per GPU device.
 - **Yield step**: one level of the graduated response, applied per allocation and per resource:
@@ -426,9 +428,10 @@ node reports with the expected per-resource values at each step.
 - **Configuration edited by hand to select Performance.** Loading fails unless the file also
   contains the acknowledgement entry `performance_mode`. With the entry, CedeGrid loads it and
   reports the caution option as active.
-- **A floor set near its minimum, or below it.** A floor below the minimum is raised to it. A
-  floor near the minimum without the `small_floor` entry loads with a warning, so 0.2 files keep
-  loading; setup always records the entry.
+- **A floor set near its minimum, or below it.** A floor is "near" its minimum below twice the
+  minimum. A floor below the minimum is raised to it. A floor near the minimum without the
+  `small_floor` entry still loads, so 0.2 files keep loading, but is raised to twice the minimum
+  with a warning; it applies as configured only once confirmed. Setup always records the entry.
 - **A configuration sets a removed option.** Floor policy `b` or `c`, or Neutral memory policy
   `b`, fails to load with a message that names the replacement settings.
 - **Terminal too small or lacking cursor control for the interface.** Setup falls back to
@@ -473,9 +476,9 @@ node reports with the expected per-resource values at each step.
   (default 1000) whose usage of a resource has stayed at or above `principal_min_percent` for
   `principal_window_intervals`. A principal MUST leave only after its usage has stayed below
   half that threshold for the same window. Until then, a user's usage counts toward the single
-  unattributed principal. Usage by user IDs below `uid_min` MUST count as background external
-  demand: it is subtracted from capacity and never forms a principal. Unreadable owners MUST
-  count as one external principal.
+  unattributed principal, which unreadable owners share; that principal contends once its usage
+  reaches `principal_min_percent`. Usage by user IDs below `uid_min` MUST count as background
+  external demand: it is subtracted from capacity and never forms a principal.
 - **FR-060**: Admission headroom for RAM and GPU memory MUST use the peak of external usage over
   `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Yield
   decisions use current usage.
@@ -489,11 +492,13 @@ node reports with the expected per-resource values at each step.
   - Memory contention MUST start at the hint step for hint-ready allocations, and at drain for
     the others. Pause MUST NOT be used to resolve GPU memory contention.
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
-  within a bounded time. Termination MUST be used only after drain fails within its deadline.
+  within a bounded time. Termination MUST be used only after drain fails within its deadline,
+  except on the critical floor path for a worker that does not observe the drain file (FR-063).
 - **FR-013**: Steps 1–4 MUST be reversible. When external demand recedes past a reversal
   threshold with hysteresis, steps MUST be undone in reverse order at the mode's scale-up rate.
 - **FR-014**: Pause MUST be bounded in time. A pause that does not resolve contention within the
-  bound MUST escalate to the next step.
+  bound MUST escalate to the next step. For CPU alone that is the hint, whose target also caps
+  CPU, at the 5% minimum duty for a target of zero; CPU contention alone never drains (SC-007).
 - **FR-015**: Each node MUST have exactly one authoritative policy state that decides yield steps.
   Supervisors MUST carry out that authority's steps and enforce deadlines. They MUST NOT make
   contradicting yield decisions. When the authority is lost, supervisors MUST hold the current
@@ -508,6 +513,8 @@ node reports with the expected per-resource values at each step.
   Remaining ties MUST break deterministically. Once jobs carry their own modes (FR-030), the
   owner's aggregate share comes from the node mode and cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
+  Class rules still win across tiers: every opportunistic allocation is drained before any
+  Guaranteed one (FR-024), and a Guaranteed allocation keeps its CPU request in every tier.
 - **FR-017**: Observation or control errors MUST hold the current step and block expansion. They
   MUST NOT by themselves terminate Guaranteed work. For opportunistic work they MAY escalate only
   through the bounded unknown policy (FR-008).
@@ -543,8 +550,8 @@ node reports with the expected per-resource values at each step.
   - when external demand grows, yield what is needed to restore the margin and floors within the
     mode's response time;
   - on a contended compute resource, yield down to the Neutral fair share and never below it;
-  - while external activity of unknown amount exists, hold own work to at most Neutral's fair
-    share, counting that activity as one active principal.
+  - while external activity of unknown amount exists, hold own work to Neutral's fair share,
+    counting that activity as one active principal.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
   Yield First ≤ Neutral ≤ Performance. The defaults satisfy it by construction: the Yield First
   margin exceeds the Performance margin, Neutral and Performance share the fair share under
@@ -567,7 +574,11 @@ node reports with the expected per-resource values at each step.
     the allocation is hint-ready, and, for RAM, after the breach has lasted
     `ram.guaranteed_breach_window_s`. GPU memory breaches have no window. On the critical floor
     path (FR-063), the critical hint deadline replaces the Guaranteed hint deadline and the
-    window is skipped.
+    window is skipped, and a Guaranteed allocation that does not observe the drain file may be
+    terminated as that path's last step.
+  - The envelope exception applies to RAM and GPU memory only, with the same deadlines and
+    window; a CPU envelope breach caps usage above the request and never drains Guaranteed
+    work.
 
   Explicit operator drain keeps today's behavior.
 - **FR-025**: Every threshold that steers yielding MUST be a configuration value, not a
@@ -592,6 +603,8 @@ node reports with the expected per-resource values at each step.
 - **FR-028**: Node reports MUST state admission per resource. Coordinator placement MUST honor it.
   Admission for a resource MUST be blocked while own work on that resource is above step zero.
 - **FR-029**: Nodes MUST advertise only the control capabilities they can actually apply.
+- **FR-064**: `contention.never_share_occupied_gpus` (default false) MUST, when set, block new own
+  GPU work on any device with an external context or unknown external processes, in every mode.
 
 **Configuration and compatibility**
 
@@ -618,14 +631,16 @@ node reports with the expected per-resource values at each step.
   interoperate in any combination. A peer MUST NOT reject a message because of fields it does not
   know. Features unsupported by either peer MUST stay off.
 - **FR-033**: Recorded snapshots and policy inputs from 0.2 MUST remain replayable.
-- **FR-034**: Scale-up timing MUST be configured per resource. CPU uses its own cooldown, by
-  default the mode's scale-up interval (30, 10 or 2 s). RAM and GPU memory use a memory cooldown,
-  and repeated reclaim episodes on the same memory resource MUST lengthen it by exponential
-  backoff (default 1 s doubling to at most 30 s) until a peak window passes without an episode
-  (FR-061).
+- **FR-034**: Scale-up timing MUST be configured per resource and counted from the time that
+  resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
+  interval (30, 10 or 2 s). GPU memory uses `gpu.scale_up_cooldown_ms` per device. RAM and GPU
+  memory add the reclaim backoff (FR-061). Until per-resource admission is placed on (US5),
+  CPU/RAM admission opens once both have cooled.
 - **FR-061**: A reclaim episode on a memory resource starts when any own allocation on it
-  enters the hint step or above. Each further episode within `memory_peak_window_s` doubles the
-  extra delay before own work may grow on that resource again.
+  enters the hint step or above. The n-th episode within `memory_peak_window_s` adds
+  `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
+  (default 1 s doubling to 30 s); the first episode adds 1 s. A window without an episode clears
+  the count.
 
 **Cooperative resource targets**
 
@@ -642,7 +657,8 @@ node reports with the expected per-resource values at each step.
   allocation's node report once negotiated. The policy MUST use these facts: only hint-ready
   allocations receive hints, and a refused hint is not a capability probe.
 - **FR-063**: A floor breach is critical when free memory on the resource falls below
-  `critical_floor_percent` of its floor (default 50%). On the critical path:
+  `critical_floor_percent` of its floor (default 50%, 10–90%), and never below the minimum floor
+  (FR-023). On the critical path:
   - hint-ready allocations get `critical_hint_deadline_s` (default 1 s) instead of their hint
     deadline;
   - allocations that are not hint-ready are drained at once;
@@ -661,6 +677,8 @@ node reports with the expected per-resource values at each step.
   - target share
   - current yield step per allocation
   - concise reasons
+  The negotiated node report carries mode, admission, own, external, target share and step
+  summary today; the remaining fields arrive with US8 (T112).
 - **FR-039**: Every reason MUST be one sentence and carry a stable code that tools and tests can
   rely on.
 
@@ -733,8 +751,8 @@ node reports with the expected per-resource values at each step.
 - **FR-054**: Re-running setup MUST start from the current configuration. Hand edits MUST have
   the same effect as setup choices. Performance selected by hand without the `performance_mode`
   entry MUST fail to load with an error naming the missing entry. A floor near its minimum
-  without the `small_floor` entry MUST load with a warning naming the entry, so that 0.2 files
-  keep loading (FR-031).
+  without the `small_floor` entry MUST load, so that 0.2 files keep loading (FR-031), and MUST
+  apply as twice the minimum, with a warning naming the entry.
 - **FR-055**: Cancelling setup MUST write nothing and MUST restore the terminal. If the interface
   cannot drive the terminal, setup MUST fall back to line-based prompts.
 
@@ -751,8 +769,6 @@ node reports with the expected per-resource values at each step.
   restore the envelope per resource through the yield ladder.
   - Opportunistic work is released first, by least cost.
   - Guaranteed work MUST NOT be drained except as floor policy A allows (FR-024).
-- **FR-064**: `contention.never_share_occupied_gpus` (default false) MUST, when set, block new own
-  GPU work on any device with an external context or unknown external processes, in every mode.
   - An envelope breach MUST NOT stop every allocation at once.
 - **FR-058**: When the node's spool budget is exhausted, CedeGrid MUST block new admission and
   report the condition. It MUST NOT drain allocations because of it. Explicit operator drain
@@ -805,7 +821,7 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     defaults are 80% of available capacity minus the margin, within 30 s.
   - When an external workload starts, it gets its demanded usage, up to its fair share, within
     the reclaim bounds of SC-012.
-- **SC-005**: In every mode with default policies:
+- **SC-005**: In every mode and with every caution option active:
   - Zero signals, priority changes or control-group changes are applied to external processes,
     as verified by an audit of every actuation in the test and pressure suites.
   - Zero external out-of-memory kills or external GPU allocation failures attributable to
@@ -829,16 +845,18 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   - On a non-TTY, setup never waits for input.
   - Every *caution* choice needs an explicit confirmation or acknowledgement flag.
   - With `NO_COLOR` set, no color escape sequence is emitted.
-- **SC-012**: Reclaim bounds, measured from the first observation of the demand or breach:
+- **SC-012**: Reclaim bounds, each measured from the first observation of the demand or breach:
   - CPU: 2 monitor intervals in every mode (SC-002).
   - RAM and GPU memory, opportunistic work: at most hint deadline + drain timeout + termination
-    grace + 1 monitor interval (defaults 5 + 3 + 2 + 0.5 = 10.5 s).
-  - Guaranteed memory, after opportunistic work is released: the longer of the Guaranteed hint
-    deadline and, for RAM, the breach window, plus drain timeout, grace and 1 interval
-    (defaults 10 + 3 + 2 + 0.5 = 15.5 s).
+    grace + 1 monitor interval (defaults 5 + 3 + 2 + 0.5 = 10.5 s); without a hint, drain
+    timeout + grace + 1 interval (5.5 s).
+  - Guaranteed memory alone on the resource: the longer of the Guaranteed hint deadline and, for
+    RAM, the breach window, plus drain timeout, grace and 1 interval (defaults 10 + 3 + 2 + 0.5 =
+    15.5 s). With opportunistic work on the resource, the Guaranteed drain also waits for that
+    work's release.
   - Critical floor path: critical hint deadline + drain timeout + grace + 1 interval
-    (defaults 1 + 3 + 2 + 0.5 = 6.5 s); for a worker that does not observe the drain file, grace
-    + 1 interval (2.5 s).
+    (defaults 1 + 3 + 2 + 0.5 = 6.5 s); without a hint, 5.5 s; for a worker that does not observe
+    the drain file, grace + 1 interval (2.5 s).
 - **SC-013**: Over generated observations of every resource, own work's target satisfies
   Yield First ≤ Neutral ≤ Performance in 100% of cases.
 
@@ -870,6 +888,11 @@ times assume the default 500 ms monitor interval.
 | Principal window | 4 monitor intervals (2 s) | Long enough to ignore short commands, short enough that a new user's own share follows quickly; meanwhile its usage counts toward the unattributed principal. |
 | Memory peak window | 300 s | Covers typical allocation cycles of interactive and batch work, so admission does not fill memory another workload just released. |
 | Memory reclaim backoff | 1 s doubling to 30 s | The coordinator's retry backoff pattern. |
+| Principal threshold (`principal_min_percent`) | 1% of capacity | Above measurement noise, low enough that any real external use counts. |
+| Saturation (`saturation_percent`) | 98% busy | Within the few percent of sampling error of full use; below it, external demand is still visible as usage. |
+| Neutral and Performance escalation (`reclaim_s`) | 5 s compute, 15 s memory | How long a step has to free the contended amount before the next one; the first step applies at once. |
+| Drain timeout and termination grace | 3 s and 2 s | The existing `lifecycle.drain_timeout_ms` and `lifecycle.term_grace_ms`, which SC-012 adds up. |
+| Upper bounds | `hint_deadline_s` 30 s, `unknown_window_intervals` 20, `guaranteed_hint_deadline_s` 30 s, `ram.guaranteed_breach_window_s` 60 s | Keep every escalation bounded in time (constitution III) and every delay above the critical level. |
 | Unknown-measurement window | 3 monitor intervals | Matches today's freshness limit of 3 intervals for kernel observations. |
 | Step hysteresis | Reverse only below 50% of the trigger threshold; at least 3 intervals between step changes | Damps oscillation (SC-009) without delaying a real response by more than one confirmation interval. |
 | Pause bound | 10 s | Longer pauses risk worker and lease timeouts, so contention escalates to the next step instead. |

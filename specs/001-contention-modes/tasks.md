@@ -58,7 +58,8 @@ SDKs in `python/` and `npm/`.
     `unattributed_memory_mib`, `ComputeActivity::Quiet`, and the CPU/RAM usage bounds.
 - [X] T006 [P] Write failing tests in `tests/configuration.rs` for `[contention]`:
   - the defaults `default_mode = "neutral"`, `max_mode = "performance"`, `floor_policy = "a"`
-    and `neutral_memory_policy = "a"`;
+    and `neutral_memory_policy = "a"` (*`max_mode` is unset by default since T131: the most
+    aggressive node mode*);
   - the data-model.md rules: "`default_mode ≤ max_mode`", "`yield_first_margin_percent`
     1–90; > `performance_margin_percent`", "`neutral_tolerance_points` 1–50",
     "`hysteresis_percent` 1–99", "`quiet_window_intervals` ≥ 1";
@@ -108,7 +109,8 @@ SDKs in `python/` and `npm/`.
   - `cpu.nice < 0` warns and is treated as 0.
 
   Batch 1 note: the legacy GPU key warning moved to T085. Until US5 lands those keys still
-  steer GPU admission, so a "no effect" warning would be false.
+  steer GPU admission, so a "no effect" warning would be false. *Superseded by T136: the keys
+  are interpreted with a warning (FR-031).*
 - [X] T015 Implement coordinator distributed schema 4 as one versioned migration in
   `src/coordinator.rs` and `src/state.rs`, dropping and recreating the triggers. Teach
   `src/backup.rs` and `src/upgrade.rs` the new version.
@@ -326,7 +328,7 @@ pause and then reverses, with no drain (quickstart §3).
   - record the evidence in `docs/validation.md`.
 - [X] T055 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
   external CPU load leads to `cap` within the Yield First response time, and the step reverses
-  after the load stops (quickstart §3).
+  after the load stops (quickstart §3). *SC-002 now requires 2 intervals; T125 covers it.*
 
 **Checkpoint**: graduated yielding works on owned processes, including after an agent restart.
 
@@ -335,7 +337,8 @@ pause and then reverses, with no drain (quickstart §3).
 ## Phase 5: User Story 3 - Choose a contention mode per resource (Priority: P1)
 
 **Goal**: Yield First, Neutral and Performance with the same semantics on every resource, plus
-floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
+floors, policies A/B/C (*B and C removed by T131*), the envelope and spool rules, and the
+Guaranteed rules.
 
 **Independent Test**: scripted external loads per mode match the mode definitions in
 `tests/contention.rs`.
@@ -396,7 +399,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   `src/agent.rs` (audit M1).
 - [X] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
   `max_mode`), in `src/contention.rs` and `src/agent.rs`.
-- [X] T071 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
+- [X] T071 [US3] (*SC-002 and SC-004 revised; T125 adds the new bounds*) Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
   and SC-004 with the provisional defaults.
 
 **Checkpoint**: the three modes behave as specified on CPU, RAM, GPU compute and GPU memory.
@@ -526,8 +529,10 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU
   rule in `src/contention.rs` and `src/policy.rs` (B4, B10).
 - [X] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
-  report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path and
-  `terminate` in `src/policy.rs` and `src/contention.rs`; remove the refused-hint retry.
+  report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path,
+  `terminate` and the Guaranteed wait by readiness (hint deadline, RAM window, none on GPU
+  memory, critical deadline on the critical path) in `src/policy.rs` and `src/contention.rs`;
+  remove the refused-hint retry.
 - [X] T134 Implement principal classification in `src/policy.rs`, `src/contention.rs` and
   `src/config.rs` (B6), and document the `hidepid=2` fallback in `docs/guarantees.md`.
 - [X] T135 Implement the memory peak window, the per-resource cooldowns and the reclaim backoff
@@ -538,6 +543,10 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T137 Deliver the current target at once (B13): `on_resource_target` in
   `python/cedegrid/worker.py` and `onResourceTarget` in `npm/src/worker.ts`; the child's target
   file in `src/supervision.rs`; `docs/worker-protocol.md`.
+- [X] T139 Resolve the code findings of the post-revision `/speckit-analyze` in `src/config.rs`,
+  `src/policy.rs` and `tests/contracts/cedegrid-0.2.json`: an unconfirmed near-minimum floor
+  applies as twice the minimum; `hint_deadline_s` ≤ 30 and `unknown_window_intervals` ≤ 20;
+  `saturation_percent`; the removed-option and unacknowledged-Performance config cases.
 
 **Checkpoint**: US5 starts from ordered targets, one floor policy and readiness-based hints.
 
@@ -553,7 +562,8 @@ context, under Neutral and Performance (quickstart §5).
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs`:
+- [ ] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs` (including FR-064:
+  `never_share_occupied_gpus` blocks an occupied device in every mode):
   - Neutral and Performance admit on quiet or active devices within the floors;
   - Yield First requires quiet;
   - unknown memory blocks.
@@ -573,14 +583,16 @@ context, under Neutral and Performance (quickstart §5).
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
 - [ ] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
   external usage. Batch 2 blocks Active in every mode at the launch recheck in
-  `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 floors exist, invert the
+  `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 admission by mode and the T135 peak
+  headroom protect it, invert the
   regression test `launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist`
   in `tests/policy.rs` for Neutral and Performance, keeping Yield First blocked. Do not open
   this before the floors exist.
 - [ ] T087b [US5] Make T087a's launch recheck call the same pure admission function as the policy,
   on a fresh observation, so the two cannot disagree (`src/policy.rs`, `src/agent.rs`). Test in
   `tests/policy.rs`.
-- [ ] T087c [US5] Never use pause for GPU memory contention: the ladder skips pause on GPU memory
+- [ ] T087c [US5] Regression check that pause is never used for GPU memory contention (memory skips
+  steps 1–3 since T043): the ladder skips pause on GPU memory
   for every backend, with a test in `tests/contention.rs` (FR-011).
 - [ ] T087d [US5] Approximate the GPU compute fair share by pause duty-cycling of own GPU work in
   `src/actuation.rs` and `src/policy.rs`, and document the granularity (one monitor interval,
@@ -643,7 +655,8 @@ workers behave unchanged (quickstart §8).
   - the removed floor and Neutral memory policies;
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
-- [ ] T097 [US6] Add the negotiated optional fields to the shared contract fixture
+- [ ] T097 [US6] Add the negotiated optional fields (including `AllocationReport.hint_ready` and
+  `observes_drain` from T133; T139 already added the removed-option config cases) to the shared contract fixture
   `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
   (`python/tests/numeric_interop.py`, `npm/tests/numeric-interop.ts`).
 
@@ -681,7 +694,7 @@ never blocks, and caution choices need confirmation (quickstart §7).
 ### Implementation for User Story 7
 
 - [ ] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor and margin
-  sizes, Guaranteed hint deadline), defaults from the current config, validation and the caution
+  sizes, Guaranteed hint deadline, tolerances through `--set`), defaults from the current config, validation and the caution
   mapping in `src/setup.rs` (B3).
 - [ ] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
   validate through `Config::load`, then rename atomically.
@@ -738,9 +751,12 @@ each step.
 
 ## Phase 11: Polish & Cross-Cutting Concerns
 
-- [ ] T114 Update `docs/guarantees.md` as the single normative source (FR-056):
+- [ ] T114 Update `docs/guarantees.md` as the single normative source (FR-056); Phase 6a already
+  documents the items it implemented, and this task reviews the whole document:
   - floors and their minimums;
   - floor policy A, the removed options and the caution options;
+  - the Guaranteed deadline and RAM window, the critical floor path, principals by `uid_min`,
+    peak headroom and reclaim backoff, `never_share_occupied_gpus`;
   - modes;
   - envelope and spool behavior;
   - the deprecation of `gpu.execution_mode`;
@@ -759,11 +775,15 @@ each step.
     cannot be read or the platform has no `/proc`;
   - tests in `tests/contention.rs` and `tests/telemetry.rs`, then remove the known limitation
     from `spec.md`, `plan.md` and `docs/guarantees.md`.
-- [ ] T117 Validate the provisional thresholds (SC-002–SC-004) on Linux with test-owned loads.
+
+  *T134 adds `uid_min`, the principal window and background demand (FR-059).*
+- [ ] T117 Validate the provisional thresholds (SC-002–SC-004 and the SC-012 reclaim bounds) on
+  Linux with test-owned loads.
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
   that evidence.
-- [ ] T118 Audit the pressure suite for SC-005:
+- [ ] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
+  confirmed near-minimum floor:
   - run the `tools/pressure.py` scenario with the actuation audit hook;
   - assert zero actions on external processes;
   - assert zero external OOM kills and zero external GPU allocation failures.
@@ -783,7 +803,8 @@ each step.
 - [ ] T138 Add a runtime RAM cap step on delegated cgroups (B14): `memory.high` on the allocation's
   leaf before the hint, verified by readback, in `src/cgroup.rs` and `src/actuation.rs`, with a
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
-  unavailable for RAM.
+  unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
+  then starts at a cap where a delegated cgroup allows it.
 
 ---
 
@@ -801,9 +822,11 @@ each step.
 - **US5 (Phase 7)**: needs US1 (quiet class, launch contract), Foundational negotiation (T016)
   and Phase 6a.
 - **US6 (Phase 8)**: needs Foundational (T014, T016). It can run alongside US2–US5, except T093,
-  which needs the effective-mode resolution in T070 (US3).
-- **US7 (Phase 9)**: needs Foundational config (T014). It can run alongside US1–US6.
-- **US8 (Phase 10)**: needs US1–US3 outputs.
+  which needs the effective-mode resolution in T070 (US3), and T089, which builds on T122 and
+  T129 (Phase 6a).
+- **US7 (Phase 9)**: needs Foundational config (T014) and the caution and floor rules of T131
+  (Phase 6a). It can run alongside US1–US6.
+- **US8 (Phase 10)**: needs US1–US3 outputs and the `doctor` output of T136 (Phase 6a).
 - **Polish (Phase 11)**: needs the stories it documents or validates.
 
 ### Within each story

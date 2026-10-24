@@ -58,7 +58,8 @@ These are new:
     (floor policy A), or as an explicit operator drain.
 - **Terminate.** `adjust` with step `terminate` and cause `floor_breach` (the critical floor
   path, FR-063) sends TERM to the verified family without waiting on the drain file, then KILL
-  after the grace period. A supervisor that does not know the step drains instead.
+  after the grace period, for either class; for Guaranteed work it is the critical path's last
+  step. A supervisor that does not know the step drains instead.
 - **Unknown control lines.** An unknown `kind` is reported in `detail` and ignored. Only EOF or
   an I/O error counts as agent loss (fixes audit A22).
 - **Agent loss.** On stdin EOF with no socket controller, the supervisor holds the applied

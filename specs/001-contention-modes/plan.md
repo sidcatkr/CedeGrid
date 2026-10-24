@@ -35,8 +35,9 @@ graduated, reversible yield ladder. Six pieces carry it:
   - One new direct dependency: `toml_edit` 0.22.27, which is already in `Cargo.lock` through
     `toml` 0.8 (research R13).
 - **Storage.** SQLite: the node ledger and supervisor journal in `state.rs` and
-  `execution_state.rs`, and the coordinator distributed schema, which moves 3 → 4 through an
-  explicit migration (R14).
+  `execution_state.rs`, whose node-state schema moves 5 → 6 for the terminal cancelled status
+  (T052a), and the coordinator distributed schema, which moves 3 → 4 through an explicit
+  migration (R14).
 - **Testing.**
   - `cargo test` run serially, with proptest for `contention.rs`.
   - Python `unittest`, and `node --test` for the SDKs.
@@ -53,7 +54,8 @@ graduated, reversible yield ladder. Six pieces carry it:
   - One NVML scan per interval per node, instead of N+1.
   - Validation targets from `docs/validation.md`: manager CPU ≤ 0.1/0.5 logical CPU, RSS ≤
     512 MiB.
-  - Success criteria SC-002 to SC-004 use the provisional, configurable defaults.
+  - Success criteria SC-002 to SC-004, SC-012 and SC-013 use the provisional, configurable
+    defaults.
 - **Constraints.**
   - Rootless operation.
   - Act only on owned processes.
@@ -72,7 +74,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. The only tunables for Guaranteed memory (hint deadline, RAM breach window) put risk on own work, and the critical floor path bounds them. Performance and small floors are caution options with confirmation. Negative nice is clamped to 0. No priority is ever raised. | Pass |
+| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance and small floors are caution options that apply only once confirmed. Negative nice is clamped to 0. No priority is ever raised. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -95,7 +97,7 @@ Post-design re-check: Pass. Complexity Tracking lists the single justified addit
 | **D6** One missing observation drains everything | Charge that allocation at max(request, last known), hold the resource and escalate only that allocation (R10). | `policy.rs`, `contention.rs` |
 | **N+1 policy authorities** (H2) | The agent is the only engine. Supervisors receive `adjust` and enforce deadlines plus a hold-on-loss fallback. A re-attachable `control.sock` reaches supervisors after agent restarts, and a live supervisor's journal is never rewritten (R1, R2). | `agent.rs`, `supervision.rs`, `child_supervision.rs`, contract `supervisor-control.md` |
 | **SIGKILL on any post-EXEC error** (H3) | Errors are classified: observation → gone from the supervisor; control → hold; actuation → step unavailable; journal → bounded retry, then the drain chain (opportunistic) or a hold with report (Guaranteed). SIGKILL happens only after the TERM grace (R3). | `supervision.rs` |
-| **cgroup controls written once** (H7) | `LaunchBackend::actuator()` with runtime `cpu.weight`, `cpu.max` and `cgroup.freeze` (no runtime `memory.high`: FR-011 starts memory at the hint). Each write re-verifies leaf identity and that membership equals the verified PIDs, reads back and journals. A `Limit::{Max, Value}` type, and `assert_empty` replaced for adjustable controls. Advertised controls come from actual capability (H8). | `cgroup.rs`, `execution_model.rs`, `rootless.rs`, `agent.rs` |
+| **cgroup controls written once** (H7) | `LaunchBackend::actuator()` with runtime `cpu.weight`, `cpu.max` and `cgroup.freeze` (no runtime `memory.high` yet: FR-011 starts memory at the hint; T138 adds it later and amends FR-011). Each write re-verifies leaf identity and that membership equals the verified PIDs, reads back and journals. A `Limit::{Max, Value}` type, and `assert_empty` replaced for adjustable controls. Advertised controls come from actual capability (H8). | `cgroup.rs`, `execution_model.rs`, `rootless.rs`, `agent.rs` |
 | **Drain-file-only worker signal** (H9) | `CEDEGRID_RESOURCE_TARGET_FILE`, written by atomic rename, with sequence, deadline and ack. Passed to children through `GateRequest`. The drain file is unchanged and the v2 context gains optional keys only (R6). | `supervision.rs`, `child_supervision.rs`, `actuation.rs`, `python/cedegrid/worker.py`, `npm/src/worker.ts`, `docs/worker-protocol.md` |
 | **Mixed-version heartbeat breakage** (H6) | Feature negotiation through `HeartbeatReply.features`. The agent adds new `NodeReport` fields only after `contention/1`. `LaunchRequest.contention` is `skip_serializing_if` None and stripped for 0.2 agents, and overrides are placed only on capable agents. `API_VERSION` is reused as `api/1` (R7). | `protocol.rs`, `coordinator.rs`, `agent.rs`, contract `wire-negotiation.md` |
 | Also folded in | The GPU cooldown no longer gates CPU/RAM (M1). Cost-based victims (M2, M3). Envelope and spool rules (M4, FR-057, FR-058). Agent `Drop` sends no Drain (M5). Minimum TERM grace (M6). Sampling off the deadline thread (M7). Drain accounting (M8). Preemption fixes (M9, M10). Yield cause in the ledger (M11, M12). Structured reasons (M18). Reserved VRAM (Y1). Freshness versus health (Y4). | as listed |
@@ -130,7 +132,7 @@ Each new module is a top-level `mod x;` and is added to `ALLOWLIST`.
 | `src/policy.rs` | Budget and admission keep their shape. Calls `contention`. D5 and D6 fixes. Removes the protection cap |
 | `src/telemetry.rs`, `src/kernel.rs` | Reserved/free, double-read memory, quiet class, bounds, health versus freshness. One collector per node |
 | `src/model.rs` | Snapshot schema 3; `Decision.resources`, `Decision.actions`, `Decision.exceptions`; `YieldAction`; `ReasonCode` |
-| `src/config.rs` | `[contention]`, deprecation warnings, `cpu.nice` clamp, cross-validation of staleness knobs |
+| `src/config.rs` | `[contention]`, the legacy GPU interpretation and load-time warnings, removed options, caution acknowledgements, floor minimums, `cpu.nice` clamp, cross-validation of staleness knobs |
 | `src/agent.rs` | `run()` decomposition first (slots, outbox, heartbeat, actuation). Removes supervisor-side policy. Control-socket reconnect. Envelope and spool rules |
 | `src/supervision.rs`, `src/child_supervision.rs` | Adjust and Query controls, control socket, error classification, minimum TERM grace, target file for children, `oom_score_adj` in the gate |
 | `src/cgroup.rs`, `src/execution_model.rs`, `src/rootless.rs` | `Actuator` implementations and the runtime write path |
@@ -149,15 +151,16 @@ Each new module is a top-level `mod x;` and is added to `ALLOWLIST`.
 4. **Modes (US3).** Yield First, Neutral and Performance; floors; envelope and spool; Guaranteed
    rules.
 5. **Targets (US4).** Target file, SDK APIs, children, ack.
-6. **GPU sharing and placement (US5).** Launch recheck by mode; coordinator per-resource
+6. **Revisions before US5 (Phase 6a).** B1–B14 below.
+7. **GPU sharing and placement (US5).** Launch recheck by mode; coordinator per-resource
    admission.
-7. **Configuration and compatibility (US6).** `[contention]`, deprecations, negotiation,
+8. **Configuration and compatibility (US6).** `[contention]`, deprecations, negotiation,
    schema migrations, mixed-version matrix.
-8. **Setup (US7).** Flags first (shared with agents in spec 002), then the terminal
+9. **Setup (US7).** Flags first (shared with agents in spec 002), then the terminal
    interface.
-9. **Observability (US8).** `observe`, `doctor`, `status` and node reports; reason codes;
+10. **Observability (US8).** `observe`, `doctor`, `status` and node reports; reason codes;
    `docs/guarantees.md`.
-10. **Native evidence.** cgroup and GPU gates (quickstart §4–5), after which thresholds may be
+11. **Native evidence.** cgroup and GPU gates (quickstart §4–5), after which thresholds may be
     retuned.
 
 ## Project Structure
@@ -226,7 +229,10 @@ loaded with `include_str!`).
   Performance. Within a tier, `victim_order` keeps the cost order (frees the resource, pending,
   opportunistic before Guaranteed, least progress lost, best fit, ID).
 - **Per-job ceiling.** A job's own mode also bounds it: a Yield First job on a contended resource
-  goes to zero even when the aggregate would allow more, because its mode's target is zero.
+  goes to zero even when the aggregate would allow more, because its mode's target is zero. A
+  Guaranteed job keeps its CPU request in every tier.
+- **Class first for drains.** Across tiers, every opportunistic allocation is drained before any
+  Guaranteed one (FR-024); tiers order the caps, pauses and hints.
 - **Test.** Two jobs in different modes on one resource: the Yield First job yields first and is
   held to its own target; the Performance job keeps the rest of the aggregate.
 
@@ -240,9 +246,10 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   parse so that validation can name the replacement. `SupervisorOptions.guaranteed_oom_victim`
   is removed: the gate sets `oom_score_adj` 1000 for every own process. New keys:
   `guaranteed_hint_deadline_s` and `ram.guaranteed_breach_window_s`. Floor minimums are a
-  runtime clamp with a warning, so 0.2 files keep loading. `acknowledge_danger` now accepts
-  `performance_mode` and `small_floor`. An unset `max_mode` is the most aggressive node mode, so
-  no job reaches Performance unless the operator chose it.
+  runtime clamp with a warning, so 0.2 files keep loading; an unconfirmed floor below twice its
+  minimum applies as twice the minimum. `acknowledge_danger` keeps its name, as the maintainer
+  asked, and now accepts `performance_mode` and `small_floor`. An unset `max_mode` is the most
+  aggressive node mode, so no job reaches Performance unless the operator chose it.
 - **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
   Guaranteed hint deadline. Performance and small floors are caution options with confirmation.
 - **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance).
@@ -264,7 +271,9 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   unattributed principal, so contention is detected on the first observation.
 - **B7 Memory headroom.** `PolicyEngine` keeps a max-deque of external usage per memory
   resource over `memory_peak_window_s`; admission headroom uses the peak, yielding uses current
-  usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource). RAM and GPU
+  usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource, each from its
+  own stable time). Until per-resource admission is placed on (US5), CPU/RAM admission opens once
+  both have cooled, because the coordinator places against the node budget and flags. RAM and GPU
   memory add `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th
   reclaim episode within the peak window, the coordinator's retry pattern.
 - **B8 Reclaim bounds.** SC-002 and SC-012, with scenario tests in `tests/contention.rs`.
