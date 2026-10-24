@@ -49,16 +49,16 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `mode` | all | inherits `default_mode` | ≤ `max_mode` |
 | `yield_first_margin_percent` | all | 25 | 1–90; > `performance_margin_percent` |
 | `performance_margin_percent` | cpu, gpu_compute | 10 | 0–50 |
-| `yield_first_response_intervals` | cpu, gpu_compute | 3 | ≥ 1 |
+| `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
 | `scale_up_step_interval_s` | all | 30 (Yield First), 10 (Neutral), 2 (Performance) | ≥ 1 |
-| `neutral_convergence_s` | all | 60 | ≥ 1 |
-| `neutral_tolerance_points` | all | 15 | 1–50 |
-| `performance_ramp_s`, `performance_ramp_percent` | all | 30, 80 | percent 1–100 |
-| `reclaim_s` | all | 5 (cpu, gpu_compute), 15 (ram, gpu_memory) | ≥ 1; how long a Neutral or Performance step has to free the contended amount before the next step |
+| `neutral_convergence_s` | all | 60 | ≥ 1; a success-criteria parameter read by the scenario tests and validation tools, not by the policy |
+| `neutral_tolerance_points` | all | 15 | 1–50; success-criteria parameter |
+| `performance_ramp_s`, `performance_ramp_percent` | all | 30, 80 | percent 1–100; success-criteria parameters |
+| `reclaim_s` | cpu, gpu_compute | 5 | 1–60; how long a Neutral or Performance step has to free the contended amount before the next step; memory moves on at the hint deadline |
 | `hint_deadline_s` | all | 5 | 1–30 |
 | `unknown_window_intervals` | all | 3 | 1–20 |
-| `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99 |
-| `pause_bound_s` | cpu, gpu_compute | 10 | ≥ 1 |
+| `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99; dwell 1–10 |
+| `pause_bound_s` | cpu, gpu_compute | 10 | 1–60 |
 | `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0 |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
 | `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms`. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
@@ -135,7 +135,11 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
     request. They enter `drain` only as the last step of floor policy A (FR-024, FR-057).
   - On the critical floor path, the hint deadline is `critical_hint_deadline_s`, and an
     allocation that does not observe the drain file goes to `terminate` instead of `drain`
-    (FR-063).
+    (FR-063). A Guaranteed hint waits `guaranteed_hint_deadline_s` off that path.
+  - A hint waits for its deadline, never only the response time.
+  - A pause ends at `pause_bound_s` even when nothing is contended: at the next step, else as a
+    cap at the minimum duty marked `after_pause`, which does not escalate again while the
+    contention lasts (FR-014).
 - **Relax.** While a resource is not contended, a held cap rises toward the mode's target at the
   mode's scale-up rate, so own work recovers capacity that external demand no longer uses.
 - **Hold.** Unknown measurement or authority loss keeps the current step (FR-008, FR-015).
@@ -154,7 +158,8 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 ## YieldAction (Decision output, `src/model.rs`)
 
 - Fields: `allocation_id`, `resource: ResourceKey`, `step: YieldStep`, `target: Option<u64>`,
-  `cause: YieldCause`, `code: ReasonCode`.
+  `cause: YieldCause`, `code: ReasonCode`, and for a hint `deadline_ms`, the deadline the ladder
+  enforces (FR-037). The agent passes it to the supervisor in the `adjust` step request.
 - Replaces `would_drain` as the authority's output. `would_drain` is still derived, for
   recordings and compatibility.
 

@@ -212,6 +212,7 @@ mod ladder {
             trigger_external: 4000,
             calm_since_ms: None,
             contended_since_ms: Some(0),
+            after_pause: false,
         };
         let before = plan_step(
             Some(&paused),
@@ -229,6 +230,47 @@ mod ladder {
         assert_eq!(after.state.unwrap().step, YieldStep::Hint);
     }
 
+    /// FR-014: without a hint and with no drain for CPU alone, a pause still ends at
+    /// its bound, as a cap at the minimum duty that does not become a pause again.
+    #[test]
+    fn a_pause_without_a_hint_ends_at_its_bound_as_a_minimum_duty_cap() {
+        let cpu = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
+        let paused = StepState {
+            step: YieldStep::Pause,
+            entered_at_ms: 0,
+            cause: YieldCause::ExternalGrowth,
+            target: Some(0),
+            trigger_external: 4000,
+            calm_since_ms: None,
+            contended_since_ms: Some(0),
+            after_pause: false,
+        };
+        let plain = |excess| LadderInput {
+            allow_drain: false,
+            unavailable: [YieldStep::LowerShare, YieldStep::Hint].into(),
+            target: Some(0),
+            usage: Some(0),
+            ..input(ResourceKind::Cpu, excess, 4000)
+        };
+        // Paused work uses nothing, so nothing is contended, and the bound still holds.
+        for excess in [0, 500] {
+            let before = plan_step(Some(&paused), &plain(excess), &cpu, cpu.pause_bound_ms - 1);
+            assert_eq!(before.state.unwrap().step, YieldStep::Pause, "{excess}");
+            let after = plan_step(Some(&paused), &plain(excess), &cpu, cpu.pause_bound_ms);
+            assert_eq!(after.skipped, [YieldStep::Hint], "{excess}");
+            let capped = after.state.unwrap();
+            assert_eq!(
+                (capped.step, capped.target),
+                (YieldStep::Cap, Some(0)),
+                "{excess}"
+            );
+            assert!(capped.after_pause);
+            // The minimum duty does not turn back into a pause while contended.
+            let next = plan_step(Some(&capped), &plain(500), &cpu, cpu.pause_bound_ms + 500);
+            assert_eq!(next.state.unwrap().step, YieldStep::Cap, "{excess}");
+        }
+    }
+
     #[test]
     fn steps_reverse_one_level_at_a_time_below_the_hysteresis_threshold() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::Performance);
@@ -240,6 +282,7 @@ mod ladder {
             trigger_external: 4000,
             calm_since_ms: None,
             contended_since_ms: None,
+            after_pause: false,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
         let (held, changes) = run(Some(capped.clone()), &cpu, 1..40, |_| {
@@ -269,6 +312,7 @@ mod ladder {
                 trigger_external: 4000,
                 calm_since_ms: None,
                 contended_since_ms: None,
+                after_pause: false,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
                 input(ResourceKind::Cpu, 0, 0)
@@ -907,6 +951,114 @@ mod guaranteed_policy {
         let plain = alone(&|_| critical(), ready(false, false));
         assert_eq!(plain.get(&YieldStep::Terminate), Some(&0), "{plain:?}");
         assert!(!plain.contains_key(&YieldStep::Drain), "{plain:?}");
+    }
+
+    /// A memory hint lasts its hint deadline in every mode, Yield First included,
+    /// and the hint carries the deadline the policy enforces (FR-037).
+    #[test]
+    fn memory_hints_last_their_deadline_in_every_mode_and_carry_it() {
+        let mut config = config();
+        config.contention.ram.mode = Some(ContentionMode::YieldFirst);
+        let sdk = || {
+            vec![ram(
+                "a",
+                AllocationClass::Opportunistic,
+                AllocationPhase::Running,
+                8000,
+            )]
+        };
+        let first = first_steps(
+            &config,
+            &|_| breached(),
+            sdk(),
+            BTreeMap::from([("a".into(), ready(true, true))]),
+            6000,
+        );
+        assert_eq!(
+            first.get(&("a".into(), YieldStep::Drain)),
+            Some(&5000),
+            "{first:?}"
+        );
+        let deadline = |snapshot: Snapshot| {
+            PolicyEngine::new()
+                .evaluate(
+                    &config,
+                    &snapshot,
+                    &PolicyInput {
+                        allocations: sdk(),
+                        facts: BTreeMap::from([("a".into(), ready(true, true))]),
+                        ..PolicyInput::default()
+                    },
+                    0,
+                )
+                .unwrap()
+                .actions
+                .iter()
+                .find(|a| a.step == YieldStep::Hint)
+                .and_then(|a| a.deadline_ms)
+        };
+        assert_eq!(deadline(breached()), Some(5000));
+        assert_eq!(deadline(critical()), Some(1000));
+    }
+
+    /// A Guaranteed hint gets the Guaranteed hint deadline from the hint, whatever
+    /// the resource's hint deadline (FR-024).
+    #[test]
+    fn a_guaranteed_hint_gets_the_guaranteed_deadline() {
+        for seconds in [2, 8] {
+            let mut config = config();
+            config.contention.guaranteed_hint_deadline_s = seconds;
+            config.contention.ram.guaranteed_breach_window_s = Some(0);
+            let first = first_steps(
+                &config,
+                &|_| breached(),
+                vec![ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    8000,
+                )],
+                BTreeMap::from([("g".into(), ready(true, true))]),
+                10_000,
+            );
+            assert_eq!(
+                first.get(&("g".into(), YieldStep::Drain)),
+                Some(&(seconds * 1000)),
+                "{first:?}"
+            );
+        }
+    }
+
+    /// Opportunistic work nobody can act on does not block Guaranteed release.
+    #[test]
+    fn uncontrollable_opportunistic_work_does_not_block_guaranteed_release() {
+        let mut lost = ready(false, false);
+        lost.uncontrollable = true;
+        let first = first_steps(
+            &config(),
+            &|_| critical(),
+            vec![
+                ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    6000,
+                ),
+                ram(
+                    "o",
+                    AllocationClass::Opportunistic,
+                    AllocationPhase::Running,
+                    2000,
+                ),
+            ],
+            BTreeMap::from([("g".into(), ready(false, true)), ("o".into(), lost)]),
+            3000,
+        );
+        assert_eq!(
+            first.get(&("g".into(), YieldStep::Drain)),
+            Some(&0),
+            "{first:?}"
+        );
     }
 
     /// SC-012: the policy's decision time plus the supervisor's deadlines (drain

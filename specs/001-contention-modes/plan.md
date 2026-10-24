@@ -74,7 +74,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance and small floors are caution options that apply only once confirmed. Negative nice is clamped to 0. No priority is ever raised. | Pass |
+| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance and small floors are caution options that apply only once confirmed. Negative nice is clamped to 0. No priority is ever raised. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -201,10 +201,11 @@ src/
 tests/
 ├── policy.rs            # D1–D6 inverted
 ├── contention.rs        # new: mode and ladder properties
-├── agent.rs  supervision.rs  cgroup.rs  coordinator.rs  cli.rs  configuration.rs
+├── agent.rs  supervision.rs  managed_supervision.rs  cgroup.rs  coordinator.rs
+├── cli.rs  configuration.rs  kernel.rs  state.rs  upgrade.rs  backup.rs
 └── fixtures/0.2/        # recorded 0.2 heartbeat request/response fixtures
 python/cedegrid/worker.py   python/tests/test_worker.py
-npm/src/worker.ts           npm/tests/worker-drain.test.ts (new)
+npm/src/worker.ts           npm/tests/worker-drain.test.ts  npm/tests/worker-targets.test.ts
 docs/guarantees.md  docs/worker-protocol.md  CHANGELOG.md
 ```
 

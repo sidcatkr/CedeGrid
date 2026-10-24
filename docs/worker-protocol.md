@@ -94,9 +94,9 @@ being drained:
   observing the drain file once it has acked or used the supervisor socket. Only
   hint-ready allocations receive hints; the others go straight to drain.
 - The ack shows only that the worker reads targets. Compliance is judged from
-  observed usage. If usage is still above the target at `deadline_unix_ms`, the
-  next step follows: drain for RAM and GPU memory; CPU stays capped at its target
-  and is never drained.
+  observed usage. `deadline_unix_ms` is the deadline the policy enforces. If usage
+  is still above the target then, the next step follows: drain for RAM and GPU
+  memory; CPU stays capped at its target and is never drained.
 - The context may carry `resource_target_file` and lists `resource_targets` in
   `capabilities`. Agent contexts carry only the capability, because the private
   directory is created at launch, so read the environment variable.

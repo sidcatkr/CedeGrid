@@ -562,7 +562,6 @@ fn contention_defaults_and_overrides_parse() {
     assert_eq!(defaults.floor_policy, FloorPolicy::A);
     assert_eq!(defaults.neutral_memory_policy, NeutralMemoryPolicy::A);
     assert_eq!(defaults.thresholds(ResourceKind::Cpu).reclaim_s, 5);
-    assert_eq!(defaults.thresholds(ResourceKind::Ram).reclaim_s, 15);
     assert_eq!(defaults.guaranteed_hint_deadline_s, 5);
     assert_eq!(
         defaults
@@ -728,6 +727,11 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention.cpu]\nunknown_window_intervals = 21",
         "[contention.cpu]\nsaturation_percent = 49",
         "[contention.ram]\nsaturation_percent = 90",
+        "[contention.cpu]\nmin_step_dwell_intervals = 11",
+        "[contention.cpu]\nyield_first_response_intervals = 11",
+        "[contention.cpu]\nreclaim_s = 61",
+        "[contention.cpu]\npause_bound_s = 61",
+        "[contention.ram]\nreclaim_s = 5",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

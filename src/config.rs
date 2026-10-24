@@ -851,6 +851,7 @@ impl ContentionConfig {
                 &[Ram],
                 set.guaranteed_breach_window_s.is_some(),
             )?;
+            applies("reclaim_s", &[Cpu, GpuCompute], set.reclaim_s.is_some())?;
             applies(
                 "saturation_percent",
                 &[Cpu, GpuCompute],
@@ -884,6 +885,25 @@ impl ContentionConfig {
                 t.unknown_window_intervals <= 20,
                 "contention.{name}.unknown_window_intervals must be at most 20"
             );
+            for (field, value, maximum) in [
+                (
+                    "min_step_dwell_intervals",
+                    u64::from(t.min_step_dwell_intervals),
+                    10,
+                ),
+                (
+                    "yield_first_response_intervals",
+                    u64::from(t.yield_first_response_intervals),
+                    10,
+                ),
+                ("reclaim_s", t.reclaim_s, 60),
+                ("pause_bound_s", t.pause_bound_s, 60),
+            ] {
+                ensure!(
+                    value <= maximum,
+                    "contention.{name}.{field} must be at most {maximum}"
+                );
+            }
             ensure!(
                 (1..=90).contains(&t.yield_first_margin_percent),
                 "contention.{name}.yield_first_margin_percent must be between 1 and 90"

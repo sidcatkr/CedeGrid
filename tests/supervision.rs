@@ -888,6 +888,7 @@ mod actuation {
                     step,
                     target,
                     cause: YieldCause::ExternalGrowth,
+                    deadline_ms: None,
                 },
             )]),
         }
@@ -1045,6 +1046,7 @@ mod actuation {
                                     step: YieldStep::LowerShare,
                                     target: None,
                                     cause: YieldCause::ExternalGrowth,
+                                    deadline_ms: None,
                                 },
                             ),
                             (
@@ -1053,6 +1055,7 @@ mod actuation {
                                     step: YieldStep::Hint,
                                     target: Some(1),
                                     cause: YieldCause::ExternalGrowth,
+                                    deadline_ms: None,
                                 },
                             ),
                         ]),

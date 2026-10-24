@@ -26,6 +26,9 @@ fsync, and renaming it over the target.
 
 - **Version.** Readers ignore unknown keys. They reject `version > 1` by treating the file as
   absent.
+- **Deadline.** `deadline_unix_ms` is the earliest deadline the policy enforces among the
+  current hints (FR-037): the resource's hint deadline, the Guaranteed hint deadline, or the
+  critical hint deadline.
 - **Relaxing.** A relaxed target is a new file with a higher `sequence`. An absent file means
   no target.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to

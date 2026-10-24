@@ -208,8 +208,8 @@ pub struct ResourceThresholds {
     pub neutral_tolerance_points: u8,
     pub performance_ramp_s: u64,
     pub performance_ramp_percent: u8,
-    /// How long a Neutral or Performance step has to free the contended amount
-    /// before the next step.
+    /// How long a Neutral or Performance compute step has to free the contended
+    /// amount before the next step; memory moves on at the hint deadline.
     pub reclaim_s: u64,
     pub hint_deadline_s: u64,
     pub unknown_window_intervals: u32,
@@ -249,7 +249,7 @@ impl ResourceThresholds {
             neutral_tolerance_points: 15,
             performance_ramp_s: 30,
             performance_ramp_percent: 80,
-            reclaim_s: if kind.is_memory() { 15 } else { 5 },
+            reclaim_s: 5,
             hint_deadline_s: 5,
             unknown_window_intervals: 3,
             hysteresis_percent: 50,
@@ -317,6 +317,10 @@ pub struct StepState {
     /// Since when the resource has been contended without a break.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contended_since_ms: Option<u64>,
+    /// A cap that ended a pause at its bound (FR-014); it does not become a pause
+    /// again while the contention lasts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_pause: bool,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -472,8 +476,26 @@ pub fn plan_step(
             trigger_external: input.external,
             calm_since_ms: None,
             contended_since_ms: Some(now_ms),
+            after_pause: false,
         }),
         skipped,
+    };
+    // A pause ends at its bound (FR-014): at the next step when one applies, else as
+    // a cap at the minimum duty that does not become a pause again.
+    let end_pause = || -> Option<LadderDecision> {
+        let (next, skipped) = input.next_step(YieldStep::Pause);
+        if let Some(next) = next {
+            return Some(enter(next, skipped));
+        }
+        if !input.applies(YieldStep::Cap) || input.unavailable.contains(&YieldStep::Cap) {
+            return None;
+        }
+        let mut decision = enter(YieldStep::Cap, skipped);
+        if let Some(capped) = decision.state.as_mut() {
+            capped.target = Some(input.target.unwrap_or(0));
+            capped.after_pause = true;
+        }
+        Some(decision)
     };
     if input.excess > 0 {
         let contended_since = state.and_then(|s| s.contended_since_ms).unwrap_or(now_ms);
@@ -489,17 +511,25 @@ pub fn plan_step(
             && input.target == Some(0)
             && input.applies(YieldStep::Pause)
             && !input.unavailable.contains(&YieldStep::Pause);
+        let pause_bound = current == YieldStep::Pause && persisted >= timing.pause_bound_ms;
+        // The cap that ended a pause is the last CPU step for a worker without a
+        // hint, as the hint is for one with it: it never pauses again (FR-014).
+        let after_pause = state.is_some_and(|s| s.after_pause);
+        // A hint waits for its deadline, never just the response time (FR-037).
         let due = since_change >= timing.dwell_ms
             && (current == YieldStep::None
-                || persisted >= timing.response_ms
-                || current == YieldStep::Pause && persisted >= timing.pause_bound_ms
+                || current != YieldStep::Hint && persisted >= timing.response_ms
+                || pause_bound
                 || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
             || input.unavailable.contains(&current)
             || cap_to_zero;
-        if due {
+        if due && !after_pause {
             let (next, skipped) = input.next_step(current);
             if let Some(next) = next {
                 return enter(next, skipped);
+            }
+            if pause_bound && let Some(decision) = end_pause() {
+                return decision;
             }
             if current == YieldStep::None {
                 return LadderDecision {
@@ -533,6 +563,13 @@ pub fn plan_step(
         / 100;
     let mut held = state.clone();
     held.contended_since_ms = None;
+    // Paused work uses nothing, so a pause is seldom contended; its bound still holds.
+    if current == YieldStep::Pause
+        && since_change >= timing.pause_bound_ms
+        && let Some(decision) = end_pause()
+    {
+        return decision;
+    }
     // While nothing is contended, a held cap rises toward what the mode allows now,
     // one move per scale-up interval, and a pause becomes such a cap.
     if let Some(allowed) = input.target
@@ -661,6 +698,10 @@ pub struct StepRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<u64>,
     pub cause: YieldCause,
+    /// For a hint, how long the worker has before the next step, as the policy
+    /// enforces it (FR-037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
 }
 
 /// The steps a supervisor applied, journaled so a restarted agent can learn them.

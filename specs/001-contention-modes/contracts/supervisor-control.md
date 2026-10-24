@@ -27,7 +27,7 @@ These are new:
 
 | Kind | Fields | Purpose |
 |---|---|---|
-| `adjust` | `sequence` (monotonic), `resources: {<ResourceKey>: {step, target?, cause}}` | Apply one step per resource |
+| `adjust` | `sequence` (monotonic), `resources: {<ResourceKey>: {step, target?, cause, deadline_ms?}}` | Apply one step per resource; a hint's `deadline_ms` is the deadline the policy enforces |
 | `query` | none | Ask for the current applied state |
 
 ## Supervisor → agent (`Event`)
@@ -54,8 +54,8 @@ These are new:
 - **Guaranteed class.**
   - `adjust` with `pause` is refused for Guaranteed allocations.
   - A CPU `cap` below the allocation's request is raised to the request.
-  - `drain` for Guaranteed work is accepted only with cause `floor_breach` or `envelope_breach`
-    (floor policy A), or as an explicit operator drain.
+  - `drain` for Guaranteed work is accepted only with cause `floor_breach`, with cause
+    `envelope_breach` on RAM or GPU memory (floor policy A), or as an explicit operator drain.
 - **Terminate.** `adjust` with step `terminate` and cause `floor_breach` (the critical floor
   path, FR-063) sends TERM to the verified family without waiting on the drain file, then KILL
   after the grace period, for either class; for Guaranteed work it is the critical path's last

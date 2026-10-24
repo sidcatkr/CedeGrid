@@ -974,6 +974,7 @@ fn terminate(
                 step: crate::contention::YieldStep::Terminate,
                 target: None,
                 cause: cause.unwrap_or(crate::contention::YieldCause::FloorBreach),
+                deadline_ms: None,
             },
         )]),
     };
@@ -1276,6 +1277,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
                                 step: *step,
                                 target: targets.get(key).copied(),
                                 cause: crate::contention::YieldCause::ExternalGrowth,
+                                deadline_ms: None,
                             },
                         )
                     })
@@ -3016,6 +3018,7 @@ impl AgentLoop<'_> {
                         step: action.step,
                         target: action.target,
                         cause: action.cause,
+                        deadline_ms: action.deadline_ms,
                     },
                 );
         }
@@ -3035,6 +3038,7 @@ impl AgentLoop<'_> {
                         step: crate::contention::YieldStep::None,
                         target: None,
                         cause: sent.cause,
+                        deadline_ms: None,
                     });
             }
             slot.adjust_sequence += 1;

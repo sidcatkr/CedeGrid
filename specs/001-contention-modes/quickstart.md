@@ -54,7 +54,8 @@ cargo test --locked --test supervision -- --test-threads=1
   intervals (SC-002); in Neutral or Performance, `observe` shows a `cap` at the fair share
   instead.
 - No drain or termination occurs (SC-007). After the pause bound, the job resumes at the 5%
-  minimum duty while the load lasts.
+  minimum duty, as a hint for an SDK worker or a cap for a plain command, and stays there while
+  the load lasts.
 - After the load shrinks, a held cap rises again at the mode's rate; after it stops, the steps
   reverse.
 

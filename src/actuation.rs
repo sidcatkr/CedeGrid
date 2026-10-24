@@ -288,7 +288,8 @@ pub fn remove_target_files(directory: &std::path::Path) {
 #[derive(Debug, Default)]
 pub struct TargetChannel {
     sequence: u64,
-    hints: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
+    /// Each hint's target and the deadline the policy enforces for it.
+    hints: std::collections::BTreeMap<crate::contention::ResourceKey, (u64, u64)>,
     deadline_ms: u64,
 }
 
@@ -305,19 +306,30 @@ impl TargetChannel {
         directories.iter().any(|d| read_ack(d).is_some())
     }
 
-    /// Set or clear one resource's hint; true when it changed.
+    /// Set or clear one resource's hint with the default deadline; true when it changed.
     pub fn set(&mut self, key: crate::contention::ResourceKey, target: Option<u64>) -> bool {
         match target {
-            Some(target) => self.hints.insert(key, target) != Some(target),
+            Some(target) => self.set_hint(key, target, None),
             None => self.hints.remove(&key).is_some(),
         }
+    }
+
+    /// Set one resource's hint and the deadline the policy enforces (FR-037).
+    pub fn set_hint(
+        &mut self,
+        key: crate::contention::ResourceKey,
+        target: u64,
+        deadline_ms: Option<u64>,
+    ) -> bool {
+        let hint = (target, deadline_ms.unwrap_or(self.deadline_ms));
+        self.hints.insert(key, hint) != Some(hint)
     }
 
     /// Write the current hints with the next sequence; no hints relax them.
     pub fn publish(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
         use crate::contention::ResourceKey;
         let mut targets = TargetAmounts::default();
-        for (key, amount) in &self.hints {
+        for (key, (amount, _)) in &self.hints {
             match key {
                 ResourceKey::Cpu => targets.cpu_millicores = Some(*amount),
                 ResourceKey::Ram => targets.ram_mib = Some(*amount),
@@ -333,7 +345,14 @@ impl TargetChannel {
         let target = ResourceTarget {
             version: 1,
             sequence: self.sequence,
-            deadline_unix_ms: (now.as_millis() as u64).saturating_add(self.deadline_ms),
+            // The earliest hint deadline is the one the next step follows.
+            deadline_unix_ms: (now.as_millis() as u64).saturating_add(
+                self.hints
+                    .values()
+                    .map(|(_, deadline)| *deadline)
+                    .min()
+                    .unwrap_or(self.deadline_ms),
+            ),
             step: if self.hints.is_empty() {
                 YieldStep::None
             } else {

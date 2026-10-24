@@ -21,19 +21,19 @@ never_share_occupied_gpus = false   # true: no new own GPU work on devices with 
                                     # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode
 yield_first_margin_percent = 25
-yield_first_response_intervals = 3
+yield_first_response_intervals = 3  # cpu and gpu_compute only, 1-10
 performance_margin_percent = 10
 neutral_convergence_s = 60
 neutral_tolerance_points = 15
 performance_ramp_s = 30
 performance_ramp_percent = 80
-reclaim_s = 5                       # 15 for ram and gpu_memory: Neutral and Performance escalation time
+reclaim_s = 5                       # cpu and gpu_compute only, 1-60: Neutral and Performance escalation time
 hint_deadline_s = 5                 # 1-30
 unknown_window_intervals = 3        # 1-20
 saturation_percent = 98             # cpu and gpu_compute only
 hysteresis_percent = 50
-min_step_dwell_intervals = 3
-pause_bound_s = 10
+min_step_dwell_intervals = 3        # 1-10
+pause_bound_s = 10                  # cpu and gpu_compute only, 1-60
 scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
 scale_up_cooldown_ms = 10000        # cpu and ram only; admission wait; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends for a fair share

@@ -93,10 +93,10 @@ they leave after the same number of observations below half of it. Until a user
 joins, its usage counts toward one unattributed principal, together with processes
 whose owner cannot be read, so contention is seen at once. A host that mounts `/proc`
 with `hidepid=2` always takes this path for other accounts. Usage by lower UIDs is
-background demand: it comes off the capacity and never contends. On contended compute, Yield First pauses opportunistic work,
-and Neutral and Performance hold the max-min fair share among principals: owner UIDs,
-with processes whose owner cannot be read counted as one principal and the account
-CedeGrid runs as counted as the owner. Otherwise Yield First keeps 25% of schedulable
+background demand: it comes off the capacity and never contends. On contended compute,
+Yield First pauses opportunistic work, and after `pause_bound_s` (10 s) keeps it at the
+5% minimum duty while the contention lasts; Neutral and Performance hold the max-min
+fair share among these principals. Otherwise Yield First keeps 25% of schedulable
 capacity free, and Neutral and Performance keep 10% free; they differ in how fast they
 scale up (10 s and 2 s per step). On memory, Yield First keeps 25% free beyond the floor
 and the other modes only the floor. The margins are configurable per resource. In
@@ -125,9 +125,11 @@ drained without the hint. When free memory falls below `contention.critical_floo
 (50%) of a floor, never below the minimum floor, the breach is critical: hint-ready
 workers get `contention.critical_hint_deadline_s` (1 s), others are drained at once,
 and workers that observe neither file are sent TERM without the drain-file wait.
-Reclaim stays within hint deadline + drain timeout + termination grace + one
-interval (10.5 s by default), 15.5 s for Guaranteed memory, and 6.5 s on the
-critical path. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
+Each hint carries the deadline the policy enforces for it. The provisional reclaim
+target, not yet validated on hardware, is hint deadline + drain timeout + termination
+grace + one interval until own work that has not released the memory is terminated
+(10.5 s by default), 15.5 s for Guaranteed memory alone on the resource, and 6.5 s on
+the critical path. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
 remain fully charged, including pending and uncertain reservations. They may be
 lowered in share or capped, are never paused, and their memory is drained only as the
 last step of floor policy A. Explicit node drain retains its all-allocation stop semantics.
@@ -172,7 +174,8 @@ GPU memory to Neutral unless their mode is set, `conservative_non_sharing` sets
 `contention.never_share_occupied_gpus = true`, and `auto` changes nothing. A non-empty
 `gpu.best_effort_external_processes` is reported as unused. `doctor` shows the
 interpretation and every load-time warning. Until GPU admission follows the modes,
-`gpu.execution_mode` also keeps its 0.2 effect on GPU admission.
+`gpu.execution_mode` also keeps its 0.2 effect on GPU admission, and
+`contention.never_share_occupied_gpus` uses the 0.2 non-sharing path.
 
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.

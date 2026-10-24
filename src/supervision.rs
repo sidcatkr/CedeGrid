@@ -1068,13 +1068,13 @@ mod unix {
                         if wanted.step >= YieldStep::Drain {
                             // Guaranteed work drains only for a floor or envelope
                             // breach or an operator drain (supervisor-control contract).
+                            // A Guaranteed envelope drain is for memory only (FR-024).
                             let permitted = request.class == AllocationClass::Opportunistic
-                                || matches!(
-                                    wanted.cause,
-                                    YieldCause::FloorBreach
-                                        | YieldCause::EnvelopeBreach
-                                        | YieldCause::OperatorDrain
-                                );
+                                || match wanted.cause {
+                                    YieldCause::FloorBreach | YieldCause::OperatorDrain => true,
+                                    YieldCause::EnvelopeBreach => kind.is_memory(),
+                                    _ => false,
+                                };
                             if permitted && lifecycle.phase == LifecyclePhase::Running {
                                 // The critical floor path skips the drain-file wait
                                 // for a worker that does not poll it (FR-063).
@@ -1137,8 +1137,11 @@ mod unix {
                                 applied.insert(key, current);
                                 continue;
                             }
-                            hints_changed |=
-                                targets.set(key.clone(), Some(wanted.target.unwrap_or(0)));
+                            hints_changed |= targets.set_hint(
+                                key.clone(),
+                                wanted.target.unwrap_or(0),
+                                wanted.deadline_ms,
+                            );
                             applied.insert(key.clone(), YieldStep::Hint);
                             contention.applied.insert(key, wanted);
                             continue;
@@ -1168,6 +1171,7 @@ mod unix {
                                             step,
                                             target: wanted.target,
                                             cause: wanted.cause,
+                                            deadline_ms: None,
                                         },
                                     );
                                 }

@@ -14,7 +14,9 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
     "gpu_memory:GPU-…": {"mode": "neutral", "activity": "quiet", "...": "..."}
   },
   "actions": [{"allocation_id": "a1", "resource": "cpu", "step": "cap", "target": 3000,
-               "cause": "external_growth", "code": "yield_step_cap"}],
+               "cause": "external_growth", "code": "yield_step_cap"},
+              {"allocation_id": "a2", "resource": "ram", "step": "hint", "target": 6144,
+               "cause": "floor_breach", "code": "yield_step_hint", "deadline_ms": 5000}],
   "exceptions": [{"name": "performance_mode", "marker": "caution"}],
   "would_drain": ["..."],
   "reasons": ["..."]

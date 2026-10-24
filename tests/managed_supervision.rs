@@ -840,6 +840,7 @@ fn cpu_step(
                 step,
                 target: None,
                 cause: YieldCause::ExternalGrowth,
+                deadline_ms: None,
             },
         )]),
     }
@@ -995,6 +996,8 @@ child.wait(timeout=6,poll_interval=.01)
 struct TargetScript {
     dir: std::path::PathBuf,
     key: cedegrid::contention::ResourceKey,
+    /// The hint deadline each step carries, as the policy enforces it.
+    deadline_ms: Option<u64>,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
     sent: usize,
     /// One `adjusted` report per command; readiness changes are kept apart.
@@ -1023,6 +1026,7 @@ impl supervision::SupervisorControl for TargetScript {
                     step,
                     target,
                     cause: YieldCause::FloorBreach,
+                    deadline_ms: self.deadline_ms,
                 },
             )]),
         }])
@@ -1051,12 +1055,22 @@ fn run_targets_on(
     code: &str,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
 ) -> (tempfile::TempDir, TargetScript) {
+    run_targets_with(key, None, code, steps)
+}
+
+fn run_targets_with(
+    key: cedegrid::contention::ResourceKey,
+    deadline_ms: Option<u64>,
+    code: &str,
+    steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
+) -> (tempfile::TempDir, TargetScript) {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(dir.path(), code);
     let mut script = TargetScript {
         dir: dir.path().to_owned(),
         key,
+        deadline_ms,
         steps,
         sent: 0,
         reports: vec![],
@@ -1178,6 +1192,36 @@ while not (d/'stop').exists():
         fs::read_to_string(dir.path().join("child-seen")).unwrap(),
         "100"
     );
+}
+
+/// The target file carries the deadline the policy enforces, here the 1 s of the
+/// critical floor path, not the supervisor's default (FR-037, FR-063).
+#[test]
+fn a_hint_carries_the_deadline_the_policy_enforces() {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    let (dir, _script) = run_targets_with(
+        ResourceKey::Ram,
+        Some(1000),
+        r#"
+import time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env();left=None
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    t=signals.resource_targets()
+    if t is not None and left is None: left=t.deadline_unix_ms-int(time.time()*1000)
+    time.sleep(0.005)
+(d/'left').write_text(str(left))
+"#,
+        vec![("ready", YieldStep::Hint, Some(100))],
+    );
+    let left: i64 = fs::read_to_string(dir.path().join("left"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((0..=1000).contains(&left), "{left} ms left");
 }
 
 /// The request helper is Guaranteed with 1000m of CPU: a CPU target never goes

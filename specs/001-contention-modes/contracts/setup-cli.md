@@ -63,7 +63,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 | 0 | — | Written, or unchanged |
 | 2 | `ERR_CEDEGRID_SETUP_MISSING_CHOICE` | A required choice is missing in non-interactive mode; the message names the flag |
 | 3 | `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` | A caution option was chosen without `--acknowledge-danger <option>` |
-| 4 | `ERR_CEDEGRID_CONFIG_INVALID` | The result failed validation; nothing was written |
+| 4 | `ERR_CEDEGRID_CONFIG` | The result failed validation, as configuration loading reports it; nothing was written |
 | 130 | — | Cancelled interactively |
 
 `--json` prints:

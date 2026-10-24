@@ -51,6 +51,11 @@ pub fn effective_gpu_capability(
     // not the absence of samples, so it qualifies like a fresh sample (research R8).
     let healthy = observation.is_some_and(|o| o.capability == ContentionAware);
     let evidence = fresh || (gpu.external_compute == ComputeActivity::Quiet && healthy);
+    // Until GPU admission follows the modes (T085), the new key uses the existing
+    // non-sharing path (FR-064).
+    if config.contention.never_share_occupied_gpus {
+        return Some(ConservativeNonSharing);
+    }
     match config.gpu.execution_mode {
         GpuExecutionMode::Auto => observation.map(|_| {
             if evidence {
@@ -262,6 +267,7 @@ impl PolicyEngine {
                 trigger_external: 0,
                 calm_since_ms: None,
                 contended_since_ms: None,
+                after_pause: false,
             },
         );
     }
@@ -1006,6 +1012,8 @@ impl PolicyEngine {
             allocation_unknown_since.insert(id.clone(), start);
         }
         let mut ladder = BTreeMap::new();
+        // The deadline each hint carries to its worker, as the ladder enforces it.
+        let mut hint_deadlines: BTreeMap<(String, ResourceKey), u64> = BTreeMap::new();
         let mut actions = Vec::new();
         let mut breached: BTreeSet<ResourceKey> = BTreeSet::new();
         let mut floor_breach_since = BTreeMap::new();
@@ -1025,6 +1033,7 @@ impl PolicyEngine {
                     target: None,
                     cause: YieldCause::OperatorDrain,
                     code: "yield_step_drain".into(),
+                    deadline_ms: None,
                 });
             }
         } else {
@@ -1163,44 +1172,35 @@ impl PolicyEngine {
                 };
                 let guaranteed =
                     |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
-                let opportunistic_left = input
-                    .allocations
-                    .iter()
-                    .any(|a| !guaranteed(a) && amount_of(&charges[&a.id]) > 0);
+                // Opportunistic work nobody can act on cannot be released first.
+                let opportunistic_left = input.allocations.iter().any(|a| {
+                    !guaranteed(a)
+                        && amount_of(&charges[&a.id]) > 0
+                        && !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable)
+                });
                 // Guaranteed memory is drained last (FR-024): after its hint deadline
                 // when it can take a hint and, for RAM, the breach window. The critical
                 // path uses the critical hint deadline and skips the window (FR-063).
                 let breached_for = floor_breach_since
                     .get(&key)
                     .map_or(0, |start| now_monotonic_ms.saturating_sub(*start));
-                let guaranteed_drain = |hint_ready: bool| {
-                    let wait_s = if critical {
-                        if hint_ready {
-                            config.contention.critical_hint_deadline_s
-                        } else {
-                            0
-                        }
+                // The ladder's hint step gives Guaranteed work its own hint deadline;
+                // RAM also waits for the breach window, except on the critical path.
+                let guaranteed_drain = guaranteed_may_drain(
+                    kind,
+                    cause,
+                    opportunistic_left,
+                    breached_for,
+                    if critical {
+                        0
                     } else {
-                        let hint = if hint_ready {
-                            config.contention.guaranteed_hint_deadline_s
-                        } else {
-                            0
-                        };
-                        hint.max(
-                            config
-                                .contention
-                                .thresholds(kind)
-                                .guaranteed_breach_window_s,
-                        )
-                    };
-                    guaranteed_may_drain(
-                        kind,
-                        cause,
-                        opportunistic_left,
-                        breached_for,
-                        wait_s.saturating_mul(1000),
-                    )
-                };
+                        config
+                            .contention
+                            .thresholds(kind)
+                            .guaranteed_breach_window_s
+                            .saturating_mul(1000)
+                    },
+                );
                 let candidate = |a: &&Allocation| {
                     a.phase != AllocationPhase::Draining
                         && allocation_unknown_since.get(&a.id).is_none_or(|start| {
@@ -1295,6 +1295,14 @@ impl PolicyEngine {
                             .find(|a| a.id == victim.id)
                             .map_or(0, kept_cpu);
                         let state = self.ladder.get(&(victim.id.clone(), key.clone()));
+                        // A Guaranteed hint waits the Guaranteed hint deadline (FR-024).
+                        let mut victim_timing = timing.clone();
+                        if victim.guaranteed && kind.is_memory() && !critical {
+                            victim_timing.hint_deadline_ms = config
+                                .contention
+                                .guaranteed_hint_deadline_s
+                                .saturating_mul(1000);
+                        }
                         let mut unavailable = facts(&victim.id)
                             .unavailable
                             .get(&key)
@@ -1318,7 +1326,7 @@ impl PolicyEngine {
                                 // Running work is never drained for CPU alone (SC-002);
                                 // pause frees it completely.
                                 allow_drain: if victim.guaranteed {
-                                    guaranteed_drain(facts(&victim.id).hint_ready)
+                                    guaranteed_drain
                                 } else {
                                     pending_pass || kind != ResourceKind::Cpu
                                 },
@@ -1341,7 +1349,7 @@ impl PolicyEngine {
                                     .saturating_add(kept),
                                 ),
                             },
-                            &timing,
+                            &victim_timing,
                             now_monotonic_ms,
                         );
                         if !decision.skipped.is_empty() {
@@ -1366,6 +1374,14 @@ impl PolicyEngine {
                             && !facts(&victim.id).observes_drain
                         {
                             next.step = YieldStep::Terminate;
+                        }
+                        if let Some(next) = &decision.state
+                            && next.step == YieldStep::Hint
+                        {
+                            hint_deadlines.insert(
+                                (victim.id.clone(), key.clone()),
+                                victim_timing.hint_deadline_ms,
+                            );
                         }
                         if let Some(next) = &decision.state {
                             // A newly applied step is expected to release its share;
@@ -1434,6 +1450,7 @@ impl PolicyEngine {
                     target: state.target,
                     cause: state.cause,
                     code: format!("yield_step_{}", step_name(state.step)),
+                    deadline_ms: hint_deadlines.get(&(id.clone(), key.clone())).copied(),
                 });
             }
         }

@@ -291,3 +291,5 @@ research:
 - **R12.** Principals need `uid_min` and the principal window; lower user IDs are background
   demand (FR-059).
 - **R13.** The legacy GPU keys are interpreted with a warning, not ignored (FR-031).
+- **R5.** The optional launch-time `SCHED_IDLE` for Yield First CPU is not adopted in this
+  feature; launch keeps the existing non-negative nice, and caps and pauses carry the response.

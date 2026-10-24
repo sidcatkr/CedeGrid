@@ -362,6 +362,9 @@ pub struct YieldAction {
     pub target: Option<u64>,
     pub cause: crate::contention::YieldCause,
     pub code: String,
+    /// For a hint, the deadline the policy enforces before the next step (FR-037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
 }
 
 /// Per-resource state reported in decisions, `observe`, `doctor` and node reports.

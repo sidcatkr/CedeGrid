@@ -234,8 +234,8 @@ pause and then reverses, with no drain (quickstart §3).
   order:
   1. uncontrollable allocations are excluded;
   2. the victim must free the contended resource;
-  3. opportunistic before Guaranteed;
-  4. pending before running;
+  3. pending before running;
+  4. opportunistic before Guaranteed (FR-016 orders pending first);
   5. least progress lost;
   6. best fit;
   7. assignment ID as the tie-break.
@@ -394,7 +394,7 @@ Guaranteed rules.
 - [X] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
-- [X] T069 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
+- [X] T069 [US3] (*the key is `scale_up_cooldown_ms` per resource since T135*) Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
   `cpu_ram_scale_up_cooldown_ms`, in `src/policy.rs` and in the launch-slot ramp in
   `src/agent.rs` (audit M1).
 - [X] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
@@ -548,6 +548,22 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   applies as twice the minimum; `hint_deadline_s` ≤ 30 and `unknown_window_intervals` ≤ 20;
   `saturation_percent`; the removed-option and unacknowledged-Performance config cases.
 
+- [X] T140 Resolve the second `/speckit-analyze` pass in `src/contention.rs`, `src/policy.rs`,
+  `src/config.rs`, `src/actuation.rs` and `src/supervision.rs`, with tests in
+  `tests/contention.rs`, `tests/policy.rs`, `tests/configuration.rs` and
+  `tests/managed_supervision.rs`:
+  - upper bounds for `min_step_dwell_intervals`, `yield_first_response_intervals`,
+    `reclaim_s` (compute only) and `pause_bound_s`;
+  - a pause ends at its bound even when nothing is contended, as a minimum-duty cap for a
+    worker without a hint, which does not pause again;
+  - a hint waits for its deadline only, and carries the deadline the policy enforces to the
+    target file (`YieldAction.deadline_ms`, `StepRequest.deadline_ms`);
+  - a Guaranteed hint waits the Guaranteed hint deadline from the hint; the RAM window counts
+    from the breach;
+  - uncontrollable opportunistic work does not block Guaranteed release;
+  - `never_share_occupied_gpus` uses the existing non-sharing path until T085;
+  - the supervisor accepts a Guaranteed envelope drain on memory only.
+
 **Checkpoint**: US5 starts from ordered targets, one floor policy and readiness-based hints.
 
 ---
@@ -655,7 +671,8 @@ workers behave unchanged (quickstart §8).
   - the removed floor and Neutral memory policies;
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
-- [ ] T097 [US6] Add the negotiated optional fields (including `AllocationReport.hint_ready` and
+- [ ] T097 [US6] Add the worker-context keys `resource_target_file` and `capabilities`, the
+  target-file format, and the negotiated optional fields (including `AllocationReport.hint_ready` and
   `observes_drain` from T133; T139 already added the removed-option config cases) to the shared contract fixture
   `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
   (`python/tests/numeric_interop.py`, `npm/tests/numeric-interop.ts`).

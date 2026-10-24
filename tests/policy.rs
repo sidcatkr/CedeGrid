@@ -2298,6 +2298,7 @@ fn d4_cpu_contention_caps_instead_of_draining() {
             target: Some(2400),
             cause: cedegrid::contention::YieldCause::ExternalGrowth,
             code: "yield_step_cap".into(),
+            deadline_ms: None,
         }]
     );
     assert_eq!(contended.admission_headroom.cpu_millicores, 0);
@@ -2550,7 +2551,16 @@ fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
             steps.push(step);
         }
     }
-    assert_eq!(steps, [Some(YieldStep::Cap), Some(YieldStep::Pause)]);
+    // The pause ends at its bound as a cap at the minimum duty, which then holds
+    // (FR-014); running CPU work is never drained.
+    assert_eq!(
+        steps,
+        [
+            Some(YieldStep::Cap),
+            Some(YieldStep::Pause),
+            Some(YieldStep::Cap)
+        ]
+    );
 }
 
 /// CPU/RAM admission waits its own cooldown, whose default follows the mode's
@@ -2923,4 +2933,20 @@ fn repeated_ram_reclaim_episodes_back_off_exponentially() {
         now += 500;
     }
     assert_eq!(delays, [1000, 2000, 4000]);
+}
+
+/// Until GPU admission follows the modes, `never_share_occupied_gpus` uses the
+/// existing non-sharing path, so the legacy key's replacement takes effect (FR-064).
+#[test]
+fn never_share_occupied_gpus_uses_the_non_sharing_path() {
+    let mut cfg = config();
+    let snap = large_gpu_snapshot(2048, vec![4242]);
+    let auto =
+        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]);
+    assert_ne!(auto, Some(GpuExecutionCapability::ConservativeNonSharing));
+    cfg.contention.never_share_occupied_gpus = true;
+    assert_eq!(
+        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]),
+        Some(GpuExecutionCapability::ConservativeNonSharing)
+    );
 }

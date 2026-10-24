@@ -536,6 +536,7 @@ fn applied_steps_are_journaled_for_the_running_attempt_only() {
                 step: YieldStep::Cap,
                 target: Some(250),
                 cause: YieldCause::ExternalGrowth,
+                deadline_ms: None,
             },
         )]),
     };
