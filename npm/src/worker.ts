@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
-import { readFileSync, existsSync, promises as fs } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, renameSync, promises as fs } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
@@ -17,6 +18,8 @@ export interface WorkerDescriptor extends AttemptIdentity {
     task_id: string;
     output_dir?: string;
     drain_file?: string;
+    resource_target_file?: string;
+    capabilities?: string[];
     inputs?: JsonValue[];
     resume?: JsonValue;
 }
@@ -170,8 +173,90 @@ export async function spawnManaged(argv: string[], options: SpawnOptions): Promi
         throw new SpawnUncertain(requestId, { cause });
     }
 }
+/** A "use less" target from the supervisor. Unset amounts carry no target. */
+export interface ResourceTargets {
+    sequence: bigint;
+    deadlineUnixMs: bigint;
+    step: string;
+    cpuMillicores?: bigint;
+    ramMib?: bigint;
+    gpuMemoryMib: Record<string, bigint>;
+}
+/** Parse a target file; a missing, invalid or newer-version file is no target. */
+function readTargets(path: string): ResourceTargets | null {
+    let value: any;
+    try {
+        value = parseJson(readFileSync(path, 'utf8'));
+    }
+    catch {
+        return null;
+    }
+    const amount = (v: unknown): v is bigint => typeof v === 'bigint' && v >= 0n;
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1n)
+        return null;
+    const { sequence, deadline_unix_ms: deadline, step, targets } = value;
+    if (!amount(sequence) || !amount(deadline) || typeof step !== 'string' || !targets || typeof targets !== 'object' || Array.isArray(targets))
+        return null;
+    const { cpu_millicores: cpu, ram_mib: ram, gpu_memory_mib: gpu = {} } = targets;
+    if ((cpu !== undefined && !amount(cpu)) || (ram !== undefined && !amount(ram)) || !gpu || typeof gpu !== 'object' || Array.isArray(gpu) || !Object.values(gpu).every(amount))
+        return null;
+    return { sequence, deadlineUnixMs: deadline, step, cpuMillicores: cpu, ramMib: ram, gpuMemoryMib: { ...gpu } };
+}
+/** Drain and resource-target signals from CEDEGRID_DRAIN_FILE and
+ * CEDEGRID_RESOURCE_TARGET_FILE alone, so managed children can use them. */
+export class ResourceSignals {
+    private readonly hooks: Array<(targets: ResourceTargets) => void> = [];
+    private notified?: bigint;
+    private acked?: bigint;
+    constructor(readonly drainFile?: string, readonly targetFile?: string) { }
+    static fromEnv(): ResourceSignals { return new ResourceSignals(process.env.CEDEGRID_DRAIN_FILE || undefined, process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined); }
+    resourceTargets(): ResourceTargets | null {
+        const targets = this.targetFile ? readTargets(this.targetFile) : null;
+        this.acknowledge(targets ? targets.sequence : 0n);
+        return targets;
+    }
+    onResourceTarget(callback: (targets: ResourceTargets) => void): void {
+        if (typeof callback !== 'function')
+            throw new ValidationError('resource-target callback must be a function');
+        this.hooks.push(callback);
+    }
+    /** Read the targets and call each hook once per new sequence. */
+    poll(): ResourceTargets | null {
+        const targets = this.resourceTargets();
+        if (targets && (this.notified === undefined || targets.sequence > this.notified)) {
+            this.notified = targets.sequence;
+            for (const callback of [...this.hooks]) {
+                try {
+                    callback(targets);
+                }
+                catch (error) {
+                    console.warn('resource-target hook failed', error);
+                }
+            }
+        }
+        return targets;
+    }
+    draining(): boolean { this.poll(); return !!this.drainFile && existsSync(this.drainFile); }
+    /** Record the highest sequence seen; it shows the worker reads targets. */
+    private acknowledge(sequence: bigint): void {
+        if (!this.targetFile || (this.acked !== undefined && sequence <= this.acked))
+            return;
+        const ack = join(dirname(this.targetFile), 'resource-target.ack');
+        const temporary = join(dirname(this.targetFile), `.resource-target.ack.${process.pid}`);
+        try {
+            writeFileSync(temporary, `${sequence}\n`);
+            renameSync(temporary, ack);
+        }
+        catch (error) {
+            console.warn('resource-target ack could not be written; hints stay unavailable', error);
+            return;
+        }
+        this.acked = sequence;
+    }
+}
 export class WorkerContext {
     private readonly client: SupervisorTransport;
+    private readonly signals: ResourceSignals;
     private readonly artifacts = new Map<string, SealedArtifact>();
     private readonly drainHooks: Array<(context: WorkerContext) => void> = [];
     private drainNotified = false;
@@ -182,6 +267,7 @@ export class WorkerContext {
             textField(context[key], key, true);
         integer(context.generation, 'generation', 1n, I64_MAX);
         this.client = client ?? SupervisorClient.fromEnv(context);
+        this.signals = new ResourceSignals(context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE, context.resource_target_file ?? process.env.CEDEGRID_RESOURCE_TARGET_FILE);
     }
     static fromEnv(): WorkerContext { return new WorkerContext(readContext()); }
     get identity(): AttemptIdentity & {
@@ -190,7 +276,10 @@ export class WorkerContext {
     get inputs(): JsonValue[] { return [...(this.context.inputs ?? [])]; }
     get resume(): JsonValue | undefined { return this.context.resume; }
     onDrain(callback: (context: WorkerContext) => void): void { this.drainHooks.push(callback); }
-    draining(): boolean { const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
+    resourceTargets(): ResourceTargets | null { return this.signals.resourceTargets(); }
+    /** Call `callback(targets)` once per new target, during drain polls. */
+    onResourceTarget(callback: (targets: ResourceTargets) => void): void { this.signals.onResourceTarget(callback); }
+    draining(): boolean { this.signals.poll(); const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
         this.drainNotified = true;
         for (const callback of this.drainHooks)
             callback(this);

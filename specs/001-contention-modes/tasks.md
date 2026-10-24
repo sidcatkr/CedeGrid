@@ -414,14 +414,14 @@ after the hint deadline (quickstart §6).
 
 - [X] T072 [P] [US4] Add TypeScript drain, hook and managed-child tests mirroring the Python
   ones, in `npm/tests/worker-drain.test.ts` (audit M22).
-- [ ] T073 [P] [US4] Add Python tests in `python/tests/test_worker.py`:
+- [X] T073 [P] [US4] Add Python tests in `python/tests/test_worker.py`:
   - `resource_targets()`;
   - `on_resource_target` fires once per sequence;
   - hook errors are isolated;
   - `ResourceSignals.from_env()` works;
   - a file with `version > 1` is ignored;
   - the ack is written.
-- [ ] T074 [P] [US4] Add TypeScript tests mirroring T073, in
+- [X] T074 [P] [US4] Add TypeScript tests mirroring T073, in
   `npm/tests/worker-targets.test.ts`.
 - [ ] T075 [P] [US4] Add supervisor tests in `tests/managed_supervision.rs`:
   - the target file is written atomically with an increasing sequence;
@@ -438,9 +438,9 @@ after the hint deadline (quickstart §6).
   `src/supervision.rs`, and to managed children in `src/child_supervision.rs`.
 - [ ] T078 [US4] Handle the hint step in the agent actuation stage in `src/agent.rs`: the hint
   deadline, the compliance check and escalation.
-- [ ] T079 [US4] Add the Python API in `python/cedegrid/worker.py`: `ResourceTargets`,
+- [X] T079 [US4] Add the Python API in `python/cedegrid/worker.py`: `ResourceTargets`,
   `resource_targets()`, `on_resource_target()`, `ResourceSignals.from_env()` and ack writing.
-- [ ] T080 [US4] Add the TypeScript API in `npm/src/worker.ts` (`resourceTargets()`,
+- [X] T080 [US4] Add the TypeScript API in `npm/src/worker.ts` (`resourceTargets()`,
   `onResourceTarget()`, `ResourceSignals.fromEnv()`), and export it from `npm/src/index.ts`.
 - [ ] T081 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
   the native context builder in `src/agent.rs` and in the `supervise` path. The SDKs must keep

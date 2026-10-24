@@ -97,4 +97,80 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(task['resources']['gpu_memory_mib'],{'GPU-test':100})
         self.assertFalse(task['replay_safe']);self.assertFalse(task['single_process']);self.assertFalse(task['no_escape'])
 
+class ResourceTargetTests(unittest.TestCase):
+    """The resource-target channel (contracts/resource-target-file.md)."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.target_file = self.root/'resource-target.json'
+        self.ack = self.root/'resource-target.ack'
+        descriptor = {'schema_version':2,'namespace_id':'namespace','session_id':'session',
+                      'task_id':'task','assignment_id':'assignment','generation':2,
+                      'resource_target_file':str(self.target_file),'capabilities':['resource_targets']}
+        self.context = WorkerContext(descriptor, self.root/'drain', client=SupervisorFixture())
+    def tearDown(self): self.temp.cleanup()
+    def write(self, sequence, version=1, **targets):
+        import json
+        self.target_file.write_text(json.dumps({'version':version,'sequence':sequence,'deadline_unix_ms':1793000000000,
+                                                'step':'hint','targets':targets,'future_key':True}))
+    def test_resource_targets_read_the_current_file(self):
+        self.assertIsNone(self.context.resource_targets())
+        self.write(3, ram_mib=6144, gpu_memory_mib={'GPU-a':10240})
+        targets = self.context.resource_targets()
+        self.assertEqual((targets.sequence, targets.deadline_unix_ms, targets.step), (3, 1793000000000, 'hint'))
+        self.assertEqual((targets.ram_mib, targets.cpu_millicores, targets.gpu_memory_mib), (6144, None, {'GPU-a':10240}))
+        # A relaxed target is a new file with a higher sequence.
+        self.write(4)
+        relaxed = self.context.resource_targets()
+        self.assertEqual((relaxed.sequence, relaxed.ram_mib), (4, None))
+    def test_hooks_fire_once_per_sequence_during_drain_polls(self):
+        seen = []
+        self.context.on_resource_target(lambda targets: seen.append(targets.sequence))
+        self.assertFalse(self.context.draining())
+        self.write(1, ram_mib=100)
+        self.context.draining(); self.context.safe_point(); self.context.draining()
+        self.write(2, ram_mib=50)
+        self.context.draining()
+        self.assertEqual(seen, [1, 2])
+    def test_hook_errors_are_isolated(self):
+        seen = []
+        def failing(_): raise RuntimeError('worker hook failed')
+        self.context.on_resource_target(failing)
+        self.context.on_resource_target(lambda targets: seen.append(targets.sequence))
+        self.write(1, ram_mib=100)
+        with self.assertLogs('cedegrid', level='WARNING'):
+            self.assertFalse(self.context.draining())
+        self.assertEqual(seen, [1])
+    def test_signals_from_the_environment_alone(self):
+        from unittest.mock import patch
+        from cedegrid import ResourceSignals
+        self.write(5, cpu_millicores=2000)
+        environment = {'CEDEGRID_RESOURCE_TARGET_FILE':str(self.target_file),'CEDEGRID_DRAIN_FILE':str(self.root/'drain')}
+        with patch.dict('os.environ', environment, clear=True):
+            signals = ResourceSignals.from_env()
+        self.assertEqual(signals.resource_targets().cpu_millicores, 2000)
+        self.assertFalse(signals.draining())
+        (self.root/'drain').touch()
+        self.assertTrue(signals.draining())
+        with patch.dict('os.environ', {}, clear=True):
+            empty = ResourceSignals.from_env()
+        self.assertIsNone(empty.resource_targets())
+        self.assertFalse(empty.draining())
+    def test_a_newer_file_version_is_treated_as_absent(self):
+        self.write(9, version=2, ram_mib=1)
+        self.assertIsNone(self.context.resource_targets())
+        for bad in ['{', '[]', '{"version":1}', '{"version":1,"sequence":-1,"deadline_unix_ms":0,"step":"hint","targets":{}}']:
+            self.target_file.write_text(bad)
+            self.assertIsNone(self.context.resource_targets(), bad)
+    def test_the_ack_records_the_highest_sequence_seen(self):
+        self.context.draining()
+        self.assertEqual(self.ack.read_text().strip(), '0')
+        self.write(7, ram_mib=1)
+        self.context.resource_targets()
+        self.assertEqual(self.ack.read_text().strip(), '7')
+        # An older file never lowers the ack.
+        self.write(6, ram_mib=1)
+        self.context.resource_targets()
+        self.assertEqual(self.ack.read_text().strip(), '7')
+
 if __name__=='__main__':unittest.main()

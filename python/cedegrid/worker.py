@@ -1,8 +1,10 @@
 """Credential-free native worker protocol and operator download file helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import stat
@@ -78,6 +80,94 @@ def atomic_json(path: Path, value: dict, *, replace: bool = False) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_log = logging.getLogger("cedegrid")
+
+
+@dataclass(frozen=True)
+class ResourceTargets:
+    """A "use less" target from the supervisor. Unset amounts carry no target."""
+    sequence: int
+    deadline_unix_ms: int
+    step: str
+    cpu_millicores: int | None = None
+    ram_mib: int | None = None
+    gpu_memory_mib: dict = field(default_factory=dict)
+
+
+def _read_targets(path: Path) -> ResourceTargets | None:
+    """Parse a target file; a missing, invalid or newer-version file is no target."""
+    from .codec import parse_json
+    try:
+        value = parse_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
+        return None
+    sequence, deadline, step, targets = (value.get(k) for k in ("sequence", "deadline_unix_ms", "step", "targets"))
+    def amount(v): return type(v) is int and v >= 0
+    if not (amount(sequence) and amount(deadline) and type(step) is str and isinstance(targets, dict)):
+        return None
+    cpu, ram, gpu = targets.get("cpu_millicores"), targets.get("ram_mib"), targets.get("gpu_memory_mib", {})
+    if not ((cpu is None or amount(cpu)) and (ram is None or amount(ram)) and isinstance(gpu, dict)
+            and all(type(k) is str and amount(v) for k, v in gpu.items())):
+        return None
+    return ResourceTargets(sequence, deadline, step, cpu, ram, dict(gpu))
+
+
+class ResourceSignals:
+    """Drain and resource-target signals from CEDEGRID_DRAIN_FILE and
+    CEDEGRID_RESOURCE_TARGET_FILE alone, so managed children can use them."""
+    def __init__(self, drain_file=None, target_file=None):
+        self.drain_file = Path(drain_file) if drain_file else None
+        self.target_file = Path(target_file) if target_file else None
+        self._hooks, self._notified, self._acked = [], None, None
+
+    @classmethod
+    def from_env(cls):
+        return cls(os.environ.get("CEDEGRID_DRAIN_FILE") or None,
+                   os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE") or None)
+
+    def resource_targets(self) -> ResourceTargets | None:
+        targets = _read_targets(self.target_file) if self.target_file else None
+        self._acknowledge(targets.sequence if targets else 0)
+        return targets
+
+    def on_resource_target(self, callback):
+        if not callable(callback):
+            raise ValueError("resource-target callback must be callable")
+        self._hooks.append(callback)
+
+    def poll(self) -> ResourceTargets | None:
+        """Read the targets and call each hook once per new sequence."""
+        targets = self.resource_targets()
+        if targets is not None and (self._notified is None or targets.sequence > self._notified):
+            self._notified = targets.sequence
+            for callback in list(self._hooks):
+                try:
+                    callback(targets)
+                except Exception:
+                    _log.warning("resource-target hook failed", exc_info=True)
+        return targets
+
+    def draining(self) -> bool:
+        self.poll()
+        return self.drain_file is not None and self.drain_file.exists()
+
+    def _acknowledge(self, sequence):
+        """Record the highest sequence seen; it shows the worker reads targets."""
+        if self.target_file is None or (self._acked is not None and sequence <= self._acked):
+            return
+        ack = self.target_file.parent / "resource-target.ack"
+        temporary = ack.with_name(f".resource-target.ack.{os.getpid()}")
+        try:
+            temporary.write_text(f"{sequence}\n", encoding="utf-8")
+            os.replace(temporary, ack)
+        except OSError:
+            _log.warning("resource-target ack could not be written; hints stay unavailable", exc_info=True)
+            return
+        self._acked = sequence
+
+
 class WorkerContext:
     """In-process client of the native supervisor; no authoritative spool writes."""
     def __init__(self, context: dict, drain_file: Path | None = None, *, client=None):
@@ -96,6 +186,8 @@ class WorkerContext:
         self.drain_file = drain_file or (Path(context["drain_file"]) if context.get("drain_file") else None)
         self._drain_hooks, self._drain_notified = [], False
         self._artifacts = {}
+        self._signals = ResourceSignals(self.drain_file, context.get("resource_target_file")
+                                        or os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE"))
 
     @classmethod
     def from_env(cls):
@@ -123,7 +215,15 @@ class WorkerContext:
             raise ValueError("drain callback must be callable")
         self._drain_hooks.append(callback)
 
+    def resource_targets(self) -> ResourceTargets | None:
+        return self._signals.resource_targets()
+
+    def on_resource_target(self, callback):
+        """Call `callback(targets)` once per new target, during drain polls."""
+        self._signals.on_resource_target(callback)
+
     def draining(self):
+        self._signals.poll()
         requested = self.drain_file is not None and self.drain_file.exists()
         if requested and not self._drain_notified:
             self._drain_notified = True
