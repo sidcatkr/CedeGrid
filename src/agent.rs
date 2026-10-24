@@ -2335,6 +2335,7 @@ impl AgentLoop<'_> {
             &PolicyInput {
                 allocations: allocations.clone(),
                 explicit_drain: self.stopping.is_some() || self.spool_full,
+                facts: BTreeMap::new(),
             },
             self.start.elapsed().as_millis() as u64,
         )?;

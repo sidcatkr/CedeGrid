@@ -219,7 +219,7 @@ pause and then reverses, with no drain (quickstart §3).
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T033 [P] [US2] Add property tests in `tests/contention.rs` for the ladder:
+- [X] T033 [P] [US2] Add property tests in `tests/contention.rs` for the ladder:
   - steps escalate in order, and memory resources skip steps 1–3;
   - `min_step_dwell_intervals` is respected;
   - steps reverse one level at a time below `hysteresis_percent`;
@@ -228,7 +228,7 @@ pause and then reverses, with no drain (quickstart §3).
   - a pause escalates after `pause_bound_s`;
   - under a load that switches on and off every 4 monitor intervals, own work changes step at
     most once per switch (SC-009).
-- [ ] T034 [US2] Add victim-cost tests in `tests/contention.rs`, covering each rule in
+- [X] T034 [US2] Add victim-cost tests in `tests/contention.rs`, covering each rule in
   order:
   1. uncontrollable allocations are excluded;
   2. the victim must free the contended resource;
@@ -267,7 +267,7 @@ pause and then reverses, with no drain (quickstart §3).
 
 ### Implementation for User Story 2
 
-- [ ] T043 [US2] Implement the pure ladder state machine `contention::plan_steps` in
+- [X] T043 [US2] Implement the pure ladder state machine `contention::plan_steps` in
   `src/contention.rs` (data-model.md YieldStep transitions).
 - [ ] T044 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
   checkpoint times from the agent's publication records in `src/agent.rs`.

@@ -311,6 +311,23 @@ fn resources(cpu: u64, ram: u64, gpu: u64) -> Resources {
     }
 }
 
+/// Facts for rootless backends: CPU lower share is unavailable at runtime.
+fn rootless(ids: &[&str]) -> BTreeMap<String, AllocationFacts> {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    ids.iter()
+        .map(|id| {
+            let facts = AllocationFacts {
+                unavailable: BTreeMap::from([(
+                    ResourceKey::Cpu,
+                    std::collections::BTreeSet::from([YieldStep::LowerShare]),
+                )]),
+                ..Default::default()
+            };
+            (id.to_string(), facts)
+        })
+        .collect()
+}
+
 fn allocation(
     id: &str,
     phase: AllocationPhase,
@@ -379,7 +396,7 @@ fn cpu_yield_does_not_plan_an_ignored_guaranteed_release() {
         "a-guaranteed",
         AllocationPhase::Running,
         resources(1000, 0, 0),
-        Some(Resources::default()),
+        Some(resources(1000, 0, 0)),
     );
     guaranteed.class = AllocationClass::Guaranteed;
     let input = PolicyInput {
@@ -389,13 +406,15 @@ fn cpu_yield_does_not_plan_an_ignored_guaranteed_release() {
                 "b-opportunistic",
                 AllocationPhase::Running,
                 resources(1000, 0, 0),
-                Some(Resources::default()),
+                Some(resources(1000, 0, 0)),
             ),
         ],
+        facts: rootless(&["a-guaranteed", "b-opportunistic"]),
         ..Default::default()
     };
+    // External work uses 5000m, leaving 1000m for 2000m of own usage.
     let mut snap = snapshot();
-    snap.cpu_busy_millicores = Some(5000);
+    snap.cpu_busy_millicores = Some(7000);
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
@@ -461,6 +480,7 @@ fn explicit_node_drain_includes_guaranteed_and_opportunistic_work() {
             ),
         ],
         explicit_drain: true,
+        facts: Default::default(),
     };
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
@@ -1068,34 +1088,40 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         "a",
         AllocationPhase::Running,
         resources(3000, 0, 0),
-        Some(resources(0, 0, 0)),
+        Some(resources(3000, 0, 0)),
     );
     let running_b = allocation(
         "b",
         AllocationPhase::Running,
         resources(3000, 0, 0),
-        Some(resources(0, 0, 0)),
+        Some(resources(3000, 0, 0)),
     );
     let pending = allocation("z", AllocationPhase::Pending, resources(1000, 0, 0), None);
     let first = PolicyInput {
         allocations: vec![running_b.clone(), pending.clone(), running_a.clone()],
+        facts: rootless(&["a", "b", "z"]),
         ..PolicyInput::default()
     };
     let second = PolicyInput {
         allocations: vec![running_a, running_b, pending],
+        facts: rootless(&["a", "b", "z"]),
         ..PolicyInput::default()
     };
+    // External work uses 1000m: the budget is 5000m for 6000m of own usage and a
+    // 1000m reservation.
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(7000);
     let a = PolicyEngine::new()
-        .evaluate(&config(), &snapshot(), &first, 0)
+        .evaluate(&config(), &snap, &first, 0)
         .unwrap();
     let b = PolicyEngine::new()
-        .evaluate(&config(), &snapshot(), &second, 0)
+        .evaluate(&config(), &snap, &second, 0)
         .unwrap();
-    // The pending reservation is cancelled first; running work is then capped in ID
-    // order until the CPU excess is covered.
+    // The pending reservation is cancelled by its charge; running work is capped by
+    // usage, the equal candidates in ID order.
     assert_eq!(a.would_drain, ["z"]);
     assert_eq!(a.actions, b.actions);
-    let planned: Vec<_> = a
+    let planned: std::collections::BTreeSet<_> = a
         .actions
         .iter()
         .map(|action| (action.allocation_id.as_str(), action.step, action.target))
@@ -1105,8 +1131,9 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         planned,
         [
             ("z", YieldStep::Drain, None),
-            ("a", YieldStep::Cap, Some(1000))
+            ("a", YieldStep::Cap, Some(2000))
         ]
+        .into()
     );
     assert_eq!(a.admission_headroom, Resources::default());
 }
@@ -1130,6 +1157,7 @@ fn explicit_drain_covers_all_pending_and_running_allocations() {
             ),
         ],
         explicit_drain: true,
+        facts: Default::default(),
     };
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
@@ -2219,6 +2247,7 @@ fn d3_a_quiet_external_context_admits_gpu_work() {
 #[test]
 fn d4_cpu_contention_caps_instead_of_draining() {
     // 8 logical CPUs on 4 physical cores; reserving 1 physical core holds 2000m.
+    // A rootless backend cannot lower the share at runtime, so cap comes first.
     let input = PolicyInput {
         allocations: vec![allocation(
             "mine",
@@ -2226,6 +2255,7 @@ fn d4_cpu_contention_caps_instead_of_draining() {
             resources(4000, 0, 0),
             Some(resources(4000, 0, 0)),
         )],
+        facts: rootless(&["mine"]),
         ..Default::default()
     };
     let mut engine = PolicyEngine::new();
@@ -2470,4 +2500,35 @@ fn resource_arithmetic_charges_adds_subtracts_and_fits_per_scope() {
     );
     assert!(total.fits(&cap, &requested));
     assert!(!total.fits(&cap, &observed), "GPU-b is over its budget");
+}
+
+#[test]
+fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
+    use cedegrid::contention::{ContentionMode, YieldStep};
+    let mut cfg = config();
+    cfg.contention.default_mode = ContentionMode::YieldFirst;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(7000);
+    let mut engine = PolicyEngine::new();
+    let mut steps = vec![];
+    // Usage never falls in this recording, so every step looks ineffective.
+    for now in (0..40_000).step_by(500) {
+        let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+        assert!(decision.would_drain.is_empty(), "at {now}");
+        let step = decision.actions.first().map(|a| a.step);
+        if steps.last() != Some(&step) {
+            steps.push(step);
+        }
+    }
+    assert_eq!(steps, [Some(YieldStep::Cap), Some(YieldStep::Pause)]);
 }

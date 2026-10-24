@@ -645,6 +645,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         .transpose()?
                         .unwrap_or_default(),
                     explicit_drain: false,
+                    facts: Default::default(),
                 };
                 let decision = engine.evaluate(
                     &config,
@@ -796,6 +797,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         let input = PolicyInput {
             allocations: store.execution_allocations()?,
             explicit_drain: false,
+            facts: Default::default(),
         };
         let decision = engine.evaluate(
             config,

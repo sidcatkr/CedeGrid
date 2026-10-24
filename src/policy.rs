@@ -7,7 +7,10 @@ use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
-use crate::contention::{Measurement, ResourceKey, ResourceKind, YieldCause, YieldStep};
+use crate::contention::{
+    LadderInput, LadderTiming, Measurement, ResourceKey, ResourceKind, StepState, VictimFacts,
+    YieldCause, YieldStep, plan_step, victim_order,
+};
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
@@ -205,6 +208,12 @@ pub struct PolicyEngine {
     /// Last observation per allocation. Its presence also marks that the
     /// allocation's first observation, a baseline, has already happened.
     last_observed: BTreeMap<String, Resources>,
+    /// The yield ladder: the step applied per allocation and resource.
+    ladder: BTreeMap<(String, ResourceKey), StepState>,
+    /// When a resource's measurement became unknown or held (FR-008 window).
+    unknown_since: BTreeMap<ResourceKey, u64>,
+    /// When an allocation's usage became unknown (R10 window).
+    allocation_unknown_since: BTreeMap<String, u64>,
 }
 
 impl PolicyEngine {
@@ -708,93 +717,292 @@ impl PolicyEngine {
             budget = Resources::default();
         }
 
-        let mut remaining = charged.clone();
         let mut would_drain = Vec::new();
-        // Existing drains are planned releases only for choosing additional victims.
-        // They remain charged against admission below until release is confirmed.
-        for allocation in &input.allocations {
-            if allocation.phase == AllocationPhase::Draining {
-                remaining.subtract_saturating(&charges[&allocation.id]);
+        let interval_ms = config.monitor.interval_ms;
+        // An unknown or held resource first holds; after the bounded unknown window the
+        // ladder may escalate with cause unknown_measurement (FR-008, R10).
+        let window = |kind: ResourceKind| {
+            u64::from(config.contention.thresholds(kind).unknown_window_intervals)
+                .saturating_mul(interval_ms)
+        };
+        let mut unknown_since = BTreeMap::new();
+        for (key, unknown) in [
+            (ResourceKey::Cpu, cpu_unknown || cpu_held),
+            (ResourceKey::Ram, ram_unknown || ram_held),
+        ] {
+            if unknown {
+                let start = self
+                    .unknown_since
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(now_monotonic_ms);
+                unknown_since.insert(key, start);
             }
         }
-        // Automatic yielding may only plan releases the agent/supervisor can enact.
-        // Guaranteed work stays fully charged but cannot consume a victim slot and
-        // hide the need to drain opportunistic work. Explicit drain includes both.
-        // Cancel eligible pending reservations before running work, then lexical ID.
-        // Allocations whose usage is unknown hold their step (FR-008).
-        let mut candidates: Vec<_> = input
-            .allocations
-            .iter()
-            .filter(|a| {
-                a.phase != AllocationPhase::Draining
-                    && (input.explicit_drain
-                        || (a.class == crate::execution_model::AllocationClass::Opportunistic
-                            && !unknown_allocations.contains(&a.id)))
-            })
-            .collect();
-        candidates.sort_by_key(|a| (a.phase != AllocationPhase::Pending, a.id.as_str()));
+        let mut allocation_unknown_since = BTreeMap::new();
+        for id in &unknown_allocations {
+            let start = self
+                .allocation_unknown_since
+                .get(id)
+                .copied()
+                .unwrap_or(now_monotonic_ms);
+            allocation_unknown_since.insert(id.clone(), start);
+        }
+        let mut ladder = BTreeMap::new();
         let mut actions = Vec::new();
-        for allocation in candidates {
-            let charge = &charges[&allocation.id];
-            if input.explicit_drain {
+        if input.explicit_drain {
+            // Explicit node drain keeps its all-allocation stop semantics.
+            let mut candidates: Vec<_> = input
+                .allocations
+                .iter()
+                .filter(|a| a.phase != AllocationPhase::Draining)
+                .collect();
+            candidates.sort_by_key(|a| (a.phase != AllocationPhase::Pending, a.id.as_str()));
+            for allocation in candidates {
                 actions.push(YieldAction {
                     allocation_id: allocation.id.clone(),
-                    resource: first_charged_resource(charge),
+                    resource: first_charged_resource(&charges[&allocation.id]),
                     step: YieldStep::Drain,
                     target: None,
                     cause: YieldCause::OperatorDrain,
                     code: "yield_step_drain".into(),
                 });
-                remaining.subtract_saturating(charge);
-                continue;
             }
-            let Some(resource) = excess_resource(&remaining, &budget, charge, cpu_held, ram_held)
-            else {
-                continue;
-            };
-            let cause = if match &resource {
-                ResourceKey::Cpu => cpu_unknown,
-                ResourceKey::Ram => ram_unknown,
-                ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
-                    blocked_gpus.contains(uuid)
-                        && statuses
-                            .get(&resource)
-                            .is_some_and(|s| s.measurement == Some(Measurement::Unknown))
+        } else {
+            // Memory first because only its holder can release it, then CPU.
+            let mut keys = vec![ResourceKey::Ram];
+            keys.extend(
+                charged
+                    .gpu_memory_mib
+                    .keys()
+                    .map(|uuid| ResourceKey::GpuMemory(uuid.clone())),
+            );
+            keys.push(ResourceKey::Cpu);
+            for key in keys {
+                let kind = key.kind();
+                let held = unknown_since.contains_key(&key);
+                let measurement_known = !held
+                    || unknown_since.get(&key).is_some_and(|start| {
+                        now_monotonic_ms.saturating_sub(*start) >= window(kind)
+                    });
+                let gpu_unknown = matches!(&key, ResourceKey::GpuMemory(uuid) if blocked_gpus.contains(uuid))
+                    && statuses
+                        .get(&key)
+                        .is_some_and(|s| s.measurement == Some(Measurement::Unknown));
+                let cause = if held || gpu_unknown {
+                    YieldCause::UnknownMeasurement
+                } else {
+                    YieldCause::ExternalGrowth
+                };
+                let external = statuses.get(&key).and_then(|s| s.external).unwrap_or(0);
+                let timing = LadderTiming::new(
+                    &config.contention.thresholds(kind),
+                    config.contention.mode(kind),
+                    interval_ms,
+                );
+                let amount_of = |r: &Resources| match &key {
+                    ResourceKey::Cpu => r.cpu_millicores,
+                    ResourceKey::Ram => r.ram_mib,
+                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
+                        r.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                    }
+                };
+                let usage_of =
+                    |a: &Allocation| -> u64 { a.observed.as_ref().map_or(0, |o| o.cpu_millicores) };
+                // Pending reservations are cancelled by their charge. CPU in use is
+                // measured by usage, since a cap lowers usage but never the request.
+                // Existing drains are planned releases for choosing more victims only.
+                let draining_charge = input
+                    .allocations
+                    .iter()
+                    .filter(|a| a.phase == AllocationPhase::Draining)
+                    .map(|a| amount_of(&charges[&a.id]))
+                    .fold(0u64, u64::saturating_add);
+                let admission_excess = amount_of(&charged)
+                    .saturating_sub(draining_charge)
+                    .saturating_sub(amount_of(&budget));
+                let usage_excess = if kind == ResourceKind::Cpu {
+                    input
+                        .allocations
+                        .iter()
+                        .filter(|a| a.phase != AllocationPhase::Pending)
+                        .map(usage_of)
+                        .fold(unknown_charge.cpu_millicores, u64::saturating_add)
+                        .saturating_sub(budget.cpu_millicores)
+                } else {
+                    admission_excess
+                };
+                // Automatic steps apply to opportunistic work only, until fair shares
+                // and floors bound Guaranteed steps (US3).
+                let candidate = |a: &&Allocation| {
+                    a.phase != AllocationPhase::Draining
+                        && a.class == crate::execution_model::AllocationClass::Opportunistic
+                        && allocation_unknown_since.get(&a.id).is_none_or(|start| {
+                            now_monotonic_ms.saturating_sub(*start) >= window(kind)
+                        })
+                };
+                // No resource-target channel exists yet (US4), so the hint step is
+                // unavailable everywhere and reported as skipped.
+                let facts = |id: &str| {
+                    let mut facts = input.facts.get(id).cloned().unwrap_or_default();
+                    facts
+                        .unavailable
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(YieldStep::Hint);
+                    facts
+                };
+                let mut planned = BTreeSet::new();
+                // Memory's running pass covers what cancelled reservations left over.
+                let mut carried = admission_excess;
+                for pending_pass in [true, false] {
+                    let needed = if pending_pass {
+                        admission_excess
+                    } else if kind == ResourceKind::Cpu {
+                        usage_excess
+                    } else {
+                        carried
+                    };
+                    let mut victims: Vec<VictimFacts> = input
+                        .allocations
+                        .iter()
+                        .filter(candidate)
+                        .filter(|a| (a.phase == AllocationPhase::Pending) == pending_pass)
+                        .map(|a| {
+                            let amount = if kind == ResourceKind::Cpu && !pending_pass {
+                                usage_of(a)
+                            } else {
+                                amount_of(&charges[&a.id])
+                            };
+                            VictimFacts {
+                                id: a.id.clone(),
+                                controllable: !facts(&a.id).uncontrollable,
+                                frees: amount > 0,
+                                pending: pending_pass,
+                                guaranteed: false,
+                                progress_lost_ms: facts(&a.id).progress_lost_ms,
+                                amount,
+                            }
+                        })
+                        .collect();
+                    victim_order(&mut victims, needed);
+                    let mut remaining = needed;
+                    for victim in victims {
+                        planned.insert(victim.id.clone());
+                        let state = self.ladder.get(&(victim.id.clone(), key.clone()));
+                        let mut unavailable = facts(&victim.id)
+                            .unavailable
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_default();
+                        if pending_pass {
+                            // Nothing runs yet: cancelling the reservation is the only step.
+                            unavailable.extend([
+                                YieldStep::LowerShare,
+                                YieldStep::Cap,
+                                YieldStep::Pause,
+                                YieldStep::Hint,
+                            ]);
+                        }
+                        let contended = remaining > 0 && victim.frees;
+                        let decision = plan_step(
+                            state,
+                            &LadderInput {
+                                kind,
+                                guaranteed: false,
+                                // Running work is never drained for CPU alone (SC-002);
+                                // pause frees it completely.
+                                allow_drain: pending_pass || kind != ResourceKind::Cpu,
+                                unavailable,
+                                excess: if contended { remaining } else { 0 },
+                                external,
+                                measurement_known,
+                                cause,
+                                target: (kind == ResourceKind::Cpu)
+                                    .then(|| victim.amount.saturating_sub(remaining)),
+                            },
+                            &timing,
+                            now_monotonic_ms,
+                        );
+                        if !decision.skipped.is_empty() {
+                            note(
+                                &mut statuses,
+                                key.clone(),
+                                "step_skipped_unavailable",
+                                format!(
+                                    "allocation {}: unavailable steps {:?} were skipped",
+                                    victim.id, decision.skipped
+                                ),
+                            );
+                        }
+                        let before = state.map_or(YieldStep::None, |s| s.step);
+                        if let Some(next) = &decision.state {
+                            // A newly applied step is expected to release its share;
+                            // the next observation shows whether it did.
+                            if next.step > before {
+                                let freed = match next.step {
+                                    YieldStep::Cap => victim
+                                        .amount
+                                        .saturating_sub(next.target.unwrap_or(victim.amount)),
+                                    YieldStep::Pause | YieldStep::Drain | YieldStep::Terminate => {
+                                        victim.amount
+                                    }
+                                    _ => victim.amount.min(remaining),
+                                };
+                                remaining = remaining.saturating_sub(freed);
+                            }
+                            ladder.insert((victim.id.clone(), key.clone()), next.clone());
+                        }
+                    }
+                    carried = remaining;
                 }
-            } {
-                YieldCause::UnknownMeasurement
-            } else {
-                YieldCause::ExternalGrowth
-            };
-            if resource == ResourceKey::Cpu && allocation.phase != AllocationPhase::Pending {
-                // Running work shares CPU by lowering what it may use; CPU is never a
-                // reason to drain it (D4, SC-002). A pending reservation has nothing to
-                // cap and is cancelled instead. Actuation is the supervisor's.
-                let excess = remaining
-                    .cpu_millicores
-                    .saturating_sub(budget.cpu_millicores);
-                let target = charge.cpu_millicores.saturating_sub(excess);
+                // Steps of allocations that are no longer candidates hold or reverse.
+                for ((id, step_key), state) in &self.ladder {
+                    if step_key != &key || planned.contains(id) {
+                        continue;
+                    }
+                    let Some(allocation) = input.allocations.iter().find(|a| &a.id == id) else {
+                        continue;
+                    };
+                    let decision = plan_step(
+                        Some(state),
+                        &LadderInput {
+                            kind,
+                            guaranteed: allocation.class
+                                == crate::execution_model::AllocationClass::Guaranteed,
+                            allow_drain: false,
+                            unavailable: facts(id)
+                                .unavailable
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_default(),
+                            excess: 0,
+                            external,
+                            measurement_known: measurement_known
+                                && !unknown_allocations.contains(id),
+                            cause,
+                            target: None,
+                        },
+                        &timing,
+                        now_monotonic_ms,
+                    );
+                    if let Some(next) = decision.state {
+                        ladder.insert((id.clone(), key.clone()), next);
+                    }
+                }
+            }
+            for ((id, key), state) in &ladder {
+                if state.step == YieldStep::None {
+                    continue;
+                }
                 actions.push(YieldAction {
-                    allocation_id: allocation.id.clone(),
-                    resource,
-                    step: YieldStep::Cap,
-                    target: Some(target),
-                    cause,
-                    code: "yield_step_cap".into(),
+                    allocation_id: id.clone(),
+                    resource: key.clone(),
+                    step: state.step,
+                    target: state.target,
+                    cause: state.cause,
+                    code: format!("yield_step_{}", step_name(state.step)),
                 });
-                remaining.cpu_millicores = remaining
-                    .cpu_millicores
-                    .saturating_sub(charge.cpu_millicores - target);
-            } else {
-                actions.push(YieldAction {
-                    allocation_id: allocation.id.clone(),
-                    resource,
-                    step: YieldStep::Drain,
-                    target: None,
-                    cause,
-                    code: "yield_step_drain".into(),
-                });
-                remaining.subtract_saturating(charge);
             }
         }
         would_drain.extend(
@@ -803,6 +1011,8 @@ impl PolicyEngine {
                 .filter(|action| action.step >= YieldStep::Drain)
                 .map(|action| action.allocation_id.clone()),
         );
+        let mut seen = BTreeSet::new();
+        would_drain.retain(|id| seen.insert(id.clone()));
         if charged.cpu_millicores > budget.cpu_millicores {
             reasons.push("managed CPU charges exceed scheduling budget".into());
         }
@@ -858,6 +1068,9 @@ impl PolicyEngine {
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;
         self.last_observed = last_observed;
+        self.ladder = ladder;
+        self.unknown_since = unknown_since;
+        self.allocation_unknown_since = allocation_unknown_since;
         for kind in [ResourceKind::Cpu, ResourceKind::Ram] {
             let key = if kind == ResourceKind::Cpu {
                 ResourceKey::Cpu
@@ -1057,27 +1270,16 @@ fn ceil_ratio(value: u64, numerator: u64, denominator: u64) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// The over-budget resource this charge contributes to, if any. Memory comes
-/// first because only its holder can release it; held resources take no new step.
-fn excess_resource(
-    total: &Resources,
-    budget: &Resources,
-    charge: &Resources,
-    cpu_held: bool,
-    ram_held: bool,
-) -> Option<ResourceKey> {
-    if !ram_held && total.ram_mib > budget.ram_mib && charge.ram_mib > 0 {
-        return Some(ResourceKey::Ram);
+fn step_name(step: YieldStep) -> &'static str {
+    match step {
+        YieldStep::None => "none",
+        YieldStep::LowerShare => "lower_share",
+        YieldStep::Cap => "cap",
+        YieldStep::Pause => "pause",
+        YieldStep::Hint => "hint",
+        YieldStep::Drain => "drain",
+        YieldStep::Terminate => "terminate",
     }
-    if let Some(gpu) = charge.gpu_memory_mib.iter().find(|(gpu, amount)| {
-        **amount > 0
-            && total.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
-                > budget.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
-    }) {
-        return Some(ResourceKey::GpuMemory(gpu.0.clone()));
-    }
-    (!cpu_held && total.cpu_millicores > budget.cpu_millicores && charge.cpu_millicores > 0)
-        .then_some(ResourceKey::Cpu)
 }
 
 fn note(

@@ -268,3 +268,287 @@ pub struct ResourceView {
     pub floor: u64,
     pub measurement: Measurement,
 }
+
+/// Applied ladder state for one allocation and resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepState {
+    pub step: YieldStep,
+    /// When the current step was entered; every step change waits the dwell time.
+    pub entered_at_ms: u64,
+    pub cause: YieldCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u64>,
+    /// External demand when the step was entered; reversal compares against it.
+    pub trigger_external: u64,
+    /// Since when demand has stayed below the reversal threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calm_since_ms: Option<u64>,
+    /// Since when the resource has been contended without a break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contended_since_ms: Option<u64>,
+}
+
+/// What the planner needs to know about one allocation and resource this interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LadderInput {
+    pub kind: ResourceKind,
+    pub guaranteed: bool,
+    /// False for Guaranteed work unless a floor policy permits its drain.
+    pub allow_drain: bool,
+    /// Steps the backend or host cannot apply to this allocation.
+    pub unavailable: std::collections::BTreeSet<YieldStep>,
+    /// What own work still has to release on this resource; zero when nothing is contended.
+    pub excess: u64,
+    pub external: u64,
+    pub measurement_known: bool,
+    pub cause: YieldCause,
+    /// The cap target the policy computed this interval, in resource units.
+    pub target: Option<u64>,
+}
+
+/// Mode-dependent ladder timing in milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LadderTiming {
+    /// How long a step has to free the contended amount before the next one.
+    pub response_ms: u64,
+    pub dwell_ms: u64,
+    /// The mode's scale-up rate: the least time between two reversals.
+    pub scale_up_ms: u64,
+    pub pause_bound_ms: u64,
+    pub hysteresis_percent: u8,
+}
+
+impl LadderTiming {
+    pub fn new(thresholds: &ResourceThresholds, mode: ContentionMode, interval_ms: u64) -> Self {
+        let interval_ms = interval_ms.max(1);
+        let response_ms = match mode {
+            ContentionMode::YieldFirst => {
+                u64::from(thresholds.yield_first_response_intervals).saturating_mul(interval_ms)
+            }
+            ContentionMode::Neutral | ContentionMode::Performance => {
+                thresholds.reclaim_s.saturating_mul(1000)
+            }
+        };
+        Self {
+            response_ms,
+            dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
+            scale_up_ms: thresholds.scale_up_interval_s(mode).saturating_mul(1000),
+            pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
+            hysteresis_percent: thresholds.hysteresis_percent,
+        }
+    }
+}
+
+/// The planner's result: the new state (None once nothing is applied and the dwell
+/// time has passed) and the steps it skipped, which must be reported (FR-011).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LadderDecision {
+    pub state: Option<StepState>,
+    pub skipped: Vec<YieldStep>,
+}
+
+const LADDER: [YieldStep; 5] = [
+    YieldStep::LowerShare,
+    YieldStep::Cap,
+    YieldStep::Pause,
+    YieldStep::Hint,
+    YieldStep::Drain,
+];
+
+impl LadderInput {
+    /// Whether a step can apply here. Memory starts at the hint; Guaranteed work is
+    /// never paused and drained only when a floor policy allows it.
+    fn applies(&self, step: YieldStep) -> bool {
+        !(self.kind.is_memory()
+            && matches!(
+                step,
+                YieldStep::LowerShare | YieldStep::Cap | YieldStep::Pause
+            )
+            || self.guaranteed && step == YieldStep::Pause
+            || step == YieldStep::Drain && !self.allow_drain)
+    }
+
+    fn next_step(&self, current: YieldStep) -> (Option<YieldStep>, Vec<YieldStep>) {
+        let mut skipped = Vec::new();
+        for step in LADDER.into_iter().filter(|step| *step > current) {
+            if !self.applies(step) {
+                continue;
+            }
+            if self.unavailable.contains(&step) {
+                skipped.push(step);
+                continue;
+            }
+            return (Some(step), skipped);
+        }
+        (None, skipped)
+    }
+
+    fn previous_step(&self, current: YieldStep) -> YieldStep {
+        LADDER
+            .into_iter()
+            .rev()
+            .filter(|step| *step < current)
+            .find(|step| self.applies(*step) && !self.unavailable.contains(step))
+            .unwrap_or(YieldStep::None)
+    }
+}
+
+/// Pure ladder transition for one allocation and resource (data-model.md YieldStep).
+pub fn plan_step(
+    state: Option<&StepState>,
+    input: &LadderInput,
+    timing: &LadderTiming,
+    now_ms: u64,
+) -> LadderDecision {
+    let hold = |skipped| LadderDecision {
+        state: state.cloned(),
+        skipped,
+    };
+    // Unknown measurement holds the current step (FR-008, FR-017).
+    if !input.measurement_known {
+        return hold(Vec::new());
+    }
+    let current = state.map_or(YieldStep::None, |s| s.step);
+    // Drain and terminate never reverse; the drain chain owns them now.
+    if current >= YieldStep::Drain {
+        return hold(Vec::new());
+    }
+    let since_change = state.map_or(u64::MAX, |s| now_ms.saturating_sub(s.entered_at_ms));
+    let enter = |step: YieldStep, skipped: Vec<YieldStep>| LadderDecision {
+        state: Some(StepState {
+            step,
+            entered_at_ms: now_ms,
+            cause: input.cause,
+            target: (step == YieldStep::Cap).then_some(input.target).flatten(),
+            trigger_external: input.external,
+            calm_since_ms: None,
+            contended_since_ms: Some(now_ms),
+        }),
+        skipped,
+    };
+    if input.excess > 0 {
+        let contended_since = state.and_then(|s| s.contended_since_ms).unwrap_or(now_ms);
+        let anchor = state.map_or(now_ms, |s| s.entered_at_ms.max(contended_since));
+        let persisted = now_ms.saturating_sub(anchor);
+        // The first step applies at once; later ones only when the current step has
+        // not freed the contended amount within the response time.
+        let due = since_change >= timing.dwell_ms
+            && (current == YieldStep::None
+                || persisted >= timing.response_ms
+                || current == YieldStep::Pause && persisted >= timing.pause_bound_ms);
+        if due {
+            let (next, skipped) = input.next_step(current);
+            if let Some(next) = next {
+                return enter(next, skipped);
+            }
+            if current == YieldStep::None {
+                return LadderDecision {
+                    state: None,
+                    skipped,
+                };
+            }
+        }
+        let Some(state) = state else {
+            return hold(Vec::new());
+        };
+        let mut held = state.clone();
+        held.calm_since_ms = None;
+        held.contended_since_ms = Some(contended_since);
+        if held.step == YieldStep::Cap && input.target.is_some() {
+            held.target = input.target;
+        }
+        return LadderDecision {
+            state: Some(held),
+            skipped: Vec::new(),
+        };
+    }
+    let Some(state) = state else {
+        return hold(Vec::new());
+    };
+    let threshold = state
+        .trigger_external
+        .saturating_mul(u64::from(timing.hysteresis_percent))
+        / 100;
+    let mut held = state.clone();
+    held.contended_since_ms = None;
+    if state.trigger_external > 0 && input.external >= threshold {
+        held.calm_since_ms = None;
+        return LadderDecision {
+            state: Some(held),
+            skipped: Vec::new(),
+        };
+    }
+    let calm_since = state.calm_since_ms.unwrap_or(now_ms);
+    held.calm_since_ms = Some(calm_since);
+    if current == YieldStep::None {
+        // Forget the entry once the dwell time after the last change has passed.
+        return LadderDecision {
+            state: (since_change < timing.dwell_ms).then_some(held),
+            skipped: Vec::new(),
+        };
+    }
+    // Reverse one level per scale-up interval after calm has lasted the dwell time.
+    if now_ms.saturating_sub(calm_since) >= timing.dwell_ms
+        && since_change >= timing.dwell_ms.max(timing.scale_up_ms)
+    {
+        let step = input.previous_step(current);
+        held.step = step;
+        held.entered_at_ms = now_ms;
+        if step != YieldStep::Cap {
+            held.target = None;
+        }
+    }
+    LadderDecision {
+        state: Some(held),
+        skipped: Vec::new(),
+    }
+}
+
+/// Facts about one candidate for victim selection (FR-016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VictimFacts {
+    pub id: String,
+    /// False for allocations nobody can act on: needing reconciliation, still
+    /// preparing, or with a lost supervisor.
+    pub controllable: bool,
+    /// Whether reducing this allocation frees the contended resource.
+    pub frees: bool,
+    pub pending: bool,
+    pub guaranteed: bool,
+    /// Time since the last accepted checkpoint, else since start.
+    pub progress_lost_ms: u64,
+    /// What this allocation would release on the contended resource.
+    pub amount: u64,
+}
+
+/// Order candidates by least cost and drop uncontrollable ones: freeing the
+/// resource, pending before running, opportunistic before Guaranteed, least
+/// progress lost, best fit for `needed`, then assignment ID.
+pub fn victim_order(candidates: &mut Vec<VictimFacts>, needed: u64) {
+    candidates.retain(|c| c.controllable);
+    candidates.sort_by(|a, b| {
+        let fit = |c: &VictimFacts| {
+            if c.amount >= needed {
+                (0, c.amount)
+            } else {
+                (1, u64::MAX - c.amount)
+            }
+        };
+        (
+            !a.frees,
+            !a.pending,
+            a.guaranteed,
+            a.progress_lost_ms,
+            fit(a),
+            &a.id,
+        )
+            .cmp(&(
+                !b.frees,
+                !b.pending,
+                b.guaranteed,
+                b.progress_lost_ms,
+                fit(b),
+                &b.id,
+            ))
+    });
+}

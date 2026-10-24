@@ -246,6 +246,27 @@ pub struct Snapshot {
 pub struct PolicyInput {
     pub allocations: Vec<Allocation>,
     pub explicit_drain: bool,
+    /// Per-allocation facts for the ladder and victim selection (schema 3).
+    /// Missing facts mean a controllable allocation with every step available.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub facts: BTreeMap<String, AllocationFacts>,
+}
+
+/// What the agent knows about an allocation that observation does not show.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AllocationFacts {
+    /// No live supervisor can carry out a step, for example while preparing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uncontrollable: bool,
+    /// Time since the last accepted checkpoint, else since start.
+    pub progress_lost_ms: u64,
+    /// Steps the backend cannot apply, or that the supervisor reported unavailable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unavailable: BTreeMap<
+        crate::contention::ResourceKey,
+        std::collections::BTreeSet<crate::contention::YieldStep>,
+    >,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
