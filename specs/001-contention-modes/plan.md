@@ -72,7 +72,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (1.1.0) | Floors are on by default. Policies B and C are opt-in, marked, and confirmed (danger). `oom_score_adj` is only raised. Negative nice is clamped to 0. No priority is ever raised. | Pass |
+| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. The only tunables for Guaranteed memory (hint deadline, RAM breach window) put risk on own work, and the critical floor path bounds them. Performance and small floors are caution options with confirmation. Negative nice is clamped to 0. No priority is ever raised. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -126,7 +126,7 @@ Each new module is a top-level `mod x;` and is added to `ALLOWLIST`.
 |---|---|
 | `src/contention.rs` | New, pure: resource views, fair share, modes, ladder state machine, victim cost, reason codes |
 | `src/actuation.rs` | New: `Actuator` trait, rootless implementation (duty cycle and pause through owned pidfds, `oom_score_adj`), resource-target file writer and ack reader |
-| `src/setup.rs` | New: setup choices, risk mapping, flag parsing, terminal interface (termios through `libc`), `toml_edit` writer |
+| `src/setup.rs` | New: setup choices, caution mapping, flag parsing, terminal interface (termios through `libc`), `toml_edit` writer |
 | `src/policy.rs` | Budget and admission keep their shape. Calls `contention`. D5 and D6 fixes. Removes the protection cap |
 | `src/telemetry.rs`, `src/kernel.rs` | Reserved/free, double-read memory, quiet class, bounds, health versus freshness. One collector per node |
 | `src/model.rs` | Snapshot schema 3; `Decision.resources`, `Decision.actions`, `Decision.exceptions`; `YieldAction`; `ReasonCode` |
@@ -213,8 +213,79 @@ loaded with `include_str!`).
 ## Interim rules
 
 - **Mixed modes.** Until jobs can request a mode (T093), the least aggressive effective mode among
-  the running allocations on a resource governs that resource's target. T093a replaces this with
-  per-allocation targets.
+  the running allocations on a resource governs that resource's target. Because targets are
+  ordered (FR-065), this is the most conservative target. T093a replaces it with the target model
+  below.
+
+## Target model with per-job modes (T093a, US6)
+
+- **Aggregate share.** The owner's aggregate target on a resource comes from the node mode and the
+  node cap, exactly as today's single target: `own_allowance` with the node's effective mode.
+- **Yield order.** Per-job modes do not raise the aggregate. They decide who yields inside it:
+  when the aggregate must shrink, Yield First allocations yield first, then Neutral, then
+  Performance. Within a tier, `victim_order` keeps the cost order (frees the resource, pending,
+  opportunistic before Guaranteed, least progress lost, best fit, ID).
+- **Per-job ceiling.** A job's own mode also bounds it: a Yield First job on a contended resource
+  goes to zero even when the aggregate would allow more, because its mode's target is zero.
+- **Test.** Two jobs in different modes on one resource: the Yield First job yields first and is
+  held to its own target; the Performance job keeps the rest of the aggregate.
+
+## Revisions before US5 (2026-10-25)
+
+Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5.md).
+
+- **B1 Risk rule.** Constitution 2.0.0, Principle II: options whose risk falls only on own work
+  may be offered; options whose risk falls on other workloads do not exist.
+- **B2 Floor policy A only.** `FloorPolicy` and `NeutralMemoryPolicy` keep only `a`; `b` and `c`
+  parse so that validation can name the replacement. `SupervisorOptions.guaranteed_oom_victim`
+  is removed: the gate sets `oom_score_adj` 1000 for every own process. New keys:
+  `guaranteed_hint_deadline_s` and `ram.guaranteed_breach_window_s`. Floor minimums are a
+  runtime clamp with a warning, so 0.2 files keep loading. `acknowledge_danger` now accepts
+  `performance_mode` and `small_floor`. The unused `reclaim_s` key is removed, since SC-012
+  derives the bounds from the deadlines.
+- **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
+  Guaranteed hint deadline. Performance and small floors are caution options with confirmation.
+- **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance).
+  "Contended" replaces "saturated": saturation plus an active external principal, or unknown
+  activity. Under contention Yield First targets zero for opportunistic work, which the ladder
+  applies as a pause, not a cap to the 5% minimum duty. While a resource is not contended, a held
+  cap rises toward the target at the mode's scale-up rate. A proptest checks
+  `YF ≤ N ≤ P` over generated `ModeInput`s.
+- **B5 Readiness.** The supervisor tracks `hint_ready` (any acked family directory) and
+  `observes_drain` (acked, or the worker used the supervisor socket), sends `readiness` on change
+  and includes both in `adjusted` and `state`. The agent keeps them in `AllocationFacts` and the
+  negotiated `AllocationReport`. The policy offers `hint` only to hint-ready allocations, which
+  removes the refused-hint retry (deviation 36). The critical floor path uses
+  `critical_hint_deadline_s`, drains non-ready allocations at once, and sends `terminate` to
+  allocations that do not observe the drain file.
+- **B6 Principals.** `PolicyEngine` keeps per-UID admission state (`principal_window_intervals`,
+  leaving below half of `principal_min_percent`). `ModeInput` gains `background`, the usage of
+  UIDs below `uid_min`, which max-min subtracts from capacity. UIDs not admitted yet fall into the
+  unattributed principal, so contention is detected on the first observation.
+- **B7 Memory headroom.** `PolicyEngine` keeps a max-deque of external usage per memory
+  resource over `memory_peak_window_s`; admission headroom uses the peak, yielding uses current
+  usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource). RAM and GPU
+  memory add `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th
+  reclaim episode within the peak window, the coordinator's retry pattern.
+- **B8 Reclaim bounds.** SC-002 and SC-012, with scenario tests in `tests/contention.rs`.
+- **B9 Legacy GPU keys.** `Config::legacy_gpu()` returns the interpretation and warnings
+  (FR-031); `doctor` prints them. The admission effect of `never_share_occupied_gpus`, and
+  removing the legacy `GpuExecutionMode` steering, belong to T085.
+- **B10 Guaranteed.** Never paused. A CPU cap target is raised to the request, and a Guaranteed
+  victim's CPU amount is its usage above the request. Memory is released only as the last step of
+  floor policy A.
+- **B11 Target model.** Above, implemented in T093a.
+- **B12 US5 additions.** T087b, T087c and T087d.
+  - GPU compute shares use the rootless SIGSTOP/SIGCONT duty cycle. Its period is one monitor
+    interval (500 ms by default) and its minimum duty 5%. Kernels already submitted keep running,
+    so the effective granularity is the period plus the longest kernel.
+  - Pause is never used for GPU memory.
+  - The launch recheck calls the same pure admission function as the policy, on a fresh
+    observation.
+- **B13 Immediate targets.** Both SDKs call a new handler with the current target. The
+  supervisor writes the current target into a managed child's directory before the child starts.
+- **B14 Runtime `memory.high`.** A Polish task (T138): on a delegated cgroup, a RAM cap step that
+  sets `memory.high` before the hint, verified by readback.
 
 ## Complexity Tracking
 

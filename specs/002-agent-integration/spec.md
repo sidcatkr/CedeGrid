@@ -65,7 +65,7 @@ that no undocumented command was used.
 4. **Given** the guide, **When** an agent looks for what it must not do, **Then** the guide lists
    the safety boundaries:
    - CedeGrid never acts on other processes;
-   - *danger* setup options need an explicit acknowledgement;
+   - *caution* setup options need an explicit acknowledgement;
    - state-changing operations may be disabled by the operator.
 
 ---
@@ -114,7 +114,7 @@ but that power must be granted deliberately, per operation, by a person.
 **Independent Test**: enable one state-changing tool and call it. Check that:
 - it succeeds and is recorded;
 - disabled tools are neither offered nor callable;
-- a *danger* setup choice is refused without its acknowledgement.
+- a *caution* setup choice is refused without its acknowledgement.
 
 **Acceptance Scenarios**:
 
@@ -123,9 +123,9 @@ but that power must be granted deliberately, per operation, by a person.
    idempotent.
 2. **Given** a tool that is not enabled, **When** an agent calls it by name, **Then** the call is
    refused with a stable error code, and nothing changes.
-3. **Given** the setup tool is enabled, **When** an agent requests a *danger* option without the
+3. **Given** the setup tool is enabled, **When** an agent requests a *caution* option without the
    explicit acknowledgement argument, **Then** the call is refused and nothing is written. With
-   the acknowledgement, the result reports the active exception and its marker.
+   the acknowledgement, the result reports the active caution option and its marker.
 4. **Given** any state-changing call, **When** it completes or fails, **Then** an audit record
    holds:
    - the time and the tool
@@ -268,7 +268,7 @@ guidance exactly once, and that both point to the constitution.
   certificate role. The server MUST NOT create credentials, widen roles or return key material
   or certificate contents.
 - **FR-012**: The setup tool MUST use the non-interactive setup from 001.
-  - A *danger* option MUST require the same explicit acknowledgement argument as the CLI flag.
+  - A *caution* option MUST require the same explicit acknowledgement argument as the CLI flag.
   - Results MUST report active exceptions with their markers.
 - **FR-013**: Every state-changing call MUST be recorded in an audit log under CedeGrid's state
   directory. Each record holds the time, the tool, the arguments with secrets redacted, the

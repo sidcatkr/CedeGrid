@@ -177,7 +177,8 @@ invert them (FR-040).
   - Behavior change: 0.2 nodes running `auto`/`conservative_non_sharing` move from "block
     occupied devices" to Neutral sharing. Record it in `CHANGELOG.md` and the migration notes.
 - Floor policy A is the default; B (*caution*) and C (*danger*) are opt-in. Neutral memory
-  policy A is the default; B (*caution*) is opt-in. See constitution 1.1.0, Principle II.
+  policy A is the default; B (*caution*) is opt-in. Superseded on 2026-10-25 by constitution
+  2.0.0: B, C and Neutral memory policy B are removed (spec FR-041, FR-042).
 - Thresholds are configuration values with provisional defaults (spec table). No constants.
 
 ## Candidate configuration shape
@@ -189,9 +190,9 @@ additive with serde defaults.
 [contention]
 default_mode = "neutral"          # yield_first | neutral | performance
 max_mode = "performance"          # node cap
-floor_policy = "a"                # a | b | c
-neutral_memory_policy = "a"       # a | b
-acknowledge_danger = []           # e.g. ["floor_policy_c"]; required for danger options
+floor_policy = "a"                # only "a" since 2026-10-25
+neutral_memory_policy = "a"       # only "a" since 2026-10-25
+acknowledge_danger = []           # "performance_mode", "small_floor" since 2026-10-25
 
 [contention.cpu]                  # also: ram, gpu_compute, gpu_memory
 mode = "neutral"                  # optional per-resource override of default_mode
@@ -200,7 +201,6 @@ yield_first_response_intervals = 3
 performance_margin_percent = 10
 neutral_convergence_s = 60
 neutral_tolerance_points = 15
-reclaim_s = 5                     # 15 for ram / gpu_memory
 
 [contention.gpu_memory]
 noise_tolerance_mib = 256
@@ -226,7 +226,7 @@ quiet_window_intervals = 20
 ### Color
 
 - No color when `NO_COLOR` is non-empty, output is not a TTY, or `TERM=dumb`.
-- Labels `[caution]`/`[danger]` always print.
+- Labels `[caution]` always print (`[danger]` was removed on 2026-10-25).
 - Yellow is SGR 33 and red is SGR 31; defaults use no SGR.
 
 ### Writing the configuration
@@ -240,7 +240,7 @@ quiet_window_intervals = 20
 
 - One flag per choice, for example `--default-mode`, `--max-mode`, `--floor-policy` and
   `--neutral-memory-policy`, plus per-resource overrides.
-- `--acknowledge-danger floor_policy_c` is required for danger options.
+- `--acknowledge-danger performance_mode|small_floor` is required for caution options.
 - `--non-interactive` forces flag-only mode even on a TTY.
 - `--json` gives machine-readable output.
 - The exit status is non-zero when a required choice or acknowledgement is missing.

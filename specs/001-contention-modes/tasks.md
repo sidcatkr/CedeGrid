@@ -348,10 +348,10 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   - max-min fair share with 1–3 principals plus an unknown-owner principal;
   - own work converges and does not go below its share, except for floors under Neutral
     memory policy A;
-  - policy B holds the share.
+  - policy B holds the share. *Superseded by T122/T131: Neutral memory policy B is removed.*
 - [X] T058 [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
   - a 10% margin, floors and fast scale-up;
-  - floor policies A, B and C for Guaranteed work;
+  - floor policies A, B and C for Guaranteed work (*B and C superseded by T122/T131*);
   - Guaranteed work is never paused.
 - [X] T059 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
   - an envelope breach is restored per resource, opportunistic work first, with no all-stop
@@ -363,11 +363,12 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   principal.
 - [X] T061 [P] [US3] Add tests in `tests/supervision.rs`:
   - the worker gate sets `oom_score_adj = 1000` before EXEC;
-  - it skips this for Guaranteed work under floor policy C;
+  - it skips this for Guaranteed work under floor policy C (*superseded by T123: every own
+    process gets 1000*);
   - managed children inherit the value.
 - [X] T062 [P] [US3] Add tests in `tests/policy.rs`:
   - CPU/RAM expansion follows `cpu_ram_scale_up_cooldown_ms`, independently of
-    `gpu.scale_up_cooldown_ms`;
+    `gpu.scale_up_cooldown_ms` (*split per resource as `scale_up_cooldown_ms` by T128/T135*);
   - the effective mode is min(requested, `max_mode`) and is reported per allocation.
 
 ### Implementation for User Story 3
@@ -382,11 +383,11 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 - [X] T066 [US3] Implement floors and policies in `src/contention.rs`:
   - RAM and VRAM floors from `ram.reserve_mib`/`ram.reserve_percent` and
     `gpu.reserve_vram_mib`;
-  - floor policies A, B and C, and Neutral memory policies A and B;
+  - floor policies A, B and C, and Neutral memory policies A and B (*B and C removed by T131*);
   - the Guaranteed rules: no pause, and drain only for a floor breach under A.
 - [X] T067 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
   `src/supervision.rs`, skipping it for Guaranteed work under floor policy C, and verify that
-  managed children inherit it.
+  managed children inherit it. *The policy C exemption is removed by T131.*
 - [X] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
@@ -452,6 +453,96 @@ after the hint deadline (quickstart §6).
 
 ---
 
+## Phase 6a: Revisions before US5 (maintainer decisions B1–B14, 2026-10-25)
+
+**Goal**: apply constitution 2.0.0 and the revised spec before US5: one floor policy, ordered
+mode targets, readiness-based hints, principals by `uid_min`, peak-based memory headroom,
+reclaim bounds, the legacy GPU interpretation, Guaranteed semantics and immediate targets.
+
+**Independent Test**: the tests below fail on the pre-revision code and pass after it; the
+review answers are in [review-pre-us5.md](review-pre-us5.md).
+
+### Tests for the revisions ⚠️ (write first, must fail)
+
+- [ ] T122 [P] Add tests in `tests/configuration.rs` (B1, B2):
+  - `floor_policy = "b"` and `"c"` and `neutral_memory_policy = "b"` fail to load, and each
+    message names its replacement;
+  - Performance on any resource without `acknowledge_danger = ["performance_mode"]` fails with
+    `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`, and loads with it;
+  - a floor below its minimum is raised to it with a warning; a floor near its minimum without
+    `small_floor` warns and still loads;
+  - `guaranteed_hint_deadline_s` (1–30) and `ram.guaranteed_breach_window_s` (0–60, RAM only)
+    are validated.
+- [ ] T123 [P] Add a test in `tests/supervision.rs` (B2): the gate sets `oom_score_adj = 1000`
+  for Guaranteed work too, with no option to skip it.
+- [ ] T124 [P] Add tests in `tests/contention.rs` (B4, B10):
+  - a proptest over generated `ModeInput`s on every resource: target(YF) ≤ target(N) ≤
+    target(P) (SC-013);
+  - the contended targets from data-model.md, including unknown activity;
+  - a Guaranteed CPU cap never goes below the request.
+- [ ] T125 [P] Add scenario tests in `tests/contention.rs` (B8, SC-002, SC-012):
+  - CPU is returned within 2 monitor intervals in Yield First, Neutral and Performance,
+    including own work with many threads saturating the host;
+  - after the external load stops or shrinks, a held cap rises again at the mode's rate;
+  - RAM reclaim for a hint-ready, a non-ready and a Guaranteed allocation within the SC-012
+    bounds;
+  - the critical floor path within its shorter bounds.
+- [ ] T126 [P] Add readiness tests (B5):
+  - in `tests/managed_supervision.rs`: `adjusted`, `state` and `readiness` carry `hint_ready`
+    and `observes_drain`; a worker that acks late becomes hint-ready by the next interval; a
+    plain command is neither;
+  - in `tests/contention.rs`: a non-acking command escalates to drain without a refused-hint
+    round trip; on the critical path a hint-ready allocation is drained after
+    `critical_hint_deadline_s`, a non-ready one at once, and one that does not observe the drain
+    file gets `terminate`;
+  - in `src/agent.rs` tests: readiness reaches `AllocationFacts` and the negotiated
+    `AllocationReport`.
+- [ ] T127 [P] Add principal tests in `tests/contention.rs` and `tests/policy.rs` (B6):
+  - a user ID below `uid_min` is background and never a principal;
+  - a new user joins only after `principal_window_intervals`, and counts toward the unattributed
+    principal meanwhile;
+  - a principal leaves only after the window below half the threshold;
+  - the owner stays a principal below `uid_min`; unreadable owners stay one principal.
+- [ ] T128 [P] Add memory tests in `tests/policy.rs` (B7):
+  - RAM and GPU memory headroom use the external peak over `memory_peak_window_s`, including a
+    quiet GPU context;
+  - CPU expansion waits only for `contention.cpu.scale_up_cooldown_ms` and RAM only for its own;
+  - repeated reclaim episodes double the memory cooldown from 1 s to at most 30 s, and a quiet
+    window resets it.
+- [ ] T129 [P] Add tests in `tests/configuration.rs` and `tests/cli.rs` (B9): each
+  `gpu.execution_mode` value maps per FR-031 with its warning, and `doctor` prints the
+  interpretation.
+- [ ] T130 [P] Add SDK tests in `python/tests/test_worker.py`, `npm/tests/worker-targets.test.ts`
+  and `tests/managed_supervision.rs` (B13): a handler subscribed after a target exists receives
+  it at once, exactly once; a managed child started after a hint finds the current target.
+
+### Implementation for the revisions
+
+- [ ] T131 Remove floor policies B and C, Neutral memory policy B and the OOM exemption (B1, B2):
+  validation messages, `acknowledge_danger` entries, floor minimums, the new Guaranteed keys and
+  the removal of `reclaim_s` in `src/config.rs`; `guaranteed_oom_victim` in
+  `src/supervision.rs` and its callers; exceptions and markers in `src/model.rs`;
+  `NodeContentionReport` in `src/protocol.rs`; `docs/guarantees.md`.
+- [ ] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU
+  rule in `src/contention.rs` and `src/policy.rs` (B4, B10).
+- [ ] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
+  report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path and
+  `terminate` in `src/policy.rs` and `src/contention.rs`; remove the refused-hint retry.
+- [ ] T134 Implement principal classification in `src/policy.rs`, `src/contention.rs` and
+  `src/config.rs` (B6), and document the `hidepid=2` fallback in `docs/guarantees.md`.
+- [ ] T135 Implement the memory peak window, the per-resource cooldowns and the reclaim backoff
+  in `src/policy.rs`, `src/config.rs` and `src/agent.rs` (B7), and rename the tools helper in
+  `tools/runtime_config.py`.
+- [ ] T136 Implement the legacy GPU interpretation and warnings in `src/config.rs`, and print it
+  in `doctor` in `src/main.rs` (B9 parsing; the admission effect is T085).
+- [ ] T137 Deliver the current target at once (B13): `on_resource_target` in
+  `python/cedegrid/worker.py` and `onResourceTarget` in `npm/src/worker.ts`; the child's target
+  file in `src/supervision.rs`; `docs/worker-protocol.md`.
+
+**Checkpoint**: US5 starts from ordered targets, one floor policy and readiness-based hints.
+
+---
+
 ## Phase 7: User Story 5 - GPU work on shared, occupied devices (Priority: P2)
 
 **Goal**: admission on occupied devices per mode and memory headroom, and coordinator placement
@@ -475,9 +566,9 @@ context, under Neutral and Performance (quickstart §5).
 ### Implementation for User Story 5
 
 - [ ] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
-  (`validate_gpu_launch_contract` by mode). Once the legacy keys stop steering admission, emit
-  the load-time warning for `gpu.execution_mode` and `gpu.best_effort_external_processes`
-  (moved from T014).
+  (`validate_gpu_launch_contract` by mode). Replace the legacy `GpuExecutionMode` steering with
+  the FR-031 interpretation from T136, and block devices with external contexts or unknown
+  processes when `never_share_occupied_gpus` is set (FR-064).
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
 - [ ] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
@@ -486,6 +577,14 @@ context, under Neutral and Performance (quickstart §5).
   regression test `launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist`
   in `tests/policy.rs` for Neutral and Performance, keeping Yield First blocked. Do not open
   this before the floors exist.
+- [ ] T087b [US5] Make T087a's launch recheck call the same pure admission function as the policy,
+  on a fresh observation, so the two cannot disagree (`src/policy.rs`, `src/agent.rs`). Test in
+  `tests/policy.rs`.
+- [ ] T087c [US5] Never use pause for GPU memory contention: the ladder skips pause on GPU memory
+  for every backend, with a test in `tests/contention.rs` (FR-011).
+- [ ] T087d [US5] Approximate the GPU compute fair share by pause duty-cycling of own GPU work in
+  `src/actuation.rs` and `src/policy.rs`, and document the granularity (one monitor interval,
+  5% minimum duty, plus the longest running kernel) in `docs/guarantees.md` (FR-021).
 - [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
 - [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
@@ -510,9 +609,8 @@ workers behave unchanged (quickstart §8).
 - [ ] T089 [P] [US6] Add tests in `tests/configuration.rs`:
   - every `examples/*.toml` and 0.2 config loads unchanged;
   - Neutral is the default;
-  - legacy keys warn and have no effect;
-  - `floor_policy = "c"` without an acknowledgement fails with
-    `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`;
+  - legacy keys are interpreted per FR-031 (covered by T129);
+  - removed options fail to load (covered by T122);
   - a per-resource mode above `max_mode` fails.
 - [ ] T090 [P] [US6] Add the mixed-version matrix in `tests/coordinator.rs` (`mixed_version_*`)
   (SC-008):
@@ -530,16 +628,19 @@ workers behave unchanged (quickstart §8).
 - [ ] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
   `src/execution_model.rs`. In `src/coordinator.rs`, strip it for agents without
   `contention/1`, and place tasks with overrides only on capable agents.
-- [ ] T093a [US6] Replace the interim mixed-mode rule, where the least aggressive effective mode
-  on a resource governs its target, with per-allocation targets once jobs can request a mode
-  (T093), in `src/contention.rs` and `src/policy.rs`. Add a regression test in `tests/policy.rs`
-  with two jobs in different modes on the same resource, each held to its own mode's target.
+- [ ] T093a [US6] Replace the interim mixed-mode rule with the target model in plan.md (B11): the
+  owner's aggregate share comes from the node mode and cap, and per-job modes set the yield
+  order inside it (Yield First, then Neutral, then Performance), with `victim_order` within a
+  tier, in `src/contention.rs` and `src/policy.rs`. Add a regression test in `tests/policy.rs`
+  with two jobs in different modes on the same resource: the Yield First job yields first and is
+  held to its own mode's target.
 - [ ] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
 - [ ] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
 - [ ] T096 [US6] Add `CHANGELOG.md` entries for:
   - the Neutral default;
-  - the ignored legacy GPU keys;
+  - the interpreted legacy GPU keys;
+  - the removed floor and Neutral memory policies;
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
 - [ ] T097 [US6] Add the negotiated optional fields to the shared contract fixture
@@ -552,17 +653,17 @@ workers behave unchanged (quickstart §8).
 
 ## Phase 9: User Story 7 - Set up a node interactively or from the command line (Priority: P2)
 
-**Goal**: a keyboard interface by default on a TTY, equivalent flags, risk markers, danger
+**Goal**: a keyboard interface by default on a TTY, equivalent flags, caution markers and
 confirmation, and atomic writes that preserve everything else.
 
 **Independent Test**: flags and the interface produce byte-identical files. The non-TTY run
-never blocks, and danger choices need confirmation (quickstart §7).
+never blocks, and caution choices need confirmation (quickstart §7).
 
 ### Tests for User Story 7 ⚠️
 
-- [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the risk mapping: policies A have no
-  marker, floor policy B and Neutral memory policy B are `caution`, floor policy C is
-  `danger`, and a combination takes its highest marker.
+- [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the caution mapping (B3): Yield First,
+  Neutral and default floors have no marker; Performance on any resource and a floor below
+  twice its minimum are `caution`.
 - [ ] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
   - exit codes 2, 3 and 4 per `contracts/setup-cli.md`;
   - `--json` output;
@@ -571,16 +672,17 @@ never blocks, and danger choices need confirmation (quickstart §7).
   - unmanaged settings and comments preserved byte for byte.
 - [ ] T100 [US7] Add Unix PTY tests in `tests/cli.rs`:
   - arrow, Space and Enter navigation;
-  - the danger confirmation screen;
+  - the caution confirmation screen;
   - Esc, `q` and Ctrl-C write nothing and restore the terminal;
-  - with `NO_COLOR=1`, no escape sequences, while `[caution]`/`[danger]` remain;
+  - with `NO_COLOR=1`, no escape sequences, while `[caution]` remains;
   - output byte-identical to the flag path (SC-011);
   - a command that needs a missing config offers setup on a TTY.
 
 ### Implementation for User Story 7
 
-- [ ] T101 [US7] Implement setup choices, defaults from the current config, validation and the
-  risk mapping in `src/setup.rs`.
+- [ ] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor and margin
+  sizes, Guaranteed hint deadline), defaults from the current config, validation and the caution
+  mapping in `src/setup.rs` (B3).
 - [ ] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
   validate through `Config::load`, then rename atomically.
 - [ ] T103 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
@@ -588,9 +690,9 @@ never blocks, and danger choices need confirmation (quickstart §7).
 - [ ] T104 [US7] Implement the terminal interface in `src/setup.rs`:
   - termios raw mode through `libc`, restored by a drop guard and on signals;
   - ANSI rendering;
-  - keys, consequence lines, and markers in SGR 33 and SGR 31;
+  - keys, consequence lines, and the caution marker in SGR 33;
   - `NO_COLOR`, `TERM=dumb` and non-TTY detection;
-  - the danger confirmation screen and the summary screen.
+  - the caution confirmation screen and the summary screen.
 - [ ] T105 [US7] Implement the line-based prompt fallback in `src/setup.rs`, for terminals
   without cursor control or that are too small.
 - [ ] T106 [US7] In `src/main.rs`, offer setup on a TTY when a command needs a missing config.
@@ -598,7 +700,7 @@ never blocks, and danger choices need confirmation (quickstart §7).
 - [ ] T107 [US7] On Windows, setup configures client settings only and refuses node choices
   with a clear error (`src/main.rs`, `src/setup.rs`).
 - [ ] T108 [US7] Add a short setup section to `README.md` that points to `docs/guarantees.md`
-  for the risk markers.
+  for the caution marker.
 
 **Checkpoint**: new nodes are configured safely through setup.
 
@@ -616,8 +718,8 @@ each step.
 
 - [ ] T109 [P] [US8] Add tests in `tests/cli.rs`:
   - `observe --samples 2 --no-state` JSON includes `resources`, `actions` and `exceptions`;
-  - `doctor` shows the modes, policies, exceptions with markers, available steps and
-    deprecated-key warnings.
+  - `doctor` shows the modes, floors, caution options with markers, available steps and the
+    legacy GPU interpretation.
 - [ ] T110 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
   node's negotiated contention summary.
 
@@ -637,8 +739,8 @@ each step.
 ## Phase 11: Polish & Cross-Cutting Concerns
 
 - [ ] T114 Update `docs/guarantees.md` as the single normative source (FR-056):
-  - floors;
-  - floor and Neutral memory policies with their markers;
+  - floors and their minimums;
+  - floor policy A, the removed options and the caution options;
   - modes;
   - envelope and spool behavior;
   - the deprecation of `gpu.execution_mode`;
@@ -678,6 +780,10 @@ each step.
   - `cargo check --target x86_64-pc-windows-msvc` for the client paths, where the target is
     installed.
 - [ ] T121 Run quickstart §1–3 and §6–8, and record the results.
+- [ ] T138 Add a runtime RAM cap step on delegated cgroups (B14): `memory.high` on the allocation's
+  leaf before the hint, verified by readback, in `src/cgroup.rs` and `src/actuation.rs`, with a
+  native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
+  unavailable for RAM.
 
 ---
 
@@ -691,8 +797,9 @@ each step.
 - **US2 (Phase 4)**: needs US1 (one authority, error classification).
 - **US3 (Phase 5)**: needs US2 (ladder, actuators).
 - **US4 (Phase 6)**: needs US2 (actuation stage, hint step).
-- **US5 (Phase 7)**: needs US1 (quiet class, launch contract) and Foundational negotiation
-  (T016).
+- **Revisions (Phase 6a)**: needs US3 and US4, and blocks US5.
+- **US5 (Phase 7)**: needs US1 (quiet class, launch contract), Foundational negotiation (T016)
+  and Phase 6a.
 - **US6 (Phase 8)**: needs Foundational (T014, T016). It can run alongside US2–US5, except T093,
   which needs the effective-mode resolution in T070 (US3).
 - **US7 (Phase 9)**: needs Foundational config (T014). It can run alongside US1–US6.
@@ -724,8 +831,11 @@ T029 src/agent.rs    T030 src/supervision.rs
 # US4 tests together:
 T072 npm drain tests    T073 python targets    T074 npm targets    T075 supervisor targets
 
+# Revision tests together (Phase 6a):
+T122 tests/configuration.rs    T123 tests/supervision.rs    T127 tests/policy.rs principals    T130 SDK targets
+
 # US7 (independent of US2-US6); T100 follows T099 in the same file:
-T098 src/setup.rs risk mapping tests    T099 tests/cli.rs flag tests
+T098 src/setup.rs caution mapping tests    T099 tests/cli.rs flag tests
 ```
 
 ---

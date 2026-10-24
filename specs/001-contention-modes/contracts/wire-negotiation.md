@@ -15,8 +15,10 @@
    - A 0.2 agent ignores the field: `HeartbeatReply` has no `deny_unknown_fields`.
 3. **Later heartbeats.** After it sees `contention/1`, the agent includes these fields:
    - `NodeReport.features = ["api/1", "contention/1"]`
-   - `NodeReport.contention = {resources: {<ResourceKey>: {mode, admission, own, external, target_share, step_summary}}, floor_policy, neutral_memory_policy, exceptions: [..]}`
+   - `NodeReport.contention = {resources: {<ResourceKey>: {mode, admission, own, external, target_share, step_summary}}, exceptions: [..]}`
    - `AllocationReport.yield_cause` for yielded or draining allocations
+   - `AllocationReport.hint_ready` and `AllocationReport.observes_drain` for running
+     allocations (FR-062)
 4. **0.2 coordinator.** It never advertises the feature, so the agent never sends the new
    fields. A 0.2 coordinator rejects unknown `NodeReport` fields.
 5. **New coordinator, 0.2 agent.** The coordinator:

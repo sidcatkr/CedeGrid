@@ -29,8 +29,9 @@ fsync, and renaming it over the target.
 - **Relaxing.** A relaxed target is a new file with a higher `sequence`. An absent file means
   no target.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
-  `resource-target.ack` in the same directory. The ack only shows that the worker can read
-  hints; compliance is judged from observed usage.
+  `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
+  shows that the worker can read hints; the supervisor reports it as `hint_ready`, and
+  compliance is judged from observed usage.
 
 ## SDK API
 
@@ -38,13 +39,20 @@ Both SDKs add the same API.
 
 **Python** (`python/cedegrid/worker.py`):
 - `WorkerContext.resource_targets() -> ResourceTargets | None`
-- `WorkerContext.on_resource_target(callback)`: called once per new sequence, during
-  `draining()` and `safe_point()` polls. Hook errors are isolated and logged.
+- `WorkerContext.on_resource_target(callback)`: called at once with the current target when
+  one exists, then once per new sequence, during `draining()` and `safe_point()` polls. Hook
+  errors are isolated and logged.
 - `ResourceSignals.from_env()`: needs only the two environment variables. It is usable in
   managed children, which have no context.
 
 **TypeScript** (`npm/src/worker.ts`): `resourceTargets()`, `onResourceTarget(cb)`,
-`ResourceSignals.fromEnv()`.
+`ResourceSignals.fromEnv()`, with the same immediate delivery.
+
+## Managed children
+
+When the supervisor creates a managed child's private directory, it writes the current target
+there before the child starts, with the same sequence and deadline, so the child sees it on its
+first read (FR-035).
 
 ## Compatibility
 

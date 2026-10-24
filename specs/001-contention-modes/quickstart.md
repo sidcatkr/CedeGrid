@@ -93,15 +93,15 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s python/tests -p 'test_w
 ## 7. Setup (any OS for flags; a TTY for the interface)
 
 ```sh
-cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode neutral --floor-policy c
-cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode neutral --floor-policy c --acknowledge-danger floor_policy_c
+cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance
+cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance --acknowledge-danger performance_mode
 ```
 
 **Expected:**
 - The first command exits 3 with `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` and writes nothing.
-- The second writes the file and reports the `floor_policy_c` exception as `danger`.
+- The second writes the file and reports the `performance_mode` option as `caution`.
 - With `NO_COLOR=1`, the interface's output contains no escape sequences but keeps the
-  `[danger]` label.
+  `[caution]` label.
 - The interface and flags produce byte-identical files (SC-011).
 
 ## 8. Mixed versions (any OS)

@@ -38,7 +38,7 @@
   - Q3: Neutral memory policy A by default; B opt-in.
 - New user story 7 covers setup: the keyboard interface is the default, with command-line flags
   for non-TTY use.
-  - FR-046–FR-055 define keys, color, `NO_COLOR`, text markers, danger confirmation, non-TTY
+  - FR-046–FR-055 define keys, color, `NO_COLOR`, text markers, caution confirmation, non-TTY
     behavior and config writes.
   - FR-045 justifies the risk-marker mapping.
 - Success criteria now reference configuration values with provisional defaults, marked
@@ -58,3 +58,14 @@
   now require an acknowledgement entry for danger options, as constitution Principle II
   requires. Neutral and Performance scale-up rows were added to the Provisional thresholds
   table. Checklist state is unchanged (16/16).
+- Iteration 5 (maintainer revisions before US5, 2026-10-25), with constitution 2.0.0:
+  - Q2 and Q3 above are superseded. Floor policy A is the only floor policy, and floors always
+    precede fair share for memory. Removed options fail to load, naming their replacement.
+  - The only risk marker is *caution*, for Performance and floors near their minimum, and it
+    needs confirmation (FR-045, FR-051, FR-054).
+  - New requirements: principals (FR-059), memory headroom peak (FR-060), memory backoff
+    (FR-061), readiness (FR-062), the critical floor path (FR-063), never sharing occupied GPUs
+    (FR-064) and ordered mode targets (FR-065). New success criteria: reclaim bounds (SC-012)
+    and target order (SC-013).
+  - The legacy `gpu.execution_mode` values are interpreted (FR-031) instead of ignored.
+  - Checklist state is unchanged (16/16).

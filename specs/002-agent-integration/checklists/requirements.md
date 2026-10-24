@@ -36,7 +36,7 @@
   choices:
   - read-only tools by default;
   - state-changing tools enabled per tool by the operator;
-  - *danger* setup options need the same acknowledgement as the CLI.
+  - *caution* setup options need the same acknowledgement as the CLI.
 
   The remaining choices are recorded as assumptions: local stdio only, and the Python package
   launches the native binary.

@@ -15,7 +15,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   },
   "actions": [{"allocation_id": "a1", "resource": "cpu", "step": "cap", "target": 3000,
                "cause": "external_growth", "code": "yield_step_cap"}],
-  "exceptions": [{"name": "floor_policy_b", "marker": "caution"}],
+  "exceptions": [{"name": "performance_mode", "marker": "caution"}],
   "would_drain": ["..."],
   "reasons": ["..."]
 }
@@ -29,7 +29,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 | Command | Shows |
 |---|---|
 | `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, floor policy, Neutral memory policy, active exceptions with markers, available actuation steps per resource, deprecated-key warnings |
+| `doctor` | Configured and effective modes, floors and their minimums, active caution options with markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
 | `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports |
 
 ## Reason codes

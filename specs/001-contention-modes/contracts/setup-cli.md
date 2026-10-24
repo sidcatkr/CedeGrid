@@ -8,10 +8,11 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
     [--default-mode yield_first|neutral|performance]
     [--mode RESOURCE=MODE]...            # RESOURCE: cpu|ram|gpu_compute|gpu_memory
     [--max-mode MODE]
-    [--floor-policy a|b|c]
-    [--neutral-memory-policy a|b]
+    [--ram-floor-mib N] [--gpu-floor-mib N]
+    [--margin RESOURCE.MODE=PERCENT]...  # MODE: yield_first|performance
+    [--guaranteed-hint-deadline-s N]
     [--set RESOURCE.KEY=VALUE]...        # tuned thresholds, e.g. gpu_memory.noise_tolerance_mib=512
-    [--acknowledge-danger floor_policy_c]
+    [--acknowledge-danger performance_mode|small_floor]...
 ```
 
 ## Modes
@@ -35,18 +36,18 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
   label.
 - **Markers.**
 
-  | Marker | Appearance |
-  |---|---|
-  | caution | `[caution]`, yellow (SGR 33) |
-  | danger | `[danger]`, red (SGR 31) |
+  | Marker | Appearance | Options |
+  |---|---|---|
+  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource; a floor below twice its minimum |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain.
-- **Danger confirmation.** Choosing a danger option opens a separate screen that restates the
-  consequence and needs an explicit "yes". Declining restores the default.
+- **Caution confirmation.** Choosing a caution option opens a separate screen that restates the
+  consequence and needs an explicit "yes". Declining restores the default. Confirming records the
+  option in `acknowledge_danger`.
 - **Fallback.** If the terminal cannot be driven (no cursor control or too small), setup uses
   line-based prompts on the TTY.
-- **Summary.** Shown before writing, listing every active exception with its marker.
+- **Summary.** Shown before writing, listing every active caution option with its marker.
 
 ## Writes
 
@@ -60,14 +61,14 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 |---|---|---|
 | 0 | — | Written, or unchanged |
 | 2 | `ERR_CEDEGRID_SETUP_MISSING_CHOICE` | A required choice is missing in non-interactive mode; the message names the flag |
-| 3 | `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` | A danger option was chosen without `--acknowledge-danger <option>` |
+| 3 | `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` | A caution option was chosen without `--acknowledge-danger <option>` |
 | 4 | `ERR_CEDEGRID_CONFIG_INVALID` | The result failed validation; nothing was written |
 | 130 | — | Cancelled interactively |
 
 `--json` prints:
 
 ```json
-{"written": true, "path": "...", "choices": {...}, "exceptions": [{"name": "floor_policy_b", "marker": "caution"}]}
+{"written": true, "path": "...", "choices": {...}, "exceptions": [{"name": "performance_mode", "marker": "caution"}]}
 ```
 
 Errors print `{"error": {"code": ..., "message": ...}}`.
