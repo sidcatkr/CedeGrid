@@ -534,3 +534,97 @@ fn converter_refuses_existing_and_dangling_output_symlinks() {
         }
     }
 }
+
+fn node_location() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let location = root.path().canonicalize().unwrap().join("node.toml");
+    (root, location)
+}
+
+fn parse_node(body: &str) -> anyhow::Result<Config> {
+    let (_root, location) = node_location();
+    config::parse_runtime::<Config>(
+        &format!("config_version = 1\n{body}\n"),
+        &location,
+        RuntimeConfigKind::Node,
+    )
+}
+
+#[test]
+fn contention_defaults_and_overrides_parse() {
+    use cedegrid::config::{FloorPolicy, NeutralMemoryPolicy};
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let defaults = Config::default().contention;
+    assert_eq!(defaults.default_mode, ContentionMode::Neutral);
+    assert_eq!(defaults.max_mode, ContentionMode::Performance);
+    assert_eq!(defaults.floor_policy, FloorPolicy::A);
+    assert_eq!(defaults.neutral_memory_policy, NeutralMemoryPolicy::A);
+    assert_eq!(defaults.thresholds(ResourceKind::Cpu).reclaim_s, 5);
+    assert_eq!(defaults.thresholds(ResourceKind::Ram).reclaim_s, 15);
+    assert_eq!(
+        defaults
+            .thresholds(ResourceKind::GpuMemory)
+            .noise_tolerance_mib,
+        256
+    );
+    let parsed = parse_node(
+        "[contention]\ndefault_mode = \"yield_first\"\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
+    )
+    .unwrap()
+    .contention;
+    assert_eq!(parsed.default_mode, ContentionMode::YieldFirst);
+    assert_eq!(parsed.mode(ResourceKind::Cpu), ContentionMode::Performance);
+    assert_eq!(parsed.mode(ResourceKind::Ram), ContentionMode::YieldFirst);
+    assert_eq!(
+        parsed
+            .thresholds(ResourceKind::GpuMemory)
+            .noise_tolerance_mib,
+        512
+    );
+}
+
+#[test]
+fn contention_validation_rejects_out_of_range_and_unknown_settings() {
+    for bad in [
+        "[contention]\ndefault_mode = \"performance\"\nmax_mode = \"neutral\"",
+        "[contention]\nmax_mode = \"neutral\"\n[contention.cpu]\nmode = \"performance\"",
+        "[contention.cpu]\nyield_first_margin_percent = 0",
+        "[contention.cpu]\nyield_first_margin_percent = 91",
+        "[contention.cpu]\nyield_first_margin_percent = 10\nperformance_margin_percent = 10",
+        "[contention.ram]\nneutral_tolerance_points = 0",
+        "[contention.ram]\nneutral_tolerance_points = 51",
+        "[contention.cpu]\nhysteresis_percent = 0",
+        "[contention.cpu]\nhysteresis_percent = 100",
+        "[contention.gpu_compute]\nquiet_window_intervals = 0",
+        "[contention.gpu_compute]\nquiet_window_intervals = 2",
+        "[contention]\nbogus = 1",
+        "[contention.cpu]\nbogus = 1",
+        "[contention.cpu]\nnoise_tolerance_mib = 5",
+        "[contention]\nfloor_policy = \"c\"",
+        "[contention]\nacknowledge_danger = [\"something_else\"]",
+    ] {
+        assert!(parse_node(bad).is_err(), "accepted: {bad}");
+    }
+    parse_node("[contention]\nfloor_policy = \"c\"\nacknowledge_danger = [\"floor_policy_c\"]")
+        .unwrap();
+}
+
+#[test]
+fn negative_cpu_nice_warns_and_is_treated_as_zero() {
+    let (_root, location) = node_location();
+    let loaded =
+        Config::parse_reporting("config_version = 1\n[cpu]\nnice = -5\n", &location).unwrap();
+    assert_eq!(loaded.config.cpu.nice, 0);
+    assert!(loaded.warnings.iter().any(|w| w.contains("cpu.nice")));
+    let loaded = Config::parse_reporting(
+        "config_version = 1\n[contention]\nfloor_policy = \"b\"\n",
+        &location,
+    )
+    .unwrap();
+    assert!(
+        loaded
+            .warnings
+            .iter()
+            .any(|w| w.contains("floor_policy_b") && w.contains("caution"))
+    );
+}

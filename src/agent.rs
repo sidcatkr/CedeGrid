@@ -558,7 +558,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         agent_lost: false,
     };
     let options = SupervisorOptions {
-        nice: spec.config.cpu.nice,
+        nice: spec.config.effective_nice(),
         drain_timeout_ms: spec.config.lifecycle.drain_timeout_ms,
         term_grace_ms: spec.config.lifecycle.term_grace_ms,
         lease_ms: spec.config.lifecycle.allocation_lease_ms,
@@ -652,7 +652,7 @@ pub fn execution_backend(
                         && !c.starts_with("cgroup.")),
                     "required delegated control unavailable: {error:#}"
                 );
-                let mut backend = crate::rootless::RootlessBackend::new(config.cpu.nice);
+                let mut backend = crate::rootless::RootlessBackend::new(config.effective_nice());
                 backend.fallback_evidence.push(ControlEvidence {
                     control: "cgroup_backend".into(),
                     available: None,
@@ -671,7 +671,7 @@ pub fn execution_backend(
         }
     }
     Ok(Box::new(crate::rootless::RootlessBackend::new(
-        config.cpu.nice,
+        config.effective_nice(),
     )))
 }
 struct ChildSlot {
@@ -3504,6 +3504,7 @@ mod agent_transport_tests {
             cpu_capacity_millicores: 8000,
             physical_cores: Some(4),
             cpu_busy_millicores: Some(1000),
+            cpu_busy_lower_millicores: None,
             total_ram_mib: 16000,
             available_ram_mib: Some(12000),
             gpu_inventory: CapabilityStatus::Unknown,
@@ -3547,6 +3548,7 @@ mod agent_transport_tests {
                 ram_mib: 256,
                 gpu_memory_mib: BTreeMap::new(),
             }),
+            observed_upper: None,
         };
         let used = allocation_charge(std::slice::from_ref(&allocation));
         assert_eq!(used.cpu_millicores, 1000);

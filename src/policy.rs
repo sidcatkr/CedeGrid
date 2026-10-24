@@ -7,6 +7,7 @@ use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
+use crate::contention::{ResourceKey, YieldCause, YieldStep};
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
@@ -607,13 +608,45 @@ impl PolicyEngine {
             })
             .collect();
         candidates.sort_by_key(|a| (a.phase != AllocationPhase::Pending, a.id.as_str()));
+        let mut actions = Vec::new();
         for allocation in candidates {
             let charge = &charges[&allocation.id];
-            if input.explicit_drain || contributes_to_excess(&remaining, &budget, charge) {
-                would_drain.push(allocation.id.clone());
+            let resource = if input.explicit_drain {
+                Some(first_charged_resource(charge))
+            } else {
+                excess_resource(&remaining, &budget, charge)
+            };
+            if let Some(resource) = resource {
+                let cause = if input.explicit_drain {
+                    YieldCause::OperatorDrain
+                } else if match &resource {
+                    ResourceKey::Cpu => cpu_unknown,
+                    ResourceKey::Ram => ram_unknown,
+                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
+                        blocked_gpus.contains(uuid)
+                    }
+                } {
+                    YieldCause::UnknownMeasurement
+                } else {
+                    YieldCause::ExternalGrowth
+                };
+                actions.push(YieldAction {
+                    allocation_id: allocation.id.clone(),
+                    resource,
+                    step: YieldStep::Drain,
+                    target: None,
+                    cause,
+                    code: "yield_step_drain".into(),
+                });
                 subtract_resources(&mut remaining, charge);
             }
         }
+        would_drain.extend(
+            actions
+                .iter()
+                .filter(|action| action.step >= YieldStep::Drain)
+                .map(|action| action.allocation_id.clone()),
+        );
         if charged.cpu_millicores > budget.cpu_millicores {
             reasons.push("managed CPU charges exceed scheduling budget".into());
         }
@@ -676,6 +709,9 @@ impl PolicyEngine {
             cpu_ram_expansion_allowed,
             would_drain,
             reasons,
+            resources: BTreeMap::new(),
+            actions,
+            exceptions: Vec::new(),
         })
     }
 }
@@ -889,12 +925,37 @@ fn subtract_resources(total: &mut Resources, value: &Resources) {
     }
 }
 
-fn contributes_to_excess(total: &Resources, budget: &Resources, charge: &Resources) -> bool {
-    (total.cpu_millicores > budget.cpu_millicores && charge.cpu_millicores > 0)
-        || (total.ram_mib > budget.ram_mib && charge.ram_mib > 0)
-        || charge.gpu_memory_mib.iter().any(|(gpu, amount)| {
-            *amount > 0
-                && total.gpu_memory_mib.get(gpu).copied().unwrap_or(0)
-                    > budget.gpu_memory_mib.get(gpu).copied().unwrap_or(0)
+/// The first over-budget resource this charge contributes to, if any.
+fn excess_resource(
+    total: &Resources,
+    budget: &Resources,
+    charge: &Resources,
+) -> Option<ResourceKey> {
+    if total.cpu_millicores > budget.cpu_millicores && charge.cpu_millicores > 0 {
+        return Some(ResourceKey::Cpu);
+    }
+    if total.ram_mib > budget.ram_mib && charge.ram_mib > 0 {
+        return Some(ResourceKey::Ram);
+    }
+    charge
+        .gpu_memory_mib
+        .iter()
+        .find(|(gpu, amount)| {
+            **amount > 0
+                && total.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
+                    > budget.gpu_memory_mib.get(*gpu).copied().unwrap_or(0)
         })
+        .map(|(gpu, _)| ResourceKey::GpuMemory(gpu.clone()))
+}
+
+fn first_charged_resource(charge: &Resources) -> ResourceKey {
+    if charge.cpu_millicores > 0 {
+        ResourceKey::Cpu
+    } else if charge.ram_mib > 0 {
+        ResourceKey::Ram
+    } else if let Some(gpu) = charge.gpu_memory_mib.keys().next() {
+        ResourceKey::GpuMemory(gpu.clone())
+    } else {
+        ResourceKey::Cpu
+    }
 }

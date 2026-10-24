@@ -182,6 +182,7 @@ impl Collector {
             cpu_capacity_millicores: capacity,
             physical_cores: self.physical_cores,
             cpu_busy_millicores: cpu_busy,
+            cpu_busy_lower_millicores: None,
             total_ram_mib: total_ram,
             available_ram_mib: available_ram,
             gpu_inventory,
@@ -439,6 +440,9 @@ impl Collector {
                 external_compute,
                 compute_sample_id,
                 observation: Some(observation),
+                reserved_memory_mib: None,
+                free_memory_mib: None,
+                unattributed_memory_mib: None,
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -1070,6 +1074,7 @@ impl ManagedCollector {
                 } else {
                     observed
                 },
+                observed_upper: None,
             });
         }
         if !cpu_diagnostics.is_empty()

@@ -760,7 +760,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
                                 .contains(&c.as_str())),
                     "required cgroup control unavailable: {error:#}"
                 );
-                let mut baseline = RootlessBackend::new(config.cpu.nice);
+                let mut baseline = RootlessBackend::new(config.effective_nice());
                 baseline.fallback_evidence.push(ControlEvidence {
                     control: "cgroup_backend".into(),
                     available: None,
@@ -783,7 +783,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
             Err(error) => return Err(error),
         }
     } else {
-        Box::new(RootlessBackend::new(config.cpu.nice))
+        Box::new(RootlessBackend::new(config.effective_nice()))
     };
     let store = StateStore::open_with_profile(&config.state_dir, config.storage_profile)?;
     let _execution_lock = cedegrid::backup::execution_lock(&config.state_dir)?;
@@ -814,7 +814,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(config.monitor.interval_ms));
     };
     let options = SupervisorOptions {
-        nice: config.cpu.nice,
+        nice: config.effective_nice(),
         drain_timeout_ms: config.lifecycle.drain_timeout_ms,
         term_grace_ms: config.lifecycle.term_grace_ms,
         lease_ms: config.lifecycle.allocation_lease_ms,

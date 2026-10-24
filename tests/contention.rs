@@ -21,6 +21,7 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
         cpu_capacity_millicores: 8000,
         physical_cores: Some(4),
         cpu_busy_millicores: Some(cpu_busy_millicores),
+        cpu_busy_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,
@@ -46,6 +47,7 @@ pub fn allocation(
         phase: AllocationPhase::Running,
         requested: resources(cpu),
         observed: observed_cpu.map(resources),
+        observed_upper: None,
     }
 }
 

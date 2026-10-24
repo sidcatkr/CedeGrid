@@ -467,6 +467,7 @@ pub struct Config {
     pub kernel: crate::kernel::KernelConfig,
     pub cgroup: crate::cgroup::CgroupConfig,
     pub execution: ExecutionConfig,
+    pub contention: ContentionConfig,
 }
 
 impl Default for Config {
@@ -485,8 +486,357 @@ impl Default for Config {
             kernel: crate::kernel::KernelConfig::default(),
             cgroup: crate::cgroup::CgroupConfig::default(),
             execution: ExecutionConfig::default(),
+            contention: ContentionConfig::default(),
         }
     }
+}
+
+/// How no-harm floors treat Guaranteed allocations. B and C are opt-in exceptions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FloorPolicy {
+    #[default]
+    A,
+    B,
+    C,
+}
+
+/// Whether floors may push Neutral's memory below its fair share. B is opt-in.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NeutralMemoryPolicy {
+    #[default]
+    A,
+    B,
+}
+
+/// The `[contention]` section. Missing settings resolve to provisional defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContentionConfig {
+    pub default_mode: crate::contention::ContentionMode,
+    pub max_mode: crate::contention::ContentionMode,
+    pub floor_policy: FloorPolicy,
+    pub neutral_memory_policy: NeutralMemoryPolicy,
+    pub acknowledge_danger: std::collections::BTreeSet<String>,
+    pub cpu: ResourceContentionConfig,
+    pub ram: ResourceContentionConfig,
+    pub gpu_compute: ResourceContentionConfig,
+    pub gpu_memory: ResourceContentionConfig,
+}
+
+impl Default for ContentionConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: crate::contention::ContentionMode::Neutral,
+            max_mode: crate::contention::ContentionMode::Performance,
+            floor_policy: FloorPolicy::A,
+            neutral_memory_policy: NeutralMemoryPolicy::A,
+            acknowledge_danger: Default::default(),
+            cpu: Default::default(),
+            ram: Default::default(),
+            gpu_compute: Default::default(),
+            gpu_memory: Default::default(),
+        }
+    }
+}
+
+/// Danger exceptions that a file must acknowledge by name.
+const DANGER_ACKNOWLEDGEMENTS: [&str; 1] = ["floor_policy_c"];
+
+/// Settings an operator wrote for one resource; unset keys keep their defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceContentionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::contention::ContentionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yield_first_margin_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance_margin_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yield_first_response_intervals: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_up_step_interval_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neutral_convergence_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neutral_tolerance_points: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance_ramp_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance_ramp_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaim_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint_deadline_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_window_intervals: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hysteresis_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_step_dwell_intervals: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_bound_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noise_tolerance_mib: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_window_intervals: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
+}
+
+impl ContentionConfig {
+    fn resource(&self, kind: crate::contention::ResourceKind) -> &ResourceContentionConfig {
+        use crate::contention::ResourceKind::*;
+        match kind {
+            Cpu => &self.cpu,
+            Ram => &self.ram,
+            GpuCompute => &self.gpu_compute,
+            GpuMemory => &self.gpu_memory,
+        }
+    }
+
+    /// The node's mode for a resource before any per-job override.
+    pub fn mode(&self, kind: crate::contention::ResourceKind) -> crate::contention::ContentionMode {
+        self.resource(kind).mode.unwrap_or(self.default_mode)
+    }
+
+    /// Effective thresholds for a resource with defaults applied.
+    pub fn thresholds(
+        &self,
+        kind: crate::contention::ResourceKind,
+    ) -> crate::contention::ResourceThresholds {
+        let set = self.resource(kind);
+        let defaults = crate::contention::ResourceThresholds::defaults(kind);
+        crate::contention::ResourceThresholds {
+            yield_first_margin_percent: set
+                .yield_first_margin_percent
+                .unwrap_or(defaults.yield_first_margin_percent),
+            performance_margin_percent: set
+                .performance_margin_percent
+                .unwrap_or(defaults.performance_margin_percent),
+            yield_first_response_intervals: set
+                .yield_first_response_intervals
+                .unwrap_or(defaults.yield_first_response_intervals),
+            scale_up_step_interval_s: set.scale_up_step_interval_s,
+            neutral_convergence_s: set
+                .neutral_convergence_s
+                .unwrap_or(defaults.neutral_convergence_s),
+            neutral_tolerance_points: set
+                .neutral_tolerance_points
+                .unwrap_or(defaults.neutral_tolerance_points),
+            performance_ramp_s: set
+                .performance_ramp_s
+                .unwrap_or(defaults.performance_ramp_s),
+            performance_ramp_percent: set
+                .performance_ramp_percent
+                .unwrap_or(defaults.performance_ramp_percent),
+            reclaim_s: set.reclaim_s.unwrap_or(defaults.reclaim_s),
+            hint_deadline_s: set.hint_deadline_s.unwrap_or(defaults.hint_deadline_s),
+            unknown_window_intervals: set
+                .unknown_window_intervals
+                .unwrap_or(defaults.unknown_window_intervals),
+            hysteresis_percent: set
+                .hysteresis_percent
+                .unwrap_or(defaults.hysteresis_percent),
+            min_step_dwell_intervals: set
+                .min_step_dwell_intervals
+                .unwrap_or(defaults.min_step_dwell_intervals),
+            pause_bound_s: set.pause_bound_s.unwrap_or(defaults.pause_bound_s),
+            noise_tolerance_mib: set
+                .noise_tolerance_mib
+                .unwrap_or(defaults.noise_tolerance_mib),
+            quiet_window_intervals: set
+                .quiet_window_intervals
+                .unwrap_or(defaults.quiet_window_intervals),
+            cpu_ram_scale_up_cooldown_ms: set
+                .cpu_ram_scale_up_cooldown_ms
+                .unwrap_or(defaults.cpu_ram_scale_up_cooldown_ms),
+        }
+    }
+
+    /// GPU quiet window in monitor intervals. An unset window is raised from its
+    /// default until it spans longer than the GPU sample age, so a fast monitor
+    /// never declares Quiet from evidence a stale sample could still explain.
+    pub fn quiet_window_intervals(
+        &self,
+        monitor_interval_ms: u64,
+        gpu_sample_max_age_ms: u64,
+    ) -> u32 {
+        let configured = self.thresholds(crate::contention::ResourceKind::GpuCompute);
+        if self.gpu_compute.quiet_window_intervals.is_some() {
+            return configured.quiet_window_intervals;
+        }
+        let spanning = gpu_sample_max_age_ms / monitor_interval_ms.max(1) + 1;
+        configured
+            .quiet_window_intervals
+            .max(u32::try_from(spanning).unwrap_or(u32::MAX))
+    }
+
+    /// Active opt-in exceptions with their risk markers (FR-043, FR-045).
+    pub fn exceptions(&self) -> Vec<crate::model::ExceptionNotice> {
+        use crate::model::{ExceptionNotice, RiskMarker};
+        let mut result = Vec::new();
+        match self.floor_policy {
+            FloorPolicy::A => {}
+            FloorPolicy::B => result.push(ExceptionNotice {
+                name: "floor_policy_b".into(),
+                marker: RiskMarker::Caution,
+            }),
+            FloorPolicy::C => result.push(ExceptionNotice {
+                name: "floor_policy_c".into(),
+                marker: RiskMarker::Danger,
+            }),
+        }
+        if self.neutral_memory_policy == NeutralMemoryPolicy::B {
+            result.push(ExceptionNotice {
+                name: "neutral_memory_policy_b".into(),
+                marker: RiskMarker::Caution,
+            });
+        }
+        result
+    }
+
+    fn validate(&self, monitor_interval_ms: u64, gpu_sample_max_age_ms: u64) -> Result<()> {
+        use crate::contention::ResourceKind::{self, *};
+        ensure!(
+            self.default_mode <= self.max_mode,
+            "contention.default_mode cannot be more aggressive than contention.max_mode"
+        );
+        for name in &self.acknowledge_danger {
+            ensure!(
+                DANGER_ACKNOWLEDGEMENTS.contains(&name.as_str()),
+                "contention.acknowledge_danger has unknown entry {name:?}"
+            );
+        }
+        ensure!(
+            self.floor_policy != FloorPolicy::C
+                || self.acknowledge_danger.contains("floor_policy_c"),
+            "ERR_CEDEGRID_DANGER_UNACKNOWLEDGED: floor_policy = \"c\" requires acknowledge_danger = [\"floor_policy_c\"]"
+        );
+        for kind in ResourceKind::ALL {
+            let name = kind.name();
+            let set = self.resource(kind);
+            let applies = |field: &str, allowed: &[ResourceKind], present: bool| -> Result<()> {
+                ensure!(
+                    !present || allowed.contains(&kind),
+                    "contention.{name}.{field} does not apply to {name}"
+                );
+                Ok(())
+            };
+            applies(
+                "performance_margin_percent",
+                &[Cpu, GpuCompute],
+                set.performance_margin_percent.is_some(),
+            )?;
+            applies(
+                "yield_first_response_intervals",
+                &[Cpu, GpuCompute],
+                set.yield_first_response_intervals.is_some(),
+            )?;
+            applies(
+                "pause_bound_s",
+                &[Cpu, GpuCompute],
+                set.pause_bound_s.is_some(),
+            )?;
+            applies(
+                "noise_tolerance_mib",
+                &[GpuMemory],
+                set.noise_tolerance_mib.is_some(),
+            )?;
+            applies(
+                "quiet_window_intervals",
+                &[GpuCompute],
+                set.quiet_window_intervals.is_some(),
+            )?;
+            applies(
+                "cpu_ram_scale_up_cooldown_ms",
+                &[Cpu, Ram],
+                set.cpu_ram_scale_up_cooldown_ms.is_some(),
+            )?;
+            ensure!(
+                self.mode(kind) <= self.max_mode,
+                "contention.{name}.mode cannot be more aggressive than contention.max_mode"
+            );
+            let t = self.thresholds(kind);
+            ensure!(
+                (1..=90).contains(&t.yield_first_margin_percent),
+                "contention.{name}.yield_first_margin_percent must be between 1 and 90"
+            );
+            if matches!(kind, Cpu | GpuCompute) {
+                ensure!(
+                    t.performance_margin_percent <= 50,
+                    "contention.{name}.performance_margin_percent must be between 0 and 50"
+                );
+                ensure!(
+                    t.yield_first_margin_percent > t.performance_margin_percent,
+                    "contention.{name}.yield_first_margin_percent must exceed performance_margin_percent"
+                );
+            }
+            for (field, value) in [
+                (
+                    "yield_first_response_intervals",
+                    u64::from(t.yield_first_response_intervals),
+                ),
+                (
+                    "scale_up_step_interval_s",
+                    t.scale_up_step_interval_s.unwrap_or(1),
+                ),
+                ("neutral_convergence_s", t.neutral_convergence_s),
+                ("performance_ramp_s", t.performance_ramp_s),
+                ("reclaim_s", t.reclaim_s),
+                ("hint_deadline_s", t.hint_deadline_s),
+                (
+                    "unknown_window_intervals",
+                    u64::from(t.unknown_window_intervals),
+                ),
+                (
+                    "min_step_dwell_intervals",
+                    u64::from(t.min_step_dwell_intervals),
+                ),
+                ("pause_bound_s", t.pause_bound_s),
+                (
+                    "quiet_window_intervals",
+                    u64::from(t.quiet_window_intervals),
+                ),
+            ] {
+                ensure!(value >= 1, "contention.{name}.{field} must be at least 1");
+            }
+            ensure!(
+                (1..=50).contains(&t.neutral_tolerance_points),
+                "contention.{name}.neutral_tolerance_points must be between 1 and 50"
+            );
+            ensure!(
+                (1..=100).contains(&t.performance_ramp_percent),
+                "contention.{name}.performance_ramp_percent must be between 1 and 100"
+            );
+            ensure!(
+                (1..=99).contains(&t.hysteresis_percent),
+                "contention.{name}.hysteresis_percent must be between 1 and 99"
+            );
+            if kind.is_memory() {
+                ensure!(
+                    t.reclaim_s >= t.hint_deadline_s,
+                    "contention.{name}.reclaim_s must be at least hint_deadline_s"
+                );
+            }
+            if let Some(window) = set.quiet_window_intervals {
+                ensure!(
+                    u64::from(window).saturating_mul(monitor_interval_ms) > gpu_sample_max_age_ms,
+                    "contention.gpu_compute.quiet_window_intervals must span longer than gpu.process_sample_max_age_ms"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A node configuration plus the warnings an operator should see at load time.
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -618,7 +968,50 @@ impl Default for LifecycleConfig {
 impl Config {
     /// Read only versioned TOML, resolving paths against the canonical file location.
     pub fn load(path: &Path) -> Result<Self> {
-        load_runtime(path, RuntimeConfigKind::Node)
+        Ok(Self::load_reporting(path)?.config)
+    }
+
+    /// Load and apply compatibility rules, returning operator warnings.
+    pub fn load_reporting(path: &Path) -> Result<LoadedConfig> {
+        let mut config: Config = load_runtime(path, RuntimeConfigKind::Node)?;
+        let warnings = config.apply_compatibility();
+        Ok(LoadedConfig { config, warnings })
+    }
+
+    /// Parse against an already canonical location, like [`Config::load_reporting`].
+    pub fn parse_reporting(contents: &str, canonical_config_path: &Path) -> Result<LoadedConfig> {
+        let mut config: Config =
+            parse_runtime(contents, canonical_config_path, RuntimeConfigKind::Node)?;
+        let warnings = config.apply_compatibility();
+        Ok(LoadedConfig { config, warnings })
+    }
+
+    /// Clamp settings older files may still carry and describe active exceptions.
+    fn apply_compatibility(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.cpu.nice < 0 {
+            warnings.push(format!(
+                "cpu.nice = {} would raise priority above the default; treated as 0",
+                self.cpu.nice
+            ));
+            self.cpu.nice = 0;
+        }
+        for exception in self.contention.exceptions() {
+            let marker = match exception.marker {
+                crate::model::RiskMarker::Caution => "caution",
+                crate::model::RiskMarker::Danger => "danger",
+            };
+            warnings.push(format!(
+                "opt-in exception {} is active [{marker}]",
+                exception.name
+            ));
+        }
+        warnings
+    }
+
+    /// The launch-time nice value. Own priority is never raised above the default.
+    pub fn effective_nice(&self) -> i32 {
+        self.cpu.nice.max(0)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -721,6 +1114,8 @@ impl Config {
             .checked_add(self.lifecycle.term_grace_ms)
             .and_then(|v| v.checked_add(self.lifecycle.allocation_lease_ms))
             .context("lifecycle deadline sum overflows milliseconds")?;
+        self.contention
+            .validate(self.monitor.interval_ms, self.gpu.process_sample_max_age_ms)?;
         Ok(())
     }
 }

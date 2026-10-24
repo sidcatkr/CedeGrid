@@ -31,6 +31,7 @@ fn observation() -> (Snapshot, Decision) {
         cpu_capacity_millicores: 4000,
         physical_cores: Some(2),
         cpu_busy_millicores: Some(500),
+        cpu_busy_lower_millicores: None,
         total_ram_mib: 8192,
         available_ram_mib: Some(4096),
         gpu_inventory: CapabilityStatus::Available,
@@ -48,6 +49,9 @@ fn observation() -> (Snapshot, Decision) {
         cpu_ram_expansion_allowed: false,
         would_drain: vec![],
         reasons: vec!["recorded decision".into()],
+        resources: Default::default(),
+        actions: vec![],
+        exceptions: vec![],
     };
     (snapshot, decision)
 }

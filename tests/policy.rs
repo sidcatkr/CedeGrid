@@ -26,6 +26,7 @@ fn snapshot() -> Snapshot {
         cpu_capacity_millicores: 8000,
         physical_cores: Some(4),
         cpu_busy_millicores: Some(2000),
+        cpu_busy_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,
@@ -290,6 +291,9 @@ fn gpu_snapshot() -> Snapshot {
         external_compute: ComputeActivity::Idle,
         compute_sample_id: Some(1),
         observation: None,
+        reserved_memory_mib: None,
+        free_memory_mib: None,
+        unattributed_memory_mib: None,
     });
     result
 }
@@ -318,6 +322,7 @@ fn allocation(
         phase,
         requested,
         observed,
+        observed_upper: None,
     }
 }
 
@@ -2129,4 +2134,67 @@ fn known_defect_d6_one_missing_observation_drains_unrelated_tasks() {
     // Defect: host busy time already includes the unobserved task and charges stay
     // 3500m under the measured budget, yet the budget is zeroed and both tasks drain.
     assert_eq!(decision.would_drain, ["a-unobserved", "b-observed"]);
+}
+
+#[test]
+fn schema_v1_v2_and_v3_snapshots_decide_identically() {
+    assert_eq!(SCHEMA_VERSION, 3);
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "a",
+            AllocationPhase::Running,
+            resources(1000, 1000, 0),
+            Some(resources(800, 900, 0)),
+        )],
+        ..Default::default()
+    };
+    let decisions: Vec<_> = [1, 2, SCHEMA_VERSION]
+        .into_iter()
+        .map(|version| {
+            let mut snap = snapshot();
+            snap.schema_version = version;
+            let decision = PolicyEngine::new()
+                .evaluate(&config(), &snap, &input, 0)
+                .unwrap();
+            (
+                decision.managed_budget,
+                decision.admission_headroom,
+                decision.would_drain,
+                decision.expansion_allowed,
+            )
+        })
+        .collect();
+    assert!(decisions.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn schema_v3_fields_round_trip_and_older_recordings_default_them() {
+    let mut snap = gpu_snapshot();
+    snap.schema_version = SCHEMA_VERSION;
+    snap.cpu_busy_lower_millicores = Some(1900);
+    snap.gpus[0].reserved_memory_mib = Some(400);
+    snap.gpus[0].free_memory_mib = Some(9600);
+    snap.gpus[0].unattributed_memory_mib = Some(120);
+    snap.gpus[0].external_compute = ComputeActivity::Quiet;
+    let back: Snapshot = serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+    assert_eq!(back.cpu_busy_lower_millicores, Some(1900));
+    assert_eq!(back.gpus[0].reserved_memory_mib, Some(400));
+    assert_eq!(back.gpus[0].free_memory_mib, Some(9600));
+    assert_eq!(back.gpus[0].unattributed_memory_mib, Some(120));
+    assert_eq!(back.gpus[0].external_compute, ComputeActivity::Quiet);
+    let mut managed = allocation(
+        "a",
+        AllocationPhase::Running,
+        resources(1000, 1000, 0),
+        Some(resources(980, 900, 0)),
+    );
+    managed.observed_upper = Some(resources(1044, 1200, 0));
+    let back: Allocation = serde_json::from_str(&serde_json::to_string(&managed).unwrap()).unwrap();
+    assert_eq!(back.observed_upper, Some(resources(1044, 1200, 0)));
+    // A schema 2 recording omits every new field; readers default them to unknown.
+    let mut old = serde_json::to_value(gpu_snapshot()).unwrap();
+    old["schema_version"] = 2.into();
+    let old: Snapshot = serde_json::from_value(old).unwrap();
+    assert_eq!(old.cpu_busy_lower_millicores, None);
+    assert_eq!(old.gpus[0].reserved_memory_mib, None);
 }

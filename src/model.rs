@@ -2,9 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub fn supported_schema(version: u32) -> bool {
-    matches!(version, 1 | 2)
+    matches!(version, 1..=3)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,7 +53,11 @@ pub struct Allocation {
     pub phase: AllocationPhase,
     pub requested: Resources,
     /// Independently attributed usage; None is unknown, never zero usage.
+    /// Collectors report a lower bound here.
     pub observed: Option<Resources>,
+    /// Upper bound of attributed usage (schema 3). Missing means no bound is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_upper: Option<Resources>,
 }
 
 fn legacy_policy_allocation_class() -> crate::execution_model::AllocationClass {
@@ -64,6 +68,9 @@ fn legacy_policy_allocation_class() -> crate::execution_model::AllocationClass {
 #[serde(rename_all = "snake_case")]
 pub enum ComputeActivity {
     Idle,
+    /// External contexts exist but showed no compute activity over a sustained
+    /// window of healthy observation (schema 3).
+    Quiet,
     Active,
     Unknown,
 }
@@ -133,6 +140,15 @@ pub struct GpuSnapshot {
     /// original fail-closed activity interpretation, never inventing a mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<GpuObservation>,
+    /// Device memory reserved by the driver or firmware (schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_memory_mib: Option<u64>,
+    /// Device memory free for allocation (schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_memory_mib: Option<u64>,
+    /// Memory that is neither attributed to own work nor proven external (schema 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattributed_memory_mib: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +160,9 @@ pub struct Snapshot {
     pub cpu_capacity_millicores: u64,
     pub physical_cores: Option<u32>,
     pub cpu_busy_millicores: Option<u64>,
+    /// Lower bound of host busy time (schema 3); `cpu_busy_millicores` is the upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_busy_lower_millicores: Option<u64>,
     pub total_ram_mib: u64,
     pub available_ram_mib: Option<u64>,
     pub gpu_inventory: CapabilityStatus,
@@ -173,6 +192,88 @@ pub struct Decision {
     /// Independent CPU/RAM scope; never authorizes a GPU allocation.
     #[serde(default)]
     pub cpu_ram_expansion_allowed: bool,
+    /// Derived from `actions` with a step at or above drain.
     pub would_drain: Vec<String>,
     pub reasons: Vec<String>,
+    /// Per-resource state (schema 3).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub resources: BTreeMap<crate::contention::ResourceKey, ResourceStatus>,
+    /// The yield steps the policy authority decided (schema 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<YieldAction>,
+    /// Active opt-in exceptions with their risk marker (schema 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exceptions: Vec<ExceptionNotice>,
+}
+
+/// A stable machine-readable code plus one sentence for people. Tests and tools
+/// rely on the code only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasonCode {
+    pub code: String,
+    pub text: String,
+}
+
+impl ReasonCode {
+    pub fn new(code: &str, text: impl Into<String>) -> Self {
+        Self {
+            code: code.to_owned(),
+            text: text.into(),
+        }
+    }
+}
+
+/// One step for one allocation and resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YieldAction {
+    pub allocation_id: String,
+    pub resource: crate::contention::ResourceKey,
+    pub step: crate::contention::YieldStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u64>,
+    pub cause: crate::contention::YieldCause,
+    pub code: String,
+}
+
+/// Per-resource state reported in decisions, `observe`, `doctor` and node reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::contention::ContentionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_mode: Option<crate::contention::ContentionMode>,
+    /// Lower and upper bound of own usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattributed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_share: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<crate::contention::Measurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ComputeActivity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<ReasonCode>,
+}
+
+/// An opt-in exception that is active, with its risk marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExceptionNotice {
+    pub name: String,
+    pub marker: RiskMarker,
+}
+
+/// Risk markers for opt-in exceptions: caution can make other workloads'
+/// allocations fail or slow them; danger can let an external process be
+/// killed or starved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskMarker {
+    Caution,
+    Danger,
 }

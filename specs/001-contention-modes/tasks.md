@@ -52,11 +52,11 @@ SDKs in `python/` and `npm/`.
 
 ### Tests first
 
-- [ ] T005 [P] Write failing tests in `tests/policy.rs` for snapshot schema 3:
+- [X] T005 [P] Write failing tests in `tests/policy.rs` for snapshot schema 3:
   - v1 and v2 recordings replay with unchanged decisions;
   - the schema 3 fields round-trip: `reserved_memory_mib`, `free_memory_mib`,
     `unattributed_memory_mib`, `ComputeActivity::Quiet`, and the CPU/RAM usage bounds.
-- [ ] T006 [P] Write failing tests in `tests/configuration.rs` for `[contention]`:
+- [X] T006 [P] Write failing tests in `tests/configuration.rs` for `[contention]`:
   - the defaults `default_mode = "neutral"`, `max_mode = "performance"`, `floor_policy = "a"`
     and `neutral_memory_policy = "a"`;
   - the data-model.md rules: "`default_mode ≤ max_mode`", "`yield_first_margin_percent`
@@ -84,28 +84,31 @@ SDKs in `python/` and `npm/`.
 - [ ] T010 Split `agent::run()` in `src/agent.rs` into functions for slot lifecycle, outbox,
   heartbeat/admission and the actuation stage, with no behavior change. `tests/agent.rs` and
   `tests/distributed_service.rs` must pass serially.
-- [ ] T011 Add snapshot schema 3 in `src/model.rs`:
+- [X] T011 Add snapshot schema 3 in `src/model.rs`:
   - `SCHEMA_VERSION = 3`, and `supported_schema` accepts 1–3;
   - optional `GpuSnapshot.reserved_memory_mib`, `free_memory_mib` and
     `unattributed_memory_mib`;
   - `ComputeActivity::Quiet`;
   - optional CPU/RAM lower and upper usage bounds, with serde defaults.
-- [ ] T012 Add the Decision output types in `src/model.rs`: `ReasonCode`, `YieldAction`,
+- [X] T012 Add the Decision output types in `src/model.rs`: `ReasonCode`, `YieldAction`,
   `Decision.resources`, `Decision.actions` and `Decision.exceptions`, all additive.
   `would_drain` is derived from actions with step ≥ drain (see
   `contracts/decision-output.md`).
-- [ ] T013 Define the pure core types in `src/contention.rs`:
+- [X] T013 Define the pure core types in `src/contention.rs`:
   - `ResourceKey`, with the stable order cpu, ram, then GPU keys by UUID with compute before
     memory;
   - `ContentionMode`, with the order yield_first < neutral < performance;
   - `YieldStep` (none = 0 … terminate = 6);
   - `YieldCause`, `Principal`, `ResourceView` and `ResourceThresholds`.
-- [ ] T014 Implement `[contention]` in `src/config.rs` per `contracts/config-contention.md`,
+- [X] T014 Implement `[contention]` in `src/config.rs` per `contracts/config-contention.md`,
   with the data-model.md validation rules. At load time:
   - `gpu.execution_mode` and `gpu.best_effort_external_processes` are accepted, have no
     effect, and produce one warning naming `contention.gpu_compute.mode` and
     `contention.gpu_memory.mode`;
   - `cpu.nice < 0` warns and is treated as 0.
+
+  Batch 1 note: the legacy GPU key warning moved to T085. Until US5 lands those keys still
+  steer GPU admission, so a "no effect" warning would be false.
 - [ ] T015 Implement coordinator distributed schema 4 as one versioned migration in
   `src/coordinator.rs` and `src/state.rs`, dropping and recreating the triggers. Teach
   `src/backup.rs` and `src/upgrade.rs` the new version.
@@ -461,7 +464,9 @@ context, under Neutral and Performance (quickstart §5).
 ### Implementation for User Story 5
 
 - [ ] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
-  (`validate_gpu_launch_contract` by mode).
+  (`validate_gpu_launch_contract` by mode). Once the legacy keys stop steering admission, emit
+  the load-time warning for `gpu.execution_mode` and `gpu.best_effort_external_processes`
+  (moved from T014).
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
 - [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
