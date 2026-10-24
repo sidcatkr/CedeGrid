@@ -395,7 +395,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
   `src/agent.rs` (audit M1).
 - [X] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
   `max_mode`), in `src/contention.rs` and `src/agent.rs`.
-- [ ] T071 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
+- [X] T071 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
   and SC-004 with the provisional defaults.
 
 **Checkpoint**: the three modes behave as specified on CPU, RAM, GPU compute and GPU memory.

@@ -845,3 +845,258 @@ mod guaranteed_policy {
         );
     }
 }
+
+/// Time-stepped scenarios for SC-002 to SC-004 with the provisional defaults. A
+/// simulated host splits CPU by weighted max-min over threads and honours the
+/// steps the policy applies; the real policy engine runs every 500 ms.
+mod scenarios {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const CAPACITY: u64 = 8000;
+    const INTERVAL: u64 = 500;
+
+    /// Weighted max-min: claimants get CPU in proportion to their threads, never
+    /// above what they can use.
+    fn schedule(claims: &[(u64, u64)]) -> Vec<u64> {
+        let mut shares = vec![0u64; claims.len()];
+        let mut open: Vec<usize> = (0..claims.len()).filter(|i| claims[*i].1 > 0).collect();
+        let mut remaining = CAPACITY;
+        while !open.is_empty() && remaining > 0 {
+            let weight: u64 = open.iter().map(|i| claims[*i].0).sum();
+            let (done, rest): (Vec<usize>, Vec<usize>) = open
+                .iter()
+                .partition(|i| claims[**i].1 - shares[**i] <= remaining * claims[**i].0 / weight);
+            if done.is_empty() {
+                let level = remaining;
+                for i in &open {
+                    shares[*i] += level * claims[*i].0 / weight;
+                }
+                break;
+            }
+            for i in done {
+                remaining -= claims[i].1 - shares[i];
+                shares[i] = claims[i].1;
+            }
+            open = rest;
+        }
+        shares
+    }
+
+    struct World {
+        config: Config,
+        engine: PolicyEngine,
+        /// Own work: threads and what it would use uncapped.
+        own: (u64, u64),
+        /// External work: threads and demand.
+        external: (u64, u64),
+        step: YieldStep,
+        target: Option<u64>,
+        drained: bool,
+    }
+
+    impl World {
+        fn new(mode: ContentionMode, own: (u64, u64)) -> Self {
+            let mut config = config();
+            config.cpu.reserve_physical_cores = 0;
+            config.contention.default_mode = mode;
+            Self {
+                config,
+                engine: PolicyEngine::new(),
+                own,
+                external: (0, 0),
+                step: YieldStep::None,
+                target: None,
+                drained: false,
+            }
+        }
+
+        /// One interval: run the host under the applied step, then the policy.
+        fn tick(&mut self, now: u64) -> (u64, u64) {
+            let own_demand = match self.step {
+                YieldStep::Pause => 0,
+                YieldStep::Cap => self.target.unwrap_or(self.own.1).min(self.own.1),
+                _ => self.own.1,
+            };
+            let usage = schedule(&[(self.own.0, own_demand), self.external]);
+            let (own, external) = (usage[0], usage[1]);
+            let mut snapshot = snapshot(own + external);
+            snapshot.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: external,
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "own",
+                    AllocationClass::Opportunistic,
+                    1000,
+                    Some(own),
+                )],
+                facts: BTreeMap::from([(
+                    "own".into(),
+                    AllocationFacts {
+                        unavailable: BTreeMap::from([(
+                            ResourceKey::Cpu,
+                            [YieldStep::LowerShare].into(),
+                        )]),
+                        ..AllocationFacts::default()
+                    },
+                )]),
+                ..PolicyInput::default()
+            };
+            let decision = self
+                .engine
+                .evaluate(&self.config, &snapshot, &input, now)
+                .unwrap();
+            let action = decision
+                .actions
+                .iter()
+                .find(|a| a.allocation_id == "own" && a.resource == ResourceKey::Cpu);
+            self.step = action.map_or(YieldStep::None, |a| a.step);
+            self.target = action.and_then(|a| a.target);
+            self.drained |= self.step >= YieldStep::Drain || !decision.would_drain.is_empty();
+            (own, external)
+        }
+    }
+
+    #[test]
+    fn sc_002_yield_first_restores_its_margin_within_three_intervals_without_draining() {
+        let mut world = World::new(ContentionMode::YieldFirst, (8, 8000));
+        let mut now = 0;
+        while now < 5000 {
+            world.tick(now);
+            now += INTERVAL;
+        }
+        world.external = (4, 4000);
+        let appeared = now;
+        let mut restored_at = None;
+        while now < appeared + 30_000 {
+            let (own, external) = world.tick(now);
+            // Within the margin: own and external together leave 25% free.
+            if restored_at.is_none() && own + external <= CAPACITY * 3 / 4 && external >= 4000 {
+                restored_at = Some(now);
+            }
+            now += INTERVAL;
+        }
+        let restored_at = restored_at.expect("Yield First never restored its margin");
+        assert!(
+            restored_at - appeared <= 3 * INTERVAL,
+            "after {} ms",
+            restored_at - appeared
+        );
+        assert!(!world.drained, "CPU contention alone never drains (SC-007)");
+    }
+
+    #[test]
+    fn sc_003_neutral_converges_to_half_with_one_contending_principal() {
+        // Own work has twice the threads, so the host alone would give it two thirds.
+        let mut world = World::new(ContentionMode::Neutral, (16, 16_000));
+        let mut now = 0;
+        while now < 5000 {
+            world.tick(now);
+            now += INTERVAL;
+        }
+        world.external = (8, 8000);
+        let arrived = now;
+        let mut shares = vec![];
+        while now < arrived + 90_000 {
+            let (own, _) = world.tick(now);
+            if now >= arrived + 60_000 {
+                shares.push(own * 100 / CAPACITY);
+            }
+            now += INTERVAL;
+        }
+        assert!(
+            shares.iter().all(|share| (35..=65).contains(share)),
+            "own share after 60 s: {shares:?}"
+        );
+        assert!(!world.drained);
+    }
+
+    #[test]
+    fn sc_004_performance_ramps_on_an_idle_host_and_yields_within_the_reclaim_time() {
+        // Ramp: one more 1000m job each time CPU/RAM expansion is allowed.
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = ContentionMode::Performance;
+        let mut engine = PolicyEngine::new();
+        let mut jobs: Vec<Allocation> = vec![];
+        let target = (CAPACITY - CAPACITY / 10) * 80 / 100;
+        let mut reached = None;
+        let mut last_growth = 0;
+        for now in (0..=30_000).step_by(INTERVAL as usize) {
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
+            let own: u64 = jobs
+                .iter()
+                .filter_map(|j| j.observed.as_ref())
+                .map(|o| o.cpu_millicores)
+                .sum();
+            if reached.is_none() && own >= target {
+                reached = Some(now);
+            }
+            let input = PolicyInput {
+                allocations: jobs.clone(),
+                ..PolicyInput::default()
+            };
+            let decision = engine
+                .evaluate(&config, &snapshot(own), &input, now)
+                .unwrap();
+            let cooldown = config
+                .contention
+                .thresholds(cedegrid::contention::ResourceKind::Cpu)
+                .cpu_ram_cooldown_ms(ContentionMode::Performance);
+            if decision.cpu_ram_expansion_allowed
+                && decision.admission_headroom.cpu_millicores >= 1000
+                && now - last_growth >= cooldown
+            {
+                let mut job = allocation(
+                    &format!("job-{now}"),
+                    AllocationClass::Opportunistic,
+                    1000,
+                    None,
+                );
+                job.phase = AllocationPhase::Pending;
+                jobs.push(job);
+                last_growth = now;
+            }
+        }
+        let reached = reached.expect("Performance never reached its ramp target");
+        assert!(reached <= 30_000, "ramp target reached at {reached} ms");
+
+        // Reclaim: external work gets its demand within 5 s of starting.
+        let mut world = World::new(ContentionMode::Performance, (8, 8000));
+        let mut now = 0;
+        while now < 5000 {
+            world.tick(now);
+            now += INTERVAL;
+        }
+        world.external = (4, 3000);
+        let started = now;
+        let mut served_at = None;
+        while now < started + 20_000 {
+            let (_, external) = world.tick(now);
+            if served_at.is_none() && external >= 3000 {
+                served_at = Some(now);
+            }
+            now += INTERVAL;
+        }
+        let served_at = served_at.expect("external work never got its demand");
+        assert!(
+            served_at - started <= 5000,
+            "after {} ms",
+            served_at - started
+        );
+        assert!(!world.drained);
+    }
+}
