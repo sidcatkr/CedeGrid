@@ -571,3 +571,27 @@ pub struct AllocationContention {
     pub sequence: u64,
     pub applied: std::collections::BTreeMap<ResourceKey, StepRequest>,
 }
+
+/// What own work may use of CPU in a mode (FR-020 to FR-022), from the idle
+/// budget. On a saturated host measured external usage is suppressed, so Neutral
+/// converges to its fair share instead; until principals are counted (US3) one
+/// external principal is assumed.
+pub fn cpu_allowance(
+    mode: ContentionMode,
+    thresholds: &ResourceThresholds,
+    schedulable: u64,
+    budget: u64,
+    saturated: bool,
+) -> u64 {
+    let margin = |percent: u8| schedulable.saturating_mul(u64::from(percent)) / 100;
+    match mode {
+        ContentionMode::YieldFirst => {
+            budget.saturating_sub(margin(thresholds.yield_first_margin_percent))
+        }
+        ContentionMode::Performance => {
+            budget.saturating_sub(margin(thresholds.performance_margin_percent))
+        }
+        ContentionMode::Neutral if saturated => schedulable / 2,
+        ContentionMode::Neutral => budget,
+    }
+}

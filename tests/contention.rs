@@ -396,3 +396,32 @@ mod victims {
         assert_eq!(order(vec![facts("b"), pending_guaranteed], 500), ["a", "b"]);
     }
 }
+
+mod cpu_allowance {
+    use cedegrid::contention::*;
+
+    fn allowance(mode: ContentionMode, budget: u64, saturated: bool) -> u64 {
+        cpu_allowance(
+            mode,
+            &ResourceThresholds::defaults(ResourceKind::Cpu),
+            8000,
+            budget,
+            saturated,
+        )
+    }
+
+    #[test]
+    fn each_mode_bounds_own_cpu_as_the_spec_defines() {
+        // Unsaturated: idle capacity minus the mode's margin of schedulable capacity.
+        assert_eq!(allowance(ContentionMode::YieldFirst, 5000, false), 3000);
+        assert_eq!(allowance(ContentionMode::Performance, 5000, false), 4200);
+        assert_eq!(allowance(ContentionMode::Neutral, 5000, false), 5000);
+        // Saturated: measured external demand is suppressed. Yield First and
+        // Performance still keep their margin free; Neutral converges to the fair
+        // share and never below it.
+        assert_eq!(allowance(ContentionMode::YieldFirst, 700, true), 0);
+        assert_eq!(allowance(ContentionMode::Performance, 7000, true), 6200);
+        assert_eq!(allowance(ContentionMode::Neutral, 700, true), 4000);
+        assert_eq!(allowance(ContentionMode::Neutral, 7000, true), 4000);
+    }
+}

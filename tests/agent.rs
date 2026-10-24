@@ -1044,3 +1044,296 @@ fn unknown_control_kinds_are_ignored_and_adjust_reports_applied_steps() {
     );
     assert_eq!(outcome.exit_code, Some(0));
 }
+
+/// Quickstart §3: rootless CPU contention caps the job and reverses, never drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
+    use cedegrid::{agent::AgentConfig, coordinator::serve, protocol::*};
+    let dir = directory();
+    let root = std::env::current_dir().unwrap();
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let pki = dir.path().join("pki");
+    let generated = Command::new("python3")
+        .arg(root.join("tools/make_test_pki.py"))
+        .arg("--output")
+        .arg(&pki)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("TMPDIR", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "PKI: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let info: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
+    let tls = |name: &str| TlsIdentity {
+        ca_cert: pki.join("ca.pem"),
+        certificate: pki.join(format!("{name}.pem")),
+        private_key: pki.join(format!("{name}.key")),
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let endpoint = format!("https://{address}");
+    let server = tokio::spawn(serve(CoordinatorConfig {
+        storage_profile: Default::default(),
+        state_dir: dir.path().join("coordinator"),
+        listen: address,
+        tls: tls("server"),
+        clients: BTreeMap::from([
+            (
+                info["client_fingerprints"]["operator"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                Principal::Operator,
+            ),
+            (
+                info["client_fingerprints"]["node"].as_str().unwrap().into(),
+                Principal::Node {
+                    node_id: "node".into(),
+                },
+            ),
+        ]),
+        lease_ms: 30_000,
+        telemetry_ttl_ms: 3000,
+        max_artifact_bytes: 1024 * 1024,
+        artifact_quota_bytes: 10 * 1024 * 1024,
+        retry_limit: 3,
+        retry_backoff_ms: 1000,
+        retry_backoff_max_ms: 30000,
+        yield_retry_backoff_ms: 1000,
+        yield_retry_backoff_max_ms: 30000,
+    }));
+    let operator = RpcClient::new(&endpoint, &tls("operator")).unwrap();
+    for _ in 0..50 {
+        if operator
+            .request(&Request::Status { job_id: None })
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut local = spec(
+        dir.path(),
+        AllocationClass::Opportunistic,
+        vec![
+            python.clone(),
+            "-c".into(),
+            "import time\nend=time.monotonic()+30\nwhile time.monotonic()<end: pass\n".into(),
+        ],
+    );
+    local.config.gpu.scale_up_cooldown_ms = 0;
+    local.config.lifecycle.heartbeat_interval_ms = 400;
+    local.config.lifecycle.allocation_lease_ms = 30_000;
+    local.config.monitor.interval_ms = 400;
+    local.config.contention.cpu.mode = Some(cedegrid::contention::ContentionMode::YieldFirst);
+    local.config.contention.cpu.scale_up_step_interval_s = Some(1);
+    local.assignment.request.resources.cpu_millicores = 1000;
+    let config_file = dir.path().join("node.toml");
+    fs::write(
+        &config_file,
+        cedegrid::config::serialize_runtime(
+            &local.config,
+            cedegrid::config::RuntimeConfigKind::Node,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let deployment_file = dir.path().join("agent.toml");
+    fs::write(
+        &deployment_file,
+        cedegrid::config::serialize_runtime(
+            &AgentConfig {
+                coordinator_url: endpoint,
+                tls: tls("node"),
+                cpu_affinity: None,
+                max_transfer_bytes_per_second: 10 * 1024 * 1024,
+                capacity: local.capacity.clone(),
+                max_workers: 1,
+                max_spool_bytes: 10 * 1024 * 1024,
+                max_runtime_seconds: 90,
+            },
+            cedegrid::config::RuntimeConfigKind::Agent,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    operator
+        .request(&Request::PutPool {
+            pool: PoolSpec {
+                pool_id: "cpu".into(),
+                class: AllocationClass::Opportunistic,
+                node_ids: vec!["node".into()],
+                min_workers: 1,
+                max_workers: 1,
+            },
+        })
+        .await
+        .unwrap();
+    local.assignment.request.assignment_id = String::new();
+    operator
+        .request(&Request::Submit {
+            job: JobSpec {
+                job_id: "job".into(),
+                pool_id: "cpu".into(),
+                priority: 0,
+                tasks: vec![local.assignment.request.clone()],
+            },
+        })
+        .await
+        .unwrap();
+    let mut agent = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+        .arg("--config")
+        .arg(&config_file)
+        .arg("agent")
+        .arg("--deployment")
+        .arg(&deployment_file)
+        .env("TMPDIR", dir.path())
+        .stdout(Stdio::from(
+            fs::File::create(dir.path().join("agent.log")).unwrap(),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(dir.path().join("agent.err")).unwrap(),
+        ))
+        .spawn()
+        .unwrap();
+    // The latest decision's own CPU and the job's CPU step, from the agent's history.
+    let state = local.config.state_dir.clone();
+    let latest = move || -> Option<(u64, Option<String>)> {
+        let store = StateStore::open_read_only(&state).ok()?;
+        let row = store.observations(1).ok()?.into_iter().next()?;
+        let decision = &row["decision"];
+        let own = decision["resources"]["cpu"]["own"][0].as_u64()?;
+        let step = decision["actions"].as_array().and_then(|actions| {
+            actions
+                .iter()
+                .find(|a| a["resource"] == "cpu")
+                .and_then(|a| a["step"].as_str().map(str::to_owned))
+        });
+        Some((own, step))
+    };
+    let evidence = local.config.state_dir.clone();
+    let describe = move || -> String {
+        StateStore::open_read_only(&evidence)
+            .ok()
+            .and_then(|store| store.observations(1).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| {
+                let d = &row["decision"];
+                let s = &row["snapshot"];
+                format!(
+                    "busy={} budget={} cpu={} actions={} reasons={}",
+                    s["cpu_busy_millicores"],
+                    d["managed_budget"],
+                    d["resources"]["cpu"],
+                    d["actions"],
+                    d["reasons"]
+                )
+            })
+            .unwrap_or_default()
+    };
+    let wait_for = |what: &str, deadline: Duration, ok: &dyn Fn(u64, Option<&str>) -> bool| {
+        let end = Instant::now() + deadline;
+        loop {
+            if let Some((own, step)) = latest()
+                && ok(own, step.as_deref())
+            {
+                return (own, step);
+            }
+            assert!(
+                Instant::now() < end,
+                "timed out waiting for {what}: {}",
+                describe()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let (alone, _) = wait_for("the job to run", Duration::from_secs(20), &|own, step| {
+        own >= 600 && step.is_none()
+    });
+    // Test-owned external load on every logical CPU.
+    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let mut load: Vec<Child> = (0..cpus)
+        .map(|_| {
+            Command::new(&python)
+                .args([
+                    "-c",
+                    "import time\nend=time.monotonic()+40\nwhile time.monotonic()<end: pass\n",
+                ])
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let (_, step) = wait_for("a cap or pause", Duration::from_secs(8), &|_, step| {
+        matches!(step, Some("cap" | "pause"))
+    });
+    let (capped, _) = wait_for("own CPU to fall", Duration::from_secs(8), &|own, step| {
+        own < alone / 2 && matches!(step, Some("cap" | "pause"))
+    });
+    let assignment = StateStore::open_read_only(&local.config.state_dir)
+        .unwrap()
+        .executions()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.task_id == "task")
+        .unwrap()
+        .assignment_id;
+    let journaled = StateStore::open_read_only(&local.config.state_dir)
+        .unwrap()
+        .contention(&assignment)
+        .unwrap();
+    for process in &mut load {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    wait_for(
+        "the step to reverse",
+        Duration::from_secs(15),
+        &|_, step| step.is_none(),
+    );
+    let mut completed = None;
+    for _ in 0..400 {
+        if let Response::Result { submission } = operator
+            .request(&Request::GetResult {
+                task_id: "task".into(),
+            })
+            .await
+            .unwrap()
+            && submission.is_some()
+        {
+            completed = submission;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = agent.kill();
+    let _ = agent.wait();
+    server.abort();
+    assert!(step.is_some(), "own work was capped or paused");
+    assert!(capped < alone / 2, "own CPU fell from {alone} to {capped}");
+    assert!(
+        journaled.is_some_and(|c| c.applied.values().any(|s| matches!(
+            s.step,
+            cedegrid::contention::YieldStep::Cap | cedegrid::contention::YieldStep::Pause
+        ))),
+        "the supervisor journaled the applied step"
+    );
+    assert!(completed.is_some(), "the job completed instead of draining");
+    let outcome: ExecutionOutcome = serde_json::from_slice(
+        &fs::read(
+            local
+                .config
+                .state_dir
+                .join("attempts")
+                .join(&assignment)
+                .join("execution-outcome.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!outcome.yielded, "CPU contention never drains running work");
+}

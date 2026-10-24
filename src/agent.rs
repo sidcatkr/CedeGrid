@@ -724,7 +724,8 @@ pub fn execution_backend(
 }
 struct ChildSlot {
     child: Child,
-    input: ChildStdin,
+    /// None once closed; closing it without Drain is agent loss, never a drain.
+    input: Option<ChildStdin>,
     events: mpsc::Receiver<std::result::Result<Event, String>>,
     assignment: Assignment,
     output_dir: PathBuf,
@@ -740,23 +741,56 @@ struct ChildSlot {
     /// Steps the supervisor reported applied, and the last acknowledged sequence.
     applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
     applied_sequence: u64,
+    /// When the first Drain was sent, by local policy or for the coordinator.
+    drain_sent_at: Option<Instant>,
+    started_at: Instant,
+    last_checkpoint_at: Option<Instant>,
+    /// The last `adjust` sent and its sequence.
+    adjust_sequence: u64,
+    sent_steps: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
 }
 impl Drop for ChildSlot {
     fn drop(&mut self) {
-        // Native output work must finish before the slot releases its namespace.
-        // Drain uses the authenticated owned control pipe and never signals a PID.
-        let _ = send(self, &Control::Drain { cause: None });
-        let _ = self.child.wait();
-        for thread in self.capture_threads.drain(..) {
-            let _ = thread.join();
+        // Closing the pipe is agent loss: the supervisor holds its steps and the
+        // lease rules apply. Only a deliberate stop sends Drain (audit M5).
+        drop(self.input.take());
+        // Never block on a supervisor that outlives this agent; join output work
+        // only once it has finished.
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            for thread in self.capture_threads.drain(..) {
+                let _ = thread.join();
+            }
         }
     }
 }
 fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
-    serde_json::to_writer(&mut slot.input, message)?;
-    slot.input.write_all(b"\n")?;
-    slot.input.flush()?;
+    let input = slot
+        .input
+        .as_mut()
+        .context("supervisor control pipe closed")?;
+    serde_json::to_writer(&mut *input, message)?;
+    input.write_all(b"\n")?;
+    input.flush()?;
     Ok(())
+}
+/// Send Drain and record it for the admission back-off.
+fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) {
+    slot.drain_sent_at.get_or_insert_with(Instant::now);
+    // A closed pipe already means agent loss for this supervisor.
+    let _ = send(slot, &Control::Drain { cause });
+}
+/// Drains sent since the last call, local or for the coordinator, each counted once.
+fn new_drains<'a>(
+    slots: impl Iterator<Item = (&'a String, Option<Instant>)>,
+    counted: &mut BTreeSet<String>,
+) -> usize {
+    let mut new = 0;
+    for (id, sent) in slots {
+        if sent.is_some() && counted.insert(id.clone()) {
+            new += 1;
+        }
+    }
+    new
 }
 fn minimum(left: &Resources, right: &Resources) -> Resources {
     Resources {
@@ -1378,7 +1412,7 @@ async fn start_assignment(
             );
         }
     });
-    let input = child.stdin.take().context("supervisor input absent")?;
+    let input = Some(child.stdin.take().context("supervisor input absent")?);
     let stdout = child.stdout.take().context("supervisor output absent")?;
     let (tx, events) = mpsc::channel();
     let events_thread = std::thread::spawn(move || {
@@ -1407,6 +1441,11 @@ async fn start_assignment(
         unavailable: BTreeMap::new(),
         applied: BTreeMap::new(),
         applied_sequence: 0,
+        drain_sent_at: None,
+        started_at: Instant::now(),
+        last_checkpoint_at: None,
+        adjust_sequence: 0,
+        sent_steps: BTreeMap::new(),
     })
 }
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
@@ -1944,6 +1983,8 @@ struct AgentLoop<'a> {
     spool_full: bool,
     admitted_parallelism: usize,
     last_growth: Instant,
+    /// Slots whose drain already reduced the admitted parallelism.
+    counted_drains: BTreeSet<String>,
 }
 
 impl AgentLoop<'_> {
@@ -1962,7 +2003,7 @@ impl AgentLoop<'_> {
             match handle.await.context("assignment preparation task failed")? {
                 Ok(mut slot) => {
                     if revoked || self.stopping.is_some() {
-                        let _ = send(&mut slot, &Control::Drain { cause: None });
+                        drain(&mut slot, None);
                     }
                     self.slots.insert(id, slot);
                 }
@@ -1995,7 +2036,8 @@ impl AgentLoop<'_> {
                     Ok(()) => {
                         if let Some(slot) = self.slots.get_mut(&id) {
                             if checkpoint {
-                                slot.checkpoint_hash = Some(hash)
+                                slot.checkpoint_hash = Some(hash);
+                                slot.last_checkpoint_at = Some(Instant::now());
                             } else {
                                 slot.reported = true;
                             }
@@ -2453,7 +2495,7 @@ impl AgentLoop<'_> {
             &PolicyInput {
                 allocations: allocations.clone(),
                 explicit_drain: self.stopping.is_some() || self.spool_full,
-                facts: BTreeMap::new(),
+                facts: self.allocation_facts(records, &allocations),
             },
             self.start.elapsed().as_millis() as u64,
         )?;
@@ -2505,17 +2547,116 @@ impl AgentLoop<'_> {
                 serde_json::to_string(&allocations)?
             ));
         }
+        let causes: BTreeMap<&str, crate::contention::YieldCause> = decision
+            .actions
+            .iter()
+            .filter(|a| a.step >= crate::contention::YieldStep::Drain)
+            .map(|a| (a.allocation_id.as_str(), a.cause))
+            .collect();
         for id in &decision.would_drain {
             if let Some(slot) = self.slots.get_mut(id)
+                && slot.drain_sent_at.is_none()
                 && (self.stopping.is_some()
                     || self.spool_full
                     || envelope_exceeded
                     || slot.assignment.request.class == AllocationClass::Opportunistic)
             {
-                let _ = send(slot, &Control::Drain { cause: None });
+                let cause = if envelope_exceeded {
+                    Some(crate::contention::YieldCause::EnvelopeBreach)
+                } else {
+                    causes.get(id.as_str()).copied()
+                };
+                drain(slot, cause);
+            }
+        }
+        // Runtime steps go to the supervisors, which apply them to their own
+        // family only; a resource whose step ended returns to none.
+        let mut wanted: BTreeMap<
+            &str,
+            BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
+        > = BTreeMap::new();
+        for action in decision
+            .actions
+            .iter()
+            .filter(|a| a.step < crate::contention::YieldStep::Drain)
+        {
+            wanted
+                .entry(action.allocation_id.as_str())
+                .or_default()
+                .insert(
+                    action.resource.clone(),
+                    crate::contention::StepRequest {
+                        step: action.step,
+                        target: action.target,
+                        cause: action.cause,
+                    },
+                );
+        }
+        for (id, slot) in self.slots.iter_mut() {
+            if slot.exited || slot.sequence == 0 || slot.drain_sent_at.is_some() {
+                continue;
+            }
+            let steps = wanted.remove(id.as_str()).unwrap_or_default();
+            if steps == slot.sent_steps {
+                continue;
+            }
+            let mut resources = steps.clone();
+            for (key, sent) in &slot.sent_steps {
+                resources
+                    .entry(key.clone())
+                    .or_insert(crate::contention::StepRequest {
+                        step: crate::contention::YieldStep::None,
+                        target: None,
+                        cause: sent.cause,
+                    });
+            }
+            slot.adjust_sequence += 1;
+            let message = Control::Adjust {
+                sequence: slot.adjust_sequence,
+                resources,
+            };
+            if send(slot, &message).is_ok() {
+                slot.sent_steps = steps;
             }
         }
         Ok(())
+    }
+
+    /// What observation cannot show the policy: who can act, progress at risk
+    /// and the steps each backend or supervisor cannot apply.
+    fn allocation_facts(
+        &self,
+        records: &[ExecutionRecord],
+        allocations: &[crate::model::Allocation],
+    ) -> BTreeMap<String, crate::model::AllocationFacts> {
+        use crate::contention::{ResourceKey, YieldStep};
+        allocations
+            .iter()
+            .map(|allocation| {
+                let mut facts = crate::model::AllocationFacts::default();
+                match self.slots.get(&allocation.id) {
+                    Some(slot) => {
+                        facts.uncontrollable = slot.exited || slot.sequence == 0;
+                        let since = slot.last_checkpoint_at.unwrap_or(slot.started_at);
+                        facts.progress_lost_ms = since.elapsed().as_millis() as u64;
+                        facts.unavailable = slot.unavailable.clone();
+                    }
+                    None => facts.uncontrollable = true,
+                }
+                // A rootless backend has no runtime share control (research R4).
+                if records
+                    .iter()
+                    .any(|r| r.assignment_id == allocation.id && r.backend == "rootless")
+                {
+                    facts
+                        .unavailable
+                        .entry(ResourceKey::Cpu)
+                        .or_default()
+                        .insert(YieldStep::LowerShare);
+                }
+                (allocation.id.clone(), facts)
+            })
+            .collect()
     }
 
     /// Heartbeat and admission: report, apply coordinator drains, acknowledge
@@ -2607,12 +2748,19 @@ impl AgentLoop<'_> {
         }
         let active_workers =
             self.slots.values().filter(|s| !s.reported).count() + self.preparations.len();
-        let draining_workers = decision
-            .would_drain
-            .iter()
-            .filter(|id| self.slots.get(*id).is_some_and(|s| !s.reported))
+        // Every drain sent since the last heartbeat backs off once, whether local
+        // policy or the coordinator asked for it (audit M8).
+        let draining_workers = self
+            .slots
+            .values()
+            .filter(|s| s.drain_sent_at.is_some() && !s.reported)
             .count();
-        if draining_workers > 0 {
+        let fresh_drains = new_drains(
+            self.slots.iter().map(|(id, s)| (id, s.drain_sent_at)),
+            &mut self.counted_drains,
+        );
+        self.counted_drains.retain(|id| self.slots.contains_key(id));
+        if fresh_drains > 0 {
             self.admitted_parallelism = self
                 .admitted_parallelism
                 .min(active_workers.saturating_sub(draining_workers));
@@ -2666,7 +2814,7 @@ impl AgentLoop<'_> {
                         *revoked = true;
                     }
                     if let Some(slot) = self.slots.get_mut(&id) {
-                        let _ = send(slot, &Control::Drain { cause: None });
+                        drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain));
                     }
                 }
                 let mut acknowledged = vec![];
@@ -2826,7 +2974,7 @@ impl AgentLoop<'_> {
             handle.abort();
             match handle.await {
                 Ok(Ok(mut slot)) => {
-                    let _ = send(&mut slot, &Control::Drain { cause: None });
+                    drain(&mut slot, None);
                     self.slots.insert(id, slot);
                 }
                 Ok(Err(_)) | Err(_) => {
@@ -2846,7 +2994,7 @@ impl AgentLoop<'_> {
         // Closing pipes is agent failure for any remaining opportunistic supervisor.
         // We deliberately never signal an uncertain supervisor/workload by PID.
         for slot in self.slots.values_mut() {
-            let _ = send(slot, &Control::Drain { cause: None });
+            drain(slot, None);
             let _ = slot.child.try_wait()?;
         }
         let retained: Vec<_>=self.slots.iter().map(|(id,slot)|serde_json::json!({"assignment_id":id,"exited":slot.exited,"reported":slot.reported,"publishing":self.publishing.iter().filter(|(publishing_id,_)|publishing_id==id).collect::<Vec<_>>(),"result_receipt":slot.output_dir.join("result.receipt.json").is_file(),"failure_receipt":slot.output_dir.join("failure.receipt.json").is_file()})).collect();
@@ -3017,6 +3165,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         spool_full: false,
         admitted_parallelism: 0,
         last_growth: start,
+        counted_drains: BTreeSet::new(),
     };
     loop {
         // Anchor observations to their scheduled cadence. Processing and RPC
@@ -3954,6 +4103,117 @@ mod negotiation_tests {
         assert!(
             plain(&rejected),
             "a rejected heartbeat falls back to 0.2 reports"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod drain_tests {
+    use super::*;
+
+    fn slot_with(child: Child, input: ChildStdin) -> ChildSlot {
+        let (_tx, events) = mpsc::channel();
+        let request = crate::execution_model::LaunchRequest {
+            task_id: "t".into(),
+            assignment_id: "a".into(),
+            argv: vec!["unused".into()],
+            cwd: std::env::temp_dir(),
+            env: BTreeMap::new(),
+            resources: Resources::default(),
+            replay_safe: true,
+            class: AllocationClass::Guaranteed,
+            no_escape: true,
+            single_process: true,
+            managed_child_limit: 0,
+            max_attempts: None,
+            input_artifacts: vec![],
+            required_controls: vec![],
+            allow_fallback: true,
+        };
+        ChildSlot {
+            child,
+            input: Some(input),
+            events,
+            assignment: Assignment {
+                node_id: "node".into(),
+                generation: 1,
+                coordinator_epoch: 1,
+                request,
+                checkpoint: None,
+            },
+            output_dir: std::env::temp_dir(),
+            sequence: 0,
+            last_renew: Instant::now(),
+            prepared: None,
+            reported: false,
+            checkpoint_hash: None,
+            exited: false,
+            capture_threads: vec![],
+            unavailable: BTreeMap::new(),
+            applied: BTreeMap::new(),
+            applied_sequence: 0,
+            drain_sent_at: None,
+            started_at: Instant::now(),
+            last_checkpoint_at: None,
+            adjust_sequence: 0,
+            sent_steps: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn dropping_a_slot_closes_the_pipe_without_drain_and_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let received = dir.path().join("received");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("cat > '{}'; sleep 1", received.display()))
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let slot = slot_with(child, input);
+        let started = Instant::now();
+        drop(slot);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "drop must not wait for the supervisor"
+        );
+        let end = Instant::now() + Duration::from_secs(3);
+        while !received.exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            fs::read_to_string(&received).unwrap(),
+            "",
+            "no Drain on drop"
+        );
+    }
+
+    #[test]
+    fn every_sent_drain_is_counted_once_for_back_off() {
+        let now = Instant::now();
+        let mut counted = BTreeSet::new();
+        // A local drain sent between heartbeats and a coordinator drain both count.
+        let sent = BTreeMap::from([
+            ("local".to_string(), Some(now)),
+            ("coordinator".to_string(), Some(now)),
+            ("running".to_string(), None),
+        ]);
+        assert_eq!(
+            new_drains(sent.iter().map(|(k, v)| (k, *v)), &mut counted),
+            2
+        );
+        // The same drains are not counted again on the next heartbeat.
+        assert_eq!(
+            new_drains(sent.iter().map(|(k, v)| (k, *v)), &mut counted),
+            0
+        );
+        let mut more = sent.clone();
+        more.insert("later".into(), Some(now));
+        assert_eq!(
+            new_drains(more.iter().map(|(k, v)| (k, *v)), &mut counted),
+            1
         );
     }
 }

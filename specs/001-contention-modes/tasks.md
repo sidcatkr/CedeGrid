@@ -252,7 +252,7 @@ pause and then reverses, with no drain (quickstart §3).
 - [ ] T038 [US2] Add control-socket tests in `tests/supervision.rs`:
   - a wrong token and an unauthenticated second connection are rejected;
   - the correct token is accepted and replaces the previous controller.
-- [ ] T039 [US2] Add tests in `tests/agent.rs`:
+- [X] T039 [US2] Add tests in `tests/agent.rs`:
   - drain back-off counts every sent drain, local and coordinator-issued (audit M8);
   - dropping a `ChildSlot` closes the pipe without sending Drain (audit M5).
 - [ ] T040 [P] [US2] Add tests in `tests/coordinator.rs`: failures are classified by the
@@ -269,7 +269,7 @@ pause and then reverses, with no drain (quickstart §3).
 
 - [X] T043 [US2] Implement the pure ladder state machine `contention::plan_steps` in
   `src/contention.rs` (data-model.md YieldStep transitions).
-- [ ] T044 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
+- [X] T044 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
   checkpoint times from the agent's publication records in `src/agent.rs`.
 - [X] T045 [US2] Add an `Actuator` trait to `LaunchBackend` in `src/execution_model.rs`: apply
   a step and target, read it back, and report unavailable steps.
@@ -297,7 +297,7 @@ pause and then reverses, with no drain (quickstart §3).
 - [ ] T050 [US2] In `src/agent.rs` reconciliation, reconnect to live supervisors through
   `supervisor-identity.json` and `control.sock`, and stop rewriting live supervisors' journals
   (audit H5).
-- [ ] T051 [US2] Add the actuation stage in `src/agent.rs`:
+- [X] T051 [US2] Add the actuation stage in `src/agent.rs`:
   - send `adjust` per allocation from `Decision.actions`;
   - track sent drains with timestamps for back-off (audit M8);
   - make `ChildSlot::drop` close the pipe without sending Drain (audit M5).
@@ -314,7 +314,7 @@ pause and then reverses, with no drain (quickstart §3).
   - add `runtime_adjust_requires_verified_membership` to `tests/cgroup.rs`;
   - run quickstart §4 with `CEDEGRID_TEST_CGROUP_ROOT` on Linux;
   - record the evidence in `docs/validation.md`.
-- [ ] T055 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
+- [X] T055 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
   external CPU load leads to `cap` within the Yield First response time, and the step reverses
   after the load stops (quickstart §3).
 

@@ -822,13 +822,26 @@ impl PolicyEngine {
                     .saturating_sub(draining_charge)
                     .saturating_sub(amount_of(&budget));
                 let usage_excess = if kind == ResourceKind::Cpu {
+                    // A saturated host suppresses measured external usage, so the
+                    // mode's allowance decides what own work may keep.
+                    let ceiling = cpu_capacity.min(cpu_ceiling);
+                    let schedulable = cpu_capacity.saturating_sub(cpu_reserve).min(cpu_ceiling);
+                    let saturated =
+                        cpu_busy.is_some_and(|busy| busy.saturating_add(ceiling / 50) >= ceiling);
+                    let allowed = crate::contention::cpu_allowance(
+                        config.contention.mode(kind),
+                        &config.contention.thresholds(kind),
+                        schedulable,
+                        budget.cpu_millicores,
+                        saturated,
+                    );
                     input
                         .allocations
                         .iter()
                         .filter(|a| a.phase != AllocationPhase::Pending)
                         .map(usage_of)
                         .fold(unknown_charge.cpu_millicores, u64::saturating_add)
-                        .saturating_sub(budget.cpu_millicores)
+                        .saturating_sub(allowed)
                 } else {
                     admission_excess
                 };
