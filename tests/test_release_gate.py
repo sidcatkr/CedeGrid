@@ -157,6 +157,11 @@ class ReleaseGateTests(CandidateFixture):
         with self.assertRaisesRegex(ValueError, 'packaged bytes'):
             self.validate()
 
+    def test_native_member_hashing_works_without_python_3_11_file_digest(self):
+        python_3_10_hashlib = type('hashlib', (), {'sha256': staticmethod(hashlib.sha256)})
+        with patch.object(release, 'hashlib', python_3_10_hashlib):
+            self.assertTrue(self.validate()['stable_readiness'])
+
     def test_checksum_file_must_cover_exact_artifact_list(self):
         (self.root / 'SHA256SUMS').write_text('')
         with self.assertRaisesRegex(ValueError, 'SHA256SUMS'):

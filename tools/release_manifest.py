@@ -27,12 +27,16 @@ EXPECTED |= {'standalone/cedegrid-0.2.0-'+target+('.zip' if target=='win32-x64' 
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 SOURCE_EXCLUDED = {'docs/release-0.2-gates.json', 'docs/release-0.2-evidence.md'}
 
-def digest(path):
+def stream_digest(stream):
+    # hashlib.file_digest needs Python 3.11; tools support 3.10.
     result = hashlib.sha256()
-    with path.open('rb') as stream:
-        for part in iter(lambda: stream.read(1024 * 1024), b''):
-            result.update(part)
+    for part in iter(lambda: stream.read(1024 * 1024), b''):
+        result.update(part)
     return result.hexdigest()
+
+def digest(path):
+    with path.open('rb') as stream:
+        return stream_digest(stream)
 
 def member(root, name):
     if not isinstance(name, str) or not name or '\\' in name:
@@ -101,14 +105,14 @@ def verify_native_members(packages, manifest, artifact_paths):
                     if len(entries) != 1 or entries[0].file_size != size:
                         raise ValueError('native ZIP member identity/size mismatch')
                     with archive.open(entries[0]) as stream:
-                        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+                        actual = stream_digest(stream)
             else:
                 with tarfile.open(path) as archive:
                     entries = [item for item in archive.getmembers() if item.name == name]
                     if len(entries) != 1 or not entries[0].isfile() or entries[0].size != size:
                         raise ValueError('native tar member identity/size mismatch')
                     with archive.extractfile(entries[0]) as stream:
-                        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+                        actual = stream_digest(stream)
             if actual != native['sha256']:
                 raise ValueError('native input hash does not match packaged bytes')
 
