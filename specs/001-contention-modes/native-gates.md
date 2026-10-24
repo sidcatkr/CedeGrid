@@ -75,9 +75,19 @@ export CEDEGRID_SERVICE_TEST_MONITOR_MS=500
 
 ## B. Batch 2 (US2) checks that can run now
 
+Container evidence, not host qualification: items 1 and 2 passed at commit 015d9c1 in a Docker
+Desktop Linux container (aarch64, kernel 7.0.12-linuxkit, Rust 1.98.1, Python 3.11, non-root
+UID 1000). fmt, clippy and the full serial suite passed with 470 tests and 9 ignored, and both
+Python suites passed. The ignored tests are subprocess fixtures run by their owning tests, one
+opt-in measurement, and the two hardware gates, `authorized_native_empty_leaf_preparation_and_cleanup`
+(T054) and `owned_cuda_context_is_observed_then_released_after_drain` (T088). The container had
+no delegated cgroup, so `CgroupActuator` over `LeafHandle` compiled but did not run; T054 covers it.
+State and test fixtures must be on a local disk filesystem under `$HOME`, so the checkout was
+copied to a named volume there; Docker's overlay filesystem is refused by design.
+
 1. Compile and lint the Linux-only paths. `CgroupActuator` over the pinned leaf descriptors
-   (`LeafHandle`) and `CgroupBackend::actuator` have never been compiled, because macOS has no
-   Linux C toolchain for the dependencies:
+   (`LeafHandle`) and `CgroupBackend::actuator` compile only for Linux, and macOS has no Linux C
+   toolchain for a cross-check:
 
    ```sh
    cargo clippy --locked --all-targets -- -D warnings
