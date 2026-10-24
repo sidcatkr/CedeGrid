@@ -2047,7 +2047,7 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
     let concurrency = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = accept_retrying(|| listener.accept()).await;
         let Ok(permit) = concurrency.clone().try_acquire_owned() else {
             drop(stream);
             continue;
@@ -2116,6 +2116,35 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
     }
 }
 
+const ACCEPT_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(10);
+const ACCEPT_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Accept errors such as EMFILE or ECONNABORTED are transient or affect one
+/// connection. They must not stop the coordinator, because every node lease
+/// depends on it.
+async fn accept_retrying<T, F, Fut>(mut accept: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let mut delay = ACCEPT_RETRY_MIN;
+    loop {
+        match accept().await {
+            Ok(value) => return value,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "coordinator accept failed: {error}; retrying in {}ms",
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(ACCEPT_RETRY_MAX);
+            }
+        }
+    }
+}
+
 fn db(value: u64) -> Result<i64> {
     i64::try_from(value).context("integer exceeds durable SQLite range")
 }
@@ -2136,5 +2165,27 @@ fn subtract(a: &mut Resources, b: &Resources) {
     for (k, v) in &b.gpu_memory_mib {
         let entry = a.gpu_memory_mib.entry(k.clone()).or_default();
         *entry = entry.saturating_sub(*v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accept_retrying;
+
+    #[tokio::test]
+    async fn accept_errors_do_not_stop_the_coordinator() {
+        let mut results = vec![
+            Err(std::io::Error::other("too many open files")),
+            Err(std::io::ErrorKind::ConnectionAborted.into()),
+            Ok(7),
+        ]
+        .into_iter();
+        let accepted = accept_retrying(|| {
+            let next = results.next().expect("accept retried after success");
+            async move { next }
+        })
+        .await;
+        assert_eq!(accepted, 7);
+        assert!(results.next().is_none());
     }
 }
