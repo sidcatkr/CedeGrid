@@ -470,6 +470,12 @@ context, under Neutral and Performance (quickstart §5).
   (moved from T014).
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
+- [ ] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
+  external usage. Batch 2 blocks Active in every mode at the launch recheck in
+  `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 floors exist, invert the
+  regression test `launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist`
+  in `tests/policy.rs` for Neutral and Performance, keeping Yield First blocked. Do not open
+  this before the floors exist.
 - [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
 - [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an

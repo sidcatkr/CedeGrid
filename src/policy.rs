@@ -7,9 +7,7 @@ use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
-use crate::contention::{
-    ContentionMode, Measurement, ResourceKey, ResourceKind, YieldCause, YieldStep,
-};
+use crate::contention::{Measurement, ResourceKey, ResourceKind, YieldCause, YieldStep};
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
@@ -153,11 +151,12 @@ pub fn validate_gpu_launch_contract(
             );
         }
         let mode = config.contention.mode(ResourceKind::GpuCompute);
-        let admitted = match gpu.external_compute {
-            ComputeActivity::Idle | ComputeActivity::Quiet => true,
-            ComputeActivity::Active => mode != ContentionMode::YieldFirst,
-            ComputeActivity::Unknown => false,
-        };
+        // Active devices stay blocked in every mode, as in policy admission, until
+        // the US5 floors protect external usage.
+        let admitted = matches!(
+            gpu.external_compute,
+            ComputeActivity::Idle | ComputeActivity::Quiet
+        );
         ensure!(
             capability == Some(GpuExecutionCapability::BestEffortOccupied) || admitted,
             "GPU {uuid} external activity {:?} is not admitted by mode {mode:?} at the launch recheck",

@@ -1708,8 +1708,11 @@ fn launch_recheck_refuses_an_external_context_appearing_after_empty_device_offer
     }
 }
 
+/// Pinned until US5 floors protect external usage; the US5 task that adds those
+/// floors inverts this test for Neutral and Performance.
 #[test]
-fn launch_recheck_admits_active_external_compute_only_in_sharing_modes() {
+fn launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist() {
+    use cedegrid::contention::ContentionMode;
     let mut cfg = config();
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_process_ids = Some(vec![987]);
@@ -1718,27 +1721,40 @@ fn launch_recheck_admits_active_external_compute_only_in_sharing_modes() {
     observation.fresh_after_baseline = true;
     observation.newest_sample_timestamp_us = Some(101);
     snap.gpus[0].observation = Some(observation);
-    // Neutral, the default, shares an active device; Yield First requires quiet.
-    cedegrid::policy::validate_gpu_launch_contract(
-        &cfg,
-        &snap,
-        &resources(1, 1, 500),
-        AllocationClass::Opportunistic,
-    )
-    .unwrap();
-    cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
-    let error = cedegrid::policy::validate_gpu_launch_contract(
-        &cfg,
-        &snap,
-        &resources(1, 1, 500),
-        AllocationClass::Opportunistic,
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("not admitted by mode YieldFirst")
-    );
+    for mode in [
+        ContentionMode::YieldFirst,
+        ContentionMode::Neutral,
+        ContentionMode::Performance,
+    ] {
+        cfg.contention.default_mode = mode;
+        let error = cedegrid::policy::validate_gpu_launch_contract(
+            &cfg,
+            &snap,
+            &resources(1, 1, 500),
+            AllocationClass::Opportunistic,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("external activity Active"),
+            "{mode:?}: {error}"
+        );
+    }
+    // Quiet stays admitted in every mode.
+    snap.gpus[0].external_compute = ComputeActivity::Quiet;
+    for mode in [
+        ContentionMode::YieldFirst,
+        ContentionMode::Neutral,
+        ContentionMode::Performance,
+    ] {
+        cfg.contention.default_mode = mode;
+        cedegrid::policy::validate_gpu_launch_contract(
+            &cfg,
+            &snap,
+            &resources(1, 1, 500),
+            AllocationClass::Opportunistic,
+        )
+        .unwrap();
+    }
 }
 
 fn best_effort_fixture() -> (Config, Snapshot) {
