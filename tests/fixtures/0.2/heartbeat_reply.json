@@ -1,0 +1,30 @@
+{
+  "coordinator_epoch": 3,
+  "assignments": [
+    {
+      "node_id": "node",
+      "generation": 1,
+      "coordinator_epoch": 3,
+      "request": {
+        "task_id": "task-1",
+        "assignment_id": "a-2",
+        "argv": ["/bin/true"],
+        "cwd": "/tmp",
+        "env": {},
+        "resources": {"cpu_millicores": 1000, "ram_mib": 256, "gpu_memory_mib": {}},
+        "replay_safe": true,
+        "class": "opportunistic",
+        "no_escape": true,
+        "single_process": true,
+        "managed_child_limit": 0,
+        "max_attempts": null,
+        "input_artifacts": [],
+        "required_controls": [],
+        "allow_fallback": false
+      },
+      "checkpoint": null
+    }
+  ],
+  "drain": [],
+  "uncertain": []
+}

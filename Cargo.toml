@@ -26,6 +26,7 @@ include = [
     "/examples/*.c",
     "/examples/*.rs",
     "/tests/contracts/*.json",
+    "/tests/fixtures/0.2/*.json",
     "/npm/src/**/*.ts",
     "/npm/tests/**/*.ts",
     "/npm/scripts/*",
@@ -84,6 +85,8 @@ serde = { version = "1", features = ["derive"] }
 # SDK metadata must retain its IEEE-754 values through spool, RPC and state parses.
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 toml = "0.8"
+# Already in Cargo.lock via toml 0.8; comment-preserving setup writes.
+toml_edit = "0.22"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 sysinfo = "0.38"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "io-util", "fs", "sync"] }

@@ -30,15 +30,15 @@ SDKs in `python/` and `npm/`.
 
 **Purpose**: new modules, the one justified dependency, test scaffolding and fixtures.
 
-- [ ] T001 Create `src/contention.rs`, `src/actuation.rs` and `src/setup.rs`, each with a
+- [X] T001 Create `src/contention.rs`, `src/actuation.rs` and `src/setup.rs`, each with a
   module doc line. Register them as top-level `pub mod` in `src/lib.rs`, and add the three
   paths to `ALLOWLIST` in `tools/pack_source_review.py`.
-- [ ] T002 Add `toml_edit = "0.22"` as a direct dependency in `Cargo.toml`, with a one-line
+- [X] T002 Add `toml_edit = "0.22"` as a direct dependency in `Cargo.toml`, with a one-line
   justification comment: "already in Cargo.lock via toml 0.8; comment-preserving setup writes".
   Confirm that `cargo tree --locked` shows no new crate.
-- [ ] T003 [P] Create `tests/contention.rs` with a proptest harness and shared builders for
+- [X] T003 [P] Create `tests/contention.rs` with a proptest harness and shared builders for
   snapshot, allocation and config, modeled on the helpers in `tests/policy.rs`.
-- [ ] T004 [P] Record 0.2 protocol fixtures as JSON in `tests/fixtures/0.2/`: a 0.2
+- [X] T004 [P] Record 0.2 protocol fixtures as JSON in `tests/fixtures/0.2/`: a 0.2
   `NodeReport` heartbeat request, and a `HeartbeatReply` carrying an `Assignment`. Add them to
   `ALLOWLIST` in `tools/pack_source_review.py` and to `include` in `Cargo.toml`.
 
