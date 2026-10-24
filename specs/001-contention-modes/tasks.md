@@ -81,7 +81,7 @@ SDKs in `python/` and `npm/`.
   charge = max(request, observed), add, subtract and fits. Replace the copies in
   `src/policy.rs`, `src/agent.rs`, `src/coordinator.rs` and `src/execution_state.rs`. Behavior
   must not change; the existing suites must still pass.
-- [ ] T010 Split `agent::run()` in `src/agent.rs` into functions for slot lifecycle, outbox,
+- [X] T010 Split `agent::run()` in `src/agent.rs` into functions for slot lifecycle, outbox,
   heartbeat/admission and the actuation stage, with no behavior change. `tests/agent.rs` and
   `tests/distributed_service.rs` must pass serially.
 - [X] T011 Add snapshot schema 3 in `src/model.rs`:
