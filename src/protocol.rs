@@ -155,8 +155,6 @@ pub struct NodeReport {
 #[serde(default, deny_unknown_fields)]
 pub struct NodeContentionReport {
     pub resources: BTreeMap<crate::contention::ResourceKey, ResourceContentionReport>,
-    pub floor_policy: crate::config::FloorPolicy,
-    pub neutral_memory_policy: crate::config::NeutralMemoryPolicy,
     pub exceptions: Vec<crate::model::ExceptionNotice>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

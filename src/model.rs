@@ -318,7 +318,7 @@ pub struct Decision {
     /// The yield steps the policy authority decided (schema 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<YieldAction>,
-    /// Active opt-in exceptions with their risk marker (schema 3).
+    /// Active caution options with their marker (schema 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exceptions: Vec<ExceptionNotice>,
     /// The effective mode of each allocation per resource (FR-030).
@@ -386,19 +386,17 @@ pub struct ResourceStatus {
     pub reasons: Vec<ReasonCode>,
 }
 
-/// An opt-in exception that is active, with its risk marker.
+/// A caution option that is active, with its marker (FR-043).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExceptionNotice {
     pub name: String,
     pub marker: RiskMarker,
 }
 
-/// Risk markers for opt-in exceptions: caution can make other workloads'
-/// allocations fail or slow them; danger can let an external process be
-/// killed or starved.
+/// Risk markers. Caution options let own work hold more capacity within the
+/// floors and reclaim bounds; no option may put another workload at risk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskMarker {
     Caution,
-    Danger,
 }

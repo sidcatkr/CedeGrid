@@ -49,7 +49,6 @@ fn options() -> SupervisorOptions {
         duty_period_ms: 100,
         hint_deadline_ms: 5_000,
         nice: 10,
-        guaranteed_oom_victim: true,
     }
 }
 

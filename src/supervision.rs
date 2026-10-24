@@ -25,9 +25,6 @@ pub struct SupervisorOptions {
     pub duty_period_ms: u64,
     /// How long a worker has to comply with a resource target (FR-037).
     pub hint_deadline_ms: u64,
-    /// Guaranteed processes are preferred OOM victims too; false only under
-    /// floor policy C (FR-041).
-    pub guaranteed_oom_victim: bool,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -40,7 +37,6 @@ impl Default for SupervisorOptions {
             release_confirm_timeout_ms: 10_000,
             duty_period_ms: 500,
             hint_deadline_ms: 5_000,
-            guaranteed_oom_victim: true,
         }
     }
 }
@@ -1295,12 +1291,9 @@ mod unix {
             if request.class == AllocationClass::Opportunistic && setup.nice.is_none() {
                 setup.nice = Some(options.nice);
             }
-            // Own work is the preferred OOM victim where an unprivileged process can
-            // mark itself (FR-023); floor policy C exempts Guaranteed work (FR-041).
-            if cfg!(target_os = "linux")
-                && (request.class == AllocationClass::Opportunistic
-                    || options.guaranteed_oom_victim)
-            {
+            // Every own process is a preferred OOM victim where an unprivileged
+            // process can mark itself (FR-023).
+            if cfg!(target_os = "linux") {
                 setup.oom_score_adj = Some(OOM_PREFERRED);
             }
             children = ChildServer::new(request, record.generation, setup.clone(), journal)?;

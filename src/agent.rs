@@ -709,7 +709,6 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
         duty_period_ms: spec.config.monitor.interval_ms,
         hint_deadline_ms: spec.config.contention.hint_deadline_ms(),
-        guaranteed_oom_victim: spec.config.contention.floor_policy != crate::config::FloorPolicy::C,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,
@@ -2265,9 +2264,7 @@ fn node_contention_report(
         .collect();
     NodeContentionReport {
         resources,
-        floor_policy: config.contention.floor_policy,
-        neutral_memory_policy: config.contention.neutral_memory_policy,
-        exceptions: config.contention.exceptions(),
+        exceptions: config.caution_options(),
     }
 }
 

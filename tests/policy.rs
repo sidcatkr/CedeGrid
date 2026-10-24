@@ -2589,6 +2589,9 @@ fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
     // Unset, the cooldown is the mode's scale-up interval: 2 s in Performance.
     let mut cfg = config();
     cfg.contention.default_mode = ContentionMode::Performance;
+    cfg.contention
+        .acknowledge_danger
+        .insert("performance_mode".into());
     cfg.contention.cpu.cpu_ram_scale_up_cooldown_ms = None;
     cfg.contention.ram.cpu_ram_scale_up_cooldown_ms = None;
     let mut engine = PolicyEngine::new();
@@ -2609,7 +2612,7 @@ fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
 fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
     use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind};
     let mut cfg = config();
-    cfg.contention.max_mode = ContentionMode::Neutral;
+    cfg.contention.max_mode = Some(ContentionMode::Neutral);
     let with_modes = |id: &str, modes: &[(ResourceKind, ContentionMode)]| {
         let mut allocation = allocation(
             id,
@@ -2643,6 +2646,21 @@ fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
     let cpu = &decision.resources[&ResourceKey::Cpu];
     assert_eq!(cpu.mode, Some(ContentionMode::Neutral));
     assert_eq!(cpu.effective_mode, Some(ContentionMode::YieldFirst));
+    // Without a configured cap, no job reaches Performance unless the operator chose it.
+    let modes = |cfg: &Config| {
+        PolicyEngine::new()
+            .evaluate(cfg, &snapshot(), &input, 0)
+            .unwrap()
+            .allocation_modes["fast"][&ResourceKind::Cpu]
+    };
+    assert_eq!(modes(&config()), ContentionMode::Neutral);
+    let mut chosen = config();
+    chosen.contention.max_mode = Some(ContentionMode::Performance);
+    chosen
+        .contention
+        .acknowledge_danger
+        .insert("performance_mode".into());
+    assert_eq!(modes(&chosen), ContentionMode::Performance);
 }
 
 #[test]

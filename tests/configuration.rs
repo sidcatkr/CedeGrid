@@ -556,11 +556,20 @@ fn contention_defaults_and_overrides_parse() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     let defaults = Config::default().contention;
     assert_eq!(defaults.default_mode, ContentionMode::Neutral);
-    assert_eq!(defaults.max_mode, ContentionMode::Performance);
+    // Without a cap, jobs reach no further than the node's own most aggressive mode.
+    assert_eq!(defaults.max_mode, None);
+    assert_eq!(defaults.max_mode(), ContentionMode::Neutral);
     assert_eq!(defaults.floor_policy, FloorPolicy::A);
     assert_eq!(defaults.neutral_memory_policy, NeutralMemoryPolicy::A);
     assert_eq!(defaults.thresholds(ResourceKind::Cpu).reclaim_s, 5);
     assert_eq!(defaults.thresholds(ResourceKind::Ram).reclaim_s, 15);
+    assert_eq!(defaults.guaranteed_hint_deadline_s, 5);
+    assert_eq!(
+        defaults
+            .thresholds(ResourceKind::Ram)
+            .guaranteed_breach_window_s,
+        10
+    );
     assert_eq!(
         defaults
             .thresholds(ResourceKind::GpuMemory)
@@ -568,7 +577,7 @@ fn contention_defaults_and_overrides_parse() {
         256
     );
     let parsed = parse_node(
-        "[contention]\ndefault_mode = \"yield_first\"\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
+        "[contention]\ndefault_mode = \"yield_first\"\nacknowledge_danger = [\"performance_mode\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
     )
     .unwrap()
     .contention;
@@ -600,13 +609,115 @@ fn contention_validation_rejects_out_of_range_and_unknown_settings() {
         "[contention]\nbogus = 1",
         "[contention.cpu]\nbogus = 1",
         "[contention.cpu]\nnoise_tolerance_mib = 5",
-        "[contention]\nfloor_policy = \"c\"",
         "[contention]\nacknowledge_danger = [\"something_else\"]",
+        "[contention]\nacknowledge_danger = [\"floor_policy_c\"]",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }
-    parse_node("[contention]\nfloor_policy = \"c\"\nacknowledge_danger = [\"floor_policy_c\"]")
-        .unwrap();
+}
+
+/// Constitution 2.0.0: options that put other workloads at risk no longer exist.
+#[test]
+fn removed_floor_and_memory_policies_fail_naming_their_replacement() {
+    for (body, replacement) in [
+        (
+            "[contention]\nfloor_policy = \"b\"",
+            "contention.guaranteed_hint_deadline_s",
+        ),
+        (
+            "[contention]\nfloor_policy = \"c\"\nacknowledge_danger = [\"floor_policy_c\"]",
+            "contention.ram.guaranteed_breach_window_s",
+        ),
+        (
+            "[contention]\nneutral_memory_policy = \"b\"",
+            "ram.reserve_mib",
+        ),
+    ] {
+        let error = format!("{:#}", parse_node(body).unwrap_err());
+        assert!(
+            error.contains("was removed") && error.contains(replacement),
+            "{body}: {error}"
+        );
+    }
+    parse_node("[contention]\nfloor_policy = \"a\"\nneutral_memory_policy = \"a\"").unwrap();
+}
+
+#[test]
+fn performance_needs_its_acknowledgement() {
+    for (body, acknowledged) in [
+        (
+            "[contention]\ndefault_mode = \"performance\"",
+            "[contention]\ndefault_mode = \"performance\"\nacknowledge_danger = [\"performance_mode\"]",
+        ),
+        (
+            "[contention.gpu_memory]\nmode = \"performance\"",
+            "[contention]\nacknowledge_danger = [\"performance_mode\"]\n[contention.gpu_memory]\nmode = \"performance\"",
+        ),
+    ] {
+        let error = format!("{:#}", parse_node(body).unwrap_err());
+        assert!(
+            error.contains("ERR_CEDEGRID_DANGER_UNACKNOWLEDGED")
+                && error.contains("performance_mode"),
+            "{body}: {error}"
+        );
+        parse_node(acknowledged).unwrap();
+    }
+}
+
+#[test]
+fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
+    let (_root, location) = node_location();
+    let load = |body: &str| {
+        Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location).unwrap()
+    };
+    let raised =
+        load("[ram]\nreserve_mib = 100\nreserve_percent = 0\n[gpu]\nreserve_vram_mib = 100");
+    assert_eq!(raised.config.ram_floor_mib(32_000), 512);
+    assert_eq!(raised.config.vram_floor_mib(), 256);
+    assert!(
+        raised
+            .warnings
+            .iter()
+            .any(|w| w.contains("ram.reserve_mib") && w.contains("512"))
+    );
+    assert!(
+        raised
+            .warnings
+            .iter()
+            .any(|w| w.contains("gpu.reserve_vram_mib") && w.contains("256"))
+    );
+    // A floor below twice its minimum still loads, so 0.2 files keep loading.
+    let small = load("[ram]\nreserve_mib = 800\nreserve_percent = 0");
+    assert_eq!(small.config.ram_floor_mib(32_000), 800);
+    let confirm = |w: &String| w.contains("acknowledge_danger = [\"small_floor\"]");
+    assert!(small.warnings.iter().any(confirm));
+    let acknowledged = load(
+        "[ram]\nreserve_mib = 800\nreserve_percent = 0\n[contention]\nacknowledge_danger = [\"small_floor\"]",
+    );
+    assert!(!acknowledged.warnings.iter().any(confirm));
+    // A percentage floor can exceed the minimum on a large host.
+    let percent = load("[ram]\nreserve_mib = 0\nreserve_percent = 5");
+    assert_eq!(percent.config.ram_floor_mib(32_000), 1600);
+    assert_eq!(Config::default().vram_floor_mib(), 3072);
+}
+
+#[test]
+fn guaranteed_memory_knobs_are_validated() {
+    for bad in [
+        "[contention]\nguaranteed_hint_deadline_s = 0",
+        "[contention]\nguaranteed_hint_deadline_s = 31",
+        "[contention.ram]\nguaranteed_breach_window_s = 61",
+        "[contention.gpu_memory]\nguaranteed_breach_window_s = 5",
+    ] {
+        assert!(parse_node(bad).is_err(), "accepted: {bad}");
+    }
+    for good in [
+        "[contention]\nguaranteed_hint_deadline_s = 30",
+        "[contention.ram]\nguaranteed_breach_window_s = 0",
+        "[contention.ram]\nguaranteed_breach_window_s = 60",
+    ] {
+        parse_node(good).unwrap();
+    }
 }
 
 #[test]
@@ -617,7 +728,7 @@ fn negative_cpu_nice_warns_and_is_treated_as_zero() {
     assert_eq!(loaded.config.cpu.nice, 0);
     assert!(loaded.warnings.iter().any(|w| w.contains("cpu.nice")));
     let loaded = Config::parse_reporting(
-        "config_version = 1\n[contention]\nfloor_policy = \"b\"\n",
+        "config_version = 1\n[contention]\ndefault_mode = \"performance\"\nacknowledge_danger = [\"performance_mode\"]\n",
         &location,
     )
     .unwrap();
@@ -625,6 +736,6 @@ fn negative_cpu_nice_warns_and_is_treated_as_zero() {
         loaded
             .warnings
             .iter()
-            .any(|w| w.contains("floor_policy_b") && w.contains("caution"))
+            .any(|w| w.contains("performance_mode") && w.contains("caution"))
     );
 }

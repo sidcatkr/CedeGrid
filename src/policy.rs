@@ -320,7 +320,7 @@ impl PolicyEngine {
                         let mode = crate::contention::effective_mode(
                             config.contention.mode(kind),
                             a.modes.get(&kind).copied(),
-                            config.contention.max_mode,
+                            config.contention.max_mode(),
                         );
                         (kind, mode)
                     })
@@ -511,11 +511,7 @@ impl PolicyEngine {
             cpu_unknown = true;
             reasons.push("CPU busy telemetry unavailable; CPU admission blocked".into());
         }
-        let ram_reserve = config.ram.reserve_mib.max(ceil_ratio(
-            snapshot.total_ram_mib,
-            u64::from(config.ram.reserve_percent),
-            100,
-        ));
+        let ram_reserve = config.ram_floor_mib(snapshot.total_ram_mib);
         if let Some(available) = snapshot.available_ram_mib {
             let used = snapshot.total_ram_mib - available;
             let own_lower = managed_observed.ram_mib;
@@ -573,8 +569,6 @@ impl PolicyEngine {
                     .collect::<Vec<_>>()
             })
         };
-        let fair_share_over_floor =
-            config.contention.neutral_memory_policy == crate::config::NeutralMemoryPolicy::B;
         // What own work may hold before the mode's target applies: for memory, what
         // keeps the floor free.
         let mut floor_available: BTreeMap<ResourceKey, u64> = BTreeMap::new();
@@ -597,7 +591,6 @@ impl PolicyEngine {
                     principals: principals(&|p| p.cpu_millicores),
                     saturated: cpu_saturated,
                     unknown_activity: false,
-                    fair_share_over_floor: false,
                 },
                 &config.contention.thresholds(ResourceKind::Cpu),
             )
@@ -618,7 +611,6 @@ impl PolicyEngine {
                     principals: principals(&|p| p.ram_mib),
                     saturated: false,
                     unknown_activity: false,
-                    fair_share_over_floor,
                 },
                 &config.contention.thresholds(ResourceKind::Ram),
             );
@@ -706,7 +698,7 @@ impl PolicyEngine {
                 let memory_budget = external
                     .map(|used| {
                         gpu.total_memory_mib
-                            .saturating_sub(config.gpu.reserve_vram_mib)
+                            .saturating_sub(config.vram_floor_mib())
                             .saturating_sub(used)
                     })
                     .unwrap_or(0);
@@ -817,16 +809,13 @@ impl PolicyEngine {
                         &ModeInput {
                             kind: ResourceKind::GpuMemory,
                             mode: governing(ResourceKind::GpuMemory),
-                            capacity: gpu
-                                .total_memory_mib
-                                .saturating_sub(config.gpu.reserve_vram_mib),
+                            capacity: gpu.total_memory_mib.saturating_sub(config.vram_floor_mib()),
                             external: external.unwrap_or(0),
                             principals: principals(&|p| {
                                 p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
                             }),
                             saturated: false,
                             unknown_activity: false,
-                            fair_share_over_floor,
                         },
                         &config.contention.thresholds(ResourceKind::GpuMemory),
                     )
@@ -1068,19 +1057,26 @@ impl PolicyEngine {
                     .any(|a| !guaranteed(a) && amount_of(&charges[&a.id]) > 0);
                 // Guaranteed work is drained only for a memory floor under floor
                 // policy A, after opportunistic work and the hint deadline (FR-024).
+                // Guaranteed memory waits for its hint deadline and, for RAM, the
+                // breach window before it is drained (FR-024).
+                let guaranteed_wait_ms = config
+                    .contention
+                    .guaranteed_hint_deadline_s
+                    .max(
+                        config
+                            .contention
+                            .thresholds(kind)
+                            .guaranteed_breach_window_s,
+                    )
+                    .saturating_mul(1000);
                 let guaranteed_drain = guaranteed_may_drain(
                     kind,
                     cause,
-                    config.contention.floor_policy == crate::config::FloorPolicy::A,
                     opportunistic_left,
                     floor_breach_since
                         .get(&key)
                         .map_or(0, |start| now_monotonic_ms.saturating_sub(*start)),
-                    config
-                        .contention
-                        .thresholds(kind)
-                        .hint_deadline_s
-                        .saturating_mul(1000),
+                    guaranteed_wait_ms,
                 );
                 let candidate = |a: &&Allocation| {
                     a.phase != AllocationPhase::Draining
@@ -1374,7 +1370,7 @@ impl PolicyEngine {
             reasons,
             resources: statuses,
             actions,
-            exceptions: config.contention.exceptions(),
+            exceptions: config.caution_options(),
             allocation_modes,
         })
     }

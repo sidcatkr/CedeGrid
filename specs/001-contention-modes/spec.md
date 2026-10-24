@@ -597,8 +597,9 @@ node reports with the expected per-resource values at each step.
 
 - **FR-030**: A node MUST have a default mode per resource. A job or task MAY override it per
   resource. A node MAY set a cap on the most aggressive mode allowed (Yield First < Neutral <
-  Performance). A job runs at the less aggressive of its requested mode and the node cap, and
-  the effective mode MUST be reported.
+  Performance); without one, the cap is the node's most aggressive configured mode, so no job
+  runs in Performance unless the operator chose it. A job runs at the less aggressive of its
+  requested mode and the node cap, and the effective mode MUST be reported.
 - **FR-031**: Existing `config_version = 1` files MUST load unchanged.
   - Without mode settings, every resource MUST run in Neutral.
   - `gpu.execution_mode` MUST still be accepted and is interpreted for the GPU resources that

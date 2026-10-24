@@ -6,7 +6,7 @@ Defaults are provisional, to validate on real hardware.
 ```toml
 [contention]
 default_mode = "neutral"            # "yield_first" | "neutral" | "performance"
-max_mode = "performance"            # node cap; jobs run at min(requested, max_mode)
+max_mode = "neutral"                # node cap; jobs run at min(requested, max_mode); unset, the most aggressive node mode
 floor_policy = "a"                  # the only value; "b" and "c" fail to load
 neutral_memory_policy = "a"         # the only value; "b" fails to load
 acknowledge_danger = []             # "performance_mode", "small_floor" [caution]
@@ -26,6 +26,7 @@ neutral_convergence_s = 60
 neutral_tolerance_points = 15
 performance_ramp_s = 30
 performance_ramp_percent = 80
+reclaim_s = 5                       # 15 for ram and gpu_memory: Neutral and Performance escalation time
 hint_deadline_s = 5
 unknown_window_intervals = 3
 hysteresis_percent = 50

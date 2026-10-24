@@ -417,7 +417,6 @@ mod modes {
             principals: None,
             saturated: false,
             unknown_activity: false,
-            fair_share_over_floor: false,
         }
     }
 
@@ -565,14 +564,12 @@ mod neutral {
     }
 
     #[test]
-    fn memory_floors_win_under_policy_a_and_the_share_holds_under_policy_b() {
+    fn memory_floors_always_come_before_the_fair_share() {
         for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
             // Capacity is above the floor; external use leaves own work 1000.
             let mut view = input(kind, ContentionMode::Neutral, 10_000, 9000);
             view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 9000)]);
             assert_eq!(allowance(&view), 1000, "{kind:?}");
-            view.fair_share_over_floor = true;
-            assert_eq!(allowance(&view), 5000, "{kind:?}");
         }
     }
 }
@@ -618,28 +615,22 @@ mod performance_and_guaranteed {
     }
 
     #[test]
-    fn only_floor_policy_a_drains_guaranteed_work_and_only_after_the_hint_deadline() {
-        let rule = |floor_drain, opportunistic_left, breached_ms| {
+    fn guaranteed_memory_is_drained_last_and_only_after_its_wait() {
+        let rule = |opportunistic_left, breached_ms| {
             guaranteed_may_drain(
                 ResourceKind::Ram,
                 YieldCause::FloorBreach,
-                floor_drain,
                 opportunistic_left,
                 breached_ms,
-                5000,
+                10_000,
             )
         };
-        assert!(rule(true, false, 5000));
-        assert!(!rule(true, false, 4999), "the hint deadline has not passed");
-        assert!(!rule(true, true, 60_000), "opportunistic work goes first");
-        assert!(
-            !rule(false, false, 60_000),
-            "floor policies B and C never drain"
-        );
+        assert!(rule(false, 10_000));
+        assert!(!rule(false, 9999), "the wait has not passed");
+        assert!(!rule(true, 60_000), "opportunistic work goes first");
         assert!(guaranteed_may_drain(
             ResourceKind::Ram,
             YieldCause::EnvelopeBreach,
-            true,
             false,
             5000,
             5000
@@ -647,7 +638,6 @@ mod performance_and_guaranteed {
         assert!(!guaranteed_may_drain(
             ResourceKind::Ram,
             YieldCause::ExternalGrowth,
-            true,
             false,
             60_000,
             5000
@@ -655,7 +645,6 @@ mod performance_and_guaranteed {
         assert!(!guaranteed_may_drain(
             ResourceKind::Cpu,
             YieldCause::FloorBreach,
-            true,
             false,
             60_000,
             5000
@@ -663,10 +652,9 @@ mod performance_and_guaranteed {
     }
 }
 
-/// Floors, floor policies and the Guaranteed rules through the policy engine.
+/// Floors, floor policy A and the Guaranteed rules through the policy engine.
 mod guaranteed_policy {
     use super::*;
-    use cedegrid::config::FloorPolicy;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
 
     fn ram(id: &str, class: AllocationClass, phase: AllocationPhase, mib: u64) -> Allocation {
@@ -731,27 +719,39 @@ mod guaranteed_policy {
     }
 
     #[test]
-    fn policy_a_drains_guaranteed_work_for_a_floor_only_after_the_hint_deadline() {
-        let decisions = run(
-            &config(),
-            vec![ram(
-                "g",
-                AllocationClass::Guaranteed,
-                AllocationPhase::Running,
-                8000,
-            )],
-            6000,
-        );
-        for (now, decision) in &decisions {
-            let drained = step(decision, "g") == Some((YieldStep::Drain, YieldCause::FloorBreach));
-            assert_eq!(drained, *now >= 5000, "at {now} ms: {:?}", decision.actions);
-            assert!(
-                decision.resources[&ResourceKey::Ram]
-                    .reasons
-                    .iter()
-                    .any(|r| r.code == "floor_breach"),
-                "at {now} ms"
+    fn policy_a_drains_guaranteed_ram_only_after_the_breach_window_and_hint_deadline() {
+        // The default RAM breach window (10 s) outlasts the Guaranteed hint deadline (5 s);
+        // without a window the hint deadline alone applies.
+        let mut no_window = config();
+        no_window.contention.ram.guaranteed_breach_window_s = Some(0);
+        for (config, wait_ms) in [(config(), 10_000), (no_window, 5000)] {
+            let decisions = run(
+                &config,
+                vec![ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    8000,
+                )],
+                11_000,
             );
+            for (now, decision) in &decisions {
+                let drained =
+                    step(decision, "g") == Some((YieldStep::Drain, YieldCause::FloorBreach));
+                assert_eq!(
+                    drained,
+                    *now >= wait_ms,
+                    "at {now} ms: {:?}",
+                    decision.actions
+                );
+                assert!(
+                    decision.resources[&ResourceKey::Ram]
+                        .reasons
+                        .iter()
+                        .any(|r| r.code == "floor_breach"),
+                    "at {now} ms"
+                );
+            }
         }
     }
 
@@ -786,44 +786,6 @@ mod guaranteed_policy {
                 Some(YieldStep::Drain),
                 "at {now} ms"
             );
-        }
-    }
-
-    #[test]
-    fn policies_b_and_c_never_drain_guaranteed_work_and_block_admission() {
-        for policy in [FloorPolicy::B, FloorPolicy::C] {
-            let mut config = config();
-            config.contention.floor_policy = policy;
-            if policy == FloorPolicy::C {
-                config
-                    .contention
-                    .acknowledge_danger
-                    .insert("floor_policy_c".into());
-            }
-            let decisions = run(
-                &config,
-                vec![ram(
-                    "g",
-                    AllocationClass::Guaranteed,
-                    AllocationPhase::Running,
-                    8000,
-                )],
-                20_000,
-            );
-            for (now, decision) in &decisions {
-                assert_ne!(
-                    step(decision, "g").map(|s| s.0),
-                    Some(YieldStep::Drain),
-                    "{policy:?} at {now} ms"
-                );
-                assert_eq!(decision.admission_headroom.ram_mib, 0, "{policy:?}");
-                assert!(
-                    decision.resources[&ResourceKey::Ram]
-                        .reasons
-                        .iter()
-                        .any(|r| r.code == "floor_breach")
-                );
-            }
         }
     }
 
@@ -912,6 +874,10 @@ mod scenarios {
             let mut config = config();
             config.cpu.reserve_physical_cores = 0;
             config.contention.default_mode = mode;
+            config
+                .contention
+                .acknowledge_danger
+                .insert("performance_mode".into());
             Self {
                 config,
                 engine: PolicyEngine::new(),
@@ -1039,6 +1005,10 @@ mod scenarios {
         let mut config = config();
         config.cpu.reserve_physical_cores = 0;
         config.contention.default_mode = ContentionMode::Performance;
+        config
+            .contention
+            .acknowledge_danger
+            .insert("performance_mode".into());
         let mut engine = PolicyEngine::new();
         let mut jobs: Vec<Allocation> = vec![];
         let target = (CAPACITY - CAPACITY / 10) * 80 / 100;

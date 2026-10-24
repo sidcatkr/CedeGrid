@@ -208,6 +208,8 @@ pub struct ResourceThresholds {
     pub neutral_tolerance_points: u8,
     pub performance_ramp_s: u64,
     pub performance_ramp_percent: u8,
+    /// How long a Neutral or Performance step has to free the contended amount
+    /// before the next step.
     pub reclaim_s: u64,
     pub hint_deadline_s: u64,
     pub unknown_window_intervals: u32,
@@ -222,6 +224,9 @@ pub struct ResourceThresholds {
     /// Usage, in percent of capacity, from which a principal contends for a
     /// fair share; smaller usage is counted as it is.
     pub principal_min_percent: u8,
+    /// RAM only: how long a floor breach must last before Guaranteed work is
+    /// drained for it (FR-024).
+    pub guaranteed_breach_window_s: u64,
 }
 
 impl ResourceThresholds {
@@ -246,6 +251,7 @@ impl ResourceThresholds {
             quiet_window_intervals: 20,
             cpu_ram_scale_up_cooldown_ms: None,
             principal_min_percent: 1,
+            guaranteed_breach_window_s: if kind == ResourceKind::Ram { 10 } else { 0 },
         }
     }
 
@@ -609,8 +615,6 @@ pub struct ModeInput {
     pub saturated: bool,
     /// Activity of unknown amount, such as unsampled GPU compute.
     pub unknown_activity: bool,
-    /// Neutral memory policy B: memory keeps its fair share over the floor.
-    pub fair_share_over_floor: bool,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -646,7 +650,7 @@ pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
 /// keeps its generous margin free and counts unknown activity as demand.
 /// Performance keeps a small margin on compute and only the floor on memory.
 /// Neutral uses idle capacity and converges to its fair share under
-/// contention; memory floors win unless Neutral memory policy B is chosen.
+/// contention; memory floors always win.
 pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     let margin = |percent: u8| input.capacity.saturating_mul(u64::from(percent)) / 100;
     let available = input.capacity.saturating_sub(input.external);
@@ -668,13 +672,7 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
                 held
             }
         }
-        ContentionMode::Neutral if input.kind.is_memory() => {
-            if input.fair_share_over_floor {
-                available.max(neutral_share(input, thresholds))
-            } else {
-                available
-            }
-        }
+        ContentionMode::Neutral if input.kind.is_memory() => available,
         ContentionMode::Neutral if input.saturated || input.unknown_activity => {
             neutral_share(input, thresholds)
         }
@@ -716,22 +714,21 @@ fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     max_min_shares(input.capacity, &demands)[0].saturating_sub(owner_unmanaged)
 }
 
-/// Whether Guaranteed work may be drained (FR-024, FR-041, FR-057): only for a
-/// memory floor or envelope breach, only under floor policy A, only after all
-/// opportunistic work on the resource is released and a hint's deadline has passed.
+/// Whether Guaranteed work may be drained (FR-024, FR-057): only for a memory
+/// floor or envelope breach, as the last step of floor policy A, after all
+/// opportunistic work on the resource is released and the breach has lasted
+/// `wait_ms`, the Guaranteed hint deadline or the RAM breach window.
 pub fn guaranteed_may_drain(
     kind: ResourceKind,
     cause: YieldCause,
-    floor_policy_a: bool,
     opportunistic_left: bool,
     breached_for_ms: u64,
-    hint_deadline_ms: u64,
+    wait_ms: u64,
 ) -> bool {
     kind.is_memory()
         && matches!(cause, YieldCause::FloorBreach | YieldCause::EnvelopeBreach)
-        && floor_policy_a
         && !opportunistic_left
-        && breached_for_ms >= hint_deadline_ms
+        && breached_for_ms >= wait_ms
 }
 
 /// A job runs at the less aggressive of its requested mode and the node cap

@@ -98,8 +98,8 @@ Memory contention starts with a resource target for workers that read targets
 target at the hint deadline, 5 s by default, leads to a drain. Other workers are
 drained without the hint. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
 remain fully charged, including pending and uncertain reservations. They may be
-lowered in share or capped, are never paused, and are drained automatically only
-under floor policy A. Explicit node drain retains its all-allocation stop semantics.
+lowered in share or capped, are never paused, and their memory is drained only as the
+last step of floor policy A. Explicit node drain retains its all-allocation stop semantics.
 
 When own work exceeds the operator's node envelope, the policy restores the envelope per
 resource through the yield ladder, releasing opportunistic work first. Guaranteed work is
@@ -108,16 +108,27 @@ once. An exhausted node spool budget blocks admission and is reported; nothing i
 because of it.
 
 No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host
-RAM and `gpu.reserve_vram_mib` per GPU stay free. A breached floor blocks admission
-on that resource and releases opportunistic work holding it. Floor policy A, the
-default, may then drain Guaranteed work that holds the memory, once the hint
-deadline has passed. Floor policy B (caution) never drains Guaranteed work for a
-floor; it reports the breach and blocks admission. On Linux, own processes mark
-themselves as the preferred out-of-memory victims (`oom_score_adj` 1000) before they
-run; floor policy C (danger) is B, and it leaves Guaranteed processes unmarked.
-Other platforms offer no unprivileged equivalent and claim none. Neutral memory policy A, the
-default, puts floors before fair share; Neutral memory policy B (caution) keeps
-Neutral's fair share of memory while a floor is breached.
+RAM and `gpu.reserve_vram_mib` per GPU stay free, never less than 512 MiB of RAM and
+256 MiB per GPU. A smaller setting is raised to the minimum with a load-time warning.
+Floors always come before the fair share. A breached floor blocks admission on that
+resource and releases opportunistic work holding it. Floor policy A, the only floor
+policy, then drains Guaranteed work that holds the memory, as the last step: after
+`contention.guaranteed_hint_deadline_s` (5 s) and, for RAM, after the breach has lasted
+`contention.ram.guaranteed_breach_window_s` (10 s). GPU memory breaches have no window.
+On Linux, every own process, Guaranteed included, marks itself as a preferred
+out-of-memory victim (`oom_score_adj` 1000) before it runs. Other platforms offer no
+unprivileged equivalent and claim none.
+
+No option puts another workload at risk of an out-of-memory kill, swap thrash or a
+failed GPU allocation. The former floor policies `b` and `c` and Neutral memory policy
+`b` were removed, and a configuration that sets them fails to load with a message that
+names the replacement settings. Two options are marked *caution* because they let own
+work hold more capacity within the floors: Performance mode and a floor below twice its
+minimum. Performance needs `contention.acknowledge_danger = ["performance_mode"]` to
+load; a small floor without `"small_floor"` loads with a warning, so 0.2 files keep
+loading. `doctor`, `status` and node reports list active caution options. Without
+`contention.max_mode`, a job may request at most the node's most aggressive configured
+mode, so no job runs in Performance unless the operator chose it.
 Policy recordings without an allocation class retain the legacy opportunistic
 default; live observation copies the required class from the durable execution record.
 

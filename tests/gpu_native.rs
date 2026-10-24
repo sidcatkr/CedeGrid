@@ -106,7 +106,6 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         release_confirm_timeout_ms: 10000,
         duty_period_ms: 500,
         hint_deadline_ms: 5_000,
-        guaranteed_oom_victim: true,
     };
     let mut control = GpuReadyDrain {
         marker,

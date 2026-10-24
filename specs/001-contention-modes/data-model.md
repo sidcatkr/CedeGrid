@@ -19,7 +19,7 @@ Serialization contracts are in [contracts/](contracts/).
 | Field | Type | Default | Rule |
 |---|---|---|---|
 | `default_mode` | ContentionMode | `neutral` | Q1 |
-| `max_mode` | ContentionMode | `performance` | `default_mode ≤ max_mode` |
+| `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
 | `acknowledge_danger` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource without `performance_mode` fails to load; a floor near its minimum without `small_floor` warns (FR-051, FR-054) |
@@ -53,6 +53,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `neutral_convergence_s` | all | 60 | ≥ 1 |
 | `neutral_tolerance_points` | all | 15 | 1–50 |
 | `performance_ramp_s`, `performance_ramp_percent` | all | 30, 80 | percent 1–100 |
+| `reclaim_s` | all | 5 (cpu, gpu_compute), 15 (ram, gpu_memory) | ≥ 1; how long a Neutral or Performance step has to free the contended amount before the next step |
 | `hint_deadline_s` | all | 5 | ≥ 1 |
 | `unknown_window_intervals` | all | 3 | ≥ 1 |
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99 |

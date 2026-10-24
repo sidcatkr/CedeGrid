@@ -241,8 +241,8 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   is removed: the gate sets `oom_score_adj` 1000 for every own process. New keys:
   `guaranteed_hint_deadline_s` and `ram.guaranteed_breach_window_s`. Floor minimums are a
   runtime clamp with a warning, so 0.2 files keep loading. `acknowledge_danger` now accepts
-  `performance_mode` and `small_floor`. The unused `reclaim_s` key is removed, since SC-012
-  derives the bounds from the deadlines.
+  `performance_mode` and `small_floor`. An unset `max_mode` is the most aggressive node mode, so
+  no job reaches Performance unless the operator chose it.
 - **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
   Guaranteed hint deadline. Performance and small floors are caution options with confirmation.
 - **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance).

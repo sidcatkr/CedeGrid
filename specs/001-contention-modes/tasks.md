@@ -464,7 +464,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 
 ### Tests for the revisions ⚠️ (write first, must fail)
 
-- [ ] T122 [P] Add tests in `tests/configuration.rs` (B1, B2):
+- [X] T122 [P] Add tests in `tests/configuration.rs` (B1, B2):
   - `floor_policy = "b"` and `"c"` and `neutral_memory_policy = "b"` fail to load, and each
     message names its replacement;
   - Performance on any resource without `acknowledge_danger = ["performance_mode"]` fails with
@@ -473,7 +473,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
     `small_floor` warns and still loads;
   - `guaranteed_hint_deadline_s` (1–30) and `ram.guaranteed_breach_window_s` (0–60, RAM only)
     are validated.
-- [ ] T123 [P] Add a test in `tests/supervision.rs` (B2): the gate sets `oom_score_adj = 1000`
+- [X] T123 [P] Add a test in `tests/supervision.rs` (B2): the gate sets `oom_score_adj = 1000`
   for Guaranteed work too, with no option to skip it.
 - [ ] T124 [P] Add tests in `tests/contention.rs` (B4, B10):
   - a proptest over generated `ModeInput`s on every resource: target(YF) ≤ target(N) ≤
@@ -518,9 +518,9 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 
 ### Implementation for the revisions
 
-- [ ] T131 Remove floor policies B and C, Neutral memory policy B and the OOM exemption (B1, B2):
+- [X] T131 Remove floor policies B and C, Neutral memory policy B and the OOM exemption (B1, B2):
   validation messages, `acknowledge_danger` entries, floor minimums, the new Guaranteed keys and
-  the removal of `reclaim_s` in `src/config.rs`; `guaranteed_oom_victim` in
+  the implicit node cap in `src/config.rs`; `guaranteed_oom_victim` in
   `src/supervision.rs` and its callers; exceptions and markers in `src/model.rs`;
   `NodeContentionReport` in `src/protocol.rs`; `docs/guarantees.md`.
 - [ ] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU

@@ -181,7 +181,6 @@ fn options() -> SupervisorOptions {
         release_confirm_timeout_ms: 2_000,
         duty_period_ms: 100,
         hint_deadline_ms: 5_000,
-        guaranteed_oom_victim: true,
     }
 }
 fn run(
@@ -1198,14 +1197,10 @@ mod control_socket {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec() {
-    let inherited = fs::read_to_string("/proc/self/oom_score_adj")
-        .unwrap()
-        .trim()
-        .to_owned();
-    for (class, preferred, expected) in [
-        (AllocationClass::Opportunistic, true, "1000"),
-        (AllocationClass::Guaranteed, true, "1000"),
-        (AllocationClass::Guaranteed, false, inherited.as_str()),
+    // Every own process is a preferred victim; no option exempts Guaranteed work (FR-023).
+    for (class, expected) in [
+        (AllocationClass::Opportunistic, "1000"),
+        (AllocationClass::Guaranteed, "1000"),
     ] {
         let dir = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
         let mut request = request(dir.path());
@@ -1215,14 +1210,12 @@ fn the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec() {
             "-c".into(),
             "cat /proc/self/oom_score_adj > adj".into(),
         ];
-        let mut options = options();
-        options.guaranteed_oom_victim = preferred;
-        let outcome = run(&request, &options, &Journal::new(), &mut Backend::new()).unwrap();
+        let outcome = run(&request, &options(), &Journal::new(), &mut Backend::new()).unwrap();
         assert_eq!(outcome.exit_code, Some(0), "{class:?}");
         assert_eq!(
             fs::read_to_string(dir.path().join("adj")).unwrap().trim(),
             expected,
-            "{class:?} preferred={preferred}"
+            "{class:?}"
         );
         let claimed = outcome
             .record

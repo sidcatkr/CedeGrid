@@ -491,7 +491,8 @@ impl Default for Config {
     }
 }
 
-/// How no-harm floors treat Guaranteed allocations. B and C are opt-in exceptions.
+/// How no-harm floors treat Guaranteed allocations. Only A remains; B and C still
+/// parse so that loading can name their replacement (constitution 2.0.0).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FloorPolicy {
@@ -501,7 +502,8 @@ pub enum FloorPolicy {
     C,
 }
 
-/// Whether floors may push Neutral's memory below its fair share. B is opt-in.
+/// Whether floors may push Neutral's memory below its fair share. Only A remains;
+/// B still parses so that loading can name its replacement.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NeutralMemoryPolicy {
@@ -515,10 +517,16 @@ pub enum NeutralMemoryPolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct ContentionConfig {
     pub default_mode: crate::contention::ContentionMode,
-    pub max_mode: crate::contention::ContentionMode,
+    /// The most aggressive mode a job may request; unset, the most aggressive
+    /// node mode, so no job reaches Performance unless the operator chose it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_mode: Option<crate::contention::ContentionMode>,
     pub floor_policy: FloorPolicy,
     pub neutral_memory_policy: NeutralMemoryPolicy,
     pub acknowledge_danger: std::collections::BTreeSet<String>,
+    /// How long a hint-ready Guaranteed allocation may take to release memory
+    /// before it is drained (FR-024).
+    pub guaranteed_hint_deadline_s: u64,
     pub cpu: ResourceContentionConfig,
     pub ram: ResourceContentionConfig,
     pub gpu_compute: ResourceContentionConfig,
@@ -529,10 +537,11 @@ impl Default for ContentionConfig {
     fn default() -> Self {
         Self {
             default_mode: crate::contention::ContentionMode::Neutral,
-            max_mode: crate::contention::ContentionMode::Performance,
+            max_mode: None,
             floor_policy: FloorPolicy::A,
             neutral_memory_policy: NeutralMemoryPolicy::A,
             acknowledge_danger: Default::default(),
+            guaranteed_hint_deadline_s: 5,
             cpu: Default::default(),
             ram: Default::default(),
             gpu_compute: Default::default(),
@@ -541,8 +550,12 @@ impl Default for ContentionConfig {
     }
 }
 
-/// Danger exceptions that a file must acknowledge by name.
-const DANGER_ACKNOWLEDGEMENTS: [&str; 1] = ["floor_policy_c"];
+/// Caution options a file acknowledges by name (FR-051, FR-054).
+const ACKNOWLEDGEMENTS: [&str; 2] = ["performance_mode", "small_floor"];
+
+/// Floors are never smaller than these (FR-023).
+pub const MIN_RAM_FLOOR_MIB: u64 = 512;
+pub const MIN_VRAM_FLOOR_MIB: u64 = 256;
 
 /// Settings an operator wrote for one resource; unset keys keep their defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -586,6 +599,8 @@ pub struct ResourceContentionConfig {
     pub cpu_ram_scale_up_cooldown_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal_min_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guaranteed_breach_window_s: Option<u64>,
 }
 
 impl ContentionConfig {
@@ -658,7 +673,25 @@ impl ContentionConfig {
             principal_min_percent: set
                 .principal_min_percent
                 .unwrap_or(defaults.principal_min_percent),
+            guaranteed_breach_window_s: set
+                .guaranteed_breach_window_s
+                .unwrap_or(defaults.guaranteed_breach_window_s),
         }
+    }
+
+    /// The node cap: the configured `max_mode`, else the most aggressive node mode.
+    pub fn max_mode(&self) -> crate::contention::ContentionMode {
+        self.max_mode.unwrap_or_else(|| {
+            crate::contention::ResourceKind::ALL
+                .into_iter()
+                .map(|kind| self.mode(kind))
+                .max()
+                .unwrap_or(self.default_mode)
+        })
+    }
+
+    fn performance_chosen(&self) -> bool {
+        self.max_mode() == crate::contention::ContentionMode::Performance
     }
 
     /// GPU quiet window in monitor intervals. An unset window is raised from its
@@ -688,46 +721,38 @@ impl ContentionConfig {
             .unwrap_or(5000)
     }
 
-    /// Active opt-in exceptions with their risk markers (FR-043, FR-045).
-    pub fn exceptions(&self) -> Vec<crate::model::ExceptionNotice> {
-        use crate::model::{ExceptionNotice, RiskMarker};
-        let mut result = Vec::new();
-        match self.floor_policy {
-            FloorPolicy::A => {}
-            FloorPolicy::B => result.push(ExceptionNotice {
-                name: "floor_policy_b".into(),
-                marker: RiskMarker::Caution,
-            }),
-            FloorPolicy::C => result.push(ExceptionNotice {
-                name: "floor_policy_c".into(),
-                marker: RiskMarker::Danger,
-            }),
-        }
-        if self.neutral_memory_policy == NeutralMemoryPolicy::B {
-            result.push(ExceptionNotice {
-                name: "neutral_memory_policy_b".into(),
-                marker: RiskMarker::Caution,
-            });
-        }
-        result
-    }
-
     fn validate(&self, monitor_interval_ms: u64, gpu_sample_max_age_ms: u64) -> Result<()> {
         use crate::contention::ResourceKind::{self, *};
+        if let Some(removed) = match self.floor_policy {
+            FloorPolicy::A => None,
+            FloorPolicy::B => Some("b"),
+            FloorPolicy::C => Some("c"),
+        } {
+            anyhow::bail!(
+                "contention.floor_policy = \"{removed}\" was removed: Guaranteed memory is released last under policy A; tune contention.guaranteed_hint_deadline_s and contention.ram.guaranteed_breach_window_s"
+            );
+        }
         ensure!(
-            self.default_mode <= self.max_mode,
-            "contention.default_mode cannot be more aggressive than contention.max_mode"
+            self.neutral_memory_policy == NeutralMemoryPolicy::A,
+            "contention.neutral_memory_policy = \"b\" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib"
         );
         for name in &self.acknowledge_danger {
             ensure!(
-                DANGER_ACKNOWLEDGEMENTS.contains(&name.as_str()),
+                ACKNOWLEDGEMENTS.contains(&name.as_str()),
                 "contention.acknowledge_danger has unknown entry {name:?}"
             );
         }
         ensure!(
-            self.floor_policy != FloorPolicy::C
-                || self.acknowledge_danger.contains("floor_policy_c"),
-            "ERR_CEDEGRID_DANGER_UNACKNOWLEDGED: floor_policy = \"c\" requires acknowledge_danger = [\"floor_policy_c\"]"
+            self.default_mode <= self.max_mode(),
+            "contention.default_mode cannot be more aggressive than contention.max_mode"
+        );
+        ensure!(
+            !self.performance_chosen() || self.acknowledge_danger.contains("performance_mode"),
+            "ERR_CEDEGRID_DANGER_UNACKNOWLEDGED: Performance mode requires acknowledge_danger = [\"performance_mode\"]"
+        );
+        ensure!(
+            (1..=30).contains(&self.guaranteed_hint_deadline_s),
+            "contention.guaranteed_hint_deadline_s must be between 1 and 30"
         );
         for kind in ResourceKind::ALL {
             let name = kind.name();
@@ -769,8 +794,13 @@ impl ContentionConfig {
                 &[Cpu, Ram],
                 set.cpu_ram_scale_up_cooldown_ms.is_some(),
             )?;
+            applies(
+                "guaranteed_breach_window_s",
+                &[Ram],
+                set.guaranteed_breach_window_s.is_some(),
+            )?;
             ensure!(
-                self.mode(kind) <= self.max_mode,
+                self.mode(kind) <= self.max_mode(),
                 "contention.{name}.mode cannot be more aggressive than contention.max_mode"
             );
             let t = self.thresholds(kind);
@@ -833,12 +863,10 @@ impl ContentionConfig {
                 (1..=50).contains(&t.principal_min_percent),
                 "contention.{name}.principal_min_percent must be between 1 and 50"
             );
-            if kind.is_memory() {
-                ensure!(
-                    t.reclaim_s >= t.hint_deadline_s,
-                    "contention.{name}.reclaim_s must be at least hint_deadline_s"
-                );
-            }
+            ensure!(
+                t.guaranteed_breach_window_s <= 60,
+                "contention.{name}.guaranteed_breach_window_s must be between 0 and 60"
+            );
             if let Some(window) = set.quiet_window_intervals {
                 ensure!(
                     u64::from(window).saturating_mul(monitor_interval_ms) > gpu_sample_max_age_ms,
@@ -1004,7 +1032,7 @@ impl Config {
         Ok(LoadedConfig { config, warnings })
     }
 
-    /// Clamp settings older files may still carry and describe active exceptions.
+    /// Clamp settings older files may still carry and describe active caution options.
     fn apply_compatibility(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
         if self.cpu.nice < 0 {
@@ -1014,17 +1042,69 @@ impl Config {
             ));
             self.cpu.nice = 0;
         }
-        for exception in self.contention.exceptions() {
-            let marker = match exception.marker {
-                crate::model::RiskMarker::Caution => "caution",
-                crate::model::RiskMarker::Danger => "danger",
-            };
+        if self.ram.reserve_mib < MIN_RAM_FLOOR_MIB {
             warnings.push(format!(
-                "opt-in exception {} is active [{marker}]",
-                exception.name
+                "ram.reserve_mib = {} is below the {MIN_RAM_FLOOR_MIB} MiB minimum floor; the RAM floor is at least {MIN_RAM_FLOOR_MIB} MiB",
+                self.ram.reserve_mib
+            ));
+        }
+        if self.gpu.reserve_vram_mib < MIN_VRAM_FLOOR_MIB {
+            warnings.push(format!(
+                "gpu.reserve_vram_mib = {} is below the {MIN_VRAM_FLOOR_MIB} MiB minimum floor; each GPU floor is {MIN_VRAM_FLOOR_MIB} MiB",
+                self.gpu.reserve_vram_mib
+            ));
+        }
+        if self.small_floor() && !self.contention.acknowledge_danger.contains("small_floor") {
+            warnings.push(
+                "a no-harm floor is near its minimum; confirm it with acknowledge_danger = [\"small_floor\"]"
+                    .into(),
+            );
+        }
+        for option in self.caution_options() {
+            warnings.push(format!(
+                "caution option {} is active [caution]",
+                option.name
             ));
         }
         warnings
+    }
+
+    /// The RAM floor on a host with `total_mib` of RAM, never below the minimum.
+    pub fn ram_floor_mib(&self, total_mib: u64) -> u64 {
+        let percent = total_mib
+            .saturating_mul(u64::from(self.ram.reserve_percent))
+            .div_ceil(100);
+        self.ram.reserve_mib.max(percent).max(MIN_RAM_FLOOR_MIB)
+    }
+
+    /// The per-device GPU memory floor, never below the minimum.
+    pub fn vram_floor_mib(&self) -> u64 {
+        self.gpu.reserve_vram_mib.max(MIN_VRAM_FLOOR_MIB)
+    }
+
+    /// A floor below twice its minimum, judged from the settings alone.
+    fn small_floor(&self) -> bool {
+        (self.ram.reserve_percent == 0 && self.ram.reserve_mib < 2 * MIN_RAM_FLOOR_MIB)
+            || self.gpu.reserve_vram_mib < 2 * MIN_VRAM_FLOOR_MIB
+    }
+
+    /// Active caution options with their markers (FR-043, FR-045).
+    pub fn caution_options(&self) -> Vec<crate::model::ExceptionNotice> {
+        use crate::model::{ExceptionNotice, RiskMarker};
+        let mut result = Vec::new();
+        if self.contention.performance_chosen() {
+            result.push(ExceptionNotice {
+                name: "performance_mode".into(),
+                marker: RiskMarker::Caution,
+            });
+        }
+        if self.small_floor() {
+            result.push(ExceptionNotice {
+                name: "small_floor".into(),
+                marker: RiskMarker::Caution,
+            });
+        }
+        result
     }
 
     /// The launch-time nice value. Own priority is never raised above the default.
