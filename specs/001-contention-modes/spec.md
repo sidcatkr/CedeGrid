@@ -9,7 +9,31 @@
 **Input**: Maintainer feature description: contention modes (Yield First, Neutral, Performance)
 with graduated, reversible yielding for CPU, RAM and GPU (compute and memory, per device), plus
 fixes for six reproduced yielding defects. Implementation candidates are recorded separately in
-[plan-notes.md](plan-notes.md).
+[plan-notes.md](plan-notes.md). Updated the same day with maintainer decisions (see
+Clarifications), an interactive-by-default setup with a CLI equivalent, and provisional
+thresholds.
+
+## Clarifications
+
+### Session 2026-10-24
+
+- Q: What do configurations without mode settings get, and what happens to `gpu.execution_mode`?
+  → A: The default mode is Neutral on every resource. The legacy `gpu.execution_mode` key, and
+  `gpu.best_effort_external_processes` with it, are ignored with a deprecation warning that
+  names the replacement mode settings.
+- Q: May a no-harm floor that only a Guaranteed allocation's memory can restore drain that
+  allocation? → A: Yes, by default (floor policy A): after all opportunistic work, and with a
+  hint first. Policies B (keep Guaranteed memory) and C (keep Guaranteed memory, and do not mark
+  Guaranteed processes as preferred OOM victims) are opt-in choices made during setup.
+- Q: May no-harm floors push Neutral's memory below its fair share? → A: Yes, by default (Neutral
+  memory policy A). Holding the fair share even against floors (policy B) is an opt-in setup
+  toggle. Constitution 1.1.0 allows these opt-in exceptions while keeping A as the default.
+- Q: What are the success-criteria thresholds? → A: No measured numbers exist yet. The spec
+  proposes conservative defaults, each a configuration value, all provisional until validated on
+  real hardware (see Provisional thresholds).
+- Q: How is a node set up? → A: Interactive setup is the default way to configure CedeGrid. A
+  terminal interface opens on a TTY, and command-line flags provide the same choices for
+  scripts, agents and non-TTY use.
 
 ## Terms
 
@@ -34,6 +58,14 @@ fixes for six reproduced yielding defects. Implementation candidates are recorde
   6. termination of the own process
 - **Contention mode**: per-resource behavior that decides how much capacity own work may use
   and how fast it gives capacity back. The modes are Yield First, Neutral and Performance.
+- **Floor policy**: how no-harm floors treat Guaranteed allocations. A is the default; B and C
+  are opt-in exceptions.
+- **Neutral memory policy**: whether no-harm floors may push Neutral's memory below its fair
+  share. A is the default; B is an opt-in exception.
+- **Risk marker**: the label setup shows on an opt-in exception.
+  - *caution*: it can make other workloads' allocations fail or slow them, but never ends an
+    external process.
+  - *danger*: it can let an external process be killed or starved.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -206,19 +238,73 @@ previous release.
 **Acceptance Scenarios**:
 
 1. **Given** a 0.2 configuration without mode settings, **When** it is loaded, **Then** it loads
-   unchanged and the node runs in the documented default mode [NEEDS CLARIFICATION: default mode
-   and mapping of `gpu.execution_mode` — see Q1].
-2. **Given** a node capped at Neutral, **When** a job requests Performance, **Then** the job runs
+   unchanged and every resource runs in Neutral.
+2. **Given** a configuration that sets `gpu.execution_mode` or
+   `gpu.best_effort_external_processes`, **When** it is loaded, **Then** it still loads, the
+   legacy keys have no effect, and a deprecation warning names the replacement mode settings.
+3. **Given** a node capped at Neutral, **When** a job requests Performance, **Then** the job runs
    at Neutral and the effective mode is reported.
-3. **Given** a coordinator and an agent on different releases, **When** they exchange heartbeats
+4. **Given** a coordinator and an agent on different releases, **When** they exchange heartbeats
    and assignments, **Then** both keep operating. Features the older peer lacks stay off, and no
    message is rejected because of a field the peer does not know.
-4. **Given** a Guaranteed job, **When** contention requires capacity back, **Then** the job may
-   be lowered in share, capped or hinted, but is drained only in the case defined in FR-024.
+5. **Given** a Guaranteed job, **When** contention requires capacity back, **Then** the job may
+   be lowered in share, capped or hinted, and is drained only under floor policy A, as FR-024
+   defines.
 
 ---
 
-### User Story 7 - See what the node is doing (Priority: P3)
+### User Story 7 - Set up a node interactively or from the command line (Priority: P2)
+
+An operator runs setup and is guided through the choices: node role, per-resource modes, node
+cap, floor policy and Neutral memory policy. On a terminal the default is an interactive,
+keyboard-driven interface. Scripts, agents and non-TTY sessions pass the same choices as
+command-line flags. Either way, the result is written to the configuration file and can be
+changed later.
+
+**Why this priority**: modes and opt-in exceptions are only safe if operators see what each
+choice does before choosing it. Convenient setup is also the main way new nodes get configured.
+
+**Independent Test**:
+- Run setup on a TTY using only the keyboard, and check the written configuration.
+- Run it again with the same choices as flags in a non-TTY session; the configuration must be
+  identical.
+- Check that the interactive run shows the risk markers and that a danger choice asks for
+  confirmation.
+
+**Acceptance Scenarios**:
+
+1. **Given** a TTY, **When** the operator runs setup without flags, **Then** the interactive
+   interface opens:
+   - Arrow keys move the selection, Space toggles or selects, Enter confirms.
+   - No mouse is needed.
+   - Defaults are preselected.
+2. **Given** the floor-policy and Neutral-memory-policy choices, **When** they are displayed,
+   **Then**:
+   - Each option shows a one-line consequence.
+   - Default options are uncolored and unmarked.
+   - Caution options are yellow and labelled `[caution]`; danger options are red and labelled
+     `[danger]`.
+3. **Given** `NO_COLOR` is set, or the terminal cannot show color, **When** the options are
+   displayed, **Then** no color is used and the `[caution]` and `[danger]` labels still appear.
+4. **Given** the operator selects a danger option, **When** they press Enter, **Then** a separate
+   confirmation step states the consequence. The choice is kept only after explicit
+   confirmation; declining returns to the selection with the default still in place.
+5. **Given** a non-TTY session, **When** setup runs, **Then** it never prompts or waits for
+   input. It uses the flags and any existing configuration. If a required choice is missing, or a
+   danger option lacks its explicit acknowledgement flag, it exits with an error that names the
+   missing flag.
+6. **Given** a completed setup, **When** the operator confirms the summary, **Then** the choices
+   are validated and written to the configuration file atomically. Other settings are preserved.
+   Re-running setup starts from the current values, and editing the file by hand has the same
+   effect as setup.
+7. **Given** setup is cancelled (Escape, `q` or Ctrl-C), **When** it exits, **Then** nothing is
+   written and the terminal is restored.
+8. **Given** a TTY and no configuration file, **When** the operator runs a command that needs
+   one, **Then** CedeGrid offers to start setup. It never does this on a non-TTY.
+
+---
+
+### User Story 8 - See what the node is doing (Priority: P3)
 
 An operator inspects a node and sees, per resource, the mode, own usage, external demand, the
 target share, the current yield step and a short reason.
@@ -268,6 +354,14 @@ node reports with the expected per-resource values at each step.
   subtree). The ladder uses the steps that are available and reports which ones it skipped.
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
   memory floor covers all of them together.
+- **Danger option chosen non-interactively without its acknowledgement flag.** Setup refuses and
+  writes nothing.
+- **Configuration edited by hand to enable a danger option.** CedeGrid loads it, logs a warning
+  that names the exception, and reports it as active. Editing is an explicit operator action.
+- **Terminal too small or lacking cursor control for the interface.** Setup falls back to
+  line-based prompts on a TTY; it never hangs.
+- **Caution and danger options combined** (for example, Neutral memory policy B with floor
+  policy C). The summary shows the combination with the highest marker, danger.
 
 ## Requirements *(mandatory)*
 
@@ -348,10 +442,13 @@ node reports with the expected per-resource values at each step.
 - **FR-021**: Neutral MUST:
   - let own work use idle capacity;
   - converge own work to its fair share under contention, and not step it below fair share
-    except to keep a no-harm floor [NEEDS CLARIFICATION: whether no-harm floors may push Neutral
-    memory below fair share — see Q3];
+    except to keep a no-harm floor;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission.
+
+  Under the default Neutral memory policy A, no-harm floors take precedence over fair share for
+  RAM and GPU memory. Under the opt-in policy B, Neutral keeps its fair share of memory even when
+  a floor is breached (see FR-042).
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin;
   - scale up quickly;
@@ -362,13 +459,20 @@ node reports with the expected per-resource values at each step.
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
   - own processes marked as the preferred out-of-memory victims where the platform allows an
     unprivileged process to mark itself.
-- **FR-024**: Guaranteed allocations MAY be lowered in share, capped, paused and hinted, and MUST
-  NOT be drained by automatic yielding [NEEDS CLARIFICATION: whether a no-harm floor that only
-  releasing a Guaranteed allocation's memory can restore may drain it — see Q2]. Explicit
-  operator drain keeps today's behavior.
-- **FR-025**: Mode margins, response times, scale-up rates, tolerances and windows MUST be
-  configurable per resource, with documented defaults. The Yield First margin MUST be larger than
-  the Performance margin.
+- **FR-024**: Guaranteed allocations MAY be lowered in share, capped, paused and hinted. Automatic
+  yielding MUST NOT drain them, except under the default floor policy A. In that case a
+  Guaranteed allocation MAY be drained when a no-harm floor can only be restored by releasing
+  its memory, but only after all opportunistic work has been released and a hint's deadline has
+  passed. Floor policies B and C are defined in FR-041. Explicit operator drain keeps today's
+  behavior.
+- **FR-025**: Every threshold that steers yielding MUST be a configuration value, not a
+  hard-coded constant. This covers:
+  - margins, response times and scale-up rates
+  - tolerances, windows and deadlines
+  - convergence targets
+
+  Each is set per resource where it applies, defaults to the provisional value in this spec, and
+  is documented. The Yield First margin MUST be larger than the Performance margin.
 
 **GPU sharing and placement**
 
@@ -387,8 +491,11 @@ node reports with the expected per-resource values at each step.
   resource. A node MAY set a cap on the most aggressive mode allowed (Yield First < Neutral <
   Performance). A job runs at the less aggressive of its requested mode and the node cap, and
   the effective mode MUST be reported.
-- **FR-031**: Existing `config_version = 1` files MUST load unchanged. The relationship of modes
-  to `gpu.execution_mode` and the default for configs without modes MUST be documented [see Q1].
+- **FR-031**: Existing `config_version = 1` files MUST load unchanged.
+  - Without mode settings, every resource MUST run in Neutral.
+  - `gpu.execution_mode` and `gpu.best_effort_external_processes` MUST still be accepted. They
+    MUST have no effect, and MUST produce a deprecation warning at load time that names the
+    replacement mode settings.
 - **FR-032**: Agents, coordinators and SDK workers from 0.2 and from this release MUST
   interoperate in any combination. A peer MUST NOT reject a message because of fields it does not
   know. Features unsupported by either peer MUST stay off.
@@ -421,6 +528,84 @@ node reports with the expected per-resource values at each step.
 - **FR-040**: The characterization tests for D1–D6 MUST be inverted to assert the corrected
   behavior. Each MUST pass.
 
+**Opt-in floor exceptions**
+
+- **FR-041**: Floor policy MUST be selectable as:
+  - **A** (default): FR-024 applies.
+  - **B** (opt-in, *caution*): Guaranteed allocations are never drained to restore a floor.
+    CedeGrid releases opportunistic work, hints Guaranteed work, blocks admission and reports
+    the breach. Own processes remain preferred OOM victims.
+  - **C** (opt-in, *danger*): as B, and Guaranteed processes are not marked as preferred OOM
+    victims.
+- **FR-042**: Neutral memory policy MUST be selectable as:
+  - **A** (default): FR-021 applies, with floors first.
+  - **B** (opt-in, *caution*): Neutral keeps its fair share of RAM and GPU memory even when a
+    floor is breached. Own processes remain preferred OOM victims unless floor policy C is also
+    chosen.
+- **FR-043**: Opt-in exceptions:
+  - MUST be off by default;
+  - MUST NOT be enabled by upgrades, migrations or defaults;
+  - MUST be recorded in configuration;
+  - MUST appear in `doctor`, `status` and node reports while active, with their risk marker.
+- **FR-044**: No exception MAY permit acting on an external process or raising own priority.
+- **FR-045**: The risk markers are justified as follows. A marker is assigned by the worst
+  plausible effect on other workloads.
+
+  | Option | Marker | Justification |
+  |---|---|---|
+  | Floor policy A, Neutral memory policy A | none | Floors hold in every mode. Own work is released before others are affected. |
+  | Floor policy B | *caution* (yellow) | Host RAM stays protected: own processes are still preferred OOM victims, so memory exhaustion ends own work first. GPU memory has no such backstop, so other workloads' new GPU allocations can fail while Guaranteed work keeps its memory. No external process is ended by this choice. |
+  | Neutral memory policy B | *caution* (yellow) | Other workloads always keep at least their fair share. Allocations above it can fail or face memory pressure, but the OOM preference still ends own work first. |
+  | Floor policy C | *danger* (red) | With own Guaranteed processes no longer preferred OOM victims, the kernel can kill another user's process or leave it starved of memory. |
+  | Any combination including C | *danger* (red) | A combination takes its highest marker. |
+
+**Setup**
+
+- **FR-046**: Interactive setup MUST be the default way to configure a node. Running setup on a
+  TTY without flags MUST open the terminal interface. On a TTY, a command that needs a missing
+  configuration file MUST offer to start setup.
+- **FR-047**: Setup MUST cover:
+  - node role
+  - per-resource default modes
+  - node mode cap
+  - floor policy
+  - Neutral memory policy
+  - the thresholds an operator is likely to tune (margins and tolerances)
+
+  The remaining thresholds keep their defaults unless changed by flags or in the file.
+- **FR-048**: The interface MUST be usable with the keyboard alone: arrow keys move, Space toggles
+  or selects, Enter confirms. It MUST NOT require a mouse.
+- **FR-049**: Each floor-policy and Neutral-memory-policy option MUST show a one-line consequence.
+  - Default options MUST be uncolored and unmarked.
+  - *Caution* options MUST be yellow, and *danger* options red.
+  - Every marked option MUST also show the text label `[caution]` or `[danger]`, so color is
+    never the only signal.
+- **FR-050**: Setup MUST NOT emit color in any of these cases: `NO_COLOR` is set to a non-empty
+  value, output is not a terminal, or the terminal does not support color. Text labels MUST
+  remain.
+- **FR-051**: Choosing a *danger* option MUST require a separate, explicit confirmation step
+  that restates the consequence. In non-interactive use, it MUST require an explicit
+  acknowledgement flag that names the option.
+- **FR-052**: Setup MUST offer every interactive choice as a command-line flag. On a non-TTY it
+  MUST NOT prompt or block. It MUST:
+  - take values from flags and the existing configuration;
+  - exit with a non-zero status and name the missing flag when a required choice is absent;
+  - offer machine-readable output for scripts and agents.
+- **FR-053**: Before writing, setup MUST show a summary that includes every active exception and
+  its marker, and MUST validate the result like any configuration load. It MUST write the file
+  atomically and preserve all settings it does not manage.
+- **FR-054**: Re-running setup MUST start from the current configuration. Hand edits MUST have
+  the same effect as setup choices. A hand-enabled *danger* option MUST produce a load-time
+  warning naming it.
+- **FR-055**: Cancelling setup MUST write nothing and MUST restore the terminal. If the interface
+  cannot drive the terminal, setup MUST fall back to line-based prompts.
+
+**Documentation**
+
+- **FR-056**: `docs/guarantees.md` MUST describe the no-harm floors, the floor and Neutral memory
+  policies with their markers, and the deprecation of `gpu.execution_mode`, in the same change
+  that implements them.
+
 ### Key Entities
 
 - **Contention mode**: Yield First, Neutral or Performance. Configured per resource as a node
@@ -436,29 +621,34 @@ node reports with the expected per-resource values at each step.
 - **Yield cause**: why a step was taken, such as external growth, floor breach, unknown
   measurement, operator drain or envelope breach. It travels with the decision to the
   coordinator.
+- **Setup choices**: the operator's selections and their risk markers, written to configuration.
+  They include role, modes, node cap, floor policy, Neutral memory policy and tuned thresholds.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-Thresholds marked † are proposals that need maintainer confirmation.
+Every threshold below is a configuration value (FR-025). The listed defaults are **provisional,
+to validate on real hardware**; see Provisional thresholds for the rationale.
 
 - **SC-001**:
   - Across 100 consecutive launches on a shared GPU device and the D1/D2 replay scenarios: zero
     self-drains caused by the first observation after launch or by unattributed memory changes
-    below the tolerance.
+    below the tolerance (default 256 MiB).
   - In the D5/D6 replay scenarios: zero drains caused by a single interval of measurement skew
     or one missing allocation measurement.
-- **SC-002**: In Yield First, own CPU usage falls to within the configured margin within 2
-  monitor intervals of external CPU demand appearing.† No work is drained or terminated when CPU
-  is the only contended resource.
-- **SC-003**: In Neutral, with one contending principal, own share of the contended resource
-  converges to 50% ± 10% within 30 seconds.†
+- **SC-002**: In Yield First, own CPU usage falls to within the Yield First margin within the
+  Yield First response time of external CPU demand appearing. The defaults are a 25% margin and
+  3 monitor intervals. No work is drained or terminated when CPU is the only contended resource.
+- **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
+  within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
+  of ±15 percentage points and a convergence time of 60 s.
 - **SC-004**: In Performance:
-  - On an idle host, own work reaches at least 90% of available capacity minus the margin within
-    10 seconds.†
-  - When an external workload starts, it gets its demanded usage within 5 seconds.†
-- **SC-005**: In every mode:
+  - On an idle host, own work reaches the Performance ramp target within the ramp time. The
+    defaults are 80% of available capacity minus the margin, within 30 s.
+  - When an external workload starts, it gets its demanded usage within the reclaim time. The
+    defaults are 5 s for CPU and GPU compute and 15 s for RAM and GPU memory.
+- **SC-005**: In every mode with default policies:
   - Zero signals, priority changes or control-group changes are applied to external processes,
     as verified by an audit of every actuation in the test and pressure suites.
   - Zero external out-of-memory kills or external GPU allocation failures attributable to
@@ -477,6 +667,34 @@ Thresholds marked † are proposals that need maintainer confirmation.
   resource.
 - **SC-010**: Every step change and its reason appear in `observe`, `status` and the node report
   within one report interval.
+- **SC-011**: Setup with flags and setup through the keyboard interface produce byte-identical
+  configuration for the same choices.
+  - On a non-TTY, setup never waits for input.
+  - Every *danger* choice needs an explicit confirmation or acknowledgement flag.
+  - With `NO_COLOR` set, no color escape sequence is emitted.
+
+### Provisional thresholds
+
+All values are **provisional, to validate on real hardware**. Each is a configuration value; the
+times assume the default 500 ms monitor interval.
+
+| Threshold | Default | Rationale |
+|---|---|---|
+| GPU memory noise tolerance | 256 MiB per device | Larger than typical driver and context jitter, and small next to common device sizes. It was the maintainer's proposal. |
+| Yield First margin | 25% of schedulable capacity per resource | Generous by design: it leaves a quarter of each resource free for other workloads to burst into. |
+| Yield First response time | 3 monitor intervals (1.5 s) | One interval to observe new demand (CPU usage is a per-interval average), one to confirm it beyond noise, one to apply the step and measure it. The originally proposed 2 intervals leave no confirmation interval. |
+| Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
+| Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
+| Performance margin | 10% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Small, but above the known sampling error of a few percent, so measurement noise does not cause yields. |
+| Performance ramp | 80% of available minus margin within 30 s | Admission advances on the 2 s heartbeat and scale-up is damped. The originally proposed 90% in 10 s is unproven. |
+| Reclaim time: CPU, GPU compute | 5 s | A few intervals plus step application. The response does not depend on worker cooperation. |
+| Reclaim time: RAM, GPU memory | 15 s | Hint deadline (5 s), drain timeout (3 s) and termination grace (2 s), plus margin for observation. |
+| Hint deadline | 5 s | Long enough for a cooperative worker to reach a safe point; short enough to bound memory reclaim. |
+| Unknown-measurement window | 3 monitor intervals | Matches today's freshness limit of 3 intervals for kernel observations. |
+| Step hysteresis | Reverse only below 50% of the trigger threshold; at least 3 intervals between step changes | Damps oscillation (SC-009) without delaying a real response by more than one confirmation interval. |
+| Pause bound | 10 s | Longer pauses risk worker and lease timeouts, so contention escalates to the next step instead. |
+| GPU quiet window | 20 monitor intervals (10 s) of healthy observation with no activity | Activity samples are only produced for non-zero use, so quiet must be shown by sustained absence over a complete inventory. |
+| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB) | Reusing the existing settings keeps 0.2 configurations meaningful and their values unchanged. |
 
 ## Assumptions
 
@@ -492,6 +710,10 @@ Thresholds marked † are proposals that need maintainer confirmation.
   minus the account's unmanaged usage.
 - Mode settings take effect when the agent restarts or reloads its configuration. A job's
   effective mode is fixed when it is admitted.
+- Interactive setup targets Linux and macOS terminals. On Windows, setup configures client
+  settings only, consistent with today's platform scope.
+- Agent-facing help documentation and MCP servers are specified separately, in
+  `specs/002-agent-integration`. They build on the setup command-line flags defined here.
 - The default memory-noise tolerance is 256 MiB per GPU device. Other defaults (margins, response
   times, windows) are chosen in the plan and documented.
 - Out of scope:

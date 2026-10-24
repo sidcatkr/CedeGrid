@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain
+- [x] No [NEEDS CLARIFICATION] markers remain
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Success criteria are technology-agnostic (no implementation details)
@@ -31,14 +31,23 @@
 
 ## Notes
 
-- Three [NEEDS CLARIFICATION] markers are open and await the maintainer:
-  - Q1: default mode, and how `gpu.execution_mode` maps to modes (US6, FR-031)
-  - Q2: Guaranteed allocations versus no-harm floors (FR-024)
-  - Q3: Neutral fair share versus no-harm floors for memory (FR-021)
-- Success-criteria thresholds marked † (SC-002, SC-003, SC-004) are proposals that need
-  maintainer confirmation.
-- Audience: the spec is written for operators and maintainers of a compute agent. It names
-  product surfaces (`observe`, `doctor`, `status`, node reports, the Python and TypeScript SDKs)
-  but no mechanisms. Mechanisms are in [plan-notes.md](../plan-notes.md).
-- Validation iteration 1 found the cross-mode unknown-measurement rule placed under Performance.
-  It was moved to FR-008, and FR-017 now references it. No other failing items.
+- Iteration 2 (2026-10-24), after maintainer decisions. The three earlier markers are resolved
+  and recorded under Clarifications:
+  - Q1: Neutral by default; legacy `gpu.execution_mode` ignored with a deprecation warning.
+  - Q2: floor policy A by default; B and C opt-in.
+  - Q3: Neutral memory policy A by default; B opt-in.
+- New user story 7 covers setup: the keyboard interface is the default, with command-line flags
+  for non-TTY use.
+  - FR-046–FR-055 define keys, color, `NO_COLOR`, text markers, danger confirmation, non-TTY
+    behavior and config writes.
+  - FR-045 justifies the risk-marker mapping.
+- Success criteria now reference configuration values with provisional defaults, marked
+  "provisional, to validate on real hardware" in the Provisional thresholds table.
+- Implementation-detail check. The spec names these, all of them product surfaces:
+  - the setup keys (arrows, Space, Enter)
+  - `NO_COLOR`
+  - two existing configuration keys (`gpu.execution_mode`, and the reserves reused as floors)
+  - the commands `observe`, `doctor` and `status`
+
+  Libraries and mechanisms appear only in [plan-notes.md](../plan-notes.md).
+- Agent-facing documentation and MCP servers are a separate feature (`specs/002-agent-integration`).

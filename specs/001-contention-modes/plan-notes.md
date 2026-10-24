@@ -154,13 +154,96 @@ Each needs verification on the target kernel and driver.
 | NVML `nvmlDeviceGetProcessUtilization` (already used) | activity | Samples only for non-zero utilization; NOT_FOUND otherwise. The cursor is in CPU microseconds. Define "quiet" from healthy NOT_FOUND windows over a complete inventory. |
 | Resource-target file plus SDK watcher | hint | See the worker protocol section above. |
 
+## Maintainer decisions (2026-10-24)
+
+- The default mode is Neutral on every resource.
+  - `gpu.execution_mode` and `gpu.best_effort_external_processes` stay accepted by the
+    `deny_unknown_fields` loader, have no effect, and warn once at load time naming the
+    replacement keys.
+  - Behavior change: 0.2 nodes running `auto`/`conservative_non_sharing` move from "block
+    occupied devices" to Neutral sharing. Record it in `CHANGELOG.md` and the migration notes.
+- Floor policy A is the default; B (*caution*) and C (*danger*) are opt-in. Neutral memory
+  policy A is the default; B (*caution*) is opt-in. See constitution 1.1.0, Principle II.
+- Thresholds are configuration values with provisional defaults (spec table). No constants.
+
+## Candidate configuration shape
+
+To validate in the plan. This is TOML 1.0 with `config_version = 1` kept; all keys are
+additive with serde defaults.
+
+```toml
+[contention]
+default_mode = "neutral"          # yield_first | neutral | performance
+max_mode = "performance"          # node cap
+floor_policy = "a"                # a | b | c
+neutral_memory_policy = "a"       # a | b
+acknowledge_danger = []           # e.g. ["floor_policy_c"]; required for danger options
+
+[contention.cpu]                  # also: ram, gpu_compute, gpu_memory
+mode = "neutral"                  # optional per-resource override of default_mode
+yield_first_margin_percent = 25
+yield_first_response_intervals = 3
+performance_margin_percent = 10
+neutral_convergence_s = 60
+neutral_tolerance_points = 15
+reclaim_s = 5                     # 15 for ram / gpu_memory
+
+[contention.gpu_memory]
+noise_tolerance_mib = 256
+quiet_window_intervals = 20
+```
+
+- Per-job overrides belong in the job/task spec, which is JSON, as optional per-resource `mode`
+  fields. They are capability-gated on the wire (see the compatibility notes).
+- Floors reuse `ram.reserve_mib` / `ram.reserve_percent` and `gpu.reserve_vram_mib`.
+- `gpu.scale_up_cooldown_ms` stays for GPU. CPU and RAM get their own cooldown keys.
+
+## Setup implementation candidates
+
+### Terminal UI
+
+- **No new dependency.** Raw mode through `termios` (via `libc`, already a dependency) plus ANSI
+  escapes. Restore the terminal from a drop guard and on SIGINT/SIGTERM/SIGTSTP. Detect a TTY
+  with `isatty` on stdin and stdout.
+- **Or add `crossterm`.** It brings cross-platform key events and raw mode. That is a new
+  dependency, so it needs written justification (constitution, CLAUDE.md). It weighs against the
+  rootless, minimal-dependency stance.
+
+### Color
+
+- No color when `NO_COLOR` is non-empty, output is not a TTY, or `TERM=dumb`.
+- Labels `[caution]`/`[danger]` always print.
+- Yellow is SGR 33 and red is SGR 31; defaults use no SGR.
+
+### Writing the configuration
+
+- **Comment-preserving edits** need a TOML editing library (`toml_edit`; also a new
+  dependency), or setup owns a delimited `[contention]` table that it rewrites textually and
+  leaves the rest of the file byte-for-byte.
+- Validate the result by loading it through `Config::load` before an atomic rename.
+
+### Command-line flags
+
+- One flag per choice, for example `--default-mode`, `--max-mode`, `--floor-policy` and
+  `--neutral-memory-policy`, plus per-resource overrides.
+- `--acknowledge-danger floor_policy_c` is required for danger options.
+- `--non-interactive` forces flag-only mode even on a TTY.
+- `--json` gives machine-readable output.
+- The exit status is non-zero when a required choice or acknowledgement is missing.
+
+### Scope
+
+- Agent docs and MCP reuse these flags. See `specs/002-agent-integration`.
+- Windows: client settings only, because nodes don't run there.
+
 ## Mapping questions for the plan
 
-- How Yield First, Neutral and Performance map to today's `gpu.execution_mode` values, and
-  whether that key is deprecated with a warning (spec Q1).
+- Precise per-mode semantics of each legacy `gpu.execution_mode` value for the deprecation
+  message and migration notes (they are ignored, but operators need to know what changes).
 - How fair share is computed per principal from visible process ownership. What CedeGrid does
   when process ownership is hidden.
-- Default margins, tolerances, response times, unknown windows and hysteresis per resource.
+- A hardware validation plan for each provisional threshold in the spec, and how measured values
+  replace them.
 - Where per-resource cooldowns live (a new section, or the resource sections).
 - How existing D1–D6 characterization tests (`tests/policy.rs`, `known_defect_*`) become
   regression tests (FR-040).
