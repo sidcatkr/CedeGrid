@@ -62,6 +62,7 @@ SDKs in `python/` and `npm/`.
   - the data-model.md rules: "`default_mode ≤ max_mode`", "`yield_first_margin_percent`
     1–90; > `performance_margin_percent`", "`neutral_tolerance_points` 1–50",
     "`hysteresis_percent` 1–99", "`quiet_window_intervals` ≥ 1";
+  - `cpu.nice < 0` warns and is treated as 0;
   - rejection of unknown keys.
 - [ ] T007 [P] Write failing tests in `tests/coordinator.rs` for feature negotiation:
   - the reply carries `features = ["api/1", "contention/1"]`;
@@ -160,10 +161,10 @@ job launched with unattributed device memory is not drained.
 
 ### Implementation for User Story 1
 
-- [ ] T022 [P] [US1] Read NVML `reserved` and `free` in `src/telemetry.rs` (from
+- [ ] T022 [US1] Read NVML `reserved` and `free` in `src/telemetry.rs` (from
   `memory_info()`). Compute unavailable = total − free, read device memory before and after
   process enumeration, and report unattributed memory.
-- [ ] T023 [P] [US1] Report bounds:
+- [ ] T023 [US1] Report bounds:
   - managed CPU and RAM lower and upper bounds in `src/telemetry.rs` (per-allocation
     quantization; anonymous PSS vs RSS);
   - host busy bounds in `src/kernel.rs`.
@@ -220,8 +221,11 @@ pause and then reverses, with no drain (quickstart §3).
   - `min_step_dwell_intervals` is respected;
   - steps reverse one level at a time below `hysteresis_percent`;
   - drain and terminate never reverse;
-  - an unknown measurement holds.
-- [ ] T034 [P] [US2] Add victim-cost tests in `tests/contention.rs`, covering each rule in
+  - an unknown measurement holds;
+  - a pause escalates after `pause_bound_s`;
+  - under a load that switches on and off every 4 monitor intervals, own work changes step at
+    most once per switch (SC-009).
+- [ ] T034 [US2] Add victim-cost tests in `tests/contention.rs`, covering each rule in
   order:
   1. uncontrollable allocations are excluded;
   2. the victim must free the contended resource;
@@ -237,24 +241,40 @@ pause and then reverses, with no drain (quickstart §3).
   - `adjusted` reports unavailable steps.
 - [ ] T036 [P] [US2] Add actuation audit tests in `tests/managed_supervision.rs`:
   - every signal and control write targets a verified identity;
-  - a reused PID and a foreign PID in a cgroup leaf are refused (FR-002).
+  - a reused PID and a foreign PID in a cgroup leaf are refused;
+  - both checks still hold after an agent restart reconnects to the supervisor (FR-002).
 - [ ] T037 [P] [US2] Add an agent restart test in `tests/agent.rs`: the restarted agent
   reconnects through `control.sock`, reads the applied steps, and never marks the live
   supervisor NeedsReconciliation.
+- [ ] T038 [US2] Add control-socket tests in `tests/supervision.rs`:
+  - a wrong token and an unauthenticated second connection are rejected;
+  - the correct token is accepted and replaces the previous controller.
+- [ ] T039 [US2] Add tests in `tests/agent.rs`:
+  - drain back-off counts every sent drain, local and coordinator-issued (audit M8);
+  - dropping a `ChildSlot` closes the pipe without sending Drain (audit M5).
+- [ ] T040 [P] [US2] Add tests in `tests/coordinator.rs`: failures are classified by the
+  recorded yield cause regardless of detail text, and a cancelled task becomes terminal instead
+  of being re-queued.
+- [ ] T041 [US2] Add a test in `tests/agent.rs`: advertised controls include cgroup controls only
+  after successful backend preparation with authorized settings, and never PSI observations.
+- [ ] T042 [P] [US2] Add non-native tests in `tests/cgroup.rs`, using a temporary fixture tree:
+  - a runtime write is refused when leaf membership differs from the verified PIDs or the leaf
+    identity changed;
+  - `Limit::Max` round-trips.
 
 ### Implementation for User Story 2
 
-- [ ] T038 [US2] Implement the pure ladder state machine `contention::plan_steps` in
+- [ ] T043 [US2] Implement the pure ladder state machine `contention::plan_steps` in
   `src/contention.rs` (data-model.md YieldStep transitions).
-- [ ] T039 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
+- [ ] T044 [US2] Implement victim cost ordering (research R11) in `src/contention.rs`, fed with
   checkpoint times from the agent's publication records in `src/agent.rs`.
-- [ ] T040 [US2] Add an `Actuator` trait to `LaunchBackend` in `src/execution_model.rs`: apply
+- [ ] T045 [US2] Add an `Actuator` trait to `LaunchBackend` in `src/execution_model.rs`: apply
   a step and target, read it back, and report unavailable steps.
-- [ ] T041 [US2] Implement the rootless actuator in `src/actuation.rs`:
+- [ ] T046 [US2] Implement the rootless actuator in `src/actuation.rs`:
   - SIGSTOP/SIGCONT duty-cycle cap and bounded pause through owned pidfds (`OwnedChild` in
     `src/supervision.rs`);
   - lower share reported unavailable at runtime.
-- [ ] T042 [US2] Implement the cgroup actuator in `src/cgroup.rs`:
+- [ ] T047 [US2] Implement the cgroup actuator in `src/cgroup.rs`:
   - a `Limit::{Max, Value}` type;
   - runtime writes of `cpu.weight`, `cpu.max`, `memory.high` and `cgroup.freeze`, with
     `cgroup.events` readback;
@@ -262,35 +282,35 @@ pause and then reverses, with no drain (quickstart §3).
     PIDs;
   - `assert_empty` replaced for adjustable controls;
   - targets journaled.
-- [ ] T043 [US2] Add `Control::Adjust`, `Control::Query`, `Event::Adjusted` and `Event::State`:
+- [ ] T048 [US2] Add `Control::Adjust`, `Control::Query`, `Event::Adjusted` and `Event::State`:
   - message types in `src/agent.rs`;
   - handling in `src/supervision.rs` and `src/child_supervision.rs`;
   - applied steps persisted as `AllocationContention` in `src/execution_state.rs`.
-- [ ] T044 [US2] Add the supervisor `control.sock` listener in `src/supervision.rs`:
+- [ ] T049 [US2] Add the supervisor `control.sock` listener in `src/supervision.rs`:
   - socket mode 0600, inside the 0700 output directory;
   - a `hello` carrying the 32-byte token from the spec;
   - a peer UID check;
   - one active controller at a time.
-- [ ] T045 [US2] In `src/agent.rs` reconciliation, reconnect to live supervisors through
+- [ ] T050 [US2] In `src/agent.rs` reconciliation, reconnect to live supervisors through
   `supervisor-identity.json` and `control.sock`, and stop rewriting live supervisors' journals
   (audit H5).
-- [ ] T046 [US2] Add the actuation stage in `src/agent.rs`:
+- [ ] T051 [US2] Add the actuation stage in `src/agent.rs`:
   - send `adjust` per allocation from `Decision.actions`;
   - track sent drains with timestamps for back-off (audit M8);
   - make `ChildSlot::drop` close the pipe without sending Drain (audit M5).
-- [ ] T047 [US2] Record the yield cause across `src/agent.rs` and `src/coordinator.rs`:
+- [ ] T052 [US2] Record the yield cause across `src/agent.rs` and `src/coordinator.rs`:
   - the agent sends `AllocationReport.yield_cause` once negotiated;
   - the coordinator persists `drain_requests.cause` when it issues a drain;
   - failures are classified by recorded cause, removing `detail.contains("revoked")`;
   - cancelled tasks become terminal.
-- [ ] T048 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
+- [ ] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).
-- [ ] T049 [US2] Native-evidence gate, run only when explicitly authorized:
+- [ ] T054 [US2] Native-evidence gate, run only when explicitly authorized:
   - add `runtime_adjust_requires_verified_membership` to `tests/cgroup.rs`;
   - run quickstart §4 with `CEDEGRID_TEST_CGROUP_ROOT` on Linux;
   - record the evidence in `docs/validation.md`.
-- [ ] T050 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
+- [ ] T055 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
   external CPU load leads to `cap` within the Yield First response time, and the step reverses
   after the load stops (quickstart §3).
 
@@ -308,49 +328,60 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T051 [P] [US3] Add tests in `tests/contention.rs` for Yield First: a 25% margin, a
+- [ ] T056 [P] [US3] Add tests in `tests/contention.rs` for Yield First: a 25% margin, a
   3-interval response, unknown activity counted as demand, and slow scale-up.
-- [ ] T052 [P] [US3] Add tests in `tests/contention.rs` for Neutral:
+- [ ] T057 [US3] Add tests in `tests/contention.rs` for Neutral:
   - max-min fair share with 1–3 principals plus an unknown-owner principal;
   - own work converges and does not go below its share, except for floors under Neutral
     memory policy A;
   - policy B holds the share.
-- [ ] T053 [P] [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
+- [ ] T058 [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
   - a 10% margin, floors and fast scale-up;
   - floor policies A, B and C for Guaranteed work;
   - Guaranteed work is never paused.
-- [ ] T054 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
+- [ ] T059 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
   - an envelope breach is restored per resource, opportunistic work first, with no all-stop
     (FR-057);
   - spool exhaustion blocks admission and drains nothing (FR-058);
   - explicit operator drain still drains every allocation.
+- [ ] T060 [P] [US3] Add tests in the `src/telemetry.rs` tests module: external processes
+  aggregate into principals by owner UID, and processes with unreadable owners form one
+  principal.
+- [ ] T061 [P] [US3] Add tests in `tests/supervision.rs`:
+  - the worker gate sets `oom_score_adj = 1000` before EXEC;
+  - it skips this for Guaranteed work under floor policy C;
+  - managed children inherit the value.
+- [ ] T062 [P] [US3] Add tests in `tests/policy.rs`:
+  - CPU/RAM expansion follows `cpu_ram_scale_up_cooldown_ms`, independently of
+    `gpu.scale_up_cooldown_ms`;
+  - the effective mode is min(requested, `max_mode`) and is reported per allocation.
 
 ### Implementation for User Story 3
 
-- [ ] T055 [US3] Aggregate principals in `src/telemetry.rs`:
+- [ ] T063 [US3] Aggregate principals in `src/telemetry.rs`:
   - the owner UID per external process, from sysinfo or `/proc/<pid>/status`, mapping NVML
     PIDs to UIDs;
   - processes whose owner is unreadable count as one principal.
-- [ ] T056 [US3] Implement max-min fair share in `src/contention.rs` (research R12).
-- [ ] T057 [US3] Implement the Yield First, Neutral and Performance target computations per
+- [ ] T064 [US3] Implement max-min fair share in `src/contention.rs` (research R12).
+- [ ] T065 [US3] Implement the Yield First, Neutral and Performance target computations per
   resource in `src/contention.rs`, from `ResourceThresholds`.
-- [ ] T058 [US3] Implement floors and policies in `src/contention.rs`:
+- [ ] T066 [US3] Implement floors and policies in `src/contention.rs`:
   - RAM and VRAM floors from `ram.reserve_mib`/`ram.reserve_percent` and
     `gpu.reserve_vram_mib`;
   - floor policies A, B and C, and Neutral memory policies A and B;
   - the Guaranteed rules: no pause, and drain only for a floor breach under A.
-- [ ] T059 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
+- [ ] T067 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
   `src/supervision.rs`, skipping it for Guaranteed work under floor policy C, and verify that
   managed children inherit it.
-- [ ] T060 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
+- [ ] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
-- [ ] T061 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
+- [ ] T069 [US3] Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
   `cpu_ram_scale_up_cooldown_ms`, in `src/policy.rs` and in the launch-slot ramp in
   `src/agent.rs` (audit M1).
-- [ ] T062 [US3] Resolve the effective mode per allocation and resource as min(requested,
+- [ ] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
   `max_mode`), in `src/contention.rs` and `src/agent.rs`.
-- [ ] T063 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
+- [ ] T071 [US3] Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
   and SC-004 with the provisional defaults.
 
 **Checkpoint**: the three modes behave as specified on CPU, RAM, GPU compute and GPU memory.
@@ -367,18 +398,18 @@ after the hint deadline (quickstart §6).
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T064 [P] [US4] Add TypeScript drain, hook and managed-child tests mirroring the Python
+- [ ] T072 [P] [US4] Add TypeScript drain, hook and managed-child tests mirroring the Python
   ones, in `npm/tests/worker-drain.test.ts` (audit M22).
-- [ ] T065 [P] [US4] Add Python tests in `python/tests/test_worker.py`:
+- [ ] T073 [P] [US4] Add Python tests in `python/tests/test_worker.py`:
   - `resource_targets()`;
   - `on_resource_target` fires once per sequence;
   - hook errors are isolated;
   - `ResourceSignals.from_env()` works;
   - a file with `version > 1` is ignored;
   - the ack is written.
-- [ ] T066 [P] [US4] Add TypeScript tests mirroring T065, in
+- [ ] T074 [P] [US4] Add TypeScript tests mirroring T073, in
   `npm/tests/worker-targets.test.ts`.
-- [ ] T067 [P] [US4] Add supervisor tests in `tests/managed_supervision.rs`:
+- [ ] T075 [P] [US4] Add supervisor tests in `tests/managed_supervision.rs`:
   - the target file is written atomically with an increasing sequence;
   - managed children receive `CEDEGRID_RESOURCE_TARGET_FILE`;
   - compliance is judged by observed usage;
@@ -387,20 +418,20 @@ after the hint deadline (quickstart §6).
 
 ### Implementation for User Story 4
 
-- [ ] T068 [US4] Implement the target-file writer and the ack reader in `src/actuation.rs`, per
+- [ ] T076 [US4] Implement the target-file writer and the ack reader in `src/actuation.rs`, per
   `contracts/resource-target-file.md`.
-- [ ] T069 [US4] Pass the target-file path through `GateRequest` and the environment in
+- [ ] T077 [US4] Pass the target-file path through `GateRequest` and the environment in
   `src/supervision.rs`, and to managed children in `src/child_supervision.rs`.
-- [ ] T070 [US4] Handle the hint step in the agent actuation stage in `src/agent.rs`: the hint
+- [ ] T078 [US4] Handle the hint step in the agent actuation stage in `src/agent.rs`: the hint
   deadline, the compliance check and escalation.
-- [ ] T071 [US4] Add the Python API in `python/cedegrid/worker.py`: `ResourceTargets`,
+- [ ] T079 [US4] Add the Python API in `python/cedegrid/worker.py`: `ResourceTargets`,
   `resource_targets()`, `on_resource_target()`, `ResourceSignals.from_env()` and ack writing.
-- [ ] T072 [US4] Add the TypeScript API in `npm/src/worker.ts` (`resourceTargets()`,
+- [ ] T080 [US4] Add the TypeScript API in `npm/src/worker.ts` (`resourceTargets()`,
   `onResourceTarget()`, `ResourceSignals.fromEnv()`), and export it from `npm/src/index.ts`.
-- [ ] T073 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
+- [ ] T081 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
   the native context builder in `src/agent.rs` and in the `supervise` path. The SDKs must keep
   accepting `schema_version == 2`.
-- [ ] T074 [US4] Document in `docs/worker-protocol.md` the target channel, the ack, deadlines,
+- [ ] T082 [US4] Document in `docs/worker-protocol.md` the target channel, the ack, deadlines,
   and drain exit semantics.
 
 **Checkpoint**: memory contention can be resolved in place by cooperative workers.
@@ -417,25 +448,27 @@ context, under Neutral and Performance (quickstart §5).
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T075 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs`:
+- [ ] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs`:
   - Neutral and Performance admit on quiet or active devices within the floors;
   - Yield First requires quiet;
   - unknown memory blocks.
-- [ ] T076 [P] [US5] Add placement tests in `tests/coordinator.rs`: placement honors the
-  per-resource admission from a negotiated `NodeReport.contention`; legacy agents use the 0.2
-  fields.
+- [ ] T084 [P] [US5] Add placement tests in `tests/coordinator.rs`:
+  - placement honors the per-resource admission from a negotiated `NodeReport.contention`;
+  - legacy agents use the 0.2 fields;
+  - admission for a resource is blocked while own work on it is above step zero (FR-028);
+  - preemption keeps a pass-level victim set and runs only on real slot or capacity exhaustion.
 
 ### Implementation for User Story 5
 
-- [ ] T077 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
+- [ ] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
   (`validate_gpu_launch_contract` by mode).
-- [ ] T078 [US5] Place work by per-resource admission in `src/coordinator.rs`.
+- [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
-- [ ] T079 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
+- [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
-- [ ] T080 [US5] Native-evidence gate, run only when explicitly authorized:
+- [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized:
   - run quickstart §5 on Linux + NVIDIA with `CEDEGRID_TEST_GPU_UUID` and an idle external
-    context;
+    context, including 100 consecutive launches on the shared device;
   - record the evidence for SC-006 and the VRAM part of SC-001 in `docs/validation.md`.
 
 **Checkpoint**: GPU work no longer needs an empty device.
@@ -451,36 +484,38 @@ workers behave unchanged (quickstart §8).
 
 ### Tests for User Story 6 ⚠️
 
-- [ ] T081 [P] [US6] Add tests in `tests/configuration.rs`:
+- [ ] T089 [P] [US6] Add tests in `tests/configuration.rs`:
   - every `examples/*.toml` and 0.2 config loads unchanged;
   - Neutral is the default;
   - legacy keys warn and have no effect;
   - `floor_policy = "c"` without an acknowledgement fails with
     `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`;
   - a per-resource mode above `max_mode` fails.
-- [ ] T082 [P] [US6] Add the mixed-version matrix in `tests/coordinator.rs` (`mixed_version_*`)
+- [ ] T090 [P] [US6] Add the mixed-version matrix in `tests/coordinator.rs` (`mixed_version_*`)
   (SC-008):
   - the old-agent fixture with the new coordinator;
   - a new agent with a coordinator that advertises no features;
   - new with new.
-- [ ] T083 [P] [US6] Add SDK compatibility tests in `python/tests/test_worker.py` and
+- [ ] T091 [P] [US6] Add SDK compatibility tests in `python/tests/test_worker.py` and
   `npm/tests/worker-drain.test.ts`: a drain-only 0.2-style worker behaves unchanged under the
   new supervisor.
+- [ ] T092 [P] [US6] Add client tests in `python/tests/test_transport.py` and
+  `npm/tests/sdk.test.ts`: job specs carry `contention` only when it is set.
 
 ### Implementation for User Story 6
 
-- [ ] T084 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
+- [ ] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
   `src/execution_model.rs`. In `src/coordinator.rs`, strip it for agents without
   `contention/1`, and place tasks with overrides only on capable agents.
-- [ ] T085 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
+- [ ] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
-- [ ] T086 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
-- [ ] T087 [US6] Add `CHANGELOG.md` entries for:
+- [ ] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
+- [ ] T096 [US6] Add `CHANGELOG.md` entries for:
   - the Neutral default;
   - the ignored legacy GPU keys;
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
-- [ ] T088 [US6] Add the negotiated optional fields to the shared contract fixture
+- [ ] T097 [US6] Add the negotiated optional fields to the shared contract fixture
   `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
   (`python/tests/numeric_interop.py`, `npm/tests/numeric-interop.ts`).
 
@@ -498,42 +533,44 @@ never blocks, and danger choices need confirmation (quickstart §7).
 
 ### Tests for User Story 7 ⚠️
 
-- [ ] T089 [P] [US7] Add unit tests in `src/setup.rs` for the risk mapping: policies A have no
+- [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the risk mapping: policies A have no
   marker, floor policy B and Neutral memory policy B are `caution`, floor policy C is
   `danger`, and a combination takes its highest marker.
-- [ ] T090 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
+- [ ] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
   - exit codes 2, 3 and 4 per `contracts/setup-cli.md`;
   - `--json` output;
   - no prompt or blocking on a non-TTY;
+  - a missing config on a non-TTY never offers setup;
   - unmanaged settings and comments preserved byte for byte.
-- [ ] T091 [P] [US7] Add Unix PTY tests in `tests/cli.rs`:
+- [ ] T100 [US7] Add Unix PTY tests in `tests/cli.rs`:
   - arrow, Space and Enter navigation;
   - the danger confirmation screen;
   - Esc, `q` and Ctrl-C write nothing and restore the terminal;
   - with `NO_COLOR=1`, no escape sequences, while `[caution]`/`[danger]` remain;
-  - output byte-identical to the flag path (SC-011).
+  - output byte-identical to the flag path (SC-011);
+  - a command that needs a missing config offers setup on a TTY.
 
 ### Implementation for User Story 7
 
-- [ ] T092 [US7] Implement setup choices, defaults from the current config, validation and the
+- [ ] T101 [US7] Implement setup choices, defaults from the current config, validation and the
   risk mapping in `src/setup.rs`.
-- [ ] T093 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
+- [ ] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
   validate through `Config::load`, then rename atomically.
-- [ ] T094 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
+- [ ] T103 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
   `contracts/setup-cli.md`, with JSON output and stable error codes.
-- [ ] T095 [US7] Implement the terminal interface in `src/setup.rs`:
+- [ ] T104 [US7] Implement the terminal interface in `src/setup.rs`:
   - termios raw mode through `libc`, restored by a drop guard and on signals;
   - ANSI rendering;
   - keys, consequence lines, and markers in SGR 33 and SGR 31;
   - `NO_COLOR`, `TERM=dumb` and non-TTY detection;
   - the danger confirmation screen and the summary screen.
-- [ ] T096 [US7] Implement the line-based prompt fallback in `src/setup.rs`, for terminals
+- [ ] T105 [US7] Implement the line-based prompt fallback in `src/setup.rs`, for terminals
   without cursor control or that are too small.
-- [ ] T097 [US7] In `src/main.rs`, offer setup on a TTY when a command needs a missing config.
+- [ ] T106 [US7] In `src/main.rs`, offer setup on a TTY when a command needs a missing config.
   Never do this on a non-TTY.
-- [ ] T098 [US7] On Windows, setup configures client settings only and refuses node choices
+- [ ] T107 [US7] On Windows, setup configures client settings only and refuses node choices
   with a clear error (`src/main.rs`, `src/setup.rs`).
-- [ ] T099 [US7] Add a short setup section to `README.md` that points to `docs/guarantees.md`
+- [ ] T108 [US7] Add a short setup section to `README.md` that points to `docs/guarantees.md`
   for the risk markers.
 
 **Checkpoint**: new nodes are configured safely through setup.
@@ -550,20 +587,20 @@ each step.
 
 ### Tests for User Story 8 ⚠️
 
-- [ ] T100 [P] [US8] Add tests in `tests/cli.rs`:
+- [ ] T109 [P] [US8] Add tests in `tests/cli.rs`:
   - `observe --samples 2 --no-state` JSON includes `resources`, `actions` and `exceptions`;
   - `doctor` shows the modes, policies, exceptions with markers, available steps and
     deprecated-key warnings.
-- [ ] T101 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
+- [ ] T110 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
   node's negotiated contention summary.
 
 ### Implementation for User Story 8
 
-- [ ] T102 [US8] Render the decision's resources, actions and exceptions in `observe` and
+- [ ] T111 [US8] Render the decision's resources, actions and exceptions in `observe` and
   `doctor` in `src/main.rs`.
-- [ ] T103 [US8] Include node contention summaries in the coordinator status in
+- [ ] T112 [US8] Include node contention summaries in the coordinator status in
   `src/coordinator.rs`.
-- [ ] T104 [US8] Add a reason-code catalog in `src/contention.rs`: stable codes, each with one
+- [ ] T113 [US8] Add a reason-code catalog in `src/contention.rs`: stable codes, each with one
   sentence of text.
 
 **Checkpoint**: every step change is explainable within one report interval (SC-010).
@@ -572,28 +609,28 @@ each step.
 
 ## Phase 11: Polish & Cross-Cutting Concerns
 
-- [ ] T105 Update `docs/guarantees.md` as the single normative source (FR-056):
+- [ ] T114 Update `docs/guarantees.md` as the single normative source (FR-056):
   - floors;
   - floor and Neutral memory policies with their markers;
   - modes;
   - envelope and spool behavior;
   - the deprecation of `gpu.execution_mode`;
   - the reason-code catalog.
-- [ ] T106 [P] Update the layout map in `CLAUDE.md` with `contention.rs`, `actuation.rs` and
+- [ ] T115 [P] Update the layout map in `CLAUDE.md` with `contention.rs`, `actuation.rs` and
   `setup.rs`.
-- [ ] T107 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
+- [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
-- [ ] T108 Validate the provisional thresholds (SC-002–SC-004) on Linux with test-owned loads.
+- [ ] T117 Validate the provisional thresholds (SC-002–SC-004) on Linux with test-owned loads.
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
   that evidence.
-- [ ] T109 Audit the pressure suite for SC-005:
+- [ ] T118 Audit the pressure suite for SC-005:
   - run the `tools/pressure.py` scenario with the actuation audit hook;
   - assert zero actions on external processes;
   - assert zero external OOM kills and zero external GPU allocation failures.
-- [ ] T110 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
+- [ ] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
   `include`, `tests/test_source_review.py` passes, and the in-memory
   `validate_files(public=True)` passes.
-- [ ] T111 Run the full verification:
+- [ ] T120 Run the full verification:
   - `cargo fmt --check`;
   - `cargo clippy --all-targets -D warnings`;
   - the serial Rust suite;
@@ -602,7 +639,7 @@ each step.
   - `npm test`;
   - `cargo check --target x86_64-pc-windows-msvc` for the client paths, where the target is
     installed.
-- [ ] T112 Run quickstart §1–3 and §6–8, and record the results.
+- [ ] T121 Run quickstart §1–3 and §6–8, and record the results.
 
 ---
 
@@ -618,7 +655,8 @@ each step.
 - **US4 (Phase 6)**: needs US2 (actuation stage, hint step).
 - **US5 (Phase 7)**: needs US1 (quiet class, launch contract) and Foundational negotiation
   (T016).
-- **US6 (Phase 8)**: needs Foundational (T014, T016). It can run alongside US2–US5.
+- **US6 (Phase 8)**: needs Foundational (T014, T016). It can run alongside US2–US5, except T093,
+  which needs the effective-mode resolution in T070 (US3).
 - **US7 (Phase 9)**: needs Foundational config (T014). It can run alongside US1–US6.
 - **US8 (Phase 10)**: needs US1–US3 outputs.
 - **Polish (Phase 11)**: needs the stories it documents or validates.
@@ -642,14 +680,14 @@ T005 tests/policy.rs (schema 3)    T006 tests/configuration.rs    T007 tests/coo
 
 # US1 tests together:
 T018 src/telemetry.rs tests    T019 tests/kernel.rs    T020 tests/supervision.rs    T021 tests/agent.rs
-# US1 independent implementation:
-T022 telemetry memory    T023 telemetry/kernel bounds
+# US1 implementation in different files (after T025–T028):
+T029 src/agent.rs    T030 src/supervision.rs
 
 # US4 tests together:
-T064 npm drain tests    T065 python targets    T066 npm targets    T067 supervisor targets
+T072 npm drain tests    T073 python targets    T074 npm targets    T075 supervisor targets
 
-# US7 (independent of US2-US6):
-T089 risk mapping tests    T090 CLI flag tests    T091 PTY tests
+# US7 (independent of US2-US6); T100 follows T099 in the same file:
+T098 src/setup.rs risk mapping tests    T099 tests/cli.rs flag tests
 ```
 
 ---
@@ -667,7 +705,7 @@ T089 risk mapping tests    T090 CLI flag tests    T091 PTY tests
 1. US2 brings graduated yielding.
 2. US3 brings modes.
 3. US4 brings worker targets.
-4. US5 brings GPU sharing, which needs the native GPU gate (T080).
+4. US5 brings GPU sharing, which needs the native GPU gate (T088).
 5. US6, US7 and US8 can proceed alongside once Foundational is done.
-6. Native gates T049 and T080, and threshold validation T108, need authorized Linux hosts.
+6. Native gates T054 and T088, and threshold validation T117, need authorized Linux hosts.
    Hardware claims stay open until those run.

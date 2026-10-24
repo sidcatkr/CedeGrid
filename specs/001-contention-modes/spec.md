@@ -366,8 +366,9 @@ node reports with the expected per-resource values at each step.
   memory floor covers all of them together.
 - **Danger option chosen non-interactively without its acknowledgement flag.** Setup refuses and
   writes nothing.
-- **Configuration edited by hand to enable a danger option.** CedeGrid loads it, logs a warning
-  that names the exception, and reports it as active. Editing is an explicit operator action.
+- **Configuration edited by hand to enable a danger option.** Loading fails unless the file
+  also contains the acknowledgement entry that names the option. With the entry, CedeGrid loads
+  it, logs a warning that names the exception, and reports it as active.
 - **Terminal too small or lacking cursor control for the interface.** Setup falls back to
   line-based prompts on a TTY; it never hangs.
 - **Caution and danger options combined** (for example, Neutral memory policy B with floor
@@ -593,9 +594,11 @@ node reports with the expected per-resource values at each step.
 - **FR-050**: Setup MUST NOT emit color in any of these cases: `NO_COLOR` is set to a non-empty
   value, output is not a terminal, or the terminal does not support color. Text labels MUST
   remain.
-- **FR-051**: Choosing a *danger* option MUST require a separate, explicit confirmation step
-  that restates the consequence. In non-interactive use, it MUST require an explicit
-  acknowledgement flag that names the option.
+- **FR-051**: Choosing a *danger* option MUST require a separate, explicit confirmation that
+  restates the consequence:
+  - in the interface, a separate confirmation step;
+  - in non-interactive use, an acknowledgement flag that names the option;
+  - in a hand-edited file, an acknowledgement entry that names the option.
 - **FR-052**: Setup MUST offer every interactive choice as a command-line flag. On a non-TTY it
   MUST NOT prompt or block. It MUST:
   - take values from flags and the existing configuration;
@@ -605,8 +608,9 @@ node reports with the expected per-resource values at each step.
   its marker, and MUST validate the result like any configuration load. It MUST write the file
   atomically and preserve all settings it does not manage.
 - **FR-054**: Re-running setup MUST start from the current configuration. Hand edits MUST have
-  the same effect as setup choices. A hand-enabled *danger* option MUST produce a load-time
-  warning naming it.
+  the same effect as setup choices. A hand-enabled *danger* option without its acknowledgement
+  entry MUST fail to load with an error naming the missing entry. With the entry, it MUST
+  produce a load-time warning naming the option.
 - **FR-055**: Cancelling setup MUST write nothing and MUST restore the terminal. If the interface
   cannot drive the terminal, setup MUST fall back to line-based prompts.
 
@@ -705,6 +709,8 @@ times assume the default 500 ms monitor interval.
 | Yield First margin | 25% of schedulable capacity per resource | Generous by design: it leaves a quarter of each resource free for other workloads to burst into. |
 | Yield First response time | 3 monitor intervals (1.5 s) | One interval to observe new demand (CPU usage is a per-interval average), one to confirm it beyond noise, one to apply the step and measure it. The originally proposed 2 intervals leave no confirmation interval. |
 | Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
+| Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
+| Performance scale-up | 1 step per 2 s | One heartbeat interval per step, which supports the 30 s ramp target. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
 | Performance margin | 10% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Small, but above the known sampling error of a few percent, so measurement noise does not cause yields. |
 | Performance ramp | 80% of available minus margin within 30 s | Admission advances on the 2 s heartbeat and scale-up is damped. The originally proposed 90% in 10 s is unproven. |

@@ -54,3 +54,7 @@
 - Iteration 3 (clarify, 2026-10-24): the envelope/spool behavior (FR-057, FR-058) and the ban on
   pausing Guaranteed work (FR-024) are recorded as proposed defaults pending maintainer
   confirmation. Checklist state is unchanged (16/16).
+- Iteration 4 (analyze remediation, 2026-10-24): FR-051 and FR-054 and the hand-edit edge case
+  now require an acknowledgement entry for danger options, as constitution Principle II
+  requires. Neutral and Performance scale-up rows were added to the Provisional thresholds
+  table. Checklist state is unchanged (16/16).
