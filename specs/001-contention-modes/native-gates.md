@@ -1,6 +1,7 @@
-# Native gates deferred from batches 1 and 2
+# Native gates deferred from batches 1 to 3
 
-Batch 1 (T001–T032) and batch 2 (US2, T033–T055) were implemented and verified on macOS only.
+Batch 1 (T001–T032), batch 2 (US2, T033–T055) and batch 3 (US3, T056–T071) were implemented and
+verified on macOS, with the Linux container check below.
 Passing tests on macOS does not establish Linux runtime behavior, and no gate below is recorded
 as qualified. Run these only on an authorized Linux host, and record results in
 `docs/validation.md`.
@@ -143,6 +144,35 @@ copied to a named volume there; Docker's overlay filesystem is refused by design
 
    If the write is refused, authorize only `cpu.weight` and `cpu.max`; pause then uses the
    rootless SIGSTOP fallback.
+
+## US3 checks that can run now
+
+1. Principals on a real host (T063), read-only. Expected: the owner principal, one entry per
+   other UID with usage, and, under a `hidepid` mount, unreadable owners grouped under `None`:
+
+   ```sh
+   cargo run --locked -- --config examples/node.toml observe --samples 3 --no-state | tail -1 \
+     | python3 -c 'import json,sys; [print(p["uid"], p["is_owner"], p["cpu_millicores"], p["ram_mib"], p.get("gpu_memory_mib")) for p in json.loads(sys.stdin.read())["snapshot"]["principals"]]'
+   ```
+
+2. GPU principals (T063), on an NVIDIA host. Start an idle CUDA context under a second,
+   test-owned account, observe, then stop it. Expected: that account's UID lists the context's
+   memory under `gpu_memory_mib` for `<GPU-UUID>`, and no step acts on it:
+
+   ```sh
+   sudo -u <test-account> "$CEDEGRID_TEST_PYTHON" -c 'import torch,time; x=torch.ones(1,device="cuda"); time.sleep(120)' &
+   cargo run --locked -- --config examples/node.toml observe --samples 5 --no-state | tail -1 \
+     | python3 -c 'import json,sys; [print(p["uid"], p.get("gpu_memory_mib")) for p in json.loads(sys.stdin.read())["snapshot"]["principals"]]'
+   kill %1
+   ```
+
+3. The OOM preference on the host kernel (T061, T067). The Linux container check already runs
+   these; a host run records host evidence:
+
+   ```sh
+   cargo test --locked --test supervision -- --exact the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec
+   cargo test --locked --test managed_supervision -- --exact managed_children_carry_the_oom_preference
+   ```
 
 ## C. Deferred gates that need later work
 
