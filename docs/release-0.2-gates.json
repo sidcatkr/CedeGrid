@@ -3,8 +3,8 @@
   "target_release": "0.2.0",
   "specification": "release-0.2-spec.md",
   "candidate": {
-    "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
-    "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef",
+    "source_commit": "ca7bac336b40b3e6541af79a205bd3c9ef0b515b",
+    "source_sha256": "c4e864fe08800799d688c2a6ef4fccb7e924d7041a0267d7d544b88dff120d9e",
     "artifacts": [
       {
         "path": "npm/cedegrid-0.2.0.tgz",
@@ -80,8 +80,8 @@
       },
       {
         "path": "standalone/cedegrid-0.2.0-darwin-arm64.tar.gz",
-        "sha256": "b3210eb5086a5fa5a6954fb50f9537e6842afa10a77990a7db21b18d5bf3fc1c",
-        "size": 5729014,
+        "sha256": "a6483ca32534bc85d1a752292c991b111cefb07a90246901feca817bddce344a",
+        "size": 5729036,
         "scan": {
           "file_count": 4,
           "expanded_bytes": 15517875
@@ -89,8 +89,8 @@
       },
       {
         "path": "standalone/cedegrid-0.2.0-darwin-x64.tar.gz",
-        "sha256": "c2c679ebe5f19133438ca480b529ebbd811c0c476dbce8496dad0e5fba0f729f",
-        "size": 6240838,
+        "sha256": "8c664543c47f12511439a72c52ddd654038d2e75d4b3113a26a353dc551dc70c",
+        "size": 6240873,
         "scan": {
           "file_count": 4,
           "expanded_bytes": 16494307
@@ -98,8 +98,8 @@
       },
       {
         "path": "standalone/cedegrid-0.2.0-linux-arm64-gnu.tar.gz",
-        "sha256": "f7522480d936132203ef9ce1eecc52670a896eb7e3c51cee2ab8bd2469db9bc3",
-        "size": 6686594,
+        "sha256": "88243ce89fa46a5c6392d21a91f3cc667b8deb6d7aa63d7bf155824d07a33b74",
+        "size": 6686633,
         "scan": {
           "file_count": 4,
           "expanded_bytes": 21016955
@@ -107,8 +107,8 @@
       },
       {
         "path": "standalone/cedegrid-0.2.0-linux-x64-gnu.tar.gz",
-        "sha256": "f2237d71e86846cff1b8bd6011171dcccd85a65fc23e1979110f27e816c38a64",
-        "size": 6917975,
+        "sha256": "1b06bef46b8820650f0c361032f553c877844423f90661efcb267a491f9874cc",
+        "size": 6917985,
         "scan": {
           "file_count": 4,
           "expanded_bytes": 21306403
@@ -116,7 +116,7 @@
       },
       {
         "path": "standalone/cedegrid-0.2.0-win32-x64.zip",
-        "sha256": "4e89e45ef2bec571094f9ac7acf6191e13dbd0a7497ebb2bf048fee825fc3ed1",
+        "sha256": "6e4b4f31c2d832ff4ac87c86bc51f5550e7c0ad4d95ee732ff4f1ba287c02a20",
         "size": 5878829,
         "scan": {
           "file_count": 4,
@@ -125,11 +125,11 @@
       },
       {
         "path": "source/cedegrid-0.2.0-source.tar.gz",
-        "sha256": "5bf9001e6012b0d0bdf81f38249e1dce50a1806a7b0c12b31170f93e8cd087cd",
-        "size": 776307,
+        "sha256": "e3f653d84bec8ab6478a8a634be2c4b8ae02010c2ff1339301934294c0b00d2e",
+        "size": 752676,
         "scan": {
           "file_count": 185,
-          "expanded_bytes": 3144698
+          "expanded_bytes": 3068484
         }
       }
     ]
@@ -151,7 +151,7 @@
         "macos"
       ],
       "status": "FAIL",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -187,7 +187,7 @@
         "native-c"
       ],
       "status": "FAIL",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -222,7 +222,7 @@
         "windows-client"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -257,7 +257,7 @@
         "windows-client"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -290,7 +290,7 @@
         "x86_64-unknown-linux-gnu"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -323,7 +323,7 @@
         "aarch64-unknown-linux-gnu"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -356,7 +356,7 @@
         "x86_64-apple-darwin"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -389,7 +389,7 @@
         "aarch64-apple-darwin"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -422,7 +422,7 @@
         "x86_64-pc-windows-msvc"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -454,8 +454,8 @@
       "targets": [
         "all-five-native-packages"
       ],
-      "status": "PASS",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "status": "NOT_RUN",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -478,7 +478,7 @@
           "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
         }
       ],
-      "reason": "Original packages passed Node22/24/26 isolated registry installations, type checks, interop and PTY checks.",
+      "reason": "Prior evidence belongs to a different source candidate.",
       "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
     },
     {
@@ -487,8 +487,8 @@
       "targets": [
         "python"
       ],
-      "status": "PASS",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "status": "NOT_RUN",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -511,7 +511,7 @@
           "sha256": "c746d48c0bef6c274937efd2c8df675a8c5d1aec47dd5d678ce833c8f590dcbc"
         }
       ],
-      "reason": "Original wheel and independent sdist rebuilds passed on Python3.10..3.14; both public uploaded files hash-verified.",
+      "reason": "Prior evidence belongs to a different source candidate.",
       "source_sha256": "e14a2c6848f61177749c54ce138e4e35a8ec8a04051eec365d5df3b4dd9fb0ef"
     },
     {
@@ -521,7 +521,7 @@
         "all"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -554,7 +554,7 @@
         "macos"
       ],
       "status": "FAIL",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -589,7 +589,7 @@
         "replay-agent"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -622,7 +622,7 @@
         "rtx-5060-ti"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -655,7 +655,7 @@
         "l4"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -688,7 +688,7 @@
         "three-agent"
       ],
       "status": "NOT_RUN",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -721,7 +721,7 @@
         "all-artifacts"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -754,7 +754,7 @@
         "all-public-archives"
       ],
       "status": "BLOCKED",
-      "source_commit": "c2e60e335581276e3c00b53dd31d3808718f50b7",
+      "source_commit": "34463259eab0c08c24a62ec1e470c7dea4361ccf",
       "artifact_sha256": [
         "fa126de32a608dea1da450731653b2c115bd865e997590427f1baebf8a082608",
         "5bcfa4d09bed663f4506f43b4e4d0827c715a8fed92118790c4b5101d82553dd",
@@ -820,5 +820,5 @@
     "scenario_seconds": 240,
     "cleanup_seconds": 30
   },
-  "published_release_commit": "1ab3fc6db420c8767f06d6f217b1e1c571c43882"
+  "published_release_commit": "ca7bac336b40b3e6541af79a205bd3c9ef0b515b"
 }
