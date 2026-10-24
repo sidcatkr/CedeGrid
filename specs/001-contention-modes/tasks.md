@@ -309,7 +309,8 @@ pause and then reverses, with no drain (quickstart §3).
 - [ ] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).
-- [ ] T054 [US2] Native-evidence gate, run only when explicitly authorized:
+- [ ] T054 [US2] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
+  authorized Linux host; commands in [native-gates.md](native-gates.md).*
   - add `runtime_adjust_requires_verified_membership` to `tests/cgroup.rs`;
   - run quickstart §4 with `CEDEGRID_TEST_CGROUP_ROOT` on Linux;
   - record the evidence in `docs/validation.md`.
@@ -471,7 +472,8 @@ context, under Neutral and Performance (quickstart §5).
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
 - [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
-- [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized:
+- [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
+  authorized Linux host with an NVIDIA device; commands in [native-gates.md](native-gates.md).*
   - run quickstart §5 on Linux + NVIDIA with `CEDEGRID_TEST_GPU_UUID` and an idle external
     context, including 100 consecutive launches on the shared device;
   - record the evidence for SC-006 and the VRAM part of SC-001 in `docs/validation.md`.
@@ -626,6 +628,7 @@ each step.
 - [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
 - [ ] T117 Validate the provisional thresholds (SC-002–SC-004) on Linux with test-owned loads.
+  *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
   that evidence.
 - [ ] T118 Audit the pressure suite for SC-005:

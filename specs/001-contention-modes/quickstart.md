@@ -9,10 +9,11 @@ environment from `CLAUDE.md`:
 ## 1. Policy regressions (any OS)
 
 ```sh
-cargo test --locked --test policy known_defect
+cargo test --locked --test policy -- d1_ d2_ d3_ d4_ d5_ d6_
 ```
 
-- **Expected.** The six former `known_defect_*` tests now assert corrected behavior and pass:
+- **Expected.** The six former `known_defect_*` tests, renamed `d1_` to `d6_`, assert corrected
+  behavior and pass:
   - D1: no drain on first observation
   - D2: no protection event below 256 MiB
   - D3: quiet external context admits GPU work
