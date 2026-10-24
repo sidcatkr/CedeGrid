@@ -397,7 +397,9 @@ pub fn restore(
         )?;
         ensure!(actual == entry.sha256, "snapshot changed during restore");
     }
-    if original_schema < crate::state::SCHEMA_VERSION || original_distributed < 3 {
+    if original_schema < crate::state::SCHEMA_VERSION
+        || original_distributed < crate::coordinator::DISTRIBUTED_SCHEMA
+    {
         crate::upgrade::migrate_database(
             &destination,
             manifest.storage_profile,
@@ -465,7 +467,10 @@ fn require_coordinator_only(store: &StateStore, root: &Path) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    ensure!(matches!(schema, 1..=3), "unsupported distributed schema");
+    ensure!(
+        (1..=crate::coordinator::DISTRIBUTED_SCHEMA).contains(&schema),
+        "unsupported distributed schema"
+    );
     let local: i64 = store
         .connection
         .query_row("SELECT count(*) FROM executions", [], |r| r.get(0))?;

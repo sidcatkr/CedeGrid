@@ -2656,7 +2656,7 @@ fn replay_session_retry_does_not_refence_new_work_or_reset_durable_ready() {
             |r| r.get::<_, u32>(0)
         )
         .unwrap(),
-        3
+        4
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM allocation_fences", [], |r| r

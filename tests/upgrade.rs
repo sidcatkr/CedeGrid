@@ -290,3 +290,103 @@ fn interrupted_after_schema_commit_resumes_recorded_bundle_without_empty_replace
         cedegrid::state::TaskStatus::NeedsReconciliation
     );
 }
+
+fn coordinator_config(path: &Path) -> cedegrid::protocol::CoordinatorConfig {
+    serde_json::from_value(serde_json::json!({"state_dir":path,"listen":"127.0.0.1:0","tls":{"ca_cert":"","certificate":"","private_key":""},"clients":{}})).unwrap()
+}
+
+fn distributed_schema(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT value FROM distributed_meta WHERE key='schema'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn assert_schema_four(db: &Connection) {
+    assert_eq!(distributed_schema(db), 4);
+    let columns = |table: &str| -> Vec<String> {
+        let mut statement = db
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .unwrap();
+        statement
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert!(columns("drain_requests").contains(&"cause".to_owned()));
+    assert!(columns("reservations").contains(&"yield_cause".to_owned()));
+    let default: String = db
+        .query_row(
+            "SELECT dflt_value FROM pragma_table_info('drain_requests') WHERE name='cause'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(default, "'coordinator_drain'");
+    let reservations: String = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='reservations'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(reservations.contains("CHECK(phase IN ("), "{reservations}");
+    for trigger in ["status_reservations_insert", "status_reservations_delete"] {
+        let present: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1)",
+                [trigger],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(present, "{trigger} must exist after the migration");
+    }
+}
+
+#[test]
+fn new_coordinator_state_starts_at_distributed_schema_four() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let state = root.path().join("state");
+    drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
+    assert_schema_four(&Connection::open(state.join("state.sqlite3")).unwrap());
+}
+
+#[test]
+fn distributed_schema_three_migrates_to_four_with_check_and_recreated_triggers() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let state = root.path().join("state");
+    drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
+    {
+        // Reproduce the schema 3 shape: no cause/yield_cause columns, no phase CHECK.
+        let db = Connection::open(state.join("state.sqlite3")).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             BEGIN;
+             DROP TRIGGER IF EXISTS status_reservations_insert;
+             ALTER TABLE drain_requests DROP COLUMN cause;
+             CREATE TABLE reservations_v3(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),node_id TEXT NOT NULL,phase TEXT NOT NULL,resources_json TEXT NOT NULL,observed_json TEXT,lease_sequence INTEGER NOT NULL DEFAULT 0,lease_deadline_ms INTEGER NOT NULL DEFAULT 0,epoch INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '') STRICT;
+             INSERT INTO reservations_v3 SELECT assignment_id,node_id,phase,resources_json,observed_json,lease_sequence,lease_deadline_ms,epoch,detail FROM reservations;
+             DROP TABLE reservations;
+             ALTER TABLE reservations_v3 RENAME TO reservations;
+             UPDATE distributed_meta SET value=3 WHERE key='schema';
+             COMMIT;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        assert_eq!(distributed_schema(&db), 3);
+    }
+    drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
+    let db = Connection::open(state.join("state.sqlite3")).unwrap();
+    assert_schema_four(&db);
+    assert!(
+        db.execute(
+            "INSERT INTO reservations(assignment_id,node_id,phase,resources_json,epoch) VALUES ('x','n','bogus','{}',1)",
+            [],
+        )
+        .is_err(),
+        "an unknown reservation phase must be rejected"
+    );
+}

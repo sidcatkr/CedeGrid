@@ -30,6 +30,47 @@ struct PreparedArtifacts {
     commit: Option<(String, crate::artifacts::UploadMetadata)>,
     proofs: Vec<crate::artifacts::VerifiedArtifact>,
 }
+/// Current coordinator distributed schema. Version 4 records yield causes and
+/// rejects unknown reservation phases.
+pub const DISTRIBUTED_SCHEMA: i64 = 4;
+
+const RESERVATION_COLUMNS: &str = "assignment_id,node_id,phase,resources_json,observed_json,lease_sequence,lease_deadline_ms,epoch,detail";
+
+fn has_column(tx: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        params![table, column],
+        |r| r.get(0),
+    )?)
+}
+
+/// Brings distributed tables to [`DISTRIBUTED_SCHEMA`] inside the caller's
+/// schema transaction. Each step checks the shape it changes, so a resumed or
+/// repeated run is a no-op. Rebuilding `reservations` drops its triggers and
+/// index; `pagination::initialize` recreates them from the same definitions.
+pub(crate) fn migrate_distributed_schema(tx: &rusqlite::Connection) -> Result<()> {
+    if !has_column(tx, "drain_requests", "cause")? {
+        tx.execute_batch(
+            "ALTER TABLE drain_requests ADD COLUMN cause TEXT NOT NULL DEFAULT 'coordinator_drain'",
+        )?;
+    }
+    if !has_column(tx, "reservations", "yield_cause")? {
+        // Unknown phases fail the copy and leave the old schema in place.
+        tx.execute_batch(&format!("DROP TRIGGER IF EXISTS status_reservations_insert;
+ DROP TRIGGER IF EXISTS status_reservations_delete;
+ CREATE TABLE reservations_v4(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),node_id TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('offered','prepared','authorized','running','draining','uncertain','released')),resources_json TEXT NOT NULL,observed_json TEXT,lease_sequence INTEGER NOT NULL DEFAULT 0,lease_deadline_ms INTEGER NOT NULL DEFAULT 0,epoch INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '',yield_cause TEXT) STRICT;
+ INSERT INTO reservations_v4({RESERVATION_COLUMNS}) SELECT {RESERVATION_COLUMNS} FROM reservations;
+ DROP TABLE reservations;
+ ALTER TABLE reservations_v4 RENAME TO reservations;"))?;
+    }
+    crate::pagination::initialize(tx)?;
+    tx.execute(
+        "UPDATE distributed_meta SET value=?1 WHERE key='schema'",
+        [DISTRIBUTED_SCHEMA],
+    )?;
+    Ok(())
+}
+
 impl Coordinator {
     pub fn open(config: CoordinatorConfig) -> Result<Self> {
         ensure!(
@@ -72,8 +113,8 @@ impl Coordinator {
  CREATE TABLE IF NOT EXISTS jobs(job_id TEXT PRIMARY KEY,pool_id TEXT NOT NULL REFERENCES pools(pool_id),priority INTEGER NOT NULL,cancelled INTEGER NOT NULL DEFAULT 0,submitted_ms INTEGER NOT NULL,spec_json TEXT NOT NULL) STRICT;
  CREATE TABLE IF NOT EXISTS task_specs(sequence INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),job_id TEXT NOT NULL REFERENCES jobs(job_id),request_json TEXT NOT NULL) STRICT;
  CREATE TABLE IF NOT EXISTS nodes(node_id TEXT PRIMARY KEY,report_json TEXT NOT NULL,received_ms INTEGER NOT NULL,drain INTEGER NOT NULL DEFAULT 0) STRICT;
- CREATE TABLE IF NOT EXISTS reservations(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),node_id TEXT NOT NULL,phase TEXT NOT NULL,resources_json TEXT NOT NULL,observed_json TEXT,lease_sequence INTEGER NOT NULL DEFAULT 0,lease_deadline_ms INTEGER NOT NULL DEFAULT 0,epoch INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '') STRICT;
- CREATE TABLE IF NOT EXISTS drain_requests(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),reason TEXT NOT NULL) STRICT;
+ CREATE TABLE IF NOT EXISTS reservations(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),node_id TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('offered','prepared','authorized','running','draining','uncertain','released')),resources_json TEXT NOT NULL,observed_json TEXT,lease_sequence INTEGER NOT NULL DEFAULT 0,lease_deadline_ms INTEGER NOT NULL DEFAULT 0,epoch INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '',yield_cause TEXT) STRICT;
+ CREATE TABLE IF NOT EXISTS drain_requests(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),reason TEXT NOT NULL,cause TEXT NOT NULL DEFAULT 'coordinator_drain') STRICT;
  CREATE TABLE IF NOT EXISTS preparations(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),record_json TEXT NOT NULL) STRICT;
  CREATE TABLE IF NOT EXISTS unrecognized_allocations(node_id TEXT NOT NULL,assignment_id TEXT NOT NULL,generation INTEGER NOT NULL,report_json TEXT NOT NULL,PRIMARY KEY(node_id,assignment_id)) STRICT;
  CREATE TABLE IF NOT EXISTS allocation_fences(assignment_id TEXT PRIMARY KEY REFERENCES assignments(assignment_id),reason TEXT NOT NULL) STRICT;
@@ -84,7 +125,7 @@ impl Coordinator {
  CREATE TABLE IF NOT EXISTS publications(assignment_id TEXT NOT NULL REFERENCES assignments(assignment_id),generation INTEGER NOT NULL,sha256 TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(assignment_id,sha256)) STRICT;
  CREATE TABLE IF NOT EXISTS result_payloads(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),submission_json TEXT NOT NULL) STRICT;
  CREATE TABLE IF NOT EXISTS checkpoints(task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),submission_json TEXT NOT NULL,receipt_hash TEXT NOT NULL) STRICT;
- INSERT OR IGNORE INTO distributed_meta(key,value) VALUES ('schema',3),('epoch',0),('last_clock_ms',0);")?;
+ INSERT OR IGNORE INTO distributed_meta(key,value) VALUES ('schema',4),('epoch',0),('last_clock_ms',0);")?;
         let mut columns = tx.prepare("PRAGMA table_info(retry_state)")?;
         let has_yield_count = columns
             .query_map([], |r| r.get::<_, String>(1))?
@@ -103,10 +144,10 @@ impl Coordinator {
             |r| r.get(0),
         )?;
         ensure!(
-            schema == 3,
+            schema == 3 || schema == DISTRIBUTED_SCHEMA,
             "ERR_CEDEGRID_UPGRADE_REQUIRED: distributed schema requires offline state upgrade"
         );
-        crate::pagination::initialize(&tx)?;
+        migrate_distributed_schema(&tx)?;
         let old_epoch: i64 = tx.query_row(
             "SELECT value FROM distributed_meta WHERE key='epoch'",
             [],
@@ -703,7 +744,10 @@ impl Coordinator {
         } else {
             // Commit session replacement and allocation fencing together. The
             // distributed schema bump prevents older binaries bypassing this fence.
-            tx.execute("UPDATE distributed_meta SET value=3 WHERE key='schema'", [])?;
+            tx.execute(
+                "UPDATE distributed_meta SET value=?1 WHERE key='schema'",
+                [DISTRIBUTED_SCHEMA],
+            )?;
             if let Some((old_session, _)) = old {
                 tx.execute(
                     "INSERT INTO replay_retired_sessions(node_id,session_id) VALUES (?1,?2)",

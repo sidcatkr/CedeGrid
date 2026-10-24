@@ -135,7 +135,7 @@ pub fn upgrade(
         None
     };
     ensure!(
-        distributed.is_none_or(|v| matches!(v, 1..=3)),
+        distributed.is_none_or(|v| (1..=crate::coordinator::DISTRIBUTED_SCHEMA).contains(&v)),
         "unsupported distributed schema; original state is unchanged"
     );
     let integrity: String = inspected.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
@@ -279,8 +279,7 @@ pub(crate) fn migrate_database(
     )?;
     tx.execute("UPDATE tasks SET status='needs_reconciliation' WHERE task_id IN (SELECT task_id FROM upgrade_task_holds)", [])?;
     if has_table(&tx, "distributed_meta")? {
-        crate::pagination::initialize(&tx)?;
-        tx.execute("UPDATE distributed_meta SET value=3 WHERE key='schema'", [])?;
+        crate::coordinator::migrate_distributed_schema(&tx)?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     let held: i64 = tx.query_row("SELECT count(*) FROM upgrade_task_holds", [], |r| r.get(0))?;

@@ -439,7 +439,7 @@ fn legacy_snapshot_manifest_without_profile_remains_wal_compatible() {
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
-        3
+        4
     );
 }
 
@@ -493,7 +493,7 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema, 3);
+    assert_eq!(schema, 4);
     let unfenced: i64 = db
         .query_row(
             "SELECT count(*) FROM reservations WHERE phase!='released' AND phase!='uncertain'",
@@ -505,10 +505,30 @@ fn offline_snapshot_restore_supports_replay_fenced_distributed_schema_two() {
     drop(db);
     // A future distributed schema still fails closed before any snapshot output.
     let db = rusqlite::Connection::open(source.join(cedegrid::state::DATABASE_FILENAME)).unwrap();
-    db.execute("UPDATE distributed_meta SET value=4 WHERE key='schema'", [])
+    db.execute("UPDATE distributed_meta SET value=5 WHERE key='schema'", [])
         .unwrap();
     drop(db);
     let forbidden = d.path().join("future-schema-snapshot");
     assert!(backup::create(&source, &forbidden, limits()).is_err());
     assert!(!forbidden.exists());
+}
+
+#[test]
+fn snapshot_and_restore_round_trip_distributed_schema_four() {
+    let d = dir();
+    let source = d.path().join("source");
+    seed(&source);
+    let snapshot = d.path().join("snapshot");
+    backup::create(&source, &snapshot, limits()).unwrap();
+    let restored = d.path().join("restored");
+    backup::restore(&snapshot, &restored, limits(), true).unwrap();
+    let db = rusqlite::Connection::open(restored.join("state.sqlite3")).unwrap();
+    let schema: i64 = db
+        .query_row(
+            "SELECT value FROM distributed_meta WHERE key='schema'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema, 4);
 }

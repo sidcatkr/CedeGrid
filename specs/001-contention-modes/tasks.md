@@ -68,7 +68,7 @@ SDKs in `python/` and `npm/`.
   - the reply carries `features = ["api/1", "contention/1"]`;
   - a `NodeReport` without new fields is accepted;
   - the fixtures in `tests/fixtures/0.2/` parse.
-- [ ] T008 [P] Write failing tests in `tests/upgrade.rs` and `tests/backup.rs` for coordinator
+- [X] T008 [P] Write failing tests in `tests/upgrade.rs` and `tests/backup.rs` for coordinator
   distributed schema 4:
   - migrating from schema 3 adds `drain_requests.cause TEXT NOT NULL DEFAULT
     'coordinator_drain'`, `reservations.yield_cause TEXT` and a CHECK on `reservations.phase`,
@@ -109,7 +109,7 @@ SDKs in `python/` and `npm/`.
 
   Batch 1 note: the legacy GPU key warning moved to T085. Until US5 lands those keys still
   steer GPU admission, so a "no effect" warning would be false.
-- [ ] T015 Implement coordinator distributed schema 4 as one versioned migration in
+- [X] T015 Implement coordinator distributed schema 4 as one versioned migration in
   `src/coordinator.rs` and `src/state.rs`, dropping and recreating the triggers. Teach
   `src/backup.rs` and `src/upgrade.rs` the new version.
 - [ ] T016 Implement feature negotiation in `src/protocol.rs`, `src/coordinator.rs` and
