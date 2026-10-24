@@ -509,7 +509,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   - CPU expansion waits only for `contention.cpu.scale_up_cooldown_ms` and RAM only for its own;
   - repeated reclaim episodes double the memory cooldown from 1 s to at most 30 s, and a quiet
     window resets it.
-- [ ] T129 [P] Add tests in `tests/configuration.rs` and `tests/cli.rs` (B9): each
+- [X] T129 [P] Add tests in `tests/configuration.rs` and `tests/cli.rs` (B9): each
   `gpu.execution_mode` value maps per FR-031 with its warning, and `doctor` prints the
   interpretation.
 - [ ] T130 [P] Add SDK tests in `python/tests/test_worker.py`, `npm/tests/worker-targets.test.ts`
@@ -533,7 +533,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T135 Implement the memory peak window, the per-resource cooldowns and the reclaim backoff
   in `src/policy.rs`, `src/config.rs` and `src/agent.rs` (B7), and rename the tools helper in
   `tools/runtime_config.py`.
-- [ ] T136 Implement the legacy GPU interpretation and warnings in `src/config.rs`, and print it
+- [X] T136 Implement the legacy GPU interpretation and warnings in `src/config.rs`, and print it
   in `doctor` in `src/main.rs` (B9 parsing; the admission effect is T085).
 - [ ] T137 Deliver the current target at once (B13): `on_resource_target` in
   `python/cedegrid/worker.py` and `onResourceTarget` in `npm/src/worker.ts`; the child's target

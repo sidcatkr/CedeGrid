@@ -744,3 +744,79 @@ fn negative_cpu_nice_warns_and_is_treated_as_zero() {
             .any(|w| w.contains("performance_mode") && w.contains("caution"))
     );
 }
+
+/// Legacy `gpu.execution_mode` values are interpreted with a warning naming the
+/// replacement, for GPU resources without an explicit mode (FR-031).
+#[test]
+fn legacy_gpu_execution_modes_are_interpreted_with_a_warning() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let (_root, location) = node_location();
+    let load = |body: &str| {
+        Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location).unwrap()
+    };
+    let legacy = |loaded: &cedegrid::config::LoadedConfig| {
+        loaded
+            .warnings
+            .iter()
+            .filter(|w| w.contains("gpu."))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for body in ["", "[gpu]\nexecution_mode = \"auto\""] {
+        let auto = load(body);
+        assert!(legacy(&auto).is_empty(), "{body}");
+        assert!(auto.config.legacy_gpu().warnings.is_empty());
+    }
+    let aware = load(
+        "[contention]\ndefault_mode = \"yield_first\"\n[gpu]\nexecution_mode = \"contention_aware\"",
+    );
+    assert!(
+        legacy(&aware)
+            .iter()
+            .any(|w| w.contains("contention_aware") && w.contains("contention.gpu_compute.mode")),
+        "{:?}",
+        aware.warnings
+    );
+    let mode = |loaded: &cedegrid::config::LoadedConfig, kind| loaded.config.contention.mode(kind);
+    assert_eq!(
+        mode(&aware, ResourceKind::GpuCompute),
+        ContentionMode::Neutral
+    );
+    assert_eq!(
+        mode(&aware, ResourceKind::GpuMemory),
+        ContentionMode::Neutral
+    );
+    assert_eq!(mode(&aware, ResourceKind::Cpu), ContentionMode::YieldFirst);
+    // An explicit mode wins over the legacy value.
+    let explicit = load(
+        "[contention.gpu_compute]\nmode = \"yield_first\"\n[gpu]\nexecution_mode = \"contention_aware\"",
+    );
+    assert_eq!(
+        mode(&explicit, ResourceKind::GpuCompute),
+        ContentionMode::YieldFirst
+    );
+    assert_eq!(
+        mode(&explicit, ResourceKind::GpuMemory),
+        ContentionMode::Neutral
+    );
+    let conservative = load("[gpu]\nexecution_mode = \"conservative_non_sharing\"");
+    assert!(conservative.config.contention.never_share_occupied_gpus);
+    assert!(
+        legacy(&conservative)
+            .iter()
+            .any(|w| w.contains("contention.never_share_occupied_gpus"))
+    );
+    let best_effort = load(
+        "[gpu]\nexecution_mode = \"best_effort_occupied\"\n[[gpu.best_effort_external_processes.GPU-x]]\npid = 4242\nboot_id = \"boot\"\nstart_ticks = 1\nuid = 1000",
+    );
+    assert_eq!(
+        mode(&best_effort, ResourceKind::GpuMemory),
+        ContentionMode::Neutral
+    );
+    assert!(
+        legacy(&best_effort)
+            .iter()
+            .any(|w| w.contains("best_effort_occupied") && w.contains("no longer used"))
+    );
+    assert!(!best_effort.config.legacy_gpu().interpretation.is_empty());
+}

@@ -238,10 +238,16 @@ struct ReplayFrame {
 }
 
 fn read_config(path: &Path) -> Result<Config> {
+    Ok(read_config_reporting(path)?.0)
+}
+
+/// The configuration and the load-time warnings an operator should see.
+fn read_config_reporting(path: &Path) -> Result<(Config, Vec<String>)> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
-    let mut config = Config::load(&canonical)?;
+    let loaded = Config::load_reporting(&canonical)?;
+    let (mut config, warnings) = (loaded.config, loaded.warnings);
     config.kernel.monitor_interval_ms = config.monitor.interval_ms;
     if config.kernel.delegated_root.is_none() {
         config.kernel.delegated_root = config.cgroup.delegated_root.clone();
@@ -253,7 +259,7 @@ fn read_config(path: &Path) -> Result<Config> {
             .join(&config.state_dir);
     }
     config.validate()?;
-    Ok(config)
+    Ok((config, warnings))
 }
 
 fn emit(value: &impl Serialize) -> Result<()> {
@@ -550,7 +556,11 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         _ => {}
     }
-    let config = read_config(&cli.config)?;
+    let (config, config_warnings) = read_config_reporting(&cli.config)?;
+    // Load-time warnings go to stderr, where they never mix with JSON output.
+    for warning in &config_warnings {
+        eprintln!("cedegrid: warning: {warning}");
+    }
     match cli.command {
         Command::Backup { .. }
         | Command::Restore { .. }
@@ -607,7 +617,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "snapshot": snapshot,
                 "execution_available": cfg!(any(target_os="linux",target_os="macos")),
                 "execution_configured": config.execution.enabled,
-                "kernel_controls_applied": false
+                "kernel_controls_applied": false,
+                "config_warnings": config_warnings,
+                "legacy_gpu": config.legacy_gpu(),
+                "caution_options": config.caution_options()
             }))?;
             ensure!(
                 role_admitted,

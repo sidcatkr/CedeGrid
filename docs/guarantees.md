@@ -164,6 +164,14 @@ mode, so no job runs in Performance unless the operator chose it.
 Policy recordings without an allocation class retain the legacy opportunistic
 default; live observation copies the required class from the durable execution record.
 
+The legacy `gpu.execution_mode` is read at load time, with a warning on stderr that
+names the replacement: `contention_aware` and `best_effort_occupied` set GPU compute and
+GPU memory to Neutral unless their mode is set, `conservative_non_sharing` sets
+`contention.never_share_occupied_gpus = true`, and `auto` changes nothing. A non-empty
+`gpu.best_effort_external_processes` is reported as unused. `doctor` shows the
+interpretation and every load-time warning. Until GPU admission follows the modes,
+`gpu.execution_mode` also keeps its 0.2 effect on GPU admission.
+
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.
 CPU/RAM reserves without applied cgroup controls are scheduling policies, not kernel

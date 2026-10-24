@@ -535,6 +535,9 @@ pub struct ContentionConfig {
     pub uid_min: u32,
     /// Consecutive observations a user needs to join, or leave, the principals.
     pub principal_window_intervals: u32,
+    /// Never start own GPU work on a device with external contexts, in any mode
+    /// (FR-064).
+    pub never_share_occupied_gpus: bool,
     pub cpu: ResourceContentionConfig,
     pub ram: ResourceContentionConfig,
     pub gpu_compute: ResourceContentionConfig,
@@ -554,6 +557,7 @@ impl Default for ContentionConfig {
             critical_hint_deadline_s: 1,
             uid_min: 1000,
             principal_window_intervals: 4,
+            never_share_occupied_gpus: false,
             cpu: Default::default(),
             ram: Default::default(),
             gpu_compute: Default::default(),
@@ -939,6 +943,14 @@ impl ContentionConfig {
     }
 }
 
+/// How a legacy GPU setting was read (FR-031).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LegacyGpu {
+    pub execution_mode: GpuExecutionMode,
+    pub interpretation: &'static str,
+    pub warnings: Vec<String>,
+}
+
 /// A node configuration plus the warnings an operator should see at load time.
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
@@ -1127,7 +1139,62 @@ impl Config {
                 option.name
             ));
         }
+        // Legacy GPU values are read once, here (FR-031); explicit modes win.
+        let legacy = self.legacy_gpu();
+        match self.gpu.execution_mode {
+            GpuExecutionMode::Auto => {}
+            GpuExecutionMode::ContentionAware | GpuExecutionMode::BestEffortOccupied => {
+                // Only an explicit cap limits it; the implicit cap follows node modes.
+                let neutral = crate::contention::ContentionMode::Neutral;
+                let neutral = self
+                    .contention
+                    .max_mode
+                    .map_or(neutral, |cap| neutral.min(cap));
+                for set in [
+                    &mut self.contention.gpu_compute,
+                    &mut self.contention.gpu_memory,
+                ] {
+                    set.mode.get_or_insert(neutral);
+                }
+            }
+            GpuExecutionMode::ConservativeNonSharing => {
+                self.contention.never_share_occupied_gpus = true;
+            }
+        }
+        warnings.extend(legacy.warnings);
         warnings
+    }
+
+    /// How the legacy `gpu.execution_mode` and `gpu.best_effort_external_processes`
+    /// are read (FR-031); `doctor` shows it.
+    pub fn legacy_gpu(&self) -> LegacyGpu {
+        let mut warnings = Vec::new();
+        let interpretation = match self.gpu.execution_mode {
+            GpuExecutionMode::Auto => "the contention mode settings apply",
+            GpuExecutionMode::ContentionAware => {
+                warnings.push("deprecated: gpu.execution_mode = \"contention_aware\" is read as Neutral; set contention.gpu_compute.mode and contention.gpu_memory.mode".into());
+                "GPU compute and GPU memory run in Neutral unless their mode is set"
+            }
+            GpuExecutionMode::ConservativeNonSharing => {
+                warnings.push("deprecated: gpu.execution_mode = \"conservative_non_sharing\" is read as contention.never_share_occupied_gpus = true; set that key".into());
+                "contention.never_share_occupied_gpus = true"
+            }
+            GpuExecutionMode::BestEffortOccupied => {
+                warnings.push("deprecated: gpu.execution_mode = \"best_effort_occupied\" is read as Neutral; gpu.best_effort_external_processes is no longer used".into());
+                "GPU compute and GPU memory run in Neutral unless their mode is set"
+            }
+        };
+        if self.gpu.execution_mode != GpuExecutionMode::BestEffortOccupied
+            && !self.gpu.best_effort_external_processes.is_empty()
+        {
+            warnings
+                .push("deprecated: gpu.best_effort_external_processes is no longer used".into());
+        }
+        LegacyGpu {
+            execution_mode: self.gpu.execution_mode,
+            interpretation,
+            warnings,
+        }
     }
 
     /// The RAM floor on a host with `total_mib` of RAM, never below the minimum.

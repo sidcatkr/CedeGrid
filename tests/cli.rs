@@ -81,6 +81,10 @@ fn doctor_separates_selected_profile_from_requested_role_without_creating_state(
     .unwrap();
     let agent = success_json(run(&path, &["doctor", "--role", "agent"]));
     assert_eq!(agent["requested_role"], "agent");
+    // Doctor shows how the legacy GPU key was read (FR-031).
+    assert_eq!(agent["legacy_gpu"]["execution_mode"], "auto");
+    assert!(agent["legacy_gpu"]["interpretation"].is_string());
+    assert!(agent["config_warnings"].is_array());
     assert_eq!(agent["selected_profile_admitted"], true);
     assert_eq!(agent["role_admitted"], true);
     let coordinator = run(&path, &["doctor", "--role", "coordinator"]);
