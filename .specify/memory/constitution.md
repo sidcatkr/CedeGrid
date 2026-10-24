@@ -22,16 +22,28 @@ never let CedeGrid act on a process it does not own.
 ### II. No Harm in Any Mode
 
 - Own work MUST be the first to give capacity back when external demand needs it.
-- CedeGrid MUST NOT drive another workload into OOM kills, swap thrash, failed GPU allocations
-  or loss of capacity that workload is already using. Every mode keeps explicit floors, such as
-  minimum available host RAM and per-device VRAM headroom.
-- Own processes MUST be the preferred OOM victims. Where the platform allows an unprivileged
-  process to mark itself, this happens before user code runs.
+- By default, CedeGrid MUST NOT drive another workload into OOM kills, swap thrash, failed GPU
+  allocations or loss of capacity that workload is already using. Every mode keeps explicit
+  floors, such as minimum available host RAM and per-device VRAM headroom.
+- By default, own processes MUST be the preferred OOM victims. Where the platform allows an
+  unprivileged process to mark itself, this happens before user code runs.
 - Own priority MUST NOT be raised above the default: no negative nice values and no real-time
-  scheduling classes.
+  scheduling classes. No exception relaxes this rule.
+- **Opt-in exceptions.** An operator MAY opt in to a documented exception that relaxes a floor
+  or the OOM preference for specific own work. Examples: keeping a Guaranteed allocation's memory
+  when a floor is breached, or holding Neutral's fair share of memory. Every exception MUST:
+  - be off by default and never enabled implicitly, including by upgrades, migrations or
+    non-interactive defaults;
+  - be chosen explicitly, with its consequence shown;
+  - be marked *caution* if it can make other workloads' allocations fail or slow them, and
+    *danger* if it can let an external process be killed or starved;
+  - require a separate confirmation when it is marked danger;
+  - be recorded in configuration and reported in observability output while it is active;
+  - leave Principle I intact. No exception permits acting on an external process.
 
-Rationale: CedeGrid runs only on spare capacity. Running it must never make another workload
-fail.
+Rationale: CedeGrid runs only on spare capacity, so by default running it must never make
+another workload fail. An operator who accepts a specific, visible risk for their own work may
+do so knowingly; the risk must never be hidden or imposed by default.
 
 ### III. Unknown Is Never Silently Idle
 
@@ -166,4 +178,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-24
+**Version**: 1.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-24
