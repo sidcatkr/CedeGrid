@@ -257,6 +257,8 @@ pub struct ResourceStatus {
     pub measurement: Option<crate::contention::Measurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<ComputeActivity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<crate::contention::Admission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<ReasonCode>,
 }

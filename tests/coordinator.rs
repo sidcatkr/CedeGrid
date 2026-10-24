@@ -84,6 +84,8 @@ fn report(now: u64) -> NodeReport {
         launch_slots: 2,
         available_controls: vec![],
         allocations: vec![],
+        features: Vec::new(),
+        contention: None,
     }
 }
 fn node() -> Principal {
@@ -301,6 +303,7 @@ fn uncertain_allocations_stay_reserved_until_release() {
         phase: RemotePhase::Released,
         observed: None,
         detail: "verified pidfd exit and resource release".into(),
+        yield_cause: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 20_001)
@@ -657,6 +660,7 @@ fn checkpoints_do_not_rewind_and_follow_retries() {
         phase: RemotePhase::Released,
         observed: None,
         detail: "released after checkpoint drain".into(),
+        yield_cause: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, 105)
         .unwrap();
@@ -852,6 +856,7 @@ fn higher_priority_preemption_waits_for_verified_release() {
         phase: RemotePhase::Running,
         observed: Some(a.request.resources.clone()),
         detail: "running before preemption".into(),
+        yield_cause: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 102)
@@ -867,6 +872,7 @@ fn higher_priority_preemption_waits_for_verified_release() {
         phase: RemotePhase::Released,
         observed: None,
         detail: "verified release".into(),
+        yield_cause: None,
     };
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r }, 103)
@@ -916,6 +922,7 @@ fn unknown_managed_allocation_blocks_expansion() {
         phase: RemotePhase::Running,
         observed: Some(Resources::default()),
         detail: "requires local reconciliation".into(),
+        yield_cause: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report }, 100)
@@ -994,6 +1001,7 @@ fn released_failure(c: &mut Coordinator, a: &Assignment, now: u64, kind: Failure
         phase: RemotePhase::Released,
         observed: None,
         detail: "verified release".into(),
+        yield_cause: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, now)
         .unwrap();
@@ -1111,6 +1119,7 @@ fn draining_and_uncertain_reports_cannot_be_reactivated_by_later_running_reports
         phase: RemotePhase::Draining,
         observed: Some(a.request.resources.clone()),
         detail: "local policy drain".into(),
+        yield_cause: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 101)
         .unwrap();
@@ -1163,6 +1172,7 @@ fn delayed_node_telemetry_is_rejected_and_new_live_release_contradiction_reclaim
         phase: RemotePhase::Released,
         observed: None,
         detail: "verified exit".into(),
+        yield_cause: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 110)
         .unwrap();
@@ -1302,6 +1312,7 @@ fn named_inputs_require_publication_and_only_authorize_current_assignees() {
         phase: RemotePhase::Released,
         observed: None,
         detail: "never launched; release verified".into(),
+        yield_cause: None,
     }];
     c.handle_at(&principal, Request::Heartbeat { report: nr }, 112)
         .unwrap();
@@ -1338,6 +1349,7 @@ fn missing_live_allocation_blocks_growth_and_cannot_be_revived_by_running_report
         phase: RemotePhase::Running,
         observed: Some(a.request.resources.clone()),
         detail: "late running report".into(),
+        yield_cause: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 103)
@@ -1449,6 +1461,7 @@ fn task_uncertain_on_one_node_cannot_preempt_another_nodes_healthy_work() {
         phase: RemotePhase::Running,
         observed: Some(b.request.resources.clone()),
         detail: "healthy".into(),
+        yield_cause: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&other, Request::Heartbeat { report: r }, 10200)
@@ -1538,6 +1551,7 @@ fn unknown_allocations_remain_fenced_through_omission_and_restart_until_verified
         phase: RemotePhase::Running,
         observed: Some(Resources::default()),
         detail: "post-snapshot local journal".into(),
+        yield_cause: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 100)
         .unwrap();
@@ -1785,6 +1799,7 @@ fn four_thousand_historical_tasks_page_while_oversized_inventory_is_refused() {
             phase: RemotePhase::Released,
             observed: None,
             detail: detail.into(),
+            yield_cause: None,
         });
     }
     tx.commit().unwrap();
@@ -2092,6 +2107,7 @@ fn allocation_report(a: &Assignment, phase: RemotePhase) -> AllocationReport {
         phase,
         observed: Some(a.request.resources.clone()),
         detail: "scoped coordinator regression".into(),
+        yield_cause: None,
     }
 }
 
@@ -2426,6 +2442,7 @@ fn replay_allocation_report(a: &Assignment, phase: RemotePhase) -> AllocationRep
         phase,
         observed: Some(a.request.resources.clone()),
         detail: "independent recovery evidence fixture".into(),
+        yield_cause: None,
     }
 }
 fn replay_database(path: &std::path::Path) -> rusqlite::Connection {
@@ -2899,6 +2916,7 @@ fn replay_snapshot_retains_unrecognized_allocations_until_explicit_release() {
         phase: RemotePhase::Uncertain,
         observed: None,
         detail: "state loss".into(),
+        yield_cause: None,
     };
     let mut old = report(100);
     old.allocations.push(orphan.clone());
@@ -3184,4 +3202,36 @@ fn operator_certificate_cannot_act_for_a_node_assignment() {
     // The owning node keeps every assignment-scoped operation.
     assert!(c.handle_at(&node(), renew, 104).is_ok());
     assert!(c.handle_at(&node(), upload, 105).is_ok());
+}
+
+#[test]
+fn heartbeat_reply_advertises_contention_features() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["task"], 100);
+    assert_eq!(offers(&mut c, 100).features, ["api/1", "contention/1"]);
+}
+
+#[test]
+fn recorded_0_2_messages_parse_and_negotiated_report_fields_are_accepted() {
+    let request: Request =
+        serde_json::from_str(include_str!("fixtures/0.2/node_report.json")).unwrap();
+    assert!(matches!(request, Request::Heartbeat { .. }));
+    let reply: HeartbeatReply =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    assert_eq!(reply.assignments.len(), 1);
+    assert!(reply.features.is_empty());
+    // Before negotiation a report carries no new keys, so a 0.2 coordinator accepts it.
+    let plain = serde_json::to_value(report(100)).unwrap();
+    assert!(plain.get("features").is_none() && plain.get("contention").is_none());
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["task"], 100);
+    let mut negotiated = report(100);
+    negotiated.features = vec!["api/1".into(), "contention/1".into()];
+    negotiated.contention = Some(NodeContentionReport::default());
+    assert!(
+        c.handle_at(&node(), Request::Heartbeat { report: negotiated }, 100)
+            .is_ok()
+    );
 }

@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const API_VERSION: u32 = 1;
+pub const FEATURE_API: &str = "api/1";
+pub const FEATURE_CONTENTION: &str = "contention/1";
+/// Features this coordinator advertises in every heartbeat reply.
+pub const COORDINATOR_FEATURES: [&str; 2] = [FEATURE_API, FEATURE_CONTENTION];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsIdentity {
@@ -104,6 +108,9 @@ pub struct AllocationReport {
     pub observed: Option<Resources>,
     #[serde(default)]
     pub detail: String,
+    /// Why the allocation yielded. Sent only after `contention/1` negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_cause: Option<crate::contention::YieldCause>,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +143,36 @@ pub struct NodeReport {
     pub launch_slots: u32,
     pub available_controls: Vec<String>,
     pub allocations: Vec<AllocationReport>,
+    /// Agent features; present only after the coordinator advertised them, since
+    /// a 0.2 coordinator rejects unknown report fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contention: Option<NodeContentionReport>,
+}
+/// Per-resource admission and mode summary (`contention/1`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NodeContentionReport {
+    pub resources: BTreeMap<crate::contention::ResourceKey, ResourceContentionReport>,
+    pub floor_policy: crate::config::FloorPolicy,
+    pub neutral_memory_policy: crate::config::NeutralMemoryPolicy,
+    pub exceptions: Vec<crate::model::ExceptionNotice>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceContentionReport {
+    pub mode: crate::contention::ContentionMode,
+    pub admission: crate::contention::Admission,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_share: Option<u64>,
+    /// Allocations at each yield step above none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub step_summary: BTreeMap<crate::contention::YieldStep, u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
@@ -179,6 +216,9 @@ pub struct HeartbeatReply {
     pub assignments: Vec<Assignment>,
     pub drain: Vec<String>,
     pub uncertain: Vec<String>,
+    /// Coordinator features. 0.2 agents ignore the field; 0.2 coordinators omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactRef {

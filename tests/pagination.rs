@@ -185,6 +185,8 @@ fn report_overflow_and_invalid_controls_fail_without_dropping_inventory() {
         launch_slots: 0,
         available_controls: vec![],
         allocations: vec![],
+        features: Vec::new(),
+        contention: None,
     };
     report.allocations = (0..2049)
         .map(|n| AllocationReport {
@@ -193,6 +195,7 @@ fn report_overflow_and_invalid_controls_fail_without_dropping_inventory() {
             phase: RemotePhase::Uncertain,
             observed: None,
             detail: String::new(),
+            yield_cause: None,
         })
         .collect();
     assert!(report.validate_bounds().is_err());

@@ -1755,6 +1755,7 @@ async fn start_replay_session(
             phase: RemotePhase::Uncertain,
             observed: None,
             detail: "authenticated recovery retains original reservation".into(),
+            yield_cause: None,
         })
         .collect();
     allocations.extend(snapshot.unrecognized.iter().cloned().map(|mut a| {
@@ -1775,6 +1776,8 @@ async fn start_replay_session(
         launch_slots: 0,
         available_controls: vec!["storage.replayable_local".into()],
         allocations,
+        features: Vec::new(),
+        contention: None,
     };
     maintenance.set_phase("awaiting_readiness")?;
     let response = rpc
@@ -1790,6 +1793,73 @@ async fn start_replay_session(
     drop(store);
     let (owner, guard) = maintenance.activate(guard, Duration::from_secs(30))?;
     Ok((owner, guard, snapshot))
+}
+
+/// Coordinator features learned from the latest heartbeat reply. A 0.2
+/// coordinator rejects unknown report fields, so negotiated fields are sent only
+/// while the last reply advertised them (contracts/wire-negotiation.md).
+#[derive(Debug, Default)]
+struct NegotiatedFeatures {
+    contention: bool,
+}
+
+impl NegotiatedFeatures {
+    fn learn(&mut self, reply: &HeartbeatReply) {
+        self.contention = reply.features.iter().any(|f| f == FEATURE_CONTENTION);
+    }
+
+    /// A rejected or failed heartbeat may come from a restarted older coordinator.
+    fn forget(&mut self) {
+        self.contention = false;
+    }
+
+    fn apply(&self, report: &mut NodeReport, contention: impl FnOnce() -> NodeContentionReport) {
+        if self.contention {
+            report.features = COORDINATOR_FEATURES.map(String::from).to_vec();
+            report.contention = Some(contention());
+        } else {
+            report.features.clear();
+            report.contention = None;
+            for allocation in &mut report.allocations {
+                allocation.yield_cause = None;
+            }
+        }
+    }
+}
+
+/// Resources whose mode or admission is not yet known are left out, which a
+/// negotiated coordinator treats as not open.
+fn node_contention_report(
+    config: &Config,
+    decision: &crate::model::Decision,
+) -> NodeContentionReport {
+    let resources = decision
+        .resources
+        .iter()
+        .filter_map(|(key, status)| {
+            let mut step_summary = BTreeMap::new();
+            for action in decision.actions.iter().filter(|a| &a.resource == key) {
+                *step_summary.entry(action.step).or_insert(0u32) += 1;
+            }
+            Some((
+                key.clone(),
+                ResourceContentionReport {
+                    mode: status.effective_mode.or(status.mode)?,
+                    admission: status.admission.clone()?,
+                    own: status.own,
+                    external: status.external,
+                    target_share: status.target_share,
+                    step_summary,
+                },
+            ))
+        })
+        .collect();
+    NodeContentionReport {
+        resources,
+        floor_policy: config.contention.floor_policy,
+        neutral_memory_policy: config.contention.neutral_memory_policy,
+        exceptions: config.contention.exceptions(),
+    }
 }
 
 /// Run a node service until shutdown or its configured finite envelope. Every
@@ -1935,6 +2005,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     let observation_interval = Duration::from_millis(config.monitor.interval_ms);
     let mut next_observation = start;
     let mut last_heartbeat = start - Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
+    let mut negotiated = NegotiatedFeatures::default();
     let mut stopping: Option<Instant> = None;
     let mut stop_signal = Box::pin(shutdown_signal());
     let mut last_spool_check = Instant::now();
@@ -2455,6 +2526,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                         .find(|a| a.id == r.assignment_id)
                         .and_then(|a| a.observed.clone()),
                     detail: r.detail.clone(),
+                    yield_cause: None,
                 })
                 .collect();
             reports.extend(
@@ -2471,6 +2543,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                         phase: RemotePhase::Released,
                         observed: None,
                         detail: detail.clone(),
+                        yield_cause: None,
                     }),
             );
             let mut available_controls = vec!["cpu.nice".into()];
@@ -2522,7 +2595,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             } else {
                 0
             };
-            let report = NodeReport {
+            let mut report = NodeReport {
                 node_id: config.node_id.clone(),
                 launch_slots,
                 boot_id,
@@ -2536,7 +2609,10 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                     && !spool_full,
                 available_controls,
                 allocations: reports,
+                features: Vec::new(),
+                contention: None,
             };
+            negotiated.apply(&mut report, || node_contention_report(config, &decision));
             // Report preparation can cross a scheduled slot. Advance at actual
             // enqueue so the next due time agrees with recorded lateness.
             let due = next_control_due(&mut last_heartbeat, interval);
@@ -2545,6 +2621,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 .await
             {
                 Ok(Response::Heartbeat { reply }) => {
+                    negotiated.learn(&reply);
                     for slot in slots.values_mut() {
                         slot.assignment.coordinator_epoch = reply.coordinator_epoch;
                     }
@@ -2664,6 +2741,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                     }
                 }
                 result => {
+                    negotiated.forget();
                     emit(
                         &serde_json::json!({"event":"coordinator_disconnected","detail":format!("{result:?}")}),
                     )?;
@@ -3576,5 +3654,88 @@ mod agent_transport_tests {
         }
         assert!(begin.elapsed() >= Duration::from_millis(195));
         assert!(wire_charge(256 * 1024) > 256 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod negotiation_tests {
+    use super::*;
+
+    fn reply(features: &[&str]) -> HeartbeatReply {
+        HeartbeatReply {
+            coordinator_epoch: 1,
+            assignments: vec![],
+            drain: vec![],
+            uncertain: vec![],
+            features: features.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    fn report() -> NodeReport {
+        NodeReport {
+            node_id: "node".into(),
+            boot_id: "boot".into(),
+            observed_at_unix_ms: 1,
+            managed_budget: Resources::default(),
+            expansion_allowed: false,
+            gpu_expansion_allowed: false,
+            gpu_guaranteed_allowed: false,
+            launch_slots: 0,
+            available_controls: vec![],
+            allocations: vec![AllocationReport {
+                assignment_id: "a".into(),
+                generation: 1,
+                phase: RemotePhase::Draining,
+                observed: None,
+                detail: String::new(),
+                yield_cause: Some(crate::contention::YieldCause::ExternalGrowth),
+            }],
+            features: vec![],
+            contention: None,
+        }
+    }
+
+    fn plain(report: &NodeReport) -> bool {
+        let value = serde_json::to_value(report).unwrap();
+        value.get("features").is_none()
+            && value.get("contention").is_none()
+            && value["allocations"][0].get("yield_cause").is_none()
+    }
+
+    #[test]
+    fn new_fields_are_sent_only_after_the_coordinator_advertises_them() {
+        let mut negotiated = NegotiatedFeatures::default();
+        let mut first = report();
+        negotiated.apply(&mut first, NodeContentionReport::default);
+        assert!(plain(&first), "the first heartbeat must stay 0.2-shaped");
+
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        let mut later = report();
+        negotiated.apply(&mut later, NodeContentionReport::default);
+        assert_eq!(later.features, COORDINATOR_FEATURES);
+        assert!(later.contention.is_some());
+        assert!(later.allocations[0].yield_cause.is_some());
+    }
+
+    #[test]
+    fn features_are_relearned_from_every_reply_and_dropped_after_a_rejection() {
+        let mut negotiated = NegotiatedFeatures::default();
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        negotiated.learn(&reply(&[]));
+        let mut restarted = report();
+        negotiated.apply(&mut restarted, NodeContentionReport::default);
+        assert!(
+            plain(&restarted),
+            "a coordinator without the feature gets 0.2 reports"
+        );
+
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        negotiated.forget();
+        let mut rejected = report();
+        negotiated.apply(&mut rejected, NodeContentionReport::default);
+        assert!(
+            plain(&rejected),
+            "a rejected heartbeat falls back to 0.2 reports"
+        );
     }
 }

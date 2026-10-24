@@ -99,6 +99,7 @@ fn four_thousand_released_records_component_cost() {
                     phase: RemotePhase::Released,
                     observed: None,
                     detail: r.detail,
+                    yield_cause: None,
                 })
                 .collect();
             let report = NodeReport {
@@ -112,6 +113,8 @@ fn four_thousand_released_records_component_cost() {
                 gpu_guaranteed_allowed: false,
                 available_controls: vec![],
                 allocations,
+                features: Vec::new(),
+                contention: None,
             };
             wire_bytes = serde_json::to_vec(&Request::Heartbeat { report })
                 .unwrap()

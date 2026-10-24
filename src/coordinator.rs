@@ -1180,6 +1180,7 @@ impl Coordinator {
                 assignments,
                 drain,
                 uncertain,
+                features: COORDINATOR_FEATURES.map(String::from).to_vec(),
             },
         })
     }

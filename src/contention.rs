@@ -162,6 +162,21 @@ pub enum YieldCause {
     CoordinatorDrain,
 }
 
+/// Whether new own work may start on a resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum Admission {
+    Open,
+    /// Waiting for a measurement or a step to settle; retried every interval.
+    Held {
+        reason: String,
+    },
+    /// Refused until the cause changes, such as a floor or the node cap.
+    Blocked {
+        reason: String,
+    },
+}
+
 /// A user ID with current demand. `uid: None` stands for every process whose
 /// owner cannot be read; they count together as one principal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

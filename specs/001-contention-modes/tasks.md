@@ -64,7 +64,7 @@ SDKs in `python/` and `npm/`.
     "`hysteresis_percent` 1–99", "`quiet_window_intervals` ≥ 1";
   - `cpu.nice < 0` warns and is treated as 0;
   - rejection of unknown keys.
-- [ ] T007 [P] Write failing tests in `tests/coordinator.rs` for feature negotiation:
+- [X] T007 [P] Write failing tests in `tests/coordinator.rs` for feature negotiation:
   - the reply carries `features = ["api/1", "contention/1"]`;
   - a `NodeReport` without new fields is accepted;
   - the fixtures in `tests/fixtures/0.2/` parse.
@@ -112,7 +112,7 @@ SDKs in `python/` and `npm/`.
 - [X] T015 Implement coordinator distributed schema 4 as one versioned migration in
   `src/coordinator.rs` and `src/state.rs`, dropping and recreating the triggers. Teach
   `src/backup.rs` and `src/upgrade.rs` the new version.
-- [ ] T016 Implement feature negotiation in `src/protocol.rs`, `src/coordinator.rs` and
+- [X] T016 Implement feature negotiation in `src/protocol.rs`, `src/coordinator.rs` and
   `src/agent.rs`:
   - `HeartbeatReply.features`;
   - optional `NodeReport.features`, `NodeReport.contention` and
