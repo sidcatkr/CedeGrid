@@ -2361,6 +2361,7 @@ impl AgentLoop<'_> {
                 && (!slot.assignment.request.resources.gpu_memory_mib.is_empty()
                     || slot.assignment.request.managed_child_limit > 0)
         }) {
+            // A closed pipe leaves that supervisor's observation stale, which fails its recheck closed.
             let _ = send(slot, &message);
         }
     }

@@ -893,6 +893,7 @@ mod unix {
         if owned.reaped {
             return Ok(());
         }
+        // A failed drain-file write only forgoes cooperative exit; TERM and KILL still follow.
         let _ = drain.notify();
         if exited_within(owned, options.drain_timeout_ms) {
             return Ok(());
