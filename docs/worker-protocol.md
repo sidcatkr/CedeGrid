@@ -71,6 +71,47 @@ checkpoint as resume context. Managed children use `spawn`, `status`, and `stop`
 on the same authenticated socket and an explicit per-parent child limit. An
 ambiguous spawn retains its original request ID for inspection or retry.
 
+## Resource targets
+
+The supervisor also sets `CEDEGRID_RESOURCE_TARGET_FILE` for the leader and for
+every managed child. Each process's file sits next to its drain file, in the same
+private directory. The file asks a worker to use less of a resource instead of
+being drained:
+
+```json
+{"version": 1, "sequence": 7, "deadline_unix_ms": 1793000000000, "step": "hint",
+ "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-0": 10240}, "cpu_millicores": 2000}}
+```
+
+- The supervisor replaces the file atomically. Each change has a higher
+  `sequence`; a relaxed target is a new file with `step: "none"` and fewer or no
+  targets. An absent file means no target.
+- Readers ignore unknown keys and treat `version` above 1, or an invalid file, as
+  absent.
+- A worker that reads targets writes the highest sequence it has seen, `0` before
+  any target, to `resource-target.ack` in the same directory. Without an ack from
+  the leader or a managed child, the hint step is unavailable for that allocation
+  and the ladder moves on.
+- The ack shows only that the worker reads targets. Compliance is judged from
+  observed usage. If usage is still above the target at `deadline_unix_ms`, the
+  next step follows: drain for RAM and GPU memory; CPU stays capped at its target
+  and is never drained.
+- The context may carry `resource_target_file` and lists `resource_targets` in
+  `capabilities`. Agent contexts carry only the capability, because the private
+  directory is created at launch, so read the environment variable.
+
+The SDKs implement this channel. `WorkerContext.resource_targets()` returns the
+current target, and `WorkerContext.on_resource_target(callback)` runs the callback
+once per new sequence during `draining()` and `safe_point()` polls; a failing
+callback is logged and never stops the poll. `ResourceSignals.from_env()` needs only
+the two environment variables, so managed children can use it. The TypeScript names
+are `resourceTargets()`, `onResourceTarget()` and `ResourceSignals.fromEnv()`.
+
+Drain is unchanged: the drain file's existence means drain, whatever a target says.
+After a drain request, publish a checkpoint at a safe boundary and exit; work that
+does not exit is terminated after the drain timeout. Workers that do not read
+targets keep exactly this drain behavior.
+
 ## Numeric metadata
 
 Integer tokens range from -2^63 through 2^64-1. Decimal tokens map to finite

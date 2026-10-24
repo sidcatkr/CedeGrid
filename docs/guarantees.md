@@ -93,7 +93,10 @@ Own work grows on CPU and RAM only after both have stayed stable for
 whichever is longer. Unset, each is its mode's scale-up interval: 30 s in Yield First, 10 s in
 Neutral and 2 s in Performance. `gpu.scale_up_cooldown_ms` applies to GPU work only.
 
-Automatic yielding releases opportunistic allocations first. Guaranteed allocations
+Memory contention starts with a resource target for workers that read targets
+(see [worker protocol](worker-protocol.md#resource-targets)); usage still above the
+target at the hint deadline, 5 s by default, leads to a drain. Other workers are
+drained without the hint. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
 remain fully charged, including pending and uncertain reservations. They may be
 lowered in share or capped, are never paused, and are drained automatically only
 under floor policy A. Explicit node drain retains its all-allocation stop semantics.

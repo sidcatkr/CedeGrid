@@ -445,7 +445,7 @@ after the hint deadline (quickstart §6).
 - [X] T081 [US4] Add the optional v2 context keys `resource_target_file` and `capabilities` in
   the native context builder in `src/agent.rs` and in the `supervise` path. The SDKs must keep
   accepting `schema_version == 2`.
-- [ ] T082 [US4] Document in `docs/worker-protocol.md` the target channel, the ack, deadlines,
+- [X] T082 [US4] Document in `docs/worker-protocol.md` the target channel, the ack, deadlines,
   and drain exit semantics.
 
 **Checkpoint**: memory contention can be resolved in place by cooperative workers.
