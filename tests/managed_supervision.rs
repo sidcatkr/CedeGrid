@@ -781,3 +781,170 @@ fn supervisor_loss_before_child_authorization_retains_then_reconciles_family() {
     let records = cedegrid::agent::reconcile(&config).unwrap();
     assert_eq!(records[0].phase, ExecutionPhase::Released);
 }
+
+/// The `ps` run state of a process, such as `S`, `R` or `T` (stopped).
+fn run_state(pid: u32) -> String {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Pauses CPU, then reverses it, and samples each process's run state after
+/// each adjustment is reported.
+struct ActuationAudit {
+    dir: std::path::PathBuf,
+    foreign: u32,
+    stage: u8,
+    reports: Vec<supervision::SupervisorReport>,
+    paused: BTreeMap<&'static str, String>,
+    resumed: BTreeMap<&'static str, String>,
+}
+impl ActuationAudit {
+    fn pids(&self) -> Option<BTreeMap<&'static str, u32>> {
+        let read = |name: &str| -> Option<u32> {
+            fs::read_to_string(self.dir.join(name))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        };
+        Some(BTreeMap::from([
+            ("leader", read("leader.pid")?),
+            ("child", read("child.pid")?),
+            ("loose", read("loose.pid")?),
+            ("foreign", self.foreign),
+        ]))
+    }
+    fn sample(&self) -> BTreeMap<&'static str, String> {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        self.pids()
+            .unwrap()
+            .into_iter()
+            .map(|(name, pid)| (name, run_state(pid)))
+            .collect()
+    }
+}
+fn cpu_step(
+    sequence: u64,
+    step: cedegrid::contention::YieldStep,
+) -> supervision::SupervisorCommand {
+    use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};
+    supervision::SupervisorCommand::Adjust {
+        sequence,
+        resources: BTreeMap::from([(
+            ResourceKey::Cpu,
+            StepRequest {
+                step,
+                target: None,
+                cause: YieldCause::ExternalGrowth,
+            },
+        )]),
+    }
+}
+impl supervision::SupervisorControl for ActuationAudit {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        use cedegrid::contention::YieldStep;
+        Ok(match self.stage {
+            0 if self.pids().is_some() => {
+                self.stage = 1;
+                vec![cpu_step(1, YieldStep::Pause)]
+            }
+            1 if self.reports.len() == 1 => {
+                self.paused = self.sample();
+                self.stage = 2;
+                vec![cpu_step(2, YieldStep::None)]
+            }
+            2 if self.reports.len() == 2 => {
+                self.resumed = self.sample();
+                self.stage = 3;
+                fs::write(self.dir.join("stop"), "").unwrap();
+                vec![]
+            }
+            _ => vec![],
+        })
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        self.reports.push(report);
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_steps_reach_only_the_verified_family() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    // A test-owned process outside the family, and an unmanaged fork inside the
+    // job, are never verified, so no step may reach either of them.
+    let mut foreign = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let mut request = request(
+        dir.path(),
+        r#"
+import os,sys,time,subprocess
+from pathlib import Path
+from cedegrid import spawn_managed
+d=Path.cwd()
+child=spawn_managed([sys.executable,'-c',"import os,time,pathlib;pathlib.Path(%r,'child.pid').write_text(str(os.getpid()));time.sleep(30)" % str(d)],single_process=True,no_escape=True)
+loose=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+(d/'loose.pid').write_text(str(loose.pid))
+(d/'leader.pid').write_text(str(os.getpid()))
+while not (d/'stop').exists():
+    time.sleep(0.02)
+loose.kill();loose.wait()
+child.stop();child.wait(timeout=6,poll_interval=.01)
+"#,
+    );
+    request.class = AllocationClass::Opportunistic;
+    let mut audit = ActuationAudit {
+        dir: dir.path().to_owned(),
+        foreign: foreign.id(),
+        stage: 0,
+        reports: vec![],
+        paused: BTreeMap::new(),
+        resumed: BTreeMap::new(),
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut audit,
+    )
+    .unwrap();
+    let foreign_after = run_state(foreign.id());
+    let foreign_alive = foreign.try_wait().unwrap().is_none();
+    foreign.kill().unwrap();
+    foreign.wait().unwrap();
+    assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+    assert_eq!(audit.stage, 3, "{:?}", audit.reports);
+    let applied: Vec<_> = audit
+        .reports
+        .iter()
+        .map(|report| match report {
+            supervision::SupervisorReport::Adjusted { applied, .. } => {
+                applied[&cedegrid::contention::ResourceKey::Cpu]
+            }
+            other => panic!("unexpected report {other:?}"),
+        })
+        .collect();
+    use cedegrid::contention::YieldStep;
+    assert_eq!(applied, [YieldStep::Pause, YieldStep::None]);
+    for name in ["leader", "child"] {
+        assert!(audit.paused[name].contains('T'), "{:?}", audit.paused);
+        assert!(!audit.resumed[name].contains('T'), "{:?}", audit.resumed);
+    }
+    for name in ["loose", "foreign"] {
+        assert!(!audit.paused[name].contains('T'), "{:?}", audit.paused);
+        assert!(!audit.resumed[name].contains('T'), "{:?}", audit.resumed);
+    }
+    assert!(
+        foreign_alive && !foreign_after.contains('T'),
+        "{foreign_after}"
+    );
+}

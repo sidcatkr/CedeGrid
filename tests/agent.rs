@@ -1470,3 +1470,195 @@ fn advertised_controls_come_from_backend_capability_never_from_observations() {
         );
     }
 }
+
+/// The `ps` run state of a process, such as `S`, `R` or `T` (stopped).
+fn run_state(pid: u32) -> String {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[test]
+fn a_reconnected_controller_still_reaches_only_the_verified_family() {
+    let dir = directory();
+    let mut foreign = Command::new("sleep").arg("30").spawn().unwrap();
+    let code = r#"
+import os,sys,time,subprocess
+from pathlib import Path
+d=Path.cwd()
+loose=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+(d/'loose.pid').write_text(str(loose.pid))
+(d/'leader.pid').write_text(str(os.getpid()))
+while not (d/'stop').exists():
+    time.sleep(0.02)
+loose.kill();loose.wait()
+"#;
+    let mut spec = spec(
+        dir.path(),
+        AllocationClass::Opportunistic,
+        vec![
+            std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into()),
+            "-c".into(),
+            code.into(),
+        ],
+    );
+    spec.config.lifecycle.allocation_lease_ms = 20_000;
+    let token = "5a".repeat(32);
+    spec.control_token = Some(token.clone());
+    let (mut child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    authorize(&mut input, 20_000);
+    let end = Instant::now() + Duration::from_secs(10);
+    while read_pid(&dir.path().join("leader.pid")).is_none() {
+        assert!(Instant::now() < end, "job never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let leader = read_pid(&dir.path().join("leader.pid")).unwrap();
+    let loose = read_pid(&dir.path().join("loose.pid")).unwrap();
+    // The first agent is gone; a restarted one reconnects through the socket.
+    drop(input);
+    let socket: serde_json::Value =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("control-socket.json")).unwrap())
+            .unwrap();
+    let mut stream = cedegrid::supervision::control_socket::connect(
+        Path::new(socket["path"].as_str().unwrap()),
+        &token,
+    )
+    .unwrap();
+    let (tx, events) = mpsc::channel();
+    let reader = stream.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                let _ = tx.send(value);
+            }
+        }
+    });
+    let mut adjust = |sequence: u64, step: &str| {
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"kind":"adjust","sequence":sequence,"resources":{"cpu":{"step":step,"cause":"external_growth"}}})
+        )
+        .unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < end, "no adjusted event for {sequence}");
+            if let Ok(event) = events.recv_timeout(Duration::from_millis(100))
+                && event["event"] == "adjusted"
+            {
+                assert_eq!(event["sequence"], sequence);
+                assert_eq!(event["applied"]["cpu"], step, "{event}");
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        [leader, loose, foreign.id()].map(run_state)
+    };
+    let paused = adjust(1, "pause");
+    let resumed = adjust(2, "none");
+    fs::write(dir.path().join("stop"), "").unwrap();
+    let status = wait(&mut child);
+    let foreign_alive = foreign.try_wait().unwrap().is_none();
+    let foreign_after = run_state(foreign.id());
+    foreign.kill().unwrap();
+    foreign.wait().unwrap();
+    assert!(status.success());
+    assert!(paused[0].contains('T'), "{paused:?}");
+    assert!(
+        !paused[1].contains('T') && !paused[2].contains('T'),
+        "{paused:?}"
+    );
+    assert!(
+        resumed.iter().all(|state| !state.contains('T')),
+        "{resumed:?}"
+    );
+    assert!(
+        foreign_alive && !foreign_after.contains('T'),
+        "{foreign_after}"
+    );
+    let outcome: ExecutionOutcome =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
+            .unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(!outcome.yielded, "{outcome:?}");
+}
+
+/// A restarted agent never reattaches to, or signals, a process that reuses the
+/// recorded supervisor PID (FR-002).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_agent_refuses_a_reused_supervisor_pid() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(30)".into()],
+        |local| {
+            // The orphaned supervisor stays live past the restart, then drains.
+            local.config.lifecycle.allocation_lease_ms = 6000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("first");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+    // The recorded supervisor PID now names another live process.
+    let mut decoy = Command::new("sleep").arg("30").spawn().unwrap();
+    let record = service.record().unwrap();
+    let path = service
+        .local
+        .config
+        .state_dir
+        .join("attempts")
+        .join(&record.assignment_id)
+        .join("supervisor-identity.json");
+    let mut identity: ProcessIdentity = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let supervisor = identity.pid;
+    identity.pid = decoy.id();
+    fs::write(&path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let mut restarted = service.agent("second");
+    let mut states = vec![];
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        states.push(run_state(decoy.id()));
+    }
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    let decoy_alive = decoy.try_wait().unwrap().is_none();
+    decoy.kill().unwrap();
+    decoy.wait().unwrap();
+    // The orphaned supervisor drains at its own lease expiry and exits.
+    let end = Instant::now() + Duration::from_secs(15);
+    while unsafe { libc::kill(supervisor as libc::pid_t, 0) } == 0 {
+        assert!(Instant::now() < end, "orphaned supervisor did not exit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    service.server.abort();
+    let log = fs::read_to_string(service.dir.path().join("second.log")).unwrap();
+    assert!(!log.contains("supervisor_reattached"), "{log}");
+    assert!(
+        log.contains("supervisor_not_reattached") && log.contains("supervisor is not live"),
+        "{log}"
+    );
+    assert!(decoy_alive, "the decoy was signaled");
+    assert!(
+        states.iter().all(|state| !state.contains('T')),
+        "{states:?}"
+    );
+}

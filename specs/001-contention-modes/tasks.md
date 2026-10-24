@@ -242,10 +242,12 @@ pause and then reverses, with no drain (quickstart §3).
   - an unknown `kind` is ignored and does not count as AgentLost;
   - `pause` is refused for Guaranteed work;
   - `adjusted` reports unavailable steps.
-- [ ] T036 [P] [US2] Add actuation audit tests in `tests/managed_supervision.rs`:
+- [X] T036 [P] [US2] Add actuation audit tests in `tests/managed_supervision.rs`:
   - every signal and control write targets a verified identity;
   - a reused PID and a foreign PID in a cgroup leaf are refused;
   - both checks still hold after an agent restart reconnects to the supervisor (FR-002).
+  The restart cases use the supervisor harness in `tests/agent.rs`, and the leaf cases the
+  fixture tree in `tests/cgroup.rs`.
 - [X] T037 [P] [US2] Add an agent restart test in `tests/agent.rs`: the restarted agent
   reconnects through `control.sock`, reads the applied steps, and never marks the live
   supervisor NeedsReconciliation.
