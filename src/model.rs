@@ -294,6 +294,12 @@ pub struct AllocationFacts {
         crate::contention::ResourceKey,
         std::collections::BTreeSet<crate::contention::YieldStep>,
     >,
+    /// The worker acknowledged its resource-target file (FR-062).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hint_ready: bool,
+    /// The worker polls the drain file: it acked targets or used the supervisor socket.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub observes_drain: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -196,6 +196,8 @@ fn report_overflow_and_invalid_controls_fail_without_dropping_inventory() {
             observed: None,
             detail: String::new(),
             yield_cause: None,
+            hint_ready: None,
+            observes_drain: None,
         })
         .collect();
     assert!(report.validate_bounds().is_err());

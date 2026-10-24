@@ -100,6 +100,8 @@ fn four_thousand_released_records_component_cost() {
                     observed: None,
                     detail: r.detail,
                     yield_cause: None,
+                    hint_ready: None,
+                    observes_drain: None,
                 })
                 .collect();
             let report = NodeReport {

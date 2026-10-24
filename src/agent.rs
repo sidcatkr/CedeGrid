@@ -85,6 +85,11 @@ enum Event {
         applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
         unavailable: BTreeMap<crate::contention::ResourceKey, Vec<crate::contention::YieldStep>>,
         detail: String,
+        /// Readiness (FR-062); an older supervisor reports none, which is not ready.
+        #[serde(default)]
+        hint_ready: bool,
+        #[serde(default)]
+        observes_drain: bool,
     },
     State {
         applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
@@ -96,6 +101,14 @@ enum Event {
         sequence: u64,
         /// "connected" or "lost"
         authority: String,
+        #[serde(default)]
+        hint_ready: bool,
+        #[serde(default)]
+        observes_drain: bool,
+    },
+    Readiness {
+        hint_ready: bool,
+        observes_drain: bool,
     },
 }
 /// One line from the agent. A line that does not parse is reported and ignored;
@@ -439,23 +452,38 @@ impl SupervisorControl for PipeControl {
                 applied,
                 unavailable,
                 detail,
+                hint_ready,
+                observes_drain,
             } => Event::Adjusted {
                 sequence,
                 applied,
                 unavailable,
                 detail,
+                hint_ready,
+                observes_drain,
             },
             supervision::SupervisorReport::State {
                 applied,
                 targets,
                 lease_sequence,
                 sequence,
+                hint_ready,
+                observes_drain,
             } => Event::State {
                 applied,
                 targets,
                 lease_sequence,
                 sequence,
                 authority: if self.agent_lost { "lost" } else { "connected" }.into(),
+                hint_ready,
+                observes_drain,
+            },
+            supervision::SupervisorReport::Readiness {
+                hint_ready,
+                observes_drain,
+            } => Event::Readiness {
+                hint_ready,
+                observes_drain,
             },
         };
         self.send_event(&event)
@@ -858,6 +886,9 @@ struct ChildSlot {
     /// Steps the supervisor reported applied, and the last acknowledged sequence.
     applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
     applied_sequence: u64,
+    /// Readiness as the supervisor last reported it (FR-062).
+    hint_ready: bool,
+    observes_drain: bool,
     /// When the first Drain was sent, by local policy or for the coordinator.
     drain_sent_at: Option<Instant>,
     /// Why it was drained, reported to the coordinator once negotiated.
@@ -869,6 +900,26 @@ struct ChildSlot {
     sent_steps: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
     /// Steps learned from a reattached supervisor, to seed the policy authority.
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
+}
+
+impl ChildSlot {
+    /// Readiness only turns true: an ack or a served request cannot be undone.
+    fn note_readiness(&mut self, hint_ready: bool, observes_drain: bool) {
+        self.hint_ready |= hint_ready;
+        self.observes_drain |= observes_drain;
+    }
+
+    /// What observation cannot show the policy about this allocation.
+    fn facts(&self) -> crate::model::AllocationFacts {
+        let since = self.last_checkpoint_at.unwrap_or(self.started_at);
+        crate::model::AllocationFacts {
+            uncontrollable: self.exited || self.sequence == 0,
+            progress_lost_ms: since.elapsed().as_millis() as u64,
+            unavailable: self.unavailable.clone(),
+            hint_ready: self.hint_ready,
+            observes_drain: self.observes_drain,
+        }
+    }
 }
 impl Drop for ChildSlot {
     fn drop(&mut self) {
@@ -902,6 +953,32 @@ fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) {
     }
     // A closed pipe already means agent loss for this supervisor.
     let _ = send(slot, &Control::Drain { cause });
+}
+/// Ask for TERM without the drain-file wait (FR-063); a supervisor that does not
+/// know the step drains instead.
+fn terminate(
+    slot: &mut ChildSlot,
+    key: crate::contention::ResourceKey,
+    cause: Option<crate::contention::YieldCause>,
+) {
+    slot.drain_sent_at.get_or_insert_with(Instant::now);
+    if slot.drain_cause.is_none() {
+        slot.drain_cause = cause;
+    }
+    slot.adjust_sequence += 1;
+    let message = Control::Adjust {
+        sequence: slot.adjust_sequence,
+        resources: BTreeMap::from([(
+            key,
+            crate::contention::StepRequest {
+                step: crate::contention::YieldStep::Terminate,
+                target: None,
+                cause: cause.unwrap_or(crate::contention::YieldCause::FloorBreach),
+            },
+        )]),
+    };
+    // A closed pipe already means agent loss for this supervisor.
+    let _ = send(slot, &message);
 }
 /// Drains sent since the last call, local or for the coordinator, each counted once.
 fn new_drains<'a>(
@@ -1162,6 +1239,8 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         unavailable: BTreeMap::new(),
         applied: BTreeMap::new(),
         applied_sequence: 0,
+        hint_ready: false,
+        observes_drain: false,
         drain_sent_at: None,
         drain_cause: None,
         started_at: Instant::now(),
@@ -1730,6 +1809,8 @@ async fn start_assignment(
         unavailable: BTreeMap::new(),
         applied: BTreeMap::new(),
         applied_sequence: 0,
+        hint_ready: false,
+        observes_drain: false,
         drain_sent_at: None,
         drain_cause: None,
         started_at: Instant::now(),
@@ -2142,6 +2223,8 @@ async fn start_replay_session(
             observed: None,
             detail: "authenticated recovery retains original reservation".into(),
             yield_cause: None,
+            hint_ready: None,
+            observes_drain: None,
         })
         .collect();
     allocations.extend(snapshot.unrecognized.iter().cloned().map(|mut a| {
@@ -2230,6 +2313,8 @@ impl NegotiatedFeatures {
             report.contention = None;
             for allocation in &mut report.allocations {
                 allocation.yield_cause = None;
+                allocation.hint_ready = None;
+                allocation.observes_drain = None;
             }
         }
     }
@@ -2383,13 +2468,30 @@ impl AgentLoop<'_> {
                         sequence,
                         applied,
                         unavailable,
+                        hint_ready,
+                        observes_drain,
                         ..
                     }) => {
-                        merge_unavailable(&mut slot.unavailable, &applied, unavailable);
+                        for (key, steps) in unavailable {
+                            slot.unavailable.entry(key).or_default().extend(steps);
+                        }
                         slot.applied = applied;
                         slot.applied_sequence = slot.applied_sequence.max(sequence);
+                        slot.note_readiness(hint_ready, observes_drain);
                     }
-                    Ok(Event::State { applied, .. }) => slot.applied = applied,
+                    Ok(Event::State {
+                        applied,
+                        hint_ready,
+                        observes_drain,
+                        ..
+                    }) => {
+                        slot.applied = applied;
+                        slot.note_readiness(hint_ready, observes_drain);
+                    }
+                    Ok(Event::Readiness {
+                        hint_ready,
+                        observes_drain,
+                    }) => slot.note_readiness(hint_ready, observes_drain),
                     Ok(Event::Failed { detail }) | Err(detail) => {
                         emit(
                             &serde_json::json!({"event":"supervisor_error","assignment_id":slot.assignment.request.assignment_id,"detail":detail}),
@@ -2866,6 +2968,13 @@ impl AgentLoop<'_> {
             .filter(|a| a.step >= crate::contention::YieldStep::Drain)
             .map(|a| (a.allocation_id.as_str(), a.cause))
             .collect();
+        // The critical floor path terminates workers that do not poll the drain file.
+        let terminations: BTreeMap<&str, crate::contention::ResourceKey> = decision
+            .actions
+            .iter()
+            .filter(|a| a.step == crate::contention::YieldStep::Terminate)
+            .map(|a| (a.allocation_id.as_str(), a.resource.clone()))
+            .collect();
         for id in &decision.would_drain {
             // Guaranteed work drains only for a breach the policy permits.
             if let Some(slot) = self.slots.get_mut(id)
@@ -2880,7 +2989,11 @@ impl AgentLoop<'_> {
                         )
                     ))
             {
-                drain(slot, causes.get(id.as_str()).copied());
+                let cause = causes.get(id.as_str()).copied();
+                match terminations.get(id.as_str()) {
+                    Some(key) => terminate(slot, key.clone(), cause),
+                    None => drain(slot, cause),
+                }
             }
         }
         // Runtime steps go to the supervisors, which apply them to their own
@@ -2949,12 +3062,7 @@ impl AgentLoop<'_> {
             .map(|allocation| {
                 let mut facts = crate::model::AllocationFacts::default();
                 match self.slots.get(&allocation.id) {
-                    Some(slot) => {
-                        facts.uncontrollable = slot.exited || slot.sequence == 0;
-                        let since = slot.last_checkpoint_at.unwrap_or(slot.started_at);
-                        facts.progress_lost_ms = since.elapsed().as_millis() as u64;
-                        facts.unavailable = slot.unavailable.clone();
-                    }
+                    Some(slot) => facts = slot.facts(),
                     None => facts.uncontrollable = true,
                 }
                 // A rootless backend has no runtime share control (research R4).
@@ -3019,6 +3127,11 @@ impl AgentLoop<'_> {
                     .slots
                     .get(&r.assignment_id)
                     .and_then(|slot| slot.drain_cause),
+                hint_ready: self.slots.get(&r.assignment_id).map(|slot| slot.hint_ready),
+                observes_drain: self
+                    .slots
+                    .get(&r.assignment_id)
+                    .map(|slot| slot.observes_drain),
             })
             .collect();
         reports.extend(
@@ -3036,6 +3149,8 @@ impl AgentLoop<'_> {
                     observed: None,
                     detail: detail.clone(),
                     yield_cause: None,
+                    hint_ready: None,
+                    observes_drain: None,
                 }),
         );
         let available_controls = advertised_controls(config, agent.cpu_affinity.is_some());
@@ -3659,27 +3774,6 @@ fn spool_size(path: &Path) -> Result<u64> {
 }
 
 /// Record the steps a supervisor could not apply; they are skipped from now on.
-/// A refused hint is retried once its resource returns to none, because the
-/// worker may acknowledge the target channel later.
-fn merge_unavailable(
-    slot: &mut BTreeMap<crate::contention::ResourceKey, BTreeSet<crate::contention::YieldStep>>,
-    applied: &BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
-    refused: BTreeMap<crate::contention::ResourceKey, Vec<crate::contention::YieldStep>>,
-) {
-    use crate::contention::YieldStep;
-    for (key, step) in applied {
-        if *step == YieldStep::None
-            && !refused.contains_key(key)
-            && let Some(steps) = slot.get_mut(key)
-        {
-            steps.remove(&YieldStep::Hint);
-        }
-    }
-    for (key, steps) in refused {
-        slot.entry(key).or_default().extend(steps);
-    }
-}
-
 /// The agent's operator-envelope check: cumulative charges, max(request,
 /// observed), against the explicit node envelope.
 pub fn envelope_exceeded(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
@@ -4416,6 +4510,8 @@ mod negotiation_tests {
                 observed: None,
                 detail: String::new(),
                 yield_cause: Some(crate::contention::YieldCause::ExternalGrowth),
+                hint_ready: Some(true),
+                observes_drain: Some(true),
             }],
             features: vec![],
             contention: None,
@@ -4426,7 +4522,9 @@ mod negotiation_tests {
         let value = serde_json::to_value(report).unwrap();
         value.get("features").is_none()
             && value.get("contention").is_none()
-            && value["allocations"][0].get("yield_cause").is_none()
+            && ["yield_cause", "hint_ready", "observes_drain"]
+                .iter()
+                .all(|field| value["allocations"][0].get(field).is_none())
     }
 
     #[test]
@@ -4478,38 +4576,36 @@ mod drain_tests {
     use super::*;
 
     #[test]
-    fn a_refused_hint_is_retried_once_the_resource_returns_to_none() {
-        use crate::contention::{ResourceKey, YieldStep};
-        let mut unavailable = BTreeMap::new();
-        merge_unavailable(
-            &mut unavailable,
-            &BTreeMap::from([(ResourceKey::Ram, YieldStep::None)]),
-            BTreeMap::from([(ResourceKey::Ram, vec![YieldStep::Hint])]),
-        );
-        assert!(unavailable[&ResourceKey::Ram].contains(&YieldStep::Hint));
-        // The worker may acknowledge the channel later; a new episode tries again.
-        merge_unavailable(
-            &mut unavailable,
-            &BTreeMap::from([(ResourceKey::Ram, YieldStep::None)]),
-            BTreeMap::new(),
-        );
-        assert!(
-            unavailable
-                .get(&ResourceKey::Ram)
-                .is_none_or(|s| !s.contains(&YieldStep::Hint))
-        );
-        // Other refused steps stay skipped.
-        merge_unavailable(
-            &mut unavailable,
-            &BTreeMap::from([(ResourceKey::Cpu, YieldStep::None)]),
-            BTreeMap::from([(ResourceKey::Cpu, vec![YieldStep::Pause])]),
-        );
-        merge_unavailable(
-            &mut unavailable,
-            &BTreeMap::from([(ResourceKey::Cpu, YieldStep::None)]),
-            BTreeMap::new(),
-        );
-        assert!(unavailable[&ResourceKey::Cpu].contains(&YieldStep::Pause));
+    fn supervisor_readiness_reaches_the_policy_facts() {
+        // An older supervisor reports no readiness, which is not ready.
+        let older: Event = serde_json::from_str(
+            r#"{"event":"adjusted","sequence":1,"applied":{},"unavailable":{},"detail":""}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            older,
+            Event::Adjusted {
+                hint_ready: false,
+                observes_drain: false,
+                ..
+            }
+        ));
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut slot = slot_with(child, input);
+        slot.sequence = 1;
+        assert!(!slot.facts().hint_ready && !slot.facts().observes_drain);
+        slot.note_readiness(false, true);
+        slot.note_readiness(true, true);
+        // Readiness never turns false again within one supervisor.
+        slot.note_readiness(false, false);
+        let facts = slot.facts();
+        assert!(facts.hint_ready && facts.observes_drain);
     }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
@@ -4553,6 +4649,8 @@ mod drain_tests {
             unavailable: BTreeMap::new(),
             applied: BTreeMap::new(),
             applied_sequence: 0,
+            hint_ready: false,
+            observes_drain: false,
             drain_sent_at: None,
             drain_cause: None,
             started_at: Instant::now(),

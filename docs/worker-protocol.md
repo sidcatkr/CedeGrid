@@ -89,9 +89,10 @@ being drained:
 - Readers ignore unknown keys and treat `version` above 1, or an invalid file, as
   absent.
 - A worker that reads targets writes the highest sequence it has seen, `0` before
-  any target, to `resource-target.ack` in the same directory. Without an ack from
-  the leader or a managed child, the hint step is unavailable for that allocation
-  and the ladder moves on.
+  any target, to `resource-target.ack` in the same directory. The supervisor reports
+  an allocation as hint-ready once the leader or a managed child has acked, and as
+  observing the drain file once it has acked or used the supervisor socket. Only
+  hint-ready allocations receive hints; the others go straight to drain.
 - The ack shows only that the worker reads targets. Compliance is judged from
   observed usage. If usage is still above the target at `deadline_unix_ms`, the
   next step follows: drain for RAM and GPU memory; CPU stays capped at its target
@@ -110,7 +111,9 @@ are `resourceTargets()`, `onResourceTarget()` and `ResourceSignals.fromEnv()`.
 Drain is unchanged: the drain file's existence means drain, whatever a target says.
 After a drain request, publish a checkpoint at a safe boundary and exit; work that
 does not exit is terminated after the drain timeout. Workers that do not read
-targets keep exactly this drain behavior.
+targets keep exactly this drain behavior. When free memory falls below the critical
+share of a floor, hint-ready workers get a 1 s hint deadline, and a worker that
+observes neither file is sent TERM without the drain-file wait.
 
 ## Numeric metadata
 

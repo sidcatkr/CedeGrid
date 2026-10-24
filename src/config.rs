@@ -527,6 +527,10 @@ pub struct ContentionConfig {
     /// How long a hint-ready Guaranteed allocation may take to release memory
     /// before it is drained (FR-024).
     pub guaranteed_hint_deadline_s: u64,
+    /// A floor breach is critical below this share of the floor (FR-063).
+    pub critical_floor_percent: u8,
+    /// The hint deadline on the critical floor path.
+    pub critical_hint_deadline_s: u64,
     pub cpu: ResourceContentionConfig,
     pub ram: ResourceContentionConfig,
     pub gpu_compute: ResourceContentionConfig,
@@ -542,6 +546,8 @@ impl Default for ContentionConfig {
             neutral_memory_policy: NeutralMemoryPolicy::A,
             acknowledge_danger: Default::default(),
             guaranteed_hint_deadline_s: 5,
+            critical_floor_percent: 50,
+            critical_hint_deadline_s: 1,
             cpu: Default::default(),
             ram: Default::default(),
             gpu_compute: Default::default(),
@@ -753,6 +759,20 @@ impl ContentionConfig {
         ensure!(
             (1..=30).contains(&self.guaranteed_hint_deadline_s),
             "contention.guaranteed_hint_deadline_s must be between 1 and 30"
+        );
+        ensure!(
+            (10..=90).contains(&self.critical_floor_percent),
+            "contention.critical_floor_percent must be between 10 and 90"
+        );
+        let shortest_hint = [Ram, GpuMemory]
+            .into_iter()
+            .map(|kind| self.thresholds(kind).hint_deadline_s)
+            .chain([self.guaranteed_hint_deadline_s])
+            .min()
+            .unwrap_or(1);
+        ensure!(
+            (1..=shortest_hint).contains(&self.critical_hint_deadline_s),
+            "contention.critical_hint_deadline_s must be at least 1 and at most every memory hint deadline"
         );
         for kind in ResourceKind::ALL {
             let name = kind.name();

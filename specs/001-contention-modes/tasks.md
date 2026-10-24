@@ -480,14 +480,14 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
     target(P) (SC-013);
   - the contended targets from data-model.md, including unknown activity;
   - a Guaranteed CPU cap never goes below the request.
-- [ ] T125 [P] Add scenario tests in `tests/contention.rs` (B8, SC-002, SC-012):
+- [X] T125 [P] Add scenario tests in `tests/contention.rs` (B8, SC-002, SC-012):
   - CPU is returned within 2 monitor intervals in Yield First, Neutral and Performance,
     including own work with many threads saturating the host;
   - after the external load stops or shrinks, a held cap rises again at the mode's rate;
   - RAM reclaim for a hint-ready, a non-ready and a Guaranteed allocation within the SC-012
     bounds;
   - the critical floor path within its shorter bounds.
-- [ ] T126 [P] Add readiness tests (B5):
+- [X] T126 [P] Add readiness tests (B5):
   - in `tests/managed_supervision.rs`: `adjusted`, `state` and `readiness` carry `hint_ready`
     and `observes_drain`; a worker that acks late becomes hint-ready by the next interval; a
     plain command is neither;
@@ -525,7 +525,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   `NodeContentionReport` in `src/protocol.rs`; `docs/guarantees.md`.
 - [X] T132 Implement ordered targets, the contended state, cap relaxation and the Guaranteed CPU
   rule in `src/contention.rs` and `src/policy.rs` (B4, B10).
-- [ ] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
+- [X] T133 Implement readiness (B5): tracking and events in `src/supervision.rs`, facts and
   report fields in `src/agent.rs` and `src/protocol.rs`, the hint rule, the critical path and
   `terminate` in `src/policy.rs` and `src/contention.rs`; remove the refused-hint retry.
 - [ ] T134 Implement principal classification in `src/policy.rs`, `src/contention.rs` and

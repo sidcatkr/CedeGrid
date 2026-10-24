@@ -111,6 +111,11 @@ pub struct AllocationReport {
     /// Why the allocation yielded. Sent only after `contention/1` negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yield_cause: Option<crate::contention::YieldCause>,
+    /// Readiness as the supervisor reports it (FR-062), after negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observes_drain: Option<bool>,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

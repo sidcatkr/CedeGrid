@@ -304,6 +304,8 @@ fn uncertain_allocations_stay_reserved_until_release() {
         observed: None,
         detail: "verified pidfd exit and resource release".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 20_001)
@@ -661,6 +663,8 @@ fn checkpoints_do_not_rewind_and_follow_retries() {
         observed: None,
         detail: "released after checkpoint drain".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, 105)
         .unwrap();
@@ -857,6 +861,8 @@ fn higher_priority_preemption_waits_for_verified_release() {
         observed: Some(a.request.resources.clone()),
         detail: "running before preemption".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 102)
@@ -873,6 +879,8 @@ fn higher_priority_preemption_waits_for_verified_release() {
         observed: None,
         detail: "verified release".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     };
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r }, 103)
@@ -923,6 +931,8 @@ fn unknown_managed_allocation_blocks_expansion() {
         observed: Some(Resources::default()),
         detail: "requires local reconciliation".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report }, 100)
@@ -1002,6 +1012,8 @@ fn released_failure(c: &mut Coordinator, a: &Assignment, now: u64, kind: Failure
         observed: None,
         detail: "verified release".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, now)
         .unwrap();
@@ -1120,6 +1132,8 @@ fn draining_and_uncertain_reports_cannot_be_reactivated_by_later_running_reports
         observed: Some(a.request.resources.clone()),
         detail: "local policy drain".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 101)
         .unwrap();
@@ -1173,6 +1187,8 @@ fn delayed_node_telemetry_is_rejected_and_new_live_release_contradiction_reclaim
         observed: None,
         detail: "verified exit".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 110)
         .unwrap();
@@ -1313,6 +1329,8 @@ fn named_inputs_require_publication_and_only_authorize_current_assignees() {
         observed: None,
         detail: "never launched; release verified".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     }];
     c.handle_at(&principal, Request::Heartbeat { report: nr }, 112)
         .unwrap();
@@ -1350,6 +1368,8 @@ fn missing_live_allocation_blocks_growth_and_cannot_be_revived_by_running_report
         observed: Some(a.request.resources.clone()),
         detail: "late running report".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 103)
@@ -1462,6 +1482,8 @@ fn task_uncertain_on_one_node_cannot_preempt_another_nodes_healthy_work() {
         observed: Some(b.request.resources.clone()),
         detail: "healthy".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     let Response::Heartbeat { reply } = c
         .handle_at(&other, Request::Heartbeat { report: r }, 10200)
@@ -1552,6 +1574,8 @@ fn unknown_allocations_remain_fenced_through_omission_and_restart_until_verified
         observed: Some(Resources::default()),
         detail: "post-snapshot local journal".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r.clone() }, 100)
         .unwrap();
@@ -1800,6 +1824,8 @@ fn four_thousand_historical_tasks_page_while_oversized_inventory_is_refused() {
             observed: None,
             detail: detail.into(),
             yield_cause: None,
+            hint_ready: None,
+            observes_drain: None,
         });
     }
     tx.commit().unwrap();
@@ -2108,6 +2134,8 @@ fn allocation_report(a: &Assignment, phase: RemotePhase) -> AllocationReport {
         observed: Some(a.request.resources.clone()),
         detail: "scoped coordinator regression".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     }
 }
 
@@ -2443,6 +2471,8 @@ fn replay_allocation_report(a: &Assignment, phase: RemotePhase) -> AllocationRep
         observed: Some(a.request.resources.clone()),
         detail: "independent recovery evidence fixture".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     }
 }
 fn replay_database(path: &std::path::Path) -> rusqlite::Connection {
@@ -2917,6 +2947,8 @@ fn replay_snapshot_retains_unrecognized_allocations_until_explicit_release() {
         observed: None,
         detail: "state loss".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     };
     let mut old = report(100);
     old.allocations.push(orphan.clone());
@@ -3268,6 +3300,8 @@ fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
         observed: None,
         detail: "verified release".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     // The node reports why it drained the other attempt (negotiated field).
     r.allocations.push(AllocationReport {
@@ -3277,6 +3311,8 @@ fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
         observed: None,
         detail: "local yield".into(),
         yield_cause: Some(cedegrid::contention::YieldCause::ExternalGrowth),
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, 101)
         .unwrap();
@@ -3300,6 +3336,8 @@ fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
         observed: None,
         detail: "verified release".into(),
         yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
     });
     c.handle_at(&node(), Request::Heartbeat { report: r }, 102)
         .unwrap();

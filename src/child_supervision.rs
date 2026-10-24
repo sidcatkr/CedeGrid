@@ -47,6 +47,9 @@ struct ChildServer {
     publisher: Option<crate::publication::PublisherService>,
     namespace_id: String,
     session_id: String,
+    /// An authenticated request arrived, so the worker uses the SDK and polls the
+    /// drain file (FR-062).
+    served: bool,
 }
 impl ChildServer {
     fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup, journal: &dyn ExecutionJournal) -> Result<Option<Self>> {
@@ -86,6 +89,7 @@ impl ChildServer {
             generation,
             setup,
             publisher, namespace_id, session_id,
+            served: false,
         }))
     }
     fn expose(&self, request: &mut LaunchRequest) {
@@ -99,6 +103,9 @@ impl ChildServer {
         request
             .env
             .insert("CEDEGRID_SUPERVISOR_TOKEN".into(), self.token.clone());
+    }
+    fn served(&self) -> bool {
+        self.served
     }
     /// Verified identities of mediated children that are running user code.
     /// Private directories of running children, for resource targets.
@@ -237,6 +244,7 @@ impl ChildServer {
                         )? == *parent_identity,
                         "allocation leader identity is no longer verified"
                     );
+                    self.served = true;
                     match value["op"].as_str() {
                         Some("artifact_begin" | "artifact_chunk" | "artifact_finish" | "publication_commit" | "publication_status" | "publication_abort") => {
                             connection.reply = Some(self.publisher.as_ref().context("publication is unavailable for this invocation")?.submit(value)?);

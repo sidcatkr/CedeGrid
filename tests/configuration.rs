@@ -708,6 +708,11 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention]\nguaranteed_hint_deadline_s = 31",
         "[contention.ram]\nguaranteed_breach_window_s = 61",
         "[contention.gpu_memory]\nguaranteed_breach_window_s = 5",
+        "[contention]\ncritical_floor_percent = 5",
+        "[contention]\ncritical_floor_percent = 95",
+        "[contention]\ncritical_hint_deadline_s = 0",
+        "[contention]\ncritical_hint_deadline_s = 6",
+        "[contention]\nguaranteed_hint_deadline_s = 2\ncritical_hint_deadline_s = 3",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

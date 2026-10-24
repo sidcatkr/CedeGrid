@@ -84,6 +84,8 @@ pub struct Lifecycle {
     drain_ms: u64,
     term_ms: u64,
     drain_at_ms: Option<u64>,
+    /// TERM without the drain-file wait, on the critical floor path (FR-063).
+    terminate: bool,
     pub phase: LifecyclePhase,
 }
 impl Lifecycle {
@@ -105,6 +107,7 @@ impl Lifecycle {
             drain_ms: options.drain_timeout_ms,
             term_ms: options.term_grace_ms,
             drain_at_ms: None,
+            terminate: false,
             phase: LifecyclePhase::Running,
         }
     }
@@ -158,6 +161,17 @@ impl Lifecycle {
             self.phase = LifecyclePhase::Draining;
         }
     }
+    /// Skip the drain-file wait and send TERM now, then KILL after the grace.
+    pub fn request_terminate(&mut self, now_ms: u64) {
+        if self.phase == LifecyclePhase::Running {
+            self.terminate = true;
+            self.request_drain(now_ms);
+            self.tick(now_ms);
+        }
+    }
+    fn drain_wait_ms(&self) -> u64 {
+        if self.terminate { 0 } else { self.drain_ms }
+    }
     pub fn tick(&mut self, now_ms: u64) -> LifecyclePhase {
         if matches!(
             self.phase,
@@ -174,9 +188,9 @@ impl Lifecycle {
         }
         if let Some(start) = self.drain_at_ms {
             let elapsed = now_ms.saturating_sub(start);
-            if elapsed >= self.drain_ms.saturating_add(self.term_ms) {
+            if elapsed >= self.drain_wait_ms().saturating_add(self.term_ms) {
                 self.phase = LifecyclePhase::KillRequested;
-            } else if elapsed >= self.drain_ms {
+            } else if elapsed >= self.drain_wait_ms() {
                 self.phase = LifecyclePhase::Terminating;
             }
         }
@@ -192,7 +206,7 @@ impl Lifecycle {
     /// When SIGTERM is due: the drain request plus the drain timeout.
     pub fn termination_deadline_ms(&self) -> Option<u64> {
         self.drain_at_ms
-            .map(|start| start.saturating_add(self.drain_ms))
+            .map(|start| start.saturating_add(self.drain_wait_ms()))
     }
 }
 
@@ -269,6 +283,11 @@ pub enum SupervisorReport {
             Vec<crate::contention::YieldStep>,
         >,
         detail: String,
+        /// Readiness as of this report (FR-062).
+        #[serde(default)]
+        hint_ready: bool,
+        #[serde(default)]
+        observes_drain: bool,
     },
     State {
         applied: std::collections::BTreeMap<
@@ -279,6 +298,16 @@ pub enum SupervisorReport {
         lease_sequence: u64,
         /// The last applied `adjust` sequence.
         sequence: u64,
+        #[serde(default)]
+        hint_ready: bool,
+        #[serde(default)]
+        observes_drain: bool,
+    },
+    /// Readiness changed: the worker acked its target file or used the
+    /// supervisor socket (FR-062).
+    Readiness {
+        hint_ready: bool,
+        observes_drain: bool,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1001,6 +1030,7 @@ mod unix {
         directories: &[PathBuf],
         journal: &dyn ExecutionJournal,
         control: &mut dyn SupervisorControl,
+        (hint_ready, observes_drain): (bool, bool),
     ) {
         use crate::contention::{ResourceKind, StepRequest, YieldCause, YieldStep};
         for command in commands {
@@ -1046,8 +1076,18 @@ mod unix {
                                         | YieldCause::OperatorDrain
                                 );
                             if permitted && lifecycle.phase == LifecyclePhase::Running {
-                                lifecycle.request_drain(elapsed);
-                                applied.insert(key.clone(), YieldStep::Drain);
+                                // The critical floor path skips the drain-file wait
+                                // for a worker that does not poll it (FR-063).
+                                let step = if wanted.step == YieldStep::Terminate
+                                    && wanted.cause == YieldCause::FloorBreach
+                                {
+                                    lifecycle.request_terminate(elapsed);
+                                    YieldStep::Terminate
+                                } else {
+                                    lifecycle.request_drain(elapsed);
+                                    YieldStep::Drain
+                                };
+                                applied.insert(key.clone(), step);
                                 contention.applied.insert(key, wanted);
                             } else {
                                 unavailable
@@ -1154,6 +1194,8 @@ mod unix {
                         applied,
                         unavailable,
                         detail: details.join("; "),
+                        hint_ready,
+                        observes_drain,
                     });
                 }
                 SupervisorCommand::Query => {
@@ -1170,6 +1212,8 @@ mod unix {
                             .collect(),
                         lease_sequence: lifecycle.lease_sequence(),
                         sequence: contention.sequence,
+                        hint_ready,
+                        observes_drain,
                     });
                 }
                 _ => {}
@@ -1290,6 +1334,10 @@ mod unix {
         let mut exec_sent = false;
         let mut actuator: Option<Box<dyn Actuator>> = None;
         let mut meter = crate::actuation::CpuMeter::default();
+        // (hint_ready, observes_drain), reported when either changes (FR-062).
+        let mut readiness = (false, false);
+        let mut readiness_checked_at: Option<Instant> = None;
+        let duty_period = Duration::from_millis(options.duty_period_ms.max(1));
         let mut contention = crate::contention::AllocationContention::default();
         let mut targets = crate::actuation::TargetChannel::new(options.hint_deadline_ms);
         let result = (|| -> Result<ExecutionOutcome> {
@@ -1632,6 +1680,31 @@ mod unix {
                     if let Some(server) = children.as_ref() {
                         directories.extend(server.target_directories());
                     }
+                    // Readiness only ever turns true, so a ready family is not
+                    // checked again; others are checked once per duty period.
+                    let served = children.as_ref().is_some_and(|server| server.served());
+                    if !readiness.0
+                        && readiness_checked_at
+                            .is_none_or(|at: Instant| at.elapsed() >= duty_period)
+                    {
+                        readiness_checked_at = Some(Instant::now());
+                        let hint_ready =
+                            crate::actuation::TargetChannel::acknowledged(&directories);
+                        let next = (hint_ready, hint_ready || served);
+                        if next != readiness {
+                            readiness = next;
+                            let _ = control.report(SupervisorReport::Readiness {
+                                hint_ready: readiness.0,
+                                observes_drain: readiness.1,
+                            });
+                        }
+                    } else if served && !readiness.1 {
+                        readiness.1 = true;
+                        let _ = control.report(SupervisorReport::Readiness {
+                            hint_ready: readiness.0,
+                            observes_drain: true,
+                        });
+                    }
                     let mut family = OwnedFamily {
                         leader: &mut *owned,
                         identity: &leader_identity,
@@ -1652,6 +1725,7 @@ mod unix {
                             &directories,
                             journal,
                             control,
+                            readiness,
                         );
                     }
                     if lifecycle.phase == LifecyclePhase::Running
@@ -2249,6 +2323,16 @@ mod tests {
         assert_eq!(state.tick(130), LifecyclePhase::Terminating);
         assert_eq!(state.tick(150), LifecyclePhase::KillRequested);
         assert_ne!(state.tick(100_000), LifecyclePhase::Released);
+    }
+    /// The critical floor path skips the drain-file wait (FR-063).
+    #[test]
+    fn terminate_sends_term_at_once_and_kill_after_the_grace() {
+        let mut state = lifecycle(AllocationClass::Guaranteed);
+        state.request_terminate(10);
+        assert_eq!(state.phase, LifecyclePhase::Terminating);
+        assert_eq!(state.termination_deadline_ms(), Some(10));
+        assert_eq!(state.tick(29), LifecyclePhase::Terminating);
+        assert_eq!(state.tick(30), LifecyclePhase::KillRequested);
     }
     #[test]
     fn loss_modes_have_different_guarantees() {

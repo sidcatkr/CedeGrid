@@ -753,12 +753,225 @@ mod guaranteed_policy {
         }
     }
 
-    /// 32000 MiB total, a 1000 MiB floor and 24000 MiB of external use: own
-    /// work may hold 7000 MiB before the floor is breached.
+    /// 32000 MiB total with 700 MiB free and a 1000 MiB floor: the floor is
+    /// breached, but free memory is above the critical level (512 MiB, the
+    /// minimum floor, since half the floor is less).
     fn breached() -> Snapshot {
+        let mut snapshot = snapshot(1000);
+        snapshot.available_ram_mib = Some(700);
+        snapshot
+    }
+
+    /// No free memory: a critical floor breach (FR-063).
+    fn critical() -> Snapshot {
         let mut snapshot = snapshot(1000);
         snapshot.available_ram_mib = Some(0);
         snapshot
+    }
+
+    /// Readiness facts for one allocation, as its supervisor reports them.
+    fn ready(hint_ready: bool, observes_drain: bool) -> AllocationFacts {
+        AllocationFacts {
+            hint_ready,
+            observes_drain,
+            ..AllocationFacts::default()
+        }
+    }
+
+    /// When each allocation first reaches each step, over `until_ms`.
+    fn first_steps(
+        config: &Config,
+        snapshot: &dyn Fn(u64) -> Snapshot,
+        allocations: Vec<Allocation>,
+        facts: BTreeMap<String, AllocationFacts>,
+        until_ms: u64,
+    ) -> BTreeMap<(String, YieldStep), u64> {
+        let mut engine = PolicyEngine::new();
+        let input = PolicyInput {
+            allocations,
+            facts,
+            ..PolicyInput::default()
+        };
+        let mut first = BTreeMap::new();
+        for now in (0..=until_ms).step_by(500) {
+            let decision = engine
+                .evaluate(config, &snapshot(now), &input, now)
+                .unwrap();
+            for action in decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Ram)
+            {
+                first
+                    .entry((action.allocation_id.clone(), action.step))
+                    .or_insert(now);
+            }
+        }
+        first
+    }
+
+    /// When one opportunistic allocation with these facts first reaches each step.
+    fn alone(
+        snapshot: &dyn Fn(u64) -> Snapshot,
+        facts: AllocationFacts,
+    ) -> BTreeMap<YieldStep, u64> {
+        first_steps(
+            &config(),
+            snapshot,
+            vec![ram(
+                "a",
+                AllocationClass::Opportunistic,
+                AllocationPhase::Running,
+                8000,
+            )],
+            BTreeMap::from([("a".into(), facts)]),
+            6000,
+        )
+        .into_iter()
+        .map(|((_, step), at)| (step, at))
+        .collect()
+    }
+
+    #[test]
+    fn only_hint_ready_allocations_are_hinted_and_others_drain_without_a_probe() {
+        // A plain command drains at once, without a refused hint first.
+        let plain = alone(&|_| breached(), ready(false, false));
+        assert_eq!(plain.get(&YieldStep::Drain), Some(&0), "{plain:?}");
+        assert!(!plain.contains_key(&YieldStep::Hint), "{plain:?}");
+        // An SDK worker is hinted first and drained only at the hint deadline.
+        let sdk = alone(&|_| breached(), ready(true, true));
+        assert_eq!(sdk.get(&YieldStep::Hint), Some(&0), "{sdk:?}");
+        assert_eq!(sdk.get(&YieldStep::Drain), Some(&5000), "{sdk:?}");
+    }
+
+    #[test]
+    fn a_late_acker_is_hinted_once_its_supervisor_reports_it_ready() {
+        let mut engine = PolicyEngine::new();
+        let allocations = vec![ram(
+            "late",
+            AllocationClass::Guaranteed,
+            AllocationPhase::Running,
+            8000,
+        )];
+        let input = |hint_ready| PolicyInput {
+            allocations: allocations.clone(),
+            facts: BTreeMap::from([("late".into(), ready(hint_ready, hint_ready))]),
+            ..PolicyInput::default()
+        };
+        let calm = snapshot(1000);
+        engine.evaluate(&config(), &calm, &input(false), 0).unwrap();
+        // The worker acked during the previous interval; the next breach hints it.
+        let decision = engine
+            .evaluate(&config(), &breached(), &input(true), 500)
+            .unwrap();
+        assert_eq!(
+            step(&decision, "late"),
+            Some((YieldStep::Hint, YieldCause::FloorBreach))
+        );
+    }
+
+    #[test]
+    fn the_critical_path_shortens_the_hint_drains_at_once_and_terminates_the_unobserving() {
+        let sdk = alone(&|_| critical(), ready(true, true));
+        assert_eq!(sdk.get(&YieldStep::Hint), Some(&0), "{sdk:?}");
+        assert_eq!(sdk.get(&YieldStep::Drain), Some(&1000), "{sdk:?}");
+        // A 0.2 SDK worker polls the drain file but does not ack targets.
+        let old = alone(&|_| critical(), ready(false, true));
+        assert_eq!(old.get(&YieldStep::Drain), Some(&0), "{old:?}");
+        let plain = alone(&|_| critical(), ready(false, false));
+        assert_eq!(plain.get(&YieldStep::Terminate), Some(&0), "{plain:?}");
+        assert!(!plain.contains_key(&YieldStep::Drain), "{plain:?}");
+    }
+
+    /// SC-012: the policy's decision time plus the supervisor's deadlines (drain
+    /// timeout, termination grace) and one observation interval.
+    #[test]
+    fn sc_012_memory_reclaim_stays_within_its_bounds() {
+        let config = config();
+        let after_drain = config.lifecycle.drain_timeout_ms + config.lifecycle.term_grace_ms + 500;
+        let after_terminate = config.lifecycle.term_grace_ms + 500;
+        let decided = |snapshot: &dyn Fn(u64) -> Snapshot, class, facts, step| {
+            first_steps(
+                &config,
+                snapshot,
+                vec![ram("a", class, AllocationPhase::Running, 8000)],
+                BTreeMap::from([("a".into(), facts)]),
+                12_000,
+            )
+            .get(&("a".into(), step))
+            .copied()
+            .expect("the step is decided")
+        };
+        let opportunistic = AllocationClass::Opportunistic;
+        let guaranteed = AllocationClass::Guaranteed;
+        let hinted = decided(
+            &|_| breached(),
+            opportunistic,
+            ready(true, true),
+            YieldStep::Drain,
+        );
+        assert!(hinted + after_drain <= 10_500, "{hinted}");
+        let plain = decided(
+            &|_| breached(),
+            opportunistic,
+            ready(false, false),
+            YieldStep::Drain,
+        );
+        assert!(plain + after_drain <= 10_500, "{plain}");
+        let kept = decided(
+            &|_| breached(),
+            guaranteed,
+            ready(true, true),
+            YieldStep::Drain,
+        );
+        assert!(kept + after_drain <= 15_500, "{kept}");
+        let critical_hint = decided(
+            &|_| critical(),
+            opportunistic,
+            ready(true, true),
+            YieldStep::Drain,
+        );
+        assert!(critical_hint + after_drain <= 6500, "{critical_hint}");
+        let unobserved = decided(
+            &|_| critical(),
+            opportunistic,
+            ready(false, false),
+            YieldStep::Terminate,
+        );
+        assert!(unobserved + after_terminate <= 2500, "{unobserved}");
+    }
+
+    #[test]
+    fn guaranteed_memory_waits_for_its_hint_and_ram_window_except_on_the_critical_path() {
+        let guaranteed = || {
+            vec![ram(
+                "g",
+                AllocationClass::Guaranteed,
+                AllocationPhase::Running,
+                8000,
+            )]
+        };
+        let facts = |hint_ready| BTreeMap::from([("g".into(), ready(hint_ready, true))]);
+        let drained = |snapshot: &dyn Fn(u64) -> Snapshot, hint_ready, until| {
+            first_steps(&config(), snapshot, guaranteed(), facts(hint_ready), until)
+                .get(&("g".into(), YieldStep::Drain))
+                .copied()
+        };
+        // RAM: the longer of the Guaranteed hint deadline (5 s) and the window (10 s).
+        assert_eq!(drained(&|_| breached(), true, 12_000), Some(10_000));
+        assert_eq!(drained(&|_| breached(), false, 12_000), Some(10_000));
+        // A breach that clears within the window drains nothing.
+        let clears = |now: u64| {
+            if now < 6000 {
+                breached()
+            } else {
+                snapshot(1000)
+            }
+        };
+        assert_eq!(drained(&clears, true, 12_000), None);
+        // The critical path skips the window: the critical hint deadline, or at once.
+        assert_eq!(drained(&|_| critical(), true, 3000), Some(1000));
+        assert_eq!(drained(&|_| critical(), false, 3000), Some(0));
     }
 
     fn step(decision: &Decision, id: &str) -> Option<(YieldStep, YieldCause)> {
@@ -800,11 +1013,11 @@ mod guaranteed_policy {
 
     #[test]
     fn policy_a_drains_guaranteed_ram_only_after_the_breach_window_and_hint_deadline() {
-        // The default RAM breach window (10 s) outlasts the Guaranteed hint deadline (5 s);
-        // without a window the hint deadline alone applies.
+        // The RAM breach window (10 s) applies to a plain command too; without a
+        // window, an allocation that cannot take a hint has nothing to wait for.
         let mut no_window = config();
         no_window.contention.ram.guaranteed_breach_window_s = Some(0);
-        for (config, wait_ms) in [(config(), 10_000), (no_window, 5000)] {
+        for (config, wait_ms) in [(config(), 10_000), (no_window, 0)] {
             let decisions = run(
                 &config,
                 vec![ram(
@@ -1263,8 +1476,9 @@ mod hints {
     /// The worker's RAM action at each interval: step, target and cause.
     type Steps = Vec<(u64, Option<(YieldStep, Option<u64>, YieldCause)>)>;
 
-    /// 32000 MiB total, a 1000 MiB floor and 24000 MiB of external use: own work
-    /// may hold 7000 MiB, so an 8000 MiB allocation must release 1000 MiB.
+    /// 32000 MiB total, a 1000 MiB floor and 23300 MiB of external use: own work
+    /// may hold 7700 MiB, so an 8000 MiB allocation must release 300 MiB. The
+    /// 700 MiB left free stay above the critical level (512 MiB).
     fn run(compliant: bool, hint_unavailable_after: Option<u64>) -> Steps {
         let mut engine = PolicyEngine::new();
         let mut held = 8000;
@@ -1275,8 +1489,12 @@ mod hints {
                 ..Resources::default()
             };
             let mut snapshot = snapshot(1000);
-            snapshot.available_ram_mib = Some(8000 - held);
-            let mut facts = AllocationFacts::default();
+            snapshot.available_ram_mib = Some(8700 - held);
+            let mut facts = AllocationFacts {
+                hint_ready: true,
+                observes_drain: true,
+                ..AllocationFacts::default()
+            };
             if hint_unavailable_after.is_some_and(|after| now > after) {
                 facts
                     .unavailable
@@ -1318,7 +1536,7 @@ mod hints {
         let steps = run(false, None);
         assert_eq!(
             steps[0].1,
-            Some((YieldStep::Hint, Some(7000), YieldCause::FloorBreach))
+            Some((YieldStep::Hint, Some(7700), YieldCause::FloorBreach))
         );
     }
 

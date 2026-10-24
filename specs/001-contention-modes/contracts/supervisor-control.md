@@ -56,9 +56,9 @@ These are new:
   - A CPU `cap` below the allocation's request is raised to the request.
   - `drain` for Guaranteed work is accepted only with cause `floor_breach` or `envelope_breach`
     (floor policy A), or as an explicit operator drain.
-- **Terminate.** `adjust` with step `terminate` (the critical floor path, FR-063) sends TERM to
-  the verified family without writing or waiting on the drain file, then KILL after the grace
-  period.
+- **Terminate.** `adjust` with step `terminate` and cause `floor_breach` (the critical floor
+  path, FR-063) sends TERM to the verified family without waiting on the drain file, then KILL
+  after the grace period. A supervisor that does not know the step drains instead.
 - **Unknown control lines.** An unknown `kind` is reported in `detail` and ignored. Only EOF or
   an I/O error counts as agent loss (fixes audit A22).
 - **Agent loss.** On stdin EOF with no socket controller, the supervisor holds the applied

@@ -867,7 +867,9 @@ impl supervision::SupervisorControl for ActuationAudit {
         })
     }
     fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
-        self.reports.push(report);
+        if !matches!(report, supervision::SupervisorReport::Readiness { .. }) {
+            self.reports.push(report);
+        }
         Ok(())
     }
 }
@@ -995,7 +997,9 @@ struct TargetScript {
     key: cedegrid::contention::ResourceKey,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
     sent: usize,
+    /// One `adjusted` report per command; readiness changes are kept apart.
     reports: Vec<supervision::SupervisorReport>,
+    readiness: Vec<(bool, bool)>,
 }
 impl supervision::SupervisorControl for TargetScript {
     fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
@@ -1024,7 +1028,13 @@ impl supervision::SupervisorControl for TargetScript {
         }])
     }
     fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
-        self.reports.push(report);
+        match report {
+            supervision::SupervisorReport::Readiness {
+                hint_ready,
+                observes_drain,
+            } => self.readiness.push((hint_ready, observes_drain)),
+            report => self.reports.push(report),
+        }
         Ok(())
     }
 }
@@ -1050,6 +1060,7 @@ fn run_targets_on(
         steps,
         sent: 0,
         reports: vec![],
+        readiness: vec![],
     };
     let outcome = supervision::supervise_controlled(
         &request,
@@ -1160,6 +1171,61 @@ while not (d/'stop').exists():
         vec![("ready", YieldStep::Hint, Some(0))],
     );
     assert_eq!(fs::read_to_string(dir.path().join("seen")).unwrap(), "1000");
+}
+
+/// The supervisor reports readiness when it changes and in every `adjusted`
+/// report, so the agent learns a late ack by the next interval (FR-062).
+#[test]
+fn readiness_follows_the_ack_and_a_plain_command_is_never_ready() {
+    use cedegrid::contention::YieldStep;
+    let ready = |report: &supervision::SupervisorReport| match report {
+        supervision::SupervisorReport::Adjusted {
+            hint_ready,
+            observes_drain,
+            ..
+        } => (*hint_ready, *observes_drain),
+        other => panic!("unexpected report {other:?}"),
+    };
+    let (_dir, late) = run_targets(
+        r#"
+import time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env()
+(d/'ready').write_text('1')
+time.sleep(0.5)
+signals.draining()
+time.sleep(0.3)
+(d/'acked').write_text('1')
+while not (d/'stop').exists():
+    time.sleep(0.01)
+"#,
+        vec![
+            ("ready", YieldStep::None, None),
+            ("acked", YieldStep::None, None),
+        ],
+    );
+    assert_eq!(
+        late.reports.iter().map(ready).collect::<Vec<_>>(),
+        [(false, false), (true, true)]
+    );
+    assert_eq!(late.readiness, [(true, true)]);
+    let (_dir, plain) = run_targets(
+        r#"
+import time
+from pathlib import Path
+d=Path.cwd()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    time.sleep(0.01)
+"#,
+        vec![("ready", YieldStep::None, None)],
+    );
+    assert_eq!(
+        plain.reports.iter().map(ready).collect::<Vec<_>>(),
+        [(false, false)]
+    );
+    assert!(plain.readiness.is_empty());
 }
 
 #[test]

@@ -512,6 +512,18 @@ impl PolicyEngine {
             reasons.push("CPU busy telemetry unavailable; CPU admission blocked".into());
         }
         let ram_reserve = config.ram_floor_mib(snapshot.total_ram_mib);
+        // A floor breach is critical once free memory falls below this level, which
+        // never goes below the minimum floor (FR-063).
+        let critical_level = |floor: u64, minimum: u64| {
+            (floor.saturating_mul(u64::from(config.contention.critical_floor_percent)) / 100)
+                .max(minimum)
+        };
+        let mut critical_keys: BTreeSet<ResourceKey> = BTreeSet::new();
+        if snapshot.available_ram_mib.is_some_and(|free| {
+            free < critical_level(ram_reserve, crate::config::MIN_RAM_FLOOR_MIB)
+        }) {
+            critical_keys.insert(ResourceKey::Ram);
+        }
         if let Some(available) = snapshot.available_ram_mib {
             let used = snapshot.total_ram_mib - available;
             let own_lower = managed_observed.ram_mib;
@@ -805,6 +817,15 @@ impl PolicyEngine {
                     if full_yield { 0 } else { memory_budget }
                 } else {
                     floor_available.insert(key.clone(), memory_budget);
+                    if gpu.used_memory_mib.is_some_and(|used| {
+                        gpu.total_memory_mib.saturating_sub(used)
+                            < critical_level(
+                                config.vram_floor_mib(),
+                                crate::config::MIN_VRAM_FLOOR_MIB,
+                            )
+                    }) {
+                        critical_keys.insert(key.clone());
+                    }
                     own_allowance(
                         &ModeInput {
                             kind: ResourceKind::GpuMemory,
@@ -1027,11 +1048,19 @@ impl PolicyEngine {
                     YieldCause::ExternalGrowth
                 };
                 let external = statuses.get(&key).and_then(|s| s.external).unwrap_or(0);
-                let timing = LadderTiming::new(
+                let critical = critical_keys.contains(&key);
+                let mut timing = LadderTiming::new(
                     &config.contention.thresholds(kind),
                     governing(kind),
                     interval_ms,
                 );
+                if critical {
+                    timing.hint_deadline_ms = config
+                        .contention
+                        .critical_hint_deadline_s
+                        .saturating_mul(1000);
+                    timing.dwell_ms = timing.dwell_ms.min(timing.hint_deadline_ms);
+                }
                 let usage_of =
                     |a: &Allocation| -> u64 { a.observed.as_ref().map_or(0, |o| o.cpu_millicores) };
                 // Pending reservations are cancelled by their charge. CPU in use is
@@ -1055,29 +1084,40 @@ impl PolicyEngine {
                     .allocations
                     .iter()
                     .any(|a| !guaranteed(a) && amount_of(&charges[&a.id]) > 0);
-                // Guaranteed work is drained only for a memory floor under floor
-                // policy A, after opportunistic work and the hint deadline (FR-024).
-                // Guaranteed memory waits for its hint deadline and, for RAM, the
-                // breach window before it is drained (FR-024).
-                let guaranteed_wait_ms = config
-                    .contention
-                    .guaranteed_hint_deadline_s
-                    .max(
-                        config
-                            .contention
-                            .thresholds(kind)
-                            .guaranteed_breach_window_s,
+                // Guaranteed memory is drained last (FR-024): after its hint deadline
+                // when it can take a hint and, for RAM, the breach window. The critical
+                // path uses the critical hint deadline and skips the window (FR-063).
+                let breached_for = floor_breach_since
+                    .get(&key)
+                    .map_or(0, |start| now_monotonic_ms.saturating_sub(*start));
+                let guaranteed_drain = |hint_ready: bool| {
+                    let wait_s = if critical {
+                        if hint_ready {
+                            config.contention.critical_hint_deadline_s
+                        } else {
+                            0
+                        }
+                    } else {
+                        let hint = if hint_ready {
+                            config.contention.guaranteed_hint_deadline_s
+                        } else {
+                            0
+                        };
+                        hint.max(
+                            config
+                                .contention
+                                .thresholds(kind)
+                                .guaranteed_breach_window_s,
+                        )
+                    };
+                    guaranteed_may_drain(
+                        kind,
+                        cause,
+                        opportunistic_left,
+                        breached_for,
+                        wait_s.saturating_mul(1000),
                     )
-                    .saturating_mul(1000);
-                let guaranteed_drain = guaranteed_may_drain(
-                    kind,
-                    cause,
-                    opportunistic_left,
-                    floor_breach_since
-                        .get(&key)
-                        .map_or(0, |start| now_monotonic_ms.saturating_sub(*start)),
-                    guaranteed_wait_ms,
-                );
+                };
                 let candidate = |a: &&Allocation| {
                     a.phase != AllocationPhase::Draining
                         && allocation_unknown_since.get(&a.id).is_none_or(|start| {
@@ -1087,14 +1127,18 @@ impl PolicyEngine {
                 // The supervisor reports the steps, the hint among them, that it cannot
                 // apply. An allocation without facts, as in recordings, has no target
                 // channel, so its hint is unavailable.
+                // Only a worker that acknowledged its target file takes a hint
+                // (FR-062); recordings without facts have no target channel.
                 let facts = |id: &str| {
-                    input.facts.get(id).cloned().unwrap_or_else(|| {
-                        let mut facts = AllocationFacts::default();
+                    let mut facts = input.facts.get(id).cloned().unwrap_or_default();
+                    if !facts.hint_ready {
                         facts
                             .unavailable
-                            .insert(key.clone(), BTreeSet::from([YieldStep::Hint]));
-                        facts
-                    })
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(YieldStep::Hint);
+                    }
+                    facts
                 };
                 // A Guaranteed allocation keeps its CPU request: only usage above it
                 // can be capped (FR-024).
@@ -1191,7 +1235,7 @@ impl PolicyEngine {
                                 // Running work is never drained for CPU alone (SC-002);
                                 // pause frees it completely.
                                 allow_drain: if victim.guaranteed {
-                                    guaranteed_drain
+                                    guaranteed_drain(facts(&victim.id).hint_ready)
                                 } else {
                                     pending_pass || kind != ResourceKind::Cpu
                                 },
@@ -1229,6 +1273,17 @@ impl PolicyEngine {
                             );
                         }
                         let before = state.map_or(YieldStep::None, |s| s.step);
+                        let mut decision = decision;
+                        // On the critical path, a worker that does not poll the drain
+                        // file is sent TERM without the drain-file wait (FR-063).
+                        if let Some(next) = decision.state.as_mut()
+                            && critical
+                            && next.step == YieldStep::Drain
+                            && next.cause == YieldCause::FloorBreach
+                            && !facts(&victim.id).observes_drain
+                        {
+                            next.step = YieldStep::Terminate;
+                        }
                         if let Some(next) = &decision.state {
                             // A newly applied step is expected to release its share;
                             // the next observation shows whether it did.

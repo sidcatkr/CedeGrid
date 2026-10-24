@@ -104,8 +104,16 @@ Neutral and 2 s in Performance. `gpu.scale_up_cooldown_ms` applies to GPU work o
 
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the
-target at the hint deadline, 5 s by default, leads to a drain. Other workers are
-drained without the hint. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
+target at the hint deadline, 5 s by default, leads to a drain. Each supervisor reports
+whether its worker has acknowledged the target file (hint-ready) and whether it
+observes the drain file; only hint-ready workers are hinted, and the others are
+drained without the hint. When free memory falls below `contention.critical_floor_percent`
+(50%) of a floor, never below the minimum floor, the breach is critical: hint-ready
+workers get `contention.critical_hint_deadline_s` (1 s), others are drained at once,
+and workers that observe neither file are sent TERM without the drain-file wait.
+Reclaim stays within hint deadline + drain timeout + termination grace + one
+interval (10.5 s by default), 15.5 s for Guaranteed memory, and 6.5 s on the
+critical path. Automatic yielding releases opportunistic allocations first. Guaranteed allocations
 remain fully charged, including pending and uncertain reservations. They may be
 lowered in share or capped, are never paused, and their memory is drained only as the
 last step of floor policy A. Explicit node drain retains its all-allocation stop semantics.
@@ -124,6 +132,8 @@ resource and releases opportunistic work holding it. Floor policy A, the only fl
 policy, then drains Guaranteed work that holds the memory, as the last step: after
 `contention.guaranteed_hint_deadline_s` (5 s) and, for RAM, after the breach has lasted
 `contention.ram.guaranteed_breach_window_s` (10 s). GPU memory breaches have no window.
+A Guaranteed allocation that is not hint-ready waits only for the window, and on the
+critical path the window is skipped.
 On Linux, every own process, Guaranteed included, marks itself as a preferred
 out-of-memory victim (`oom_score_adj` 1000) before it runs. Other platforms offer no
 unprivileged equivalent and claim none.
