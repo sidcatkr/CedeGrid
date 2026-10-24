@@ -6,6 +6,43 @@ use cedegrid::{
 use rusqlite::Connection;
 use std::{fs, path::Path};
 
+/// Rebuild `tasks` with the schema 5 shape, which has no `cancelled` status,
+/// and mark the database with `version`.
+fn downgrade_tasks(root: &Path, version: i64) {
+    let db = Connection::open(root.join("state.sqlite3")).unwrap();
+    db.execute_batch(&format!(
+        "PRAGMA foreign_keys=OFF;
+         BEGIN;
+         CREATE TABLE tasks_v5 (task_id TEXT PRIMARY KEY NOT NULL, replay_safe INTEGER NOT NULL CHECK(replay_safe IN (0, 1)), status TEXT NOT NULL CHECK(status IN ('queued','assigned','completed','needs_reconciliation')), generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0), assignment_id TEXT, receipt_hash TEXT, CHECK((status = 'completed') = (receipt_hash IS NOT NULL))) STRICT;
+         INSERT INTO tasks_v5 SELECT task_id,replay_safe,status,generation,assignment_id,receipt_hash FROM tasks;
+         DROP TABLE tasks;
+         ALTER TABLE tasks_v5 RENAME TO tasks;
+         PRAGMA user_version={version};
+         COMMIT;
+         PRAGMA wal_checkpoint(TRUNCATE);"
+    ))
+    .unwrap();
+    assert!(!accepts_cancelled(&db));
+}
+
+fn accepts_cancelled(db: &Connection) -> bool {
+    let sql: String = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    sql.contains("'cancelled'")
+}
+
+fn foreign_key_violations(db: &Connection) -> i64 {
+    db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
 fn mark_legacy(root: &Path, version: i64) {
     let db = Connection::open(root.join("state.sqlite3")).unwrap();
     db.pragma_update(None, "user_version", version).unwrap();
@@ -29,7 +66,7 @@ fn offline_upgrade_preserves_payload_bytes_receipts_outboxes_and_profile() {
             b"{ \"historical\": \"RESMGR\", \"n\": 9007199254740993 }\n",
         )
         .unwrap();
-        mark_legacy(&state, previous);
+        downgrade_tasks(&state, previous);
         assert!(
             StateStore::open_with_profile(&state, profile).is_err(),
             "startup must refuse implicit migration"
@@ -59,6 +96,11 @@ fn offline_upgrade_preserves_payload_bytes_receipts_outboxes_and_profile() {
             reopened.task("historical-RESMGR-identity").unwrap().status,
             cedegrid::state::TaskStatus::NeedsReconciliation
         );
+        drop(reopened);
+        // The offline upgrade runs the same task-status migration.
+        let db = Connection::open(state.join("state.sqlite3")).unwrap();
+        assert!(accepts_cancelled(&db));
+        assert_eq!(foreign_key_violations(&db), 0);
     }
 }
 
@@ -389,4 +431,102 @@ fn distributed_schema_three_migrates_to_four_with_check_and_recreated_triggers()
         .is_err(),
         "an unknown reservation phase must be rejected"
     );
+}
+
+/// Schema 5 state migrates in place when opened: `tasks` gains the terminal
+/// `cancelled` status, and rows and references survive the rebuild.
+#[test]
+fn schema_five_state_migrates_in_place_to_the_cancelled_status() {
+    use cedegrid::state::TaskStatus;
+    for profile in [
+        StorageProfile::WalFull,
+        StorageProfile::DeleteExtra,
+        StorageProfile::BurstReplayDeleteExtra,
+    ] {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let state = temp.path().join("state");
+        let store = StateStore::open_with_profile(&state, profile).unwrap();
+        store.submit("waiting", true).unwrap();
+        store.submit("running", true).unwrap();
+        assert_eq!(store.assign("running", "attempt-1").unwrap(), 1);
+        drop(store);
+        downgrade_tasks(&state, 5);
+        let store = StateStore::open_with_profile(&state, profile).unwrap();
+        assert_eq!(
+            store.durability_settings().unwrap().schema_version,
+            SCHEMA_VERSION,
+            "{profile:?}"
+        );
+        assert_eq!(store.task("waiting").unwrap().status, TaskStatus::Queued);
+        let running = store.task("running").unwrap();
+        assert_eq!(running.status, TaskStatus::Assigned);
+        assert_eq!(running.assignment_id.as_deref(), Some("attempt-1"));
+        drop(store);
+        let db = Connection::open(state.join("state.sqlite3")).unwrap();
+        assert!(accepts_cancelled(&db), "{profile:?}");
+        assert_eq!(foreign_key_violations(&db), 0);
+        db.execute(
+            "UPDATE tasks SET status='cancelled' WHERE task_id='waiting'",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        // Reopening neither repeats nor reverses the migration.
+        let store = StateStore::open_with_profile(&state, profile).unwrap();
+        assert_eq!(store.task("waiting").unwrap().status, TaskStatus::Cancelled);
+    }
+}
+
+/// A coordinator's schema 5 state migrates on open with every reference to
+/// `tasks` intact.
+#[test]
+fn schema_five_coordinator_state_migrates_with_its_references_intact() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let state = root.path().join("state");
+    drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
+    {
+        let db = Connection::open(state.join("state.sqlite3")).unwrap();
+        db.execute_batch(
+            "INSERT INTO pools(pool_id,spec_json) VALUES ('pool','{}');
+             INSERT INTO jobs(job_id,pool_id,priority,submitted_ms,spec_json) VALUES ('job','pool',0,1,'{}');
+             INSERT INTO tasks(task_id,replay_safe,status) VALUES ('task',1,'queued');
+             INSERT INTO task_specs(task_id,job_id,request_json) VALUES ('task','job','{}');
+             INSERT INTO retry_state(task_id,failures,not_before_ms) VALUES ('task',1,2);",
+        )
+        .unwrap();
+    }
+    downgrade_tasks(&state, 5);
+    drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
+    let db = Connection::open(state.join("state.sqlite3")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    assert!(accepts_cancelled(&db));
+    assert_eq!(foreign_key_violations(&db), 0);
+    let failures: i64 = db
+        .query_row(
+            "SELECT r.failures FROM retry_state r JOIN task_specs s USING(task_id) JOIN tasks t USING(task_id) WHERE t.status='queued'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(failures, 1);
+}
+
+/// Schema 5 needs no offline upgrade; the command refuses and changes nothing.
+#[test]
+fn offline_upgrade_refuses_schema_five_because_it_migrates_in_place() {
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let state = temp.path().join("state");
+    drop(StateStore::open(&state).unwrap());
+    downgrade_tasks(&state, 5);
+    let before = fs::read(state.join("state.sqlite3")).unwrap();
+    let bundle = temp.path().join("bundle");
+    let error = upgrade::upgrade(&state, &bundle, StorageProfile::WalFull, true)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("in place"), "{error}");
+    assert_eq!(fs::read(state.join("state.sqlite3")).unwrap(), before);
+    assert!(!bundle.exists());
 }

@@ -308,9 +308,14 @@ pause and then reverses, with no drain (quickstart §3).
   - the agent sends `AllocationReport.yield_cause` once negotiated;
   - the coordinator persists `drain_requests.cause` when it issues a drain;
   - failures are classified by recorded cause, removing `detail.contains("revoked")`.
-- [ ] T052a [US2] Cancelled tasks become terminal instead of being re-queued (audit A18), with
-  a test in `tests/coordinator.rs`. *Pending decision:* `tasks.status` has a CHECK constraint, so
-  a terminal status needs a node-state schema migration plus SDK and tool updates.
+- [X] T052a [US2] Cancelled tasks become terminal instead of being re-queued (audit A18):
+  - state schema 6 adds `cancelled` to `tasks.status`; schema 5 migrates in place on open, the
+    offline upgrade runs the same step, and backup and restore accept both (`src/state.rs`,
+    `src/upgrade.rs`, `src/backup.rs`);
+  - cancel, failure, replay-session and retry paths in `src/coordinator.rs`;
+  - task-status constants in both SDKs, and the tools that wait on task status;
+  - tests in `tests/coordinator.rs`, `tests/agent.rs` (across an agent restart),
+    `tests/upgrade.rs`, `tests/backup.rs` and `tests/state.rs`.
 - [X] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).

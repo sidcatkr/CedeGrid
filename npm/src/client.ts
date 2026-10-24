@@ -34,6 +34,10 @@ async function downloadDirectory(path: string, strict: boolean): Promise<void> {
     }
 }
 export type RpcReply = Record<string, any>;
+/** Task statuses in status replies. `completed` and `cancelled` are terminal. */
+export const TASK_STATUSES = ['queued', 'assigned', 'completed', 'needs_reconciliation', 'cancelled'] as const;
+export type TaskStatus = typeof TASK_STATUSES[number];
+export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = ['completed', 'cancelled'];
 export type StatusCollection = 'tasks' | 'jobs' | 'pools' | 'nodes' | 'allocations' | 'pool_nodes' | 'reported_allocations' | 'unrecognized_allocations';
 export interface StatusFilters {
     jobId?: string;
@@ -200,6 +204,7 @@ export class Client {
             throw new RemoteError('status cursor did not advance', 'ERR_CEDEGRID_PROTOCOL');
         cursor = next;
     } }
+    /** Queued tasks end at once, running ones after their drain. Cancellation is terminal. */
     cancel(jobId: string): Promise<RpcReply> { return this.request('cancel', { job_id: jobId }); }
     drainNode(nodeId: string, drain = true): Promise<RpcReply> { return this.request('drain_node', { node_id: nodeId, drain }); }
     async result(taskId: string): Promise<RpcReply | null> { return (await this.request('get_result', { task_id: taskId })).submission; }

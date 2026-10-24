@@ -57,8 +57,8 @@ includes the database, sidecars, outboxes, receipts, and relevant local files; i
 does not replace your separate credential backup. Destination reuse requires an
 exact matching interrupted upgrade and is checked before proceeding.
 
-Audited legacy WAL schema 2 and DELETE schema 3 state upgrade to schema 5;
-distributed schema becomes 3. Replay schema 4 preserves local bytes but requires
+Audited legacy WAL schema 2 and DELETE schema 3 state upgrade to the current
+schema 6; distributed schema becomes 4. Replay schema 4 preserves local bytes but requires
 authenticated coordinator reconstruction before renewed authority. Unsupported
 old or future schemas are refused without changing the original state.
 
@@ -67,6 +67,11 @@ Nonterminal legacy work is held for explicit retry/reconciliation. Valid legacy
 result descriptors and receipts are indexed without rewriting their hashed bytes;
 unresolved outboxes remain retained. A clean rename never performs string
 replacement inside durable records.
+
+State schema 6 adds the terminal `cancelled` task status. A build with schema 6
+migrates 0.2 state (schema 5) in place when it first opens it, so `state upgrade`
+refuses schema 5 and leaves it unchanged. Read-only commands and offline snapshots
+also accept schema 5. Builds that only know schema 5 refuse schema 6 state.
 
 ## Recovery and rollback
 

@@ -46,6 +46,11 @@ def _resolve_config_tls_path(config_path: Path, value: str | Path) -> Path:
     return config_path.parent.joinpath(value)
 
 
+#: Task statuses in status replies. ``completed`` and ``cancelled`` are terminal.
+TASK_STATUSES = ("queued", "assigned", "completed", "needs_reconciliation", "cancelled")
+TERMINAL_TASK_STATUSES = ("completed", "cancelled")
+
+
 def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int = 1000,
                  ram_mib: int = 512, gpu_vram_mib: dict[str, int] | None = None,
                  env: dict[str, str] | None = None, replay_safe: bool = False,
@@ -186,6 +191,10 @@ class Client:
         return self.request("status", job_id=job_id)
 
     def cancel(self, job_id: str) -> dict:
+        """Cancel a job: queued tasks end at once, running ones after their drain.
+
+        Cancellation is terminal; a cancelled job's tasks cannot be resumed.
+        """
         return self.request("cancel", job_id=job_id)
 
     def drain_node(self, node_id: str, drain: bool = True) -> dict:

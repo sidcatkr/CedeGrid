@@ -171,8 +171,8 @@ def installed_run(args, env):
 
         def all_completed(status):
             rows = {row['task_id']: row for row in status.get('tasks', [])}
-            if any(row['status'] in ('needs_reconciliation', 'failed') for row in rows.values()):
-                raise RuntimeError('a worker failed or requires reconciliation')
+            if any(row['status'] in ('needs_reconciliation', 'cancelled', 'failed') for row in rows.values()):
+                raise RuntimeError('a worker failed, was cancelled or requires reconciliation')
             allocations = status.get('allocations', [])
             return (all(rows.get(task['task_id'], {}).get('status') == 'completed' for task in tasks)
                     and len(allocations) == len(tasks) and all(row['phase'] == 'released' for row in allocations))

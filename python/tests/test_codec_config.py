@@ -7,6 +7,12 @@ from cedegrid.config import endpoint_origin
 from cedegrid.codec import integer, I64_MAX, U64_MAX
 
 class CodecTests(unittest.TestCase):
+    def test_cancelled_is_a_terminal_task_status(self):
+        from cedegrid import TASK_STATUSES, TERMINAL_TASK_STATUSES
+        self.assertIn("cancelled", TASK_STATUSES)
+        self.assertEqual(set(TERMINAL_TASK_STATUSES), {"completed", "cancelled"})
+        self.assertLessEqual(set(TERMINAL_TASK_STATUSES), set(TASK_STATUSES))
+
     def test_exact_integer_and_float_kinds(self):
         value = parse_json('{"nested":[9007199254740993,18446744073709551615,-9223372036854775808,1,1.0,-0,-0.0,5e-324,1.7976931348623157e308],"语言":"한국어"}')
         items=value['nested']

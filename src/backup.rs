@@ -397,7 +397,8 @@ pub fn restore(
         )?;
         ensure!(actual == entry.sha256, "snapshot changed during restore");
     }
-    if original_schema < crate::state::SCHEMA_VERSION
+    // Schema 5 migrates in place when the restored state is opened below.
+    if original_schema < crate::state::IN_PLACE_SCHEMA_VERSION
         || original_distributed < crate::coordinator::DISTRIBUTED_SCHEMA
     {
         crate::upgrade::migrate_database(

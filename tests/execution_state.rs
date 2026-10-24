@@ -266,7 +266,10 @@ fn offline_schema_two_upgrade_preserves_tasks_and_observations() {
     );
     assert!(upgraded.executions().unwrap().is_empty());
     assert_eq!(upgraded.observations(10).unwrap().len(), 1);
-    assert_eq!(upgraded.durability_settings().unwrap().schema_version, 5);
+    assert_eq!(
+        upgraded.durability_settings().unwrap().schema_version,
+        cedegrid::state::SCHEMA_VERSION
+    );
     assert!(upgraded.assign("existing-task", "forbidden-retry").is_err());
     upgraded
         .reserve(&request("new-task", "new-attempt"), &resources(1000))

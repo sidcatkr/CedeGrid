@@ -1,5 +1,5 @@
-export { Client, commandTask } from './client';
-export type { RpcReply, StatusCollection, StatusFilters, Artifact, CommandOptions } from './client';
+export { Client, commandTask, TASK_STATUSES, TERMINAL_TASK_STATUSES } from './client';
+export type { RpcReply, StatusCollection, StatusFilters, Artifact, CommandOptions, TaskStatus } from './client';
 export { WorkerContext, ManagedChild, spawnManaged } from './worker';
 export type { WorkerDescriptor, AttemptIdentity, SealedArtifact, PublicationHandle, SpawnOptions, SupervisorTransport } from './worker';
 export { parseJson, stringifyJson, integer, I64_MIN, I64_MAX, U64_MAX } from './codec';

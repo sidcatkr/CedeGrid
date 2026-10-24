@@ -175,6 +175,11 @@ receipt; stale attempts and conflicting results cannot replace it. This does not
 deduplicate external side effects. Automatic retry requires an explicit replay-safe
 workload declaration. Uncertain unsafe work enters `needs_reconciliation`.
 
+Cancelling a job is terminal. Its queued tasks become `cancelled` at once, and running tasks
+become `cancelled` when their drain releases them. A cancelled job's tasks are never retried or
+assigned again, including after an agent restart or a replaced replay session. Interrupted unsafe
+work still enters `needs_reconciliation` so its side effects stay visible.
+
 Authoritative and strict-profile SQLite state must reside on an actual supported local durable filesystem. A path
 under a home directory proves nothing about the filesystem. Inspect the target
 filesystem before opening it. The default `wal_full` profile requires WAL with

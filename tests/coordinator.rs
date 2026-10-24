@@ -3369,3 +3369,154 @@ fn coordinator_issued_drains_record_their_cause_when_issued() {
     assert_eq!(causes[&shrunk[0]], "coordinator_drain");
     assert!(causes.values().any(|cause| cause == "operator_drain"));
 }
+
+fn task_states(c: &mut Coordinator, now: u64) -> BTreeMap<String, (String, u64)> {
+    let Response::Status { tasks, .. } = c
+        .handle_at(&Principal::Operator, Request::Status { job_id: None }, now)
+        .unwrap()
+    else {
+        panic!()
+    };
+    tasks
+        .into_iter()
+        .map(|t| {
+            let value = serde_json::to_value(&t).unwrap();
+            (
+                t.task_id.clone(),
+                (
+                    value["status"].as_str().unwrap().to_owned(),
+                    value["generation"].as_u64().unwrap(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn cancel(c: &mut Coordinator, now: u64) {
+    c.handle_at(
+        &Principal::Operator,
+        Request::Cancel {
+            job_id: "job".into(),
+        },
+        now,
+    )
+    .unwrap();
+}
+
+fn retry(c: &mut Coordinator, task_id: &str, now: u64) -> anyhow::Result<Response> {
+    c.handle_at(
+        &Principal::Operator,
+        Request::Retry {
+            task_id: task_id.into(),
+            confirm_side_effects_reconciled: true,
+        },
+        now,
+    )
+}
+
+/// Cancellation is terminal: queued work stops at once, running work ends as
+/// cancelled after its drain, and nothing is retried or assigned again (A18).
+#[test]
+fn cancelled_tasks_become_terminal_and_are_never_requeued() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["running", "waiting"], 100);
+    let mut p = pool();
+    p.max_workers = 1;
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+        .unwrap();
+    let a = offers(&mut c, 100).assignments.remove(0);
+    assert_eq!(a.request.task_id, "running");
+    authorize(&mut c, &a, 100);
+    cancel(&mut c, 101);
+    let states = task_states(&mut c, 101);
+    assert_eq!(states["waiting"], ("cancelled".into(), 0));
+    assert_eq!(states["running"], ("assigned".into(), 1));
+    assert_eq!(
+        offers(&mut c, 102).drain,
+        vec![a.request.assignment_id.clone()]
+    );
+    released_failure(&mut c, &a, 103, FailureKind::Yielded);
+    let states = task_states(&mut c, 103);
+    assert_eq!(states["running"], ("cancelled".into(), 1));
+    assert_eq!(states["waiting"], ("cancelled".into(), 0));
+    assert!(retry(&mut c, "running", 104).is_err());
+    assert!(retry(&mut c, "waiting", 104).is_err());
+    for now in 105..110 {
+        assert!(offers(&mut c, now).assignments.is_empty());
+    }
+    assert_eq!(task_states(&mut c, 110), states);
+    // A repeated cancel changes nothing.
+    cancel(&mut c, 111);
+    assert_eq!(task_states(&mut c, 111), states);
+}
+
+/// Uncertain side effects of unsafe work stay visible after cancellation, but
+/// the task can never run again.
+#[test]
+fn a_cancelled_unsafe_task_keeps_its_reconciliation_flag_and_cannot_retry() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    let mut unsafe_task = task("unsafe");
+    unsafe_task.replay_safe = false;
+    c.handle_at(
+        &Principal::Operator,
+        Request::Submit {
+            job: JobSpec {
+                job_id: "job".into(),
+                pool_id: "pool".into(),
+                priority: 0,
+                tasks: vec![unsafe_task],
+            },
+        },
+        100,
+    )
+    .unwrap();
+    let a = offers(&mut c, 100).assignments.remove(0);
+    authorize(&mut c, &a, 100);
+    cancel(&mut c, 101);
+    released_failure(&mut c, &a, 102, FailureKind::Yielded);
+    assert_eq!(
+        task_states(&mut c, 102)["unsafe"],
+        ("needs_reconciliation".into(), 1)
+    );
+    assert!(retry(&mut c, "unsafe", 103).is_err());
+    for now in 104..108 {
+        assert!(offers(&mut c, now).assignments.is_empty());
+    }
+}
+
+/// A replacement replay session requeues interrupted work, except work whose
+/// job was cancelled.
+#[test]
+fn a_replay_session_replacement_never_requeues_a_cancelled_task() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let first = uuid::Uuid::new_v4().to_string();
+    replay_open(&mut c, &first, 100);
+    replay_heartbeat(&mut c, &first, report(100), 100);
+    setup(&mut c, &["task"], 101);
+    let a = replay_heartbeat(&mut c, &first, report(101), 101)
+        .assignments
+        .remove(0);
+    assert_eq!(a.request.task_id, "task");
+    cancel(&mut c, 102);
+    let second = uuid::Uuid::new_v4().to_string();
+    replay_open(&mut c, &second, 103);
+    assert_eq!(task_states(&mut c, 103)["task"], ("cancelled".into(), 1));
+    let mut r = report(104);
+    r.allocations
+        .push(replay_allocation_report(&a, RemotePhase::Uncertain));
+    // Only the retained attempt comes back, to be drained; no new attempt starts.
+    let reply = replay_heartbeat(&mut c, &second, r, 104);
+    assert!(
+        reply
+            .assignments
+            .iter()
+            .all(|x| x.request.assignment_id == a.request.assignment_id && x.generation == 1)
+    );
+    assert_eq!(reply.drain, vec![a.request.assignment_id.clone()]);
+    assert_eq!(task_states(&mut c, 104)["task"], ("cancelled".into(), 1));
+}

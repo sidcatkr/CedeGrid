@@ -1199,8 +1199,15 @@ fn both_profiles_preserve_acknowledged_receipts_and_uncertainty_after_process_lo
 
 #[test]
 fn hot_rollback_recovery_checks_current_and_rolled_back_schema_before_mutation() {
-    for (original, pending, allowed) in [(5, 5, true), (3, 5, false), (6, 5, false), (5, 6, false)]
-    {
+    // Schema 5 migrates in place; legacy and future schemas are refused.
+    let current = SCHEMA_VERSION as i32;
+    for (original, pending, allowed) in [
+        (current, current, true),
+        (current - 1, current, true),
+        (3, current, false),
+        (current + 1, current, false),
+        (current, current + 1, false),
+    ] {
         let directory = storage_dir();
         let mode = format!("hot-rollback-{original}-{pending}");
         let mut child = profile_child(directory.path(), StorageProfile::DeleteExtra, &mode);
@@ -1425,7 +1432,7 @@ fn replayable_profile_is_explicit_persisted_and_fenced_from_strict_openers() {
     assert_eq!(settings["assurance"], "replayable_local");
     assert_eq!(settings["journal_mode"], "delete");
     assert_eq!(settings["synchronous"], 3);
-    assert_eq!(settings["schema_version"], 5);
+    assert_eq!(settings["schema_version"], SCHEMA_VERSION);
     store.submit("replayable", true).unwrap();
     let generation = store.assign("replayable", "attempt-one").unwrap();
     assert!(
@@ -1684,4 +1691,54 @@ fn existing_only_open_preserves_normal_weak_state_and_effective_connection_setti
             .unwrap(),
         TaskStatus::Queued
     );
+}
+
+/// The Python and TypeScript SDKs list exactly the task statuses Rust serializes.
+#[test]
+fn task_statuses_match_both_sdks() {
+    let all = [
+        TaskStatus::Queued,
+        TaskStatus::Assigned,
+        TaskStatus::Completed,
+        TaskStatus::NeedsReconciliation,
+        TaskStatus::Cancelled,
+    ];
+    // A new variant fails to compile here until it is listed above.
+    for status in all {
+        match status {
+            TaskStatus::Queued
+            | TaskStatus::Assigned
+            | TaskStatus::Completed
+            | TaskStatus::NeedsReconciliation
+            | TaskStatus::Cancelled => {}
+        }
+    }
+    let names: Vec<String> = all
+        .iter()
+        .map(|s| {
+            serde_json::to_value(s)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (file, marker) in [
+        ("python/cedegrid/client.py", "TASK_STATUSES = ("),
+        ("npm/src/client.ts", "TASK_STATUSES = ["),
+    ] {
+        let source = std::fs::read_to_string(root.join(file)).unwrap();
+        let line = source
+            .lines()
+            .find(|line| line.contains(marker) && !line.contains("TERMINAL"))
+            .unwrap_or_else(|| panic!("{file} lists no task statuses"));
+        let listed: Vec<String> = line
+            .split(['"', '\''])
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(listed, names, "{file}");
+    }
 }

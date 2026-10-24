@@ -3,7 +3,7 @@
 use crate::{
     execution_model::{ExecutionPhase, ExecutionRecord, ProcessIdentity},
     namespace::{Namespace, NamespaceGuard},
-    state::{DATABASE_FILENAME, SCHEMA_VERSION, StorageProfile},
+    state::{DATABASE_FILENAME, IN_PLACE_SCHEMA_VERSION, SCHEMA_VERSION, StorageProfile},
 };
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
@@ -113,6 +113,10 @@ pub fn upgrade(
     ensure!(
         persisted == profile,
         "upgrade must preserve persisted storage profile"
+    );
+    ensure!(
+        version != IN_PLACE_SCHEMA_VERSION,
+        "schema {version} migrates in place when the state is opened; offline upgrade is not needed and the original state is unchanged"
     );
     let supported = match profile {
         StorageProfile::WalFull => version == 2,
@@ -229,8 +233,9 @@ pub(crate) fn require_replay_upgrade(namespace: &Namespace, guard: &NamespaceGua
         "replay state has unsupported future schema"
     );
     let legacy = matches!(schema, Some(1..=4));
-    let unknown_previous_version =
-        namespace.state()?.is_none() && schema != Some(SCHEMA_VERSION as u32);
+    let unknown_previous_version = namespace.state()?.is_none()
+        && schema != Some(SCHEMA_VERSION as u32)
+        && schema != Some(IN_PLACE_SCHEMA_VERSION as u32);
     ensure!(
         !(legacy || unknown_previous_version)
             || namespace
@@ -258,7 +263,9 @@ pub(crate) fn migrate_database(
         "state profile changed since inspection"
     );
     connection.pragma_update(None, "synchronous", profile.synchronous())?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
+    // The task table rebuild needs foreign keys off outside the transaction;
+    // migrate_task_statuses checks them before the transaction commits.
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
     #[cfg(target_os = "macos")]
     {
         connection.pragma_update(None, "fullfsync", "ON")?;
@@ -272,7 +279,8 @@ pub(crate) fn migrate_database(
         "INSERT OR IGNORE INTO state_storage_profile VALUES(1,?1)",
         [profile.name()],
     )?;
-    tx.execute("INSERT OR IGNORE INTO upgrade_task_holds SELECT task_id FROM tasks WHERE status!='completed'", [])?;
+    crate::state::migrate_task_statuses(&tx)?;
+    tx.execute("INSERT OR IGNORE INTO upgrade_task_holds SELECT task_id FROM tasks WHERE status NOT IN ('completed','cancelled')", [])?;
     tx.execute(
         "INSERT OR IGNORE INTO upgrade_attempt_holds SELECT assignment_id FROM assignments",
         [],
@@ -281,6 +289,14 @@ pub(crate) fn migrate_database(
     if has_table(&tx, "distributed_meta")? {
         crate::coordinator::migrate_distributed_schema(&tx)?;
     }
+    let violations: i64 =
+        tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?;
+    ensure!(
+        violations == 0,
+        "upgrade left {violations} foreign key violations"
+    );
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     let held: i64 = tx.query_row("SELECT count(*) FROM upgrade_task_holds", [], |r| r.get(0))?;
     tx.commit()?;

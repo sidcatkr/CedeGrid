@@ -4,11 +4,16 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync, promise
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { parseJson, stringifyJson, integer, U64_MAX, I64_MAX, commandTask, loadClientConfig, PublicationUncertain, DownloadUncertain, WorkerContext, Client, CedeGridError, isCedeGridError } from '../src';
+import { parseJson, stringifyJson, integer, U64_MAX, I64_MAX, commandTask, loadClientConfig, PublicationUncertain, DownloadUncertain, WorkerContext, Client, CedeGridError, isCedeGridError, TASK_STATUSES, TERMINAL_TASK_STATUSES } from '../src';
 import { createHash } from 'node:crypto';
 import { endpointOrigin } from '../src/config';
 import { nativePackage } from '../src/launcher';
 import { protocolValue } from '../src/codec';
+test('cancelled is a terminal task status', () => {
+    assert.ok(TASK_STATUSES.includes('cancelled'));
+    assert.deepEqual([...TERMINAL_TASK_STATUSES].sort(), ['cancelled', 'completed']);
+    assert.ok(TERMINAL_TASK_STATUSES.every(status => TASK_STATUSES.includes(status)));
+});
 test('download synchronizes new ancestors and reports uncertainty after publication', { skip: process.platform === 'win32' }, async () => {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), 'cedegrid-download-')));
     const payload = Buffer.from('exact artifact bytes');

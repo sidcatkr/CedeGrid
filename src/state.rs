@@ -18,10 +18,13 @@ use std::time::Duration;
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
 #[cfg(unix)]
 const INITIALIZATION_LOCK_FILENAME: &str = ".storage-profile.lock";
-/// Unified 0.2 schema fence. Legacy 0.1 databases require explicit offline upgrade.
-pub const SCHEMA_VERSION: i64 = 5;
-pub const DELETE_EXTRA_SCHEMA_VERSION: i64 = 5;
-pub const MAX_SCHEMA_VERSION: i64 = 5;
+/// Unified schema fence. Schema 6 adds the terminal `cancelled` task status.
+/// Legacy 0.1 databases require explicit offline upgrade.
+pub const SCHEMA_VERSION: i64 = 6;
+pub const DELETE_EXTRA_SCHEMA_VERSION: i64 = 6;
+pub const MAX_SCHEMA_VERSION: i64 = 6;
+/// The 0.2 schema, which migrates in place when the state is opened.
+pub const IN_PLACE_SCHEMA_VERSION: i64 = 5;
 
 /// SQLite transaction and storage-assurance profile. The replayable variant is
 /// an explicit deployment opt-in for non-authoritative, replay-safe local state.
@@ -275,6 +278,8 @@ pub enum TaskStatus {
     Assigned,
     Completed,
     NeedsReconciliation,
+    /// Terminal: the job was cancelled and the task never runs again.
+    Cancelled,
 }
 
 impl TaskStatus {
@@ -284,6 +289,7 @@ impl TaskStatus {
             "assigned" => Ok(Self::Assigned),
             "completed" => Ok(Self::Completed),
             "needs_reconciliation" => Ok(Self::NeedsReconciliation),
+            "cancelled" => Ok(Self::Cancelled),
             _ => bail!("unknown task status {value:?}; refusing to infer recovery behavior"),
         }
     }
@@ -514,7 +520,10 @@ impl StateStore {
         let existing_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            existing_version == 0 || existing_version == SCHEMA_VERSION,
+            matches!(
+                existing_version,
+                0 | IN_PLACE_SCHEMA_VERSION | SCHEMA_VERSION
+            ),
             "state upgrade required: schema {existing_version}; use offline state upgrade"
         );
         ensure!(
@@ -538,7 +547,8 @@ impl StateStore {
         if let Some(existing) = persisted {
             ensure!(
                 existing == StorageProfile::WalFull
-                    || existing_version == existing.schema_version(),
+                    || existing_version == existing.schema_version()
+                    || existing_version == IN_PLACE_SCHEMA_VERSION,
                 "persisted rollback profile schema fence is invalid; refusing automatic repair"
             );
             ensure!(
@@ -677,7 +687,7 @@ impl StateStore {
             };
             ensure!(
                 !profile.is_replayable()
-                    && matches!(settings.schema_version, version if version == legacy || version == SCHEMA_VERSION),
+                    && matches!(settings.schema_version, version if version == legacy || version == IN_PLACE_SCHEMA_VERSION || version == SCHEMA_VERSION),
                 "unsupported legacy snapshot schema"
             );
             ensure!(
@@ -688,7 +698,7 @@ impl StateStore {
             );
             verify_assurance(&store.connection, profile)?;
         } else {
-            store.verify_durability()?;
+            store.verify_durability_for(true)?;
         }
         Ok(store)
     }
@@ -735,6 +745,12 @@ impl StateStore {
     }
 
     fn verify_durability(&self) -> Result<()> {
+        self.verify_durability_for(false)
+    }
+
+    /// Read-only handles also accept schema 5, so a snapshot can precede the
+    /// first open that migrates it.
+    fn verify_durability_for(&self, read_only: bool) -> Result<()> {
         verify_assurance(&self.connection, self.profile)?;
         let actual = self.durability_settings()?;
         ensure!(
@@ -752,7 +768,8 @@ impl StateStore {
         );
         ensure!(actual.foreign_keys, "SQLite did not enable foreign keys");
         ensure!(
-            actual.schema_version == self.profile.schema_version(),
+            actual.schema_version == self.profile.schema_version()
+                || (read_only && actual.schema_version == IN_PLACE_SCHEMA_VERSION),
             "unsupported database schema {}",
             actual.schema_version
         );
@@ -767,6 +784,17 @@ impl StateStore {
     }
 
     fn migrate(&self) -> Result<()> {
+        // Rebuilding `tasks` follows SQLite's table-rebuild procedure: foreign
+        // keys off outside the transaction, checked before it commits.
+        self.connection.pragma_update(None, "foreign_keys", "OFF")?;
+        let migrated = self.migrate_schema();
+        let restored = self.connection.pragma_update(None, "foreign_keys", "ON");
+        migrated?;
+        restored?;
+        Ok(())
+    }
+
+    fn migrate_schema(&self) -> Result<()> {
         let transaction = self.transaction()?;
         let version: i64 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -787,7 +815,7 @@ impl StateStore {
                 CREATE TABLE tasks (
                     task_id TEXT PRIMARY KEY NOT NULL,
                     replay_safe INTEGER NOT NULL CHECK(replay_safe IN (0, 1)),
-                    status TEXT NOT NULL CHECK(status IN ('queued','assigned','completed','needs_reconciliation')),
+                    status TEXT NOT NULL CHECK(status IN ('queued','assigned','completed','needs_reconciliation','cancelled')),
                     generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
                     assignment_id TEXT,
                     receipt_hash TEXT,
@@ -841,6 +869,7 @@ impl StateStore {
             )?;
         }
         verify_assurance(&transaction, self.profile)?;
+        migrate_task_statuses(&transaction)?;
         // Every profile fences all 0.1 writable readers.
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -1097,13 +1126,14 @@ fn reject_legacy_before_mutation(state_dir: &Path) -> Result<()> {
     require_current_schema(version)
 }
 
+/// Read-only opens also accept schema 5: it differs only in a looser task CHECK.
 fn require_current_schema(version: i64) -> Result<()> {
     ensure!(
         version <= SCHEMA_VERSION,
         "database schema {version} is newer than supported schema {SCHEMA_VERSION}"
     );
     ensure!(
-        version == 0 || version == SCHEMA_VERSION,
+        matches!(version, 0 | IN_PLACE_SCHEMA_VERSION | SCHEMA_VERSION),
         "state upgrade required: database schema {version}; supported schema is {SCHEMA_VERSION}; unsupported future schemas must not be modified"
     );
     Ok(())
@@ -1357,6 +1387,49 @@ pub(crate) fn expire_attempt(
     if read_task(connection, task_id)?.generation == generation {
         mark_uncertain_in(connection, task_id, generation)?;
     }
+    Ok(())
+}
+
+/// Brings `tasks` to schema 6, which admits the terminal `cancelled` status, in
+/// the caller's transaction. The caller turns foreign keys off before the
+/// transaction; a repeated run is a no-op.
+pub(crate) fn migrate_task_statuses(tx: &Connection) -> Result<()> {
+    let sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='tasks'",
+        [],
+        |r| r.get(0),
+    )?;
+    if sql.contains("'cancelled'") {
+        return Ok(());
+    }
+    let enforced: bool = tx.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    ensure!(
+        !enforced,
+        "task table rebuild requires foreign keys off outside the transaction"
+    );
+    tx.execute_batch(
+        "CREATE TABLE tasks_v6 (
+            task_id TEXT PRIMARY KEY NOT NULL,
+            replay_safe INTEGER NOT NULL CHECK(replay_safe IN (0, 1)),
+            status TEXT NOT NULL CHECK(status IN ('queued','assigned','completed','needs_reconciliation','cancelled')),
+            generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+            assignment_id TEXT,
+            receipt_hash TEXT,
+            CHECK((status = 'completed') = (receipt_hash IS NOT NULL))
+        ) STRICT;
+        INSERT INTO tasks_v6(task_id,replay_safe,status,generation,assignment_id,receipt_hash)
+            SELECT task_id,replay_safe,status,generation,assignment_id,receipt_hash FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v6 RENAME TO tasks;",
+    )?;
+    let violations: i64 =
+        tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?;
+    ensure!(
+        violations == 0,
+        "task table rebuild left {violations} foreign key violations"
+    );
     Ok(())
 }
 

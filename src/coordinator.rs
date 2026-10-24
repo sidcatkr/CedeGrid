@@ -416,6 +416,15 @@ impl Coordinator {
                     current.replay_safe || confirm_side_effects_reconciled,
                     "unsafe retry requires explicit confirmation that external side effects were reconciled"
                 );
+                let cancelled: bool = self.store.connection.query_row(
+                    "SELECT j.cancelled FROM task_specs s JOIN jobs j USING(job_id) WHERE s.task_id=?1",
+                    [&task_id],
+                    |r| r.get(0),
+                )?;
+                ensure!(
+                    !cancelled,
+                    "the task's job is cancelled; cancellation is terminal"
+                );
                 let request_json: String = self.store.connection.query_row(
                     "SELECT request_json FROM task_specs WHERE task_id=?1",
                     [&task_id],
@@ -453,11 +462,15 @@ impl Coordinator {
             }
             Request::Cancel { job_id } => {
                 operator(principal)?;
-                let n = self
-                    .store
-                    .connection
-                    .execute("UPDATE jobs SET cancelled=1 WHERE job_id=?1", [job_id])?;
+                let tx = Transaction::new_unchecked(
+                    &self.store.connection,
+                    TransactionBehavior::Immediate,
+                )?;
+                let n = tx.execute("UPDATE jobs SET cancelled=1 WHERE job_id=?1", [&job_id])?;
                 ensure!(n == 1, "unknown job");
+                // Queued work ends now; running work ends when its drain releases it.
+                tx.execute("UPDATE tasks SET status='cancelled' WHERE status='queued' AND task_id IN (SELECT task_id FROM task_specs WHERE job_id=?1)", [&job_id])?;
+                tx.commit()?;
                 Ok(Response::Ok)
             }
             Request::DrainNode { node_id, drain } => {
@@ -755,7 +768,7 @@ impl Coordinator {
                 )?;
             }
             tx.execute("INSERT INTO replay_node_sessions(node_id,session_id,boot_id,ready) VALUES (?1,?2,?3,0) ON CONFLICT(node_id) DO UPDATE SET session_id=excluded.session_id,boot_id=excluded.boot_id,ready=0", params![node_id, session_id, boot_id])?;
-            tx.execute("UPDATE tasks SET status=CASE replay_safe WHEN 1 THEN 'queued' ELSE 'needs_reconciliation' END WHERE status!='completed' AND assignment_id IN (SELECT assignment_id FROM reservations WHERE node_id=?1 AND phase!='released')", [node_id])?;
+            tx.execute("UPDATE tasks SET status=CASE WHEN replay_safe=0 THEN 'needs_reconciliation' WHEN EXISTS(SELECT 1 FROM task_specs s JOIN jobs j USING(job_id) WHERE s.task_id=tasks.task_id AND j.cancelled=1) THEN 'cancelled' ELSE 'queued' END WHERE status NOT IN ('completed','cancelled') AND assignment_id IN (SELECT assignment_id FROM reservations WHERE node_id=?1 AND phase!='released')", [node_id])?;
             tx.execute("UPDATE reservations SET phase='uncertain',detail='replay node session replaced; require authoritative recovery and verified release' WHERE node_id=?1 AND phase!='released'", [node_id])?;
             tx.execute("INSERT OR IGNORE INTO allocation_fences(assignment_id,reason) SELECT assignment_id,'replay node session replaced' FROM reservations WHERE node_id=?1 AND phase!='released'", [node_id])?;
         }
@@ -1514,11 +1527,21 @@ impl Coordinator {
         let attempts_available = request
             .max_attempts
             .is_none_or(|limit| generation < u64::from(limit));
-        if current.status != TaskStatus::Completed {
-            let next = if current.replay_safe
-                && failures < self.config.retry_limit
-                && attempts_available
-            {
+        let cancelled: bool = tx.query_row(
+            "SELECT j.cancelled FROM task_specs s JOIN jobs j USING(job_id) WHERE s.task_id=?1",
+            [&task],
+            |r| r.get(0),
+        )?;
+        if !matches!(
+            current.status,
+            TaskStatus::Completed | TaskStatus::Cancelled
+        ) {
+            // Cancellation is terminal; unsafe work keeps its reconciliation flag.
+            let next = if !current.replay_safe {
+                "needs_reconciliation"
+            } else if cancelled {
+                "cancelled"
+            } else if failures < self.config.retry_limit && attempts_available {
                 "queued"
             } else {
                 "needs_reconciliation"

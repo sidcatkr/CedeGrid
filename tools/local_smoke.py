@@ -319,7 +319,7 @@ def run(args):
                 tick();record=next(value for value in last_status['tasks'] if value['task_id']==command_id)
                 allocation=ledger.allocations.get(record.get('assignment_id'))
                 if record['status']=='completed' and allocation and allocation['phase']=='released':break
-                if record['status']=='needs_reconciliation' or time.monotonic()>deadline:
+                if record['status'] in ('needs_reconciliation','cancelled') or time.monotonic()>deadline:
                     raise RuntimeError('ordinary real command failed or exceeded120s; retain its allocation for reconciliation')
             receipt=client.result(command_id)
             if receipt is None:raise RuntimeError('ordinary real command lacks accepted result receipt')

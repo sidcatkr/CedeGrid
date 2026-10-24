@@ -1662,3 +1662,85 @@ async fn a_restarted_agent_refuses_a_reused_supervisor_pid() {
         "{states:?}"
     );
 }
+
+async fn task_state(service: &Service) -> Option<(String, u64)> {
+    use cedegrid::protocol::*;
+    let Response::Status { tasks, .. } = service
+        .operator
+        .request(&Request::Status { job_id: None })
+        .await
+        .ok()?
+    else {
+        return None;
+    };
+    let task = serde_json::to_value(tasks.first()?).ok()?;
+    Some((
+        task["status"].as_str()?.to_owned(),
+        task["generation"].as_u64()?,
+    ))
+}
+
+/// A job cancelled while its agent is down ends as cancelled once the restarted
+/// agent drains it, and the task is never assigned again (A18).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_task_stays_cancelled_across_an_agent_restart() {
+    use cedegrid::protocol::*;
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(30)".into()],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 6000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("first");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+    service
+        .operator
+        .request(&Request::Cancel {
+            job_id: "job".into(),
+        })
+        .await
+        .unwrap();
+    let mut restarted = service.agent("second");
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut state = None;
+    while Instant::now() < end {
+        state = task_state(&service).await;
+        if state
+            .as_ref()
+            .is_some_and(|(status, _)| status != "assigned")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // Several more heartbeats with free capacity never bring the task back.
+    let mut later = vec![];
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        later.push(task_state(&service).await);
+    }
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    service.server.abort();
+    let log = fs::read_to_string(service.dir.path().join("second.log")).unwrap();
+    assert!(log.contains("supervisor_reattached"), "{log}");
+    assert_eq!(state, Some(("cancelled".into(), 1)), "{log}");
+    assert!(
+        later.iter().all(|s| s == &Some(("cancelled".into(), 1))),
+        "{later:?}"
+    );
+    let assignment = service.record().unwrap().assignment_id;
+    assert!(service.outcome(&assignment).yielded);
+}

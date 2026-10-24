@@ -430,7 +430,7 @@ fn legacy_snapshot_manifest_without_profile_remains_wal_compatible() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        cedegrid::state::SCHEMA_VERSION
     );
     assert_eq!(
         db.query_row(
@@ -531,4 +531,61 @@ fn snapshot_and_restore_round_trip_distributed_schema_four() {
         )
         .unwrap();
     assert_eq!(schema, 4);
+}
+
+/// A snapshot taken at state schema 5 restores at the current schema, with the
+/// same task states as a snapshot taken at the current schema.
+#[test]
+fn a_schema_five_snapshot_restores_like_a_current_one() {
+    let statuses = |root: &Path| -> Vec<(String, String)> {
+        let db = rusqlite::Connection::open(root.join("state.sqlite3")).unwrap();
+        let mut statement = db
+            .prepare("SELECT task_id,status FROM tasks ORDER BY task_id")
+            .unwrap();
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let d = dir();
+    let mut restored = vec![];
+    for schema_five in [false, true] {
+        let source = d.path().join(format!("source-{schema_five}"));
+        seed(&source);
+        if schema_five {
+            let db = rusqlite::Connection::open(source.join("state.sqlite3")).unwrap();
+            db.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 BEGIN;
+                 CREATE TABLE tasks_v5 (task_id TEXT PRIMARY KEY NOT NULL, replay_safe INTEGER NOT NULL CHECK(replay_safe IN (0, 1)), status TEXT NOT NULL CHECK(status IN ('queued','assigned','completed','needs_reconciliation')), generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0), assignment_id TEXT, receipt_hash TEXT, CHECK((status = 'completed') = (receipt_hash IS NOT NULL))) STRICT;
+                 INSERT INTO tasks_v5 SELECT task_id,replay_safe,status,generation,assignment_id,receipt_hash FROM tasks;
+                 DROP TABLE tasks;
+                 ALTER TABLE tasks_v5 RENAME TO tasks;
+                 PRAGMA user_version=5;
+                 COMMIT;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        }
+        let snapshot = d.path().join(format!("snapshot-{schema_five}"));
+        backup::create(&source, &snapshot, limits()).unwrap();
+        let destination = d.path().join(format!("restored-{schema_five}"));
+        backup::restore(&snapshot, &destination, limits(), true).unwrap();
+        let db = rusqlite::Connection::open(destination.join("state.sqlite3")).unwrap();
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, cedegrid::state::SCHEMA_VERSION);
+        let sql: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("'cancelled'"), "{sql}");
+        restored.push(statuses(&destination));
+    }
+    assert_eq!(restored[0], restored[1]);
 }
