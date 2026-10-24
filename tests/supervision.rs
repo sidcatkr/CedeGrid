@@ -1126,3 +1126,65 @@ mod actuation {
         assert!(resumed > 0.7 * free, "free {free} resumed {resumed}");
     }
 }
+
+mod control_socket {
+    use cedegrid::supervision::control_socket::{Line, Listener, connect, token};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn next(rx: &mpsc::Receiver<Line>) -> Line {
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()
+    }
+
+    fn read_line(stream: &UnixStream) -> Option<String> {
+        // macOS refuses socket options once the peer has closed the connection.
+        stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+        let mut line = String::new();
+        let read = BufReader::new(stream).read_line(&mut line).ok()?;
+        (read > 0).then(|| line.trim_end().to_owned())
+    }
+
+    #[test]
+    fn only_the_token_holder_controls_and_a_newer_controller_replaces_the_older() {
+        let token = token().unwrap();
+        assert_eq!(token.len(), 64, "32 random bytes, hex");
+        let listener = Listener::bind(token.clone()).unwrap();
+        let path = listener.path().to_owned();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        let (tx, rx) = mpsc::channel();
+        let sink = listener.serve(move |line| {
+            let _ = tx.send(line);
+        });
+
+        // A wrong token and a connection without hello are both refused.
+        assert!(connect(&path, &"0".repeat(64)).is_err());
+        let mut stranger = UnixStream::connect(&path).unwrap();
+        writeln!(stranger, "{{\"kind\":\"adjust\"}}").unwrap();
+        assert_eq!(read_line(&stranger), None, "closed without authority");
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+
+        let mut first = connect(&path, &token).unwrap();
+        assert_eq!(next(&rx), Line::Attached);
+        writeln!(first, "from-first").unwrap();
+        assert_eq!(next(&rx), Line::Text("from-first".into()));
+        assert!(sink.write_line("to-first"));
+        assert_eq!(read_line(&first).as_deref(), Some("to-first"));
+
+        // A newer authenticated controller replaces the older one.
+        let mut second = connect(&path, &token).unwrap();
+        assert_eq!(next(&rx), Line::Attached);
+        assert_eq!(read_line(&first), None, "the replaced controller is closed");
+        writeln!(second, "from-second").unwrap();
+        assert_eq!(next(&rx), Line::Text("from-second".into()));
+        assert!(sink.write_line("to-second"));
+        assert_eq!(read_line(&second).as_deref(), Some("to-second"));
+        drop(second);
+        assert_eq!(next(&rx), Line::Detached);
+        assert!(!sink.write_line("nobody"));
+    }
+}

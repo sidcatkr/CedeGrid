@@ -246,10 +246,10 @@ pause and then reverses, with no drain (quickstart §3).
   - every signal and control write targets a verified identity;
   - a reused PID and a foreign PID in a cgroup leaf are refused;
   - both checks still hold after an agent restart reconnects to the supervisor (FR-002).
-- [ ] T037 [P] [US2] Add an agent restart test in `tests/agent.rs`: the restarted agent
+- [X] T037 [P] [US2] Add an agent restart test in `tests/agent.rs`: the restarted agent
   reconnects through `control.sock`, reads the applied steps, and never marks the live
   supervisor NeedsReconciliation.
-- [ ] T038 [US2] Add control-socket tests in `tests/supervision.rs`:
+- [X] T038 [US2] Add control-socket tests in `tests/supervision.rs`:
   - a wrong token and an unauthenticated second connection are rejected;
   - the correct token is accepted and replaces the previous controller.
 - [X] T039 [US2] Add tests in `tests/agent.rs`:
@@ -289,12 +289,12 @@ pause and then reverses, with no drain (quickstart §3).
   - message types in `src/agent.rs`;
   - handling in `src/supervision.rs` and `src/child_supervision.rs`;
   - applied steps persisted as `AllocationContention` in `src/execution_state.rs`.
-- [ ] T049 [US2] Add the supervisor `control.sock` listener in `src/supervision.rs`:
+- [X] T049 [US2] Add the supervisor `control.sock` listener in `src/supervision.rs`:
   - socket mode 0600, inside the 0700 output directory;
   - a `hello` carrying the 32-byte token from the spec;
   - a peer UID check;
   - one active controller at a time.
-- [ ] T050 [US2] In `src/agent.rs` reconciliation, reconnect to live supervisors through
+- [X] T050 [US2] In `src/agent.rs` reconciliation, reconnect to live supervisors through
   `supervisor-identity.json` and `control.sock`, and stop rewriting live supervisors' journals
   (audit H5).
 - [X] T051 [US2] Add the actuation stage in `src/agent.rs`:

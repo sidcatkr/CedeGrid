@@ -21,7 +21,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -64,6 +64,9 @@ pub struct SupervisorSpec {
     #[serde(default)]
     pub envelope: Option<Resources>,
     pub output_dir: PathBuf,
+    /// Token for the re-attachable control socket; older specs have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_token: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -86,6 +89,11 @@ enum Event {
     State {
         applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
         targets: BTreeMap<crate::contention::ResourceKey, u64>,
+        /// The last coordinator lease sequence, so a reattached agent can renew.
+        lease_sequence: u64,
+        /// The last applied `adjust` sequence; a reattached agent continues above it.
+        #[serde(default)]
+        sequence: u64,
         /// "connected" or "lost"
         authority: String,
     },
@@ -95,7 +103,11 @@ enum Event {
 enum Incoming {
     Control(Control),
     Unknown(String),
+    /// The inherited pipe closed.
     Lost,
+    /// A controller authenticated on the control socket, or left it.
+    Attached,
+    Detached,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -324,6 +336,11 @@ impl ReplayJournalGuard {
 }
 struct PipeControl {
     rx: mpsc::Receiver<Incoming>,
+    /// Writes events to an authenticated control-socket controller as well.
+    #[cfg(unix)]
+    sink: Option<supervision::control_socket::Sink>,
+    stdin_open: bool,
+    controller: bool,
     assignment: Assignment,
     config: Config,
     /// The latest agent GPU observation and when it arrived.
@@ -416,7 +433,7 @@ impl SupervisorControl for PipeControl {
         self.pending_commands()
     }
     fn report(&mut self, report: supervision::SupervisorReport) -> Result<()> {
-        emit(&match report {
+        let event = match report {
             supervision::SupervisorReport::Adjusted {
                 sequence,
                 applied,
@@ -428,12 +445,31 @@ impl SupervisorControl for PipeControl {
                 unavailable,
                 detail,
             },
-            supervision::SupervisorReport::State { applied, targets } => Event::State {
+            supervision::SupervisorReport::State {
                 applied,
                 targets,
+                lease_sequence,
+                sequence,
+            } => Event::State {
+                applied,
+                targets,
+                lease_sequence,
+                sequence,
                 authority: if self.agent_lost { "lost" } else { "connected" }.into(),
             },
-        })
+        };
+        self.send_event(&event)
+    }
+}
+
+fn new_control_token() -> Result<Option<String>> {
+    #[cfg(unix)]
+    {
+        Ok(Some(supervision::control_socket::token()?))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(None)
     }
 }
 
@@ -448,6 +484,24 @@ fn unknown_control(detail: &str) {
     );
 }
 impl PipeControl {
+    /// Events go to the inherited pipe and to an attached controller; either may
+    /// be gone after an agent restart.
+    fn send_event(&self, event: &Event) -> Result<()> {
+        let line = serde_json::to_string(event)?;
+        let piped = emit(event).is_ok();
+        #[cfg(unix)]
+        let attached = self
+            .sink
+            .as_ref()
+            .is_some_and(|sink| sink.write_line(&line));
+        #[cfg(not(unix))]
+        let attached = {
+            let _ = line;
+            false
+        };
+        ensure!(piped || attached, "no agent receives supervisor events");
+        Ok(())
+    }
     fn recv_until(&mut self, deadline: Instant) -> Result<Control> {
         loop {
             match self
@@ -456,6 +510,7 @@ impl PipeControl {
             {
                 Ok(Incoming::Control(control)) => return Ok(control),
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
+                Ok(Incoming::Attached | Incoming::Detached) => {}
                 _ => bail!("agent lost or execution authorization absent; gate stays blocked"),
             }
         }
@@ -518,12 +573,27 @@ impl PipeControl {
                 Ok(Incoming::Control(Control::Query)) => commands.push(SupervisorCommand::Query),
                 Ok(Incoming::Control(Control::Authorize { .. })) => {}
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
-                Ok(Incoming::Lost) | Err(mpsc::TryRecvError::Disconnected) => {
-                    if !self.agent_lost {
+                // Authority returns when a controller reattaches (research R2).
+                Ok(Incoming::Attached) => {
+                    self.controller = true;
+                    self.agent_lost = false;
+                }
+                Ok(Incoming::Detached) => {
+                    self.controller = false;
+                    if !self.stdin_open && !self.agent_lost {
                         commands.push(SupervisorCommand::AgentLost);
                         self.agent_lost = true;
                     }
-                    break;
+                }
+                Ok(Incoming::Lost) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.stdin_open = false;
+                    if !self.controller && !self.agent_lost {
+                        commands.push(SupervisorCommand::AgentLost);
+                        self.agent_lost = true;
+                    }
+                    if matches!(self.rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                        break;
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
             }
@@ -576,20 +646,42 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     }
 
     let (tx, rx) = mpsc::channel();
+    let parse = |line: &str| match serde_json::from_str(line) {
+        Ok(control) => Incoming::Control(control),
+        Err(error) => Incoming::Unknown(error.to_string()),
+    };
+    let stdin_tx = tx.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(std::io::stdin()).lines() {
-            let message = match line {
-                Ok(line) => match serde_json::from_str(&line) {
-                    Ok(control) => Incoming::Control(control),
-                    Err(error) => Incoming::Unknown(error.to_string()),
-                },
-                Err(_) => Incoming::Lost,
-            };
-            if tx.send(message).is_err() {
-                break;
+            let Ok(line) = line else { break };
+            if stdin_tx.send(parse(&line)).is_err() {
+                return;
             }
         }
+        let _ = stdin_tx.send(Incoming::Lost);
     });
+    // A restarted agent reattaches through this socket (research R2).
+    #[cfg(unix)]
+    let sink = match &spec.control_token {
+        Some(token) => {
+            let listener = supervision::control_socket::Listener::bind(token.clone())?;
+            write_json_new(
+                &spec.output_dir.join("control-socket.json"),
+                &serde_json::json!({"path": listener.path()}),
+            )?;
+            let socket_tx = std::sync::Mutex::new(tx.clone());
+            Some(listener.serve(move |line| {
+                let message = match line {
+                    supervision::control_socket::Line::Attached => Incoming::Attached,
+                    supervision::control_socket::Line::Detached => Incoming::Detached,
+                    supervision::control_socket::Line::Text(line) => parse(&line),
+                };
+                let _ = socket_tx.lock().map(|tx| tx.send(message));
+            }))
+        }
+        None => None,
+    };
+    drop(tx);
     let mut backend = execution_backend(&spec.config, &spec.assignment.request)?;
     let journal = AssignedJournal {
         store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
@@ -597,6 +689,10 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     };
     let mut control = PipeControl {
         rx,
+        #[cfg(unix)]
+        sink,
+        stdin_open: true,
+        controller: false,
         assignment: spec.assignment.clone(),
         config: spec.config.clone(),
         observation: None,
@@ -622,10 +718,12 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         &std::env::current_exe()?,
         &mut control,
     );
+    // The outcome files are authoritative; an event nobody receives is not an error.
     let result = match result {
         Ok(outcome) => {
             write_json_new(&spec.output_dir.join("execution-outcome.json"), &outcome)?;
-            emit(&Event::Finished { outcome })
+            let _ = control.send_event(&Event::Finished { outcome });
+            Ok(())
         }
         Err(error) => {
             let detail = format!("{error:#}");
@@ -633,7 +731,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
                 &spec.output_dir.join("execution-error.json"),
                 &serde_json::json!({"detail":detail}),
             );
-            emit(&Event::Failed { detail })?;
+            let _ = control.send_event(&Event::Failed { detail });
             Err(error)
         }
     };
@@ -722,10 +820,28 @@ pub fn execution_backend(
         config.effective_nice(),
     )))
 }
+/// The supervisor behind a slot.
+enum SupervisorProcess {
+    /// Spawned by this agent: its direct child.
+    Owned(Child),
+    /// Reattached after an agent restart; exit is seen through its identity.
+    Attached(ProcessIdentity),
+}
+impl SupervisorProcess {
+    /// The exit status when this agent reaped it, or a description once gone.
+    fn exited(&mut self) -> Result<Option<String>> {
+        match self {
+            SupervisorProcess::Owned(child) => Ok(child.try_wait()?.map(|s| s.to_string())),
+            SupervisorProcess::Attached(identity) => {
+                Ok(identity_absent(identity).then(|| "after reattachment".to_string()))
+            }
+        }
+    }
+}
 struct ChildSlot {
-    child: Child,
+    child: SupervisorProcess,
     /// None once closed; closing it without Drain is agent loss, never a drain.
-    input: Option<ChildStdin>,
+    input: Option<Box<dyn Write + Send>>,
     events: mpsc::Receiver<std::result::Result<Event, String>>,
     assignment: Assignment,
     output_dir: PathBuf,
@@ -748,6 +864,8 @@ struct ChildSlot {
     /// The last `adjust` sent and its sequence.
     adjust_sequence: u64,
     sent_steps: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
+    /// Steps learned from a reattached supervisor, to seed the policy authority.
+    seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
 }
 impl Drop for ChildSlot {
     fn drop(&mut self) {
@@ -756,7 +874,7 @@ impl Drop for ChildSlot {
         drop(self.input.take());
         // Never block on a supervisor that outlives this agent; join output work
         // only once it has finished.
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
+        if matches!(self.child.exited(), Ok(Some(_))) {
             for thread in self.capture_threads.drain(..) {
                 let _ = thread.join();
             }
@@ -929,6 +1047,164 @@ pub(crate) fn recovery_allows_release(record: &ExecutionRecord) -> bool {
             .is_ok_and(|current| current.boot_id != old.boot_id)
     })
 }
+/// Whether the attempt's supervisor is verifiably the same live process.
+fn live_supervisor(config: &Config, record: &ExecutionRecord) -> Option<ProcessIdentity> {
+    let output = config
+        .state_dir
+        .join("attempts")
+        .join(&record.assignment_id);
+    let bytes =
+        crate::publication::read_bounded(&output.join("supervisor-identity.json"), 64 * 1024)
+            .ok()?;
+    let identity: ProcessIdentity = serde_json::from_slice(&bytes).ok()?;
+    (identity.assignment_id == record.assignment_id
+        && identity.generation == record.generation
+        && supervision::process_identity(
+            identity.pid,
+            &identity.assignment_id,
+            identity.generation,
+        )
+        .ok()
+        .as_ref()
+            == Some(&identity)
+        && !identity_absent(&identity))
+    .then_some(identity)
+}
+
+/// Reconnect to live supervisors after an agent restart (research R2). Each one is
+/// verified by identity and authenticated by the token from its spec, and reports
+/// its applied steps, lease sequence and adjust sequence.
+#[cfg(unix)]
+fn reattach_supervisors(config: &Config, store: &StateStore) -> Result<Vec<ChildSlot>> {
+    let mut slots = Vec::new();
+    for record in store.executions()?.into_iter().filter(|r| {
+        matches!(
+            r.phase,
+            ExecutionPhase::Authorized | ExecutionPhase::Running | ExecutionPhase::Draining
+        )
+    }) {
+        match reattach_supervisor(config, &record) {
+            Ok(slot) => {
+                emit(
+                    &serde_json::json!({"event":"supervisor_reattached","assignment_id":record.assignment_id,
+                    "lease_sequence":slot.sequence,"applied":slot.applied}),
+                )?;
+                slots.push(slot);
+            }
+            Err(error) => emit(&serde_json::json!({"event":"supervisor_not_reattached",
+                "assignment_id":record.assignment_id,"detail":format!("{error:#}")}))?,
+        }
+    }
+    Ok(slots)
+}
+
+#[cfg(unix)]
+fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<ChildSlot> {
+    let output = config
+        .state_dir
+        .join("attempts")
+        .join(&record.assignment_id);
+    let spec: SupervisorSpec = serde_json::from_slice(&crate::publication::read_bounded(
+        &output.join("supervisor-spec.json"),
+        3 * 1024 * 1024,
+    )?)?;
+    ensure!(
+        spec.assignment.request.assignment_id == record.assignment_id
+            && spec.assignment.generation == record.generation,
+        "supervisor spec identity mismatch"
+    );
+    let token = spec
+        .control_token
+        .clone()
+        .context("supervisor has no control socket")?;
+    let identity = live_supervisor(config, record).context("supervisor is not live")?;
+    let socket: serde_json::Value = serde_json::from_slice(&crate::publication::read_bounded(
+        &output.join("control-socket.json"),
+        64 * 1024,
+    )?)?;
+    let path = PathBuf::from(
+        socket["path"]
+            .as_str()
+            .context("control socket path missing")?,
+    );
+    let stream = supervision::control_socket::connect(&path, &token)?;
+    let reader = stream.try_clone()?;
+    let (tx, events) = mpsc::channel();
+    let events_thread = std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines() {
+            let event = line
+                .map_err(|e| e.to_string())
+                .and_then(|l| serde_json::from_str(&l).map_err(|e| e.to_string()));
+            if tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    let mut slot = ChildSlot {
+        child: SupervisorProcess::Attached(identity),
+        input: Some(Box::new(stream)),
+        events,
+        assignment: spec.assignment,
+        output_dir: output,
+        sequence: 0,
+        last_renew: Instant::now(),
+        prepared: None,
+        reported: false,
+        checkpoint_hash: None,
+        exited: false,
+        capture_threads: vec![events_thread],
+        unavailable: BTreeMap::new(),
+        applied: BTreeMap::new(),
+        applied_sequence: 0,
+        drain_sent_at: None,
+        started_at: Instant::now(),
+        last_checkpoint_at: None,
+        adjust_sequence: 0,
+        sent_steps: BTreeMap::new(),
+        seed: None,
+    };
+    send(&mut slot, &Control::Query)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match slot
+            .events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(Ok(Event::State {
+                applied,
+                targets,
+                lease_sequence,
+                sequence,
+                ..
+            })) => {
+                // Continue above the supervisor's sequences and renew its lease.
+                slot.sequence = lease_sequence;
+                slot.adjust_sequence = sequence;
+                let steps: BTreeMap<_, _> = applied
+                    .iter()
+                    .filter(|(_, step)| **step != crate::contention::YieldStep::None)
+                    .map(|(key, step)| {
+                        (
+                            key.clone(),
+                            crate::contention::StepRequest {
+                                step: *step,
+                                target: targets.get(key).copied(),
+                                cause: crate::contention::YieldCause::ExternalGrowth,
+                            },
+                        )
+                    })
+                    .collect();
+                slot.sent_steps = steps.clone();
+                slot.seed = Some(steps);
+                slot.applied = applied;
+                return Ok(slot);
+            }
+            Ok(_) => {}
+            Err(_) => bail!("reattached supervisor reported no state"),
+        }
+    }
+}
+
 fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec<ExecutionRecord>> {
     let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
     reconcile_guarded(config, exclude, guard)
@@ -954,6 +1230,11 @@ fn reconcile_guarded(
     let store = open_existing_node_store_guarded(config, guard)?;
     for mut record in store.executions()? {
         if record.phase == ExecutionPhase::Released || exclude.contains(&record.assignment_id) {
+            continue;
+        }
+        // A verifiably live supervisor owns its journal; rewriting it would turn its
+        // later drain into a rejected transition (audit H5).
+        if live_supervisor(config, &record).is_some() {
             continue;
         }
         let request = store.execution_request(&record.assignment_id)?;
@@ -1361,6 +1642,7 @@ async fn start_assignment(
         capacity: capacity.clone(),
         envelope: Some(agent.capacity.clone()),
         output_dir: output.clone(),
+        control_token: new_control_token()?,
     };
     let path = output.join("supervisor-spec.json");
     client.write_json_new(&path, &spec)?;
@@ -1426,8 +1708,8 @@ async fn start_assignment(
         }
     });
     Ok(ChildSlot {
-        child,
-        input,
+        child: SupervisorProcess::Owned(child),
+        input: input.map(|i| Box::new(i) as Box<dyn Write + Send>),
         events,
         assignment,
         output_dir: output,
@@ -1446,6 +1728,7 @@ async fn start_assignment(
         last_checkpoint_at: None,
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
+        seed: None,
     })
 }
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
@@ -2059,7 +2342,7 @@ impl AgentLoop<'_> {
     async fn service_slots(&mut self) -> Result<()> {
         let config = self.config;
         for slot in self.slots.values_mut() {
-            let supervisor_exited = slot.child.try_wait()?.is_some();
+            let supervisor_exited = slot.child.exited()?.is_some();
             slot.exited = supervisor_exited;
             while let Ok(event) = slot.events.try_recv() {
                 match event {
@@ -2324,7 +2607,7 @@ impl AgentLoop<'_> {
                     (id, checkpoint, hash, result)
                 }));
             }
-            if let Some(status) = slot.child.try_wait()?
+            if let Some(status) = slot.child.exited()?
                 && let Some(mut record) = self
                     .store
                     .execution_record(&slot.assignment.request.assignment_id)?
@@ -2488,6 +2771,12 @@ impl AgentLoop<'_> {
             self.spool_full =
                 spool_size(&config.state_dir.join("attempts"))? > agent.max_spool_bytes;
             self.last_spool_check = Instant::now();
+        }
+        for (id, slot) in self.slots.iter_mut() {
+            for (key, step) in slot.seed.take().unwrap_or_default() {
+                self.policy
+                    .seed(id, key, step, self.start.elapsed().as_millis() as u64);
+            }
         }
         let mut decision = self.policy.evaluate(
             config,
@@ -2995,7 +3284,7 @@ impl AgentLoop<'_> {
         // We deliberately never signal an uncertain supervisor/workload by PID.
         for slot in self.slots.values_mut() {
             drain(slot, None);
-            let _ = slot.child.try_wait()?;
+            let _ = slot.child.exited()?;
         }
         let retained: Vec<_>=self.slots.iter().map(|(id,slot)|serde_json::json!({"assignment_id":id,"exited":slot.exited,"reported":slot.reported,"publishing":self.publishing.iter().filter(|(publishing_id,_)|publishing_id==id).collect::<Vec<_>>(),"result_receipt":slot.output_dir.join("result.receipt.json").is_file(),"failure_receipt":slot.output_dir.join("failure.receipt.json").is_file()})).collect();
         let status = serde_json::json!({"event":"agent_stopped","node_id":config.node_id,"elapsed_ms":self.start.elapsed().as_millis(),"retained_slots":self.slots.len(),"retained_slot_details":retained,"executions":self.store.executions()?});
@@ -3107,7 +3396,19 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         .open(config.state_dir.join("agent.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .context("another agent already owns this node state")?;
-    let _ = reconcile_guarded(config, &BTreeSet::new(), namespace_guard.clone())?;
+    #[cfg(unix)]
+    let attached = if replay.is_none() {
+        reattach_supervisors(config, &store)?
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(unix))]
+    let attached: Vec<ChildSlot> = Vec::new();
+    let attached_ids: BTreeSet<String> = attached
+        .iter()
+        .map(|slot| slot.assignment.request.assignment_id.clone())
+        .collect();
+    let _ = reconcile_guarded(config, &attached_ids, namespace_guard.clone())?;
     let mut client = NodeClient::new(
         agent,
         &config.state_dir,
@@ -3167,6 +3468,11 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         last_growth: start,
         counted_drains: BTreeSet::new(),
     };
+    for slot in attached {
+        state
+            .slots
+            .insert(slot.assignment.request.assignment_id.clone(), slot);
+    }
     loop {
         // Anchor observations to their scheduled cadence. Processing and RPC
         // time consume this interval instead of extending it. After an overrun,
@@ -4111,7 +4417,7 @@ mod negotiation_tests {
 mod drain_tests {
     use super::*;
 
-    fn slot_with(child: Child, input: ChildStdin) -> ChildSlot {
+    fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
         let (_tx, events) = mpsc::channel();
         let request = crate::execution_model::LaunchRequest {
             task_id: "t".into(),
@@ -4131,8 +4437,8 @@ mod drain_tests {
             allow_fallback: true,
         };
         ChildSlot {
-            child,
-            input: Some(input),
+            child: SupervisorProcess::Owned(child),
+            input: Some(Box::new(input)),
             events,
             assignment: Assignment {
                 node_id: "node".into(),
@@ -4157,6 +4463,7 @@ mod drain_tests {
             last_checkpoint_at: None,
             adjust_sequence: 0,
             sent_steps: BTreeMap::new(),
+            seed: None,
         }
     }
 

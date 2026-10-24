@@ -221,6 +221,29 @@ impl PolicyEngine {
         Self::default()
     }
 
+    /// Re-establish a step a supervisor already applied, after an agent restart
+    /// (research R2). The step then holds, escalates or reverses as usual.
+    pub fn seed(
+        &mut self,
+        allocation_id: &str,
+        key: ResourceKey,
+        request: crate::contention::StepRequest,
+        now_monotonic_ms: u64,
+    ) {
+        self.ladder.insert(
+            (allocation_id.to_owned(), key),
+            StepState {
+                step: request.step,
+                entered_at_ms: now_monotonic_ms,
+                cause: request.cause,
+                target: request.target,
+                trigger_external: 0,
+                calm_since_ms: None,
+                contended_since_ms: None,
+            },
+        );
+    }
+
     pub fn evaluate(
         &mut self,
         config: &Config,

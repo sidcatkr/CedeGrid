@@ -87,6 +87,7 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
         },
         envelope: None,
         output_dir,
+        control_token: None,
     }
 }
 fn start(spec: &SupervisorSpec) -> (Child, ChildStdin, mpsc::Receiver<serde_json::Value>) {
@@ -173,7 +174,7 @@ fn independent_supervisor_agent_loss_before_authorization_never_executes() {
     assert_eq!(rows[0].generation, 7);
 }
 #[test]
-fn independent_supervisor_agent_loss_yields_opportunistic_but_preserves_guaranteed() {
+fn independent_supervisor_agent_loss_holds_until_the_lease_expires() {
     for class in [AllocationClass::Opportunistic, AllocationClass::Guaranteed] {
         let dir = directory();
         let spec = spec(
@@ -183,7 +184,7 @@ fn independent_supervisor_agent_loss_yields_opportunistic_but_preserves_guarante
                 std::env::current_exe().unwrap().display().to_string(),
                 "--ignored".into(),
                 "--exact".into(),
-                "short_single_process_fixture".into(),
+                "full_single_cpu_fixture".into(),
             ],
         );
         let (mut child, mut input, rx) = start(&spec);
@@ -191,7 +192,7 @@ fn independent_supervisor_agent_loss_yields_opportunistic_but_preserves_guarante
             rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
             "prepared"
         );
-        authorize(&mut input, 2000);
+        authorize(&mut input, 1000);
         drop(input);
         assert!(wait(&mut child).success());
         let outcome: ExecutionOutcome = serde_json::from_slice(
@@ -199,8 +200,11 @@ fn independent_supervisor_agent_loss_yields_opportunistic_but_preserves_guarante
         )
         .unwrap();
         assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+        // Opportunistic work yields at its lease expiry, not at the moment of loss.
         assert_eq!(outcome.yielded, class == AllocationClass::Opportunistic);
-        if class == AllocationClass::Guaranteed {
+        if class == AllocationClass::Opportunistic {
+            assert!(outcome.drain_started_ms.unwrap() >= 900, "{outcome:?}");
+        } else {
             assert_eq!(outcome.exit_code, Some(0));
         }
     }
@@ -1045,165 +1049,245 @@ fn unknown_control_kinds_are_ignored_and_adjust_reports_applied_steps() {
     assert_eq!(outcome.exit_code, Some(0));
 }
 
+/// A coordinator and a node configuration for an end-to-end agent test.
+struct Service {
+    dir: tempfile::TempDir,
+    operator: cedegrid::protocol::RpcClient,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    local: SupervisorSpec,
+    config_file: PathBuf,
+    deployment_file: PathBuf,
+}
+
+impl Service {
+    /// Start a coordinator, write node and agent configs, and submit one task.
+    async fn start(
+        class: AllocationClass,
+        argv: Vec<String>,
+        configure: impl FnOnce(&mut SupervisorSpec),
+    ) -> Self {
+        use cedegrid::{agent::AgentConfig, coordinator::serve, protocol::*};
+        let dir = directory();
+        let root = std::env::current_dir().unwrap();
+        let pki = dir.path().join("pki");
+        let generated = Command::new("python3")
+            .arg(root.join("tools/make_test_pki.py"))
+            .arg("--output")
+            .arg(&pki)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("TMPDIR", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "PKI: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let info: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
+        let tls = |name: &str| TlsIdentity {
+            ca_cert: pki.join("ca.pem"),
+            certificate: pki.join(format!("{name}.pem")),
+            private_key: pki.join(format!("{name}.key")),
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let endpoint = format!("https://{address}");
+        let server = tokio::spawn(serve(CoordinatorConfig {
+            storage_profile: Default::default(),
+            state_dir: dir.path().join("coordinator"),
+            listen: address,
+            tls: tls("server"),
+            clients: BTreeMap::from([
+                (
+                    info["client_fingerprints"]["operator"]
+                        .as_str()
+                        .unwrap()
+                        .into(),
+                    Principal::Operator,
+                ),
+                (
+                    info["client_fingerprints"]["node"].as_str().unwrap().into(),
+                    Principal::Node {
+                        node_id: "node".into(),
+                    },
+                ),
+            ]),
+            lease_ms: 30_000,
+            telemetry_ttl_ms: 3000,
+            max_artifact_bytes: 1024 * 1024,
+            artifact_quota_bytes: 10 * 1024 * 1024,
+            retry_limit: 3,
+            retry_backoff_ms: 1000,
+            retry_backoff_max_ms: 30000,
+            yield_retry_backoff_ms: 1000,
+            yield_retry_backoff_max_ms: 30000,
+        }));
+        let operator = RpcClient::new(&endpoint, &tls("operator")).unwrap();
+        for _ in 0..50 {
+            if operator
+                .request(&Request::Status { job_id: None })
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut local = spec(dir.path(), class, argv);
+        local.config.gpu.scale_up_cooldown_ms = 0;
+        local.config.lifecycle.heartbeat_interval_ms = 400;
+        local.config.monitor.interval_ms = 400;
+        configure(&mut local);
+        let config_file = dir.path().join("node.toml");
+        fs::write(
+            &config_file,
+            cedegrid::config::serialize_runtime(
+                &local.config,
+                cedegrid::config::RuntimeConfigKind::Node,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let deployment_file = dir.path().join("agent.toml");
+        fs::write(
+            &deployment_file,
+            cedegrid::config::serialize_runtime(
+                &AgentConfig {
+                    coordinator_url: endpoint,
+                    tls: tls("node"),
+                    cpu_affinity: None,
+                    max_transfer_bytes_per_second: 10 * 1024 * 1024,
+                    capacity: local.capacity.clone(),
+                    max_workers: 1,
+                    max_spool_bytes: 10 * 1024 * 1024,
+                    max_runtime_seconds: 90,
+                },
+                cedegrid::config::RuntimeConfigKind::Agent,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        operator
+            .request(&Request::PutPool {
+                pool: PoolSpec {
+                    pool_id: "pool".into(),
+                    class,
+                    node_ids: vec!["node".into()],
+                    min_workers: 1,
+                    max_workers: 1,
+                },
+            })
+            .await
+            .unwrap();
+        local.assignment.request.assignment_id = String::new();
+        operator
+            .request(&Request::Submit {
+                job: JobSpec {
+                    job_id: "job".into(),
+                    pool_id: "pool".into(),
+                    priority: 0,
+                    tasks: vec![local.assignment.request.clone()],
+                },
+            })
+            .await
+            .unwrap();
+        Self {
+            dir,
+            operator,
+            server,
+            local,
+            config_file,
+            deployment_file,
+        }
+    }
+
+    fn agent(&self, log: &str) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(&self.config_file)
+            .arg("agent")
+            .arg("--deployment")
+            .arg(&self.deployment_file)
+            .env("TMPDIR", self.dir.path())
+            .stdout(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.log"))).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.err"))).unwrap(),
+            ))
+            .spawn()
+            .unwrap()
+    }
+
+    async fn result(&self, attempts: usize) -> Option<cedegrid::protocol::ResultSubmission> {
+        use cedegrid::protocol::*;
+        for _ in 0..attempts {
+            if let Response::Result { submission } = self
+                .operator
+                .request(&Request::GetResult {
+                    task_id: "task".into(),
+                })
+                .await
+                .unwrap()
+                && submission.is_some()
+            {
+                return submission;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    }
+
+    fn record(&self) -> Option<ExecutionRecord> {
+        StateStore::open_read_only(&self.local.config.state_dir)
+            .ok()?
+            .executions()
+            .ok()?
+            .into_iter()
+            .find(|r| r.task_id == "task")
+    }
+
+    fn outcome(&self, assignment: &str) -> ExecutionOutcome {
+        serde_json::from_slice(
+            &fs::read(
+                self.local
+                    .config
+                    .state_dir
+                    .join("attempts")
+                    .join(assignment)
+                    .join("execution-outcome.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+}
+
 /// Quickstart §3: rootless CPU contention caps the job and reverses, never drains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
-    use cedegrid::{agent::AgentConfig, coordinator::serve, protocol::*};
-    let dir = directory();
-    let root = std::env::current_dir().unwrap();
     let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
-    let pki = dir.path().join("pki");
-    let generated = Command::new("python3")
-        .arg(root.join("tools/make_test_pki.py"))
-        .arg("--output")
-        .arg(&pki)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .env("TMPDIR", dir.path())
-        .output()
-        .unwrap();
-    assert!(
-        generated.status.success(),
-        "PKI: {}",
-        String::from_utf8_lossy(&generated.stderr)
-    );
-    let info: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
-    let tls = |name: &str| TlsIdentity {
-        ca_cert: pki.join("ca.pem"),
-        certificate: pki.join(format!("{name}.pem")),
-        private_key: pki.join(format!("{name}.key")),
-    };
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    let endpoint = format!("https://{address}");
-    let server = tokio::spawn(serve(CoordinatorConfig {
-        storage_profile: Default::default(),
-        state_dir: dir.path().join("coordinator"),
-        listen: address,
-        tls: tls("server"),
-        clients: BTreeMap::from([
-            (
-                info["client_fingerprints"]["operator"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                Principal::Operator,
-            ),
-            (
-                info["client_fingerprints"]["node"].as_str().unwrap().into(),
-                Principal::Node {
-                    node_id: "node".into(),
-                },
-            ),
-        ]),
-        lease_ms: 30_000,
-        telemetry_ttl_ms: 3000,
-        max_artifact_bytes: 1024 * 1024,
-        artifact_quota_bytes: 10 * 1024 * 1024,
-        retry_limit: 3,
-        retry_backoff_ms: 1000,
-        retry_backoff_max_ms: 30000,
-        yield_retry_backoff_ms: 1000,
-        yield_retry_backoff_max_ms: 30000,
-    }));
-    let operator = RpcClient::new(&endpoint, &tls("operator")).unwrap();
-    for _ in 0..50 {
-        if operator
-            .request(&Request::Status { job_id: None })
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut local = spec(
-        dir.path(),
+    let service = Service::start(
         AllocationClass::Opportunistic,
         vec![
             python.clone(),
             "-c".into(),
             "import time\nend=time.monotonic()+30\nwhile time.monotonic()<end: pass\n".into(),
         ],
-    );
-    local.config.gpu.scale_up_cooldown_ms = 0;
-    local.config.lifecycle.heartbeat_interval_ms = 400;
-    local.config.lifecycle.allocation_lease_ms = 30_000;
-    local.config.monitor.interval_ms = 400;
-    local.config.contention.cpu.mode = Some(cedegrid::contention::ContentionMode::YieldFirst);
-    local.config.contention.cpu.scale_up_step_interval_s = Some(1);
-    local.assignment.request.resources.cpu_millicores = 1000;
-    let config_file = dir.path().join("node.toml");
-    fs::write(
-        &config_file,
-        cedegrid::config::serialize_runtime(
-            &local.config,
-            cedegrid::config::RuntimeConfigKind::Node,
-        )
-        .unwrap(),
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 30_000;
+            local.config.contention.cpu.mode =
+                Some(cedegrid::contention::ContentionMode::YieldFirst);
+            local.config.contention.cpu.scale_up_step_interval_s = Some(1);
+            local.assignment.request.resources.cpu_millicores = 1000;
+        },
     )
-    .unwrap();
-    let deployment_file = dir.path().join("agent.toml");
-    fs::write(
-        &deployment_file,
-        cedegrid::config::serialize_runtime(
-            &AgentConfig {
-                coordinator_url: endpoint,
-                tls: tls("node"),
-                cpu_affinity: None,
-                max_transfer_bytes_per_second: 10 * 1024 * 1024,
-                capacity: local.capacity.clone(),
-                max_workers: 1,
-                max_spool_bytes: 10 * 1024 * 1024,
-                max_runtime_seconds: 90,
-            },
-            cedegrid::config::RuntimeConfigKind::Agent,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    operator
-        .request(&Request::PutPool {
-            pool: PoolSpec {
-                pool_id: "cpu".into(),
-                class: AllocationClass::Opportunistic,
-                node_ids: vec!["node".into()],
-                min_workers: 1,
-                max_workers: 1,
-            },
-        })
-        .await
-        .unwrap();
-    local.assignment.request.assignment_id = String::new();
-    operator
-        .request(&Request::Submit {
-            job: JobSpec {
-                job_id: "job".into(),
-                pool_id: "cpu".into(),
-                priority: 0,
-                tasks: vec![local.assignment.request.clone()],
-            },
-        })
-        .await
-        .unwrap();
-    let mut agent = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
-        .arg("--config")
-        .arg(&config_file)
-        .arg("agent")
-        .arg("--deployment")
-        .arg(&deployment_file)
-        .env("TMPDIR", dir.path())
-        .stdout(Stdio::from(
-            fs::File::create(dir.path().join("agent.log")).unwrap(),
-        ))
-        .stderr(Stdio::from(
-            fs::File::create(dir.path().join("agent.err")).unwrap(),
-        ))
-        .spawn()
-        .unwrap();
+    .await;
+    let mut agent = service.agent("agent");
     // The latest decision's own CPU and the job's CPU step, from the agent's history.
-    let state = local.config.state_dir.clone();
-    let latest = move || -> Option<(u64, Option<String>)> {
+    let state = service.local.config.state_dir.clone();
+    let latest = move || -> Option<(u64, Option<String>, String)> {
         let store = StateStore::open_read_only(&state).ok()?;
         let row = store.observations(1).ok()?.into_iter().next()?;
         let decision = &row["decision"];
@@ -1214,40 +1298,28 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
                 .find(|a| a["resource"] == "cpu")
                 .and_then(|a| a["step"].as_str().map(str::to_owned))
         });
-        Some((own, step))
-    };
-    let evidence = local.config.state_dir.clone();
-    let describe = move || -> String {
-        StateStore::open_read_only(&evidence)
-            .ok()
-            .and_then(|store| store.observations(1).ok())
-            .and_then(|rows| rows.into_iter().next())
-            .map(|row| {
-                let d = &row["decision"];
-                let s = &row["snapshot"];
-                format!(
-                    "busy={} budget={} cpu={} actions={} reasons={}",
-                    s["cpu_busy_millicores"],
-                    d["managed_budget"],
-                    d["resources"]["cpu"],
-                    d["actions"],
-                    d["reasons"]
-                )
-            })
-            .unwrap_or_default()
+        let evidence = format!(
+            "busy={} budget={} cpu={} actions={}",
+            row["snapshot"]["cpu_busy_millicores"],
+            decision["managed_budget"],
+            decision["resources"]["cpu"],
+            decision["actions"]
+        );
+        Some((own, step, evidence))
     };
     let wait_for = |what: &str, deadline: Duration, ok: &dyn Fn(u64, Option<&str>) -> bool| {
         let end = Instant::now() + deadline;
         loop {
-            if let Some((own, step)) = latest()
-                && ok(own, step.as_deref())
+            let current = latest();
+            if let Some((own, step, _)) = &current
+                && ok(*own, step.as_deref())
             {
-                return (own, step);
+                return (*own, step.clone());
             }
             assert!(
                 Instant::now() < end,
                 "timed out waiting for {what}: {}",
-                describe()
+                current.map(|c| c.2).unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1274,15 +1346,8 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
     let (capped, _) = wait_for("own CPU to fall", Duration::from_secs(8), &|own, step| {
         own < alone / 2 && matches!(step, Some("cap" | "pause"))
     });
-    let assignment = StateStore::open_read_only(&local.config.state_dir)
-        .unwrap()
-        .executions()
-        .unwrap()
-        .into_iter()
-        .find(|r| r.task_id == "task")
-        .unwrap()
-        .assignment_id;
-    let journaled = StateStore::open_read_only(&local.config.state_dir)
+    let assignment = service.record().unwrap().assignment_id;
+    let journaled = StateStore::open_read_only(&service.local.config.state_dir)
         .unwrap()
         .contention(&assignment)
         .unwrap();
@@ -1295,24 +1360,10 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
         Duration::from_secs(15),
         &|_, step| step.is_none(),
     );
-    let mut completed = None;
-    for _ in 0..400 {
-        if let Response::Result { submission } = operator
-            .request(&Request::GetResult {
-                task_id: "task".into(),
-            })
-            .await
-            .unwrap()
-            && submission.is_some()
-        {
-            completed = submission;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let completed = service.result(400).await;
     let _ = agent.kill();
     let _ = agent.wait();
-    server.abort();
+    service.server.abort();
     assert!(step.is_some(), "own work was capped or paused");
     assert!(capped < alone / 2, "own CPU fell from {alone} to {capped}");
     assert!(
@@ -1323,17 +1374,62 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
         "the supervisor journaled the applied step"
     );
     assert!(completed.is_some(), "the job completed instead of draining");
-    let outcome: ExecutionOutcome = serde_json::from_slice(
-        &fs::read(
-            local
-                .config
-                .state_dir
-                .join("attempts")
-                .join(&assignment)
-                .join("execution-outcome.json"),
-        )
-        .unwrap(),
+    assert!(
+        !service.outcome(&assignment).yielded,
+        "CPU contention never drains running work"
+    );
+}
+
+/// A restarted agent reattaches through control.sock, renews the lease and never
+/// marks the live supervisor NeedsReconciliation (FR-015, audit H5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_agent_reattaches_to_live_supervisors() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(8)".into()],
+        |local| {
+            // Without renewals after the restart this lease would expire and drain.
+            local.config.lifecycle.allocation_lease_ms = 3000;
+        },
     )
-    .unwrap();
-    assert!(!outcome.yielded, "CPU contention never drains running work");
+    .await;
+    let mut agent = service.agent("first");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+    let mut restarted = service.agent("second");
+    let mut phases = std::collections::BTreeSet::new();
+    let mut completed = None;
+    for _ in 0..200 {
+        if let Some(record) = service.record() {
+            phases.insert(format!("{:?}", record.phase));
+        }
+        completed = service.result(1).await;
+        if completed.is_some() {
+            break;
+        }
+    }
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    service.server.abort();
+    let log = fs::read_to_string(service.dir.path().join("second.log")).unwrap();
+    assert!(log.contains("supervisor_reattached"), "{log}");
+    assert!(!phases.contains("NeedsReconciliation"), "{phases:?}");
+    assert!(completed.is_some(), "the job completed after the restart");
+    let assignment = service.record().unwrap().assignment_id;
+    let outcome = service.outcome(&assignment);
+    assert!(
+        !outcome.yielded,
+        "the reattached agent renewed the lease: {outcome:?}"
+    );
+    assert_eq!(outcome.exit_code, Some(0));
 }

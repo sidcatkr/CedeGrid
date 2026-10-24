@@ -139,10 +139,11 @@ impl Lifecycle {
     }
     pub fn agent_heartbeat(&mut self) { /* deliberately does not extend a coordinator lease */
     }
-    pub fn agent_failed(&mut self, now_ms: u64) {
-        if self.class == AllocationClass::Opportunistic {
-            self.request_drain(now_ms);
-        }
+    /// Agent loss holds the applied steps; the existing lease rules then apply
+    /// (FR-015, supervisor-control contract).
+    pub fn agent_failed(&mut self, _now_ms: u64) {}
+    pub fn lease_sequence(&self) -> u64 {
+        self.last_sequence
     }
     /// A separate observer may record this. A dead supervisor cannot run tick().
     pub fn supervisor_failed(&mut self) {
@@ -269,6 +270,9 @@ pub enum SupervisorReport {
             crate::contention::YieldStep,
         >,
         targets: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
+        lease_sequence: u64,
+        /// The last applied `adjust` sequence.
+        sequence: u64,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1062,6 +1066,8 @@ mod unix {
                             .iter()
                             .filter_map(|(k, v)| v.target.map(|t| (k.clone(), t)))
                             .collect(),
+                        lease_sequence: lifecycle.lease_sequence(),
+                        sequence: contention.sequence,
                     });
                 }
                 _ => {}
@@ -2117,8 +2123,10 @@ mod tests {
             LifecyclePhase::NeedsReconciliation
         );
         let mut opportunistic = lifecycle(AllocationClass::Opportunistic);
+        // Agent loss holds; the lease expiry (100 ms here) then drains.
         opportunistic.agent_failed(5);
-        assert_eq!(opportunistic.tick(5), LifecyclePhase::Draining);
+        assert_eq!(opportunistic.tick(5), LifecyclePhase::Running);
+        assert_eq!(opportunistic.tick(100), LifecyclePhase::Draining);
         opportunistic.supervisor_failed();
         assert_eq!(
             opportunistic.tick(100_000),
@@ -2135,5 +2143,265 @@ mod tests {
         assert_eq!(state.tick(109), LifecyclePhase::Running);
         assert!(state.coordinator_renewal("a", 3, 2, 110).is_err());
         assert_eq!(state.phase, LifecyclePhase::Draining);
+    }
+}
+
+/// The supervisor's re-attachable control socket (research R2): an owner-only
+/// directory and socket, a 32-byte token, a same-UID peer check, and one active
+/// controller at a time. Socket paths are short-lived files under /tmp because a
+/// Unix socket path must stay within about 100 bytes.
+#[cfg(unix)]
+pub mod control_socket {
+    use anyhow::{Context, Result, bail, ensure};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    const VERSION: u64 = 1;
+    const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// What the active controller sent, in order.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Line {
+        Attached,
+        Text(String),
+        Detached,
+    }
+
+    /// 32 random bytes as hex, for the supervisor spec (mode 0600).
+    pub fn token() -> Result<String> {
+        let mut bytes = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .context("random source unavailable")?
+            .read_exact(&mut bytes)?;
+        Ok(hex::encode(bytes))
+    }
+
+    fn same(a: &str, b: &str) -> bool {
+        a.len() == b.len()
+            && a.bytes()
+                .zip(b.bytes())
+                .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+                == 0
+    }
+
+    fn peer_is_owner(stream: &UnixStream) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            // SAFETY: a correctly sized credential query on a connected socket.
+            let rc = unsafe {
+                libc::getsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    (&mut credentials as *mut libc::ucred).cast(),
+                    &mut size,
+                )
+            };
+            rc == 0 && credentials.uid == unsafe { libc::geteuid() }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (mut uid, mut gid) = (0, 0);
+            // SAFETY: a read-only credential query on a connected socket.
+            let queried = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
+            queried && uid == unsafe { libc::geteuid() }
+        }
+    }
+
+    pub struct Listener {
+        listener: UnixListener,
+        files: Arc<Files>,
+        token: String,
+    }
+
+    struct Files {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+    impl Drop for Files {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
+    type Active = Arc<Mutex<Option<(u64, UnixStream)>>>;
+
+    /// Writes to the active controller. Removes the socket files once dropped.
+    #[derive(Clone)]
+    pub struct Sink {
+        active: Active,
+        _files: Arc<Files>,
+    }
+    impl Sink {
+        /// Returns false when no controller is attached or the write failed.
+        pub fn write_line(&self, line: &str) -> bool {
+            let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+            let Some((_, stream)) = active.as_mut() else {
+                return false;
+            };
+            if writeln!(stream, "{line}")
+                .and_then(|()| stream.flush())
+                .is_ok()
+            {
+                return true;
+            }
+            *active = None;
+            false
+        }
+    }
+
+    impl Listener {
+        pub fn bind(token: String) -> Result<Self> {
+            ensure!(token.len() == 64, "control token must be 32 bytes of hex");
+            let nonce = &self::token()?[..16];
+            let directory = Path::new("/tmp")
+                .canonicalize()?
+                .join(format!("cedegrid-ctl-{nonce}"));
+            std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+            let path = directory.join("c");
+            let files = Arc::new(Files {
+                directory,
+                path: path.clone(),
+            });
+            let listener = UnixListener::bind(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(Self {
+                listener,
+                files,
+                token,
+            })
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.files.path
+        }
+
+        /// Accept controllers on background threads and deliver their lines.
+        pub fn serve(self, deliver: impl Fn(Line) + Send + Sync + 'static) -> Sink {
+            let active: Active = Arc::new(Mutex::new(None));
+            let deliver = Arc::new(deliver);
+            let accept_active = active.clone();
+            let token = self.token;
+            let listener = self.listener;
+            std::thread::spawn(move || {
+                let mut next_id = 0u64;
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { continue };
+                    next_id += 1;
+                    let (id, active, deliver, token) = (
+                        next_id,
+                        accept_active.clone(),
+                        deliver.clone(),
+                        token.clone(),
+                    );
+                    std::thread::spawn(move || controller(id, stream, &token, &active, &*deliver));
+                }
+            });
+            Sink {
+                active,
+                _files: self.files,
+            }
+        }
+    }
+
+    fn controller(
+        id: u64,
+        stream: UnixStream,
+        token: &str,
+        active: &Active,
+        deliver: &dyn Fn(Line),
+    ) {
+        let authenticated = (|| -> Result<BufReader<UnixStream>> {
+            ensure!(
+                peer_is_owner(&stream),
+                "control peer is not the runtime user"
+            );
+            stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
+            let mut reader = BufReader::new(stream.try_clone()?);
+            let mut line = String::new();
+            reader.by_ref().take(4096).read_line(&mut line)?;
+            let hello: serde_json::Value = serde_json::from_str(&line)?;
+            ensure!(
+                hello["kind"] == "hello"
+                    && hello["version"] == VERSION
+                    && hello["token"].as_str().is_some_and(|t| same(t, token)),
+                "control hello refused"
+            );
+            stream.set_read_timeout(None)?;
+            Ok(reader)
+        })();
+        let Ok(reader) = authenticated else {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return;
+        };
+        {
+            let mut current = active.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, old)) = current.take() {
+                let _ = old.shutdown(std::net::Shutdown::Both);
+            }
+            let Ok(mut writer) = stream.try_clone() else {
+                return;
+            };
+            if writeln!(
+                writer,
+                "{}",
+                serde_json::json!({"ok":true,"version":VERSION})
+            )
+            .is_err()
+            {
+                return;
+            }
+            *current = Some((id, writer));
+        }
+        deliver(Line::Attached);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            let still_active = active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|(current, _)| *current == id);
+            if !still_active {
+                return;
+            }
+            deliver(Line::Text(line));
+        }
+        let mut current = active.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_ref().is_some_and(|(current, _)| *current == id) {
+            *current = None;
+            drop(current);
+            deliver(Line::Detached);
+        }
+    }
+
+    /// Connect as the controller and authenticate with the token.
+    pub fn connect(path: &Path, token: &str) -> Result<UnixStream> {
+        let mut stream = UnixStream::connect(path)?;
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"kind":"hello","token":token,"version":VERSION})
+        )?;
+        stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
+        let mut reply = String::new();
+        BufReader::new(stream.try_clone()?).read_line(&mut reply)?;
+        let reply: serde_json::Value = match serde_json::from_str(&reply) {
+            Ok(reply) => reply,
+            Err(_) => bail!("supervisor refused the control connection"),
+        };
+        ensure!(
+            reply["ok"] == true,
+            "supervisor refused the control connection"
+        );
+        stream.set_read_timeout(None)?;
+        Ok(stream)
     }
 }
