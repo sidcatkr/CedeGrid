@@ -265,11 +265,9 @@ fn full_single_cpu_fixture() {
     }
 }
 
-#[test]
-fn real_extra_cpu_threads_still_trigger_the_unchanged_envelope() {
-    let dir = directory();
+fn busy_envelope_spec(dir: &Path) -> SupervisorSpec {
     let mut spec = spec(
-        dir.path(),
+        dir,
         AllocationClass::Guaranteed,
         vec![
             std::env::current_exe().unwrap().display().to_string(),
@@ -286,20 +284,68 @@ fn real_extra_cpu_threads_still_trigger_the_unchanged_envelope() {
     spec.capacity.cpu_millicores = 1000;
     spec.config.monitor.interval_ms = 500;
     spec.envelope = Some(spec.capacity.clone());
+    spec
+}
+
+#[test]
+fn supervisors_run_no_collector_or_policy_and_never_drain_locally() {
+    // Three busy threads exceed the 1000m envelope, but only the agent decides.
+    let dir = directory();
+    let spec = busy_envelope_spec(dir.path());
     let (mut child, mut input, rx) = start(&spec);
     assert_eq!(
         rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
         "prepared"
     );
-    authorize(&mut input, 2000);
+    authorize(&mut input, 10_000);
     assert!(wait(&mut child).success());
+    let mut diagnostics = String::new();
+    std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut diagnostics).unwrap();
+    assert!(!diagnostics.contains("local_policy_drain"), "{diagnostics}");
     let outcome: ExecutionOutcome =
         serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
             .unwrap();
     assert!(
-        outcome.yielded,
-        "real measured parallel CPU excess must still yield"
+        !outcome.yielded,
+        "a supervisor never drains on its own measurement"
     );
+    assert_eq!(outcome.exit_code, Some(0));
+}
+
+#[test]
+fn real_extra_cpu_threads_still_trigger_the_agent_envelope() {
+    // The test plays the agent: it measures the owned worker with the agent's
+    // collector, applies the agent's envelope check and delivers the drain.
+    let dir = directory();
+    let spec = busy_envelope_spec(dir.path());
+    let (mut child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    authorize(&mut input, 10_000);
+    let mut collector = cedegrid::telemetry::ManagedCollector::new(&spec.config).unwrap();
+    let store = StateStore::open_read_only(&spec.config.state_dir).unwrap();
+    let mut drained = false;
+    let end = Instant::now() + Duration::from_secs(3);
+    while !drained && Instant::now() < end && child.try_wait().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(500));
+        let (_, allocations) = collector.sample(&store.executions().unwrap()).unwrap();
+        if cedegrid::agent::envelope_exceeded(&allocations, &spec.capacity) {
+            writeln!(input, "{}", serde_json::json!({"kind":"drain"})).unwrap();
+            input.flush().unwrap();
+            drained = true;
+        }
+    }
+    assert!(
+        drained,
+        "real measured parallel CPU excess must exceed the envelope"
+    );
+    assert!(wait(&mut child).success());
+    let outcome: ExecutionOutcome =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
+            .unwrap();
+    assert!(outcome.yielded, "the agent's envelope drain must yield");
     assert_eq!(outcome.record.phase, ExecutionPhase::Released);
 }
 

@@ -153,13 +153,13 @@ job launched with unattributed device memory is not drained.
   - an idle device's health never becomes InsufficientObservability.
 - [X] T019 [P] [US1] Add tests in `tests/kernel.rs` for CPU busy bounds: USER_HZ rounding and
   iowait count only in the upper bound.
-- [ ] T020 [P] [US1] Add tests in `tests/supervision.rs`:
+- [X] T020 [P] [US1] Add tests in `tests/supervision.rs`:
   - an injected control-channel error holds the step;
   - a rejected journal transition is retried and never reaches `kill_and_confirm` for
     Guaranteed work;
   - opportunistic work goes through drain → TERM → KILL with its deadlines;
   - a minimum TERM grace applies after the first SIGTERM actually sent.
-- [ ] T021 [P] [US1] Add a test in `tests/agent.rs` proving that supervisors construct no
+- [X] T021 [P] [US1] Add a test in `tests/agent.rs` proving that supervisors construct no
   collector or `PolicyEngine` and never emit `local_policy_drain`.
 
 ### Implementation for User Story 1
@@ -189,16 +189,16 @@ job launched with unattributed device memory is not drained.
   - `validate_gpu_launch_contract` follows the effective mode, accepting Quiet or Active per
     mode instead of requiring `Idle`;
   - CPU-only excess produces `cap` actions instead of drain. Actuation follows in US2.
-- [ ] T029 [US1] Remove the collector and `PolicyEngine` from `PipeControl` in `src/agent.rs`.
+- [X] T029 [US1] Remove the collector and `PolicyEngine` from `PipeControl` in `src/agent.rs`.
   Supervisors keep the lease and drain deadlines only; envelope checks stay in the agent.
-- [ ] T030 [US1] Classify post-EXEC errors in `src/supervision.rs` per research R3, and remove
+- [X] T030 [US1] Classify post-EXEC errors in `src/supervision.rs` per research R3, and remove
   the direct `kill_and_confirm` from the running-loop error path:
   - control → hold;
   - actuation → mark the step unavailable;
   - drain-file or target-file write → retry, then escalate;
   - journal → bounded retry, then the drain chain for opportunistic work, or hold and report
     for Guaranteed work.
-- [ ] T031 [US1] Enforce a minimum TERM grace after the first SIGTERM actually sent, and record
+- [X] T031 [US1] Enforce a minimum TERM grace after the first SIGTERM actually sent, and record
   both the deadline anchor and the actual send time, in `src/supervision.rs` (audit M6).
 - [X] T032 [US1] Emit the reason codes `first_observation_baseline`,
   `vram_noise_below_tolerance`, `inconsistent_within_tolerance` and `allocation_unknown_hold`

@@ -44,7 +44,11 @@ pub struct ExecutionOutcome {
     pub process_handle: String,
     /// From launch authorization; these are observations, not release guarantees.
     pub drain_started_ms: Option<u64>,
+    /// When the first SIGTERM was actually sent.
     pub termination_started_ms: Option<u64>,
+    /// The deadline that SIGTERM was due at: drain request plus drain timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_deadline_ms: Option<u64>,
     pub process_exit_ms: u64,
     pub release_confirmed_ms: Option<u64>,
 }
@@ -173,6 +177,15 @@ impl Lifecycle {
     }
     pub fn confirm_release(&mut self) {
         self.phase = LifecyclePhase::Released;
+    }
+    /// When drain was requested, as the deadline anchor.
+    pub fn drain_requested_ms(&self) -> Option<u64> {
+        self.drain_at_ms
+    }
+    /// When SIGTERM is due: the drain request plus the drain timeout.
+    pub fn termination_deadline_ms(&self) -> Option<u64> {
+        self.drain_at_ms
+            .map(|start| start.saturating_add(self.drain_ms))
     }
 }
 
@@ -827,6 +840,69 @@ mod unix {
         }
     }
 
+    /// Bounded attempts for a journal transition after EXEC (research R3).
+    const JOURNAL_ATTEMPTS: u32 = 4;
+
+    fn persist_with_retry(journal: &dyn ExecutionJournal, record: &ExecutionRecord) -> Result<()> {
+        let mut delay = Duration::from_millis(10);
+        let mut attempt = 1;
+        loop {
+            match journal.transition(record) {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt >= JOURNAL_ATTEMPTS => return Err(error),
+                Err(_) => {
+                    std::thread::sleep(delay);
+                    delay = delay.saturating_mul(2);
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Best-effort operator diagnostic; a closed stderr never unwinds supervision.
+    fn report(event: &str, assignment_id: &str, detail: String) {
+        let _ = writeln!(
+            io::stderr(),
+            "{}",
+            serde_json::json!({"event": event, "assignment_id": assignment_id, "detail": detail})
+        );
+    }
+
+    /// Wait up to `ms` for the owned child to exit. An unobservable child counts
+    /// as still running so the chain proceeds to its next step.
+    fn exited_within(owned: &mut OwnedChild, ms: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        loop {
+            if owned.try_wait().ok().flatten().is_some() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The opportunistic chain after an unrecoverable error once EXEC was sent:
+    /// drain, TERM and KILL with their deadlines, on the owned child only.
+    fn drain_chain(
+        owned: &mut OwnedChild,
+        drain: &DrainDirectory,
+        options: &SupervisorOptions,
+    ) -> Result<()> {
+        if owned.reaped {
+            return Ok(());
+        }
+        let _ = drain.notify();
+        if exited_within(owned, options.drain_timeout_ms) {
+            return Ok(());
+        }
+        if owned.signal(libc::SIGTERM).is_ok() && exited_within(owned, options.term_grace_ms) {
+            return Ok(());
+        }
+        owned.kill_and_confirm(Duration::from_millis(options.release_confirm_timeout_ms))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn supervise(
         request: &LaunchRequest,
@@ -873,6 +949,7 @@ mod unix {
         let mut child: Option<OwnedChild> = None;
         let mut children: Option<ChildServer> = None;
         let mut capture: Option<OutputCapture> = None;
+        let mut exec_sent = false;
         let result = (|| -> Result<ExecutionOutcome> {
             let deadline = Instant::now()
                 .checked_add(Duration::from_millis(options.prepare_timeout_ms))
@@ -1020,6 +1097,7 @@ mod unix {
             record.detail =
                 "Durable authorization committed before sending EXEC to the blocked gate".into();
             journal.transition(&record)?;
+            exec_sent = true;
             write_deadline(&mut input, b"EXEC\n", deadline)?;
             drop(input);
             let start = Instant::now();
@@ -1037,9 +1115,31 @@ mod unix {
             record.detail =
                 "EXEC sent after durable authorization; no claim that exec itself succeeded yet"
                     .into();
-            journal.transition(&record)?;
+            // After EXEC no error leads straight to SIGKILL (research R3). A journal
+            // that stays unavailable drains opportunistic work through its
+            // deadlines; Guaranteed work stays supervised and is reported.
+            let journal_unavailable =
+                |lifecycle: &mut Lifecycle, elapsed: u64, error: anyhow::Error| {
+                    report(
+                        "journal_unavailable",
+                        &request.assignment_id,
+                        format!("{error:#}; reservation needs reconciliation"),
+                    );
+                    if request.class == AllocationClass::Opportunistic {
+                        lifecycle.request_drain(elapsed);
+                    }
+                };
+            if let Err(error) = persist_with_retry(journal, &record) {
+                let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                journal_unavailable(&mut lifecycle, elapsed, error);
+            }
             let mut drain_started_ms = None;
+            let mut drain_notified = false;
             let mut termination_started_ms = None;
+            let mut termination_deadline_ms = None;
+            let mut term_sent_at: Option<Instant> = None;
+            let mut term_unavailable = false;
+            let mut control_failing = false;
             let mut killed = false;
             let mut kill_at = None;
             let mut leader_status = None;
@@ -1078,6 +1178,7 @@ mod unix {
                         process_handle: owned.handle_detail.clone(),
                         drain_started_ms,
                         termination_started_ms,
+                        termination_deadline_ms,
                         process_exit_ms: leader_exit_ms.unwrap_or(elapsed),
                         release_confirmed_ms: Some(
                             start.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -1085,7 +1186,25 @@ mod unix {
                     });
                 }
                 let polled_at = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                apply_control_commands(control.poll()?, &mut lifecycle, start, polled_at);
+                // A control-channel error holds the current step; lease rules still apply.
+                let commands = match control.poll() {
+                    Ok(commands) => {
+                        control_failing = false;
+                        commands
+                    }
+                    Err(error) => {
+                        if !control_failing {
+                            report(
+                                "control_unavailable",
+                                &request.assignment_id,
+                                format!("{error:#}; holding the current step"),
+                            );
+                        }
+                        control_failing = true;
+                        Vec::new()
+                    }
+                };
+                apply_control_commands(commands, &mut lifecycle, start, polled_at);
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let phase = lifecycle.tick(elapsed);
                 if let Some(server) = &mut children {
@@ -1129,25 +1248,59 @@ mod unix {
                 let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let phase = lifecycle.tick(elapsed);
                 if phase != LifecyclePhase::Running && drain_started_ms.is_none() {
-                    drain.notify()?;
-                    drain_started_ms = Some(elapsed);
+                    drain_started_ms = Some(lifecycle.drain_requested_ms().unwrap_or(elapsed));
                     record.phase = ExecutionPhase::Draining;
                     record.detail =
-                        "Local policy, cancellation, or authorization deadline requested drain"
-                            .into();
-                    journal.transition(&record)?;
+                        "Agent, cancellation, or authorization deadline requested drain".into();
+                    if let Err(error) = persist_with_retry(journal, &record) {
+                        journal_unavailable(&mut lifecycle, elapsed, error);
+                    }
+                }
+                // A failed drain-file write is retried every pass; the drain
+                // deadline still escalates to TERM.
+                if drain_started_ms.is_some() && !drain_notified {
+                    match drain.notify() {
+                        Ok(()) => drain_notified = true,
+                        Err(error) => report(
+                            "drain_file_unavailable",
+                            &request.assignment_id,
+                            format!("{error:#}; retrying"),
+                        ),
+                    }
                 }
                 if matches!(
                     phase,
                     LifecyclePhase::Terminating | LifecyclePhase::KillRequested
                 ) && termination_started_ms.is_none()
+                    && !term_unavailable
                 {
+                    termination_deadline_ms = lifecycle.termination_deadline_ms();
                     if leader_status.is_none() {
-                        owned.signal(libc::SIGTERM)?;
+                        match owned.signal(libc::SIGTERM) {
+                            Ok(()) => {
+                                termination_started_ms = Some(elapsed);
+                                term_sent_at = Some(Instant::now());
+                            }
+                            // An unavailable step is skipped; KILL follows at its deadline.
+                            Err(error) => {
+                                term_unavailable = true;
+                                report(
+                                    "step_unavailable",
+                                    &request.assignment_id,
+                                    format!("SIGTERM: {error:#}"),
+                                );
+                            }
+                        }
+                    } else {
+                        termination_started_ms = Some(elapsed);
                     }
-                    termination_started_ms = Some(elapsed);
                 }
-                if phase == LifecyclePhase::KillRequested && !killed {
+                // KILL never follows a SIGTERM actually sent sooner than the TERM grace,
+                // even when a stalled pass reached both deadlines together (audit M6).
+                let grace_elapsed = term_sent_at.is_none_or(|sent| {
+                    sent.elapsed() >= Duration::from_millis(options.term_grace_ms)
+                });
+                if phase == LifecyclePhase::KillRequested && !killed && grace_elapsed {
                     if leader_status.is_none() {
                         owned.signal(libc::SIGKILL)?;
                     }
@@ -1178,17 +1331,32 @@ mod unix {
                         record.evidence.push(evidence);
                     }
                 }
-                // A failed preparation never sends EXEC. If authorization was sent,
-                // only a verified owned child is signaled. Uncertain release remains charged.
+                // A failed preparation never sends EXEC: the gate is killed before it
+                // runs user code. After EXEC no error kills directly (research R3):
+                // opportunistic work goes through drain, TERM and KILL with their
+                // deadlines, and running Guaranteed work is never signaled for an
+                // error. Only a verified owned child is signaled; uncertain release
+                // remains charged.
+                let guaranteed_running = exec_sent
+                    && request.class == AllocationClass::Guaranteed
+                    && child.as_ref().is_some_and(|owned| !owned.reaped);
                 let child_release = match child.as_mut() {
+                    Some(_) if guaranteed_running => Err(anyhow::anyhow!(
+                        "Guaranteed workload left running after a supervisor error"
+                    )),
+                    Some(owned) if exec_sent => drain_chain(owned, &drain, options),
                     Some(owned) => owned.kill_and_confirm(Duration::from_millis(
                         options.release_confirm_timeout_ms,
                     )),
                     None => Ok(()),
                 };
-                let family_release = children.as_mut().map_or(Ok(()), |server| {
-                    server.cleanup(journal, options, &gpu_release)
-                });
+                let family_release = if guaranteed_running {
+                    Ok(())
+                } else {
+                    children.as_mut().map_or(Ok(()), |server| {
+                        server.cleanup(journal, options, &gpu_release)
+                    })
+                };
                 let release = child_release
                     .and(family_release)
                     .and_then(|()| backend.confirm_release())

@@ -675,3 +675,172 @@ fn explicit_cpu_affinity_is_verified_or_refused_before_execution() {
         assert_eq!(journal.last().phase, ExecutionPhase::Released);
     }
 }
+
+fn run_controlled(
+    request: &LaunchRequest,
+    options: &SupervisorOptions,
+    journal: &Journal,
+    backend: &mut Backend,
+    control: &mut dyn supervision::SupervisorControl,
+) -> Result<supervision::ExecutionOutcome> {
+    supervision::supervise_controlled(
+        request,
+        &Resources {
+            cpu_millicores: 1_000,
+            ram_mib: 1_000,
+            ..Default::default()
+        },
+        options,
+        journal,
+        backend,
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        control,
+    )
+}
+
+fn short_marker_job(dir: &Path) -> Vec<String> {
+    let _ = dir;
+    vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "sleep 0.3; printf done > marker".into(),
+    ]
+}
+
+#[test]
+fn a_control_channel_error_after_exec_holds_the_step() {
+    struct Broken;
+    impl supervision::SupervisorControl for Broken {
+        fn poll(&mut self) -> Result<Vec<supervision::SupervisorCommand>> {
+            bail!("injected control channel failure")
+        }
+    }
+    for class in [AllocationClass::Guaranteed, AllocationClass::Opportunistic] {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = class;
+        req.argv = short_marker_job(temp.path());
+        // The lease outlives the job, so only the control error could stop it.
+        let opts = SupervisorOptions {
+            lease_ms: 10_000,
+            ..options()
+        };
+        let outcome = run_controlled(
+            &req,
+            &opts,
+            &Journal::new(),
+            &mut Backend::new(),
+            &mut Broken,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0), "{class:?}");
+        assert!(!outcome.yielded && outcome.termination_signal.is_none());
+        assert!(temp.path().join("marker").exists());
+    }
+}
+
+#[test]
+fn a_rejected_journal_transition_is_retried_and_never_kills_guaranteed_work() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.argv = short_marker_job(temp.path());
+    let journal = Journal {
+        fail: Some(ExecutionPhase::Running),
+        ..Journal::new()
+    };
+    let outcome = run(&req, &options(), &journal, &mut Backend::new()).unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    assert!(!outcome.yielded && outcome.termination_signal.is_none());
+    assert!(temp.path().join("marker").exists());
+    assert_eq!(journal.last().phase, ExecutionPhase::Released);
+    assert!(
+        !journal
+            .records
+            .borrow()
+            .iter()
+            .any(|r| r.phase == ExecutionPhase::Running)
+    );
+}
+
+#[test]
+fn opportunistic_work_with_a_failing_journal_goes_through_drain_term_and_kill() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.class = AllocationClass::Opportunistic;
+    req.argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "trap '' TERM; while :; do :; done".into(),
+    ];
+    let journal = Journal {
+        fail: Some(ExecutionPhase::Running),
+        ..Journal::new()
+    };
+    let opts = SupervisorOptions {
+        lease_ms: 10_000,
+        drain_timeout_ms: 50,
+        term_grace_ms: 50,
+        ..options()
+    };
+    let outcome = run(&req, &opts, &journal, &mut Backend::new()).unwrap();
+    assert!(outcome.yielded);
+    assert_eq!(outcome.termination_signal, Some(libc::SIGKILL));
+    let drain = outcome.drain_started_ms.unwrap();
+    let term = outcome.termination_started_ms.unwrap();
+    assert!(term >= drain + opts.drain_timeout_ms, "{outcome:?}");
+    assert!(
+        outcome.process_exit_ms >= term + opts.term_grace_ms,
+        "{outcome:?}"
+    );
+    assert_eq!(journal.last().phase, ExecutionPhase::Released);
+}
+
+#[test]
+fn kill_waits_a_minimum_term_grace_after_the_first_sigterm_actually_sent() {
+    struct Stalled(u32);
+    impl supervision::SupervisorControl for Stalled {
+        fn poll(&mut self) -> Result<Vec<supervision::SupervisorCommand>> {
+            self.0 += 1;
+            match self.0 {
+                1 => Ok(vec![supervision::SupervisorCommand::Drain]),
+                // The loop stalls past both the drain and TERM deadlines.
+                2 => {
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(vec![])
+                }
+                _ => Ok(vec![]),
+            }
+        }
+    }
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.class = AllocationClass::Opportunistic;
+    req.argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "trap '' TERM; while :; do :; done".into(),
+    ];
+    let opts = SupervisorOptions {
+        lease_ms: 10_000,
+        drain_timeout_ms: 20,
+        term_grace_ms: 100,
+        ..options()
+    };
+    let outcome = run_controlled(
+        &req,
+        &opts,
+        &Journal::new(),
+        &mut Backend::new(),
+        &mut Stalled(0),
+    )
+    .unwrap();
+    assert_eq!(outcome.termination_signal, Some(libc::SIGKILL));
+    let anchor = outcome.termination_deadline_ms.unwrap();
+    let sent = outcome.termination_started_ms.unwrap();
+    // Both are recorded: the deadline anchor and the late actual send.
+    assert!(sent >= anchor + 300, "{outcome:?}");
+    assert!(
+        outcome.process_exit_ms >= sent + opts.term_grace_ms,
+        "{outcome:?}"
+    );
+}

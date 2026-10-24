@@ -84,6 +84,11 @@ enum Control {
         expires_monotonic_ms: u64,
     },
     Drain,
+    /// The agent's latest GPU observation. Supervisors run no collector of
+    /// their own; GPU launch rechecks use this (research R1).
+    Observation {
+        snapshot: Box<crate::model::Snapshot>,
+    },
 }
 fn emit(value: &impl Serialize) -> Result<()> {
     let mut out = std::io::stdout().lock();
@@ -277,95 +282,69 @@ struct PipeControl {
     rx: mpsc::Receiver<std::result::Result<Control, String>>,
     assignment: Assignment,
     config: Config,
-    capacity: Resources,
-    store: StateStore,
-    collector: ManagedCollector,
-    policy: PolicyEngine,
-    last_sample: Instant,
-    start: Instant,
+    /// The latest agent GPU observation and when it arrived.
+    observation: Option<(crate::model::Snapshot, Instant)>,
     authorized_at: Option<Instant>,
     remaining_ms: Option<u64>,
     agent_lost: bool,
 }
 impl SupervisorControl for PipeControl {
     fn prepared(&mut self, record: &ExecutionRecord) -> Result<()> {
-        self.collector.prime(&self.store.executions()?);
-        // Establish a local observation baseline while user code is still gated.
-        // The coordinator's sample is never substituted for this supervisor's check.
-        let mut snapshot = self
-            .collector
-            .sample_with_children(
-                &self.store.executions()?,
-                &self.store.all_unreleased_managed_children()?,
-            )?
-            .0;
-        if !self.assignment.request.resources.gpu_memory_mib.is_empty()
-            && self.config.gpu.execution_mode == crate::config::GpuExecutionMode::ContentionAware
-        {
-            ensure!(
-                self.config.monitor.interval_ms < self.config.execution.prepare_timeout_ms,
-                "GPU baseline interval cannot fit inside preparation deadline"
-            );
-            std::thread::sleep(Duration::from_millis(self.config.monitor.interval_ms));
-            snapshot = self
-                .collector
-                .sample_with_children(
-                    &self.store.executions()?,
-                    &self.store.all_unreleased_managed_children()?,
-                )?
-                .0;
+        let deadline =
+            Instant::now() + Duration::from_millis(self.config.execution.prepare_timeout_ms);
+        let gpu = !self.assignment.request.resources.gpu_memory_mib.is_empty();
+        if gpu {
+            // Check against an observation the agent sent after this gate was
+            // prepared; never one from before it.
+            let snapshot = loop {
+                match self.recv_until(deadline)? {
+                    Control::Observation { snapshot } => break *snapshot,
+                    Control::Drain => {
+                        bail!("drain requested before authorization; gate stays blocked")
+                    }
+                    _ => {}
+                }
+            };
+            self.observation = Some((snapshot, Instant::now()));
+            self.validate_gpu(
+                &self.assignment.request.resources,
+                self.assignment.request.class,
+            )?;
         }
-        validate_gpu_launch_contract(
-            &self.config,
-            &snapshot,
-            &self.assignment.request.resources,
-            self.assignment.request.class,
-        )?;
         emit(&Event::Prepared {
             record: record.clone(),
         })?;
-        match self.rx.recv_timeout(Duration::from_millis(
-            self.config.execution.prepare_timeout_ms,
-        )) {
-            Ok(Ok(Control::Authorize {
-                lease,
-                expires_monotonic_ms,
-            })) => {
-                let remaining_ms = expires_monotonic_ms.saturating_sub(local_clock_ms()?);
-                validate_lease(&lease, &self.assignment)?;
-                ensure!(
-                    !lease.drain && remaining_ms > 0 && remaining_ms <= lease.valid_for_ms,
-                    "authorization expired or draining"
-                );
-                // Admission may have changed while awaiting remote authorization.
-                // A newly visible external context closes the non-sharing gate.
-                let snapshot = self
-                    .collector
-                    .sample_with_children(
-                        &self.store.executions()?,
-                        &self.store.all_unreleased_managed_children()?,
-                    )?
-                    .0;
-                validate_gpu_launch_contract(
-                    &self.config,
-                    &snapshot,
-                    &self.assignment.request.resources,
-                    self.assignment.request.class,
-                )?;
-                let remaining_ms = expires_monotonic_ms.saturating_sub(local_clock_ms()?);
-                ensure!(
-                    remaining_ms > 0,
-                    "authorization expired during telemetry verification"
-                );
-                self.remaining_ms = Some(remaining_ms);
-                self.authorized_at = Some(Instant::now());
-                // The authorization recheck just refreshed this collector.
-                // Starting the periodic clock from preparation would sample it
-                // again immediately, before its CPU accounting window advances.
-                self.last_sample = Instant::now();
-                Ok(())
+        loop {
+            match self.recv_until(deadline)? {
+                Control::Observation { snapshot } => {
+                    self.observation = Some((*snapshot, Instant::now()));
+                }
+                Control::Authorize {
+                    lease,
+                    expires_monotonic_ms,
+                } => {
+                    let remaining_ms = expires_monotonic_ms.saturating_sub(local_clock_ms()?);
+                    validate_lease(&lease, &self.assignment)?;
+                    ensure!(
+                        !lease.drain && remaining_ms > 0 && remaining_ms <= lease.valid_for_ms,
+                        "authorization expired or draining"
+                    );
+                    // Admission may have changed while awaiting remote authorization.
+                    // A newly visible external context closes the non-sharing gate.
+                    if gpu {
+                        self.validate_gpu(
+                            &self.assignment.request.resources,
+                            self.assignment.request.class,
+                        )?;
+                    }
+                    self.remaining_ms = Some(remaining_ms);
+                    self.authorized_at = Some(Instant::now());
+                    return Ok(());
+                }
+                Control::Drain | Control::Renewal { .. } => {
+                    bail!("execution authorization absent; gate stays blocked")
+                }
             }
-            _ => bail!("agent lost or execution authorization absent; gate stays blocked"),
         }
     }
     fn initial_remaining_ms(&self) -> Option<u64> {
@@ -380,64 +359,43 @@ impl SupervisorControl for PipeControl {
         &mut self,
         request: &LaunchRequest,
     ) -> Result<Vec<SupervisorCommand>> {
+        // Queued commands include the newest agent observation.
+        let commands = self.pending_commands()?;
         if !request.resources.gpu_memory_mib.is_empty() {
-            let snapshot = self
-                .collector
-                .sample_with_children(
-                    &self.store.executions()?,
-                    &self.store.all_unreleased_managed_children()?,
-                )?
-                .0;
-            validate_gpu_launch_contract(
-                &self.config,
-                &snapshot,
-                &request.resources,
-                request.class,
-            )?;
-        }
-        // Read cancellation and fresh grants after the potentially slow driver
-        // query without taking another sample that supersedes this launch check.
-        self.pending_commands()
-    }
-    fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
-        let mut commands = self.pending_commands()?;
-        if self.last_sample.elapsed() >= Duration::from_millis(self.config.monitor.interval_ms) {
-            self.last_sample = Instant::now();
-            let records = self.store.executions()?;
-            let (mut snapshot, allocations) = self
-                .collector
-                .sample_with_children(&records, &self.store.all_unreleased_managed_children()?)?;
-            restrict_gpu_scope(&mut snapshot, &self.capacity);
-            let envelope_exceeded = !allocations_fit(&allocations, &self.capacity);
-            let decision = self.policy.evaluate(
-                &self.config,
-                &snapshot,
-                &PolicyInput {
-                    allocations: allocations.clone(),
-                    explicit_drain: false,
-                },
-                self.start.elapsed().as_millis() as u64,
-            )?;
-            if envelope_exceeded
-                || (self.assignment.request.class == AllocationClass::Opportunistic
-                    && decision
-                        .would_drain
-                        .contains(&self.assignment.request.assignment_id))
-            {
-                write_diagnostic(
-                    std::io::stderr(),
-                    format_args!(
-                        "{}",
-                        serde_json::json!({"event":"local_policy_drain","assignment_id":self.assignment.request.assignment_id,"envelope_exceeded":envelope_exceeded,"capacity":self.capacity,"allocations":allocations,"decision":decision})
-                    ),
-                );
-                commands.push(SupervisorCommand::Drain);
-            }
+            self.validate_gpu(&request.resources, request.class)?;
         }
         Ok(commands)
     }
+    fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
+        self.pending_commands()
+    }
 }
 impl PipeControl {
+    fn recv_until(&mut self, deadline: Instant) -> Result<Control> {
+        match self
+            .rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(Ok(control)) => Ok(control),
+            _ => bail!("agent lost or execution authorization absent; gate stays blocked"),
+        }
+    }
+    /// GPU launch recheck against the agent's observation, which must be fresh.
+    fn validate_gpu(
+        &self,
+        resources: &Resources,
+        class: crate::execution_model::AllocationClass,
+    ) -> Result<()> {
+        let fresh = Duration::from_millis(self.config.monitor.interval_ms.saturating_mul(3));
+        let Some((snapshot, _)) = self
+            .observation
+            .as_ref()
+            .filter(|(_, received)| received.elapsed() <= fresh)
+        else {
+            bail!("no fresh agent GPU observation for the launch recheck");
+        };
+        validate_gpu_launch_contract(&self.config, snapshot, resources, class)
+    }
     fn pending_commands(&mut self) -> Result<Vec<SupervisorCommand>> {
         let mut commands = Vec::new();
         loop {
@@ -465,6 +423,9 @@ impl PipeControl {
                     }
                 }
                 Ok(Ok(Control::Drain)) => commands.push(SupervisorCommand::Drain),
+                Ok(Ok(Control::Observation { snapshot })) => {
+                    self.observation = Some((*snapshot, Instant::now()));
+                }
                 Ok(Ok(Control::Authorize { .. })) => {}
                 Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
                     if !self.agent_lost {
@@ -539,20 +500,11 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
         generation: spec.assignment.generation,
     };
-    let start = Instant::now();
     let mut control = PipeControl {
         rx,
         assignment: spec.assignment.clone(),
         config: spec.config.clone(),
-        capacity: spec
-            .envelope
-            .clone()
-            .unwrap_or_else(|| spec.capacity.clone()),
-        store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
-        collector: ManagedCollector::new(&spec.config)?,
-        policy: PolicyEngine::new(),
-        last_sample: start,
-        start,
+        observation: None,
         authorized_at: None,
         remaining_ms: None,
         agent_lost: false,
@@ -2395,6 +2347,24 @@ impl AgentLoop<'_> {
         Ok((snapshot, allocations, decision))
     }
 
+    /// Supervisors run no collector; send the GPU part of this observation to
+    /// those that can launch GPU work so their launch rechecks stay current.
+    fn share_observation(&mut self, snapshot: &crate::model::Snapshot) {
+        let mut shared = snapshot.clone();
+        shared.capabilities.clear();
+        shared.kernel = None;
+        let message = Control::Observation {
+            snapshot: Box::new(shared),
+        };
+        for slot in self.slots.values_mut().filter(|slot| {
+            !slot.exited
+                && (!slot.assignment.request.resources.gpu_memory_mib.is_empty()
+                    || slot.assignment.request.managed_child_limit > 0)
+        }) {
+            let _ = send(slot, &message);
+        }
+    }
+
     /// Actuation stage: the operator envelope check and drain delivery.
     fn actuate(
         &mut self,
@@ -2404,7 +2374,7 @@ impl AgentLoop<'_> {
         let agent = self.agent;
         // Re-evaluate victims against the explicit operator envelope by cumulative
         // reservation/actual charges, independent of a larger idle host budget.
-        let envelope_exceeded = !allocations_fit(allocations, &agent.capacity);
+        let envelope_exceeded = envelope_exceeded(allocations, &agent.capacity);
         if envelope_exceeded {
             decision.expansion_allowed = false;
             decision.cpu_ram_expansion_allowed = false;
@@ -2945,6 +2915,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         state.retire_slots(&records)?;
         state.recover_outbox(&records)?;
         let (snapshot, allocations, mut decision) = state.observe(&records).await?;
+        state.share_observation(&snapshot);
         state.actuate(&mut decision, &allocations)?;
         state.store.append_observation(&snapshot, &decision)?;
         state
@@ -3082,6 +3053,12 @@ fn spool_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// The agent's operator-envelope check: cumulative charges, max(request,
+/// observed), against the explicit node envelope.
+pub fn envelope_exceeded(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
+    !allocations_fit(allocations, capacity)
 }
 
 fn allocations_fit(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
@@ -3313,7 +3290,7 @@ mod diagnostic_tests {
     #[test]
     #[ignore = "subprocess fixture for diagnostics_survive_a_closed_stderr_pipe"]
     fn closed_stderr_diagnostic_fixture() {
-        super::write_diagnostic(std::io::stderr(), format_args!("local_policy_drain"));
+        super::write_diagnostic(std::io::stderr(), format_args!("supervisor_diagnostic"));
     }
 
     #[cfg(unix)]
