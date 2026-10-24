@@ -79,8 +79,12 @@ pub struct CpuTopology {
     pub cores: Vec<CpuCore>,
     /// Count of effective logical CPUs, independent of a cgroup bandwidth quota.
     pub effective_cpu_capacity_millicores: Option<u64>,
-    /// Busy time on exactly effective_cpu_ids; never whole-host usage.
+    /// Busy time on exactly effective_cpu_ids; never whole-host usage. This is
+    /// the upper bound: rounding allowance and iowait count as busy.
     pub busy_millicores: Option<u64>,
+    /// Lower bound of the same busy time, without iowait or rounding allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_lower_millicores: Option<u64>,
     pub busy_status: CpuUsageStatus,
     pub busy_interval_ms: Option<u64>,
     /// A visible ceiling, NOT free capacity or guaranteed CPU time. Hidden
@@ -172,6 +176,8 @@ pub fn parse_cpu_stat(input: &str) -> Result<BTreeMap<u32, CpuTicks>, String> {
 pub struct CpuUsage {
     pub status: CpuUsageStatus,
     pub busy_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_lower_millicores: Option<u64>,
     pub interval_ms: Option<u64>,
     pub detail: String,
 }
@@ -221,6 +227,7 @@ impl CpuUsageTracker {
         let mut result = CpuUsage {
             status: CpuUsageStatus::Unknown,
             busy_millicores: None,
+            busy_lower_millicores: None,
             interval_ms: None,
             detail: "CPU usage unavailable; no free-capacity inference.".into(),
         };
@@ -265,6 +272,7 @@ impl CpuUsageTracker {
                 }
                 Some(interval) => {
                     let mut busy = 0u64;
+                    let mut busy_lower = 0u64;
                     let mut max_interval_ticks = 0u64;
                     let mut valid = true;
                     for (id, current) in &selected {
@@ -287,6 +295,9 @@ impl CpuUsageTracker {
                         let tick_busy =
                             ((u128::from(total - idle) * 1000).div_ceil(u128::from(total))) as u64;
                         let mut conservative_busy = tick_busy;
+                        // Lower bound: busy ticks without iowait, less one tick of
+                        // endpoint rounding, over the longer of ticks and elapsed time.
+                        let mut lower_denominator = u128::from(total) * 1000;
                         if let Some(hz) = self.clock_tick_hz {
                             let Some(idle_only) = current.idle_only.checked_sub(old.idle_only)
                             else {
@@ -308,13 +319,18 @@ impl CpuUsageTracker {
                                 .div_ceil(elapsed_ticks)
                                 as u64;
                             conservative_busy = conservative_busy.max(non_idle);
+                            lower_denominator = lower_denominator.max(elapsed_ticks);
                         }
+                        let lower = (u128::from((total - idle).saturating_sub(1)) * 1_000_000
+                            / lower_denominator) as u64;
                         busy += conservative_busy;
+                        busy_lower += lower.min(conservative_busy);
                         max_interval_ticks = max_interval_ticks.max(total);
                     }
                     if valid {
                         result.status = CpuUsageStatus::Available;
                         result.busy_millicores = Some(busy);
+                        result.busy_lower_millicores = Some(busy_lower);
                         self.max_interval_ticks = Some(max_interval_ticks);
                         result.detail = if self.clock_tick_hz.is_some() {
                             "Per-effective-CPU conservative busy estimate: maximum of busy-tick ratio and monotonic non-idle fraction with one USER_HZ tick of idle rounding allowance. Missing busy ticks never manufacture spare capacity; iowait is occupied in the non-idle bound. Guest is not double counted. This is advisory observation, not a hard CPU limit."
@@ -934,6 +950,7 @@ impl KernelCollector {
             ttl,
         );
         result.cpu.busy_millicores = usage.busy_millicores;
+        result.cpu.busy_lower_millicores = usage.busy_lower_millicores;
         result.cpu.busy_status = usage.status;
         result.cpu.busy_interval_ms = usage.interval_ms;
         if let Some(started) = self.cpu_read_started
@@ -1361,7 +1378,7 @@ fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTo
                 .collect()
         })
         .unwrap_or_default();
-    CpuTopology { allowed_cpu_ids, effective_cgroup_cpu_ids, effective_cpu_ids, cores, effective_cpu_capacity_millicores, busy_millicores: None, busy_status: CpuUsageStatus::Unknown, busy_interval_ms: None, visible_cpu_ceiling_millicores: ceiling,
+    CpuTopology { allowed_cpu_ids, effective_cgroup_cpu_ids, effective_cpu_ids, cores, effective_cpu_capacity_millicores, busy_millicores: None, busy_lower_millicores: None, busy_status: CpuUsageStatus::Unknown, busy_interval_ms: None, visible_cpu_ceiling_millicores: ceiling,
         detail: "Observer task affinity intersected with the observed cgroup effective set; minimum visible ancestor cpu.max. This is a ceiling only: no guaranteed share or headroom. Namespace-hidden ancestors and future workload affinity may differ. Never subtract whole-host CPU usage from this restricted budget.".into() }
 }
 

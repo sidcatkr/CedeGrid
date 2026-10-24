@@ -43,6 +43,23 @@ fn cpu_idle_complement_preserves_busy_tick_and_iowait_protection() {
     );
 }
 
+#[test]
+fn cpu_busy_bounds_round_by_one_tick_and_count_iowait_only_in_the_upper_bound() {
+    let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
+    tracker.observe(Ok("cpu0 100 0 0 100 0 0 0 0\n"), Some(&[0]), 0, 1500);
+    // 25 busy and 25 idle ticks in 500 ms: one tick of rounding either way.
+    let plain = tracker.observe(Ok("cpu0 125 0 0 125 0 0 0 0\n"), Some(&[0]), 500, 1500);
+    assert_eq!(plain.busy_millicores, Some(520));
+    assert_eq!(plain.busy_lower_millicores, Some(480));
+    // 25 user and 25 iowait ticks: iowait is occupied only in the upper bound.
+    let iowait = tracker.observe(Ok("cpu0 150 0 0 125 25 0 0 0\n"), Some(&[0]), 1000, 1500);
+    assert_eq!(iowait.busy_millicores, Some(1000));
+    assert_eq!(iowait.busy_lower_millicores, Some(480));
+    // Unknown usage has no bounds either.
+    let repeated = tracker.observe(Ok("cpu0 150 0 0 125 25 0 0 0\n"), Some(&[0]), 1000, 1500);
+    assert_eq!(repeated.busy_lower_millicores, None);
+}
+
 fn psi(some: u64, full: u64) -> String {
     format!(
         "some avg10=1.00 avg60=0.50 avg300=0.10 total={some}\nfull avg10=0.05 avg60=0.00 avg300=0.00 total={full}\n"

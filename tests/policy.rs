@@ -62,6 +62,7 @@ fn scoped_snapshot() -> Snapshot {
                 .collect(),
             effective_cpu_capacity_millicores: Some(4000),
             busy_millicores: Some(1000),
+            busy_lower_millicores: None,
             busy_status: CpuUsageStatus::Available,
             busy_interval_ms: Some(500),
             visible_cpu_ceiling_millicores: Some(4000),
@@ -1534,7 +1535,7 @@ fn coordinator_budget_never_reuses_an_ineligible_device_protection_cap() {
 }
 
 #[test]
-fn explicit_sharing_needs_recent_process_capability_and_never_infers_from_utilization() {
+fn explicit_sharing_needs_healthy_process_observation_and_never_infers_from_utilization() {
     use cedegrid::config::GpuExecutionMode;
     let mut cfg = config();
     cfg.gpu.execution_mode = GpuExecutionMode::ContentionAware;
@@ -1560,8 +1561,22 @@ fn explicit_sharing_needs_recent_process_capability_and_never_infers_from_utiliz
             .gpu_memory_mib["GPU-test"]
             > 0
     );
+    // Health does not depend on fresh samples: an empty, idle device stays
+    // admissible when its cursor ages out (research R8)...
     observation.baseline_age_ms = Some(cfg.gpu.process_sample_max_age_ms + 1);
+    observation.fresh_after_baseline = false;
     snap.gpus[0].observation = Some(observation);
+    assert!(
+        PolicyEngine::new()
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
+            .unwrap()
+            .admission_headroom
+            .gpu_memory_mib["GPU-test"]
+            > 0
+    );
+    // ...while an external context with unknown activity blocks admission.
+    snap.gpus[0].external_process_ids = Some(vec![987]);
+    snap.gpus[0].external_compute = ComputeActivity::Unknown;
     assert!(
         PolicyEngine::new()
             .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
@@ -1570,6 +1585,16 @@ fn explicit_sharing_needs_recent_process_capability_and_never_infers_from_utiliz
             .gpu_memory_mib
             .is_empty()
     );
+    // Without healthy observation the explicit mode yields fully.
+    snap.gpus[0].observation.as_mut().unwrap().capability =
+        GpuExecutionCapability::ConservativeNonSharing;
+    snap.gpus[0].external_process_ids = Some(vec![]);
+    snap.gpus[0].external_compute = ComputeActivity::Idle;
+    let d = PolicyEngine::new()
+        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
+        .unwrap();
+    assert!(d.admission_headroom.gpu_memory_mib.is_empty());
+    assert_eq!(d.managed_budget.gpu_memory_mib["GPU-test"], 0);
 }
 
 #[test]

@@ -38,6 +38,9 @@ pub struct Collector {
     managed_pids: BTreeSet<u32>,
     managed_gpu_usage: BTreeMap<u32, BTreeMap<String, u64>>,
     gpu_accounting_known: BTreeSet<String>,
+    gpu_quiet: BTreeMap<String, QuietState>,
+    gpu_memory_tolerance_mib: u64,
+    quiet_window_intervals: u32,
 }
 
 impl Collector {
@@ -68,6 +71,15 @@ impl Collector {
             managed_pids: BTreeSet::new(),
             managed_gpu_usage: BTreeMap::new(),
             gpu_accounting_known: BTreeSet::new(),
+            gpu_quiet: BTreeMap::new(),
+            gpu_memory_tolerance_mib: crate::contention::ResourceThresholds::defaults(
+                crate::contention::ResourceKind::GpuMemory,
+            )
+            .noise_tolerance_mib,
+            quiet_window_intervals: crate::contention::ResourceThresholds::defaults(
+                crate::contention::ResourceKind::GpuCompute,
+            )
+            .quiet_window_intervals,
         })
     }
 
@@ -81,6 +93,14 @@ impl Collector {
         let mut collector = Self::with_kernel(&config.node_id, config.kernel.clone())?;
         collector.gpu_sample_max_age = Duration::from_millis(config.gpu.process_sample_max_age_ms);
         collector.gpu_config = config.gpu.clone();
+        collector.gpu_memory_tolerance_mib = config
+            .contention
+            .thresholds(crate::contention::ResourceKind::GpuMemory)
+            .noise_tolerance_mib;
+        collector.quiet_window_intervals = config.contention.quiet_window_intervals(
+            config.monitor.interval_ms,
+            config.gpu.process_sample_max_age_ms,
+        );
         Ok(collector)
     }
 
@@ -144,6 +164,12 @@ impl Collector {
         } else {
             None
         };
+        // The OS percentage rounds up for the upper bound; its floor is the lower.
+        let cpu_busy_lower = cpu_busy.map(|busy| {
+            ((f64::from(self.system.global_cpu_usage()) / 100.0) * capacity as f64)
+                .floor()
+                .clamp(0.0, busy as f64) as u64
+        });
         self.system.refresh_memory();
         let total_ram = self.system.total_memory() / MIB;
         let available_ram = sysinfo::IS_SUPPORTED_SYSTEM
@@ -182,7 +208,7 @@ impl Collector {
             cpu_capacity_millicores: capacity,
             physical_cores: self.physical_cores,
             cpu_busy_millicores: cpu_busy,
-            cpu_busy_lower_millicores: None,
+            cpu_busy_lower_millicores: cpu_busy_lower,
             total_ram_mib: total_ram,
             available_ram_mib: available_ram,
             gpu_inventory,
@@ -260,28 +286,18 @@ impl Collector {
                     continue;
                 }
             };
-            let memory = device.memory_info();
-            let normalized_memory = memory
-                .as_ref()
-                .ok()
-                .and_then(|memory| gpu_memory_mib(memory.total, memory.used));
-            let (total_memory_mib, used_memory_mib) = match normalized_memory {
-                Some((total, used)) => {
-                    capabilities.insert(format!("gpu:{uuid}:memory"), capability(CapabilityStatus::Available, "Device-wide bytes; all occupied memory is external or unattributed in observe-only mode."));
-                    (total, Some(used))
-                }
-                None => {
-                    capabilities.insert(
-                        format!("gpu:{uuid}:memory"),
-                        capability(
-                            CapabilityStatus::Unavailable,
-                            format!("Memory unavailable or inconsistent: {memory:?}"),
-                        ),
-                    );
-                    (0, None)
-                }
+            let read = |memory: &std::result::Result<
+                nvml_wrapper::struct_wrappers::device::MemoryInfo,
+                NvmlError,
+            >| {
+                memory.as_ref().ok().map(|memory| DeviceMemoryRead {
+                    total: memory.total,
+                    free: memory.free,
+                    reserved: memory.reserved,
+                })
             };
-            let mut accounting_known = normalized_memory.is_some();
+            // Read device memory on both sides of process enumeration.
+            let memory_before = device.memory_info();
             let utilization_percent = match device.utilization_rates() {
                 Ok(utilization) if utilization.gpu <= 100 => {
                     capabilities.insert(format!("gpu:{uuid}:utilization"), capability(CapabilityStatus::Available, "Auxiliary kernel-busy-time percentage. Polls can share an internal sample interval."));
@@ -324,6 +340,29 @@ impl Collector {
             let graphics = graphics_info
                 .as_ref()
                 .map(|p| p.iter().map(|p| p.pid).collect::<Vec<_>>());
+            let memory_after = device.memory_info();
+            let memory = device_memory(
+                read(&memory_before),
+                read(&memory_after),
+                self.gpu_memory_tolerance_mib,
+            );
+            let (total_memory_mib, used_memory_mib) = match memory {
+                Some(memory) => {
+                    capabilities.insert(format!("gpu:{uuid}:memory"), capability(CapabilityStatus::Available, format!("Device-wide bytes read before and after process enumeration; unavailable = total - free, including {} MiB reserved. Attribution known: {}.", memory.reserved_mib, memory.attribution_known)));
+                    (memory.total_mib, Some(memory.unavailable_mib))
+                }
+                None => {
+                    capabilities.insert(
+                        format!("gpu:{uuid}:memory"),
+                        capability(
+                            CapabilityStatus::Unavailable,
+                            format!("Memory unavailable or inconsistent: {memory_before:?}"),
+                        ),
+                    );
+                    (0, None)
+                }
+            };
+            let mut accounting_known = memory.is_some_and(|memory| memory.attribution_known);
             let external_process_ids =
                 merge_process_lists(compute.as_deref().ok(), graphics.as_deref().ok()).map(
                     |pids| {
@@ -332,8 +371,17 @@ impl Collector {
                             .collect()
                     },
                 );
+            // Memory of every enumerated context; unattributed is what remains.
+            let mut process_memory: Option<BTreeMap<u32, u64>> = Some(BTreeMap::new());
             if let (Ok(compute), Ok(graphics)) = (&compute_info, &graphics_info) {
                 for process in compute.iter().chain(graphics) {
+                    match (&mut process_memory, &process.used_gpu_memory) {
+                        (Some(known), nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes)) => {
+                            let entry = known.entry(process.pid).or_default();
+                            *entry = (*entry).max(bytes.div_ceil(MIB));
+                        }
+                        _ => process_memory = None,
+                    }
                     if self.managed_pids.contains(&process.pid) {
                         match process.used_gpu_memory {
                             nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => {
@@ -361,7 +409,16 @@ impl Collector {
                 }
             } else {
                 accounting_known = false;
+                process_memory = None;
             }
+            let unattributed_memory_mib = memory
+                .filter(|memory| memory.attribution_known)
+                .zip(process_memory)
+                .map(|(memory, processes)| {
+                    memory
+                        .unavailable_mib
+                        .saturating_sub(processes.values().fold(0, |sum, n| sum.saturating_add(*n)))
+                });
             capabilities.insert(format!("gpu:{uuid}:processes"), capability(
                 if external_process_ids.is_some() { CapabilityStatus::Available } else { CapabilityStatus::Unknown },
                 format!("Compute and graphics enumeration must both succeed; Only registry-verified managed identities are excluded; all other PIDs remain external. Compute error: {:?}; graphics error: {:?}", compute.err(), graphics.err()),
@@ -386,6 +443,14 @@ impl Collector {
                 activity_baseline,
                 samples.as_deref().ok(),
             );
+            let quiet = self.gpu_quiet.entry(uuid.clone()).or_default();
+            let quiet_ticks = advance_quiet(
+                quiet,
+                external_process_ids.as_deref(),
+                quiet_tick(external_process_ids.as_deref(), previous, &samples),
+            );
+            let external_compute =
+                quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
             if let Some(cursor) = next_cursor {
                 // An unchanged timestamp never refreshes the age of the baseline.
                 if previous.is_none() || baseline.is_none_or(|(old, _)| cursor > old) {
@@ -394,7 +459,7 @@ impl Collector {
                 }
             }
             let mut observation = describe_gpu_observation(
-                normalized_memory.is_some() && external_process_ids.is_some(),
+                memory.is_some() && external_process_ids.is_some(),
                 previous,
                 baseline_age,
                 &samples,
@@ -440,9 +505,9 @@ impl Collector {
                 external_compute,
                 compute_sample_id,
                 observation: Some(observation),
-                reserved_memory_mib: None,
-                free_memory_mib: None,
-                unattributed_memory_mib: None,
+                reserved_memory_mib: memory.map(|memory| memory.reserved_mib),
+                free_memory_mib: memory.map(|memory| memory.free_mib),
+                unattributed_memory_mib,
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -567,6 +632,99 @@ fn verify_external_gpu_inventory(
         .collect()
 }
 
+/// One NVML memory read in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceMemoryRead {
+    total: u64,
+    free: u64,
+    reserved: u64,
+}
+
+/// Device memory from reads before and after process enumeration (research R8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceMemory {
+    total_mib: u64,
+    /// Total minus free. Unlike NVML v2 `used`, this includes reserved memory.
+    unavailable_mib: u64,
+    free_mib: u64,
+    reserved_mib: u64,
+    /// False when the two reads disagree beyond the tolerance or the second read
+    /// failed: process memory read between them cannot be attributed this tick.
+    attribution_known: bool,
+}
+
+fn device_memory(
+    before: Option<DeviceMemoryRead>,
+    after: Option<DeviceMemoryRead>,
+    tolerance_mib: u64,
+) -> Option<DeviceMemory> {
+    let valid = |read: DeviceMemoryRead| read.free <= read.total && read.reserved <= read.total;
+    let before = before.filter(|read| valid(*read))?;
+    let after = after.filter(|read| valid(*read) && read.total == before.total);
+    let free = after.map_or(before.free, |after| after.free.min(before.free));
+    let (total_mib, unavailable_mib) = gpu_memory_mib(before.total, before.total - free)?;
+    Some(DeviceMemory {
+        total_mib,
+        unavailable_mib,
+        free_mib: (free / MIB).min(total_mib - unavailable_mib),
+        reserved_mib: after
+            .map_or(before.reserved, |after| after.reserved.max(before.reserved))
+            .div_ceil(MIB),
+        attribution_known: after
+            .is_some_and(|after| after.free.abs_diff(before.free) <= tolerance_mib * MIB),
+    })
+}
+
+/// Consecutive healthy intervals with no external compute, per device.
+#[derive(Debug, Clone, Default)]
+struct QuietState {
+    pids: BTreeSet<u32>,
+    ticks: u32,
+}
+
+/// Whether one query is healthy evidence that no external context computed: a
+/// complete non-empty inventory, a successful or NOT_FOUND query, and no positive
+/// sample for an external PID newer than the submitted cursor.
+fn quiet_tick(
+    processes: Option<&[u32]>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+) -> bool {
+    let Some(pids) = processes.filter(|pids| !pids.is_empty()) else {
+        return false;
+    };
+    let samples: &[ProcessUtilizationSample] = match samples {
+        Ok(samples) => samples,
+        Err(NvmlError::NotFound) => &[],
+        Err(_) => return false,
+    };
+    !samples.iter().any(|sample| {
+        pids.contains(&sample.pid) && sample.timestamp > previous.unwrap_or(0) && sample.sm_util > 0
+    })
+}
+
+/// A process leaving keeps the window; a new external process restarts it.
+fn advance_quiet(state: &mut QuietState, processes: Option<&[u32]>, healthy: bool) -> u32 {
+    let pids: BTreeSet<u32> = processes.unwrap_or_default().iter().copied().collect();
+    let new_process = !pids.is_subset(&state.pids);
+    state.pids = pids;
+    state.ticks = match (healthy, new_process) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => state.ticks.saturating_add(1),
+    };
+    state.ticks
+}
+
+/// Quiet only replaces Unknown; Idle and Active evidence always wins.
+fn quiet_activity(activity: ComputeActivity, ticks: u32, window: u32) -> ComputeActivity {
+    if activity == ComputeActivity::Unknown && window > 0 && ticks >= window {
+        ComputeActivity::Quiet
+    } else {
+        activity
+    }
+}
+
 fn fresh_cursor(previous: Option<u64>, age: Option<Duration>, max_age: Duration) -> Option<u64> {
     previous.filter(|_| age.is_some_and(|age| age <= max_age))
 }
@@ -593,9 +751,12 @@ fn describe_gpu_observation(
             | NvmlError::LibRmVersionMismatch
             | NvmlError::OperatingSystem)
     );
+    // Health and fresh activity evidence are separate: a successful or NOT_FOUND
+    // query is healthy observation even when it carries no new sample (R8).
+    let healthy = matches!(samples, Ok(_) | Err(NvmlError::NotFound));
     let capability = if !basic_known || device_error {
         GpuExecutionCapability::InsufficientObservability
-    } else if fresh_id.is_some() {
+    } else if healthy || fresh_id.is_some() {
         GpuExecutionCapability::ContentionAware
     } else {
         GpuExecutionCapability::ConservativeNonSharing
@@ -900,8 +1061,13 @@ impl ManagedCollector {
             .cloned()
             .collect();
         allocations.retain(|a| !parents.contains_key(&a.id));
+        let add = |total: Option<Resources>, usage: Option<Resources>| match (total, usage) {
+            (Some(mut total), Some(usage)) => total.add_checked(&usage).ok().map(|()| total),
+            _ => None,
+        };
         for child in child_allocations {
             if let Some(parent) = allocations.iter_mut().find(|a| a.id == parents[&child.id]) {
+                parent.observed_upper = add(parent.observed_upper.take(), child.observed_upper);
                 parent.observed = match (parent.observed.take(), child.observed) {
                     (Some(mut total), Some(usage)) => (|| -> Option<Resources> {
                         total.cpu_millicores =
@@ -997,7 +1163,7 @@ impl ManagedCollector {
         let mut cpu_diagnostics = Vec::new();
         for record in active {
             let old_cpu = self.previous.get(&record.assignment_id).cloned();
-            let observed = (|| -> Option<Resources> {
+            let bounds = (|| -> Option<(Resources, Resources)> {
                 let id = record.identity.as_ref()?;
                 if !verified.contains(&id.pid)
                     || crate::supervision::process_identity(
@@ -1023,20 +1189,39 @@ impl ManagedCollector {
                 if old.0 != *id {
                     return None;
                 }
+                let delta = ticks.checked_sub(old.1)?;
+                let quantization = cpu_counter_quantization_ms()?;
                 let cpu_millicores = aligned_cpu_usage_lower_bound(
-                    ticks.checked_sub(old.1)?,
+                    delta,
                     old.2,
                     before_ended,
                     cpu_window?,
-                    cpu_counter_quantization_ms()?,
+                    quantization,
                 )?;
                 let ram_mib = anonymous_memory_mib(id.pid)?;
-                Some(Resources {
-                    cpu_millicores,
-                    ram_mib,
-                    gpu_memory_mib: self.collector.gpu_usage(id.pid, &record.resources)?,
-                })
+                let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources)?;
+                // Upper bounds: the rate over the process's own interval plus
+                // quantization, and resident memory including shared pages.
+                let upper = Resources {
+                    cpu_millicores: cpu_usage_upper_bound(
+                        delta,
+                        before_ended.checked_duration_since(old.2)?,
+                        quantization,
+                    )?
+                    .max(cpu_millicores),
+                    ram_mib: process.memory().div_ceil(MIB).max(ram_mib),
+                    gpu_memory_mib: gpu_memory_mib.clone(),
+                };
+                Some((
+                    Resources {
+                        cpu_millicores,
+                        ram_mib,
+                        gpu_memory_mib,
+                    },
+                    upper,
+                ))
             })();
+            let (observed, observed_upper) = bounds.unzip();
             // Bounded read-only evidence makes a rejected subtraction
             // diagnosable even if the workload drains before the next heartbeat.
             if cpu_diagnostics.len() < 64
@@ -1057,6 +1242,10 @@ impl ManagedCollector {
                     "observed_cpu_millicores":observed.as_ref().map(|value|value.cpu_millicores)
                 }));
             }
+            let pending = matches!(
+                record.phase,
+                ExecutionPhase::Reserved | ExecutionPhase::Prepared
+            );
             allocations.push(Allocation {
                 id: record.assignment_id.clone(),
                 class: record.class,
@@ -1066,15 +1255,8 @@ impl ManagedCollector {
                     _ => AllocationPhase::Running,
                 },
                 requested: record.resources.clone(),
-                observed: if matches!(
-                    record.phase,
-                    ExecutionPhase::Reserved | ExecutionPhase::Prepared
-                ) {
-                    None
-                } else {
-                    observed
-                },
-                observed_upper: None,
+                observed: if pending { None } else { observed },
+                observed_upper: if pending { None } else { observed_upper },
             });
         }
         if !cpu_diagnostics.is_empty()
@@ -1120,6 +1302,20 @@ fn cpu_usage_lower_bound(
         return None;
     }
     u64::try_from(u128::from(delta_ms.saturating_sub(quantization_ms)) * 1_000_000_000 / nanos).ok()
+}
+
+/// Upper bound over the process's own measurement interval, which lies inside
+/// the aggregate window, with the counter quantization added.
+fn cpu_usage_upper_bound(
+    delta_ms: u64,
+    process_interval: Duration,
+    quantization_ms: u64,
+) -> Option<u64> {
+    let nanos = process_interval.as_nanos();
+    if nanos == 0 {
+        return None;
+    }
+    u64::try_from(u128::from(delta_ms.saturating_add(quantization_ms)) * 1_000_000_000 / nanos).ok()
 }
 
 fn cpu_counter_quantization_ms() -> Option<u64> {
@@ -1312,6 +1508,171 @@ mod tests {
             error_status(&NvmlError::LibraryNotFound),
             CapabilityStatus::Unavailable
         );
+    }
+
+    #[test]
+    fn unavailable_device_memory_is_total_minus_free() {
+        let read = DeviceMemoryRead {
+            total: 24 * 1024 * MIB,
+            free: 20 * 1024 * MIB,
+            reserved: 300 * MIB,
+        };
+        let memory = device_memory(Some(read), Some(read), 256).unwrap();
+        assert_eq!(memory.total_mib, 24 * 1024);
+        // Unavailable includes driver-reserved memory that `used` leaves out.
+        assert_eq!(memory.unavailable_mib, 4 * 1024);
+        assert_eq!(memory.free_mib, 20 * 1024);
+        assert_eq!(memory.reserved_mib, 300);
+        assert!(memory.attribution_known);
+        // Rounding never invents free memory.
+        let odd = DeviceMemoryRead {
+            total: 4 * MIB + 1,
+            free: MIB + 1,
+            reserved: 0,
+        };
+        let memory = device_memory(Some(odd), Some(odd), 256).unwrap();
+        assert_eq!(
+            (memory.total_mib, memory.unavailable_mib, memory.free_mib),
+            (4, 3, 1)
+        );
+        let inconsistent = DeviceMemoryRead {
+            total: 4 * MIB,
+            free: 5 * MIB,
+            reserved: 0,
+        };
+        assert_eq!(device_memory(Some(inconsistent), Some(read), 256), None);
+        assert_eq!(device_memory(None, Some(read), 256), None);
+    }
+
+    #[test]
+    fn a_double_read_disagreement_beyond_tolerance_makes_attribution_unknown() {
+        let before = DeviceMemoryRead {
+            total: 24 * 1024 * MIB,
+            free: 20 * 1024 * MIB,
+            reserved: 300 * MIB,
+        };
+        let moved = |mib: u64| DeviceMemoryRead {
+            free: before.free - mib * MIB,
+            ..before
+        };
+        let within = device_memory(Some(before), Some(moved(200)), 256).unwrap();
+        assert!(within.attribution_known);
+        // The larger of the two reads is reported as unavailable.
+        assert_eq!(within.unavailable_mib, 4 * 1024 + 200);
+        let beyond = device_memory(Some(before), Some(moved(300)), 256).unwrap();
+        assert!(!beyond.attribution_known);
+        assert_eq!(beyond.unavailable_mib, 4 * 1024 + 300);
+        let failed_second_read = device_memory(Some(before), None, 256).unwrap();
+        assert!(!failed_second_read.attribution_known);
+    }
+
+    #[test]
+    fn quiet_requires_a_window_of_healthy_samples_over_a_complete_inventory() {
+        type Samples = std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>;
+        let window = 20;
+        fn tick(
+            state: &mut QuietState,
+            pids: Option<&[u32]>,
+            samples: &Samples,
+        ) -> ComputeActivity {
+            let healthy = quiet_tick(pids, Some(100), samples);
+            quiet_activity(
+                ComputeActivity::Unknown,
+                advance_quiet(state, pids, healthy),
+                20,
+            )
+        }
+        let not_found: Samples = Err(NvmlError::NotFound);
+        let mut state = QuietState::default();
+        for _ in 1..window {
+            assert_eq!(
+                tick(&mut state, Some(&[42]), &not_found),
+                ComputeActivity::Unknown
+            );
+        }
+        assert_eq!(
+            tick(&mut state, Some(&[42]), &not_found),
+            ComputeActivity::Quiet
+        );
+        // Successful zero samples are healthy evidence as well.
+        let zero: Samples = Ok(vec![gpu_sample(42, 101, 0)]);
+        assert_eq!(tick(&mut state, Some(&[42]), &zero), ComputeActivity::Quiet);
+        // A process that leaves keeps the window; a new one restarts it.
+        let mut state = QuietState::default();
+        for _ in 0..window {
+            tick(&mut state, Some(&[42, 7]), &not_found);
+        }
+        assert_eq!(
+            tick(&mut state, Some(&[42]), &not_found),
+            ComputeActivity::Quiet
+        );
+        assert_eq!(
+            tick(&mut state, Some(&[42, 9]), &not_found),
+            ComputeActivity::Unknown
+        );
+        // Incomplete inventory, query errors and positive samples reset the window.
+        let resets: [(Option<&[u32]>, Samples); 3] = [
+            (None, Err(NvmlError::NotFound)),
+            (Some(&[42]), Err(NvmlError::NoPermission)),
+            (Some(&[42]), Ok(vec![gpu_sample(42, 101, 30)])),
+        ];
+        for (pids, samples) in resets {
+            let mut state = QuietState::default();
+            for _ in 0..window {
+                tick(&mut state, Some(&[42]), &not_found);
+            }
+            assert_eq!(tick(&mut state, pids, &samples), ComputeActivity::Unknown);
+            assert_eq!(state.ticks, 0);
+        }
+        // Known activity is never overridden.
+        assert_eq!(
+            quiet_activity(ComputeActivity::Active, 99, window),
+            ComputeActivity::Active
+        );
+        assert_eq!(
+            quiet_activity(ComputeActivity::Idle, 0, window),
+            ComputeActivity::Idle
+        );
+    }
+
+    #[test]
+    fn an_idle_devices_health_never_becomes_insufficient_observability() {
+        let max_age = Duration::from_millis(731);
+        for (previous, age, samples) in [
+            (None, None, Err(NvmlError::NotFound)),
+            (
+                Some(100),
+                Some(Duration::from_millis(20)),
+                Err(NvmlError::NotFound),
+            ),
+            (Some(100), Some(Duration::from_secs(5)), Ok(vec![])),
+            (None, None, Ok(vec![gpu_sample(42, 90, 0)])),
+        ] {
+            let observation =
+                describe_gpu_observation(true, previous, age, &samples, None, 1234, max_age);
+            assert_eq!(
+                observation.capability,
+                GpuExecutionCapability::ContentionAware,
+                "{samples:?}"
+            );
+            assert!(!observation.fresh_after_baseline);
+        }
+        for samples in [Err(NvmlError::GpuLost), Ok(vec![])] {
+            let basic_known = samples.is_err();
+            assert_eq!(
+                describe_gpu_observation(basic_known, None, None, &samples, None, 1234, max_age)
+                    .capability,
+                GpuExecutionCapability::InsufficientObservability
+            );
+        }
+    }
+
+    #[test]
+    fn managed_cpu_upper_bound_adds_quantization_over_the_process_interval() {
+        let lower = cpu_usage_lower_bound(500, Duration::from_secs(1), 22).unwrap();
+        let upper = cpu_usage_upper_bound(500, Duration::from_millis(900), 22).unwrap();
+        assert_eq!((lower, upper), (478, 580));
+        assert_eq!(cpu_usage_upper_bound(1, Duration::ZERO, 2), None);
     }
 
     #[test]
@@ -1567,10 +1928,12 @@ mod tests {
             assert_eq!(observation.query_cursor_us, 100);
             assert_eq!(
                 observation.capability,
-                if expected == "GpuLost" {
-                    GpuExecutionCapability::InsufficientObservability
-                } else {
-                    GpuExecutionCapability::ConservativeNonSharing
+                match expected {
+                    "GpuLost" => GpuExecutionCapability::InsufficientObservability,
+                    // Healthy queries without a new sample are not activity evidence,
+                    // but they are healthy observation (research R8).
+                    "NotFound" | "NVML_SUCCESS" => GpuExecutionCapability::ContentionAware,
+                    _ => GpuExecutionCapability::ConservativeNonSharing,
                 }
             );
             assert!(!observation.fresh_after_baseline);
@@ -1656,10 +2019,12 @@ mod tests {
             describe_gpu_observation(true, cursor, Some(age), &samples, fresh_id, 1234, max_age);
         assert_eq!(observation.query_cursor_us, 100);
         assert_eq!(observation.newest_sample_timestamp_us, Some(101));
+        // Healthy observation, but not fresh activity evidence.
         assert_eq!(
             observation.capability,
-            GpuExecutionCapability::ConservativeNonSharing
+            GpuExecutionCapability::ContentionAware
         );
+        assert!(!observation.fresh_after_baseline);
         assert!(observation.freshness_decision.contains("baseline_expired"));
     }
 
@@ -1765,9 +2130,15 @@ mod tests {
                 std::slice::from_ref(&identity),
                 |_| Some(identity.clone()),
             );
+            // NOT_FOUND is a healthy query without samples; the others cannot
+            // observe activity at all.
             assert_eq!(
                 observation.capability,
-                GpuExecutionCapability::ConservativeNonSharing
+                if error_detail == "NotFound" {
+                    GpuExecutionCapability::ContentionAware
+                } else {
+                    GpuExecutionCapability::ConservativeNonSharing
+                }
             );
             assert_eq!(observation.activity_api_status, error_detail);
             assert!(observation.best_effort_external_processes.is_some());

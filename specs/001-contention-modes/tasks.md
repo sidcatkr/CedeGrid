@@ -145,13 +145,13 @@ job launched with unattributed device memory is not drained.
   - D6: one unknown allocation does not drain others.
 
   They must fail before T025–T028.
-- [ ] T018 [P] [US1] Add tests in the `src/telemetry.rs` tests module:
+- [X] T018 [P] [US1] Add tests in the `src/telemetry.rs` tests module:
   - unavailable memory = total − free;
   - a double-read disagreement beyond tolerance makes attribution unknown;
   - `Quiet` appears only after `quiet_window_intervals` of healthy NOT_FOUND samples with a
     complete inventory;
   - an idle device's health never becomes InsufficientObservability.
-- [ ] T019 [P] [US1] Add tests in `tests/kernel.rs` for CPU busy bounds: USER_HZ rounding and
+- [X] T019 [P] [US1] Add tests in `tests/kernel.rs` for CPU busy bounds: USER_HZ rounding and
   iowait count only in the upper bound.
 - [ ] T020 [P] [US1] Add tests in `tests/supervision.rs`:
   - an injected control-channel error holds the step;
@@ -164,14 +164,14 @@ job launched with unattributed device memory is not drained.
 
 ### Implementation for User Story 1
 
-- [ ] T022 [US1] Read NVML `reserved` and `free` in `src/telemetry.rs` (from
+- [X] T022 [US1] Read NVML `reserved` and `free` in `src/telemetry.rs` (from
   `memory_info()`). Compute unavailable = total − free, read device memory before and after
   process enumeration, and report unattributed memory.
-- [ ] T023 [US1] Report bounds:
+- [X] T023 [US1] Report bounds:
   - managed CPU and RAM lower and upper bounds in `src/telemetry.rs` (per-allocation
     quantization; anonymous PSS vs RSS);
   - host busy bounds in `src/kernel.rs`.
-- [ ] T024 [US1] Implement `Quiet` activity, and split observation health from fresh activity
+- [X] T024 [US1] Implement `Quiet` activity, and split observation health from fresh activity
   evidence, in `classify_activity` and `describe_gpu_observation` in `src/telemetry.rs`
   (research R8).
 - [X] T025 [US1] Fix D1 and D2 in `src/policy.rs`:

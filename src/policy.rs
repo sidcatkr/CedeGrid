@@ -47,9 +47,8 @@ pub fn effective_gpu_capability(
     });
     // A Quiet class is positive evidence from healthy observation over a window,
     // not the absence of samples, so it qualifies like a fresh sample (research R8).
-    let evidence = fresh
-        || (gpu.external_compute == ComputeActivity::Quiet
-            && observation.is_some_and(|o| o.capability == ContentionAware));
+    let healthy = observation.is_some_and(|o| o.capability == ContentionAware);
+    let evidence = fresh || (gpu.external_compute == ComputeActivity::Quiet && healthy);
     match config.gpu.execution_mode {
         GpuExecutionMode::Auto => observation.map(|_| {
             if evidence {
@@ -58,7 +57,9 @@ pub fn effective_gpu_capability(
                 ConservativeNonSharing
             }
         }),
-        GpuExecutionMode::ContentionAware => Some(if evidence {
+        // Explicit contention-aware mode needs healthy observation; unknown activity
+        // then blocks admission and holds instead of forcing a full yield.
+        GpuExecutionMode::ContentionAware => Some(if healthy {
             ContentionAware
         } else {
             InsufficientObservability
@@ -385,11 +386,12 @@ impl PolicyEngine {
             // Own usage is a lower bound and host busy an upper bound (schema 3 adds
             // the host lower bound). Overlapping bounds are consistent (R9).
             let own_lower = managed_observed.cpu_millicores;
-            let host_lower = if scoped_kernel.is_some() {
-                busy
-            } else {
-                snapshot.cpu_busy_lower_millicores.unwrap_or(busy).min(busy)
-            };
+            let host_lower = match scoped_kernel {
+                Some(kernel) => kernel.cpu.busy_lower_millicores,
+                None => snapshot.cpu_busy_lower_millicores,
+            }
+            .unwrap_or(busy)
+            .min(busy);
             let external = if own_lower > busy {
                 cpu_held = true;
                 statuses.entry(ResourceKey::Cpu).or_default().measurement =
