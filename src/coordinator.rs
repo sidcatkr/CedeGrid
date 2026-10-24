@@ -163,7 +163,7 @@ impl Coordinator {
             [],
             |r| r.get(0),
         )?;
-        tx.execute("INSERT OR IGNORE INTO drain_requests(assignment_id,reason) SELECT assignment_id,'drain persisted across coordinator restart' FROM reservations WHERE phase='draining'",[])?;
+        tx.execute("INSERT OR IGNORE INTO drain_requests(assignment_id,reason,cause) SELECT assignment_id,'drain persisted across coordinator restart',COALESCE(yield_cause,'coordinator_drain') FROM reservations WHERE phase='draining'",[])?;
         tx.execute("UPDATE reservations SET phase='uncertain',detail='coordinator restarted; require node reconciliation' WHERE phase!='released'",[])?;
         let last_clock_ms = tx.query_row(
             "SELECT value FROM distributed_meta WHERE key='last_clock_ms'",
@@ -1062,8 +1062,16 @@ impl Coordinator {
             } else {
                 requested_phase
             };
+            // The node's reported cause travels with the drain (FR-018). Nodes that
+            // do not report one drained under local resource pressure.
+            let reported_cause = allocation
+                .yield_cause
+                .map(|cause| {
+                    serde_json::to_value(cause).map(|v| v.as_str().unwrap_or_default().to_owned())
+                })
+                .transpose()?;
             if phase == "draining" {
-                tx.execute("INSERT OR IGNORE INTO drain_requests(assignment_id,reason) VALUES (?1,'node-local drain began')",[&allocation.assignment_id])?;
+                tx.execute("INSERT OR IGNORE INTO drain_requests(assignment_id,reason,cause) VALUES (?1,'node-local drain began',COALESCE(?2,'external_growth'))",params![allocation.assignment_id,reported_cause])?;
             }
             if phase == "uncertain" {
                 tx.execute(
@@ -1078,7 +1086,7 @@ impl Coordinator {
                 unknown_allocations.push(allocation.assignment_id.clone());
             }
             // A release report is a node assertion backed by its local journal, never a timeout inference.
-            tx.execute("UPDATE reservations SET phase=?2,observed_json=?3,detail=?4 WHERE assignment_id=?1",params![allocation.assignment_id,phase,allocation.observed.as_ref().map(serde_json::to_string).transpose()?,allocation.detail])?;
+            tx.execute("UPDATE reservations SET phase=?2,observed_json=?3,detail=?4,yield_cause=COALESCE(?5,yield_cause) WHERE assignment_id=?1",params![allocation.assignment_id,phase,allocation.observed.as_ref().map(serde_json::to_string).transpose()?,allocation.detail,reported_cause])?;
         }
         let mut outstanding=tx.prepare("SELECT assignment_id FROM reservations WHERE node_id=?1 AND phase!='released' AND (?2 OR lease_sequence>0 OR phase='prepared')")?;
         let missing = outstanding
@@ -1134,7 +1142,15 @@ impl Coordinator {
             if phase == "released" {
                 continue;
             }
-            let should_drain = self.should_drain(&id)?
+            // A durable drain decision is recorded with its cause when issued.
+            let cause = self.drain_cause(&id)?;
+            if let Some(cause) = cause {
+                self.store.connection.execute(
+                    "INSERT OR IGNORE INTO drain_requests(assignment_id,reason,cause) VALUES (?1,'coordinator issued drain',?2)",
+                    params![id, cause],
+                )?;
+            }
+            let should_drain = cause.is_some()
                 || ((!fresh || phase == "uncertain")
                     && self.assignment_request(&id)?.class == AllocationClass::Opportunistic);
             if should_drain {
@@ -1440,7 +1456,13 @@ impl Coordinator {
             current.generation == generation && current.assignment_id.as_deref() == Some(id),
             "stale failure report"
         );
-        let yielded = kind == FailureKind::Yielded || self.should_drain(id)?;
+        // A recorded cause decides, never the detail text (FR-018).
+        let recorded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM drain_requests WHERE assignment_id=?1) OR EXISTS(SELECT 1 FROM reservations WHERE assignment_id=?1 AND yield_cause IS NOT NULL)",
+            [id],
+            |r| r.get(0),
+        )?;
+        let yielded = kind == FailureKind::Yielded || recorded || self.should_drain(id)?;
         let previous: u32 = tx
             .query_row(
                 "SELECT failures FROM retry_state WHERE task_id=?1",
@@ -1577,6 +1599,10 @@ impl Coordinator {
         Ok(task)
     }
     fn should_drain(&self, id: &str) -> Result<bool> {
+        Ok(self.drain_cause(id)?.is_some())
+    }
+    /// Why the coordinator drains an allocation, if it does.
+    fn drain_cause(&self, id: &str) -> Result<Option<&'static str>> {
         let(cancelled,node_drain,pool_json):(bool,bool,String)=self.store.connection.query_row("SELECT j.cancelled,n.drain,p.spec_json FROM reservations r JOIN assignments a USING(assignment_id) JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) JOIN pools p USING(pool_id) JOIN nodes n ON n.node_id=r.node_id WHERE assignment_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let pool: PoolSpec = serde_json::from_str(&pool_json)?;
         let owner: String = self.store.connection.query_row(
@@ -1594,11 +1620,14 @@ impl Coordinator {
             [id],
             |r| r.get(0),
         )?;
-        if cancelled || node_drain || preempt || draining || !pool.node_ids.contains(&owner) {
-            return Ok(true);
+        if cancelled || node_drain {
+            return Ok(Some("operator_drain"));
+        }
+        if preempt || draining || !pool.node_ids.contains(&owner) {
+            return Ok(Some("coordinator_drain"));
         }
         let rank:u32=self.store.connection.query_row("SELECT count(*) FROM reservations r JOIN assignments a USING(assignment_id) JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE j.pool_id=?1 AND r.phase!='released' AND (s.sequence<(SELECT sequence FROM task_specs JOIN assignments USING(task_id) WHERE assignment_id=?2) OR r.assignment_id=?2)",params![pool.pool_id,id],|r|r.get(0))?;
-        Ok(rank > pool.max_workers)
+        Ok((rank > pool.max_workers).then_some("coordinator_drain"))
     }
     fn grant(
         &self,

@@ -859,6 +859,8 @@ struct ChildSlot {
     applied_sequence: u64,
     /// When the first Drain was sent, by local policy or for the coordinator.
     drain_sent_at: Option<Instant>,
+    /// Why it was drained, reported to the coordinator once negotiated.
+    drain_cause: Option<crate::contention::YieldCause>,
     started_at: Instant,
     last_checkpoint_at: Option<Instant>,
     /// The last `adjust` sent and its sequence.
@@ -894,6 +896,9 @@ fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
 /// Send Drain and record it for the admission back-off.
 fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) {
     slot.drain_sent_at.get_or_insert_with(Instant::now);
+    if slot.drain_cause.is_none() {
+        slot.drain_cause = cause;
+    }
     // A closed pipe already means agent loss for this supervisor.
     let _ = send(slot, &Control::Drain { cause });
 }
@@ -1157,6 +1162,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         applied: BTreeMap::new(),
         applied_sequence: 0,
         drain_sent_at: None,
+        drain_cause: None,
         started_at: Instant::now(),
         last_checkpoint_at: None,
         adjust_sequence: 0,
@@ -1724,6 +1730,7 @@ async fn start_assignment(
         applied: BTreeMap::new(),
         applied_sequence: 0,
         drain_sent_at: None,
+        drain_cause: None,
         started_at: Instant::now(),
         last_checkpoint_at: None,
         adjust_sequence: 0,
@@ -2989,7 +2996,11 @@ impl AgentLoop<'_> {
                     .find(|a| a.id == r.assignment_id)
                     .and_then(|a| a.observed.clone()),
                 detail: r.detail.clone(),
-                yield_cause: None,
+                // Stripped again unless the coordinator negotiated contention/1.
+                yield_cause: self
+                    .slots
+                    .get(&r.assignment_id)
+                    .and_then(|slot| slot.drain_cause),
             })
             .collect();
         reports.extend(
@@ -3124,7 +3135,9 @@ impl AgentLoop<'_> {
                                 assignment_id: id.clone(),
                                 generation: assignment.generation,
                                 detail: detail.clone(),
-                                failure_kind: if detail.contains("revoked") || yielded {
+                                // The coordinator classifies by its recorded cause;
+                                // the node adds only its journal-backed outcome.
+                                failure_kind: if yielded {
                                     FailureKind::Yielded
                                 } else {
                                     FailureKind::ExecutionFailure
@@ -4459,6 +4472,7 @@ mod drain_tests {
             applied: BTreeMap::new(),
             applied_sequence: 0,
             drain_sent_at: None,
+            drain_cause: None,
             started_at: Instant::now(),
             last_checkpoint_at: None,
             adjust_sequence: 0,

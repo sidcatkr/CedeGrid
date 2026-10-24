@@ -255,9 +255,8 @@ pause and then reverses, with no drain (quickstart §3).
 - [X] T039 [US2] Add tests in `tests/agent.rs`:
   - drain back-off counts every sent drain, local and coordinator-issued (audit M8);
   - dropping a `ChildSlot` closes the pipe without sending Drain (audit M5).
-- [ ] T040 [P] [US2] Add tests in `tests/coordinator.rs`: failures are classified by the
-  recorded yield cause regardless of detail text, and a cancelled task becomes terminal instead
-  of being re-queued.
+- [X] T040 [P] [US2] Add tests in `tests/coordinator.rs`: failures are classified by the
+  recorded yield cause regardless of detail text. (The cancelled-task test moved to T052a.)
 - [ ] T041 [US2] Add a test in `tests/agent.rs`: advertised controls include cgroup controls only
   after successful backend preparation with authorized settings, and never PSI observations.
 - [ ] T042 [P] [US2] Add non-native tests in `tests/cgroup.rs`, using a temporary fixture tree:
@@ -301,11 +300,13 @@ pause and then reverses, with no drain (quickstart §3).
   - send `adjust` per allocation from `Decision.actions`;
   - track sent drains with timestamps for back-off (audit M8);
   - make `ChildSlot::drop` close the pipe without sending Drain (audit M5).
-- [ ] T052 [US2] Record the yield cause across `src/agent.rs` and `src/coordinator.rs`:
+- [X] T052 [US2] Record the yield cause across `src/agent.rs` and `src/coordinator.rs`:
   - the agent sends `AllocationReport.yield_cause` once negotiated;
   - the coordinator persists `drain_requests.cause` when it issues a drain;
-  - failures are classified by recorded cause, removing `detail.contains("revoked")`;
-  - cancelled tasks become terminal.
+  - failures are classified by recorded cause, removing `detail.contains("revoked")`.
+- [ ] T052a [US2] Cancelled tasks become terminal instead of being re-queued (audit A18), with
+  a test in `tests/coordinator.rs`. *Pending decision:* `tasks.status` has a CHECK constraint, so
+  a terminal status needs a node-state schema migration plus SDK and tool updates.
 - [ ] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).

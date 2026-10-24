@@ -3235,3 +3235,137 @@ fn recorded_0_2_messages_parse_and_negotiated_report_fields_are_accepted() {
             .is_ok()
     );
 }
+
+fn coordinator_db(d: &tempfile::TempDir) -> rusqlite::Connection {
+    rusqlite::Connection::open(d.path().join("state/state.sqlite3")).unwrap()
+}
+
+fn failure_kind(db: &rusqlite::Connection, a: &Assignment) -> String {
+    db.query_row(
+        "SELECT failure_kind FROM failure_receipts WHERE assignment_id=?1",
+        [&a.request.assignment_id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["one", "two"], 100);
+    let mut offered = offers(&mut c, 100).assignments;
+    let (a, b) = (offered.remove(0), offered.remove(0));
+    authorize(&mut c, &a, 100);
+    authorize(&mut c, &b, 100);
+    // Detail text never decides: "revoked" without a recorded cause is a failure.
+    let mut r = report(101);
+    r.launch_slots = 0;
+    r.allocations.push(AllocationReport {
+        assignment_id: a.request.assignment_id.clone(),
+        generation: a.generation,
+        phase: RemotePhase::Released,
+        observed: None,
+        detail: "verified release".into(),
+        yield_cause: None,
+    });
+    // The node reports why it drained the other attempt (negotiated field).
+    r.allocations.push(AllocationReport {
+        assignment_id: b.request.assignment_id.clone(),
+        generation: b.generation,
+        phase: RemotePhase::Draining,
+        observed: None,
+        detail: "local yield".into(),
+        yield_cause: Some(cedegrid::contention::YieldCause::ExternalGrowth),
+    });
+    c.handle_at(&node(), Request::Heartbeat { report: r }, 101)
+        .unwrap();
+    c.handle_at(
+        &node(),
+        Request::Fail {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            detail: "coordinator revoked the offer".into(),
+            failure_kind: FailureKind::ExecutionFailure,
+        },
+        101,
+    )
+    .unwrap();
+    let mut r = report(102);
+    r.launch_slots = 0;
+    r.allocations.push(AllocationReport {
+        assignment_id: b.request.assignment_id.clone(),
+        generation: b.generation,
+        phase: RemotePhase::Released,
+        observed: None,
+        detail: "verified release".into(),
+        yield_cause: None,
+    });
+    c.handle_at(&node(), Request::Heartbeat { report: r }, 102)
+        .unwrap();
+    c.handle_at(
+        &node(),
+        Request::Fail {
+            assignment_id: b.request.assignment_id.clone(),
+            generation: b.generation,
+            detail: "owned workload ended".into(),
+            failure_kind: FailureKind::ExecutionFailure,
+        },
+        102,
+    )
+    .unwrap();
+    let db = coordinator_db(&d);
+    assert_eq!(failure_kind(&db, &a), "execution_failure");
+    assert_eq!(failure_kind(&db, &b), "yielded");
+    let cause: String = db
+        .query_row(
+            "SELECT cause FROM drain_requests WHERE assignment_id=?1",
+            [&b.request.assignment_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(cause, "external_growth");
+    let recorded: Option<String> = db
+        .query_row(
+            "SELECT yield_cause FROM reservations WHERE assignment_id=?1",
+            [&b.request.assignment_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded.as_deref(), Some("external_growth"));
+}
+
+#[test]
+fn coordinator_issued_drains_record_their_cause_when_issued() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["one", "two"], 100);
+    assert_eq!(offers(&mut c, 100).assignments.len(), 2);
+    let mut p = pool();
+    p.max_workers = 1;
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+        .unwrap();
+    let shrunk = offers(&mut c, 101).drain;
+    assert_eq!(shrunk.len(), 1);
+    c.handle_at(
+        &Principal::Operator,
+        Request::Cancel {
+            job_id: "job".into(),
+        },
+        102,
+    )
+    .unwrap();
+    assert_eq!(offers(&mut c, 103).drain.len(), 2);
+    let db = coordinator_db(&d);
+    let causes: BTreeMap<String, String> = db
+        .prepare("SELECT assignment_id,cause FROM drain_requests")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(causes.len(), 2);
+    // The pool shrink drained first; cancellation is an operator drain.
+    assert_eq!(causes[&shrunk[0]], "coordinator_drain");
+    assert!(causes.values().any(|cause| cause == "operator_drain"));
+}
