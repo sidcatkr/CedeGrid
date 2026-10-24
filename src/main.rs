@@ -266,7 +266,6 @@ fn emit(value: &impl Serialize) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let _foreground = cedegrid::launcher_terminal::Foreground::enter()?;
     #[cfg(windows)]
     ensure!(
         !matches!(
@@ -290,6 +289,9 @@ fn main() -> Result<()> {
             .context("missing supervisor spec")?;
         return cedegrid::agent::assignment_supervisor(Path::new(&spec));
     }
+    // Only the process the npm launcher started takes over its terminal. Internal
+    // gates and supervisors inherit the launcher variable but have another parent.
+    let _foreground = cedegrid::launcher_terminal::Foreground::enter()?;
     let cli = Cli::parse();
     #[cfg(windows)]
     ensure!(
