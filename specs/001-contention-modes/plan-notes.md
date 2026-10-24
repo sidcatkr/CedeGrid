@@ -30,9 +30,9 @@ and driver, and record native evidence. Line numbers refer to `dev` at `6be4cea`
   running loop goes straight to `kill_and_confirm` (`src/supervision.rs:1088, 1167-1186`).
   FR-017 forbids this. The path includes `control.poll()?` (telemetry plus `evaluate`),
   `drain.notify()?` and a rejected journal transition.
-- **Supervisor drain logging can panic.** It uses `eprintln!` (`src/agent.rs:427-430`), which
-  panics on EPIPE once the agent's stderr reader is gone, and there is no kill-on-drop. Replace
-  it with non-panicking writes.
+- **Supervisor drain logging could panic.** Fixed on this branch (`54ce12c`): diagnostics use a
+  non-panicking write. A pidfd kill guard or `panic=abort` for the hidden commands is still
+  worth considering, because any other panic would also orphan the workload.
 - **Orphaned supervisors cannot be drained.** After an agent restart, the agent marks a live
   orphaned supervisor's record NeedsReconciliation, and NeedsReconciliation → Draining is
   rejected (`src/execution_state.rs:614-628`). A re-attachable control channel is needed for any
@@ -153,6 +153,20 @@ Each needs verification on the target kernel and driver.
 | NVML per-process `usedGpuMemory` (`_v3` process lists, already used) | attribution | Can be `NotAvailable`, for example under MIG or in containers. Context overhead attribution varies by driver. |
 | NVML `nvmlDeviceGetProcessUtilization` (already used) | activity | Samples only for non-zero utilization; NOT_FOUND otherwise. The cursor is in CPU microseconds. Define "quiet" from healthy NOT_FOUND windows over a complete inventory. |
 | Resource-target file plus SDK watcher | hint | See the worker protocol section above. |
+
+## Already fixed on this branch (do not redo)
+
+| Commit | Fix | Regression test |
+|---|---|---|
+| `8df6ff4` | Hidden gate/supervisor dispatch runs before the npm-launcher terminal handoff | `tests/cli.rs::npm_launcher_identity_does_not_reach_internal_gate_or_supervisor` |
+| `77f66ed` | `tools/release_manifest.py` hashes without Python 3.11 `file_digest` | `tests/test_release_gate.py` |
+| `54ce12c` | Supervisor diagnostics never panic on a closed stderr pipe | `agent::diagnostic_tests` |
+| `6eea095` | The coordinator retries accept errors with backoff | `coordinator::tests::accept_errors_do_not_stop_the_coordinator` |
+| `6c0ddc8` | Lease expiry is atomic; a superseded attempt is fenced without failing requests | `tests/coordinator.rs::lease_expiry_*` |
+| `b3baf14` | Assignment-scoped requests require the owning node certificate (behavior change, in `CHANGELOG.md`) | `tests/coordinator.rs::operator_certificate_cannot_act_for_a_node_assignment` |
+
+The D1–D6 characterization tests (`17d33cc`) still assert the defective behavior. The plan must
+invert them (FR-040).
 
 ## Maintainer decisions (2026-10-24)
 
