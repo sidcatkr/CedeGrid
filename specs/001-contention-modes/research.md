@@ -72,7 +72,7 @@ membership equals the verified PID set.
 |---|---|---|
 | Lower share (CPU) | `cpu.weight` written at runtime | Unavailable at runtime: launch-time nice only (see R5) |
 | Cap (CPU) | `cpu.max` written at runtime | SIGSTOP/SIGCONT duty cycle on owned pidfds, period = monitor interval |
-| Cap (RAM) | `memory.high` written at runtime | Unavailable: go to hint |
+| Cap (RAM) | Not used: memory starts at the hint (FR-011) | Unavailable: go to hint |
 | Pause (CPU, GPU compute) | `cgroup.freeze` with `cgroup.events` readback | SIGSTOP on owned pidfds, bounded by the pause limit |
 | Hint (RAM, GPU memory, CPU) | Resource-target file (R6) | Same |
 | Drain / terminate | Existing drain chain | Same |

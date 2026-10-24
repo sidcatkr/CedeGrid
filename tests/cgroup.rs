@@ -182,3 +182,323 @@ fn authorized_native_empty_leaf_preparation_and_cleanup() {
     backend.confirm_release().unwrap();
     assert!(!gate.cgroup_path.unwrap().exists());
 }
+
+#[cfg(unix)]
+mod runtime_steps {
+    use cedegrid::cgroup::{
+        CgroupActuator, CgroupConfig, DirectoryLeaf, LeafIo, Limit, runtime_write,
+    };
+    use cedegrid::contention::{ResourceKind, YieldStep};
+    use cedegrid::execution_model::{
+        Actuator, ActuatorSettings, AllocationClass, Family, ProcessIdentity,
+    };
+    use cedegrid::model::Resources;
+    use std::{collections::BTreeSet, fs, path::Path, time::Duration};
+
+    fn leaf(dir: &Path, members: &str) {
+        for (name, value) in [
+            ("cgroup.procs", members),
+            ("cpu.weight", "10\n"),
+            ("cpu.max", "max 100000\n"),
+            ("cgroup.freeze", "0\n"),
+            ("cgroup.events", "populated 1\nfrozen 0\n"),
+        ] {
+            fs::write(dir.join(name), value).unwrap();
+        }
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        fs::read_to_string(dir.join(name))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn limits_round_trip() {
+        assert_eq!("max".parse::<Limit>().unwrap(), Limit::Max);
+        assert_eq!("12345".parse::<Limit>().unwrap(), Limit::Value(12345));
+        assert_eq!(Limit::Max.to_string(), "max");
+        assert_eq!(Limit::Value(7).to_string(), "7");
+        assert!("-1".parse::<Limit>().is_err());
+    }
+
+    #[test]
+    fn runtime_writes_need_the_same_leaf_and_exactly_the_verified_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("leaf");
+        fs::create_dir(&dir).unwrap();
+        leaf(&dir, "11\n12\n");
+        let io = DirectoryLeaf::open(&dir).unwrap();
+        // A foreign PID in the leaf refuses the write.
+        assert!(runtime_write(&io, &BTreeSet::from([11]), "cpu.weight", "1").is_err());
+        assert_eq!(read(&dir, "cpu.weight"), "10");
+        assert_eq!(
+            runtime_write(&io, &BTreeSet::from([11, 12]), "cpu.weight", "1").unwrap(),
+            "1"
+        );
+        // A replaced leaf directory refuses the write as well.
+        fs::rename(&dir, temp.path().join("old")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        leaf(&dir, "11\n12\n");
+        assert!(!io.same_leaf().unwrap());
+        assert!(runtime_write(&io, &BTreeSet::from([11, 12]), "cpu.weight", "1").is_err());
+        assert_eq!(read(&dir, "cpu.weight"), "10");
+    }
+
+    struct Recorder {
+        pids: Vec<u32>,
+        signals: Vec<i32>,
+    }
+    impl Family for Recorder {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            self.pids
+                .iter()
+                .map(|pid| ProcessIdentity {
+                    pid: *pid,
+                    boot_id: "fixture".into(),
+                    start_time: 1,
+                    assignment_id: "a".into(),
+                    generation: 1,
+                })
+                .collect()
+        }
+        fn signal(&mut self, signal: i32) -> anyhow::Result<()> {
+            self.signals.push(signal);
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            None
+        }
+    }
+
+    fn settings(class: AllocationClass) -> ActuatorSettings {
+        ActuatorSettings {
+            class,
+            requested: Resources {
+                cpu_millicores: 1000,
+                ..Resources::default()
+            },
+            period: Duration::from_millis(100),
+        }
+    }
+
+    fn config(controls: &[&str]) -> CgroupConfig {
+        CgroupConfig {
+            authorized_controls: controls.iter().map(|c| c.to_string()).collect(),
+            ..CgroupConfig::default()
+        }
+    }
+
+    #[test]
+    fn delegated_controls_apply_read_back_and_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "21\n");
+        // The fixture reports the freeze as soon as it is requested.
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config(&["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![21],
+            signals: vec![],
+        };
+        assert!(
+            !actuator
+                .unavailable(ResourceKind::Cpu)
+                .contains(&YieldStep::LowerShare)
+        );
+        let step = actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
+            .unwrap();
+        assert_eq!(
+            (step, read(&dir, "cpu.weight")),
+            (YieldStep::LowerShare, "1".into())
+        );
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        assert_eq!(read(&dir, "cpu.max"), "25000 100000");
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "1");
+        // Reversal and release restore the launch settings; no signal was needed.
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
+        assert_eq!(read(&dir, "cpu.max"), "max 100000");
+        assert_eq!(read(&dir, "cpu.weight"), "10");
+        actuator.release(&mut family).unwrap();
+        assert!(family.signals.is_empty());
+    }
+
+    #[test]
+    fn unauthorized_controls_fall_back_to_owned_signals_and_guaranteed_is_never_frozen() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "31\n");
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config(&["cgroup.procs", "cpu.weight"]),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![31],
+            signals: vec![],
+        };
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0", "no unauthorized write");
+        assert_eq!(family.signals, [libc::SIGSTOP]);
+        actuator.release(&mut family).unwrap();
+        assert_eq!(family.signals, [libc::SIGSTOP, libc::SIGCONT]);
+        let guaranteed = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config(&["cgroup.procs", "cpu.weight", "cgroup.freeze"]),
+            &settings(AllocationClass::Guaranteed),
+        );
+        assert!(
+            guaranteed
+                .unavailable(ResourceKind::Cpu)
+                .contains(&YieldStep::Pause)
+        );
+        for memory in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+            let steps = guaranteed.unavailable(memory);
+            assert!(
+                [YieldStep::LowerShare, YieldStep::Cap, YieldStep::Pause]
+                    .iter()
+                    .all(|s| steps.contains(s))
+            );
+        }
+    }
+
+    fn all_controls() -> CgroupConfig {
+        config(&["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"])
+    }
+
+    #[test]
+    fn a_refused_write_falls_back_to_owned_signals_and_is_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        // PID 99 is not in the verified family, so every cgroup write is refused.
+        leaf(&dir, "41\n99\n");
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![41],
+            signals: vec![],
+        };
+        let step = actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        assert_eq!(step, YieldStep::Cap);
+        assert_eq!(read(&dir, "cpu.max"), "max 100000");
+        assert!(actuator.take_detail().unwrap().contains("membership"));
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
+        assert_eq!(family.signals, [libc::SIGSTOP]);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(family.signals, [libc::SIGSTOP, libc::SIGCONT]);
+        // LowerShare has no rootless mechanism, so its refusal is an error.
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
+                .is_err()
+        );
+        assert_eq!(read(&dir, "cpu.weight"), "10");
+    }
+
+    #[test]
+    fn a_refused_restore_holds_the_step_until_it_can_be_undone() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "51\n");
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![51],
+            signals: vec![],
+        };
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        fs::write(dir.join("cgroup.procs"), "51\n52\n").unwrap();
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
+                .is_err()
+        );
+        assert_eq!(read(&dir, "cpu.max"), "25000 100000");
+        fs::write(dir.join("cgroup.procs"), "51\n").unwrap();
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cpu.max"), "max 100000");
+        assert!(family.signals.is_empty());
+    }
+
+    #[test]
+    fn a_shared_freeze_and_the_launch_quota_hold() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "61\n");
+        fs::write(dir.join("cpu.max"), "20000 100000\n").unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut config = all_controls();
+        config.cpu_max = Some(cedegrid::cgroup::CpuMax {
+            quota_us: 20_000,
+            period_us: 100_000,
+        });
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config,
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![61],
+            signals: vec![],
+        };
+        // A cap never raises the launch-time quota.
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500))
+            .unwrap();
+        assert_eq!(read(&dir, "cpu.max"), "20000 100000");
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Pause,
+                None,
+            )
+            .unwrap();
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "1", "GPU compute still paused");
+        actuator
+            .apply(&mut family, ResourceKind::GpuCompute, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
+        assert_eq!(read(&dir, "cpu.max"), "20000 100000");
+        assert!(family.signals.is_empty());
+    }
+}

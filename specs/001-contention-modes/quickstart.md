@@ -63,7 +63,7 @@ cargo test --locked --test cgroup -- --ignored --exact runtime_adjust_requires_v
 ```
 
 **Expected:**
-- Runtime writes of `cpu.weight`, `cpu.max`, `memory.high` and `cgroup.freeze` are read back.
+- Runtime writes of `cpu.weight`, `cpu.max` and `cgroup.freeze` are read back.
 - A write is refused when leaf membership differs from the verified PID set.
 
 ## 5. GPU on an occupied device (Linux + NVIDIA, authorized only)

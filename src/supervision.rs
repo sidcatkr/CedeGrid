@@ -1019,6 +1019,9 @@ mod unix {
                         }
                         match actuator.apply(family, kind, wanted.step, wanted.target) {
                             Ok(step) => {
+                                if let Some(note) = actuator.take_detail() {
+                                    details.push(format!("{key}: {note}"));
+                                }
                                 applied.insert(key.clone(), step);
                                 if step == YieldStep::None {
                                     contention.applied.remove(&key);

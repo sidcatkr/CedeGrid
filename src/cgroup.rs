@@ -5,12 +5,12 @@
 //! never enables controllers, changes ancestors, moves existing processes, or
 //! treats RAM controls as GPU memory enforcement. Linux runtime behavior must be
 //! verified on an authorized Linux host; fixture tests are not runtime evidence.
+use crate::contention::{ResourceKind, YieldStep};
 use crate::execution_model::{
-    ControlEvidence, GateSetup, LaunchBackend, LaunchRequest, ProcessIdentity,
+    Actuator, ActuatorSettings, AllocationClass, ControlEvidence, Family, GateSetup, LaunchBackend,
+    LaunchRequest, ProcessIdentity,
 };
-#[cfg(any(target_os = "linux", test))]
-use anyhow::Context;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -200,10 +200,16 @@ fn validate_absolute_path(path: &Path) -> Result<()> {
 }
 
 /// Readback uses the canonical kernel representation, not string substrings.
-#[cfg(any(target_os = "linux", test))]
 fn canonical_control(name: &str, value: &str) -> Result<String> {
     let fields: Vec<&str> = value.split_whitespace().collect();
     match name {
+        "cgroup.freeze" => {
+            ensure!(
+                fields.len() == 1 && matches!(fields[0], "0" | "1"),
+                "invalid cgroup.freeze readback"
+            );
+            Ok(fields[0].into())
+        }
         "cpu.weight" => {
             ensure!(fields.len() == 1, "invalid cpu.weight readback");
             Ok(fields[0].parse::<u16>()?.to_string())
@@ -226,6 +232,361 @@ fn canonical_control(name: &str, value: &str) -> Result<String> {
             Ok(format!("{quota} {}", fields[1].parse::<u64>()?))
         }
         _ => bail!("unsupported cgroup control readback: {name}"),
+    }
+}
+
+/// A cgroup limit: `max` or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Max,
+    Value(u64),
+}
+
+impl std::str::FromStr for Limit {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim() {
+            "max" => Ok(Limit::Max),
+            number => Ok(Limit::Value(number.parse()?)),
+        }
+    }
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Limit::Max => f.write_str("max"),
+            Limit::Value(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// The files of one workload leaf, for runtime step writes.
+pub trait LeafIo {
+    /// Whether this is still the leaf created for the allocation.
+    fn same_leaf(&self) -> Result<bool>;
+    fn read(&self, control: &str) -> Result<String>;
+    fn write(&self, control: &str, value: &str) -> Result<()>;
+}
+
+/// Write a runtime-step control only while the leaf is unchanged and holds
+/// exactly the verified processes, and only with a matching readback. Unlike
+/// launch settings, the leaf is populated here, so membership replaces emptiness.
+pub fn runtime_write(
+    io: &dyn LeafIo,
+    verified: &BTreeSet<u32>,
+    control: &str,
+    value: &str,
+) -> Result<String> {
+    verify_runtime_target(io, verified, control)?;
+    write_checked(io, control, value)
+}
+
+fn verify_runtime_target(io: &dyn LeafIo, verified: &BTreeSet<u32>, control: &str) -> Result<()> {
+    ensure!(
+        RUNTIME_CONTROLS.contains(&control),
+        "{control} is not a runtime step control"
+    );
+    ensure!(
+        io.same_leaf()?,
+        "workload leaf was replaced; refuse runtime write"
+    );
+    let members = io
+        .read("cgroup.procs")?
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    ensure!(
+        !verified.is_empty() && members == *verified,
+        "leaf membership differs from the verified processes; refuse runtime write"
+    );
+    Ok(())
+}
+
+fn write_checked(io: &dyn LeafIo, control: &str, value: &str) -> Result<String> {
+    io.write(control, value)?;
+    let actual = canonical_control(control, &io.read(control)?)?;
+    ensure!(
+        actual == canonical_control(control, value)?,
+        "{control} readback differs from the requested value"
+    );
+    Ok(actual)
+}
+
+/// A plain directory standing in for a leaf in non-native tests. It performs
+/// no cgroup v2 checks and is never used for a real allocation.
+#[cfg(unix)]
+pub struct DirectoryLeaf {
+    path: PathBuf,
+    identity: (u64, u64),
+}
+
+#[cfg(unix)]
+impl DirectoryLeaf {
+    pub fn open(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        ensure!(metadata.is_dir(), "leaf fixture must be a directory");
+        Ok(Self {
+            path: path.to_owned(),
+            identity: (metadata.dev(), metadata.ino()),
+        })
+    }
+
+    fn file(&self, control: &str) -> Result<PathBuf> {
+        ensure!(
+            !control.contains('/') && control != "." && control != "..",
+            "invalid control file name"
+        );
+        Ok(self.path.join(control))
+    }
+}
+
+#[cfg(unix)]
+impl LeafIo for DirectoryLeaf {
+    fn same_leaf(&self) -> Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.is_dir() && (m.dev(), m.ino()) == self.identity))
+    }
+    fn read(&self, control: &str) -> Result<String> {
+        Ok(std::fs::read_to_string(self.file(control)?)?)
+    }
+    fn write(&self, control: &str, value: &str) -> Result<()> {
+        Ok(std::fs::write(self.file(control)?, value)?)
+    }
+}
+
+/// Runtime steps through authorized delegated controls (research R4), with the
+/// rootless mechanisms as fallback for steps whose control is not authorized
+/// or whose write is refused.
+pub struct CgroupActuator<L: LeafIo> {
+    leaf: L,
+    authorized: BTreeSet<String>,
+    class: AllocationClass,
+    requested_cpu: u64,
+    /// Launch values restored when a step reverses.
+    weight: String,
+    cpu_max: String,
+    launch_quota_us: Option<u64>,
+    period_us: u64,
+    fallback: crate::actuation::RootlessActuator,
+    written: std::collections::BTreeMap<ResourceKind, BTreeSet<&'static str>>,
+    detail: Option<String>,
+}
+
+impl<L: LeafIo> CgroupActuator<L> {
+    pub fn new(leaf: L, config: &CgroupConfig, settings: &ActuatorSettings) -> Self {
+        let period_us = config.cpu_max.as_ref().map_or(100_000, |max| max.period_us);
+        Self {
+            leaf,
+            authorized: config.authorized_controls.iter().cloned().collect(),
+            class: settings.class,
+            requested_cpu: settings.requested.cpu_millicores.max(1),
+            // Without a launch setting the leaf keeps the kernel default weight.
+            weight: config
+                .cpu_weight
+                .map_or_else(|| "100".into(), |weight| weight.to_string()),
+            cpu_max: config.cpu_max.as_ref().map_or_else(
+                || format!("max {period_us}"),
+                |max| format!("{} {}", max.quota_us, max.period_us),
+            ),
+            launch_quota_us: config.cpu_max.as_ref().map(|max| max.quota_us),
+            period_us,
+            fallback: crate::actuation::RootlessActuator::new(settings),
+            written: Default::default(),
+            detail: None,
+        }
+    }
+
+    /// The cap quota per period, never above the launch-time quota.
+    fn quota_us(&self, target: Option<u64>) -> u64 {
+        let quota = target
+            .unwrap_or(self.requested_cpu / 2)
+            .saturating_mul(self.period_us)
+            .div_ceil(1000)
+            .max(1000);
+        self.launch_quota_us
+            .map_or(quota, |launch| quota.min(launch))
+    }
+
+    fn authorized(&self, control: &str) -> bool {
+        self.authorized.contains(control)
+    }
+
+    fn write(
+        &mut self,
+        family: &dyn Family,
+        kind: ResourceKind,
+        control: &'static str,
+        value: &str,
+    ) -> Result<()> {
+        let verified = family.identities().iter().map(|id| id.pid).collect();
+        verify_runtime_target(&self.leaf, &verified, control)?;
+        // Recorded before the write: a failed readback may still have changed it.
+        self.written.entry(kind).or_default().insert(control);
+        write_checked(&self.leaf, control, value)?;
+        Ok(())
+    }
+
+    /// Return this resource's controls to their launch values. A freeze another
+    /// resource still holds stays; a refused restore stays recorded for a retry.
+    fn restore(&mut self, family: &dyn Family, kind: ResourceKind) -> Result<()> {
+        let verified = family.identities().iter().map(|id| id.pid).collect();
+        let mut kept = BTreeSet::new();
+        let mut result = Ok(());
+        for control in self.written.remove(&kind).unwrap_or_default() {
+            if self.written.values().any(|held| held.contains(control)) {
+                continue;
+            }
+            let value = match control {
+                "cpu.weight" => self.weight.clone(),
+                "cpu.max" => self.cpu_max.clone(),
+                _ => "0".into(),
+            };
+            if let Err(error) = runtime_write(&self.leaf, &verified, control, &value) {
+                kept.insert(control);
+                result = Err(error);
+            }
+        }
+        if !kept.is_empty() {
+            self.written.insert(kind, kept);
+        }
+        result
+    }
+
+    /// Freeze and confirm through `cgroup.events` within a bound.
+    fn freeze(&mut self, family: &dyn Family, kind: ResourceKind) -> Result<()> {
+        self.write(family, kind, "cgroup.freeze", "1")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let events = self.leaf.read("cgroup.events")?;
+            if events
+                .lines()
+                .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["frozen", "1"])
+            {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                self.restore(family, kind)?;
+                bail!("cgroup did not report frozen within its bound");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Apply a refused step through the rootless mechanism, which reaches only
+    /// the verified family, and keep the refusal for the adjust report.
+    fn fall_back(
+        &mut self,
+        family: &mut dyn Family,
+        kind: ResourceKind,
+        step: YieldStep,
+        target: Option<u64>,
+        refusal: anyhow::Error,
+    ) -> Result<()> {
+        if self.fallback.unavailable(kind).contains(&step) {
+            return Err(refusal);
+        }
+        self.fallback
+            .apply(family, kind, step, target)
+            .with_context(|| format!("{refusal:#}"))?;
+        self.detail = Some(format!(
+            "cgroup write refused, rootless {step:?} applied: {refusal:#}"
+        ));
+        Ok(())
+    }
+}
+
+impl<L: LeafIo> Actuator for CgroupActuator<L> {
+    fn unavailable(&self, kind: ResourceKind) -> BTreeSet<YieldStep> {
+        let fallback = self.fallback.unavailable(kind);
+        let mut steps = BTreeSet::from([YieldStep::Hint]);
+        match kind {
+            ResourceKind::Cpu => {
+                if !self.authorized("cpu.weight") {
+                    steps.insert(YieldStep::LowerShare);
+                }
+                if !self.authorized("cpu.max") && fallback.contains(&YieldStep::Cap) {
+                    steps.insert(YieldStep::Cap);
+                }
+                if !self.authorized("cgroup.freeze") && fallback.contains(&YieldStep::Pause) {
+                    steps.insert(YieldStep::Pause);
+                }
+            }
+            ResourceKind::GpuCompute => {
+                steps.extend([YieldStep::LowerShare, YieldStep::Cap]);
+                if !self.authorized("cgroup.freeze") && fallback.contains(&YieldStep::Pause) {
+                    steps.insert(YieldStep::Pause);
+                }
+            }
+            ResourceKind::Ram | ResourceKind::GpuMemory => {
+                steps.extend([YieldStep::LowerShare, YieldStep::Cap, YieldStep::Pause]);
+            }
+        }
+        // Guaranteed work is never paused (FR-024).
+        if self.class == AllocationClass::Guaranteed {
+            steps.insert(YieldStep::Pause);
+        }
+        steps
+    }
+
+    fn apply(
+        &mut self,
+        family: &mut dyn Family,
+        kind: ResourceKind,
+        step: YieldStep,
+        target: Option<u64>,
+    ) -> Result<YieldStep> {
+        ensure!(
+            step < YieldStep::Drain
+                && (step == YieldStep::None || !self.unavailable(kind).contains(&step)),
+            "step {step:?} is not a runtime step for {kind:?} here"
+        );
+        // One step per resource: undo the previous one before applying the next.
+        self.restore(family, kind)?;
+        self.fallback.apply(family, kind, YieldStep::None, None)?;
+        match (kind, step) {
+            (_, YieldStep::None) => {}
+            (ResourceKind::Cpu, YieldStep::LowerShare) => {
+                self.write(family, kind, "cpu.weight", "1")?;
+            }
+            (ResourceKind::Cpu, YieldStep::Cap) if self.authorized("cpu.max") => {
+                let value = format!("{} {}", self.quota_us(target), self.period_us);
+                if let Err(refusal) = self.write(family, kind, "cpu.max", &value) {
+                    self.fall_back(family, kind, step, target, refusal)?;
+                }
+            }
+            (_, YieldStep::Pause) if self.authorized("cgroup.freeze") => {
+                if let Err(refusal) = self.freeze(family, kind) {
+                    self.fall_back(family, kind, step, target, refusal)?;
+                }
+            }
+            (_, step) => {
+                self.fallback.apply(family, kind, step, target)?;
+            }
+        }
+        Ok(step)
+    }
+
+    fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
+        self.fallback.tick(family)
+    }
+
+    fn take_detail(&mut self) -> Option<String> {
+        self.detail.take()
+    }
+
+    fn release(&mut self, family: &mut dyn Family) -> Result<()> {
+        let kinds: Vec<_> = self.written.keys().copied().collect();
+        let mut result = Ok(());
+        for kind in kinds {
+            if let Err(error) = self.restore(family, kind) {
+                result = Err(error);
+            }
+        }
+        self.fallback.release(family)?;
+        result
     }
 }
 
@@ -318,6 +679,17 @@ fn check_required_controls(config: &CgroupConfig, required: &[String]) -> Result
 impl LaunchBackend for CgroupBackend {
     fn name(&self) -> &str {
         "cgroup_v2"
+    }
+
+    /// Runtime steps write the pinned leaf; without one, the rootless mechanisms apply.
+    fn actuator(&self, settings: &ActuatorSettings) -> Box<dyn Actuator> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(leaf) = self.runtime.leaf_handle() {
+                return Box::new(CgroupActuator::new(leaf, &self.config, settings));
+            }
+        }
+        Box::new(crate::actuation::RootlessActuator::new(settings))
     }
 
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {
@@ -569,6 +941,12 @@ mod linux {
             Ok(unsafe { stat.assume_init() })
         }
 
+        fn try_clone(&self) -> Result<Self> {
+            Ok(Self {
+                file: self.file.try_clone()?,
+            })
+        }
+
         fn same(&self, other: &Self) -> Result<bool> {
             let a = self.stat()?;
             let b = other.stat()?;
@@ -764,6 +1142,17 @@ mod linux {
             Ok(())
         }
 
+        /// Duplicated descriptors of the pinned root and leaf for runtime steps.
+        pub(super) fn leaf_handle(&self) -> Result<LeafHandle> {
+            let leaf = self.leaf.as_ref().context("no prepared cgroup")?;
+            Ok(LeafHandle {
+                root: self.root.try_clone()?,
+                root_path: self.root_path.clone(),
+                leaf: leaf.directory.try_clone()?,
+                name: leaf.name.clone(),
+            })
+        }
+
         pub(super) fn leaf_path(&self) -> Result<&Path> {
             Ok(&self.leaf.as_ref().context("no prepared cgroup")?.path)
         }
@@ -904,6 +1293,34 @@ mod linux {
                 scope = parent;
             }
             readings
+        }
+    }
+
+    /// The allocation's leaf as pinned at creation; writes go through its descriptor.
+    pub(super) struct LeafHandle {
+        root: Directory,
+        root_path: PathBuf,
+        leaf: Directory,
+        name: CString,
+    }
+
+    impl LeafIo for LeafHandle {
+        fn same_leaf(&self) -> Result<bool> {
+            Ok(self
+                .root
+                .same(&Directory::open_absolute(&self.root_path)?)?
+                && self
+                    .leaf
+                    .same(&self.root.open_child(self.name.as_bytes())?)?)
+        }
+        fn read(&self, control: &str) -> Result<String> {
+            self.leaf.read(control)
+        }
+        fn write(&self, control: &str, value: &str) -> Result<()> {
+            self.leaf
+                .control(control, true)?
+                .write_all(value.as_bytes())?;
+            Ok(())
         }
     }
 

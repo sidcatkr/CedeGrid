@@ -259,7 +259,7 @@ pause and then reverses, with no drain (quickstart §3).
   recorded yield cause regardless of detail text. (The cancelled-task test moved to T052a.)
 - [X] T041 [US2] Add a test in `tests/agent.rs`: advertised controls include cgroup controls only
   after successful backend preparation with authorized settings, and never PSI observations.
-- [ ] T042 [P] [US2] Add non-native tests in `tests/cgroup.rs`, using a temporary fixture tree:
+- [X] T042 [P] [US2] Add non-native tests in `tests/cgroup.rs`, using a temporary fixture tree:
   - a runtime write is refused when leaf membership differs from the verified PIDs or the leaf
     identity changed;
   - `Limit::Max` round-trips.
@@ -276,10 +276,12 @@ pause and then reverses, with no drain (quickstart §3).
   - SIGSTOP/SIGCONT duty-cycle cap and bounded pause through owned pidfds (`OwnedChild` in
     `src/supervision.rs`);
   - lower share reported unavailable at runtime.
-- [ ] T047 [US2] Implement the cgroup actuator in `src/cgroup.rs`:
+- [X] T047 [US2] Implement the cgroup actuator in `src/cgroup.rs`:
   - a `Limit::{Max, Value}` type;
-  - runtime writes of `cpu.weight`, `cpu.max`, `memory.high` and `cgroup.freeze`, with
-    `cgroup.events` readback;
+  - runtime writes of `cpu.weight`, `cpu.max` and `cgroup.freeze`, with `cgroup.events`
+    readback. No runtime `memory.high`: FR-011 starts memory at the hint, so a RAM cap is never
+    requested;
+  - a refused write falls back to the rootless mechanism for cap and pause;
   - every write first re-verifies the leaf identity and that membership equals the verified
     PIDs;
   - `assert_empty` replaced for adjustable controls;

@@ -203,6 +203,10 @@ pub trait Actuator {
     ) -> Result<crate::contention::YieldStep>;
     /// Advance time-driven mechanisms such as a duty cycle.
     fn tick(&mut self, family: &mut dyn Family) -> Result<()>;
+    /// A note on how the last step was applied, such as a fallback.
+    fn take_detail(&mut self) -> Option<String> {
+        None
+    }
     /// Undo every runtime step before drain, termination or exit.
     fn release(&mut self, family: &mut dyn Family) -> Result<()>;
 }
