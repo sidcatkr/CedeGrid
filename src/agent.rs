@@ -2180,6 +2180,28 @@ async fn start_replay_session(
     Ok((owner, guard, snapshot))
 }
 
+/// Controls this node can apply to new work. Cgroup controls are advertised only
+/// when the backend prepares with authorized settings; kernel observations such
+/// as PSI are never controls (audit H8).
+pub fn advertised_controls(config: &Config, cpu_affinity: bool) -> Vec<String> {
+    let mut controls = vec!["cpu.nice".to_string()];
+    controls.push(if config.storage_profile.is_replayable() {
+        "storage.replayable_local".into()
+    } else {
+        "storage.durable_local".into()
+    });
+    if cpu_affinity {
+        controls.push("cpu.affinity".into());
+    }
+    if crate::telemetry::pidfd_capability().status == crate::model::CapabilityStatus::Available {
+        controls.push("process_handle".into());
+    }
+    if config.cgroup.enabled && crate::cgroup::CgroupBackend::new(config.cgroup.clone()).is_ok() {
+        controls.extend(config.cgroup.advertised_controls());
+    }
+    controls
+}
+
 /// Coordinator features learned from the latest heartbeat reply. A 0.2
 /// coordinator rejects unknown report fields, so negotiated fields are sent only
 /// while the last reply advertised them (contracts/wire-negotiation.md).
@@ -3020,32 +3042,7 @@ impl AgentLoop<'_> {
                     yield_cause: None,
                 }),
         );
-        let mut available_controls = vec!["cpu.nice".into()];
-        available_controls.push(if config.storage_profile.is_replayable() {
-            "storage.replayable_local".into()
-        } else {
-            "storage.durable_local".into()
-        });
-        if agent.cpu_affinity.is_some() {
-            available_controls.push("cpu.affinity".into());
-        }
-        if crate::telemetry::pidfd_capability().status == crate::model::CapabilityStatus::Available
-        {
-            available_controls.push("process_handle".into());
-        }
-        if config.cgroup.enabled
-            && let Some(kernel) = &snapshot.kernel
-        {
-            available_controls.extend(
-                kernel
-                    .controls
-                    .iter()
-                    .filter(|c| {
-                        c.available == Some(true) && c.permitted == Some(true) && c.configured
-                    })
-                    .map(|c| c.control.clone()),
-            );
-        }
+        let available_controls = advertised_controls(config, agent.cpu_affinity.is_some());
         let active_workers =
             self.slots.values().filter(|s| !s.reported).count() + self.preparations.len();
         // Every drain sent since the last heartbeat backs off once, whether local

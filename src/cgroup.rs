@@ -25,7 +25,10 @@ const WRITABLE_CONTROLS: &[&str] = &[
     "memory.high",
     "memory.max",
     "cgroup.kill",
+    "cgroup.freeze",
 ];
+/// Controls that runtime yield steps write, when the operator authorizes them.
+const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cpu.max", "cgroup.freeze"];
 
 /// CPU bandwidth is a quota per period, unlike the relative `cpu.weight`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +133,23 @@ impl CgroupConfig {
             }
         }
         Ok(())
+    }
+
+    /// Controls a successfully prepared backend applies: launch settings and the
+    /// authorized runtime-step controls. Observations such as PSI are never controls.
+    pub fn advertised_controls(&self) -> Vec<String> {
+        let mut controls: BTreeSet<String> = self
+            .settings()
+            .into_iter()
+            .map(|(control, _)| control.to_owned())
+            .collect();
+        controls.extend(
+            RUNTIME_CONTROLS
+                .iter()
+                .filter(|control| self.authorized_controls.iter().any(|c| c == *control))
+                .map(|control| (*control).to_owned()),
+        );
+        controls.into_iter().collect()
     }
 
     fn require_authorized(&self, control: &str) -> Result<()> {

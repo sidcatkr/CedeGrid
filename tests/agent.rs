@@ -1433,3 +1433,40 @@ async fn a_restarted_agent_reattaches_to_live_supervisors() {
     );
     assert_eq!(outcome.exit_code, Some(0));
 }
+
+#[test]
+fn advertised_controls_come_from_backend_capability_never_from_observations() {
+    let mut config = Config::default();
+    config.cgroup.enabled = true;
+    config.cgroup.delegated_root = Some("/nonexistent/cedegrid-control-test".into());
+    config.cgroup.authorized_controls = vec![
+        "cgroup.procs".into(),
+        "cpu.weight".into(),
+        "cpu.max".into(),
+        "cgroup.freeze".into(),
+    ];
+    config.cgroup.validate().unwrap();
+    // The controls a prepared backend would offer follow its authorized settings.
+    let offered = config.cgroup.advertised_controls();
+    assert!(offered.contains(&"cpu.weight".to_string()));
+    assert!(offered.contains(&"cpu.max".to_string()));
+    assert!(offered.contains(&"cgroup.freeze".to_string()));
+    assert!(!offered.iter().any(|c| c.ends_with(".pressure")));
+    // This backend cannot prepare, so none of them is advertised.
+    let advertised = cedegrid::agent::advertised_controls(&config, false);
+    assert!(advertised.contains(&"cpu.nice".to_string()));
+    for name in [
+        "cpu.weight",
+        "cpu.max",
+        "cgroup.freeze",
+        "memory.high",
+        "cpu.pressure",
+        "memory.pressure",
+        "io.pressure",
+    ] {
+        assert!(
+            !advertised.contains(&name.to_string()),
+            "{name}: {advertised:?}"
+        );
+    }
+}

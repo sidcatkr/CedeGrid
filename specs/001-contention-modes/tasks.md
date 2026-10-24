@@ -257,7 +257,7 @@ pause and then reverses, with no drain (quickstart §3).
   - dropping a `ChildSlot` closes the pipe without sending Drain (audit M5).
 - [X] T040 [P] [US2] Add tests in `tests/coordinator.rs`: failures are classified by the
   recorded yield cause regardless of detail text. (The cancelled-task test moved to T052a.)
-- [ ] T041 [US2] Add a test in `tests/agent.rs`: advertised controls include cgroup controls only
+- [X] T041 [US2] Add a test in `tests/agent.rs`: advertised controls include cgroup controls only
   after successful backend preparation with authorized settings, and never PSI observations.
 - [ ] T042 [P] [US2] Add non-native tests in `tests/cgroup.rs`, using a temporary fixture tree:
   - a runtime write is refused when leaf membership differs from the verified PIDs or the leaf
@@ -307,7 +307,7 @@ pause and then reverses, with no drain (quickstart §3).
 - [ ] T052a [US2] Cancelled tasks become terminal instead of being re-queued (audit A18), with
   a test in `tests/coordinator.rs`. *Pending decision:* `tasks.status` has a CHECK constraint, so
   a terminal status needs a node-state schema migration plus SDK and tool updates.
-- [ ] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
+- [X] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).
 - [ ] T054 [US2] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an

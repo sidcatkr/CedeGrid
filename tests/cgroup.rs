@@ -57,16 +57,15 @@ fn global_and_traversal_paths_and_unknown_controls_are_rejected() {
         };
         assert!(config.validate().is_err(), "{path}");
     }
-    for control in [
-        "../cpu.max",
-        "cgroup.subtree_control",
-        "cgroup.freeze",
-        "global.sysctl",
-    ] {
+    for control in ["../cpu.max", "cgroup.subtree_control", "global.sysctl"] {
         let mut config = authorized();
         config.authorized_controls.push(control.into());
         assert!(config.validate().is_err(), "{control}");
     }
+    // Pause writes cgroup.freeze at runtime, so an operator may authorize it.
+    let mut config = authorized();
+    config.authorized_controls.push("cgroup.freeze".into());
+    config.validate().unwrap();
 }
 
 #[test]
