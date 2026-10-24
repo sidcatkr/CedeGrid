@@ -51,3 +51,6 @@
 
   Libraries and mechanisms appear only in [plan-notes.md](../plan-notes.md).
 - Agent-facing documentation and MCP servers are a separate feature (`specs/002-agent-integration`).
+- Iteration 3 (clarify, 2026-10-24): the envelope/spool behavior (FR-057, FR-058) and the ban on
+  pausing Guaranteed work (FR-024) are recorded as proposed defaults pending maintainer
+  confirmation. Checklist state is unchanged (16/16).

@@ -34,6 +34,16 @@ thresholds.
 - Q: How is a node set up? → A: Interactive setup is the default way to configure CedeGrid. A
   terminal interface opens on a TTY, and command-line flags provide the same choices for
   scripts, agents and non-TTY use.
+- Q: What happens when own work exceeds the operator's resource envelope, or the node's spool
+  budget is exhausted? → A (proposed default, pending maintainer confirmation):
+  - An envelope breach is handled per resource through the yield ladder, opportunistic work
+    first. Guaranteed work is lowered, capped and hinted, and drained only as floor policy A
+    allows.
+  - Spool exhaustion blocks new admission and drains nothing.
+  - Explicit operator drain keeps draining every allocation.
+- Q: May Guaranteed allocations be paused? → A (proposed default, pending maintainer
+  confirmation): No. Guaranteed allocations may be lowered in share, capped and hinted, but not
+  paused, because a pause can break their continuity.
 
 ## Terms
 
@@ -349,7 +359,7 @@ node reports with the expected per-resource values at each step.
 - **A job is a plain command, not SDK-based.** The hint step is unavailable. Memory contention
   escalates from the steps that do not free memory straight to drain.
 - **A Guaranteed job exceeds its own request.** It is charged at its observed usage. The response
-  follows its class rules, not a node-wide stop.
+  follows its class rules and FR-057, not a node-wide stop.
 - **A finer-grained control is unavailable on the host** (for example, no delegated control
   subtree). The ladder uses the steps that are available and reports which ones it skipped.
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
@@ -459,9 +469,9 @@ node reports with the expected per-resource values at each step.
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
   - own processes marked as the preferred out-of-memory victims where the platform allows an
     unprivileged process to mark itself.
-- **FR-024**: Guaranteed allocations MAY be lowered in share, capped, paused and hinted. Automatic
-  yielding MUST NOT drain them, except under the default floor policy A. In that case a
-  Guaranteed allocation MAY be drained when a no-harm floor can only be restored by releasing
+- **FR-024**: Guaranteed allocations MAY be lowered in share, capped and hinted, and MUST NOT be
+  paused. Automatic yielding MUST NOT drain them, except under the default floor policy A. In
+  that case a Guaranteed allocation MAY be drained when a no-harm floor can only be restored by releasing
   its memory, but only after all opportunistic work has been released and a hint's deadline has
   passed. Floor policies B and C are defined in FR-041. Explicit operator drain keeps today's
   behavior.
@@ -603,8 +613,19 @@ node reports with the expected per-resource values at each step.
 **Documentation**
 
 - **FR-056**: `docs/guarantees.md` MUST describe the no-harm floors, the floor and Neutral memory
-  policies with their markers, and the deprecation of `gpu.execution_mode`, in the same change
-  that implements them.
+  policies with their markers, the envelope and spool behavior, and the deprecation of
+  `gpu.execution_mode`, in the same change that implements them.
+
+**Operator limits**
+
+- **FR-057**: When own work exceeds the operator's configured resource envelope, CedeGrid MUST
+  restore the envelope per resource through the yield ladder.
+  - Opportunistic work is released first, by least cost.
+  - Guaranteed work MUST NOT be drained except as floor policy A allows (FR-024).
+  - An envelope breach MUST NOT stop every allocation at once.
+- **FR-058**: When the node's spool budget is exhausted, CedeGrid MUST block new admission and
+  report the condition. It MUST NOT drain allocations because of it. Explicit operator drain
+  keeps draining every allocation.
 
 ### Key Entities
 
