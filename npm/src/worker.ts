@@ -215,26 +215,37 @@ export class ResourceSignals {
         this.acknowledge(targets ? targets.sequence : 0n);
         return targets;
     }
+    /** Call `callback` now with the current target, then once per new one. */
     onResourceTarget(callback: (targets: ResourceTargets) => void): void {
         if (typeof callback !== 'function')
             throw new ValidationError('resource-target callback must be a function');
         this.hooks.push(callback);
+        const targets = this.resourceTargets();
+        if (!targets)
+            return;
+        if (this.notified === undefined || targets.sequence > this.notified)
+            this.poll();
+        else
+            ResourceSignals.call(callback, targets);
     }
     /** Read the targets and call each hook once per new sequence. */
     poll(): ResourceTargets | null {
         const targets = this.resourceTargets();
         if (targets && (this.notified === undefined || targets.sequence > this.notified)) {
             this.notified = targets.sequence;
-            for (const callback of [...this.hooks]) {
-                try {
-                    callback(targets);
-                }
-                catch (error) {
-                    console.warn('resource-target hook failed', error);
-                }
-            }
+            for (const callback of [...this.hooks])
+                ResourceSignals.call(callback, targets);
         }
         return targets;
+    }
+    /** A failing hook is logged and never stops the poll. */
+    private static call(callback: (targets: ResourceTargets) => void, targets: ResourceTargets): void {
+        try {
+            callback(targets);
+        }
+        catch (error) {
+            console.warn('resource-target hook failed', error);
+        }
     }
     draining(): boolean { this.poll(); return !!this.drainFile && existsSync(this.drainFile); }
     /** Record the highest sequence seen; it shows the worker reads targets. */

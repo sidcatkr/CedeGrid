@@ -50,6 +50,8 @@ struct ChildServer {
     /// An authenticated request arrived, so the worker uses the SDK and polls the
     /// drain file (FR-062).
     served: bool,
+    /// The leader's private directory, whose current target a new child copies.
+    leader_directory: Option<PathBuf>,
 }
 impl ChildServer {
     fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup, journal: &dyn ExecutionJournal) -> Result<Option<Self>> {
@@ -90,6 +92,7 @@ impl ChildServer {
             setup,
             publisher, namespace_id, session_id,
             served: false,
+            leader_directory: None,
         }))
     }
     fn expose(&self, request: &mut LaunchRequest) {
@@ -408,6 +411,10 @@ impl ChildServer {
         // Every fallible preparation before spawn is completed first. After spawn,
         // ownership is installed immediately; acquisition/verification happens in tick.
         let drain = DrainDirectory::new()?;
+        // The child sees the current target from its first read (FR-035).
+        if let Some(leader) = &self.leader_directory {
+            crate::actuation::copy_current_target(leader, &drain.path)?;
+        }
         if let Some(settings) = self.parent.env.get("CEDEGRID_PUBLICATION_SPEC") { request.env.insert("CEDEGRID_PUBLICATION_SPEC".into(),settings.clone()); }
         let log_dir = if let Some(parent) = self.parent.env.get("CEDEGRID_OUTPUT_DIR") {
             let base = self.parent.env.get("CEDEGRID_PUBLICATION_SPEC").map(|raw| serde_json::from_str::<crate::publication::NativePublisherSettings>(raw).map(|s| s.output_dir)).transpose()?.unwrap_or_else(|| PathBuf::from(parent));

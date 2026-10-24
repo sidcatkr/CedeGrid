@@ -132,6 +132,17 @@ class ResourceTargetTests(unittest.TestCase):
         self.write(2, ram_mib=50)
         self.context.draining()
         self.assertEqual(seen, [1, 2])
+    def test_a_late_subscriber_receives_the_current_target_once(self):
+        self.write(4, ram_mib=100)
+        self.assertFalse(self.context.draining())
+        seen = []
+        self.context.on_resource_target(lambda targets: seen.append(targets.sequence))
+        self.assertEqual(seen, [4])
+        self.context.draining(); self.context.safe_point()
+        self.assertEqual(seen, [4])
+        self.write(5, ram_mib=50)
+        self.context.draining()
+        self.assertEqual(seen, [4, 5])
     def test_hook_errors_are_isolated(self):
         seen = []
         def failing(_): raise RuntimeError('worker hook failed')

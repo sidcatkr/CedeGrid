@@ -512,7 +512,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T129 [P] Add tests in `tests/configuration.rs` and `tests/cli.rs` (B9): each
   `gpu.execution_mode` value maps per FR-031 with its warning, and `doctor` prints the
   interpretation.
-- [ ] T130 [P] Add SDK tests in `python/tests/test_worker.py`, `npm/tests/worker-targets.test.ts`
+- [X] T130 [P] Add SDK tests in `python/tests/test_worker.py`, `npm/tests/worker-targets.test.ts`
   and `tests/managed_supervision.rs` (B13): a handler subscribed after a target exists receives
   it at once, exactly once; a managed child started after a hint finds the current target.
 
@@ -535,7 +535,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   `tools/runtime_config.py`.
 - [X] T136 Implement the legacy GPU interpretation and warnings in `src/config.rs`, and print it
   in `doctor` in `src/main.rs` (B9 parsing; the admission effect is T085).
-- [ ] T137 Deliver the current target at once (B13): `on_resource_target` in
+- [X] T137 Deliver the current target at once (B13): `on_resource_target` in
   `python/cedegrid/worker.py` and `onResourceTarget` in `npm/src/worker.ts`; the child's target
   file in `src/supervision.rs`; `docs/worker-protocol.md`.
 

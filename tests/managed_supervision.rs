@@ -1148,6 +1148,38 @@ while not (d/'stop').exists():
     );
 }
 
+/// A managed child started after a hint finds the current target at once (FR-035).
+#[test]
+fn a_managed_child_started_after_a_hint_finds_the_current_target() {
+    use cedegrid::contention::YieldStep;
+    let (dir, _script) = run_targets(
+        r#"
+import sys,time
+from pathlib import Path
+from cedegrid import ResourceSignals, spawn_managed
+d=Path.cwd();signals=ResourceSignals.from_env()
+signals.draining()
+(d/'ready').write_text('1')
+while signals.resource_targets() is None:
+    time.sleep(0.005)
+code="import pathlib;from cedegrid import ResourceSignals;t=ResourceSignals.from_env().resource_targets();pathlib.Path(%r,'child-seen').write_text(str(None if t is None else t.ram_mib))" % str(d)
+child=spawn_managed([sys.executable,'-c',code],single_process=True,no_escape=True)
+child.wait(timeout=10,poll_interval=.01)
+(d/'spawned').write_text('1')
+while not (d/'stop').exists():
+    time.sleep(0.01)
+"#,
+        vec![
+            ("ready", YieldStep::Hint, Some(100)),
+            ("spawned", YieldStep::Hint, Some(100)),
+        ],
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("child-seen")).unwrap(),
+        "100"
+    );
+}
+
 /// The request helper is Guaranteed with 1000m of CPU: a CPU target never goes
 /// below the request, whatever the agent asks (FR-024).
 #[test]

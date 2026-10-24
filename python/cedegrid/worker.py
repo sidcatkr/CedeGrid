@@ -133,9 +133,17 @@ class ResourceSignals:
         return targets
 
     def on_resource_target(self, callback):
+        """Call `callback(targets)` now with the current target, then once per new one."""
         if not callable(callback):
             raise ValueError("resource-target callback must be callable")
         self._hooks.append(callback)
+        targets = self.resource_targets()
+        if targets is None:
+            return
+        if self._notified is None or targets.sequence > self._notified:
+            self.poll()
+        else:
+            self._call(callback, targets)
 
     def poll(self) -> ResourceTargets | None:
         """Read the targets and call each hook once per new sequence."""
@@ -143,15 +151,20 @@ class ResourceSignals:
         if targets is not None and (self._notified is None or targets.sequence > self._notified):
             self._notified = targets.sequence
             for callback in list(self._hooks):
-                try:
-                    callback(targets)
-                except Exception:
-                    _log.warning("resource-target hook failed", exc_info=True)
+                self._call(callback, targets)
         return targets
 
     def draining(self) -> bool:
         self.poll()
         return self.drain_file is not None and self.drain_file.exists()
+
+    @staticmethod
+    def _call(callback, targets):
+        """A failing hook is logged and never stops the poll."""
+        try:
+            callback(targets)
+        except Exception:
+            _log.warning("resource-target hook failed", exc_info=True)
 
     def _acknowledge(self, sequence):
         """Record the highest sequence seen; it shows the worker reads targets."""
@@ -219,7 +232,8 @@ class WorkerContext:
         return self._signals.resource_targets()
 
     def on_resource_target(self, callback):
-        """Call `callback(targets)` once per new target, during drain polls."""
+        """Call `callback(targets)` now with the current target, then once per new
+        target, during drain polls."""
         self._signals.on_resource_target(callback)
 
     def draining(self):

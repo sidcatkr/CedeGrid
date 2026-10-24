@@ -49,6 +49,23 @@ test('hooks fire once per sequence during drain polls', () => {
     finally { f.done(); }
 });
 
+test('a late subscriber receives the current target once', () => {
+    const f = fixture();
+    try {
+        f.write(4, { ram_mib: 100 });
+        assert.equal(f.context.draining(), false);
+        const seen: bigint[] = [];
+        f.context.onResourceTarget((targets: ResourceTargets) => seen.push(targets.sequence));
+        assert.deepEqual(seen, [4n]);
+        f.context.draining(); f.context.safePoint();
+        assert.deepEqual(seen, [4n]);
+        f.write(5, { ram_mib: 50 });
+        f.context.draining();
+        assert.deepEqual(seen, [4n, 5n]);
+    }
+    finally { f.done(); }
+});
+
 test('hook errors are isolated', () => {
     const f = fixture();
     const warnings: unknown[] = [];

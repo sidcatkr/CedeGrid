@@ -1354,6 +1354,9 @@ mod unix {
                 setup.oom_score_adj = Some(OOM_PREFERRED);
             }
             children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
+            if let Some(server) = children.as_mut() {
+                server.leader_directory = Some(drain.path.clone());
+            }
             let mut gated_request = request.clone();
             if request.env.contains_key("CEDEGRID_OUTPUT_DIR") {
                 gated_request

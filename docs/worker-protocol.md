@@ -102,9 +102,11 @@ being drained:
   directory is created at launch, so read the environment variable.
 
 The SDKs implement this channel. `WorkerContext.resource_targets()` returns the
-current target, and `WorkerContext.on_resource_target(callback)` runs the callback
-once per new sequence during `draining()` and `safe_point()` polls; a failing
-callback is logged and never stops the poll. `ResourceSignals.from_env()` needs only
+current target, and `WorkerContext.on_resource_target(callback)` runs the callback at
+once with the current target, when there is one, then once per new sequence during
+`draining()` and `safe_point()` polls; a failing callback is logged and never stops
+the poll. A managed child finds the current target in its own directory when it
+starts. `ResourceSignals.from_env()` needs only
 the two environment variables, so managed children can use it. The TypeScript names
 are `resourceTargets()`, `onResourceTarget()` and `ResourceSignals.fromEnv()`.
 

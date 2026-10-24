@@ -254,6 +254,17 @@ pub fn write_target(directory: &std::path::Path, target: &ResourceTarget) -> Res
     Ok(())
 }
 
+/// Copy the current target file, if any, into a new family member's directory, so
+/// a managed child sees the current target when it starts (FR-035).
+pub fn copy_current_target(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    let raw = match std::fs::read(from.join(TARGET_FILE)) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    write_target(to, &serde_json::from_slice(&raw)?)
+}
+
 /// The highest sequence a worker acknowledged, if any. It only shows the worker
 /// reads targets; compliance is judged from observed usage.
 pub fn read_ack(directory: &std::path::Path) -> Option<u64> {
