@@ -2198,3 +2198,74 @@ fn schema_v3_fields_round_trip_and_older_recordings_default_them() {
     assert_eq!(old.cpu_busy_lower_millicores, None);
     assert_eq!(old.gpus[0].reserved_memory_mib, None);
 }
+
+#[test]
+fn resource_arithmetic_charges_adds_subtracts_and_fits_per_scope() {
+    let gpu = |pairs: &[(&str, u64)]| -> BTreeMap<String, u64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    };
+    let requested = Resources {
+        cpu_millicores: 500,
+        ram_mib: 100,
+        gpu_memory_mib: gpu(&[("GPU-a", 10)]),
+    };
+    let observed = Resources {
+        cpu_millicores: 300,
+        ram_mib: 200,
+        gpu_memory_mib: gpu(&[("GPU-a", 4), ("GPU-b", 7)]),
+    };
+    let charge = Resources::charge(&requested, Some(&observed));
+    assert_eq!(
+        charge,
+        Resources {
+            cpu_millicores: 500,
+            ram_mib: 200,
+            gpu_memory_mib: gpu(&[("GPU-a", 10), ("GPU-b", 7)]),
+        }
+    );
+    assert_eq!(Resources::charge(&requested, None), requested);
+
+    let mut total = Resources::default();
+    total.add_checked(&charge).unwrap();
+    total.add_checked(&charge).unwrap();
+    assert_eq!(total.gpu_memory_mib, gpu(&[("GPU-a", 20), ("GPU-b", 14)]));
+    let mut full = Resources {
+        cpu_millicores: u64::MAX,
+        ..Resources::default()
+    };
+    assert!(full.add_checked(&charge).is_err());
+    full.add_saturating(&charge);
+    assert_eq!(full.cpu_millicores, u64::MAX);
+
+    let mut remaining = Resources {
+        cpu_millicores: 400,
+        ram_mib: 1000,
+        gpu_memory_mib: gpu(&[("GPU-a", 5)]),
+    };
+    remaining.subtract_saturating(&charge);
+    assert_eq!(
+        remaining,
+        Resources {
+            cpu_millicores: 0,
+            ram_mib: 800,
+            gpu_memory_mib: gpu(&[("GPU-a", 0)]),
+        },
+        "subtraction saturates and never adds devices"
+    );
+
+    let cap = Resources {
+        cpu_millicores: 1000,
+        ram_mib: 1000,
+        gpu_memory_mib: gpu(&[("GPU-a", 20), ("GPU-b", 0)]),
+    };
+    let cpu_only = Resources {
+        cpu_millicores: 1,
+        ..Resources::default()
+    };
+    assert!(
+        total.fits(&cap, &cpu_only),
+        "unrelated GPU charges do not block CPU work"
+    );
+    assert!(total.fits(&cap, &requested));
+    assert!(!total.fits(&cap, &observed), "GPU-b is over its budget");
+}

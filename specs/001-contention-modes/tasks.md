@@ -77,7 +77,7 @@ SDKs in `python/` and `npm/`.
 
 ### Implementation
 
-- [ ] T009 Move the duplicated resource arithmetic into `impl Resources` in `src/model.rs`:
+- [X] T009 Move the duplicated resource arithmetic into `impl Resources` in `src/model.rs`:
   charge = max(request, observed), add, subtract and fits. Replace the copies in
   `src/policy.rs`, `src/agent.rs`, `src/coordinator.rs` and `src/execution_state.rs`. Behavior
   must not change; the existing suites must still pass.

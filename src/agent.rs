@@ -2944,48 +2944,18 @@ fn allocations_fit(allocations: &[crate::model::Allocation], capacity: &Resource
 }
 
 fn remaining_capacity(capacity: &Resources, used: &Resources) -> Resources {
-    Resources {
-        cpu_millicores: capacity.cpu_millicores.saturating_sub(used.cpu_millicores),
-        ram_mib: capacity.ram_mib.saturating_sub(used.ram_mib),
-        gpu_memory_mib: capacity
-            .gpu_memory_mib
-            .iter()
-            .map(|(id, n)| {
-                (
-                    id.clone(),
-                    n.saturating_sub(used.gpu_memory_mib.get(id).copied().unwrap_or(0)),
-                )
-            })
-            .collect(),
-    }
+    let mut remaining = capacity.clone();
+    remaining.subtract_saturating(used);
+    remaining
 }
 
 fn allocation_charge(allocations: &[crate::model::Allocation]) -> Resources {
     let mut used = Resources::default();
     for allocation in allocations {
-        used.cpu_millicores = used.cpu_millicores.saturating_add(
-            allocation
-                .requested
-                .cpu_millicores
-                .max(allocation.observed.as_ref().map_or(0, |o| o.cpu_millicores)),
-        );
-        used.ram_mib = used.ram_mib.saturating_add(
-            allocation
-                .requested
-                .ram_mib
-                .max(allocation.observed.as_ref().map_or(0, |o| o.ram_mib)),
-        );
-        let mut gpu = allocation.requested.gpu_memory_mib.clone();
-        if let Some(observed) = &allocation.observed {
-            for (id, n) in &observed.gpu_memory_mib {
-                let entry = gpu.entry(id.clone()).or_default();
-                *entry = (*entry).max(*n);
-            }
-        }
-        for (id, n) in gpu {
-            let entry = used.gpu_memory_mib.entry(id).or_default();
-            *entry = entry.saturating_add(n);
-        }
+        used.add_saturating(&Resources::charge(
+            &allocation.requested,
+            allocation.observed.as_ref(),
+        ));
     }
     used
 }

@@ -225,17 +225,17 @@ impl PolicyEngine {
             let mut charge = allocation.requested.clone();
             if allocation.phase != AllocationPhase::Pending {
                 if let Some(observed) = &allocation.observed {
-                    add_resources(&mut managed_observed, observed)?;
-                    charge = maximum(&charge, observed);
+                    managed_observed.add_checked(observed)?;
+                    charge = Resources::charge(&charge, Some(observed));
                 } else {
-                    add_resources(&mut missing_observations, &allocation.requested)?;
+                    missing_observations.add_checked(&allocation.requested)?;
                     reasons.push(format!(
                         "allocation {} has unknown managed usage; affected admission is blocked",
                         allocation.id
                     ));
                 }
             }
-            add_resources(&mut charged, &charge)?;
+            charged.add_checked(&charge)?;
             charges.insert(allocation.id.clone(), charge);
         }
 
@@ -591,7 +591,7 @@ impl PolicyEngine {
         // They remain charged against admission below until release is confirmed.
         for allocation in &input.allocations {
             if allocation.phase == AllocationPhase::Draining {
-                subtract_resources(&mut remaining, &charges[&allocation.id]);
+                remaining.subtract_saturating(&charges[&allocation.id]);
             }
         }
         // Automatic yielding may only plan releases the agent/supervisor can enact.
@@ -638,7 +638,7 @@ impl PolicyEngine {
                     cause,
                     code: "yield_step_drain".into(),
                 });
-                subtract_resources(&mut remaining, charge);
+                remaining.subtract_saturating(charge);
             }
         }
         would_drain.extend(
@@ -668,7 +668,7 @@ impl PolicyEngine {
         let mut headroom = budget.clone();
         // Recommendations are not release confirmation: subtract ALL allocations,
         // including existing draining work and everything just recommended for drain.
-        subtract_resources(&mut headroom, &charged);
+        headroom.subtract_saturating(&charged);
         headroom.gpu_memory_mib.retain(|uuid, _| {
             host_capacity_safe
                 && !blocked_gpus.contains(uuid)
@@ -884,45 +884,6 @@ fn ceil_ratio(value: u64, numerator: u64, denominator: u64) -> u64 {
     (u128::from(value) * u128::from(numerator))
         .div_ceil(u128::from(denominator))
         .min(u128::from(u64::MAX)) as u64
-}
-
-fn add_resources(total: &mut Resources, value: &Resources) -> Result<()> {
-    total.cpu_millicores = total
-        .cpu_millicores
-        .checked_add(value.cpu_millicores)
-        .context("CPU resource sum overflow")?;
-    total.ram_mib = total
-        .ram_mib
-        .checked_add(value.ram_mib)
-        .context("RAM resource sum overflow")?;
-    for (gpu, amount) in &value.gpu_memory_mib {
-        let current = total.gpu_memory_mib.entry(gpu.clone()).or_default();
-        *current = current
-            .checked_add(*amount)
-            .context("GPU resource sum overflow")?;
-    }
-    Ok(())
-}
-
-fn maximum(left: &Resources, right: &Resources) -> Resources {
-    let mut result = left.clone();
-    result.cpu_millicores = result.cpu_millicores.max(right.cpu_millicores);
-    result.ram_mib = result.ram_mib.max(right.ram_mib);
-    for (gpu, amount) in &right.gpu_memory_mib {
-        let current = result.gpu_memory_mib.entry(gpu.clone()).or_default();
-        *current = (*current).max(*amount);
-    }
-    result
-}
-
-fn subtract_resources(total: &mut Resources, value: &Resources) {
-    total.cpu_millicores = total.cpu_millicores.saturating_sub(value.cpu_millicores);
-    total.ram_mib = total.ram_mib.saturating_sub(value.ram_mib);
-    for (gpu, amount) in &value.gpu_memory_mib {
-        if let Some(current) = total.gpu_memory_mib.get_mut(gpu) {
-            *current = current.saturating_sub(*amount);
-        }
-    }
 }
 
 /// The first over-budget resource this charge contributes to, if any.

@@ -1233,17 +1233,9 @@ impl Coordinator {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })? {
             let (r, o) = row?;
-            let mut r: Resources = serde_json::from_str(&r)?;
-            if let Some(o) = o {
-                let o: Resources = serde_json::from_str(&o)?;
-                r.cpu_millicores = r.cpu_millicores.max(o.cpu_millicores);
-                r.ram_mib = r.ram_mib.max(o.ram_mib);
-                for (k, v) in o.gpu_memory_mib {
-                    let entry = r.gpu_memory_mib.entry(k).or_default();
-                    *entry = (*entry).max(v);
-                }
-            }
-            add(&mut charge, &r)?;
+            let r: Resources = serde_json::from_str(&r)?;
+            let o: Option<Resources> = o.map(|o| serde_json::from_str(&o)).transpose()?;
+            charge.add_checked(&Resources::charge(&r, o.as_ref()))?;
         }
         Ok(charge)
     }
@@ -1327,10 +1319,10 @@ impl Coordinator {
                 continue;
             }
             let mut next = charge.clone();
-            add(&mut next, &request.resources)?;
+            next.add_checked(&request.resources)?;
             if remaining_slots == 0
                 || count >= pool.max_workers
-                || !fits_requested(&next, &report.managed_budget, &request.resources)
+                || !next.fits(&report.managed_budget, &request.resources)
             {
                 self.request_preemption(&tx, report, &request, &pool, count, &charge)?;
                 continue;
@@ -1359,11 +1351,9 @@ impl Coordinator {
         charge: &Resources,
     ) -> Result<()> {
         if !gpu_request_allowed(request, report)
-            || !fits_requested(
-                &request.resources,
-                &report.managed_budget,
-                &request.resources,
-            )
+            || !request
+                .resources
+                .fits(&report.managed_budget, &request.resources)
         {
             return Ok(());
         }
@@ -1395,25 +1385,16 @@ impl Coordinator {
             if active.saturating_sub(already) <= protected.min_workers {
                 continue;
             }
-            let mut resource: Resources = serde_json::from_str(&resources)?;
-            if let Some(observed) = observed {
-                let observed: Resources = serde_json::from_str(&observed)?;
-                resource.cpu_millicores = resource.cpu_millicores.max(observed.cpu_millicores);
-                resource.ram_mib = resource.ram_mib.max(observed.ram_mib);
-                for (k, v) in observed.gpu_memory_mib {
-                    let entry = resource.gpu_memory_mib.entry(k).or_default();
-                    *entry = (*entry).max(v);
-                }
-            }
-            subtract(&mut projected, &resource);
+            let resource: Resources = serde_json::from_str(&resources)?;
+            let observed: Option<Resources> =
+                observed.map(|o| serde_json::from_str(&o)).transpose()?;
+            projected.subtract_saturating(&Resources::charge(&resource, observed.as_ref()));
             frees_pool_slot |= candidate_pool == pool.pool_id;
             *selected_counts.entry(candidate_pool).or_default() += 1;
             selected.push(id);
             let mut future = projected.clone();
-            add(&mut future, &request.resources)?;
-            if frees_pool_slot
-                && fits_requested(&future, &report.managed_budget, &request.resources)
-            {
+            future.add_checked(&request.resources)?;
+            if frees_pool_slot && future.fits(&report.managed_budget, &request.resources) {
                 for id in selected {
                     tx.execute(
                         "INSERT OR IGNORE INTO drain_requests(assignment_id,reason) VALUES (?1,?2)",
@@ -1665,7 +1646,7 @@ impl Coordinator {
             // this UUID, nor block independently qualified CPU/other-GPU capacity.
             let charge = self.node_charge(&report.node_id)?;
             ensure!(
-                fits_requested(&charge, &report.managed_budget, &request.resources),
+                charge.fits(&report.managed_budget, &request.resources),
                 "initial execution authorization exceeds current CPU/RAM or requested GPU budget"
             );
         }
@@ -2015,21 +1996,6 @@ fn phase_name(phase: RemotePhase) -> &'static str {
         RemotePhase::Released => "released",
     }
 }
-fn add(a: &mut Resources, b: &Resources) -> Result<()> {
-    a.cpu_millicores = a
-        .cpu_millicores
-        .checked_add(b.cpu_millicores)
-        .context("CPU reservation overflow")?;
-    a.ram_mib = a
-        .ram_mib
-        .checked_add(b.ram_mib)
-        .context("RAM reservation overflow")?;
-    for (k, v) in &b.gpu_memory_mib {
-        let e = a.gpu_memory_mib.entry(k.clone()).or_default();
-        *e = e.checked_add(*v).context("GPU reservation overflow")?;
-    }
-    Ok(())
-}
 fn gpu_request_allowed(
     request: &crate::execution_model::LaunchRequest,
     report: &NodeReport,
@@ -2048,16 +2014,6 @@ fn gpu_request_allowed(
             }))
 }
 
-fn fits_requested(total: &Resources, budget: &Resources, request: &Resources) -> bool {
-    // CPU/RAM scopes are shared by every allocation. GPU scopes are independent
-    // UUIDs: retain all charges, compare only the devices this new work would use.
-    total.cpu_millicores <= budget.cpu_millicores
-        && total.ram_mib <= budget.ram_mib
-        && request.gpu_memory_mib.keys().all(|uuid| {
-            total.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
-                <= budget.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
-        })
-}
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2213,15 +2169,6 @@ fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
             Box::new(e),
         )
     })
-}
-
-fn subtract(a: &mut Resources, b: &Resources) {
-    a.cpu_millicores = a.cpu_millicores.saturating_sub(b.cpu_millicores);
-    a.ram_mib = a.ram_mib.saturating_sub(b.ram_mib);
-    for (k, v) in &b.gpu_memory_mib {
-        let entry = a.gpu_memory_mib.entry(k.clone()).or_default();
-        *entry = entry.saturating_sub(*v);
-    }
 }
 
 #[cfg(test)]

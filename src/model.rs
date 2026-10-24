@@ -34,6 +34,75 @@ pub struct Resources {
     pub gpu_memory_mib: BTreeMap<String, u64>,
 }
 
+impl Resources {
+    /// One allocation's charge: the larger of request and observed usage per
+    /// resource. Unknown usage charges the request, never zero.
+    pub fn charge(requested: &Resources, observed: Option<&Resources>) -> Resources {
+        let mut result = requested.clone();
+        if let Some(observed) = observed {
+            result.cpu_millicores = result.cpu_millicores.max(observed.cpu_millicores);
+            result.ram_mib = result.ram_mib.max(observed.ram_mib);
+            for (gpu, amount) in &observed.gpu_memory_mib {
+                let current = result.gpu_memory_mib.entry(gpu.clone()).or_default();
+                *current = (*current).max(*amount);
+            }
+        }
+        result
+    }
+
+    /// Adds a charge; overflow is an error so no reservation is silently lost.
+    pub fn add_checked(&mut self, other: &Resources) -> anyhow::Result<()> {
+        use anyhow::Context;
+        self.cpu_millicores = self
+            .cpu_millicores
+            .checked_add(other.cpu_millicores)
+            .context("CPU resource sum overflow")?;
+        self.ram_mib = self
+            .ram_mib
+            .checked_add(other.ram_mib)
+            .context("RAM resource sum overflow")?;
+        for (gpu, amount) in &other.gpu_memory_mib {
+            let current = self.gpu_memory_mib.entry(gpu.clone()).or_default();
+            *current = current
+                .checked_add(*amount)
+                .context("GPU resource sum overflow")?;
+        }
+        Ok(())
+    }
+
+    pub fn add_saturating(&mut self, other: &Resources) {
+        self.cpu_millicores = self.cpu_millicores.saturating_add(other.cpu_millicores);
+        self.ram_mib = self.ram_mib.saturating_add(other.ram_mib);
+        for (gpu, amount) in &other.gpu_memory_mib {
+            let current = self.gpu_memory_mib.entry(gpu.clone()).or_default();
+            *current = current.saturating_add(*amount);
+        }
+    }
+
+    /// Subtracts without going below zero. Devices absent here stay absent.
+    pub fn subtract_saturating(&mut self, other: &Resources) {
+        self.cpu_millicores = self.cpu_millicores.saturating_sub(other.cpu_millicores);
+        self.ram_mib = self.ram_mib.saturating_sub(other.ram_mib);
+        for (gpu, amount) in &other.gpu_memory_mib {
+            if let Some(current) = self.gpu_memory_mib.get_mut(gpu) {
+                *current = current.saturating_sub(*amount);
+            }
+        }
+    }
+
+    /// Whether `self`, the total charge including a new request, fits `cap`.
+    /// CPU and RAM are shared by all work; each GPU is its own scope, so only the
+    /// devices the request uses are compared and every old charge stays counted.
+    pub fn fits(&self, cap: &Resources, request: &Resources) -> bool {
+        self.cpu_millicores <= cap.cpu_millicores
+            && self.ram_mib <= cap.ram_mib
+            && request.gpu_memory_mib.keys().all(|gpu| {
+                self.gpu_memory_mib.get(gpu).copied().unwrap_or(0)
+                    <= cap.gpu_memory_mib.get(gpu).copied().unwrap_or(0)
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AllocationPhase {

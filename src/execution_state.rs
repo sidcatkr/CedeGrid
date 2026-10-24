@@ -318,12 +318,12 @@ impl StateStore {
                         old.task_id != request.task_id,
                         "prior allocation remains reserved; reconciliation required before replacing this task"
                     );
-                    add(&mut charged, &old.resources)?;
+                    charged.add_checked(&old.resources)?;
                 }
             }
         }
         ensure!(
-            fits_requested(&charged, capacity, &request.resources),
+            charged.fits(capacity, &request.resources),
             "insufficient capacity including pending and uncertain reservations"
         );
         tx.execute("INSERT OR IGNORE INTO tasks(task_id,replay_safe,status,generation) VALUES (?1,?2,'queued',0)", params![request.task_id, request.replay_safe])?;
@@ -628,36 +628,6 @@ fn valid_transition(from: &ExecutionPhase, to: &ExecutionPhase) -> bool {
             | (Released, Released)
     )
 }
-fn add(total: &mut Resources, next: &Resources) -> Result<()> {
-    total.cpu_millicores = total
-        .cpu_millicores
-        .checked_add(next.cpu_millicores)
-        .context("CPU reservation overflow")?;
-    total.ram_mib = total
-        .ram_mib
-        .checked_add(next.ram_mib)
-        .context("RAM reservation overflow")?;
-    for (id, amount) in &next.gpu_memory_mib {
-        let value = total.gpu_memory_mib.entry(id.clone()).or_default();
-        *value = value
-            .checked_add(*amount)
-            .context("GPU reservation overflow")?;
-    }
-    Ok(())
-}
-fn fits_requested(used: &Resources, cap: &Resources, request: &Resources) -> bool {
-    // Keep every pending/uncertain reservation charged. CPU/RAM are shared by
-    // all work; GPU budgets are independent admission scopes. An unavailable
-    // unrelated UUID must not block a CPU-only or independently eligible GPU
-    // request, while a request for that UUID still includes its full old charge.
-    used.cpu_millicores <= cap.cpu_millicores
-        && used.ram_mib <= cap.ram_mib
-        && request.gpu_memory_mib.keys().all(|id| {
-            used.gpu_memory_mib.get(id).copied().unwrap_or(0)
-                <= cap.gpu_memory_mib.get(id).copied().unwrap_or(0)
-        })
-}
-
 fn recovery_marker(control: &str, detail: &str, effective: Option<String>) -> ControlEvidence {
     ControlEvidence {
         control: control.into(),
