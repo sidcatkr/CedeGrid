@@ -4,7 +4,7 @@
 //! never a measure of spare compute capacity or proof of interference.
 use crate::model::{
     Capability, CapabilityStatus, ComputeActivity, ExternalGpuProcessIdentity,
-    GpuExecutionCapability, GpuObservation, GpuSnapshot, SCHEMA_VERSION, Snapshot,
+    GpuExecutionCapability, GpuObservation, GpuSnapshot, PrincipalUsage, SCHEMA_VERSION, Snapshot,
 };
 use anyhow::{Result, ensure};
 use nvml_wrapper::{Nvml, error::NvmlError, struct_wrappers::device::ProcessUtilizationSample};
@@ -41,6 +41,99 @@ pub struct Collector {
     gpu_quiet: BTreeMap<String, QuietState>,
     gpu_memory_tolerance_mib: u64,
     quiet_window_intervals: u32,
+    /// Every visible process, for principal aggregation only.
+    processes: System,
+    /// External context memory per device and PID from the last GPU sample.
+    external_gpu_memory: BTreeMap<String, BTreeMap<u32, u64>>,
+}
+
+/// One visible process as principal aggregation sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSample {
+    pub pid: u32,
+    /// `None` when the owner cannot be read.
+    pub uid: Option<u32>,
+    pub cpu_millicores: u64,
+    pub ram_mib: u64,
+}
+
+/// Group unmanaged processes into principals by owner UID (research R12).
+/// Managed processes are own work and are left out. GPU contexts take the
+/// owner of their PID; a PID outside the visible process table has an
+/// unreadable owner, and all unreadable owners form one principal.
+pub fn aggregate_principals(
+    processes: &[ProcessSample],
+    gpu_memory: &BTreeMap<String, BTreeMap<u32, u64>>,
+    owner_uid: Option<u32>,
+    managed: &BTreeSet<u32>,
+) -> Vec<PrincipalUsage> {
+    fn entry(
+        principals: &mut BTreeMap<Option<u32>, PrincipalUsage>,
+        uid: Option<u32>,
+        owner_uid: Option<u32>,
+    ) -> &mut PrincipalUsage {
+        principals.entry(uid).or_insert_with(|| PrincipalUsage {
+            uid,
+            is_owner: uid.is_some() && uid == owner_uid,
+            ..PrincipalUsage::default()
+        })
+    }
+    let mut principals = BTreeMap::new();
+    let mut owners = BTreeMap::new();
+    for process in processes {
+        owners.insert(process.pid, process.uid);
+        if managed.contains(&process.pid) {
+            continue;
+        }
+        let principal = entry(&mut principals, process.uid, owner_uid);
+        principal.cpu_millicores = principal
+            .cpu_millicores
+            .saturating_add(process.cpu_millicores);
+        principal.ram_mib = principal.ram_mib.saturating_add(process.ram_mib);
+    }
+    for (uuid, contexts) in gpu_memory {
+        for (pid, mib) in contexts {
+            if managed.contains(pid) {
+                continue;
+            }
+            let usage = entry(
+                &mut principals,
+                owners.get(pid).copied().flatten(),
+                owner_uid,
+            )
+            .gpu_memory_mib
+            .entry(uuid.clone())
+            .or_default();
+            *usage = usage.saturating_add(*mib);
+        }
+    }
+    principals.into_values().collect()
+}
+
+/// The owner UID of a process, when the platform exposes it as a number.
+fn process_uid(process: &sysinfo::Process) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        process.user_id().map(|uid| **uid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process;
+        None
+    }
+}
+
+/// The UID this process runs as, which is the owner principal.
+fn owner_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        Some(unsafe { libc::getuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 impl Collector {
@@ -80,7 +173,42 @@ impl Collector {
                 crate::contention::ResourceKind::GpuCompute,
             )
             .quiet_window_intervals,
+            processes: System::new(),
+            external_gpu_memory: BTreeMap::new(),
         })
+    }
+
+    /// Read-only usage of every visible process, grouped by owner.
+    fn sample_principals(&mut self) -> Option<Vec<PrincipalUsage>> {
+        if !sysinfo::IS_SUPPORTED_SYSTEM {
+            return None;
+        }
+        self.processes.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory()
+                .with_user(sysinfo::UpdateKind::OnlyIfNotSet),
+        );
+        let samples: Vec<ProcessSample> = self
+            .processes
+            .processes()
+            .iter()
+            .map(|(pid, process)| ProcessSample {
+                pid: pid.as_u32(),
+                uid: process_uid(process),
+                // sysinfo reports percent of one CPU; 100% is 1000 millicores.
+                cpu_millicores: (f64::from(process.cpu_usage()) * 10.0).round() as u64,
+                ram_mib: process.memory() / MIB,
+            })
+            .collect();
+        Some(aggregate_principals(
+            &samples,
+            &self.external_gpu_memory,
+            owner_uid(),
+            &self.managed_pids,
+        ))
     }
 
     pub fn with_kernel(node_id: &str, config: crate::kernel::KernelConfig) -> Result<Self> {
@@ -200,7 +328,9 @@ impl Collector {
         }
         self.managed_gpu_usage.clear();
         self.gpu_accounting_known.clear();
+        self.external_gpu_memory.clear();
         let (gpu_inventory, gpus) = self.sample_gpus(&mut capabilities, observed_at_unix_ms);
+        let principals = self.sample_principals();
         Ok(Snapshot {
             schema_version: SCHEMA_VERSION,
             node_id: self.node_id.clone(),
@@ -215,6 +345,7 @@ impl Collector {
             gpus,
             capabilities,
             kernel: Some(self.kernel.sample()),
+            principals,
         })
     }
 
@@ -410,6 +541,16 @@ impl Collector {
             } else {
                 accounting_known = false;
                 process_memory = None;
+            }
+            if let Some(contexts) = &process_memory {
+                self.external_gpu_memory.insert(
+                    uuid.clone(),
+                    contexts
+                        .iter()
+                        .filter(|(pid, _)| !self.managed_pids.contains(pid))
+                        .map(|(pid, mib)| (*pid, *mib))
+                        .collect(),
+                );
             }
             let unattributed_memory_mib = memory
                 .filter(|memory| memory.attribution_known)
@@ -1418,6 +1559,60 @@ fn process_scope_matches(_pid: u32, _snapshot: &Snapshot, _scoped: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process(pid: u32, uid: Option<u32>, cpu_millicores: u64, ram_mib: u64) -> ProcessSample {
+        ProcessSample {
+            pid,
+            uid,
+            cpu_millicores,
+            ram_mib,
+        }
+    }
+
+    #[test]
+    fn external_processes_aggregate_into_principals_by_owner() {
+        let processes = [
+            process(1, Some(1000), 200, 10),
+            process(2, Some(1001), 300, 20),
+            process(3, Some(1001), 100, 30),
+            process(4, None, 50, 1),
+            process(5, None, 70, 2),
+            // Managed work is own work, never a principal's usage.
+            process(6, Some(1000), 900, 500),
+        ];
+        let gpu = BTreeMap::from([(
+            "GPU-a".to_string(),
+            // PID 99 is outside the visible process table, so its owner is unreadable.
+            BTreeMap::from([(2, 512), (99, 256)]),
+        )]);
+        let principals = aggregate_principals(&processes, &gpu, Some(1000), &BTreeSet::from([6]));
+        assert_eq!(
+            principals,
+            vec![
+                PrincipalUsage {
+                    uid: None,
+                    is_owner: false,
+                    cpu_millicores: 120,
+                    ram_mib: 3,
+                    gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 256)]),
+                },
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    cpu_millicores: 200,
+                    ram_mib: 10,
+                    gpu_memory_mib: BTreeMap::new(),
+                },
+                PrincipalUsage {
+                    uid: Some(1001),
+                    is_owner: false,
+                    cpu_millicores: 400,
+                    ram_mib: 50,
+                    gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 512)]),
+                },
+            ]
+        );
+    }
 
     fn gpu_sample(pid: u32, timestamp: u64, sm_util: u32) -> ProcessUtilizationSample {
         ProcessUtilizationSample {

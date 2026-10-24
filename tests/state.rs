@@ -38,6 +38,7 @@ fn observation() -> (Snapshot, Decision) {
         gpus: vec![],
         capabilities: BTreeMap::new(),
         kernel: None,
+        principals: None,
     };
     let decision = Decision {
         schema_version: 1,

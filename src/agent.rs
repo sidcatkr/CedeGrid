@@ -4272,6 +4272,7 @@ mod agent_transport_tests {
             gpus: vec![],
             capabilities: BTreeMap::new(),
             kernel: None,
+            principals: None,
         };
         restrict_gpu_scope(&mut snapshot, &Resources::default());
         let decision = PolicyEngine::new()

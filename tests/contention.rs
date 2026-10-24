@@ -28,6 +28,7 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
         gpus: vec![],
         capabilities: BTreeMap::new(),
         kernel: None,
+        principals: None,
     }
 }
 

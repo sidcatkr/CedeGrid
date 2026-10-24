@@ -33,6 +33,7 @@ fn snapshot() -> Snapshot {
         gpus: vec![],
         capabilities: BTreeMap::new(),
         kernel: None,
+        principals: None,
     }
 }
 

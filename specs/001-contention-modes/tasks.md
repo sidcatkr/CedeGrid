@@ -358,7 +358,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
     (FR-057);
   - spool exhaustion blocks admission and drains nothing (FR-058);
   - explicit operator drain still drains every allocation.
-- [ ] T060 [P] [US3] Add tests in the `src/telemetry.rs` tests module: external processes
+- [X] T060 [P] [US3] Add tests in the `src/telemetry.rs` tests module: external processes
   aggregate into principals by owner UID, and processes with unreadable owners form one
   principal.
 - [ ] T061 [P] [US3] Add tests in `tests/supervision.rs`:
@@ -372,7 +372,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 
 ### Implementation for User Story 3
 
-- [ ] T063 [US3] Aggregate principals in `src/telemetry.rs`:
+- [X] T063 [US3] Aggregate principals in `src/telemetry.rs`:
   - the owner UID per external process, from sysinfo or `/proc/<pid>/status`, mapping NVML
     PIDs to UIDs;
   - processes whose owner is unreadable count as one principal.

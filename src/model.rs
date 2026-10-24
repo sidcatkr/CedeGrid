@@ -239,6 +239,23 @@ pub struct Snapshot {
     pub capabilities: BTreeMap<String, Capability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<crate::kernel::KernelSnapshot>,
+    /// Unmanaged usage by process owner (research R12); `None` when not observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principals: Option<Vec<PrincipalUsage>>,
+}
+
+/// Usage of the processes one owner runs, outside managed work.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrincipalUsage {
+    /// Owner UID; `None` groups every process whose owner cannot be read.
+    pub uid: Option<u32>,
+    /// The account CedeGrid runs as; its usage here is the unmanaged part.
+    pub is_owner: bool,
+    pub cpu_millicores: u64,
+    pub ram_mib: u64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_memory_mib: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
