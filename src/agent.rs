@@ -4467,6 +4467,12 @@ mod negotiation_tests {
             plain(&rejected),
             "a rejected heartbeat falls back to 0.2 reports"
         );
+
+        // The next accepted 0.2 report learns the features again (deviation 11).
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        let mut recovered = report();
+        negotiated.apply(&mut recovered, NodeContentionReport::default);
+        assert!(!plain(&recovered) && recovered.contention.is_some());
     }
 }
 

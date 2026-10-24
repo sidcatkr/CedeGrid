@@ -2644,3 +2644,47 @@ fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
     assert_eq!(cpu.mode, Some(ContentionMode::Neutral));
     assert_eq!(cpu.effective_mode, Some(ContentionMode::YieldFirst));
 }
+
+#[test]
+fn lost_cpu_telemetry_holds_for_the_unknown_window_then_escalates() {
+    use cedegrid::contention::{YieldCause, YieldStep};
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "a",
+            AllocationPhase::Running,
+            resources(2000, 0, 0),
+            Some(resources(2000, 0, 0)),
+        )],
+        facts: rootless(&["a"]),
+        ..Default::default()
+    };
+    let config = config();
+    let interval = config.monitor.interval_ms;
+    let window = u64::from(
+        config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Cpu)
+            .unknown_window_intervals,
+    ) * interval;
+    let mut lost = snapshot();
+    lost.cpu_busy_millicores = None;
+    let mut engine = PolicyEngine::new();
+    let mut now = 0;
+    // Inside the window the budget is zero for admission but no step is taken.
+    while now < window {
+        let held = engine.evaluate(&config, &lost, &input, now).unwrap();
+        assert_eq!(held.managed_budget.cpu_millicores, 0);
+        assert!(
+            held.actions.is_empty() && held.would_drain.is_empty(),
+            "t={now}"
+        );
+        now += interval;
+    }
+    let after = engine.evaluate(&config, &lost, &input, now).unwrap();
+    let action = after.actions.first().expect("escalates after the window");
+    assert_eq!(
+        (action.step, action.cause),
+        (YieldStep::Cap, YieldCause::UnknownMeasurement)
+    );
+    assert!(after.would_drain.is_empty());
+}
