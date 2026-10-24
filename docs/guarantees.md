@@ -104,7 +104,10 @@ RAM and `gpu.reserve_vram_mib` per GPU stay free. A breached floor blocks admiss
 on that resource and releases opportunistic work holding it. Floor policy A, the
 default, may then drain Guaranteed work that holds the memory, once the hint
 deadline has passed. Floor policy B (caution) never drains Guaranteed work for a
-floor; it reports the breach and blocks admission. Neutral memory policy A, the
+floor; it reports the breach and blocks admission. On Linux, own processes mark
+themselves as the preferred out-of-memory victims (`oom_score_adj` 1000) before they
+run; floor policy C (danger) is B, and it leaves Guaranteed processes unmarked.
+Other platforms offer no unprivileged equivalent and claim none. Neutral memory policy A, the
 default, puts floors before fair share; Neutral memory policy B (caution) keeps
 Neutral's fair share of memory while a floor is breached.
 Policy recordings without an allocation class retain the legacy opportunistic

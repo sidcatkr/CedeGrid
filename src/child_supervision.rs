@@ -682,6 +682,13 @@ impl MediatedChild {
                     bail!("child CPU affinity unsupported");
                 }
             }
+            if let Some(requested) = self.setup.oom_score_adj {
+                evidence.push(crate::supervision::verify_oom_score_adj(
+                    actual.pid,
+                    requested,
+                    &format!("mediated_child:{}", actual.pid),
+                )?);
+            }
             if let Some(expected) = self.setup.nice {
                 let actual_nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, actual.pid) };
                 ensure!(actual_nice == expected, "child nice mismatch");

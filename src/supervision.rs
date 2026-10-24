@@ -23,6 +23,9 @@ pub struct SupervisorOptions {
     pub release_confirm_timeout_ms: u64,
     /// Duty-cycle period of a rootless CPU cap: the monitor interval.
     pub duty_period_ms: u64,
+    /// Guaranteed processes are preferred OOM victims too; false only under
+    /// floor policy C (FR-041).
+    pub guaranteed_oom_victim: bool,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -34,6 +37,7 @@ impl Default for SupervisorOptions {
             prepare_timeout_ms: 10_000,
             release_confirm_timeout_ms: 10_000,
             duty_period_ms: 500,
+            guaranteed_oom_victim: true,
         }
     }
 }
@@ -355,6 +359,39 @@ pub fn supervise_controlled(
     }
 }
 /// Read-only identity reconciliation. Never authorizes numeric-PID signaling.
+/// The OOM preference own processes take: the most likely victim.
+pub(crate) const OOM_PREFERRED: i32 = 1000;
+
+/// Read back an owned gate's OOM preference and record it as evidence.
+pub(crate) fn verify_oom_score_adj(
+    pid: u32,
+    requested: i32,
+    scope: &str,
+) -> Result<ControlEvidence> {
+    let actual: i32 = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+        .context("cannot read the gate oom_score_adj")?
+        .trim()
+        .parse()?;
+    ensure!(
+        actual == requested,
+        "gate oom_score_adj setting was not verified"
+    );
+    Ok(ControlEvidence {
+        control: "memory.oom_score_adj".into(),
+        available: Some(true),
+        permitted: Some(true),
+        configured: true,
+        applied: true,
+        fallback: false,
+        scope: scope.into(),
+        requested: Some(requested.to_string()),
+        effective: Some(actual.to_string()),
+        detail:
+            "Verified own OOM preference; own processes are the preferred out-of-memory victims"
+                .into(),
+    })
+}
+
 pub fn process_identity(pid: u32, assignment: &str, generation: u64) -> Result<ProcessIdentity> {
     #[cfg(unix)]
     {
@@ -1202,6 +1239,14 @@ mod unix {
             if request.class == AllocationClass::Opportunistic && setup.nice.is_none() {
                 setup.nice = Some(options.nice);
             }
+            // Own work is the preferred OOM victim where an unprivileged process can
+            // mark itself (FR-023); floor policy C exempts Guaranteed work (FR-041).
+            if cfg!(target_os = "linux")
+                && (request.class == AllocationClass::Opportunistic
+                    || options.guaranteed_oom_victim)
+            {
+                setup.oom_score_adj = Some(OOM_PREFERRED);
+            }
             children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
             let mut gated_request = request.clone();
             if request.env.contains_key("CEDEGRID_OUTPUT_DIR") {
@@ -1268,6 +1313,13 @@ mod unix {
                 }
                 #[cfg(not(target_os = "linux"))]
                 bail!("required CPU affinity unavailable");
+            }
+            if let Some(requested) = gate.setup.oom_score_adj {
+                record.evidence.push(verify_oom_score_adj(
+                    actual.pid,
+                    requested,
+                    &format!("direct_child:{}", actual.pid),
+                )?);
             }
             if let Some(requested_nice) = gate.setup.nice {
                 // SAFETY: a read-only query for the verified, unreaped owned gate.
@@ -1754,6 +1806,20 @@ mod unix {
                 let _ = path;
                 bail!("cgroup gate unavailable on this platform");
             }
+        }
+        if let Some(adj) = gate.setup.oom_score_adj {
+            ensure!(
+                adj == OOM_PREFERRED,
+                "invalid requested oom_score_adj value"
+            );
+            #[cfg(target_os = "linux")]
+            {
+                // Raising only this gate's own value needs no privilege.
+                std::fs::write("/proc/self/oom_score_adj", adj.to_string())
+                    .context("gate oom_score_adj application failed")?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            bail!("oom_score_adj is unavailable on this platform");
         }
         if let Some(nice) = gate.setup.nice {
             ensure!((0..=19).contains(&nice), "invalid requested nice value");

@@ -30,6 +30,7 @@ impl LaunchBackend for RootlessBackend {
         Ok(GateSetup {
             cgroup_path: None,
             nice: apply_nice.then_some(self.nice),
+            oom_score_adj: None,
         })
     }
     fn verify(&mut self, _identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {

@@ -109,6 +109,8 @@ pub struct GateSetup {
     /// Manager-created workload leaf; gate joins itself before any user exec.
     pub cgroup_path: Option<PathBuf>,
     pub nice: Option<i32>,
+    /// The gate's own OOM preference, raised before user execution (FR-023).
+    pub oom_score_adj: Option<i32>,
 }
 
 pub trait ExecutionJournal {

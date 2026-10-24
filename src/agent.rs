@@ -708,6 +708,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         prepare_timeout_ms: spec.config.execution.prepare_timeout_ms,
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
         duty_period_ms: spec.config.monitor.interval_ms,
+        guaranteed_oom_victim: spec.config.contention.floor_policy != crate::config::FloorPolicy::C,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,

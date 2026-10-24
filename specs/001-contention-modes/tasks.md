@@ -361,7 +361,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
 - [X] T060 [P] [US3] Add tests in the `src/telemetry.rs` tests module: external processes
   aggregate into principals by owner UID, and processes with unreadable owners form one
   principal.
-- [ ] T061 [P] [US3] Add tests in `tests/supervision.rs`:
+- [X] T061 [P] [US3] Add tests in `tests/supervision.rs`:
   - the worker gate sets `oom_score_adj = 1000` before EXEC;
   - it skips this for Guaranteed work under floor policy C;
   - managed children inherit the value.
@@ -384,7 +384,7 @@ floors, policies A/B/C, the envelope and spool rules, and the Guaranteed rules.
     `gpu.reserve_vram_mib`;
   - floor policies A, B and C, and Neutral memory policies A and B;
   - the Guaranteed rules: no pause, and drain only for a floor breach under A.
-- [ ] T067 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
+- [X] T067 [US3] Set `oom_score_adj = 1000` in the worker gate before EXEC in
   `src/supervision.rs`, skipping it for Guaranteed work under floor policy C, and verify that
   managed children inherit it.
 - [X] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the

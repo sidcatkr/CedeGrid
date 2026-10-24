@@ -718,6 +718,7 @@ impl LaunchBackend for CgroupBackend {
             Ok(GateSetup {
                 cgroup_path: Some(path),
                 nice: None,
+                oom_score_adj: None,
             })
         }
         #[cfg(not(target_os = "linux"))]

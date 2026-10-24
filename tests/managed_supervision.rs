@@ -48,6 +48,7 @@ fn options() -> SupervisorOptions {
         release_confirm_timeout_ms: 1000,
         duty_period_ms: 100,
         nice: 10,
+        guaranteed_oom_victim: true,
     }
 }
 
@@ -947,4 +948,42 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
         foreign_alive && !foreign_after.contains('T'),
         "{foreign_after}"
     );
+}
+
+/// A managed child carries the same OOM preference as its parent (FR-023).
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_children_carry_the_oom_preference() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(
+        dir.path(),
+        r#"
+import sys
+from pathlib import Path
+from cedegrid import spawn_managed
+d=Path.cwd()
+Path('parent-adj').write_text(Path('/proc/self/oom_score_adj').read_text())
+child=spawn_managed([sys.executable,'-c',"import pathlib;pathlib.Path(%r,'child-adj').write_text(pathlib.Path('/proc/self/oom_score_adj').read_text())" % str(d)],single_process=True,no_escape=True)
+child.wait(timeout=6,poll_interval=.01)
+"#,
+    );
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut ChangingChildPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+    for file in ["parent-adj", "child-adj"] {
+        assert_eq!(
+            fs::read_to_string(dir.path().join(file)).unwrap().trim(),
+            "1000",
+            "{file}"
+        );
+    }
 }

@@ -109,6 +109,7 @@ impl LaunchBackend for Backend {
         Ok(GateSetup {
             cgroup_path: None,
             nice: if self.bad_setup { Some(-1) } else { None },
+            oom_score_adj: None,
         })
     }
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {
@@ -179,6 +180,7 @@ fn options() -> SupervisorOptions {
         prepare_timeout_ms: 2_000,
         release_confirm_timeout_ms: 2_000,
         duty_period_ms: 100,
+        guaranteed_oom_victim: true,
     }
 }
 fn run(
@@ -1187,4 +1189,65 @@ mod control_socket {
         assert_eq!(next(&rx), Line::Detached);
         assert!(!sink.write_line("nobody"));
     }
+}
+
+/// Own work is marked as the preferred OOM victim before EXEC (FR-023), except
+/// Guaranteed work under floor policy C (FR-041).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec() {
+    let inherited = fs::read_to_string("/proc/self/oom_score_adj")
+        .unwrap()
+        .trim()
+        .to_owned();
+    for (class, preferred, expected) in [
+        (AllocationClass::Opportunistic, true, "1000"),
+        (AllocationClass::Guaranteed, true, "1000"),
+        (AllocationClass::Guaranteed, false, inherited.as_str()),
+    ] {
+        let dir = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+        let mut request = request(dir.path());
+        request.class = class;
+        request.argv = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "cat /proc/self/oom_score_adj > adj".into(),
+        ];
+        let mut options = options();
+        options.guaranteed_oom_victim = preferred;
+        let outcome = run(&request, &options, &Journal::new(), &mut Backend::new()).unwrap();
+        assert_eq!(outcome.exit_code, Some(0), "{class:?}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("adj")).unwrap().trim(),
+            expected,
+            "{class:?} preferred={preferred}"
+        );
+        let claimed = outcome
+            .record
+            .evidence
+            .iter()
+            .any(|e| e.control == "memory.oom_score_adj" && e.applied);
+        assert_eq!(claimed, expected == "1000", "{class:?}");
+    }
+}
+
+/// Platforms where an unprivileged process cannot mark itself claim nothing.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn no_oom_preference_is_claimed_where_the_platform_cannot_apply_it() {
+    let dir = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+    let outcome = run(
+        &request(dir.path()),
+        &options(),
+        &Journal::new(),
+        &mut Backend::new(),
+    )
+    .unwrap();
+    assert!(
+        !outcome
+            .record
+            .evidence
+            .iter()
+            .any(|e| e.control == "memory.oom_score_adj")
+    );
 }
