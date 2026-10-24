@@ -73,6 +73,28 @@ export CEDEGRID_SERVICE_TEST_MONITOR_MS=500
 
    `gpu_native` needs PyTorch with CUDA in `CEDEGRID_TEST_PYTHON`.
 
+## Linux container check
+
+[`tools/docker-validation/linux-check`](../../tools/docker-validation/linux-check/Dockerfile) builds a
+non-root Linux image and runs fmt, clippy, the full serial suite and both Python suites on a
+`git archive` export of `HEAD`. It needs Docker and has no cgroup delegation or GPU, so it never
+replaces sections A to C. From the repository root:
+
+```sh
+src="$HOME/.cache/cedegrid-linux-src"
+rm -rf "$src" && mkdir -p "$src" && git archive HEAD | tar -x -C "$src"
+docker build -t cedegrid-linux-check tools/docker-validation/linux-check
+docker volume rm -f cedegrid-linux-work
+docker run --rm --cpus 6 --memory 6g -v "$src":/src:ro \
+  -v cedegrid-linux-cargo:/home/cedegrid/.cargo \
+  -v cedegrid-linux-target:/home/cedegrid/target \
+  -v cedegrid-linux-work:/home/cedegrid/work \
+  cedegrid-linux-check sh /src/tools/docker-validation/linux-check/run.sh
+```
+
+The work volume must stay at the same path: test binaries embed it, and Cargo does not rebuild
+them when it moves. Remove `cedegrid-linux-target` after changing the image's paths.
+
 ## B. Batch 2 (US2) checks that can run now
 
 Container evidence, not host qualification: items 1 and 2 passed at commit 015d9c1 in a Docker

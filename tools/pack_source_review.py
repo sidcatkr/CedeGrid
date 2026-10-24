@@ -179,6 +179,8 @@ ALLOWLIST = (
     'tools/build_packages.py',
     'tools/compare.py',
     'tools/connection_proxy.py',
+    'tools/docker-validation/linux-check/Dockerfile',
+    'tools/docker-validation/linux-check/run.sh',
     'tools/gpu_qualification.py',
     'tools/local_smoke.py',
     'tools/make_kaggriculture_validation.py',

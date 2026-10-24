@@ -28,3 +28,10 @@ dist/
 # SDK build dependencies and package archives.
 /npm/node_modules/
 /npm/*.tgz
+
+# Local Docker validation files; only the Linux check image is tracked.
+/tools/docker-validation/*
+!/tools/docker-validation/linux-check/
+/tools/docker-validation/linux-check/*
+!/tools/docker-validation/linux-check/Dockerfile
+!/tools/docker-validation/linux-check/run.sh

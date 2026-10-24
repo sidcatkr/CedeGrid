@@ -49,6 +49,8 @@ include = [
     "/python/tests/*.py",
     "/python/examples/*.py",
     "/tools/*.py",
+    "/tools/docker-validation/linux-check/Dockerfile",
+    "/tools/docker-validation/linux-check/run.sh",
     "/docs/architecture.md",
     "/docs/comparison.md",
     "/docs/coordinator-work.md",
