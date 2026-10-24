@@ -424,9 +424,12 @@ impl SupervisorControl for PipeControl {
                         .would_drain
                         .contains(&self.assignment.request.assignment_id))
             {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"event":"local_policy_drain","assignment_id":self.assignment.request.assignment_id,"envelope_exceeded":envelope_exceeded,"capacity":self.capacity,"allocations":allocations,"decision":decision})
+                write_diagnostic(
+                    std::io::stderr(),
+                    format_args!(
+                        "{}",
+                        serde_json::json!({"event":"local_policy_drain","assignment_id":self.assignment.request.assignment_id,"envelope_exceeded":envelope_exceeded,"capacity":self.capacity,"allocations":allocations,"decision":decision})
+                    ),
                 );
                 commands.push(SupervisorCommand::Drain);
             }
@@ -1316,7 +1319,10 @@ async fn start_assignment(
             Ok(())
         })();
         if let Err(error) = result {
-            eprintln!("supervisor stderr capture failed: {error:#}");
+            write_diagnostic(
+                std::io::stderr(),
+                format_args!("supervisor stderr capture failed: {error:#}"),
+            );
         }
     });
     let input = child.stdin.take().context("supervisor input absent")?;
@@ -3093,6 +3099,44 @@ impl RateLimiter {
         *next = start + Duration::from_secs_f64(bytes as f64 / self.rate as f64);
         drop(next);
         tokio::time::sleep_until(start).await;
+    }
+}
+
+/// Supervisor diagnostics go to a pipe the agent reads. That reader can vanish
+/// (agent exit, exhausted spool budget); a failed write must never unwind a
+/// supervisor that still owns a running child.
+fn write_diagnostic(mut output: impl Write, line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(output, "{line}");
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    #[ignore = "subprocess fixture for diagnostics_survive_a_closed_stderr_pipe"]
+    fn closed_stderr_diagnostic_fixture() {
+        super::write_diagnostic(std::io::stderr(), format_args!("local_policy_drain"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_survive_a_closed_stderr_pipe() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "agent::diagnostic_tests::closed_stderr_diagnostic_fixture",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(writer)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "diagnostic write aborted the process: {status}"
+        );
     }
 }
 
