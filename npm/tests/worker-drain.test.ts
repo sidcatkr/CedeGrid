@@ -70,6 +70,39 @@ test('drain hooks run once', () => {
     }
 });
 
+test('a drain-only worker behaves as under 0.2 beside a changing target file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
+    const target = join(root, 'resource-target.json');
+    const previous = process.env.CEDEGRID_RESOURCE_TARGET_FILE;
+    process.env.CEDEGRID_RESOURCE_TARGET_FILE = target;
+    try {
+        const files = [JSON.stringify({ version: 1, sequence: 1, deadline_unix_ms: 1793000000000, step: 'hint', targets: { ram_mib: 64 }, allowance: { ram_mib: 128 }, allowance_sequence: 1 }), JSON.stringify({ version: 2, sequence: 2 }), '{not json', null];
+        for (const shape of [{}, { resource_target_file: target, capabilities: ['resource_targets'] }]) {
+            const drain = join(root, 'drain');
+            rmSync(drain, { force: true });
+            const transport = new FakeTransport([]);
+            const context = new WorkerContext({ ...descriptor, ...shape, drain_file: drain }, transport);
+            const calls: number[] = [];
+            context.onDrain(() => calls.push(1));
+            for (const content of files) {
+                if (content === null) rmSync(target, { force: true });
+                else writeFileSync(target, content);
+                assert.equal(context.draining(), false);
+                context.safePoint();
+            }
+            writeFileSync(drain, '');
+            assert.throws(() => context.safePoint(), DrainRequested);
+            assert.equal(context.draining(), true);
+            assert.deepEqual(calls, [1]);
+            assert.deepEqual(transport.calls, []);
+        }
+    }
+    finally {
+        if (previous === undefined) delete process.env.CEDEGRID_RESOURCE_TARGET_FILE;
+        else process.env.CEDEGRID_RESOURCE_TARGET_FILE = previous;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 test('spawning requires the child contract and a supervisor endpoint', async () => {
     await assert.rejects(spawnManaged(['child'], { noEscape: false, singleProcess: true }), ValidationError);
     await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true, cwd: 'relative' }), ValidationError);

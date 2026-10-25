@@ -86,6 +86,34 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.context.draining());(self.root/'drain').touch()
         with self.assertRaises(DrainRequested):self.context.safe_point()
         self.assertTrue(self.context.draining());self.assertEqual(calls,[1])
+    def test_a_drain_only_worker_behaves_as_under_0_2(self):
+        """A worker that only watches the drain file keeps its 0.2 drain behavior beside
+        a target file the supervisor rewrites, with either context shape (FR-036)."""
+        import json, os
+        from unittest.mock import patch
+        target = self.root/'resource-target.json'
+        files = [json.dumps({'version':1,'sequence':1,'deadline_unix_ms':1793000000000,'step':'hint',
+                             'targets':{'ram_mib':64},'allowance':{'ram_mib':128},'allowance_sequence':1}),
+                 json.dumps({'version':2,'sequence':2}), '{not json', None]
+        new = {**self.descriptor,'resource_target_file':str(target),'capabilities':['resource_targets']}
+        for descriptor in (self.descriptor, new):
+            drain = self.root/'drain'
+            drain.unlink(missing_ok=True)
+            supervisor = SupervisorFixture()
+            with patch.dict(os.environ, {'CEDEGRID_RESOURCE_TARGET_FILE':str(target)}):
+                context = WorkerContext(descriptor, drain, client=supervisor)
+                calls = []
+                context.on_drain(lambda _: calls.append(1))
+                for content in files:
+                    if content is None: target.unlink(missing_ok=True)
+                    else: target.write_text(content)
+                    self.assertFalse(context.draining())
+                    context.safe_point()
+                drain.touch()
+                with self.assertRaises(DrainRequested): context.safe_point()
+                self.assertTrue(context.draining())
+            self.assertEqual(calls, [1])
+            self.assertEqual(supervisor.calls, [])
     def test_context_and_names_fail_before_native_requests(self):
         with self.assertRaises(ValueError):WorkerContext({**self.descriptor,'schema_version':1},client=self.supervisor)
         with self.assertRaises(ValueError):WorkerContext({**self.descriptor,'generation':2**63},client=self.supervisor)

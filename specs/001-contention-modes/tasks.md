@@ -758,7 +758,7 @@ workers behave unchanged (quickstart §8).
   - the old-agent fixture with the new coordinator;
   - a new agent with a coordinator that advertises no features;
   - new with new.
-- [ ] T091 [P] [US6] Add SDK compatibility tests in `python/tests/test_worker.py` and
+- [X] T091 [P] [US6] Add SDK compatibility tests in `python/tests/test_worker.py` and
   `npm/tests/worker-drain.test.ts`: a drain-only 0.2-style worker behaves unchanged under the
   new supervisor.
 - [X] T092 [P] [US6] Add client tests in `python/tests/test_transport.py` and
@@ -778,7 +778,7 @@ workers behave unchanged (quickstart §8).
 - [X] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
 - [X] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
-- [ ] T096 [US6] Add `CHANGELOG.md` entries for:
+- [X] T096 [US6] Add `CHANGELOG.md` entries for:
   - the Neutral default;
   - the interpreted legacy GPU keys;
   - the removed floor and Neutral memory policies;
