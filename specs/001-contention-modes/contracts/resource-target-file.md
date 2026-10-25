@@ -21,7 +21,8 @@ fsync, and renaming it over the target.
   "deadline_unix_ms": 1793000000000,
   "step": "hint",
   "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-…": 10240}, "cpu_millicores": 2000},
-  "allowance": {"ram_mib": 20480, "gpu_memory_mib": {"GPU-…": 18432}, "cpu_millicores": 7000}
+  "allowance": {"ram_mib": 20480, "gpu_memory_mib": {"GPU-…": 18432}, "cpu_millicores": 7000},
+  "allowance_sequence": 4
 }
 ```
 
@@ -31,11 +32,25 @@ fsync, and renaming it over the target.
   current hints (FR-037): the resource's hint deadline, the Guaranteed hint deadline, or the
   critical hint deadline.
 - **Relaxing.** A relaxed target is a new file with a higher `sequence`. An absent file means
-  no target.
-- **Allowance.** Optional, published continuously, also without a target: per resource, what
-  own work may grow to now. A self-sizing worker can grow while the host is idle and shrink
-  before a hint is needed. Readers that do not know the key ignore it (FR-071; implemented
-  after US5).
+  no target, and so does `sequence` 0: the first published target has sequence 1.
+- **Allowance.** Optional, published also without a target: per resource (CPU, RAM, each GPU's
+  memory; no GPU compute in version 1), what the allocation may grow to now without causing a
+  step. `allowance_sequence` counts allowance changes apart from `sequence`, so an
+  allowance-only rewrite keeps `sequence`, `step`, `targets` and `deadline_unix_ms`. Readers
+  that do not know the keys ignore them (FR-071). The policy sets it as follows:
+  - its usage, plus its equal part of the room under the mode's allowance after pending
+    reservations, shared over the running allocations on that resource, less one publish
+    threshold each; the mode's allowance is `own_allowance` for CPU, and for RAM and GPU memory
+    the budget above the floor, less Yield First's margin;
+  - at most its cap or hint target while one applies, and its usage while paused;
+  - at most the operator envelope; for Guaranteed work, never below the request;
+  - only its current usage while the resource's measurement is unknown.
+
+  If every running allocation grows to its allowance at once, the totals stay within the mode's
+  allowance, apart from what running work already holds. A fall publishes at once; a rise at
+  most once per scale-up interval, by at most one scale-up step (the mode's margin of
+  capacity); only a change beyond the contention floor (CPU) or `noise_tolerance_mib` (memory)
+  publishes.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
   `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
   shows that the worker can read hints; the supervisor reports it as `hint_ready`, and
@@ -50,20 +65,23 @@ Both SDKs add the same API.
 - `WorkerContext.on_resource_target(callback)`: called at once with the current target when
   one exists, then once per new sequence, during `draining()` and `safe_point()` polls. Hook
   errors are isolated and logged.
-- `WorkerContext.on_resource_allowance(callback)`: the same delivery for `allowance` (after
-  US5).
+- `WorkerContext.resource_allowance() -> ResourceAllowance | None` and
+  `WorkerContext.on_resource_allowance(callback)`: called at once with the current allowance
+  when one exists, then once per new `allowance_sequence`. An allowance-only change never calls
+  `on_resource_target`, and a target change never calls `on_resource_allowance`.
 - `ResourceSignals.from_env()`: needs only the two environment variables. It is usable in
   managed children, which have no context.
 
 **TypeScript** (`npm/src/worker.ts`): `resourceTargets()`, `onResourceTarget(cb)`,
-`onResourceAllowance(cb)` (after US5), `ResourceSignals.fromEnv()`, with the same immediate
-delivery.
+`resourceAllowance()`, `onResourceAllowance(cb)`, `ResourceSignals.fromEnv()`, with the same
+immediate delivery. The cases in `tests/contracts/cedegrid-0.2.json` (`target_file_cases`)
+are what the supervisor writes and both SDKs read.
 
 ## Managed children
 
 When the supervisor creates a managed child's private directory, it writes the current target
-there before the child starts, with the same sequence and deadline, so the child sees it on its
-first read (FR-035).
+and allowance there before the child starts, with the same sequences and deadline, so the child
+sees them on its first read (FR-035).
 
 ## Compatibility
 

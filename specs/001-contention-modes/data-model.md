@@ -210,7 +210,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - `deadline_unix_ms`
   - `step`
   - `targets: {cpu_millicores?, ram_mib?, gpu_memory_mib?{uuid: mib}}`
-  - `allowance?`: the same shape, what own work may grow to now (FR-071, with T150)
+  - `allowance?`: the same shape, what the allocation may grow to now (FR-071); policy output
+    `Decision.allowances` per allocation
+  - `allowance_sequence`: counts allowance changes apart from `sequence`; `sequence` 0 means no
+    target was published
 - Written atomically. The format is in
   [contracts/resource-target-file.md](contracts/resource-target-file.md).
 

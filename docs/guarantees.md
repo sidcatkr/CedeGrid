@@ -180,6 +180,14 @@ peak while it lives, identified by PID and start time, and its peak is dropped w
 exits; other external usage keeps one peak. Yielding follows current usage.
 
 
+Each running allocation's resource-target file also carries its allowance: what it may
+grow to now without causing a step, per CPU, RAM and GPU memory. It is its usage plus an
+equal part of the room under the mode's allowance after pending reservations, at most a
+current cap or hint target and the operator envelope, never below a Guaranteed request,
+and only current usage while a measurement is unknown. If every allocation grows to its
+allowance at once, the totals stay within the mode's allowance. A fall publishes at once;
+a rise at most one step, the mode's margin of capacity, per scale-up interval.
+
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the
 target at the hint deadline, 5 s by default, leads to a drain. Each supervisor reports

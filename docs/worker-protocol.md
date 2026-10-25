@@ -80,14 +80,21 @@ being drained:
 
 ```json
 {"version": 1, "sequence": 7, "deadline_unix_ms": 1793000000000, "step": "hint",
- "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-0": 10240}, "cpu_millicores": 2000}}
+ "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-0": 10240}, "cpu_millicores": 2000},
+ "allowance": {"ram_mib": 20480, "gpu_memory_mib": {"GPU-0": 18432}, "cpu_millicores": 7000},
+ "allowance_sequence": 4}
 ```
 
 - The supervisor replaces the file atomically. Each change has a higher
   `sequence`; a relaxed target is a new file with `step: "none"` and fewer or no
   targets. An absent file means no target.
 - Readers ignore unknown keys and treat `version` above 1, or an invalid file, as
-  absent.
+  absent. `sequence` 0 means no target was published yet.
+- `allowance`, when present, is what the allocation may grow to now without causing a
+  step: its usage plus an equal part of the room the mode leaves, at most a current cap
+  or hint target, and only its usage while a measurement is unknown. It changes under its
+  own `allowance_sequence`; a fall publishes at once, a rise at most one step per
+  scale-up interval.
 - A worker that reads targets writes the highest sequence it has seen, `0` before
   any target, to `resource-target.ack` in the same directory. The supervisor reports
   an allocation as hint-ready once the leader or a managed child has acked, and as
@@ -106,9 +113,13 @@ current target, and `WorkerContext.on_resource_target(callback)` runs the callba
 once with the current target, when there is one, then once per new sequence during
 `draining()` and `safe_point()` polls; a failing callback is logged and never stops
 the poll. A managed child finds the current target in its own directory when it
-starts. `ResourceSignals.from_env()` needs only
-the two environment variables, so managed children can use it. The TypeScript names
-are `resourceTargets()`, `onResourceTarget()` and `ResourceSignals.fromEnv()`.
+starts. `WorkerContext.resource_allowance()` and
+`on_resource_allowance(callback)` do the same for the allowance, once per new
+`allowance_sequence`; an allowance-only change never calls `on_resource_target`.
+`ResourceSignals.from_env()` needs only the two environment variables, so managed
+children can use it. The TypeScript names are `resourceTargets()`,
+`onResourceTarget()`, `resourceAllowance()`, `onResourceAllowance()` and
+`ResourceSignals.fromEnv()`.
 
 Drain is unchanged: the drain file's existence means drain, whatever a target says.
 After a drain request, publish a checkpoint at a safe boundary and exit; work that

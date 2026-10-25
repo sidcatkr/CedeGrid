@@ -98,6 +98,26 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s python/tests -p 'test_w
 - A compliant worker is not drained.
 - A non-compliant worker is drained after the hint deadline.
 - 0.2-style workers keep their drain behavior.
+- An allowance-only change calls only the allowance callback.
+
+A self-sizing worker grows while the host has room and shrinks before a hint is needed:
+
+```python
+from cedegrid import WorkerContext
+
+context = WorkerContext.from_env()
+cache_limit_mib = 1024
+
+def resize(allowance):
+    global cache_limit_mib
+    if allowance.ram_mib is not None:
+        cache_limit_mib = max(256, allowance.ram_mib - 512)  # keep room for working memory
+
+context.on_resource_allowance(resize)
+for batch in batches():
+    process(batch, cache_limit_mib)
+    context.safe_point()  # polls the allowance, targets and drain
+```
 
 ## 7. Setup (any OS for flags; a TTY for the interface)
 

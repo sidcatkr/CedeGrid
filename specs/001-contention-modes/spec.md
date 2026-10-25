@@ -914,9 +914,13 @@ node reports with the expected per-resource values at each step.
   and `kernel.monitor_interval_ms` at most 10 s, `kernel.freshness_intervals` at most 20,
   `gpu.process_sample_max_age_ms` at most 60 s, `lifecycle.drain_timeout_ms` and
   `lifecycle.term_grace_ms` at most 60 s.
-- **FR-071**: The resource-target file MUST carry an optional `allowance` per resource,
-  published continuously: what own work may grow to now. Both SDKs MUST offer
-  `on_resource_allowance`. Workers that ignore it keep working (implemented after US5).
+- **FR-071**: The resource-target file MUST carry an optional `allowance` per resource (CPU,
+  RAM, each GPU's memory): what the allocation may grow to now without causing a step, with its
+  own `allowance_sequence`. If every running allocation grows to its allowance at once, the
+  totals MUST stay within the mode's allowance, apart from what running work already holds; a
+  fall MUST publish at once and a rise at most one scale-up step per scale-up interval. Both
+  SDKs MUST offer `on_resource_allowance`, which an allowance-only change calls instead of the
+  target callback. Workers that ignore it keep working.
 
 ### Key Entities
 

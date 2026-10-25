@@ -29,6 +29,7 @@ These are new:
 |---|---|---|
 | `adjust` | `sequence` (monotonic), `resources: {<ResourceKey>: {step, target?, cause, deadline_ms?}}` | Apply one step per resource; a hint's `deadline_ms` is the deadline the policy enforces |
 | `query` | none | Ask for the current applied state |
+| `allowance` | `allowance: {cpu_millicores?, ram_mib?, gpu_memory_mib?}` | Publish what the allocation may grow to now in its resource-target file, under the next `allowance_sequence` (FR-071) |
 
 ## Supervisor → agent (`Event`)
 

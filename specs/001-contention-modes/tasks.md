@@ -940,7 +940,7 @@ each step.
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
   unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
   then starts at a cap where a delegated cgroup allows it.
-- [ ] T150 After US5, implement the allowance signal (FR-071), tests first: the supervisor
+- [X] T150 After US5, implement the allowance signal (FR-071), tests first: the supervisor
   publishes an optional `allowance` per resource in the resource-target file whenever it changes,
   also without a target; Python `on_resource_allowance` and TypeScript `onResourceAllowance`
   deliver it like targets; add it to the contract fixture and the cross-SDK interop checks. Test in
