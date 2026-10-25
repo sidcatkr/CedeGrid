@@ -5,7 +5,7 @@
 | Feature | Meaning |
 |---|---|
 | `api/1` | Today's protocol |
-| `contention/1` | Everything below |
+| `contention/1` | Everything below; frozen when released, so a later field needs `contention/2` |
 
 ## Sequence
 

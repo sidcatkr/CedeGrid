@@ -38,7 +38,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum; a margin below its default; a saturation, contention-floor or noise threshold above its default |
+  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above its default, `memory_peak_window_s` or `quiet_window_intervals` below it |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain.

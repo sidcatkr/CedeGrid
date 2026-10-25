@@ -345,15 +345,15 @@ Guaranteed rules.
 
 ### Tests for User Story 3 ⚠️
 
-- [X] T056 [P] [US3] Add tests in `tests/contention.rs` for Yield First: a 25% margin, a
-  3-interval response, unknown activity counted as demand, and slow scale-up.
+- [X] T056 [P] [US3] (*margin 15% since T146*) Add tests in `tests/contention.rs` for Yield First:
+  a 25% margin, a 3-interval response, unknown activity counted as demand, and slow scale-up.
 - [X] T057 [US3] Add tests in `tests/contention.rs` for Neutral:
   - max-min fair share with 1–3 principals plus an unknown-owner principal;
   - own work converges and does not go below its share, except for floors under Neutral
     memory policy A;
   - policy B holds the share. *Superseded by T122/T131: Neutral memory policy B is removed.*
 - [X] T058 [US3] Add tests in `tests/contention.rs` for Performance and Guaranteed work:
-  - a 10% margin, floors and fast scale-up;
+  - a 10% margin (*2% since T146*), floors and fast scale-up;
   - floor policies A, B and C for Guaranteed work (*B and C superseded by T122/T131*);
   - Guaranteed work is never paused.
 - [X] T059 [P] [US3] Add tests in `tests/agent.rs` for operator limits:
@@ -569,7 +569,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T142 Record the pre-US5 decisions, with tests:
   - a mode the node cap refuses is reported with `mode_capped` and the cap (FR-030;
     `tests/policy.rs`);
-  - Neutral's own 20% idle margin, validated YF ≥ N ≥ P (FR-021, FR-065;
+  - Neutral's own idle margin (20%, 5% since T146), validated YF ≥ N ≥ P (FR-021, FR-065;
     `tests/configuration.rs`, `tests/contention.rs`);
   - the 512 MiB GPU floor minimum and `gpu.reserve_vram_percent` (FR-023;
     `tests/configuration.rs`);
@@ -604,8 +604,9 @@ wants does not sit idle, and no other workload is harmed.
   shorter GPU quiet window join `relaxed_detection`; `noise_tolerance_mib` ≤ 1024 MiB and, at
   the agent's first sample, ≤ half of each GPU floor; upper bounds for the monitor interval,
   kernel freshness, GPU sample age, drain timeout and termination grace; external usage beyond
-  the 64 listed processes keeps its shared peak (`tests/configuration.rs`, `tests/policy.rs`,
-  `src/telemetry.rs`; FR-068, FR-070).
+  the 64 listed processes keeps its shared peak (`src/config.rs`, `src/kernel.rs`,
+  `src/agent.rs`, `src/main.rs`, `src/telemetry.rs`, `tests/configuration.rs`,
+  `tests/policy.rs`, `tests/contracts/cedegrid-0.2.json`; FR-068, FR-070).
 - [X] T145 A memory floor breach needs observed free memory below the floor; running memory work
   is judged on usage (GPU: when hint-ready, else its charge); a charge-only shortfall only blocks
   admission (`src/policy.rs`, `tests/contention.rs`, `tests/policy.rs`; FR-066).
@@ -624,6 +625,11 @@ wants does not sit idle, and no other workload is harmed.
   and SC-015; the four test binaries that left namespace control directories remove them;
   constitution 2.1.0 (`src/model.rs`, `src/policy.rs`, `src/protocol.rs`, `src/namespace.rs`;
   FR-069).
+- [X] T151 Report each resource's admission (open, held or blocked, with its reason) so node
+  contention reports carry every resource and its `held_back`: blocked while the node drains,
+  the spool is full, the floor is breached or own work on the resource yields (FR-028); held
+  while its measurement is unknown, a GPU device is guarded, or it cools down or backs off
+  (`src/policy.rs`, `src/agent.rs`, `tests/policy.rs`; FR-038).
 
 ## Phase 7: User Story 5 - GPU work on shared, occupied devices (Priority: P2)
 
@@ -637,9 +643,11 @@ context, under Neutral and Performance (quickstart §5).
 
 - [ ] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs` (including FR-064:
   `never_share_occupied_gpus` blocks an occupied device in every mode):
-  - Neutral and Performance admit on quiet or active devices within the floors;
+  - Neutral and Performance admit on quiet or active devices within the floors, and under
+    activity of unknown amount, which counts as one principal (FR-021);
   - Yield First requires quiet;
-  - unknown memory blocks.
+  - unknown memory blocks;
+  - VRAM headroom keeps each external process's peak, quiet contexts included.
 - [ ] T084 [P] [US5] Add placement tests in `tests/coordinator.rs`:
   - placement honors the per-resource admission from a negotiated `NodeReport.contention`;
   - legacy agents use the 0.2 fields;
@@ -651,7 +659,8 @@ context, under Neutral and Performance (quickstart §5).
 - [ ] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
   (`validate_gpu_launch_contract` by mode). Replace the legacy `GpuExecutionMode` steering with
   the FR-031 interpretation from T136, and block devices with external contexts or unknown
-  processes when `never_share_occupied_gpus` is set (FR-064).
+  processes when `never_share_occupied_gpus` is set (FR-064); running own work on a device that
+  becomes occupied is not drained for that alone.
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
 - [ ] T086a [US5] Split the interim combined CPU/RAM admission per resource (plan B7): once
@@ -674,15 +683,22 @@ context, under Neutral and Performance (quickstart §5).
   for every backend, with a test in `tests/contention.rs` (FR-011).
 - [ ] T087d [US5] Approximate the GPU compute fair share by pause duty-cycling of own GPU work in
   `src/actuation.rs` and `src/policy.rs`, and document the granularity (one monitor interval,
-  5% minimum duty, plus the longest running kernel) in `docs/guarantees.md` (FR-021).
-- [ ] T087e [US5] Apply the utilization rules to GPU compute and GPU memory: GPU compute targets
-  through `own_allowance` with demand probing and Performance's contended target (FR-021,
-  FR-022); GPU memory yields on real breaches and judged usage (FR-066); VRAM headroom keeps
-  each external process's peak, quiet contexts included (FR-060). Test in `tests/policy.rs`.
+  5% minimum duty, plus the longest running kernel) in `docs/guarantees.md` (FR-021). A process
+  with both a CPU cap and a GPU compute cap runs one duty cycle at the smaller duty; GPU compute
+  steps are unavailable for Guaranteed work (FR-024). Tests first in `tests/contention.rs` and
+  the actuation unit tests.
+- [ ] T087e [US5] Apply the utilization rules to GPU compute: targets through `own_allowance`
+  with demand probing and Performance's contended target (FR-021, FR-022). GPU memory already
+  yields on real breaches and judged usage (T145) and keeps per-process peaks (T128); add a
+  regression check. Tests first in `tests/policy.rs`.
 - [ ] T087f [US5] Replace the legacy 30 s `gpu.scale_up_cooldown_ms` for GPU memory admission
   with the per-mode cooldown (`contention.gpu_memory.scale_up_cooldown_ms`, default the mode's
-  scale-up interval) plus the reclaim backoff, in `src/config.rs` and `src/policy.rs`; a set
-  `gpu.scale_up_cooldown_ms` keeps working as before. Test in `tests/policy.rs` (FR-034).
+  scale-up interval) plus the reclaim backoff, in `src/config.rs` (allow the key on gpu_memory)
+  and `src/policy.rs`. Precedence: `contention.gpu_memory.scale_up_cooldown_ms` when set, else a
+  set `gpu.scale_up_cooldown_ms`, else the mode's interval. GPU admission keeps requiring that
+  CPU and RAM are known and safe, but no longer waits for the node-wide cooldown. Amend FR-034,
+  `data-model.md`, `contracts/config-contention.md` and `docs/guarantees.md` in the same change.
+  Tests first in `tests/policy.rs`.
 - [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
 - [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
@@ -694,7 +710,9 @@ context, under Neutral and Performance (quickstart §5).
     `MIN_VRAM_FLOOR_MIB` in `src/config.rs` (512 MiB, provisional) to at least the largest value,
     updating every place that states the 512 MiB GPU minimum in the same change: FR-023 and its
     rationale in `spec.md`, `data-model.md`, `contracts/config-contention.md`,
-    `docs/guarantees.md`, and the tests in `tests/configuration.rs` and `tests/contention.rs`;
+    `docs/guarantees.md`, and the tests in `tests/configuration.rs` and `tests/contention.rs`,
+    together with what follows from it: the default `gpu.reserve_vram_mib` (twice the minimum),
+    the "1 GiB" default text, the critical level's lower bound and the noise-tolerance bound;
   - measure over a real session how often GPU activity is Unknown, and record it with the
     evidence.
 
@@ -750,8 +768,9 @@ workers behave unchanged (quickstart §8).
   - the `cpu.nice` clamp.
 - [ ] T097 [US6] Add the worker-context keys `resource_target_file` and `capabilities`, the
   target-file format, and the negotiated optional fields (including `AllocationReport.hint_ready`
-  and `observes_drain` from T133; T139 already added the removed-option config cases) to the
-  shared contract fixture `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
+  and `observes_drain` from T133, and `held_back` from T149; T139 and T144 already added the
+  removed-option and bound config cases) to the shared contract fixture
+  `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
   (`python/tests/numeric_interop.py`, `npm/tests/numeric-interop.ts`).
 
 **Checkpoint**: in-place adoption without breaking deployments.
@@ -770,8 +789,8 @@ never blocks, and caution choices need confirmation (quickstart §7).
 
 - [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the caution mapping (B3): Yield First,
   Neutral, default floors and default margins have no marker; Performance on any resource, a
-  floor below twice its minimum, a margin below its default and a detection threshold above its
-  default are `caution`.
+  floor below twice its minimum, a margin below its default and a detection setting beyond its
+  default (FR-045) are `caution`.
 - [ ] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
   - exit codes 2, 3 and 4 per `contracts/setup-cli.md`;
   - `--margin` for `yield_first`, `neutral` and `performance`, validated as YF ≥ N ≥ P;
@@ -828,15 +847,15 @@ each step.
 
 - [ ] T109 [P] [US8] Add tests in `tests/cli.rs`:
   - `observe --samples 2 --no-state` JSON includes `resources`, `actions` and `exceptions`;
-  - `doctor` shows the modes, floors, caution options with markers, available steps and the
-    legacy GPU interpretation.
+  - `doctor` shows the modes, floors, caution options with markers and settings, each
+    resource's `held_back`, available steps and the legacy GPU interpretation.
 - [ ] T110 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
-  node's negotiated contention summary.
+  node's negotiated contention summary, with each resource's admission and `held_back`.
 
 ### Implementation for User Story 8
 
-- [ ] T111 [US8] Render the decision's resources, actions and exceptions in `observe` and
-  `doctor` in `src/main.rs`.
+- [ ] T111 [US8] Render the decision's resources, actions and exceptions, including each
+  resource's `held_back`, in `observe` and `doctor` in `src/main.rs`.
 - [ ] T112 [US8] Include node contention summaries, with each resource's `held_back`, in the
   coordinator status in `src/coordinator.rs`.
 - [ ] T113 [US8] Add a reason-code catalog in `src/contention.rs`: stable codes, each with one
@@ -875,8 +894,8 @@ each step.
     from `spec.md`, `plan.md` and `docs/guarantees.md`.
 
   *T134 adds `uid_min`, the principal window and background demand (FR-059).*
-- [ ] T117 Validate the provisional thresholds (SC-002–SC-004 and the SC-012 reclaim bounds) on
-  Linux with test-owned loads.
+- [ ] T117 Validate the provisional thresholds (SC-002–SC-004, the SC-012 reclaim bounds and the
+  SC-014/SC-015 utilization targets) on Linux with test-owned loads.
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
   that evidence.
@@ -903,10 +922,10 @@ each step.
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
   unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
   then starts at a cap where a delegated cgroup allows it.
-- [ ] T150 After US5, implement the allowance signal (FR-071): the supervisor publishes an
-  optional `allowance` per resource in the resource-target file whenever it changes, also
-  without a target; Python `on_resource_allowance` and TypeScript `onResourceAllowance` deliver
-  it like targets; add it to the contract fixture and the cross-SDK interop checks. Test in
+- [ ] T150 After US5, implement the allowance signal (FR-071), tests first: the supervisor
+  publishes an optional `allowance` per resource in the resource-target file whenever it changes,
+  also without a target; Python `on_resource_allowance` and TypeScript `onResourceAllowance`
+  deliver it like targets; add it to the contract fixture and the cross-SDK interop checks. Test in
   `tests/managed_supervision.rs`, `python/tests/test_worker.py` and
   `npm/tests/worker-targets.test.ts`.
 - [ ] T141 Add PSI `cpu.some` as a secondary saturation signal next to `saturation_percent`
@@ -928,9 +947,10 @@ each step.
 - **US2 (Phase 4)**: needs US1 (one authority, error classification).
 - **US3 (Phase 5)**: needs US2 (ladder, actuators).
 - **US4 (Phase 6)**: needs US2 (actuation stage, hint step).
-- **Revisions (Phase 6a)**: needs US3 and US4, and blocks US5.
+- **Revisions (Phase 6a)**: needs US3 and US4, and blocks Phase 6b.
+- **Utilization revisions (Phase 6b)**: needs Phase 6a, and blocks US5.
 - **US5 (Phase 7)**: needs US1 (quiet class, launch contract), Foundational negotiation (T016)
-  and Phase 6a.
+  and Phase 6b.
 - **US6 (Phase 8)**: needs Foundational (T014, T016). It can run alongside US2–US5, except T093,
   which needs the effective-mode resolution in T070 (US3), and T089, which builds on T122 and
   T129 (Phase 6a).

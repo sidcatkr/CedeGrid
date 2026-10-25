@@ -293,3 +293,15 @@ research:
 - **R13.** The legacy GPU keys are interpreted with a warning, not ignored (FR-031).
 - **R5.** The optional launch-time `SCHED_IDLE` for Yield First CPU is not adopted in this
   feature; launch keeps the existing non-negative nice, and caps and pauses carry the response.
+
+## Utilization revisions (2026-10-25)
+
+Constitution 2.1.0 and plan.md, "Utilization revisions before US5", supersede further parts:
+
+- **R12.** Under saturation, a contending principal whose unknown demand is below one margin
+  step is probed; a principal that does not grow into the freed capacity is satisfied at its
+  usage plus the contention floor, and max-min bounds it there.
+- **R15.** The margins are 15/5/2% on compute and 20% on memory for Yield First; the CPU
+  reserve defaults to 0 and never stacks on the margin; CPU admission charges running
+  opportunistic work at its p95 usage over 60 s. Real hosts still have to confirm SC-014 and
+  SC-015 (T117).

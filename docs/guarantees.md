@@ -44,27 +44,31 @@ sampling period with at least one kernel executing. Products can have different
 sample periods; reading every 500 ms need not produce independent samples.
 [NVIDIA utilization definition](https://docs.nvidia.com/deploy/nvml-api/structnvmlUtilization__t.html)
 
-- Reserve violations and explicit node drain request immediate reduction. Observe-only
-  records the decision; an explicitly enabled agent drains verified allocations.
-- New external workload identities or increasing external/unattributed VRAM stop
-  expansion and cause a protective reduction.
-- Reliable external compute activity causes additional policy-directed reduction,
-  even if aggregate utilization is low.
+- A floor breach, observed free VRAM below the device floor, and explicit node drain lead
+  to yielding through the ladder. Observe-only records the decision; an explicitly
+  enabled agent acts only on verified allocations.
+- New external workload identities and external or unattributed VRAM growth beyond the
+  noise tolerance block GPU admission on that device. Running work yields only for a real
+  floor breach or own usage beyond the budget.
+- External compute activity blocks GPU admission on that device; it never drains own work
+  by itself.
 - Unsupported, failed, absent-fresh-sample, or otherwise uncertain activity never
-  becomes evidence of idleness. Default modes block expansion and yield conservatively.
-  The explicit occupied mode below accepts a narrower best-effort contract.
+  becomes evidence of idleness: it blocks admission and holds the current steps, and
+  escalation waits for the bounded unknown window. The explicit occupied mode below
+  accepts a narrower best-effort contract.
 - Stable headroom permits incremental expansion only after the configured cooldown.
   The coordinator reserves each launch before dispatch and the agent rechecks locally.
 
-GPU capability modes make these limits explicit. Auto selects only fresh activity
-telemetry or conservative non-sharing behavior on a reliably observed empty device.
-Explicit contention-aware mode requires the former; non-sharing mode freezes
-expansion and drains affected opportunistic work when external contexts appear.
-Unknown basic observations block the device. Auto/non-sharing GPU assignments must
-be opportunistic because full yield conflicts with guaranteed continuity; CPU-only
-guaranteed work remains independent. The coordinator rejects incompatible placement
-and the agent verifies the contract before authorization. An empty-device pass is
-not evidence of occupied-device sharing. See [GPU operation](coordinator-work.md#gpu-capability-modes).
+Until GPU admission follows the contention modes (T085), the legacy GPU capability modes
+keep their 0.2 effect on admission. Auto selects only fresh activity telemetry or
+conservative non-sharing behavior on a reliably observed empty device. Explicit
+contention-aware mode requires the former; non-sharing mode freezes expansion and drains
+affected opportunistic work when external contexts appear. Unknown basic observations
+block the device. Auto/non-sharing GPU assignments must be opportunistic because full
+yield conflicts with guaranteed continuity; CPU-only guaranteed work remains
+independent. The coordinator rejects incompatible placement and the agent verifies the
+contract before authorization. An empty-device pass is not evidence of occupied-device
+sharing. See [GPU operation](coordinator-work.md#gpu-capability-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.
@@ -167,32 +171,33 @@ drained for it only as floor policy A allows, and a breach never stops every all
 once. An exhausted node spool budget blocks admission and is reported; nothing is drained
 because of it.
 
-No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host
-RAM and `gpu.reserve_vram_mib`/`gpu.reserve_vram_percent` per GPU stay free, by default
-max(8 GiB, 5% of RAM) and max(1 GiB, 5% of the device), never less than 512 MiB of RAM and
-512 MiB per GPU (provisional); a fixed 3 GiB per GPU applies only when configured. A floor
-is breached when observed free memory falls below it; a charge beyond the budget only
-blocks admission and never hints, drains or terminates running work. A smaller setting is raised to the minimum with a load-time
-warning. `doctor` shows every floor as it applies on the host, and a raised floor carries
-the reason code `small_floor_raised`.
-Floors always come before the fair share. A breached floor blocks admission on that
-resource and releases opportunistic work holding it. Floor policy A, the only floor
-policy, then drains Guaranteed work that holds the memory, as the last step: after
+No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host RAM
+and `gpu.reserve_vram_mib`/`gpu.reserve_vram_percent` per GPU stay free, by default
+max(8 GiB, 5% of RAM) and max(1 GiB, 5% of the device), never less than 512 MiB of RAM
+and 512 MiB per GPU (provisional); a fixed 3 GiB per GPU applies only when configured. A
+floor is breached when observed free memory falls below it. For RAM, and for GPU work
+that takes a hint, a charge beyond the budget only blocks admission and never hints,
+drains or terminates running work; GPU work without a hint channel is judged at its
+charge, since its growth cannot be bounded. A smaller setting is raised to the minimum
+with a load-time warning. `doctor` shows every floor as it applies on the host, and a
+raised floor carries the reason code `small_floor_raised`. Floors always come before the
+fair share. A breached floor blocks admission on that resource and releases
+opportunistic work holding it. Floor policy A, the only floor policy, then drains
+Guaranteed work that holds the memory, as the last step: after
 `contention.guaranteed_hint_deadline_s` (5 s) and, for RAM, after the breach has lasted
 `contention.ram.guaranteed_breach_window_s` (10 s). GPU memory breaches have no window.
 A Guaranteed allocation that is not hint-ready waits only for the window, and on the
-critical path the window is skipped.
-On Linux, every own process, Guaranteed included, marks itself as a preferred
-out-of-memory victim (`oom_score_adj` 1000) before it runs. Other platforms offer no
-unprivileged equivalent and claim none.
+critical path the window is skipped. On Linux, every own process, Guaranteed included,
+marks itself as a preferred out-of-memory victim (`oom_score_adj` 1000) before it runs.
+Other platforms offer no unprivileged equivalent and claim none.
 
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
 failed GPU allocation. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
-names the replacement settings. Every configuration key is classified as safe, bounded or
-caution. Four options are marked *caution* because they let own work hold more capacity
-within the floors: Performance mode, a floor below twice its minimum, a margin below its
-default, and a detection setting beyond its default (`saturation_percent`,
+names the replacement settings. Every configuration key is classified as safe, bounded
+or caution. Four options are marked *caution* because they let own work hold more
+capacity within the floors: Performance mode, a floor below twice its minimum, a margin
+below its default, and a detection setting beyond its default (`saturation_percent`,
 `principal_min_percent`, `noise_tolerance_mib` or `contention.uid_min` above it,
 `memory_peak_window_s` or `quiet_window_intervals` below it). Performance needs
 `contention.acknowledge_caution = ["performance_mode"]` to load, a lower margin needs
@@ -200,16 +205,17 @@ default, and a detection setting beyond its default (`saturation_percent`,
 below twice its minimum without `"small_floor"` loads, so 0.2 files keep loading, but is
 raised to twice the minimum with a warning, given at load or, for a floor a percentage
 sets, when the agent first samples the host; it applies as configured only once
-confirmed. `doctor`, `status` and node reports list active caution options, and `doctor`
-lists the keys and values each covers. `noise_tolerance_mib` is at most 1024 MiB, and the
-agent refuses to start when it exceeds half of any GPU's floor. Settings that lengthen
-reclaim are bounded: monitor intervals at most 10 s, kernel freshness at most 20
-intervals, GPU sample age, drain timeout and termination grace at most 60 s. Decisions and
-node reports show, per resource, how much is held back and why. Without
-`contention.max_mode`, a job may request at most the node's most aggressive configured
-mode, so no job runs in Performance unless the operator chose it.
-Policy recordings without an allocation class retain the legacy opportunistic
-default; live observation copies the required class from the durable execution record.
+confirmed. `doctor` and node reports list active caution options (`status` will show
+them from the node reports, T112), and `doctor` lists the keys and values each covers.
+`noise_tolerance_mib` is at most 1024 MiB, and the agent refuses to start when it
+exceeds half of any GPU's floor. Settings that lengthen reclaim are bounded: monitor
+intervals at most 10 s, kernel freshness at most 20 intervals, GPU sample age, drain
+timeout and termination grace at most 60 s. Decisions and node reports show, per
+resource, how much is held back and why. Without `contention.max_mode`, a job may
+request at most the node's most aggressive configured mode, so no job runs in
+Performance unless the operator chose it. Policy recordings without an allocation class
+retain the legacy opportunistic default; live observation copies the required class from
+the durable execution record.
 
 The legacy `gpu.execution_mode` is read at load time, with a warning on stderr that
 names the replacement: `contention_aware` and `best_effort_occupied` set GPU compute and

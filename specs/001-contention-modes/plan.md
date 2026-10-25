@@ -54,7 +54,7 @@ graduated, reversible yield ladder. Six pieces carry it:
   - One NVML scan per interval per node, instead of N+1.
   - Validation targets from `docs/validation.md`: manager CPU ≤ 0.1/0.5 logical CPU, RSS ≤
     512 MiB.
-  - Success criteria SC-002 to SC-004, SC-012 and SC-013 use the provisional, configurable
+  - Success criteria SC-002 to SC-004 and SC-012 to SC-016 use the provisional, configurable
     defaults.
 - **Constraints.**
   - Rootless operation.
@@ -74,7 +74,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (2.1.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance, small floors, margins below their defaults and detection thresholds above theirs are caution options that apply only once confirmed; the tuning knobs were classed in the third analysis pass (T143), and delay tunables stay bounded rather than caution because they are the reclaim bounds themselves. Negative nice is clamped to 0. No priority is ever raised. Work-conserving (2.1.0): margins are small on compute, the CPU reserve never stacks on the margin, a floor breach needs observed free memory below the floor, and every configuration key has a class (safe, bounded, caution) checked by a test. | Pass |
+| II. No harm in any mode (2.1.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance, small floors, margins below their defaults and detection thresholds above theirs are caution options that apply only once confirmed; the tuning knobs were classed in the third analysis pass (T143), and delay tunables stay bounded rather than caution because they are the reclaim bounds themselves. Negative nice is clamped to 0. No priority is ever raised. Work-conserving (2.1.0): the default Neutral keeps 5% of compute and Performance 2%; Yield First's 15% of compute and 20% of memory are a more yielding mode the operator chooses, whose cost falls only on own work; the CPU reserve never stacks on the margin; a floor breach needs observed free memory below the floor; and every configuration key has a class (safe, bounded, caution) checked by a test. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -152,15 +152,16 @@ Each new module is a top-level `mod x;` and is added to `ALLOWLIST`.
    rules.
 5. **Targets (US4).** Target file, SDK APIs, children, ack.
 6. **Revisions before US5 (Phase 6a).** B1–B14 below.
-7. **GPU sharing and placement (US5).** Launch recheck by mode; coordinator per-resource
+7. **Utilization revisions (Phase 6b).** U1–U12 below, then US5.
+8. **GPU sharing and placement (US5).** Launch recheck by mode; coordinator per-resource
    admission.
-8. **Configuration and compatibility (US6).** `[contention]`, deprecations, negotiation,
+9. **Configuration and compatibility (US6).** `[contention]`, deprecations, negotiation,
    schema migrations, mixed-version matrix.
-9. **Setup (US7).** Flags first (shared with agents in spec 002), then the terminal
+10. **Setup (US7).** Flags first (shared with agents in spec 002), then the terminal
    interface.
-10. **Observability (US8).** `observe`, `doctor`, `status` and node reports; reason codes;
+11. **Observability (US8).** `observe`, `doctor`, `status` and node reports; reason codes;
    `docs/guarantees.md`.
-11. **Native evidence.** cgroup and GPU gates (quickstart §4–5), after which thresholds may be
+12. **Native evidence.** cgroup and GPU gates (quickstart §4–5), after which thresholds may be
     retuned.
 
 ## Project Structure
@@ -257,7 +258,7 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   thresholds above theirs are caution options with confirmation.
 - **B4 Ordered targets.** `own_allowance` uses the table in
   [data-model.md](data-model.md#mode-targets-contentionown_allowance), with a Neutral idle margin
-  of its own (20%, between Yield First's and Performance's, decided after the review).
+  of its own (between Yield First's and Performance's, decided after the review; 5% since U3).
   "Contended" replaces "saturated": saturation plus an active external principal, or unknown
   activity. Under contention Yield First targets zero for opportunistic work, which the ladder
   applies as a pause first, then after `pause_bound_s` as a cap or hint at the 5% minimum duty

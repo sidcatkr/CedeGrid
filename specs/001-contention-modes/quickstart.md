@@ -26,6 +26,10 @@ cargo test --locked --test policy -- d1_ d2_ d3_ d4_ d5_ d6_
   - Performance floors
   - no `pause` for Guaranteed work
   - envelope breach handled per resource
+  - idle-host utilization and a steady small external user (SC-014, SC-015):
+    `cargo test --locked --test contention -- sc_014 sc_015`
+  - real floor breaches only, and each resource's admission and `held_back`:
+    `cargo test --locked --test policy -- charge_beyond each_resource_reports decisions_show`
 
 ## 2. Single authority and error handling (Linux; macOS for the rootless parts)
 

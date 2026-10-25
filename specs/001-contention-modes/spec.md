@@ -68,7 +68,9 @@ thresholds.
   1000) that stay above `principal_min_percent` for a sustained window, plus the CedeGrid
   account. A principal leaves with hysteresis. Usage by lower user IDs is background external
   demand, subtracted from capacity. Unreadable owners still count as one external principal.
-- Q: How fast must capacity come back? → A: CPU within 2 monitor intervals in every mode. RAM
+- Q: How fast must capacity come back? → A: CPU within 2 monitor intervals in Yield First and
+  Neutral; Performance follows what external work takes, at least its margin per interval
+  (revised 2026-10-25, SC-002). RAM
   and GPU memory within hint deadline + drain timeout + termination grace, with a shorter bound
   on the critical floor path. These bounds are provisional and configurable.
 - Q: What may happen to a Guaranteed allocation? → A: It is never paused. Its CPU is never
@@ -92,7 +94,8 @@ thresholds.
   and capacity minus observed external usage minus its margin, so it gives back what external
   demand takes and never goes below the fair share.
 - Q: How is CPU charged for admission? → A: Running opportunistic work at its p95 usage over
-  60 s; pending and Guaranteed work at their requests. RAM and GPU memory stay request-based.
+  60 s; pending work at its request and Guaranteed work at max(request, observed). RAM and GPU
+  memory stay request-based.
 
 ## Terms
 
@@ -227,9 +230,10 @@ compare own usage over time with that mode's definition, including unknown and o
    **Then** own work steps down promptly, keeping the mode's generous margin free. **When** the
    resource is contended, **Then** opportunistic CPU work is paused within 2 monitor intervals,
    then runs at the minimum duty after `pause_bound_s`, while Guaranteed work keeps its CPU
-   request. **When** external demand fits in the margin, **Then** nothing is paused, also when own
-   work saturated the resource before its cap. **When** activity is unknown, **Then** it counts
-   as external demand.
+   request; own work that saturated the resource itself is first capped to the margin, and a
+   demand smaller than one margin step is probed instead (FR-020). **When** external demand fits
+   in the margin, **Then** nothing is paused. **When** activity is unknown, **Then** it counts as
+   external demand.
 2. **Given** Neutral and one contending principal, **When** both principals want more than the
    capacity, **Then** own work converges to its fair share and does not yield below it, except
    where a no-harm floor requires it (see FR-021). External demand can always reclaim anything
@@ -238,8 +242,8 @@ compare own usage over time with that mode's definition, including unknown and o
 3. **Given** Performance on an idle host, **When** own work ramps up, **Then** it uses all
    capacity external demand is not using, minus a small safety margin, and scales up quickly.
    **When** external demand grows, **Then** own work yields what is needed to restore the margin
-   and floors. **When** the resource is contended, **Then** compute yields down to the Neutral
-   fair share and never below it.
+   and floors. **When** the resource is contended, **Then** compute keeps what external demand
+   does not take, minus the margin, and never goes below the Neutral fair share.
 4. **Given** any mode, **When** a no-harm floor would be crossed, **Then** own work steps down
    until the floor holds, whatever the mode would otherwise allow.
 5. **Given** any mode, **When** CedeGrid acts, **Then** it acts only on own processes. No external
@@ -453,18 +457,21 @@ node reports with the expected per-resource values at each step.
   contains the acknowledgement entry `performance_mode`. With the entry, CedeGrid loads it and
   reports the caution option as active.
 - **Configuration edited by hand to lower a margin or relax detection.** A margin below its
-  default, or a `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its
-  default, fails to load unless the file contains the entry `reduced_margin` or
-  `relaxed_detection`. With the entry, CedeGrid reports the caution option as active.
+  default, or a detection setting beyond its default (FR-045: `saturation_percent`,
+  `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above it, `memory_peak_window_s`
+  or `quiet_window_intervals` below it), fails to load unless the file contains the entry
+  `reduced_margin` or `relaxed_detection`. With the entry, CedeGrid reports the caution option as
+  active.
 - **A floor set near its minimum, or below it.** A floor is "near" its minimum below twice the
   minimum. A floor below the minimum is raised to it. A floor near the minimum without the
   `small_floor` entry still loads, so 0.2 files keep loading, but is raised to twice the minimum
   with a warning; it applies as configured only once confirmed. The warning comes at load, or,
   for a floor a percentage sets, when the agent first samples the host. Setup always records the
   entry.
-- **A job requested far more memory than it uses.** Free memory above the floor is no breach:
-  the job is never stepped, and admission on that resource stays blocked while its charge
-  exceeds the budget.
+- **A job requested far more memory than it uses.** Free memory above the floor is no breach.
+  A RAM job, or a GPU job that takes hints, is never stepped for it, and admission on that
+  resource stays blocked while its charge exceeds the budget. A GPU job without a hint channel
+  is judged at its charge, since its growth cannot be bounded (FR-066).
 - **A small steady external user beside own work that keeps the host busy.** It is probed once
   and recorded as satisfied; own work keeps its target instead of cycling down to the fair
   share.
@@ -628,7 +635,8 @@ node reports with the expected per-resource values at each step.
   sized by `ram.reserve_percent` or `gpu.reserve_vram_percent` is judged on the host, after the
   percentage is applied; its warning comes when the agent first samples the host.
 - **FR-024**: Guaranteed allocations:
-  - MUST NOT be paused;
+  - MUST NOT be paused, which also rules out the pause duty cycle that approximates a GPU compute
+    share: GPU compute steps are unavailable for Guaranteed work;
   - MAY be lowered in share and hinted;
   - MAY have CPU usage above their request capped, but MUST NOT be capped below their request;
   - MUST NOT be drained by automatic yielding, except to restore a RAM or GPU memory floor or the
@@ -656,7 +664,9 @@ node reports with the expected per-resource values at each step.
 
   Each is set per resource where it applies, defaults to the provisional value in this spec, and
   is documented. Margins are ordered as FR-065 requires. A margin below its default, or a
-  detection setting beyond its default (FR-045), is a caution option.
+  detection setting beyond its default (FR-045), is a caution option. Fixed mechanism constants
+  are exempt and documented in the data model: a cap binds at 95% of its target and counts as
+  effective up to 105%, and FR-014's minimum duty is 5%.
 
 **GPU sharing and placement**
 
@@ -670,6 +680,8 @@ node reports with the expected per-resource values at each step.
 - **FR-029**: Nodes MUST advertise only the control capabilities they can actually apply.
 - **FR-064**: `contention.never_share_occupied_gpus` (default false) MUST, when set, block new own
   GPU work on any device with an external context or unknown external processes, in every mode.
+  Own work already running on a device that becomes occupied is not drained for that alone;
+  the device's mode and floors govern it.
 
 **Configuration and compatibility**
 
@@ -689,7 +701,7 @@ node reports with the expected per-resource values at each step.
     | absent or `auto` | Neutral | none |
     | `contention_aware` | Neutral | names `contention.gpu_compute.mode` and `contention.gpu_memory.mode` |
     | `conservative_non_sharing` | `contention.never_share_occupied_gpus = true`, orthogonal to the mode | names `contention.never_share_occupied_gpus` |
-    | `best_effort_occupied` | Neutral | states that the PID list is no longer used |
+    | `best_effort_occupied` | Neutral | states that the PID list is no longer used; it is still validated as in 0.2 so such files load unchanged |
 
   - A non-empty `gpu.best_effort_external_processes` MUST warn that the list is no longer used.
   - `doctor` MUST show how a legacy value was interpreted.
@@ -703,10 +715,10 @@ node reports with the expected per-resource values at each step.
   memory add the reclaim backoff (FR-061). Until per-resource admission is placed on (US5),
   CPU/RAM admission opens once both have cooled. For CPU admission, running opportunistic work
   is charged at its p95 usage over `contention.cpu.admission_usage_window_s` (default 60 s);
-  pending and Guaranteed work keep their requests, and RAM and GPU memory admission stays
-  request-based.
+  pending work is charged in full, Guaranteed work at max(request, observed), and RAM and GPU
+  memory admission stays request-based.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
-  usage beyond its budget. The n-th episode within `memory_peak_window_s` adds
+  usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
   (default 1 s doubling to 30 s); the first episode adds 1 s. A window without an episode clears
   the count.
@@ -853,7 +865,7 @@ node reports with the expected per-resource values at each step.
 
 - **FR-066**: A memory floor breach MUST be observed free memory below the floor (RAM: available
   memory; GPU: total minus used). Running RAM work is judged on usage. Running GPU memory work
-  is judged on usage when it is hint-ready, with its hint target as its cap, and at
+  is judged on usage when it is hint-ready, since its hint bounds its growth, and at
   max(request, observed) otherwise, since its growth cannot be bounded. A charge-only shortfall
   MUST block admission on that resource and MUST NOT hint, drain or terminate running work.
   Envelope breaches of running memory work use the same rule.
@@ -907,15 +919,18 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     below the tolerance (default 256 MiB).
   - In the D5/D6 replay scenarios: zero drains caused by a single interval of measurement skew
     or one missing allocation measurement.
-- **SC-002**: In every mode, CPU demanded by external work is returned within 2 monitor intervals
-  of the demand appearing, including on a host that own work saturates: own CPU usage reaches the
-  mode's contended target, which in Yield First is opportunistic work paused, then at the
-  minimum duty after `pause_bound_s`, and the fair share in Neutral. Where own work saturated
-  the resource before its first cap, Yield First's first step is a cap to the margin within the
-  fair share, so at least the fair share is back within the same bound. Performance gives back
-  what external work takes, at least its margin per interval while that demand grows, and never
-  goes below the fair share. With demand that fits in the margin, Yield First keeps its 15%
-  margin free. No work is drained or terminated when CPU is the only contended resource.
+- **SC-002**: In Yield First and Neutral, CPU demanded by external work is returned within 2
+  monitor intervals of the demand appearing, including on a host that own work saturates: own
+  CPU usage reaches the mode's contended target, which in Yield First is opportunistic work
+  paused, then at the minimum duty after `pause_bound_s`, and in Neutral the fair share. Where own
+  work saturated the resource before its first cap, Yield First's first step is a cap to the
+  margin within the fair share, so at least the fair share is back within the same bound; a
+  demand smaller than one margin step is probed instead (FR-021). In Performance, own CPU usage
+  falls by at least its margin per interval while external demand grows into the freed
+  capacity, so it reaches the fair share within ⌈(own usage − fair share) ÷ margin⌉ intervals
+  (24 intervals, 12 s, from 98% with the 2% margin), and never goes below it. With demand that
+  fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
+  when CPU is the only contended resource.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
@@ -951,7 +966,7 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-012**: Reclaim bounds, each measured from the first observation of the demand or breach to
   the step that frees the resource, for memory the forced termination of own work that has not
   released it:
-  - CPU: 2 monitor intervals in every mode (SC-002).
+  - CPU: 2 monitor intervals in Yield First and Neutral; Performance as SC-002 states.
   - RAM and GPU memory, opportunistic work: at most hint deadline + drain timeout + termination
     grace + 1 monitor interval (defaults 5 + 3 + 2 + 0.5 = 10.5 s); without a hint, drain
     timeout + grace + 1 interval (5.5 s).
@@ -983,7 +998,7 @@ times assume the default 500 ms monitor interval.
 | GPU memory noise tolerance | 256 MiB per device | Larger than typical driver and context jitter, and small next to common device sizes. It was the maintainer's proposal. |
 | Yield First margin | 15% of compute, 20% of memory beyond the floor | Generous by design, yet compute is reclaimed within an interval, so it needs less than memory. |
 | Yield First response time | 3 monitor intervals (1.5 s) for escalating past a step that did not free the excess | One interval to observe, one to confirm, one to apply and measure. The first step applies at once, so contended CPU returns within 2 intervals (SC-002). |
-| CPU reclaim | 2 monitor intervals in every mode | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval. |
+| CPU reclaim | 2 monitor intervals in Yield First and Neutral; in Performance at least the margin per interval down to the fair share | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval, except for Performance, which keeps what external demand does not take, and a probed small demand. |
 | Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
 | Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
 | Performance scale-up | 1 step per 2 s | One heartbeat interval per step, which supports the 30 s ramp target. |

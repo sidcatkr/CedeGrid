@@ -42,8 +42,9 @@ never let CedeGrid act on a process it does not own.
   - leave Principle I and the floors intact.
 - **Work-conserving.** Within these limits, capacity no workload wants MUST NOT sit idle. A
   reserve held back from own work is justified only by how slowly its resource can be
-  reclaimed. CPU and GPU compute are reclaimed within a monitor interval, so they keep
-  near-zero idle reserves; RAM and GPU memory keep the floors.
+  reclaimed: by default, CPU and GPU compute, reclaimed within a monitor interval, keep only
+  small idle margins, and RAM and GPU memory keep the floors. A more yielding mode the operator
+  chooses MAY keep more idle, since that cost falls only on own work.
 
 Rationale: CedeGrid runs only on spare capacity, so running it must never make another workload
 fail. An operator may trade away their own work's progress, but never another workload's

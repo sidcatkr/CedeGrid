@@ -9,8 +9,9 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   "schema_version": 3,
   "resources": {
     "cpu": {"mode": "neutral", "effective_mode": "neutral", "own": [3800, 4000], "external": 2900,
-            "unattributed": 120, "target_share": 4000, "floor": 0, "admission": "held",
-            "measurement": "known", "held_back": {"margin": 400, "contention": 2700},
+            "unattributed": 120, "target_share": 4000, "floor": 0,
+            "admission": {"state": "held", "reason": "the resource is cooling down"},
+            "measurement": {"state": "known"}, "held_back": {"margin": 400, "contention": 2700},
             "reasons": [{"code": "contention_converging", "text": "..."}]},
     "gpu_memory:GPU-…": {"mode": "neutral", "activity": "quiet", "...": "..."}
   },
@@ -37,7 +38,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 | Command | Shows |
 |---|---|
 | `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers and the keys and values each covers (`caution_options`: name, marker, settings), available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
+| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers and the keys and values each covers (`caution_options`: name, marker, settings), each resource's admission and `held_back` (T111), available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
 | `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports, including `held_back` (T112) |
 
 ## Reason codes

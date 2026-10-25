@@ -165,9 +165,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 - **Relax.** While a resource is not contended, a held cap or hint rises toward the mode's
   target at the mode's scale-up rate, so own work recovers capacity that external demand no
   longer uses.
-- **Effective cap.** A cap whose usage follows its target holds while the target moves down, as
-  in Performance and probing; it escalates only when usage stays above the cap past the
-  response time.
+- **Effective cap.** A cap whose usage follows its target, within 105% of it, holds while the
+  target moves down, as in Performance and probing; it escalates only when usage stays above
+  the cap past the response time. A cap binds while usage is at least 95% of its target. These
+  tolerances and FR-014's 5% minimum duty are fixed mechanism constants (FR-025).
 - **Hold.** Unknown measurement or authority loss keeps the current step (FR-008, FR-015).
 - **Reverse.**
   - When external demand falls below `hysteresis_percent` of the trigger for the dwell time,
@@ -203,6 +204,7 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - `deadline_unix_ms`
   - `step`
   - `targets: {cpu_millicores?, ram_mib?, gpu_memory_mib?{uuid: mib}}`
+  - `allowance?`: the same shape, what own work may grow to now (FR-071, with T150)
 - Written atomically. The format is in
   [contracts/resource-target-file.md](contracts/resource-target-file.md).
 
@@ -243,8 +245,10 @@ in their contended target and in scale-up rate (10 s and 2 s per step).
 
 Per resource, in resource units, zero amounts left out: `floor`, `reserve` (the CPU reserve
 where it exceeds the margin), `margin`, `contention` (left to contending external demand),
-`peak`, `noise_tolerance`, `unknown`, `cooldown`, `backoff`, `charge_shortfall` (admission
-capacity held by charges above usage) (FR-069).
+`peak`, `noise_tolerance` (external GPU memory growth within this much goes unseen; reported
+for information, not subtracted from the budget), `unknown`, `cooldown`, `backoff`,
+`charge_shortfall` (admission capacity held by charges above usage) (FR-069). Each resource also
+reports its `admission`: open, held or blocked, with a reason (FR-028, FR-038).
 
 ## Judged amounts (`src/policy.rs`)
 
