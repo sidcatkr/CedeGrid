@@ -3805,3 +3805,307 @@ fn gpu_memory_admission_waits_for_the_mode_cooldown() {
         assert_eq!(headroom > 0, open, "at {now}");
     }
 }
+
+/// The allowance signal (FR-071): what each running allocation may grow to now.
+mod allowance {
+    use super::*;
+    use cedegrid::contention::ContentionMode;
+
+    fn cfg(mode: ContentionMode) -> Config {
+        let mut cfg = config();
+        cfg.cpu.reserve_physical_cores = 0;
+        // The default margins, so a Neutral scale-up step is 5% of capacity.
+        cfg.contention.cpu.neutral_margin_percent = None;
+        cfg.contention.default_mode = mode;
+        cfg.contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        cfg
+    }
+
+    fn job(id: &str, cpu: u64, ram: u64, class: AllocationClass) -> Allocation {
+        let mut job = allocation(
+            id,
+            AllocationPhase::Running,
+            resources(cpu, ram, 0),
+            Some(resources(cpu, ram, 0)),
+        );
+        job.class = class;
+        job
+    }
+
+    /// The host: 8 CPUs, 32 000 MiB, external CPU and RAM usage beside own work.
+    fn host(jobs: &[Allocation], external_cpu: u64, external_ram: u64) -> Snapshot {
+        let mut snap = snapshot();
+        let own_cpu: u64 = jobs
+            .iter()
+            .filter_map(|j| j.observed.as_ref())
+            .map(|o| o.cpu_millicores)
+            .sum();
+        let own_ram: u64 = jobs
+            .iter()
+            .filter_map(|j| j.observed.as_ref())
+            .map(|o| o.ram_mib)
+            .sum();
+        snap.cpu_busy_millicores = Some((own_cpu + external_cpu).min(8000));
+        snap.available_ram_mib = Some(32_000 - own_ram - external_ram);
+        snap
+    }
+
+    fn evaluate(mode: ContentionMode, jobs: Vec<Allocation>, external: (u64, u64)) -> Decision {
+        let snap = host(&jobs, external.0, external.1);
+        PolicyEngine::new()
+            .evaluate(
+                &cfg(mode),
+                &snap,
+                &PolicyInput {
+                    allocations: jobs,
+                    facts: rootless(&["a", "b", "c", "d"]),
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap()
+    }
+
+    proptest! {
+        /// If every running allocation grows to its allowance at once, the totals
+        /// stay within the mode's allowance (and so above every floor), and for the
+        /// same state Yield First <= Neutral <= Performance per allocation.
+        #[test]
+        fn growing_to_every_allowance_at_once_stays_within_the_mode(
+            usages in proptest::collection::vec((0u64..2500, 0u64..6000, any::<bool>()), 1..4),
+            pending in 0u64..1500,
+            external_cpu in 0u64..2500,
+            external_ram in 0u64..6000,
+        ) {
+            let ids = ["a", "b", "c", "d"];
+            let mut jobs: Vec<Allocation> = usages
+                .iter()
+                .enumerate()
+                .map(|(i, (cpu, ram, guaranteed))| {
+                    let class = if *guaranteed { AllocationClass::Guaranteed } else { AllocationClass::Opportunistic };
+                    job(ids[i], *cpu, *ram, class)
+                })
+                .collect();
+            jobs.push(allocation("d", AllocationPhase::Pending, resources(pending, pending, 0), None));
+            let mut previous: Option<BTreeMap<String, ResourceAmounts>> = None;
+            for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral, ContentionMode::Performance] {
+                let decision = evaluate(mode, jobs.clone(), (external_cpu, external_ram));
+                let allowances = decision.allowances.clone();
+                // Steps the policy took already cap their allowances; check only
+                // states it leaves alone.
+                if !decision.actions.is_empty() {
+                    previous = None;
+                    continue;
+                }
+                let sum = |pick: &dyn Fn(&ResourceAmounts) -> u64| -> u64 {
+                    allowances.values().map(pick).sum::<u64>()
+                };
+                // Growth is invited only within the mode's allowance; what running
+                // work already holds (Guaranteed at its request) may exceed it.
+                let held = |pick: &dyn Fn(&Resources) -> u64| -> u64 {
+                    jobs.iter()
+                        .filter(|j| j.phase == AllocationPhase::Running)
+                        .map(|j| pick(j.observed.as_ref().unwrap()).max(
+                            if j.class == AllocationClass::Guaranteed { pick(&j.requested) } else { 0 },
+                        ))
+                        .sum::<u64>()
+                };
+                prop_assert!(
+                    sum(&|a| a.cpu_millicores.unwrap_or(0)) + pending
+                        <= decision.managed_budget.cpu_millicores.max(held(&|r| r.cpu_millicores) + pending),
+                    "{mode:?} cpu {allowances:?} budget {:?}", decision.managed_budget
+                );
+                prop_assert!(
+                    sum(&|a| a.ram_mib.unwrap_or(0)) + pending
+                        <= decision.managed_budget.ram_mib.max(held(&|r| r.ram_mib) + pending),
+                    "{mode:?} ram {allowances:?} budget {:?}", decision.managed_budget
+                );
+                if let Some(previous) = &previous {
+                    for (id, amounts) in &allowances {
+                        let before = &previous[id];
+                        prop_assert!(before.cpu_millicores <= amounts.cpu_millicores, "{mode:?} {id}");
+                        prop_assert!(before.ram_mib <= amounts.ram_mib, "{mode:?} {id}");
+                    }
+                }
+                previous = Some(allowances);
+            }
+        }
+    }
+
+    /// Each running allocation gets its usage plus an equal part of the room under
+    /// the mode's allowance after pending reservations; a Guaranteed allocation
+    /// never less than its request, and no allocation more than the envelope.
+    #[test]
+    fn the_allowance_is_usage_plus_an_equal_part_of_the_room() {
+        let decision = evaluate(
+            ContentionMode::Neutral,
+            vec![
+                job("a", 1000, 2000, AllocationClass::Opportunistic),
+                job("b", 500, 1000, AllocationClass::Opportunistic),
+            ],
+            (0, 0),
+        );
+        let budget = &decision.managed_budget;
+        let a = &decision.allowances["a"];
+        let b = &decision.allowances["b"];
+        // The room is shared equally, less one publish threshold per allocation.
+        let cpu_room = budget.cpu_millicores - 1500 - 2 * 80;
+        assert_eq!(a.cpu_millicores, Some(1000 + cpu_room / 2));
+        assert_eq!(b.cpu_millicores, Some(500 + cpu_room / 2));
+        let ram_room = budget.ram_mib - 3000 - 2 * 256;
+        assert_eq!(a.ram_mib, Some(2000 + ram_room / 2));
+        // A Guaranteed allocation using less than its request keeps the request.
+        let mut guaranteed = job("c", 100, 100, AllocationClass::Guaranteed);
+        guaranteed.requested = resources(4000, 20_000, 0);
+        let decision = evaluate(ContentionMode::YieldFirst, vec![guaranteed], (6000, 0));
+        let c = &decision.allowances["c"];
+        assert!(c.cpu_millicores.unwrap() >= 4000, "{c:?}");
+        assert!(c.ram_mib.unwrap() >= 20_000, "{c:?}");
+        // The operator envelope bounds every allowance.
+        let snap = host(
+            &[job("a", 1000, 1000, AllocationClass::Opportunistic)],
+            0,
+            0,
+        );
+        let decision = PolicyEngine::new()
+            .evaluate(
+                &cfg(ContentionMode::Performance),
+                &snap,
+                &PolicyInput {
+                    allocations: vec![job("a", 1000, 1000, AllocationClass::Opportunistic)],
+                    facts: rootless(&["a"]),
+                    envelope: Some(resources(3000, 9000, 0)),
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap();
+        assert!(decision.allowances["a"].cpu_millicores.unwrap() <= 3000);
+        assert!(decision.allowances["a"].ram_mib.unwrap() <= 9000);
+    }
+
+    /// Publishing has no churn: a fall publishes at once, a rise at most once per
+    /// scale-up interval by at most one scale-up step (the mode's margin of
+    /// capacity), and only changes beyond the contention floor (CPU) or the noise
+    /// tolerance (memory) publish.
+    #[test]
+    fn allowances_fall_at_once_and_rise_one_step_per_interval() {
+        let cfg = cfg(ContentionMode::Neutral);
+        let mut engine = PolicyEngine::new();
+        let mut run = |external: u64, usage: u64, now: u64| -> u64 {
+            let jobs = vec![job("a", usage, 1000, AllocationClass::Opportunistic)];
+            let snap = host(&jobs, external, 0);
+            engine
+                .evaluate(
+                    &cfg,
+                    &snap,
+                    &PolicyInput {
+                        allocations: jobs,
+                        facts: rootless(&["a"]),
+                        ..PolicyInput::default()
+                    },
+                    now,
+                )
+                .unwrap()
+                .allowances["a"]
+                .cpu_millicores
+                .unwrap()
+        };
+        let first = run(0, 1000, 0);
+        // External CPU appears: the allowance falls at once.
+        let fallen = run(3000, 1000, 500);
+        assert!(fallen + 2000 < first, "{first} -> {fallen}");
+        // A small external change within the 80m floor does not publish.
+        assert_eq!(run(3050, 1000, 1000), fallen);
+        // External CPU leaves: the allowance rises one 400m step (5% of 8000m) per
+        // 10 s scale-up interval.
+        let mut now = 1500;
+        let mut published = vec![];
+        while now <= 31_500 {
+            published.push((now, run(0, 1000, now)));
+            now += 500;
+        }
+        let rises: Vec<(u64, u64)> = published
+            .windows(2)
+            .filter(|w| w[1].1 != w[0].1)
+            .map(|w| (w[1].0, w[1].1 - w[0].1))
+            .collect();
+        assert!(!rises.is_empty(), "{published:?}");
+        assert!(rises.iter().all(|(_, step)| *step <= 400), "{rises:?}");
+        assert!(
+            rises.windows(2).all(|w| w[1].0 - w[0].0 >= 10_000),
+            "{rises:?}"
+        );
+    }
+
+    /// While a resource's measurement is unknown, the allowance is current usage.
+    #[test]
+    fn an_unknown_measurement_invites_no_growth() {
+        let jobs = vec![job("a", 1000, 3000, AllocationClass::Opportunistic)];
+        let mut snap = host(&jobs, 0, 0);
+        snap.cpu_busy_millicores = None;
+        let decision = PolicyEngine::new()
+            .evaluate(
+                &cfg(ContentionMode::Neutral),
+                &snap,
+                &PolicyInput {
+                    allocations: jobs,
+                    facts: rootless(&["a"]),
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(decision.allowances["a"].cpu_millicores, Some(1000));
+        assert!(decision.allowances["a"].ram_mib.unwrap() > 3000);
+    }
+
+    /// A worker that grows to its published allowance never triggers a step, on an
+    /// idle host and beside a steady 12.5% external CPU user, in every mode.
+    #[test]
+    fn growing_to_the_published_allowance_triggers_no_step() {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
+            for external in [0, 1000] {
+                let cfg = cfg(mode);
+                let mut engine = PolicyEngine::new();
+                let (mut cpu, mut ram) = (500u64, 1000u64);
+                let mut now = 0;
+                while now < 300_000 {
+                    let jobs = vec![job("a", cpu, ram, AllocationClass::Opportunistic)];
+                    let snap = host(&jobs, external, 0);
+                    let decision = engine
+                        .evaluate(
+                            &cfg,
+                            &snap,
+                            &PolicyInput {
+                                allocations: jobs,
+                                facts: rootless(&["a"]),
+                                ..PolicyInput::default()
+                            },
+                            now,
+                        )
+                        .unwrap();
+                    assert!(
+                        decision.actions.is_empty(),
+                        "{mode:?} external {external} at {now}: cpu {cpu} ram {ram} {:?}",
+                        decision.actions
+                    );
+                    let allowance = &decision.allowances["a"];
+                    cpu = allowance.cpu_millicores.unwrap();
+                    ram = allowance.ram_mib.unwrap();
+                    now += 500;
+                }
+                assert!(
+                    cpu > 5000,
+                    "{mode:?} external {external}: grew only to {cpu}"
+                );
+            }
+        }
+    }
+}

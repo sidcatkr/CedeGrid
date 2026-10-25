@@ -241,15 +241,7 @@ pub const ACK_FILE: &str = "resource-target.ack";
 const TARGET_TEMPORARY: &str = ".resource-target.json.tmp";
 
 /// Per-resource amounts in a target file; unset amounts carry no target.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TargetAmounts {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_millicores: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ram_mib: Option<u64>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub gpu_memory_mib: std::collections::BTreeMap<String, u64>,
-}
+pub type TargetAmounts = crate::model::ResourceAmounts;
 
 /// A target file (contracts/resource-target-file.md).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

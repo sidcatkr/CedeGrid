@@ -151,6 +151,8 @@ pub struct PolicyEngine {
     probes: BTreeMap<ResourceKey, crate::contention::DemandProbe>,
     /// When each principal with a satisfied record was last seen, per resource.
     principal_seen: BTreeMap<ResourceKey, BTreeMap<Option<u32>, u64>>,
+    /// Each allocation's published allowance per resource, and when it last rose.
+    allowance_published: BTreeMap<(String, ResourceKey), (u64, u64)>,
     /// Running opportunistic CPU usage over the admission window, per allocation,
     /// with the time of its first sample.
     cpu_usage: BTreeMap<String, (u64, std::collections::VecDeque<(u64, u64)>)>,
@@ -2398,6 +2400,160 @@ impl PolicyEngine {
         for (key, state) in admissions {
             statuses.entry(key).or_default().admission = Some(state);
         }
+        // The allowance (FR-071): what each running allocation may grow to now
+        // without causing a step. Its usage plus an equal part of the room under
+        // the mode's allowance after pending reservations, less one publish
+        // threshold each, so values a small fall leaves published stay within it.
+        let mut allowances: BTreeMap<String, ResourceAmounts> = BTreeMap::new();
+        let mut allowance_published = BTreeMap::new();
+        {
+            let mut keys = vec![
+                (ResourceKey::Cpu, cpu_unknown || cpu_held, cpu_capacity),
+                (
+                    ResourceKey::Ram,
+                    ram_unknown || ram_held,
+                    snapshot.total_ram_mib,
+                ),
+            ];
+            for gpu in &snapshot.gpus {
+                keys.push((
+                    ResourceKey::GpuMemory(gpu.uuid.clone()),
+                    false,
+                    gpu.total_memory_mib,
+                ));
+            }
+            for (key, unknown, capacity) in keys {
+                let kind = key.kind();
+                let unknown = unknown
+                    || statuses
+                        .get(&key)
+                        .is_some_and(|s| s.measurement == Some(Measurement::Unknown));
+                let thresholds = config.contention.thresholds(kind);
+                let pick = |r: &Resources| match &key {
+                    ResourceKey::Cpu => r.cpu_millicores,
+                    ResourceKey::Ram => r.ram_mib,
+                    ResourceKey::GpuCompute(uuid) | ResourceKey::GpuMemory(uuid) => {
+                        r.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                    }
+                };
+                let mode_allowance = pick(&budget);
+                let on_resource = |a: &Allocation| match &key {
+                    ResourceKey::GpuMemory(uuid) => a.requested.gpu_memory_mib.contains_key(uuid),
+                    _ => true,
+                };
+                let guaranteed =
+                    |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
+                // What an allocation holds as yielding judges it; Guaranteed work
+                // holds at least its request.
+                let held = |a: &Allocation| -> u64 {
+                    let usage = match (&key, &a.observed) {
+                        (ResourceKey::Cpu, Some(observed)) => observed.cpu_millicores,
+                        (ResourceKey::Ram, Some(observed)) => observed.ram_mib,
+                        (ResourceKey::GpuMemory(uuid), Some(observed))
+                            if input.facts.get(&a.id).is_some_and(|f| f.hint_ready) =>
+                        {
+                            observed.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                        }
+                        _ => pick(&charges[&a.id]),
+                    };
+                    if guaranteed(a) {
+                        usage.max(pick(&a.requested))
+                    } else {
+                        usage
+                    }
+                };
+                let running: Vec<&Allocation> = input
+                    .allocations
+                    .iter()
+                    .filter(|a| a.phase == AllocationPhase::Running && on_resource(a))
+                    .collect();
+                if running.is_empty() {
+                    continue;
+                }
+                let taken = input
+                    .allocations
+                    .iter()
+                    .filter(|a| on_resource(a))
+                    .map(|a| match a.phase {
+                        AllocationPhase::Pending => pick(&a.requested),
+                        _ => held(a),
+                    })
+                    .fold(0u64, u64::saturating_add);
+                // A change publishes beyond the contention floor (CPU) or the noise
+                // tolerance (memory); a rise moves at most one step, the mode's
+                // margin of capacity, per scale-up interval.
+                let threshold = if kind.is_memory() {
+                    thresholds.noise_tolerance_mib
+                } else {
+                    (capacity.saturating_mul(u64::from(thresholds.principal_min_percent)) / 100)
+                        .max(1)
+                };
+                let mode = governing(kind);
+                let margin = match mode {
+                    crate::contention::ContentionMode::YieldFirst => {
+                        thresholds.yield_first_margin_percent
+                    }
+                    crate::contention::ContentionMode::Neutral => thresholds.neutral_margin_percent,
+                    crate::contention::ContentionMode::Performance => {
+                        thresholds.performance_margin_percent
+                    }
+                };
+                let step = (capacity.saturating_mul(u64::from(margin)) / 100).max(threshold + 1);
+                let scale_up_ms = thresholds.scale_up_interval_s(mode).saturating_mul(1000);
+                let share = mode_allowance
+                    .saturating_sub(taken)
+                    .saturating_sub(threshold.saturating_mul(running.len() as u64))
+                    / running.len() as u64;
+                for allocation in running {
+                    // An unknown measurement invites no growth.
+                    let mut value = if unknown {
+                        held(allocation)
+                    } else {
+                        held(allocation).saturating_add(share)
+                    };
+                    match ladder.get(&(allocation.id.clone(), key.clone())) {
+                        Some(state) if matches!(state.step, YieldStep::Cap | YieldStep::Hint) => {
+                            value = value.min(state.target.unwrap_or(value));
+                        }
+                        Some(state) if state.step > YieldStep::None => {
+                            value = value.min(held(allocation));
+                        }
+                        _ => {}
+                    }
+                    if let Some(envelope) = &input.envelope {
+                        value = value.min(pick(envelope));
+                    }
+                    if guaranteed(allocation) {
+                        value = value.max(pick(&allocation.requested));
+                    }
+                    let id = (allocation.id.clone(), key.clone());
+                    let published = match self.allowance_published.get(&id).copied() {
+                        None => (value, now_monotonic_ms),
+                        Some((previous, _)) if value + threshold < previous => {
+                            (value, now_monotonic_ms)
+                        }
+                        Some((previous, rose_at))
+                            if value > previous.saturating_add(threshold)
+                                && now_monotonic_ms.saturating_sub(rose_at) >= scale_up_ms =>
+                        {
+                            (previous + (value - previous).min(step), now_monotonic_ms)
+                        }
+                        Some(kept) => kept,
+                    };
+                    allowance_published.insert(id, published);
+                    let amounts = allowances.entry(allocation.id.clone()).or_default();
+                    match &key {
+                        ResourceKey::Cpu => amounts.cpu_millicores = Some(published.0),
+                        ResourceKey::Ram => amounts.ram_mib = Some(published.0),
+                        ResourceKey::GpuMemory(uuid) => {
+                            amounts.gpu_memory_mib.insert(uuid.clone(), published.0);
+                        }
+                        ResourceKey::GpuCompute(_) => {}
+                    }
+                }
+            }
+        }
+        self.allowance_published = allowance_published;
         self.last_now = Some(now_monotonic_ms);
         self.node_id = Some(snapshot.node_id.clone());
         self.stable_since = stable_since;
@@ -2447,6 +2603,7 @@ impl PolicyEngine {
             exceptions: config.caution_options_on(snapshot),
             allocation_modes,
             max_mode: Some(cap),
+            allowances,
             cpu_admission_credit_millicores: cpu_credit
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
                 as i64,

@@ -274,6 +274,18 @@ pub struct ExternalProcessMemory {
     pub gpu_memory_mib: BTreeMap<String, u64>,
 }
 
+/// Per-resource amounts in the resource-target file, as targets or as the
+/// allowance; unset amounts carry none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceAmounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_memory_mib: BTreeMap<String, u64>,
+}
+
 /// Usage of the processes one owner runs, outside managed work.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -369,6 +381,10 @@ pub struct Decision {
     /// The node's cap on the most aggressive mode a job may request (FR-030).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_mode: Option<crate::contention::ContentionMode>,
+    /// What each running allocation may grow to now without causing a step, as
+    /// published (FR-071).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub allowances: BTreeMap<String, ResourceAmounts>,
     /// CPU that running opportunistic work is charged above its p95 usage, which
     /// the schedulable budget adds so request-based charges admit by usage
     /// (FR-034). Negative when recent usage exceeds max(request, observed).
