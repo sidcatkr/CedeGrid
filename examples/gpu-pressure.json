@@ -271,7 +271,7 @@
         {
           "uuid": "example-gpu",
           "total_memory_mib": 24576,
-          "used_memory_mib": 21504,
+          "used_memory_mib": 23347,
           "utilization_percent": 0,
           "external_process_ids": [
             4343
@@ -286,7 +286,7 @@
           "pid": 4343,
           "start_time": 1793000100,
           "gpu_memory_mib": {
-            "example-gpu": 21504
+            "example-gpu": 23347
           }
         }
       ]
