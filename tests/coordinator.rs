@@ -3753,6 +3753,31 @@ fn preemption_keeps_a_pass_level_victim_set() {
     assert_eq!(drained, expected);
 }
 
+/// Zero launch slots preempt only at the agent's worker limit; slots held back
+/// while the agent paces its growth are no exhaustion.
+#[test]
+fn paced_launch_slots_preempt_nothing() {
+    let run = |max_workers: u32| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(&mut c, "low", 0, vec![task("low")], 100);
+        let mut r = negotiated(100, &[]);
+        r.contention.as_mut().unwrap().max_workers = Some(max_workers);
+        let low = report_reply(&mut c, &r, 100).assignments.remove(0);
+        authorize(&mut c, &low, 100);
+        submit_tasks(&mut c, "high", 100, vec![task("high")], 101);
+        r.observed_at_unix_ms = 102;
+        r.launch_slots = 0;
+        r.allocations = vec![allocation_report(&low, RemotePhase::Running)];
+        let reply = report_reply(&mut c, &r, 102);
+        assert!(reply.assignments.iter().all(|a| a.request.task_id == "low"));
+        reply.drain.len()
+    };
+    assert_eq!(run(8), 0);
+    assert_eq!(run(1), 1);
+}
+
 /// Held admission is not exhaustion: nothing is preempted while a requested
 /// resource waits, on CPU/RAM or on the requested GPU.
 #[test]

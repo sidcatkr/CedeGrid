@@ -1290,6 +1290,12 @@ impl Coordinator {
             |r| r.get(0),
         )?;
         let mut remaining_slots = report.launch_slots.saturating_sub(unstarted);
+        let mut node_workers: u32 = tx.query_row(
+            "SELECT count(*) FROM reservations WHERE node_id=?1 AND phase!='released'",
+            [&report.node_id],
+            |r| r.get(0),
+        )?;
+        let worker_limit = report.contention.as_ref().and_then(|c| c.max_workers);
         let mut charge = self.node_charge(&report.node_id)?;
         let mut preemption = PreemptionPass {
             projected: charge.clone(),
@@ -1357,7 +1363,10 @@ impl Coordinator {
             next.add_checked(&request.resources)?;
             // Held admission is no exhaustion: the task waits and preempts nothing.
             let placement = placement(report, &request, &next);
-            if placement == Placement::Closed {
+            // Zero slots below the agent's worker limit mean it paces its growth.
+            let paced =
+                remaining_slots == 0 && worker_limit.is_some_and(|limit| node_workers < limit);
+            if placement == Placement::Closed || paced {
                 continue;
             }
             if remaining_slots == 0
@@ -1378,6 +1387,7 @@ impl Coordinator {
             charge = next;
             preemption.projected.add_checked(&request.resources)?;
             remaining_slots -= 1;
+            node_workers += 1;
         }
         tx.commit()?;
         Ok(())

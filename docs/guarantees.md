@@ -59,8 +59,8 @@ sample periods; reading every 500 ms need not produce independent samples.
 - Stable headroom permits incremental expansion only after the configured cooldown.
   The coordinator reserves each launch before dispatch, only where every requested
   resource's admission is open, and the agent rechecks locally. Held or blocked
-  admission never preempts other work; one scheduling pass never lets two waiting tasks
-  claim the same victim.
+  admission never preempts other work, nor do launch slots an agent holds back while it
+  paces its growth; one scheduling pass never lets two waiting tasks claim the same victim.
 
 GPU admission follows each device's GPU compute mode, by one rule the policy and the
 launch recheck share: Yield First admits only on a quiet device; Neutral and Performance

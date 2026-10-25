@@ -2327,6 +2327,7 @@ impl NegotiatedFeatures {
 fn node_contention_report(
     config: &Config,
     decision: &crate::model::Decision,
+    max_workers: usize,
 ) -> NodeContentionReport {
     let resources = decision
         .resources
@@ -2354,6 +2355,7 @@ fn node_contention_report(
         resources,
         exceptions: decision.exceptions.clone(),
         max_mode: Some(config.contention.max_mode()),
+        max_workers: Some(u32::try_from(max_workers).unwrap_or(u32::MAX)),
     }
 }
 
@@ -3240,8 +3242,9 @@ impl AgentLoop<'_> {
             features: Vec::new(),
             contention: None,
         };
-        self.negotiated
-            .apply(&mut report, || node_contention_report(config, decision));
+        self.negotiated.apply(&mut report, || {
+            node_contention_report(config, decision, agent.max_workers)
+        });
         // Report preparation can cross a scheduled slot. Advance at actual
         // enqueue so the next due time agrees with recorded lateness.
         let due = next_control_due(&mut self.last_heartbeat, interval);
@@ -4671,7 +4674,8 @@ mod negotiation_tests {
         let decision = crate::policy::PolicyEngine::new()
             .evaluate(&config, &snapshot, &Default::default(), 0)
             .unwrap();
-        let report = node_contention_report(&config, &decision);
+        let report = node_contention_report(&config, &decision, 4);
+        assert_eq!(report.max_workers, Some(4));
         for key in [
             crate::contention::ResourceKey::Cpu,
             crate::contention::ResourceKey::Ram,

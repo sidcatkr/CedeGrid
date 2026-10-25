@@ -706,6 +706,8 @@ context, under Neutral and Performance (quickstart §5).
   Tests first in `tests/policy.rs`.
 - [X] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
+  Real exhaustion: every requested resource is open, and the budget, the worker pool or the
+  launch slots are used up; zero slots count only at the agent's reported `max_workers`.
 - [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
   authorized Linux host with an NVIDIA device; commands in [native-gates.md](native-gates.md).*
   - run quickstart §5 on Linux + NVIDIA with `CEDEGRID_TEST_GPU_UUID` and an idle external

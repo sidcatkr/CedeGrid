@@ -15,7 +15,7 @@
    - A 0.2 agent ignores the field: `HeartbeatReply` has no `deny_unknown_fields`.
 3. **Later heartbeats.** After it sees `contention/1`, the agent includes these fields:
    - `NodeReport.features = ["api/1", "contention/1"]`
-   - `NodeReport.contention = {resources: {<ResourceKey>: {mode, admission, own, external, target_share, step_summary, held_back}}, exceptions: [..], max_mode}`
+   - `NodeReport.contention = {resources: {<ResourceKey>: {mode, admission, own, external, target_share, step_summary, held_back}}, exceptions: [..], max_mode, max_workers}`
    - `AllocationReport.yield_cause` for yielded or draining allocations
    - `AllocationReport.hint_ready` and `AllocationReport.observes_drain` for running
      allocations (FR-062)
@@ -42,7 +42,8 @@ With `contention/1`, the coordinator places work using per-resource admission:
 
 Placement, preemption and the first authorization share this predicate. Held or blocked
 admission never preempts; only an exhausted budget, worker pool or launch slot with every
-requested resource open does. One scheduling pass keeps the victims it chose and the charge
+requested resource open does. Zero launch slots count as exhausted only at the agent's
+reported `max_workers`; below it the agent paces its growth and the task waits. One scheduling pass keeps the victims it chose and the charge
 it projects once they release, so no two waiting tasks claim the same release.
 
 `managed_budget.cpu_millicores` adds the CPU that running opportunistic work is charged above

@@ -164,6 +164,10 @@ pub struct NodeContentionReport {
     /// The node's cap on job-requested modes (FR-030).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_mode: Option<crate::contention::ContentionMode>,
+    /// The agent's worker limit, so zero launch slots at the limit tell a full node
+    /// from one that paces its growth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
