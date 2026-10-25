@@ -983,15 +983,23 @@ pub struct DemandProbe {
     pub stepped_at_ms: u64,
     /// The probed principals' usage when it did.
     pub usage_at_step: BTreeMap<Option<u32>, u64>,
+    /// A larger demand that got the fair share at once: own work keeps that share
+    /// while the probe watches whether the demand grows into what it was given.
+    pub watch: bool,
+    /// Whether a watch has taken its baseline, the usage once the share applied.
+    pub baselined: bool,
 }
 
 /// One interval of demand probing on a compute resource. Under saturation, a
 /// contending principal whose demand is unknown and smaller than one margin step
 /// is probed: own work steps down by the mode's margin per response window, and a
 /// principal whose usage does not grow into the freed capacity is recorded as
-/// satisfied at its usage plus hysteresis (the contention floor). A record holds
-/// while usage stays within it. A larger demand gets the fair share at once.
-/// Returns the satisfied records and the probe that continues, if any.
+/// satisfied at its usage plus hysteresis (the contention floor). A larger demand
+/// gets the fair share at once and is watched for one response window from the
+/// interval after: if the host then has capacity to spare and its usage stayed
+/// within its baseline plus hysteresis, it is recorded the same way. A record holds
+/// while usage stays within it. Returns the satisfied records and the probe that
+/// continues, if any.
 pub fn probe_demand(
     input: &ModeInput,
     thresholds: &ResourceThresholds,
@@ -1014,10 +1022,12 @@ pub fn probe_demand(
             None => Some(input.external.saturating_sub(accounted)),
         }
     };
+    // A record holds while usage stays within it; a principal no longer listed
+    // uses nothing.
     let mut satisfied: Vec<(Option<u32>, u64)> = input
         .satisfied
         .iter()
-        .filter(|(uid, demand)| usage_of(*uid).is_some_and(|usage| usage <= *demand))
+        .filter(|(uid, demand)| usage_of(*uid).unwrap_or(0) <= *demand)
         .copied()
         .collect();
     if input.kind.is_memory() || input.unknown_activity {
@@ -1040,9 +1050,60 @@ pub fn probe_demand(
     } else {
         BTreeMap::new()
     };
-    // A demand of a margin step or more is real contention: no probing.
-    if unknown.values().any(|usage| *usage >= step) {
+    let larger: BTreeMap<Option<u32>, u64> = unknown
+        .iter()
+        .filter(|(_, usage)| **usage >= step)
+        .map(|(uid, usage)| (*uid, *usage))
+        .collect();
+    if let Some(watch) = probe.filter(|probe| probe.watch) {
+        let mut watch = watch.clone();
+        // External principals at or above the floor, the unattributed one included.
+        let mut present: BTreeMap<Option<u32>, u64> = input
+            .principals
+            .iter()
+            .flatten()
+            .filter(|(principal, usage)| !principal.is_owner && *usage >= floor)
+            .map(|(principal, usage)| (principal.uid, *usage))
+            .collect();
+        if let Some(usage) = usage_of(None).filter(|usage| *usage >= floor) {
+            present.insert(None, usage);
+        }
+        // The baseline is the usage once the fair share applies, an interval later;
+        // it is taken again when a principal joins or leaves, such as a new user
+        // moving from the unattributed principal to its own.
+        let moved = watch.baselined && !present.keys().eq(watch.usage_at_step.keys());
+        if !watch.baselined && now_ms > watch.stepped_at_ms || moved {
+            watch.usage_at_step = present;
+            watch.stepped_at_ms = now_ms;
+            watch.baselined = true;
+            return (satisfied, Some(watch));
+        }
+        if !watch.baselined || now_ms.saturating_sub(watch.stepped_at_ms) < response_ms {
+            return (satisfied, Some(watch));
+        }
+        // Only spare capacity shows a demand is met; on a saturated host its usage
+        // is what the host left it.
+        if !input.saturated {
+            for (uid, before) in &watch.usage_at_step {
+                let usage = usage_of(*uid).unwrap_or(0);
+                if !known(*uid, &satisfied) && usage <= before.saturating_add(floor) {
+                    satisfied.push((*uid, usage.saturating_add(floor)));
+                }
+            }
+        }
         return (satisfied, None);
+    }
+    // A demand of a margin step or more gets the fair share at once (SC-002); a
+    // watch then learns whether it is satisfied.
+    if !larger.is_empty() {
+        let watch = DemandProbe {
+            target: 0,
+            stepped_at_ms: now_ms,
+            usage_at_step: larger,
+            watch: true,
+            baselined: false,
+        };
+        return (satisfied, Some(watch));
     }
     let Some(probe) = probe else {
         if unknown.is_empty() {
@@ -1052,6 +1113,7 @@ pub fn probe_demand(
             target: input.own.saturating_sub(step),
             stepped_at_ms: now_ms,
             usage_at_step: unknown,
+            ..DemandProbe::default()
         };
         return (satisfied, Some(started));
     };
@@ -1081,6 +1143,7 @@ pub fn probe_demand(
         target: probe.target.saturating_sub(step),
         stepped_at_ms: now_ms,
         usage_at_step: grown,
+        ..DemandProbe::default()
     };
     (satisfied, Some(stepped))
 }

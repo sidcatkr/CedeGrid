@@ -241,10 +241,17 @@ in their contended target and in scale-up rate (10 s and 2 s per step).
 - `target`: the allowance while probing; it starts one margin step below own usage and steps
   down once per response window while a probed principal grows into the freed capacity.
 - `stepped_at_ms`, `usage_at_step`: when it last stepped and the probed principals' usage then.
+- `watch`, `baselined`: a watch of a larger demand, and whether it has taken its baseline.
 - A probe starts only under saturation, for contending principals whose unknown demand is below
   one margin step. At the end of a window, a principal whose usage did not grow beyond
-  `usage_at_step + floor` is satisfied at its usage plus the floor. A demand of a margin step or
-  more ends the probe, and the fair share applies at once.
+  `usage_at_step + floor` is satisfied at its usage plus the floor.
+- A demand of a margin step or more gets the fair share at once and starts a watch, which sets
+  no target. Its baseline is the external principals at or above the floor one interval later,
+  taken again whenever that set changes. At the end of one response window, if the host is not
+  saturated, each whose usage stayed within `usage_at_step + floor` is satisfied at its usage
+  plus the floor.
+- A record holds while the principal's usage stays within it, also while it is not listed. A
+  user with a record rejoins as a principal at once, without the principal window.
 
 ## HeldBack (`src/model.rs`, `ResourceStatus.held_back`, node report)
 

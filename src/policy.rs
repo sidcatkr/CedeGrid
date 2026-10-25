@@ -653,6 +653,15 @@ impl PolicyEngine {
                             .get(&(key.clone(), uid))
                             .copied()
                             .unwrap_or_default();
+                        // A user whose demand is on record as satisfied is known:
+                        // it rejoins at once, so the record applies on its return.
+                        if usage >= floor
+                            && self.satisfied.get(&key).is_some_and(|records| {
+                                records.iter().any(|(principal, _)| *principal == Some(uid))
+                            })
+                        {
+                            count.admitted = true;
+                        }
                         count.observe(usage, floor, window, now_monotonic_ms, leave_ms);
                         if count.admitted {
                             members.push((principal, usage));
@@ -729,7 +738,8 @@ impl PolicyEngine {
                 now_monotonic_ms,
             );
             view.satisfied = known.clone();
-            view.probe = probe.as_ref().map(|p| p.target);
+            // A watch keeps own work at the fair share; only a probe sets a target.
+            view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
             if !known.is_empty() {
                 satisfied.insert(ResourceKey::Cpu, known);
             }

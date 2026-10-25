@@ -2104,6 +2104,80 @@ mod scenarios {
         );
         assert!(!world.drained);
     }
+
+    /// Ticks `world` until `until`, returning own work's usage per interval.
+    fn run_until(world: &mut World, now: &mut u64, until: u64) -> Vec<u64> {
+        let mut own = vec![];
+        while *now < until {
+            own.push(world.tick(*now).0);
+            *now += INTERVAL;
+        }
+        own
+    }
+
+    /// One steady external user at 12.5% gets the fair share at once and is then
+    /// learned satisfied: at most one cap episode in 5 minutes, and own work
+    /// averages at least 90% of capacity minus the user minus the margin (FR-021).
+    #[test]
+    fn a_steady_large_external_user_is_capped_once_then_learned_satisfied() {
+        let mut world = World::new(ContentionMode::Neutral, (32, 8000));
+        let mut now = 0;
+        run_until(&mut world, &mut now, 5000);
+        world.external = (1, 1000);
+        let (start, mut previous, mut episodes, mut total) = (now, world.step, 0, 0u64);
+        while now < start + 300_000 {
+            total += world.tick(now).0;
+            if previous == YieldStep::None && world.step != YieldStep::None {
+                episodes += 1;
+            }
+            previous = world.step;
+            now += INTERVAL;
+        }
+        let average = total / 600;
+        let goal = CAPACITY - 1000 - CAPACITY * 5 / 100;
+        assert!(episodes <= 1, "{episodes} cap episodes");
+        assert!(average * 10 >= goal * 9, "average {average} of {goal}");
+        assert!(!world.drained);
+    }
+
+    /// A user learned satisfied keeps its record while it is gone: when it returns
+    /// at the same level, own work is not cut to the fair share again (FR-021).
+    #[test]
+    fn a_returning_satisfied_user_does_not_cut_own_work_again() {
+        let mut world = World::new(ContentionMode::Neutral, (32, 8000));
+        let mut now = 0;
+        run_until(&mut world, &mut now, 5000);
+        world.external = (1, 1000);
+        run_until(&mut world, &mut now, 65_000);
+        world.external = (0, 0);
+        // Alone, own work saturating the host is held to its margin.
+        let alone = run_until(&mut world, &mut now, 185_000);
+        assert!(alone.last().unwrap() + CAPACITY / 100 >= CAPACITY * 95 / 100);
+        world.external = (1, 1000);
+        let own = run_until(&mut world, &mut now, 215_000);
+        let lowest = own.iter().copied().min().unwrap();
+        assert!(lowest > 5000, "own work fell to {lowest}: {own:?}");
+    }
+
+    /// A satisfied user that grows is real demand: it gets the fair share within
+    /// SC-002's two intervals and keeps it while the host stays saturated (FR-021).
+    #[test]
+    fn a_satisfied_user_that_grows_gets_its_fair_share_within_two_intervals() {
+        let mut world = World::new(ContentionMode::Neutral, (32, 8000));
+        let mut now = 0;
+        run_until(&mut world, &mut now, 5000);
+        world.external = (1, 1000);
+        run_until(&mut world, &mut now, 65_000);
+        world.external = (5, 4800);
+        let own = run_until(&mut world, &mut now, 125_000);
+        for (interval, own) in own.iter().enumerate().skip(1) {
+            assert!(
+                *own <= 4000 + CAPACITY / 100,
+                "own {own} at interval {interval} after the growth"
+            );
+        }
+        assert!(!world.drained);
+    }
 }
 
 /// Hints through the policy engine: compliance is judged by observed usage

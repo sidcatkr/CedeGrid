@@ -601,7 +601,12 @@ node reports with the expected per-resource values at each step.
   - under saturation, probe a contending principal whose unknown demand is below one margin
     step: step own work down by the margin per response window, and record a principal whose
     usage does not grow into the freed capacity as satisfied, after which it no longer contends
-    until its usage exceeds that demand; a larger demand gets the fair share at once;
+    until its usage exceeds that demand; a larger demand gets the fair share at once, and is
+    then watched for one response window from the interval after: if the host has capacity to
+    spare at its end and the principal's usage stayed within its baseline plus the contention
+    floor, it is recorded as satisfied the same way, else it keeps its share. A satisfied
+    principal that leaves keeps its record and rejoins at once when it returns. Unknown
+    activity, including GPU compute activity whose amount is not measured, is never recorded;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission.
 
