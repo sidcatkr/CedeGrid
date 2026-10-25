@@ -582,6 +582,8 @@ pub struct ResourceContentionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yield_first_margin_percent: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub neutral_margin_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub performance_margin_percent: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yield_first_response_intervals: Option<u32>,
@@ -654,6 +656,9 @@ impl ContentionConfig {
             yield_first_margin_percent: set
                 .yield_first_margin_percent
                 .unwrap_or(defaults.yield_first_margin_percent),
+            neutral_margin_percent: set
+                .neutral_margin_percent
+                .unwrap_or(defaults.neutral_margin_percent),
             performance_margin_percent: set
                 .performance_margin_percent
                 .unwrap_or(defaults.performance_margin_percent),
@@ -822,6 +827,11 @@ impl ContentionConfig {
                 set.performance_margin_percent.is_some(),
             )?;
             applies(
+                "neutral_margin_percent",
+                &[Cpu, GpuCompute],
+                set.neutral_margin_percent.is_some(),
+            )?;
+            applies(
                 "yield_first_response_intervals",
                 &[Cpu, GpuCompute],
                 set.yield_first_response_intervals.is_some(),
@@ -916,6 +926,12 @@ impl ContentionConfig {
                 ensure!(
                     t.yield_first_margin_percent > t.performance_margin_percent,
                     "contention.{name}.yield_first_margin_percent must exceed performance_margin_percent"
+                );
+                // Ordered margins keep the targets ordered (FR-065).
+                ensure!(
+                    t.yield_first_margin_percent >= t.neutral_margin_percent
+                        && t.neutral_margin_percent >= t.performance_margin_percent,
+                    "contention.{name}.neutral_margin_percent must be between performance_margin_percent and yield_first_margin_percent"
                 );
             }
             for (field, value) in [

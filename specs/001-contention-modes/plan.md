@@ -254,7 +254,9 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   aggressive node mode, so no job reaches Performance unless the operator chose it.
 - **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
   Guaranteed hint deadline. Performance and small floors are caution options with confirmation.
-- **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance).
+- **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance),
+  with a Neutral idle margin of its own (20%, between Yield First's and Performance's, decided
+  after the review).
   "Contended" replaces "saturated": saturation plus an active external principal, or unknown
   activity. Under contention Yield First targets zero for opportunistic work, which the ladder
   applies as a pause, not a cap to the 5% minimum duty. While a resource is not contended, a held

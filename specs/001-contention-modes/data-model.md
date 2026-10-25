@@ -48,6 +48,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 |---|---|---|---|
 | `mode` | all | inherits `default_mode` | ≤ `max_mode` |
 | `yield_first_margin_percent` | all | 25 | 1–90; > `performance_margin_percent` |
+| `neutral_margin_percent` | cpu, gpu_compute | 20 | between `performance_margin_percent` and `yield_first_margin_percent` |
 | `performance_margin_percent` | cpu, gpu_compute | 10 | 0–50 |
 | `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
 | `scale_up_step_interval_s` | all | 30 (Yield First), 10 (Neutral), 2 (Performance) | ≥ 1 |
@@ -183,16 +184,18 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 ## Mode targets (`contention::own_allowance`)
 
 `C` is schedulable capacity (after reserves and, for memory, the floor), `A = C − E` with `E`
-current external usage, `S` the max-min share, `m_YF` and `m_P` the margins (FR-065).
+current external usage, `S` the max-min share, `m_YF`, `m_N` and `m_P` the margins, validated
+as `m_YF ≥ m_N ≥ m_P` (FR-065).
 
 | Resource and state | Yield First | Neutral | Performance |
 |---|---|---|---|
 | CPU, GPU compute, contended | 0 for opportunistic work | `S` | `S` |
-| CPU, GPU compute, otherwise | `A − m_YF·C` | `A − m_P·C` | `A − m_P·C` |
+| CPU, GPU compute, otherwise | `A − m_YF·C` | `A − m_N·C` | `A − m_P·C` |
 | RAM, GPU memory | `A − m_YF·C` | `A` | `A` |
 
 Targets never go below 0. Guaranteed CPU is never capped below its request. Neutral and
-Performance differ in scale-up rate (10 s and 2 s per step), not in target.
+Performance share the fair share under contention and differ in idle margin (20% and 10%) and
+scale-up rate (10 s and 2 s per step).
 
 ## AllocationContention (supervisor journal, `src/execution_state.rs`)
 

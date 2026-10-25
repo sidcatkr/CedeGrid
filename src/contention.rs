@@ -200,6 +200,8 @@ pub enum Measurement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceThresholds {
     pub yield_first_margin_percent: u8,
+    /// Compute: what Neutral leaves free while nothing is contended.
+    pub neutral_margin_percent: u8,
     pub performance_margin_percent: u8,
     pub yield_first_response_intervals: u32,
     /// Configured scale-up interval; `None` uses the mode's default.
@@ -242,6 +244,7 @@ impl ResourceThresholds {
     pub fn defaults(kind: ResourceKind) -> Self {
         Self {
             yield_first_margin_percent: 25,
+            neutral_margin_percent: 20,
             performance_margin_percent: 10,
             yield_first_response_intervals: 3,
             scale_up_step_interval_s: None,
@@ -765,9 +768,9 @@ pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
 
 /// What a mode lets own work hold on one resource this interval (FR-020 to
 /// FR-022, FR-065). On contended compute, Yield First takes opportunistic work to
-/// zero and Neutral and Performance hold the fair share. Otherwise Yield First
-/// keeps its generous margin free, and Neutral and Performance keep the small
-/// Performance margin, so the targets are ordered YF ≤ N ≤ P on every resource.
+/// zero and Neutral and Performance hold the fair share. Otherwise each keeps its
+/// own margin free, 25%, 20% and 10% by default, validated as YF ≥ N ≥ P, so the
+/// targets are ordered YF ≤ N ≤ P on every resource.
 /// Memory floors are already outside `capacity`, and memory keeps no margin
 /// beyond them except Yield First's.
 pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
@@ -781,7 +784,12 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
         }
         _ if input.kind.is_memory() => available,
         _ if contended => neutral_share(input, thresholds),
-        _ => available.saturating_sub(margin(thresholds.performance_margin_percent)),
+        ContentionMode::Neutral => {
+            available.saturating_sub(margin(thresholds.neutral_margin_percent))
+        }
+        ContentionMode::Performance => {
+            available.saturating_sub(margin(thresholds.performance_margin_percent))
+        }
     }
 }
 

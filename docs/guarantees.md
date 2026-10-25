@@ -97,8 +97,9 @@ background demand: it comes off the capacity and never contends. On contended co
 Yield First pauses opportunistic work, and after `pause_bound_s` (10 s) keeps it at the
 5% minimum duty while the contention lasts; Neutral and Performance hold the max-min
 fair share among these principals. Otherwise Yield First keeps 25% of schedulable
-capacity free, and Neutral and Performance keep 10% free; they differ in how fast they
-scale up (10 s and 2 s per step). On memory, Yield First keeps 25% free beyond the floor
+capacity free, Neutral keeps 20% free and Performance 10%; the margins are validated as
+Yield First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast
+they scale up (10 s and 2 s per step). On memory, Yield First keeps 25% free beyond the floor
 and the other modes only the floor. The margins are configurable per resource. In
 every mode, contended CPU returns within 2 monitor intervals: the first step applies
 at once. While a resource is not contended, a held cap rises again toward the mode's

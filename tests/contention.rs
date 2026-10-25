@@ -575,7 +575,7 @@ mod neutral {
 
     #[test]
     fn own_work_keeps_its_share_and_idle_capacity_but_never_more_under_contention() {
-        // Idle capacity is own work's to use, minus the Performance margin (FR-021).
+        // Idle capacity is own work's to use, minus the Neutral margin (FR-021).
         assert_eq!(
             allowance(&input(
                 ResourceKind::Cpu,
@@ -583,7 +583,7 @@ mod neutral {
                 8000,
                 1000
             )),
-            6200
+            5400
         );
         // Saturated by a demanding principal: exactly the fair share, whatever own uses now.
         let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 6000);
@@ -594,7 +594,7 @@ mod neutral {
         // contention floor, is not contended: idle capacity minus the margin.
         view.external = 10;
         view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 10)]);
-        assert_eq!(allowance(&view), 7190);
+        assert_eq!(allowance(&view), 6390);
         // The account's unmanaged usage comes out of own work's share.
         view.external = 6500;
         view.principals = Some(vec![
@@ -711,7 +711,8 @@ mod ordered_targets {
             // Saturation by own work alone is not contention.
             let mut alone = input(kind, ContentionMode::Neutral, 8000, 0);
             alone.saturated = true;
-            assert_eq!(targets(&alone), [6000, 7200, 7200], "{kind:?}");
+            // Idle margins: 25% in Yield First, 20% in Neutral, 10% in Performance.
+            assert_eq!(targets(&alone), [6000, 6400, 7200], "{kind:?}");
         }
     }
 
@@ -1504,7 +1505,7 @@ mod scenarios {
     fn a_held_cap_rises_again_when_external_demand_shrinks() {
         for (mode, target) in [
             (ContentionMode::YieldFirst, 5000),
-            (ContentionMode::Neutral, 6200),
+            (ContentionMode::Neutral, 5400),
             (ContentionMode::Performance, 6200),
         ] {
             let mut world = World::new(mode, (64, 8000));

@@ -563,6 +563,15 @@ fn contention_defaults_and_overrides_parse() {
     assert_eq!(defaults.neutral_memory_policy, NeutralMemoryPolicy::A);
     assert_eq!(defaults.thresholds(ResourceKind::Cpu).reclaim_s, 5);
     assert_eq!(defaults.guaranteed_hint_deadline_s, 5);
+    let cpu = defaults.thresholds(ResourceKind::Cpu);
+    assert_eq!(
+        (
+            cpu.yield_first_margin_percent,
+            cpu.neutral_margin_percent,
+            cpu.performance_margin_percent
+        ),
+        (25, 20, 10)
+    );
     assert_eq!(
         defaults
             .thresholds(ResourceKind::Ram)
@@ -730,6 +739,9 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention.cpu]\nunknown_window_intervals = 21",
         "[contention.cpu]\nsaturation_percent = 49",
         "[contention.ram]\nsaturation_percent = 90",
+        "[contention.cpu]\nneutral_margin_percent = 26",
+        "[contention.cpu]\nneutral_margin_percent = 9",
+        "[contention.ram]\nneutral_margin_percent = 20",
         "[contention.cpu]\nmin_step_dwell_intervals = 11",
         "[contention.cpu]\nyield_first_response_intervals = 11",
         "[contention.cpu]\nreclaim_s = 61",

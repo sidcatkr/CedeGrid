@@ -22,6 +22,7 @@ never_share_occupied_gpus = false   # true: no new own GPU work on devices with 
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode
 yield_first_margin_percent = 25
 yield_first_response_intervals = 3  # cpu and gpu_compute only, 1-10
+neutral_margin_percent = 20         # cpu and gpu_compute only; YF >= neutral >= performance
 performance_margin_percent = 10
 neutral_convergence_s = 60
 neutral_tolerance_points = 15

@@ -538,7 +538,8 @@ node reports with the expected per-resource values at each step.
   - count unknown activity as external demand;
   - scale up slowly.
 - **FR-021**: Neutral MUST:
-  - let own work use idle capacity minus the Performance margin;
+  - let own work use idle capacity minus the Neutral margin (default 20%, between the
+    Performance and Yield First margins);
   - converge own work to its fair share under contention, and not step it below fair share
     except to keep a no-harm floor;
   - let external demand reclaim anything above fair share;
@@ -556,9 +557,10 @@ node reports with the expected per-resource values at each step.
   - while external activity of unknown amount exists, hold own work to Neutral's fair share,
     counting that activity as one active principal.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
-  Yield First ≤ Neutral ≤ Performance. The defaults satisfy it by construction: the Yield First
-  margin exceeds the Performance margin, Neutral and Performance share the fair share under
-  contention, and floors bound every mode on memory.
+  Yield First ≤ Neutral ≤ Performance. Configuration enforces it by construction: the margins
+  are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance,
+  Neutral and Performance share the fair share under contention, and floors bound every mode on
+  memory.
 - **FR-023**: No-harm floors MUST apply in every mode:
   - a minimum available host RAM;
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
@@ -886,6 +888,7 @@ times assume the default 500 ms monitor interval.
 | Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
 | Performance scale-up | 1 step per 2 s | One heartbeat interval per step, which supports the 30 s ramp target. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
+| Neutral margin | 20% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand visible room without the Yield First reserve. |
 | Performance margin | 10% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Small, but above the known sampling error of a few percent, so measurement noise does not cause yields. |
 | Performance ramp | 80% of available minus margin within 30 s | Admission advances on the 2 s heartbeat and scale-up is damped. The originally proposed 90% in 10 s is unproven. |
 | Reclaim bound: RAM, GPU memory | Hint deadline + drain timeout + termination grace + 1 interval (10.5 s) | The sum of the existing deadlines; nothing else waits. |

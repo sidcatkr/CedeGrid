@@ -13,6 +13,9 @@ fn config() -> Config {
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
+    // These accounting tests keep a 10% Neutral margin; the default margins are
+    // tested in tests/contention.rs.
+    result.contention.cpu.neutral_margin_percent = Some(10);
     // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
     result
         .contention
