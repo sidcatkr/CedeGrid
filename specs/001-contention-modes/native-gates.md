@@ -198,9 +198,10 @@ failure, `pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reporte
 flake of the actuation tests in `tests/supervision.rs`, which sampled a 1 s counter worker at
 fixed offsets and failed about one run in four here (2 of 8 runs at 0ad75e1). They now wait for
 observed conditions with a deadline, and the worker runs until the test stops it. The
-supervision test binary then passed 20 consecutive runs of 25 tests in this container. A full
-run at c710915 passed with 527 tests and 9 ignored. The readiness, terminate and target-deadline paths
-need no delegated cgroup or GPU, so they are covered here:
+supervision test binary then passed 20 consecutive runs of 25 tests in this container. Full
+runs passed at c710915 (527 passed, 9 ignored) and at 384e726 (541 passed, 9 ignored, with fmt,
+clippy and both Python suites). The readiness, terminate and target-deadline paths need no
+delegated cgroup or GPU, so they are covered here:
 
 ```sh
 cargo test --locked --test managed_supervision -- readiness hint_carries guaranteed_cpu_target child_started_after
