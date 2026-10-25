@@ -400,7 +400,14 @@ fn gpu_yield_keeps_guaranteed_charges_and_selects_the_opportunistic_victim() {
             .evaluate(&config(), &snap, &input, 0)
             .unwrap();
         assert_eq!(decision.managed_budget.gpu_memory_mib["GPU-test"], 1500);
-        assert_eq!(decision.would_drain, ["b-opportunistic"]);
+        // With the Guaranteed reservation pending, 1500 MiB stay free above the
+        // 1000 MiB floor: a charge-only shortfall that steps nothing.
+        let expected: &[&str] = if phase == AllocationPhase::Pending {
+            &[]
+        } else {
+            &["b-opportunistic"]
+        };
+        assert_eq!(decision.would_drain, expected);
         assert!(decision.admission_headroom.gpu_memory_mib.is_empty());
         assert!(
             !decision.expansion_allowed,
@@ -979,6 +986,53 @@ fn lost_gpu_inventory_yields_existing_gpu_allocations() {
         .unwrap();
     assert!(!decision.expansion_allowed);
     assert_eq!(decision.would_drain, ["gpu-worker"]);
+}
+
+/// GPU memory: work that takes a hint is judged on usage, so a charge beyond the
+/// budget only blocks admission; work without a hint channel is judged at its
+/// charge, since its growth cannot be bounded.
+#[test]
+fn gpu_memory_judges_hint_ready_work_on_usage_and_other_work_on_its_charge() {
+    // 16000 MiB with a 1000 MiB floor; 6000 MiB used, 4000 MiB of it the job's,
+    // which requested 14000 MiB: 10000 MiB free, but the charge exceeds the budget.
+    let input = |hint_ready: bool| PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(0, 0, 14_000),
+            Some(resources(0, 0, 4000)),
+        )],
+        facts: BTreeMap::from([(
+            "job".into(),
+            AllocationFacts {
+                hint_ready,
+                observes_drain: true,
+                ..AllocationFacts::default()
+            },
+        )]),
+        ..PolicyInput::default()
+    };
+    let evaluate = |hint_ready| {
+        PolicyEngine::new()
+            .evaluate(&config(), &gpu_snapshot(), &input(hint_ready), 0)
+            .unwrap()
+    };
+    let ready = evaluate(true);
+    assert!(ready.actions.is_empty(), "{:?}", ready.actions);
+    assert_eq!(
+        ready
+            .admission_headroom
+            .gpu_memory_mib
+            .get("GPU-test")
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    let plain = evaluate(false);
+    assert_eq!(plain.would_drain, ["job"]);
+    for decision in [&ready, &plain] {
+        assert!(!codes(decision, "gpu_memory:GPU-test").contains(&"floor_breach".to_string()));
+    }
 }
 
 #[test]

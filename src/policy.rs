@@ -1,8 +1,10 @@
 //! Deterministic, effect-free admission and yielding recommendations.
 //!
-//! Running/draining allocations are charged max(reservation, observed), dimension by
-//! dimension. Pending reservations are charged in full. GPU utilization is auxiliary
-//! telemetry and is deliberately never a predicate for contention.
+//! For admission, running/draining allocations are charged max(reservation,
+//! observed), dimension by dimension, and pending reservations in full. Yielding
+//! judges running work on what it holds: CPU and RAM usage, and GPU memory usage
+//! for work that takes a hint. GPU utilization is auxiliary telemetry and is
+//! deliberately never a predicate for contention.
 use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -611,6 +613,15 @@ impl PolicyEngine {
         }) {
             critical_keys.insert(ResourceKey::Ram);
         }
+        // A floor breach is observed free memory below the floor, as free and
+        // floor; charges beyond the budget only block admission (FR-023).
+        let mut floor_breaches: BTreeMap<ResourceKey, (u64, u64)> = BTreeMap::new();
+        if let Some(free) = snapshot
+            .available_ram_mib
+            .filter(|free| *free < ram_reserve)
+        {
+            floor_breaches.insert(ResourceKey::Ram, (free, ram_reserve));
+        }
         if let Some(available) = snapshot.available_ram_mib {
             let used = snapshot.total_ram_mib - available;
             let own_lower = managed_observed.ram_mib;
@@ -992,6 +1003,14 @@ impl PolicyEngine {
                     }) {
                         critical_keys.insert(key.clone());
                     }
+                    let floor = config.vram_floor_mib(gpu.total_memory_mib);
+                    if let Some(free) = gpu
+                        .used_memory_mib
+                        .map(|used| gpu.total_memory_mib.saturating_sub(used))
+                        .filter(|free| *free < floor)
+                    {
+                        floor_breaches.insert(key.clone(), (free, floor));
+                    }
                     let capacity = gpu
                         .total_memory_mib
                         .saturating_sub(config.vram_floor_mib(gpu.total_memory_mib));
@@ -1155,12 +1174,43 @@ impl PolicyEngine {
                     .map(|a| amount_of(&charges[&a.id]))
                     .fold(0u64, u64::saturating_add);
                 let held_charge = amount_of(&charged).saturating_sub(draining_charge);
-                // Memory beyond what keeps the floor free breaches it in every mode.
-                let floor_breach = kind.is_memory()
-                    && floor_available
-                        .get(&key)
-                        .is_some_and(|available| held_charge > *available);
-                if floor_breach {
+                // The supervisor reports the steps, the hint among them, that it cannot
+                // apply. Only a worker that acknowledged its target file takes a hint
+                // (FR-062); recordings without facts have no target channel.
+                let facts = |id: &str| {
+                    let mut facts = input.facts.get(id).cloned().unwrap_or_default();
+                    if !facts.hint_ready {
+                        facts
+                            .unavailable
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(YieldStep::Hint);
+                    }
+                    facts
+                };
+                // Running memory work is judged on usage. On GPU memory, work that
+                // cannot take a hint keeps its charge, since its growth is unbounded.
+                let judged = |a: &Allocation| -> u64 {
+                    match (&key, &a.observed) {
+                        (ResourceKey::Ram, Some(observed)) => observed.ram_mib,
+                        (ResourceKey::GpuMemory(uuid), Some(observed))
+                            if input.facts.get(&a.id).is_some_and(|f| f.hint_ready) =>
+                        {
+                            observed.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                        }
+                        _ => amount_of(&charges[&a.id]),
+                    }
+                };
+                let judged_total = input
+                    .allocations
+                    .iter()
+                    .filter(|a| {
+                        a.phase != AllocationPhase::Pending && a.phase != AllocationPhase::Draining
+                    })
+                    .map(judged)
+                    .fold(0u64, u64::saturating_add);
+                let floor_breach = floor_breaches.get(&key).copied();
+                if let Some((free, floor)) = floor_breach {
                     breached.insert(key.clone());
                     floor_breach_since.insert(
                         key.clone(),
@@ -1173,13 +1223,11 @@ impl PolicyEngine {
                         &mut statuses,
                         key.clone(),
                         "floor_breach",
-                        format!(
-                            "own work holds {held_charge}, above the {} that keeps the floor free",
-                            floor_available[&key]
-                        ),
+                        format!("free memory {free} MiB is below the {floor} MiB floor"),
                     );
                 }
-                // Own work beyond the operator envelope: usage for CPU, charges otherwise.
+                let floor_breach = floor_breach.is_some();
+                // Own work beyond the operator envelope, judged like a floor breach.
                 let envelope_breach = input.envelope.as_ref().is_some_and(|envelope| {
                     let held = if kind == ResourceKind::Cpu {
                         input
@@ -1189,7 +1237,7 @@ impl PolicyEngine {
                             .map(|a| a.observed.as_ref().map_or(0, |o| o.cpu_millicores))
                             .fold(unknown_charge.cpu_millicores, u64::saturating_add)
                     } else {
-                        held_charge
+                        judged_total
                     };
                     held > amount_of(envelope)
                 });
@@ -1242,6 +1290,8 @@ impl PolicyEngine {
                 // measured by usage against the mode's allowance, since a cap lowers
                 // usage but never the request.
                 let admission_excess = held_charge.saturating_sub(amount_of(&budget));
+                // Running work yields for what it holds, not for its charge: a
+                // charge-only shortfall blocks admission and steps nothing.
                 let usage_excess = if kind == ResourceKind::Cpu {
                     input
                         .allocations
@@ -1251,7 +1301,7 @@ impl PolicyEngine {
                         .fold(unknown_charge.cpu_millicores, u64::saturating_add)
                         .saturating_sub(budget.cpu_millicores)
                 } else {
-                    admission_excess
+                    judged_total.saturating_sub(amount_of(&budget))
                 };
                 let guaranteed =
                     |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
@@ -1290,22 +1340,6 @@ impl PolicyEngine {
                             now_monotonic_ms.saturating_sub(*start) >= window(kind)
                         })
                 };
-                // The supervisor reports the steps, the hint among them, that it cannot
-                // apply. An allocation without facts, as in recordings, has no target
-                // channel, so its hint is unavailable.
-                // Only a worker that acknowledged its target file takes a hint
-                // (FR-062); recordings without facts have no target channel.
-                let facts = |id: &str| {
-                    let mut facts = input.facts.get(id).cloned().unwrap_or_default();
-                    if !facts.hint_ready {
-                        facts
-                            .unavailable
-                            .entry(key.clone())
-                            .or_default()
-                            .insert(YieldStep::Hint);
-                    }
-                    facts
-                };
                 // A Guaranteed allocation keeps its CPU request: only usage above it
                 // can be capped (FR-024).
                 let kept_cpu = |a: &Allocation| {
@@ -1336,15 +1370,11 @@ impl PolicyEngine {
                     0
                 };
                 let mut planned = BTreeSet::new();
-                // Memory's running pass covers what cancelled reservations left over.
-                let mut carried = admission_excess;
                 for pending_pass in [true, false] {
                     let needed = if pending_pass {
                         admission_excess
-                    } else if kind == ResourceKind::Cpu {
-                        usage_excess
                     } else {
-                        carried
+                        usage_excess
                     };
                     let mut victims: Vec<VictimFacts> = input
                         .allocations
@@ -1352,10 +1382,12 @@ impl PolicyEngine {
                         .filter(candidate)
                         .filter(|a| (a.phase == AllocationPhase::Pending) == pending_pass)
                         .map(|a| {
-                            let amount = if kind == ResourceKind::Cpu && !pending_pass {
-                                usage_of(a).saturating_sub(kept_cpu(a))
-                            } else {
-                                amount_of(&charges[&a.id])
+                            let amount = match (kind, pending_pass) {
+                                (_, true) => amount_of(&charges[&a.id]),
+                                (ResourceKind::Cpu, false) => {
+                                    usage_of(a).saturating_sub(kept_cpu(a))
+                                }
+                                (_, false) => judged(a),
                             };
                             VictimFacts {
                                 id: a.id.clone(),
@@ -1484,7 +1516,6 @@ impl PolicyEngine {
                             ladder.insert((victim.id.clone(), key.clone()), next.clone());
                         }
                     }
-                    carried = remaining;
                 }
                 // Steps of allocations that are no longer candidates hold or reverse.
                 for ((id, step_key), state) in &self.ladder {

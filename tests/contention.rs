@@ -1177,6 +1177,59 @@ mod guaranteed_policy {
         assert_eq!(drained(&|_| critical(), false, 3000), Some(0));
     }
 
+    /// A floor breach needs free memory below the floor. A Guaranteed job that
+    /// requested 64 GiB and uses 8 GiB, with free memory well above the floor, is
+    /// never stepped; only RAM admission is blocked. A real breach still follows
+    /// FR-024.
+    #[test]
+    fn a_charge_beyond_the_budget_is_no_floor_breach() {
+        let config = config();
+        let mut job = ram(
+            "g",
+            AllocationClass::Guaranteed,
+            AllocationPhase::Running,
+            8192,
+        );
+        job.requested.ram_mib = 65_536;
+        // 128 GiB with a 1000 MiB floor and the job's 8192 MiB in use.
+        let host = |external: u64| {
+            let mut snapshot = snapshot(1000);
+            snapshot.total_ram_mib = 131_072;
+            snapshot.available_ram_mib = Some(131_072 - external - 8192);
+            snapshot
+        };
+        let facts = BTreeMap::from([("g".into(), ready(true, true))]);
+        let mut engine = PolicyEngine::new();
+        let input = PolicyInput {
+            allocations: vec![job.clone()],
+            facts: facts.clone(),
+            ..PolicyInput::default()
+        };
+        for now in (0..=20_000).step_by(500) {
+            // 42 880 MiB free: the charge exceeds the budget, usage does not.
+            let decision = engine
+                .evaluate(&config, &host(80_000), &input, now)
+                .unwrap();
+            assert!(
+                decision.actions.is_empty(),
+                "at {now}: {:?}",
+                decision.actions
+            );
+            assert_eq!(decision.admission_headroom.ram_mib, 0, "at {now}");
+            assert!(
+                !decision.resources[&ResourceKey::Ram]
+                    .reasons
+                    .iter()
+                    .any(|r| r.code == "floor_breach"),
+                "at {now}"
+            );
+        }
+        // 780 MiB free: below the floor, above the critical level.
+        let first = first_steps(&config, &|_| host(122_100), vec![job], facts, 12_000);
+        assert_eq!(first.get(&("g".into(), YieldStep::Hint)), Some(&0));
+        assert_eq!(first.get(&("g".into(), YieldStep::Drain)), Some(&10_000));
+    }
+
     /// Even the longest RAM breach window never delays the critical path (FR-063).
     #[test]
     fn the_longest_ram_breach_window_is_skipped_in_the_critical_zone() {
