@@ -1146,7 +1146,9 @@ fn process_name(pid: u32) -> Option<String> {
 /// The interval's GPU compute per side from fresh per-process samples: each PID's
 /// average, capped at 100%, own PIDs being the verified managed ones, all others
 /// external. The amount is trusted only when the sum is within `tolerance` points
-/// of device utilization over the same interval (FR-021).
+/// of device utilization over the same interval (FR-021). While an external PID is
+/// listed, device time nobody accounts for is external too, the unattributed
+/// part; with own PIDs only it is sampling error on own work.
 fn measure_compute(
     external: Option<&[u32]>,
     own: &BTreeSet<u32>,
@@ -1208,6 +1210,15 @@ fn measure_compute(
             BTreeMap::new(),
         );
     }
+    let device = u64::from(device);
+    let (external_percent, own_percent) = if external.is_some_and(|pids| !pids.is_empty()) {
+        (
+            external_percent.max(device.saturating_sub(own_percent)),
+            own_percent,
+        )
+    } else {
+        (0, device)
+    };
     (
         ComputeAmount::Measured {
             external: external_percent.min(100) * 10,
@@ -1968,7 +1979,8 @@ mod tests {
                        device: Option<u32>| {
             measure_compute(Some(&[42]), &own, Some(100), samples, device, false, 15).0
         };
-        // One external PID at 5% beside own work at 94%, on a device at 100%.
+        // One external PID at 5% beside own work at 94%, on a device at 100%: the
+        // unattributed point counts as external while an external PID is listed.
         let five = ok(vec![
             gpu_sample(42, 110, 5),
             gpu_sample(7, 110, 94),
@@ -1980,7 +1992,7 @@ mod tests {
         assert_eq!(
             measure(&five, Some(100)),
             ComputeAmount::Measured {
-                external: 50,
+                external: 60,
                 own: 940
             }
         );
@@ -2006,17 +2018,28 @@ mod tests {
         assert!(
             matches!(measure(&forty, Some(84)), ComputeAmount::Unknown(reason) if reason.contains("differs"))
         );
-        // No fresh samples on a busy device are no evidence; on an idle one, zero.
+        // No fresh samples on a busy device are no evidence. Within the tolerance,
+        // device time nobody accounts for is external while an external PID is
+        // listed: NotFound at 12% with PID 42 listed is 120, not 0.
         let none = Err(NvmlError::NotFound);
         assert!(matches!(
             measure(&none, Some(60)),
             ComputeAmount::Unknown(_)
         ));
         assert_eq!(
-            measure(&none, Some(3)),
+            measure(&none, Some(12)),
+            ComputeAmount::Measured {
+                external: 120,
+                own: 0
+            }
+        );
+        // With own PIDs only, the remainder is sampling error on own work.
+        let own_only = ok(vec![gpu_sample(7, 110, 85)]);
+        assert_eq!(
+            measure_compute(Some(&[]), &own, Some(100), &own_only, Some(100), false, 15).0,
             ComputeAmount::Measured {
                 external: 0,
-                own: 0
+                own: 1000
             }
         );
         // Unsupported queries, an incomplete inventory, no baseline and MPS.

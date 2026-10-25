@@ -3555,6 +3555,53 @@ fn external_gpu_users_are_principals_by_uid() {
     assert_eq!(share, Some(334));
 }
 
+/// Device time nobody accounts for is an unattributed external principal while an
+/// external PID is listed: with own samples at 85 on a saturated device, the 150
+/// contends; Neutral steps to the fair share, learns the user is satisfied and
+/// rises to capacity minus 150 minus its 5% margin (FR-021).
+#[test]
+fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let (mut cap, mut lowest) = (None::<u64>, u64::MAX);
+    let mut now = 0;
+    while now <= 90_000 {
+        // Own work wants 850; the listed external PID shows no samples, so the
+        // device time beside own work is the 150 nobody accounts for.
+        let own = cap.unwrap_or(850).min(850);
+        lowest = lowest.min(cap.unwrap_or(1000));
+        snap.gpus[0].compute_sample_id = Some(now + 1);
+        snap.gpus[0].own_compute_milli = Some(own);
+        snap.gpus[0].external_compute_milli = Some(150);
+        snap.gpus[0].utilization_percent = Some(((own + 150) / 10) as u32);
+        let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+        let action = decision.actions.iter().find(|a| a.resource == key);
+        assert_ne!(action.map(|a| a.step), Some(YieldStep::Pause), "at {now}");
+        cap = action.and_then(|a| a.target);
+        now += 500;
+    }
+    assert_eq!(lowest, 500, "the fair share applied first");
+    assert_eq!(cap.unwrap_or(1000), 800);
+}
+
 /// Neutral learns that a measured 5% external user is satisfied once own work
 /// holds the fair share and the device has capacity to spare, and own work then
 /// runs at capacity minus the user minus the 5% margin (FR-021).

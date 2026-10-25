@@ -620,7 +620,10 @@ node reports with the expected per-resource values at each step.
   device time, from each external process's average fresh per-process utilization, capped at
   100%, when the summed per-process utilization of all processes is within
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
-  utilization over the same interval. It MUST stay activity of unknown amount when either query
+  utilization over the same interval. While the device's process inventory lists an external
+  process, the external amount MUST be at least device utilization minus own processes' sum,
+  the part nobody accounts for being one unattributed principal; with own processes only, the
+  remainder is own work. It MUST stay activity of unknown amount when either query
   is unsupported, samples are not fresh, the process inventory is incomplete, or an MPS control
   daemon or server is present. A measured amount takes the CPU paths: external processes are
   principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
