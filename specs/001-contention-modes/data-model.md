@@ -171,8 +171,13 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   tolerances and FR-014's 5% minimum duty are fixed mechanism constants (FR-025).
 - **Hold.** Unknown measurement or authority loss keeps the current step (FR-008, FR-015).
 - **Reverse.**
-  - When external demand falls below `hysteresis_percent` of the trigger for the dwell time,
-    step down one level (FR-013).
+  - A step taken for external growth: when external demand falls below `hysteresis_percent` of
+    the trigger for the dwell time, step down one level (FR-013).
+  - A step taken for an envelope breach or an unknown measurement: once its cause has stayed
+    clear for the dwell time, whatever the external level.
+  - A step taken for a floor breach: once free memory has stayed above the floor by at least
+    `StepState.to_free` (what the step had to free when it began), or `noise_tolerance_mib` if
+    larger, for the dwell time plus the episode's reclaim backoff (FR-061).
   - `drain` and `terminate` do not reverse; the coordinator retry rules apply.
 
 ## YieldCause

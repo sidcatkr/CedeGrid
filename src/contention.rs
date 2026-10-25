@@ -331,6 +331,10 @@ pub struct StepState {
     /// again while the contention lasts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub after_pause: bool,
+    /// What the step had to free when it began; a floor-breach step reverses only
+    /// while the floor has that much room (FR-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_free: Option<u64>,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -352,6 +356,8 @@ pub struct LadderInput {
     pub target: Option<u64>,
     /// The allocation's measured usage of the resource, when known.
     pub usage: Option<u64>,
+    /// Free memory above the floor, for a memory resource, when known.
+    pub room: Option<u64>,
 }
 
 /// Mode-dependent ladder timing in milliseconds.
@@ -366,6 +372,10 @@ pub struct LadderTiming {
     /// How long a hint waits for compliance before the next step (FR-037).
     pub hint_deadline_ms: u64,
     pub hysteresis_percent: u8,
+    /// The least room above the floor a floor-breach step reverses with.
+    pub reversal_room_min: u64,
+    /// The reclaim backoff a floor-breach step's reversal also waits (FR-061).
+    pub breach_backoff_ms: u64,
 }
 
 impl LadderTiming {
@@ -386,6 +396,8 @@ impl LadderTiming {
             pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
             hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,
+            reversal_room_min: thresholds.noise_tolerance_mib,
+            breach_backoff_ms: 0,
         }
     }
 }
@@ -489,6 +501,7 @@ pub fn plan_step(
             calm_since_ms: None,
             contended_since_ms: Some(now_ms),
             after_pause: false,
+            to_free: (input.excess > 0).then_some(input.excess),
         }),
         skipped,
     };
@@ -567,6 +580,7 @@ pub fn plan_step(
         held.contended_since_ms = Some(contended_since);
         // A step held from earlier, such as a margin cap, now answers this demand.
         held.trigger_external = held.trigger_external.max(input.external);
+        held.to_free = held.to_free.max(Some(input.excess));
         if matches!(held.step, YieldStep::Cap | YieldStep::Hint) && input.target.is_some() {
             held.target = input.target;
         }
@@ -643,6 +657,21 @@ pub fn plan_step(
             skipped: Vec::new(),
         };
     }
+    // A floor-breach step waits for room above the floor for what it had to free,
+    // and its reversal also waits the episode's reclaim backoff, so work that
+    // regrows into the floor backs off instead of cycling.
+    let breach = state.cause == YieldCause::FloorBreach && input.kind.is_memory();
+    if breach && current != YieldStep::None {
+        let needed = state.to_free.unwrap_or(0).max(timing.reversal_room_min);
+        if input.room.is_none_or(|room| room < needed) {
+            held.calm_since_ms = None;
+            return LadderDecision {
+                state: Some(held),
+                skipped: Vec::new(),
+            };
+        }
+    }
+    let backoff_ms = if breach { timing.breach_backoff_ms } else { 0 };
     let calm_since = state.calm_since_ms.unwrap_or(now_ms);
     held.calm_since_ms = Some(calm_since);
     if current == YieldStep::None {
@@ -653,8 +682,12 @@ pub fn plan_step(
         };
     }
     // Reverse one level per scale-up interval after calm has lasted the dwell time.
-    if now_ms.saturating_sub(calm_since) >= timing.dwell_ms
-        && since_change >= timing.dwell_ms.max(timing.scale_up_ms)
+    if now_ms.saturating_sub(calm_since) >= timing.dwell_ms.saturating_add(backoff_ms)
+        && since_change
+            >= timing
+                .dwell_ms
+                .max(timing.scale_up_ms)
+                .saturating_add(backoff_ms)
     {
         let step = input.previous_step(current);
         held.step = step;

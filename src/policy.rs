@@ -187,6 +187,7 @@ impl PolicyEngine {
                 calm_since_ms: None,
                 contended_since_ms: None,
                 after_pause: false,
+                to_free: None,
             },
         );
     }
@@ -556,6 +557,11 @@ impl PolicyEngine {
         // A floor breach is observed free memory below the floor, as free and
         // floor; charges beyond the budget only block admission (FR-023).
         let mut floor_breaches: BTreeMap<ResourceKey, (u64, u64)> = BTreeMap::new();
+        // Free memory above each floor, which a floor-breach step reverses with.
+        let mut floor_room: BTreeMap<ResourceKey, u64> = BTreeMap::new();
+        if let Some(free) = snapshot.available_ram_mib {
+            floor_room.insert(ResourceKey::Ram, free.saturating_sub(ram_reserve));
+        }
         if let Some(free) = snapshot
             .available_ram_mib
             .filter(|free| *free < ram_reserve)
@@ -1002,11 +1008,13 @@ impl PolicyEngine {
                         critical_keys.insert(key.clone());
                     }
                     let floor = config.vram_floor_mib(gpu.total_memory_mib);
-                    if let Some(free) = gpu
+                    let free = gpu
                         .used_memory_mib
-                        .map(|used| gpu.total_memory_mib.saturating_sub(used))
-                        .filter(|free| *free < floor)
-                    {
+                        .map(|used| gpu.total_memory_mib.saturating_sub(used));
+                    if let Some(free) = free {
+                        floor_room.insert(key.clone(), free.saturating_sub(floor));
+                    }
+                    if let Some(free) = free.filter(|free| *free < floor) {
                         floor_breaches.insert(key.clone(), (free, floor));
                     }
                     let capacity = gpu
@@ -1288,6 +1296,24 @@ impl PolicyEngine {
                         .saturating_mul(1000);
                     timing.dwell_ms = timing.dwell_ms.min(timing.hint_deadline_ms);
                 }
+                // Each recent reclaim episode doubles what a floor-breach step's
+                // reversal also waits (FR-013, FR-061).
+                if kind.is_memory() {
+                    let thresholds = config.contention.thresholds(kind);
+                    let window_ms = thresholds.memory_peak_window_s.saturating_mul(1000);
+                    let episodes = self.reclaim_episodes.get(&key).map_or(0, |starts| {
+                        starts
+                            .iter()
+                            .filter(|start| now_monotonic_ms.saturating_sub(**start) < window_ms)
+                            .count()
+                    }) as u32;
+                    if episodes > 0 {
+                        timing.breach_backoff_ms = thresholds
+                            .reclaim_backoff_ms
+                            .saturating_mul(1u64.checked_shl(episodes - 1).unwrap_or(u64::MAX))
+                            .min(thresholds.reclaim_backoff_max_ms);
+                    }
+                }
                 let usage_of =
                     |a: &Allocation| -> u64 { a.observed.as_ref().map_or(0, |o| o.cpu_millicores) };
                 // Pending reservations are cancelled by their charge. CPU in use is
@@ -1449,6 +1475,11 @@ impl PolicyEngine {
                         let decision = plan_step(
                             state,
                             &LadderInput {
+                                room: if kind.is_memory() {
+                                    floor_room.get(&key).copied()
+                                } else {
+                                    None
+                                },
                                 kind,
                                 guaranteed: victim.guaranteed,
                                 // Running work is never drained for CPU alone (SC-002);
@@ -1541,6 +1572,11 @@ impl PolicyEngine {
                     let decision = plan_step(
                         Some(state),
                         &LadderInput {
+                            room: if kind.is_memory() {
+                                floor_room.get(&key).copied()
+                            } else {
+                                None
+                            },
                             kind,
                             guaranteed: allocation.class
                                 == crate::execution_model::AllocationClass::Guaranteed,
@@ -1654,6 +1690,7 @@ impl PolicyEngine {
                     let decision = plan_step(
                         state,
                         &LadderInput {
+                            room: None,
                             kind,
                             guaranteed: victim.guaranteed,
                             allow_drain: false,
@@ -1708,6 +1745,7 @@ impl PolicyEngine {
                     let decision = plan_step(
                         Some(state),
                         &LadderInput {
+                            room: None,
                             kind,
                             guaranteed: guaranteed(allocation),
                             allow_drain: false,

@@ -542,8 +542,11 @@ node reports with the expected per-resource values at each step.
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
 - **FR-013**: Steps 1–4 MUST be reversible. When external demand recedes past a reversal
   threshold with hysteresis, steps MUST be undone in reverse order at the mode's scale-up rate.
-  A step taken for a floor or envelope breach or an unknown measurement MUST reverse once that
-  cause has stayed clear, whatever the external level.
+  A step taken for an envelope breach or an unknown measurement MUST reverse once that cause has
+  stayed clear, whatever the external level. A step taken for a floor breach MUST reverse only
+  after free memory has stayed above the floor by at least what the step had to free, or
+  `noise_tolerance_mib` if larger, for the calm window, and its reversal MUST also wait the
+  episode's reclaim backoff (FR-061), so own work that regrows into the floor backs off.
 - **FR-014**: Pause MUST be bounded in time. A pause that does not resolve contention within the
   bound MUST escalate to the next step. For CPU alone that is the hint, whose target also caps
   CPU, at the 5% minimum duty for a target of zero; a worker that is not hint-ready gets a cap at

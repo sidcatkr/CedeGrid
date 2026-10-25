@@ -172,7 +172,10 @@ drained without the hint. When free memory falls below `contention.critical_floo
 (50%) of a floor, never below the minimum floor, the breach is critical: hint-ready
 workers get `contention.critical_hint_deadline_s` (1 s), others are drained at once,
 and workers that observe neither file are sent TERM without the drain-file wait.
-Each hint carries the deadline the policy enforces for it. The provisional reclaim
+Each hint carries the deadline the policy enforces for it. A hint taken for a floor
+breach is lifted only after free memory has stayed above the floor by what the hint had
+to free, or `noise_tolerance_mib` if larger, for the calm window plus the episode's
+reclaim backoff, so work that regrows into the floor backs off. The provisional reclaim
 target, not yet validated on hardware, is hint deadline + drain timeout + termination
 grace + one interval until own work that has not released the memory is terminated
 (10.5 s by default), 15.5 s for Guaranteed memory alone on the resource, and 6.5 s on

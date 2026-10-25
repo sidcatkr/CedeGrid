@@ -2642,6 +2642,86 @@ fn reclaim_backoff_doubles_and_resets_after_a_quiet_period() {
     assert_eq!(cycle(120_000 + 300_000 + 5000), 1000);
 }
 
+/// One interval of a hint-ready RAM job using `job` MiB, with 2000 MiB external on
+/// the 32 000 MiB host; returns whether the job holds a RAM step.
+fn ram_job_step(engine: &mut PolicyEngine, cfg: &Config, job: u64, now: u64) -> bool {
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(0, 30_000, 0),
+            Some(resources(0, job, 0)),
+        )],
+        facts: BTreeMap::from([(
+            "job".into(),
+            AllocationFacts {
+                hint_ready: true,
+                observes_drain: true,
+                ..AllocationFacts::default()
+            },
+        )]),
+        ..PolicyInput::default()
+    };
+    let mut snap = snapshot();
+    snap.available_ram_mib = Some(32_000 - 2000 - job);
+    engine
+        .evaluate(cfg, &snap, &input, now)
+        .unwrap()
+        .actions
+        .iter()
+        .any(|a| a.allocation_id == "job" && a.resource == cedegrid::contention::ResourceKey::Ram)
+}
+
+/// Own work that regrows into the floor after each reversal backs off: each
+/// episode's reversal waits the doubling reclaim backoff, so the gaps grow instead
+/// of cycling at a fixed period (FR-013, FR-061).
+#[test]
+fn breach_steps_back_off_when_own_work_regrows_into_the_floor() {
+    let cfg = config();
+    let mut engine = PolicyEngine::new();
+    let (mut job, mut stepped, mut reversals) = (29_300u64, false, vec![]);
+    let mut now = 0;
+    while now < 250_000 && reversals.len() < 5 {
+        let step = ram_job_step(&mut engine, &cfg, job, now);
+        if stepped && !step {
+            reversals.push(now);
+        }
+        stepped = step;
+        // A compliant worker shrinks under its hint and regrows without one.
+        job = if step { 4000 } else { 29_300 };
+        now += 500;
+    }
+    assert_eq!(reversals.len(), 5, "{reversals:?}");
+    let gaps: Vec<u64> = reversals.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.windows(2).all(|g| g[1] > g[0]), "{gaps:?}");
+}
+
+/// A breach step reverses only after free memory has stayed above the floor by
+/// what the step had to free, or the noise tolerance if larger (FR-013).
+#[test]
+fn a_breach_step_holds_until_the_floor_has_room_for_what_it_freed() {
+    let cfg = config();
+    let mut engine = PolicyEngine::new();
+    // 700 MiB free against the 1000 MiB floor: the step has to free 300 MiB.
+    assert!(ram_job_step(&mut engine, &cfg, 29_300, 0));
+    // Just under its 29 000 MiB target the floor has 100 MiB of room: it holds.
+    let mut now = 500;
+    while now < 120_000 {
+        assert!(
+            ram_job_step(&mut engine, &cfg, 28_900, now),
+            "reversed at {now}"
+        );
+        now += 500;
+    }
+    // 400 MiB of room is more than the 300 MiB it had to free and the 256 MiB
+    // noise tolerance: it reverses.
+    let start = now;
+    while ram_job_step(&mut engine, &cfg, 28_600, now) {
+        now += 500;
+        assert!(now < start + 60_000, "still stepped at {now}");
+    }
+}
+
 /// A RAM reclaim backoff holds RAM admission only: CPU stays open with its
 /// headroom, each by its own cooldown (T086a).
 #[test]
@@ -2650,9 +2730,11 @@ fn a_ram_reclaim_backoff_holds_only_ram_admission() {
     let mut cfg = config();
     // A node-wide cooldown that has not elapsed must not couple CPU to RAM.
     cfg.gpu.scale_up_cooldown_ms = Some(60_000);
-    // A backoff that outlasts the RAM step's reversal.
+    // The step's reversal waits the 120 s backoff too; a 30 s cooldown on top
+    // leaves RAM held by the backoff alone once the step has reversed.
     cfg.contention.ram.reclaim_backoff_ms = Some(120_000);
     cfg.contention.ram.reclaim_backoff_max_ms = Some(120_000);
+    cfg.contention.ram.scale_up_cooldown_ms = Some(30_000);
     let mut engine = PolicyEngine::new();
     let mut evaluate = |job: u64, now: u64| {
         let input = PolicyInput {
@@ -2687,7 +2769,7 @@ fn a_ram_reclaim_backoff_holds_only_ram_admission() {
         }
         now += 500;
         assert!(
-            now < 100_000,
+            now < 200_000,
             "the RAM step did not reverse: {:?}",
             decision.actions
         );

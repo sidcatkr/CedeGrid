@@ -84,6 +84,7 @@ mod ladder {
 
     fn input(kind: ResourceKind, excess: u64, external: u64) -> LadderInput {
         LadderInput {
+            room: None,
             kind,
             guaranteed: false,
             allow_drain: true,
@@ -125,6 +126,7 @@ mod ladder {
         let timing = timing(ResourceKind::GpuMemory, ContentionMode::Neutral);
         for unavailable in [BTreeSet::new(), BTreeSet::from([YieldStep::Hint])] {
             let (_, changes) = run(None, &timing, 0..60, |_| LadderInput {
+                room: None,
                 unavailable: unavailable.clone(),
                 ..input(ResourceKind::GpuMemory, 1000, 4000)
             });
@@ -145,6 +147,7 @@ mod ladder {
     fn guaranteed_gpu_compute_takes_no_cap_or_pause() {
         let timing = timing(ResourceKind::GpuCompute, ContentionMode::Neutral);
         let (_, changes) = run(None, &timing, 0..40, |_| LadderInput {
+            room: None,
             guaranteed: true,
             allow_drain: false,
             unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
@@ -165,6 +168,7 @@ mod ladder {
                 let target = 7000u64.saturating_sub(now / INTERVAL * 100).max(4000);
                 let usage = if follows { target + 100 } else { 8000 };
                 LadderInput {
+                    room: None,
                     unavailable: BTreeSet::from([YieldStep::LowerShare]),
                     target: Some(target),
                     usage: Some(usage),
@@ -259,6 +263,7 @@ mod ladder {
         let (state, _) = run(None, &cpu, 0..4, |_| input(ResourceKind::Cpu, 1000, 4000));
         let held = state.clone().unwrap();
         let (after, changes) = run(state, &cpu, 4..40, |_| LadderInput {
+            room: None,
             measurement_known: false,
             ..input(ResourceKind::Cpu, 1000, 0)
         });
@@ -271,6 +276,7 @@ mod ladder {
         let mut cpu = timing(ResourceKind::Cpu, ContentionMode::Neutral);
         cpu.response_ms = u64::MAX; // only the pause bound can move it on
         let paused = StepState {
+            to_free: None,
             step: YieldStep::Pause,
             entered_at_ms: 0,
             cause: YieldCause::ExternalGrowth,
@@ -302,6 +308,7 @@ mod ladder {
     fn a_pause_without_a_hint_ends_at_its_bound_as_a_minimum_duty_cap() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
         let paused = StepState {
+            to_free: None,
             step: YieldStep::Pause,
             entered_at_ms: 0,
             cause: YieldCause::ExternalGrowth,
@@ -312,6 +319,7 @@ mod ladder {
             after_pause: false,
         };
         let plain = |excess| LadderInput {
+            room: None,
             allow_drain: false,
             unavailable: [YieldStep::LowerShare, YieldStep::Hint].into(),
             target: Some(0),
@@ -341,6 +349,7 @@ mod ladder {
     fn steps_reverse_one_level_at_a_time_below_the_hysteresis_threshold() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::Performance);
         let capped = StepState {
+            to_free: None,
             step: YieldStep::Cap,
             entered_at_ms: 0,
             cause: YieldCause::ExternalGrowth,
@@ -371,6 +380,7 @@ mod ladder {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::Performance);
         for step in [YieldStep::Drain, YieldStep::Terminate] {
             let state = StepState {
+                to_free: None,
                 step,
                 entered_at_ms: 0,
                 cause: YieldCause::ExternalGrowth,
