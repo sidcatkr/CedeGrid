@@ -37,6 +37,7 @@ fn four_thousand_released_records_component_cost() {
             phase:ExecutionPhase::Released,resources:Resources{cpu_millicores:1000,ram_mib:2048,gpu_memory_mib:BTreeMap::new()},
             identity:None,backend:"rootless".into(),evidence:vec![],
             detail:"Synthetic released history for read/serialization cost only; no user process was launched".into(),
+            modes: Default::default(),
         };
         transaction
             .execute(

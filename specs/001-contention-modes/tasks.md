@@ -753,7 +753,7 @@ workers behave unchanged (quickstart §8).
   - legacy keys are interpreted per FR-031 (covered by T129);
   - removed options fail to load (covered by T122);
   - a per-resource mode above `max_mode` fails.
-- [ ] T090 [P] [US6] Add the mixed-version matrix in `tests/coordinator.rs` (`mixed_version_*`)
+- [X] T090 [P] [US6] Add the mixed-version matrix in `tests/coordinator.rs` (`mixed_version_*`)
   (SC-008):
   - the old-agent fixture with the new coordinator;
   - a new agent with a coordinator that advertises no features;
@@ -761,12 +761,12 @@ workers behave unchanged (quickstart §8).
 - [ ] T091 [P] [US6] Add SDK compatibility tests in `python/tests/test_worker.py` and
   `npm/tests/worker-drain.test.ts`: a drain-only 0.2-style worker behaves unchanged under the
   new supervisor.
-- [ ] T092 [P] [US6] Add client tests in `python/tests/test_transport.py` and
+- [X] T092 [P] [US6] Add client tests in `python/tests/test_transport.py` and
   `npm/tests/sdk.test.ts`: job specs carry `contention` only when it is set.
 
 ### Implementation for User Story 6
 
-- [ ] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
+- [X] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
   `src/execution_model.rs`. In `src/coordinator.rs`, strip it for agents without
   `contention/1`, and place tasks with overrides only on capable agents.
 - [ ] T093a [US6] Replace the interim mixed-mode rule with the target model in plan.md (B11): the
@@ -775,7 +775,7 @@ workers behave unchanged (quickstart §8).
   tier, in `src/contention.rs` and `src/policy.rs`. Add a regression test in `tests/policy.rs`
   with two jobs in different modes on the same resource: the Yield First job yields first and is
   held to its own mode's target.
-- [ ] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
+- [X] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
 - [X] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
 - [ ] T096 [US6] Add `CHANGELOG.md` entries for:

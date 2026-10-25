@@ -49,6 +49,7 @@ fn task(id: &str) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     }
 }
 fn submit(c: &mut Coordinator, job: &str, pool: &str, tasks: usize) {

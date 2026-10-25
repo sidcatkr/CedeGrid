@@ -53,6 +53,7 @@ fn request(task: &str, assignment: &str) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: false,
+        contention: None,
     }
 }
 fn prepared(mut row: ExecutionRecord) -> ExecutionRecord {

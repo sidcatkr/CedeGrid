@@ -51,6 +51,16 @@ pub struct LaunchRequest {
     pub required_controls: Vec<String>,
     #[serde(default)]
     pub allow_fallback: bool,
+    /// Per-job modes (FR-030); sent only to agents that negotiated `contention/1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contention: Option<JobContention>,
+}
+
+/// A job's requested mode per resource; the node cap still applies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct JobContention {
+    pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +97,9 @@ pub struct ExecutionRecord {
     pub backend: String,
     pub evidence: Vec<ControlEvidence>,
     pub detail: String,
+    /// The job's requested modes, kept with the record so the policy sees them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

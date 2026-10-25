@@ -31,6 +31,7 @@ fn setup() -> (tempfile::TempDir, Config, StateStore, ExecutionRecord) {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     };
     let mut record = store.reserve(&request, &resources).unwrap();
     record.backend = "rootless".into();
@@ -77,4 +78,47 @@ fn pending_usage_stays_unobserved_and_reused_pid_identity_never_becomes_zero() {
     let (_, allocations) = collector.sample(&[record]).unwrap();
     assert!(allocations[0].observed.is_none());
     assert_eq!(allocations[0].requested.ram_mib, 32);
+}
+/// A job's requested modes reach the policy's allocations through the record (FR-030).
+#[test]
+fn requested_modes_travel_from_the_request_to_the_policy_allocation() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let config = Config {
+        state_dir: dir.path().join("state"),
+        ..Config::default()
+    };
+    let store = StateStore::open(&config.state_dir).unwrap();
+    let resources = Resources {
+        cpu_millicores: 100,
+        ram_mib: 32,
+        gpu_memory_mib: BTreeMap::new(),
+    };
+    let modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::YieldFirst)]);
+    let request = LaunchRequest {
+        task_id: "task".into(),
+        assignment_id: "attempt".into(),
+        argv: vec!["unused".into()],
+        cwd: dir.path().to_path_buf(),
+        env: BTreeMap::new(),
+        resources: resources.clone(),
+        replay_safe: true,
+        class: AllocationClass::Opportunistic,
+        no_escape: true,
+        single_process: true,
+        managed_child_limit: 0,
+        max_attempts: None,
+        input_artifacts: vec![],
+        required_controls: vec![],
+        allow_fallback: true,
+        contention: Some(JobContention {
+            modes: modes.clone(),
+        }),
+    };
+    let record = store.reserve(&request, &resources).unwrap();
+    assert_eq!(record.modes, modes);
+    assert_eq!(store.execution_allocations().unwrap()[0].modes, modes);
+    let mut collector = ManagedCollector::new(&config).unwrap();
+    let (_, allocations) = collector.sample(std::slice::from_ref(&record)).unwrap();
+    assert_eq!(allocations[0].modes, modes);
 }

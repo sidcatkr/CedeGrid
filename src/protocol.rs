@@ -608,6 +608,13 @@ pub fn validate_launch_request(request: &LaunchRequest) -> anyhow::Result<()> {
             && (request.managed_child_limit == 0 || (!request.single_process && request.no_escape)),
         "ERR_CEDEGRID_ARGUMENT: invalid managed-child contract"
     );
+    anyhow::ensure!(
+        request
+            .contention
+            .as_ref()
+            .is_none_or(|contention| !contention.modes.is_empty()),
+        "ERR_CEDEGRID_ARGUMENT: a per-job contention override needs at least one mode"
+    );
     Ok(())
 }
 

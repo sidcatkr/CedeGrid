@@ -70,6 +70,7 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     };
     SupervisorSpec {
         config,

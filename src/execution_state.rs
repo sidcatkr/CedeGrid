@@ -74,7 +74,7 @@ impl StateStore {
                 requested: e.resources,
                 observed: None,
                 observed_upper: None,
-                modes: Default::default(),
+                modes: e.modes,
             })
             .collect())
     }
@@ -181,6 +181,7 @@ impl StateStore {
                 backend: "unprepared".into(),
                 evidence: Vec::new(),
                 detail: String::new(),
+                modes: request.contention.clone().unwrap_or_default().modes,
             }
         };
         record.phase = ExecutionPhase::NeedsReconciliation;
@@ -398,6 +399,7 @@ impl StateStore {
             backend: "unprepared".into(),
             evidence: Vec::new(),
             detail: "capacity reserved before launch preparation".into(),
+            modes: request.contention.clone().unwrap_or_default().modes,
         };
         let json = serde_json::to_string(&record)?;
         tx.execute(

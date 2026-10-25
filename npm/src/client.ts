@@ -63,7 +63,13 @@ export interface CommandOptions {
     managedChildLimit?: IntegerInput;
     inputArtifacts?: JsonValue[];
     maxAttempts?: IntegerInput;
+    /** Requested mode per resource; the node's max_mode still caps it. */
+    contentionModes?: Partial<Record<ContentionResource, ContentionMode>>;
 }
+export const CONTENTION_RESOURCES = ['cpu', 'ram', 'gpu_compute', 'gpu_memory'] as const;
+export const CONTENTION_MODES = ['yield_first', 'neutral', 'performance'] as const;
+export type ContentionResource = typeof CONTENTION_RESOURCES[number];
+export type ContentionMode = typeof CONTENTION_MODES[number];
 export function textField(value: unknown, name: string, nonempty = false): asserts value is string { if (typeof value !== 'string' || value.includes('\0') || (nonempty && !value))
     throw new ValidationError(`${name} must be ${nonempty ? 'nonempty ' : ''}text without NUL`); }
 export function argvField(argv: unknown): asserts argv is string[] { if (!Array.isArray(argv) || !argv.length)
@@ -104,6 +110,13 @@ export function commandTask(taskId: string, argv: string[], cwd: string, options
         result.max_attempts = integer(options.maxAttempts, 'maxAttempts', 1n, 4294967295n);
     if (options.inputArtifacts)
         result.input_artifacts = options.inputArtifacts;
+    if (options.contentionModes !== undefined) {
+        const modes = options.contentionModes;
+        const entries = typeof modes === 'object' && modes !== null && !Array.isArray(modes) ? Object.entries(modes) : [];
+        if (!entries.length || entries.some(([k, v]) => !(CONTENTION_RESOURCES as readonly string[]).includes(k) || !(CONTENTION_MODES as readonly unknown[]).includes(v)))
+            throw new ValidationError('contentionModes must map resources to modes');
+        result.contention = { modes: Object.fromEntries(entries) as Record<string, string> };
+    }
     return result;
 }
 export class Client {

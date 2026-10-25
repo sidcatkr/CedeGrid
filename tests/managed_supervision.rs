@@ -37,6 +37,7 @@ fn request(dir: &Path, code: &str) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     }
 }
 fn options() -> SupervisorOptions {

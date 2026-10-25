@@ -49,6 +49,8 @@ def _resolve_config_tls_path(config_path: Path, value: str | Path) -> Path:
 #: Task statuses in status replies. ``completed`` and ``cancelled`` are terminal.
 TASK_STATUSES = ("queued", "assigned", "completed", "needs_reconciliation", "cancelled")
 TERMINAL_TASK_STATUSES = ("completed", "cancelled")
+CONTENTION_RESOURCES = ("cpu", "ram", "gpu_compute", "gpu_memory")
+CONTENTION_MODES = ("yield_first", "neutral", "performance")
 
 
 def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int = 1000,
@@ -56,7 +58,8 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
                  env: dict[str, str] | None = None, replay_safe: bool = False,
                  allocation_class: str = "guaranteed", required_controls: list[str] | None = None,
                  single_process: bool = False, no_escape: bool = False, managed_child_limit: int = 0,
-                 input_artifacts: list[dict] | None = None, max_attempts: int | None = None) -> dict:
+                 input_artifacts: list[dict] | None = None, max_attempts: int | None = None,
+                 contention_modes: dict[str, str] | None = None) -> dict:
     """Build a task; callers must explicitly acknowledge the workload contract."""
     _validate_text_field("task_id", task_id)
     _validate_text_field("cwd", cwd)
@@ -105,6 +108,13 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
         task["input_artifacts"] = input_artifacts
     if managed_child_limit:
         task["managed_child_limit"] = managed_child_limit
+    if contention_modes is not None:
+        # Requested per resource; the node's max_mode still caps it.
+        if type(contention_modes) is not dict or not contention_modes or any(
+                key not in CONTENTION_RESOURCES or value not in CONTENTION_MODES
+                for key, value in contention_modes.items()):
+            raise ValidationError("contention_modes must map resources to modes")
+        task["contention"] = {"modes": dict(contention_modes)}
     return task
 
 

@@ -66,6 +66,7 @@ fn task(id: &str) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     }
 }
 fn report(now: u64) -> NodeReport {
@@ -143,6 +144,7 @@ fn prepared(a: &Assignment) -> ExecutionRecord {
         backend: "rootless".into(),
         evidence: vec![],
         detail: "verified".into(),
+        modes: Default::default(),
     }
 }
 fn authorize(c: &mut Coordinator, a: &Assignment, now: u64) -> Lease {
@@ -3878,4 +3880,154 @@ fn held_admission_preempts_nothing() {
     };
     run(false, ResourceKey::Ram);
     run(true, ResourceKey::GpuCompute("GPU-a".into()));
+}
+
+fn with_mode(mut request: LaunchRequest) -> LaunchRequest {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    request.contention = Some(cedegrid::execution_model::JobContention {
+        modes: BTreeMap::from([(ResourceKind::Cpu, ContentionMode::YieldFirst)]),
+    });
+    request
+}
+
+/// The request keys a 0.2 agent accepts; its `LaunchRequest` denies unknown fields.
+fn request_keys_0_2() -> std::collections::BTreeSet<String> {
+    let reply: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    reply["assignments"][0]["request"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// A new coordinator with a 0.2 agent: requests stay 0.2-shaped and tasks with a
+/// per-job mode wait for an agent that negotiated `contention/1` (SC-008).
+#[test]
+fn mixed_version_old_agent_with_new_coordinator() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let mut p = pool();
+    p.node_ids = vec!["node".into(), "other".into()];
+    p.max_workers = 8;
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+        .unwrap();
+    submit_tasks(
+        &mut c,
+        "job",
+        0,
+        vec![task("plain"), with_mode(task("override"))],
+        100,
+    );
+    let reply = report_reply(&mut c, &report(100), 100);
+    assert_eq!(placed(&reply), ["plain"]);
+    let keys = request_keys_0_2();
+    for assignment in &serde_json::to_value(&reply).unwrap()["assignments"]
+        .as_array()
+        .unwrap()
+        .clone()
+    {
+        let request = assignment["request"].as_object().unwrap();
+        assert!(request.keys().all(|key| keys.contains(key)), "{request:?}");
+    }
+    let mut modern = negotiated(100, &[]);
+    modern.node_id = "other".into();
+    let Response::Heartbeat { reply } = c
+        .handle_at(
+            &Principal::Node {
+                node_id: "other".into(),
+            },
+            Request::Heartbeat { report: modern },
+            100,
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(placed(&reply), ["override"]);
+}
+
+/// A new agent with a 0.2 coordinator: the recorded reply has no features and its
+/// requests carry no per-job mode, so the node's own modes apply.
+#[test]
+fn mixed_version_new_agent_with_featureless_coordinator() {
+    let reply: HeartbeatReply =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    assert!(reply.features.is_empty());
+    assert!(reply.assignments[0].request.contention.is_none());
+}
+
+/// New with new: a per-job mode reaches the negotiated agent unchanged.
+#[test]
+fn mixed_version_new_agent_with_new_coordinator() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    submit_tasks(&mut c, "job", 0, vec![with_mode(task("override"))], 100);
+    let reply = report_reply(&mut c, &negotiated(100, &[]), 100);
+    assert_eq!(placed(&reply), ["override"]);
+    assert_eq!(
+        reply.assignments[0].request.contention,
+        with_mode(task("override")).contention
+    );
+}
+
+/// An offer with a per-job mode is not re-sent stripped to an agent whose report
+/// lacks `contention/1`, as after an agent restart; nor is it authorized then.
+#[test]
+fn mixed_version_offers_with_modes_wait_for_the_negotiated_report() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    submit_tasks(&mut c, "job", 0, vec![with_mode(task("override"))], 100);
+    let offered = report_reply(&mut c, &negotiated(100, &[]), 100).assignments;
+    assert_eq!(offered.len(), 1);
+    let restarted = report_reply(&mut c, &report(101), 101);
+    assert!(restarted.assignments.is_empty());
+    assert!(
+        c.handle_at(
+            &node(),
+            Request::Prepared {
+                assignment_id: offered[0].request.assignment_id.clone(),
+                generation: offered[0].generation,
+                coordinator_epoch: offered[0].coordinator_epoch,
+                record: prepared(&offered[0]),
+            },
+            101,
+        )
+        .is_err()
+    );
+    let again = report_reply(&mut c, &negotiated(102, &[]), 102).assignments;
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].request.contention, offered[0].request.contention);
+    authorize(&mut c, &again[0], 102);
+}
+
+/// A per-job mode needs at least one resource.
+#[test]
+fn an_empty_per_job_mode_is_refused() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    let mut request = task("empty");
+    request.contention = Some(cedegrid::execution_model::JobContention::default());
+    assert!(
+        c.handle_at(
+            &Principal::Operator,
+            Request::Submit {
+                job: JobSpec {
+                    job_id: "job".into(),
+                    pool_id: "pool".into(),
+                    priority: 0,
+                    tasks: vec![request],
+                },
+            },
+            100,
+        )
+        .is_err()
+    );
 }

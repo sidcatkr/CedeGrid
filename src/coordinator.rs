@@ -787,6 +787,12 @@ impl Coordinator {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(rows);
+        // Only an agent that negotiated `contention/1` accepts per-job modes.
+        let negotiated: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes n, json_each(n.report_json,'$.features') f WHERE n.node_id=?1 AND f.value=?2)",
+            params![node_id, FEATURE_CONTENTION],
+            |r| r.get(0),
+        )?;
         let allocations = values
             .into_iter()
             .map(
@@ -802,6 +808,9 @@ impl Coordinator {
                     let mut request: crate::execution_model::LaunchRequest =
                         serde_json::from_str(&request)?;
                     request.assignment_id = id;
+                    if !negotiated {
+                        request.contention = None;
+                    }
                     Ok(ReplayRecoveryAllocation {
                         assignment: Assignment {
                             node_id: node_id.into(),
@@ -1155,6 +1164,7 @@ impl Coordinator {
         let mut assignments = Vec::new();
         let mut drain = Vec::new();
         let mut uncertain = unknown_allocations;
+        let negotiated = report.features.iter().any(|f| f == FEATURE_CONTENTION);
         let rows = self.reservation_rows(&report.node_id)?;
         for (id, generation, phase, task_id) in rows {
             if phase == "released" {
@@ -1188,6 +1198,15 @@ impl Coordinator {
             // Include revoked offers so a node can reconcile a lost offer delivery
             // without inventing its generation or launching its workload.
             if phase == "offered" || (phase == "uncertain" && never_authorized) {
+                let mut request = self.assignment_request(&id)?;
+                // A 0.2 agent refuses the field. An offer re-sent without it would
+                // launch without its mode, so it waits for a negotiated report.
+                if request.contention.is_some() && !negotiated {
+                    if phase == "offered" {
+                        continue;
+                    }
+                    request.contention = None;
+                }
                 let checkpoint: Option<String> = self
                     .store
                     .connection
@@ -1201,7 +1220,7 @@ impl Coordinator {
                     node_id: report.node_id.clone(),
                     generation,
                     coordinator_epoch: self.epoch,
-                    request: self.assignment_request(&id)?,
+                    request,
                     checkpoint: checkpoint.map(|s| serde_json::from_str(&s)).transpose()?,
                 });
             }
@@ -2085,7 +2104,7 @@ enum Placement {
 
 /// The one admission predicate that placement, preemption and the first
 /// authorization share (audit M10). `total` is the node's charge including the
-/// request. With `contention/1`, every requested resource (CPU, RAM, and each
+/// request. A request with per-job modes needs `contention/1`. With it, every requested resource (CPU, RAM, and each
 /// requested GPU's memory and compute) must be open with no own work yielding on
 /// it; a resource the report leaves out is not open. Otherwise the 0.2 fields apply.
 fn placement(
@@ -2095,6 +2114,10 @@ fn placement(
 ) -> Placement {
     use crate::contention::{Admission, ResourceKey, YieldStep};
     let resources = &request.resources;
+    // A per-job mode needs an agent that negotiated `contention/1` (FR-030).
+    if request.contention.is_some() && !report.features.iter().any(|f| f == FEATURE_CONTENTION) {
+        return Placement::Closed;
+    }
     if !resources.gpu_memory_mib.is_empty()
         && request.class == AllocationClass::Guaranteed
         && !report.gpu_guaranteed_allowed

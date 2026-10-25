@@ -95,6 +95,19 @@ test('command task and generic RPC normalize wire integers without changing meta
     for (const options of [{ cpuMillicores: true }, { maxAttempts: 0 }, { managedChildLimit: 1 }, { ramMib: 2 ** 53 + 1 }])
         assert.throws(() => commandTask('t', ['worker'], '/work', options as any));
 });
+test('job specs carry contention only when it is set', () => {
+    assert.equal('contention' in commandTask('plain', ['worker'], '/work'), false);
+    const modes = { cpu: 'yield_first', gpu_memory: 'neutral' } as const;
+    assert.deepEqual(commandTask('override', ['worker'], '/work', { contentionModes: modes }).contention, { modes });
+    const cases = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).job_contention_cases;
+    for (const c of cases) {
+        if (c.accepted)
+            assert.deepEqual(commandTask('t', ['worker'], '/work', { contentionModes: c.modes }).contention, { modes: c.modes }, c.id);
+        else
+            assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: c.modes }), CedeGridError, c.id);
+    }
+    assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: ['cpu'] } as any));
+});
 test('strict HTTPS origin validation', () => {
     for (const origin of ['https://example.test', 'https://example.test/', 'https://[::1]:9443', 'https://localhost:65535'])
         assert.equal(endpointOrigin(origin), origin.replace(/\/$/, ''));

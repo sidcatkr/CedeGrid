@@ -29,6 +29,7 @@ fn request(task: &str, assignment: &str) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: false,
+        contention: None,
     }
 }
 /// A temporary state root in the checkout. Its namespace control directory, a
@@ -127,6 +128,7 @@ fn preparation(
         }),
         evidence: vec![],
         detail: "prepared".into(),
+        modes: Default::default(),
     }
 }
 fn marker(record: &ExecutionRecord, control: &str) -> bool {

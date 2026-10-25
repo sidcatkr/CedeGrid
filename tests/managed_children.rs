@@ -48,6 +48,7 @@ fn setup(path: &std::path::Path) -> (StateStore, ExecutionRecord, LaunchRequest)
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     };
     let mut parent = store.reserve(&request, &request.resources).unwrap();
     parent.phase = ExecutionPhase::Prepared;

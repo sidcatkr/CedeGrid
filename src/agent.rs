@@ -4172,6 +4172,7 @@ mod agent_transport_tests {
             input_artifacts: vec![],
             required_controls: vec![],
             allow_fallback: true,
+            contention: None,
         };
         let capacity = Resources {
             cpu_millicores: 200,
@@ -4864,6 +4865,7 @@ mod drain_tests {
             input_artifacts: vec![],
             required_controls: vec![],
             allow_fallback: true,
+            contention: None,
         };
         ChildSlot {
             child: SupervisorProcess::Owned(child),

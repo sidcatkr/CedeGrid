@@ -88,6 +88,7 @@ Path('leader-exit-time').write_text(str(time.clock_gettime_ns(time.CLOCK_MONOTON
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     };
     let options = SupervisorOptions {
         nice: 10,

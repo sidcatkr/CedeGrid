@@ -26,6 +26,9 @@
      `deny_unknown_fields` in 0.2 agents, and the new field is
      `skip_serializing_if = "Option::is_none"`;
    - does not place tasks with explicit `contention` overrides on that agent;
+   - does not re-send an offer with an override to a report without `contention/1`, as after an
+     agent restart, and does not authorize it then; a revoked offer or a recovery import is sent
+     without the field;
    - uses the 0.2 admission fields for it.
 6. **Coordinator restart.** The agent re-learns features from every reply. If an advertised
    feature disappears, the agent drops the new fields on the next heartbeat.

@@ -1465,3 +1465,34 @@ fn negotiated_report_fields_round_trip_beside_the_0_2_report() {
     let old: Request = serde_json::from_str(include_str!("fixtures/0.2/node_report.json")).unwrap();
     assert!(matches!(old, Request::Heartbeat { .. }));
 }
+
+/// Per-job modes parse and validate alike in Rust and both SDKs (FR-030).
+#[test]
+fn job_contention_cases_parse_and_validate_alike() {
+    use cedegrid::execution_model::LaunchRequest;
+    let reply: Value =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    let base = reply["assignments"][0]["request"].clone();
+    for case in contract()["job_contention_cases"].as_array().unwrap() {
+        let mut task = base.clone();
+        task["contention"] = json!({"modes": case["modes"]});
+        let accepted = serde_json::from_value::<LaunchRequest>(task.clone())
+            .map_err(anyhow::Error::from)
+            .and_then(|request| {
+                cedegrid::protocol::validate_launch_request(&request)?;
+                Ok(request)
+            });
+        assert_eq!(
+            accepted.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "{}: {accepted:?}",
+            case["id"]
+        );
+        if let Ok(request) = accepted {
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["contention"],
+                task["contention"]
+            );
+        }
+    }
+}

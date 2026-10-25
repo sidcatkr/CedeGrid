@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from cedegrid import Client, RemoteError, DeadlineExceeded, parse_json, stringify_json
+from cedegrid import Client, RemoteError, DeadlineExceeded, ValidationError, command_task, parse_json, stringify_json
 
 class TransportTests(unittest.TestCase):
     @classmethod
@@ -56,6 +56,23 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(result['generation'],2**53+1);self.assertEqual(result['metadata']['integer'],2**64-1)
         self.assertIs(type(result['metadata']['float']),float)
         self.assertIn('-0.0',stringify_json(result))
+    def test_job_specs_carry_contention_only_when_set(self):
+        plain=command_task('plain',['worker'],'/home/user')
+        modes={'cpu':'yield_first','gpu_memory':'neutral'}
+        override=command_task('override',['worker'],'/home/user',contention_modes=modes)
+        body=self.client().request('submit',job={'job_id':'job','pool_id':'pool','priority':0,'tasks':[plain,override]})['body']
+        sent=body['job']['tasks']
+        self.assertNotIn('contention',sent[0])
+        self.assertEqual(sent[1]['contention'],{'modes':modes})
+        fixture=parse_json((Path(__file__).resolve().parents[2]/'tests/contracts/cedegrid-0.2.json').read_bytes())
+        for case in fixture['job_contention_cases']:
+            if case['accepted']:
+                self.assertEqual(command_task('t',['worker'],'/home/user',contention_modes=case['modes'])['contention'],{'modes':case['modes']},case['id'])
+                continue
+            with self.assertRaises(ValidationError,msg=case['id']):
+                command_task('t',['worker'],'/home/user',contention_modes=case['modes'])
+        with self.assertRaises(ValidationError):
+            command_task('t',['worker'],'/home/user',contention_modes=['cpu'])
     def test_wrong_ca_wrong_hostname_and_unauthorized_leaf(self):
         with self.assertRaises(RemoteError):self.client(ca=self.root/'wrong.pem').request('echo')
         original=self.endpoint;self.endpoint=original.replace('127.0.0.1','localhost')

@@ -53,6 +53,7 @@ impl ExecutionJournal for Journal {
             backend: "pending".into(),
             evidence: vec![],
             detail: String::new(),
+            modes: Default::default(),
         };
         self.records.borrow_mut().push(record.clone());
         Ok(record)
@@ -169,6 +170,7 @@ fn request(dir: &Path) -> LaunchRequest {
         input_artifacts: vec![],
         required_controls: vec![],
         allow_fallback: true,
+        contention: None,
     }
 }
 fn options() -> SupervisorOptions {

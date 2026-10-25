@@ -330,6 +330,7 @@ mod tests {
             input_artifacts: vec![],
             required_controls: vec![],
             allow_fallback: true,
+            contention: None,
         };
         let mut record = store.reserve(&request, &resources).unwrap();
         record.phase = ExecutionPhase::Released;

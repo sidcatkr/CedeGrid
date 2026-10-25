@@ -1461,6 +1461,7 @@ impl ManagedCollector {
                 backend: "mediated_child".into(),
                 evidence: vec![],
                 detail: String::new(),
+                modes: Default::default(),
             });
         }
         let (snapshot, mut allocations) = self.sample(&augmented)?;
@@ -1666,7 +1667,7 @@ impl ManagedCollector {
                 requested: record.resources.clone(),
                 observed: if pending { None } else { observed },
                 observed_upper: if pending { None } else { observed_upper },
-                modes: Default::default(),
+                modes: record.modes.clone(),
             });
         }
         if !cpu_diagnostics.is_empty()
@@ -2461,6 +2462,7 @@ mod tests {
             backend: "rootless".into(),
             evidence: vec![],
             detail: String::new(),
+            modes: Default::default(),
         };
         for phase in [
             ExecutionPhase::Reserved,
@@ -2495,6 +2497,7 @@ mod tests {
             backend: "rootless".into(),
             evidence: vec![],
             detail: String::new(),
+            modes: Default::default(),
         };
         collector.prime(&[record]);
         assert_eq!(collector.previous.len(), 1);

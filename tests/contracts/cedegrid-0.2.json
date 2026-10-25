@@ -998,5 +998,34 @@
         }
       }
     }
+  ],
+  "job_contention_cases": [
+    {
+      "id": "JC-01",
+      "modes": {
+        "cpu": "yield_first",
+        "gpu_memory": "neutral"
+      },
+      "accepted": true
+    },
+    {
+      "id": "JC-02",
+      "modes": {},
+      "accepted": false
+    },
+    {
+      "id": "JC-03",
+      "modes": {
+        "disk": "neutral"
+      },
+      "accepted": false
+    },
+    {
+      "id": "JC-04",
+      "modes": {
+        "cpu": "turbo"
+      },
+      "accepted": false
+    }
   ]
 }

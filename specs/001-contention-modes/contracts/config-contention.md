@@ -126,3 +126,8 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
   carry the cap as `max_mode`.
 - Overrides are placed only on agents that advertise `contention/1`
   ([wire-negotiation.md](wire-negotiation.md)).
+- `modes` needs at least one resource (`cpu`, `ram`, `gpu_compute`, `gpu_memory`). The SDKs set
+  it with `command_task(..., contention_modes=...)` (Python) and
+  `commandTask(..., { contentionModes })` (TypeScript), and send `contention` only when it is
+  set. The cases in `tests/contracts/cedegrid-0.2.json` (`job_contention_cases`) are checked by
+  Rust and both SDKs.
