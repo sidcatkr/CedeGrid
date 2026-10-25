@@ -263,8 +263,8 @@ below its default, and a detection setting beyond its default (`saturation_perce
 below twice its minimum without `"small_floor"` loads, so 0.2 files keep loading, but is
 raised to twice the minimum with a warning, given at load or, for a floor a percentage
 sets, when the agent first samples the host; it applies as configured only once
-confirmed. `doctor` and node reports list active caution options (`status` will show
-them from the node reports, T112), and `doctor` lists the keys and values each covers.
+confirmed. `doctor`, node reports and the coordinator `status` list active caution
+options, and `doctor` lists the keys and values each covers.
 `noise_tolerance_mib` is at most 1024 MiB, and the agent refuses to start when it
 exceeds half of any GPU's floor. Settings that lengthen reclaim are bounded: monitor
 intervals at most 10 s, kernel freshness at most 20 intervals, GPU sample age, drain
@@ -286,6 +286,111 @@ A drain decision does not release a reservation. The durable execution ledger ke
 charged until process exit and resource-release observations confirm the release.
 CPU/RAM reserves without applied cgroup controls are scheduling policies, not kernel
 enforcement. Available, configured, and applied capabilities are distinct facts.
+
+## What the node shows
+
+Every reason the policy gives carries a stable code from the catalog below; the text
+beside a code in an output may add detail and is not stable. Codes appear in each
+resource's `reasons`, in `admission` (held or blocked), in `actions` (the step and its
+cause), as the causes in `held_back` (`held_back_<cause>`), as the GPU compute path, as
+caution options in `exceptions`, and in the node-wide `reason_codes` beside the prose
+`reasons`.
+
+- `observe` prints one JSON object per sample: the snapshot and the decision, with
+  `resources`, `actions` and `exceptions`.
+- `doctor` prints JSON, or text with `--text`. For each resource it shows the configured and
+  effective mode, own usage, external demand, unattributed usage, the target share,
+  admission, the current steps, the reasons and `held_back`. It also shows the floors on
+  this host, the active caution options with the keys and values they cover, the legacy GPU
+  interpretation and the steps the configured backend offers per resource.
+- The coordinator `status` shows each node's negotiated contention summary under
+  `contention`, with each resource's admission and `held_back`; a node that did not
+  negotiate `contention/1` shows `"not negotiated"`.
+- `held_back` gives each cause in the resource's units and, under `percent`, as a percent
+  of `capacity`: `floor`, `reserve`, `margin` and `contention` are kept from own work,
+  `unknown` while a measurement is unknown or held, and `peak`, `noise_tolerance`,
+  `cooldown`, `backoff` and `charge_shortfall` from admission.
+
+| Code | Meaning |
+|---|---|
+| `yield_step_lower_share` | Own work on the resource runs at a lower share. |
+| `yield_step_cap` | Own work on the resource is capped at a target. |
+| `yield_step_pause` | Own work on the resource is paused. |
+| `yield_step_hint` | Own work is asked through its resource-target file to shrink to a target. |
+| `yield_step_drain` | Own work is asked to drain and stop. |
+| `yield_step_terminate` | Own work that did not drain in time is terminated. |
+| `external_growth` | External demand grew into what own work holds. |
+| `floor_breach` | Free memory fell below the no-harm floor. |
+| `unknown_measurement` | The resource's measurement stayed unknown past the unknown window. |
+| `envelope_breach` | Own work exceeds the operator envelope. |
+| `operator_drain` | The operator asked the node to drain. |
+| `coordinator_drain` | The coordinator asked for the allocation to drain. |
+| `lease_expired` | The allocation's lease expired before it was renewed. |
+| `step_reversed_contention_ended` | A step taken for external growth was relaxed because external demand fell back. |
+| `step_reversed_floor_restored` | A step taken for a floor breach was relaxed because free memory is back above the floor. |
+| `step_reversed_measurement_known` | A step taken for an unknown measurement was relaxed because the measurement is known again. |
+| `step_reversed_envelope_restored` | A step taken for the operator envelope was relaxed because own work is back within it. |
+| `step_reversed_drain_lifted` | A step taken for an operator drain was relaxed because the drain was lifted. |
+| `step_skipped_unavailable` | A step this allocation cannot take was skipped for the next one. |
+| `allocation_unknown_hold` | An allocation's usage is unknown, so it is charged at the larger of its request and last known usage and its step holds. |
+| `measurement_unknown_hold` | Own usage exceeds what the host reports beyond the known error, so the resource holds. |
+| `inconsistent_within_tolerance` | Own usage exceeds what the host reports within the known error, so external usage is clamped. |
+| `first_observation_baseline` | External GPU memory at the first observation is the baseline, not growth. |
+| `vram_noise_below_tolerance` | External GPU memory grew within the noise tolerance. |
+| `mode_capped` | A job's requested mode is above the node cap, so it runs at the cap. |
+| `probing_demand` | Own work steps down by one margin step to learn whether a small external demand is satisfied. |
+| `watching_larger_demand` | Own work holds the fair share while a larger external demand is watched for one response window. |
+| `satisfied_demand` | An external user's demand is recorded as satisfied, so it no longer contends below that demand. |
+| `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
+| `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
+| `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |
+| `gpu_compute_amount_unknown` | Per-process GPU samples do not account for the device, so the external amount is unknown. |
+| `gpu_compute_recently_inconsistent` | Per-process GPU samples were recently inconsistent or are new, so the measured path waits for the quiet window. |
+| `small_floor_raised` | A floor near its minimum applies as twice the minimum until small_floor is acknowledged. |
+| `admission_draining` | The node is draining, so nothing is admitted. |
+| `admission_spool_exhausted` | The node spool budget is exhausted, so nothing is admitted and nothing is drained. |
+| `admission_floor_breached` | The floor is breached, so nothing is admitted on this resource. |
+| `admission_measurement_unknown` | The measurement is unknown, so admission waits for it. |
+| `admission_own_work_yielding` | Own work on this resource is yielding, so nothing more is admitted. |
+| `admission_cooling_down` | The resource is cooling down after its last change. |
+| `admission_reclaim_backoff` | The reclaim backoff after recent floor breaches applies. |
+| `admission_envelope_exceeded` | Own work exceeds the operator envelope, so nothing is admitted. |
+| `gpu_memory_unknown` | GPU memory or its attribution is unknown, so the device admits nothing. |
+| `gpu_external_workload_appeared` | A new external GPU workload or external memory growth appeared. |
+| `gpu_charges_exceed_reserve` | Own GPU charges exceed the memory reserve or the allocation budget. |
+| `gpu_never_share_occupied` | The never_share_occupied_gpus setting refuses a device with external contexts. |
+| `gpu_yield_first_needs_quiet_device` | Yield First admits GPU work only on a quiet device. |
+| `gpu_yield_first_activity_unknown` | Yield First admits GPU work only on a quiet device, and the device's activity is unknown. |
+| `gpu_observation_unknown` | The GPU observation is unknown. |
+| `gpu_inventory_unavailable` | The GPU inventory is unavailable, so GPU admission is blocked. |
+| `gpu_absent` | An allocated GPU is absent from the current inventory. |
+| `cpu_capacity_unknown` | The CPU capacity is unknown, so the CPU budget is zero. |
+| `ram_capacity_unknown` | The RAM capacity is unknown, so the RAM budget is zero. |
+| `cpu_usage_unknown` | CPU busy time is unavailable, so CPU admission is blocked. |
+| `ram_usage_unknown` | Available RAM is unknown, so RAM admission is blocked. |
+| `kernel_cpu_stale` | The kernel CPU snapshot is stale, and repeated readings do not refresh it. |
+| `cpu_scoped_budget` | The CPU budget uses the effective CPU set's usage and capacity. |
+| `cpu_topology_unknown` | The CPU topology is unknown, so the physical-core reserve cannot be placed. |
+| `cpu_set_unknown` | The effective CPU set is unavailable, so scoped CPU admission is blocked. |
+| `cpu_scoped_telemetry_unknown` | Scoped CPU telemetry is missing, stale or inconsistent. |
+| `cpu_charges_exceed_budget` | Managed CPU charges exceed the scheduling budget. |
+| `ram_charges_exceed_budget` | Managed RAM charges exceed the scheduling budget. |
+| `cpu_only_admission` | Stable CPU and RAM headroom allows CPU-only admission while GPU admission stays blocked. |
+| `cooldown_pending` | The stable-capacity cooldown has not elapsed. |
+| `held_back_floor` | Memory kept free as the no-harm floor. |
+| `held_back_reserve` | CPU kept free by the explicit reserve where it exceeds the margin. |
+| `held_back_margin` | Capacity kept free by the mode's idle margin. |
+| `held_back_contention` | Capacity left to contending external demand. |
+| `held_back_peak` | Admission headroom kept for the external memory peak. |
+| `held_back_noise_tolerance` | External GPU memory growth tolerated as noise. |
+| `held_back_unknown` | Capacity withheld while the measurement is unknown or held. |
+| `held_back_cooldown` | Admission headroom withheld until the resource has cooled down. |
+| `held_back_backoff` | Admission headroom withheld by the reclaim backoff. |
+| `held_back_charge_shortfall` | Admission capacity held by charges above usage. |
+| `performance_mode` | Own work keeps all idle capacity minus a small margin and grows quickly. |
+| `small_floor` | A floor below twice its minimum keeps less headroom for other workloads' bursts. |
+| `reduced_margin` | A margin below its default leaves external demand less idle capacity to grow into. |
+| `relaxed_detection` | A detection setting beyond its default recognizes contention later or forgets it sooner. |
 
 ## Process-control contract
 

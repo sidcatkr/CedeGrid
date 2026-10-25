@@ -184,6 +184,9 @@ enum Command {
     Doctor {
         #[arg(long, value_enum, default_value = "agent")]
         role: DoctorRole,
+        /// Print readable text instead of JSON.
+        #[arg(long)]
+        text: bool,
     },
     /// Sample resources, explain policy, and optionally persist observations.
     Observe {
@@ -600,14 +603,23 @@ async fn async_main(cli: Cli) -> Result<()> {
             unreachable!()
         }
         Command::Validate => emit(&json!({"valid": true, "config": config})),
-        Command::Doctor { role } => {
+        Command::Doctor { role, text } => {
             let storage = state::preflight(&config.state_dir)?;
             let role_admitted = storage.admitted_by(config.storage_profile)
                 && (role != DoctorRole::Coordinator
                     || config.storage_profile != state::StorageProfile::BurstReplayDeleteExtra);
             let mut collector = Collector::for_config(&config)?;
             let snapshot = sample_with_intent(&mut collector, &config)?;
-            emit(&json!({
+            // One read-only evaluation shows each resource's state; no state is opened.
+            let decision =
+                PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
+            if text {
+                print!(
+                    "{}",
+                    cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings)
+                );
+            } else {
+                emit(&json!({
                 "schema_version": cedegrid::model::SCHEMA_VERSION,
                 "mode": "observe_only",
                 "os": std::env::consts::OS,
@@ -629,8 +641,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "config_warnings": config_warnings,
                 "legacy_gpu": config.legacy_gpu(),
                 "floors": config.floors(&snapshot),
-                "caution_options": config.caution_details(&snapshot)
-            }))?;
+                "caution_options": config.caution_details(&snapshot),
+                "max_mode": decision.max_mode,
+                "resources": decision.resources,
+                "actions": decision.actions,
+                "exceptions": decision.exceptions,
+                "reason_codes": decision.reason_codes,
+                "available_steps": cedegrid::explain::available_steps(&config)
+                }))?;
+            }
             ensure!(
                 role_admitted,
                 "storage or requested-role preflight failed: {}",
@@ -680,7 +699,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     .as_ref()
                     .map(|s| s.append_observation(&snapshot, &decision))
                     .transpose()?;
-                emit(&json!({"observation_id": id, "snapshot": snapshot, "decision": decision}))?;
+                emit(&cedegrid::explain::observation(&snapshot, &decision, id))?;
                 count = count.saturating_add(1);
                 if samples != 0 && count >= samples {
                     break;

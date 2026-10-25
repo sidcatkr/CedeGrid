@@ -71,6 +71,7 @@ fn observation() -> (Snapshot, Decision) {
         cpu_ram_expansion_allowed: false,
         would_drain: vec![],
         reasons: vec!["recorded decision".into()],
+        reason_codes: vec![],
         resources: Default::default(),
         actions: vec![],
         exceptions: vec![],

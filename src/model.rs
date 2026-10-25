@@ -366,6 +366,9 @@ pub struct Decision {
     /// Derived from `actions` with a step at or above drain.
     pub would_drain: Vec<String>,
     pub reasons: Vec<String>,
+    /// The same reasons with their catalog codes (FR-039).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_codes: Vec<ReasonCode>,
     /// Per-resource state (schema 3).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub resources: BTreeMap<crate::contention::ResourceKey, ResourceStatus>,
@@ -499,7 +502,59 @@ pub struct HeldBack {
     /// GPU compute: whether the external amount was measured, or why it is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_path: Option<ComputePath>,
+    /// The resource's capacity, in its units.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub capacity: u64,
+    /// Each cause above as a percent of `capacity`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub percent: BTreeMap<String, Percent>,
 }
+
+impl HeldBack {
+    /// The causes that hold something back, with their amounts, in a fixed order.
+    pub fn causes(&self) -> Vec<(&'static str, u64)> {
+        [
+            ("floor", self.floor),
+            ("reserve", self.reserve),
+            ("margin", self.margin),
+            ("contention", self.contention),
+            ("unknown", self.unknown),
+            ("peak", self.peak),
+            ("noise_tolerance", self.noise_tolerance),
+            ("cooldown", self.cooldown),
+            ("backoff", self.backoff),
+            ("charge_shortfall", self.charge_shortfall),
+        ]
+        .into_iter()
+        .filter(|(_, amount)| *amount > 0)
+        .collect()
+    }
+
+    /// Record `capacity` and each cause's share of it.
+    pub fn with_capacity(mut self, capacity: u64) -> Self {
+        self.capacity = capacity;
+        self.percent = if capacity == 0 {
+            BTreeMap::new()
+        } else {
+            self.causes()
+                .into_iter()
+                .map(|(cause, amount)| {
+                    let tenths = (amount as f64 * 1000.0 / capacity as f64).round() / 10.0;
+                    (cause.to_string(), Percent(tenths))
+                })
+                .collect()
+        };
+        self
+    }
+}
+
+/// A share of capacity in percent, to one decimal.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Percent(pub f64);
+
+// Percentages are finite by construction.
+impl Eq for Percent {}
 
 /// The path a device's GPU compute share took (FR-021).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,7 +563,55 @@ pub enum ComputePath {
     /// Fresh per-process samples accounted for device utilization.
     Measured,
     /// External activity of unknown amount: one principal (FR-021).
-    Unknown { reason: String },
+    Unknown {
+        /// A catalog code.
+        #[serde(default)]
+        code: String,
+        reason: String,
+    },
+}
+
+impl ComputePath {
+    pub fn code(&self) -> &str {
+        match self {
+            ComputePath::Measured => "gpu_compute_measured",
+            ComputePath::Unknown { code, .. } => code,
+        }
+    }
+}
+
+impl Decision {
+    /// Every code this decision reports: resource reasons, admission, `held_back`
+    /// causes and compute paths, actions and their causes, caution options and
+    /// node-wide reasons (T113).
+    pub fn codes(&self) -> std::collections::BTreeSet<String> {
+        let mut codes = std::collections::BTreeSet::new();
+        for status in self.resources.values() {
+            codes.extend(status.reasons.iter().map(|reason| reason.code.clone()));
+            if let Some(code) = status.admission.as_ref().and_then(|a| a.code()) {
+                codes.insert(code.to_string());
+            }
+            if let Some(held) = &status.held_back {
+                codes.extend(
+                    held.causes()
+                        .into_iter()
+                        .map(|(cause, _)| format!("held_back_{cause}")),
+                );
+                if let Some(path) = &held.compute_path {
+                    codes.insert(path.code().to_string());
+                }
+            }
+        }
+        for action in &self.actions {
+            codes.insert(action.code.clone());
+            if let Ok(serde_json::Value::String(cause)) = serde_json::to_value(action.cause) {
+                codes.insert(cause);
+            }
+        }
+        codes.extend(self.exceptions.iter().map(|notice| notice.name.clone()));
+        codes.extend(self.reason_codes.iter().map(|reason| reason.code.clone()));
+        codes
+    }
 }
 
 fn is_zero(value: &u64) -> bool {

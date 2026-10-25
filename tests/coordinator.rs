@@ -3603,9 +3603,7 @@ fn resource(
 }
 
 fn held() -> cedegrid::contention::Admission {
-    cedegrid::contention::Admission::Held {
-        reason: "the resource is cooling down".into(),
-    }
+    cedegrid::contention::Admission::held("admission_cooling_down")
 }
 
 fn placed(reply: &HeartbeatReply) -> Vec<String> {
@@ -4030,4 +4028,45 @@ fn an_empty_per_job_mode_is_refused() {
         )
         .is_err()
     );
+}
+
+/// The operator status shows each node's negotiated contention summary with each
+/// resource's admission and `held_back`; a node without `contention/1` shows
+/// "not negotiated" (T110, T112).
+#[test]
+fn status_shows_each_nodes_contention_summary() {
+    use cedegrid::contention::ResourceKey;
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let mut p = pool();
+    p.node_ids = vec!["node".into(), "other".into()];
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+        .unwrap();
+    report_reply(&mut c, &report(100), 100);
+    let mut modern = negotiated(100, &[]);
+    modern.node_id = "other".into();
+    resource(&mut modern, ResourceKey::Cpu).held_back = Some(cedegrid::model::HeldBack {
+        margin: 100,
+        capacity: 2000,
+        ..Default::default()
+    });
+    c.handle_at(
+        &Principal::Node {
+            node_id: "other".into(),
+        },
+        Request::Heartbeat { report: modern },
+        100,
+    )
+    .unwrap();
+    let Response::Status { nodes, .. } = c
+        .handle_at(&Principal::Operator, Request::Status { job_id: None }, 101)
+        .unwrap()
+    else {
+        panic!()
+    };
+    let node = |id: &str| nodes.iter().find(|n| n["node_id"] == id).unwrap().clone();
+    assert_eq!(node("node")["contention"], "not negotiated");
+    let summary = &node("other")["contention"];
+    assert_eq!(summary["resources"]["cpu"]["admission"]["state"], "open");
+    assert_eq!(summary["resources"]["cpu"]["held_back"]["margin"], 100);
 }

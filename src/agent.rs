@@ -3859,14 +3859,18 @@ fn block_admission_beyond_envelope(
         decision.expansion_allowed = false;
         decision.cpu_ram_expansion_allowed = false;
         for status in decision.resources.values_mut() {
-            status.admission = Some(crate::contention::Admission::Blocked {
-                reason: "the operator envelope is exceeded".into(),
-            });
+            status.admission = Some(crate::contention::Admission::blocked(
+                "admission_envelope_exceeded",
+            ));
         }
-        decision.reasons.push(format!(
+        let text = format!(
             "operator-approved node envelope exceeded: capacity={}; restoring it per resource",
             serde_json::to_string(capacity)?
-        ));
+        );
+        decision.reasons.push(text.clone());
+        decision
+            .reason_codes
+            .push(crate::model::ReasonCode::new("envelope_breach", text));
     }
     Ok(())
 }

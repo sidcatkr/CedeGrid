@@ -62,7 +62,7 @@ pub fn validate_gpu_launch_contract(
             gpu_observable(snapshot.observed_at_unix_ms, gpu),
             config.contention.never_share_occupied_gpus,
         );
-        if let Admission::Held { reason } | Admission::Blocked { reason } = admission {
+        if let Admission::Held { reason, .. } | Admission::Blocked { reason, .. } = admission {
             anyhow::bail!(
                 "GPU {uuid} is not admitted by mode {mode:?} at the launch recheck: {reason}"
             );
@@ -275,10 +275,10 @@ impl PolicyEngine {
                     }
                     unknown_charge.add_checked(&charge)?;
                     unknown_allocations.insert(allocation.id.clone());
-                    reasons.push(format!(
+                    reasons.push(ReasonCode::new("allocation_unknown_hold", format!(
                         "allocation {} has unknown managed usage; charged at max(request, last known), its step holds and affected admission is blocked",
                         allocation.id
-                    ));
+                    )));
                 }
             }
             charged.add_checked(&charge)?;
@@ -389,13 +389,22 @@ impl PolicyEngine {
         let mut cpu_unknown = false;
         let mut ram_unknown = false;
         if input.explicit_drain {
-            reasons.push("explicit node drain requested".into());
+            reasons.push(ReasonCode::new(
+                "operator_drain",
+                "explicit node drain requested",
+            ));
         }
         if snapshot.cpu_capacity_millicores == 0 {
-            reasons.push("CPU capacity unavailable; zero CPU scheduling budget".into());
+            reasons.push(ReasonCode::new(
+                "cpu_capacity_unknown",
+                "CPU capacity unavailable; zero CPU scheduling budget",
+            ));
         }
         if snapshot.total_ram_mib == 0 {
-            reasons.push("RAM capacity unavailable; zero RAM scheduling budget".into());
+            reasons.push(ReasonCode::new(
+                "ram_capacity_unknown",
+                "RAM capacity unavailable; zero RAM scheduling budget",
+            ));
         }
 
         let scoped_kernel = snapshot
@@ -410,17 +419,19 @@ impl PolicyEngine {
             match self.last_kernel_cpu_sample {
                 Some((sample, _)) if kernel.monotonic_elapsed_ms < sample => {
                     valid = false;
-                    reasons
-                        .push("kernel CPU collector clock reset; establish a new baseline".into());
+                    reasons.push(ReasonCode::new(
+                        "kernel_cpu_stale",
+                        "kernel CPU collector clock reset; establish a new baseline",
+                    ));
                     next_kernel_cpu_sample = Some((kernel.monotonic_elapsed_ms, now_monotonic_ms));
                 }
                 Some((sample, received)) if kernel.monotonic_elapsed_ms == sample => {
                     if now_monotonic_ms.saturating_sub(received) > kernel.freshness_limit_ms {
                         valid = false;
-                        reasons.push(
-                            "kernel CPU snapshot is stale; repeated readings do not refresh it"
-                                .into(),
-                        );
+                        reasons.push(ReasonCode::new(
+                            "kernel_cpu_stale",
+                            "kernel CPU snapshot is stale; repeated readings do not refresh it",
+                        ));
                     }
                 }
                 _ => next_kernel_cpu_sample = Some((kernel.monotonic_elapsed_ms, now_monotonic_ms)),
@@ -429,12 +440,12 @@ impl PolicyEngine {
             let reserve = scoped_physical_reserve(&kernel.cpu, config.cpu.reserve_physical_cores);
             if reserve.is_none() {
                 valid = false;
-                reasons.push("effective CPU topology unavailable; cannot map physical-core reserve within permitted CPUs".into());
+                reasons.push(ReasonCode::new("cpu_topology_unknown", "effective CPU topology unavailable; cannot map physical-core reserve within permitted CPUs"));
             }
             if !valid {
                 cpu_unknown = true;
             }
-            reasons.push("CPU budget uses matching effective-CPU usage and hardware capacity; visible ancestor bandwidth is a separate ceiling, not a guaranteed share".into());
+            reasons.push(ReasonCode::new("cpu_scoped_budget", "CPU budget uses matching effective-CPU usage and hardware capacity; visible ancestor bandwidth is a separate ceiling, not a guaranteed share"));
             (
                 capacity,
                 kernel.cpu.busy_millicores,
@@ -468,10 +479,10 @@ impl PolicyEngine {
             .min(snapshot.cpu_capacity_millicores)
         } else {
             cpu_unknown = true;
-            reasons.push(
-                "CPU topology unavailable; cannot establish configured physical-core reserve"
-                    .into(),
-            );
+            reasons.push(ReasonCode::new(
+                "cpu_topology_unknown",
+                "CPU topology unavailable; cannot establish configured physical-core reserve",
+            ));
             snapshot.cpu_capacity_millicores
         };
         if let Some(busy) = cpu_busy {
@@ -488,10 +499,9 @@ impl PolicyEngine {
                 cpu_held = true;
                 statuses.entry(ResourceKey::Cpu).or_default().measurement =
                     Some(Measurement::Unknown);
-                reasons.push(
-                    "managed CPU observation exceeds busy observation in the selected scope beyond the known error; CPU holds and admission is blocked"
-                        .into(),
-                );
+                reasons.push(ReasonCode::new("measurement_unknown_hold", 
+                    "managed CPU observation exceeds busy observation in the selected scope beyond the known error; CPU holds and admission is blocked",
+                ));
                 note(
                     &mut statuses,
                     ResourceKey::Cpu,
@@ -537,7 +547,10 @@ impl PolicyEngine {
             ));
         } else {
             cpu_unknown = true;
-            reasons.push("CPU busy telemetry unavailable; CPU admission blocked".into());
+            reasons.push(ReasonCode::new(
+                "cpu_usage_unknown",
+                "CPU busy telemetry unavailable; CPU admission blocked",
+            ));
         }
         let ram_reserve = config.ram_floor_mib(snapshot.total_ram_mib);
         // An unconfirmed floor near its minimum applies as twice the minimum (FR-054).
@@ -591,10 +604,9 @@ impl PolicyEngine {
                 ram_held = true;
                 statuses.entry(ResourceKey::Ram).or_default().measurement =
                     Some(Measurement::Unknown);
-                reasons.push(
-                    "managed RAM observation exceeds system used observation; RAM holds and admission is blocked"
-                        .into(),
-                );
+                reasons.push(ReasonCode::new("measurement_unknown_hold", 
+                    "managed RAM observation exceeds system used observation; RAM holds and admission is blocked",
+                ));
                 note(
                     &mut statuses,
                     ResourceKey::Ram,
@@ -614,7 +626,10 @@ impl PolicyEngine {
             status.own = Some((own_lower, own_lower));
         } else {
             ram_unknown = true;
-            reasons.push("RAM availability telemetry unavailable; RAM admission blocked".into());
+            reasons.push(ReasonCode::new(
+                "ram_usage_unknown",
+                "RAM availability telemetry unavailable; RAM admission blocked",
+            ));
         }
         if cpu_unknown {
             budget.cpu_millicores = 0;
@@ -778,6 +793,7 @@ impl PolicyEngine {
             view.satisfied = known.clone();
             // A watch keeps own work at the fair share; only a probe sets a target.
             view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
+            note_demand(&mut statuses, ResourceKey::Cpu, &known, probe.as_ref());
             if !known.is_empty() {
                 satisfied.insert(ResourceKey::Cpu, known);
             }
@@ -874,9 +890,12 @@ impl PolicyEngine {
         // Why GPU admission is blocked on a device, for its admission state.
         let mut gpu_block_reasons: BTreeMap<String, String> = BTreeMap::new();
         if snapshot.gpu_inventory != CapabilityStatus::Available {
-            reasons.push(format!(
-                "GPU inventory {:?}; GPU admission blocked, CPU-only capacity remains eligible",
-                snapshot.gpu_inventory
+            reasons.push(ReasonCode::new(
+                "gpu_inventory_unavailable",
+                format!(
+                    "GPU inventory {:?}; GPU admission blocked, CPU-only capacity remains eligible",
+                    snapshot.gpu_inventory
+                ),
             ));
             for gpu in charged.gpu_memory_mib.keys() {
                 budget.gpu_memory_mib.insert(gpu.clone(), 0);
@@ -987,24 +1006,27 @@ impl PolicyEngine {
                     !telemetry_unknown,
                     config.contention.never_share_occupied_gpus,
                 );
-                let block_reason = if telemetry_unknown {
-                    Some("GPU memory or its attribution is unknown".to_string())
+                let block_code = if telemetry_unknown {
+                    Some("gpu_memory_unknown".to_string())
                 } else if protection_event {
-                    Some("a new external workload or external memory growth appeared".into())
+                    Some("gpu_external_workload_appeared".into())
                 } else if breached {
-                    Some("own charges exceed the memory reserve or allocation budget".into())
-                } else if let Admission::Held { reason } | Admission::Blocked { reason } =
-                    &compute_admission
-                {
-                    Some(reason.clone())
+                    Some("gpu_charges_exceed_reserve".into())
                 } else {
-                    None
+                    compute_admission.code().map(str::to_string)
                 };
-                if let Some(reason) = &block_reason {
+                if let Some(code) = &block_code {
                     blocked_gpus.insert(gpu.uuid.clone());
                     unsafe_now = true;
-                    reasons.push(format!("GPU {}: {reason}; GPU admission blocked", gpu.uuid));
-                    gpu_block_reasons.insert(gpu.uuid.clone(), reason.clone());
+                    reasons.push(ReasonCode::new(
+                        code,
+                        format!(
+                            "GPU {}: {} GPU admission is blocked.",
+                            gpu.uuid,
+                            crate::contention::reason_text(code).unwrap_or(code)
+                        ),
+                    ));
+                    gpu_block_reasons.insert(gpu.uuid.clone(), code.clone());
                 }
                 // A measured external amount takes the CPU paths (FR-021, FR-022):
                 // one principal of that amount, saturation from device utilization,
@@ -1036,22 +1058,38 @@ impl PolicyEngine {
                                 .min(GPU_COMPUTE_CAPACITY),
                         )
                     });
-                compute_paths.insert(
-                    gpu.uuid.clone(),
-                    match measured {
-                        Some(_) => ComputePath::Measured,
-                        None if gpu.external_compute_milli.is_some() => ComputePath::Unknown {
-                            reason: format!(
-                                "per-process samples were recently inconsistent or are new: measured {measured_streak} of {measured_window} consecutive intervals"
-                            ),
-                        },
-                        None => ComputePath::Unknown {
-                            reason: gpu.compute_amount_unknown.clone().unwrap_or_else(|| {
-                                "the collector did not measure the external amount".into()
-                            }),
-                        },
+                let path = match measured {
+                    Some(_) => ComputePath::Measured,
+                    None if gpu.external_compute_milli.is_some() => ComputePath::Unknown {
+                        code: "gpu_compute_recently_inconsistent".into(),
+                        reason: format!(
+                            "per-process samples were recently inconsistent or are new: measured {measured_streak} of {measured_window} consecutive intervals"
+                        ),
+                    },
+                    None => ComputePath::Unknown {
+                        code: if gpu.compute_amount_unknown.is_some() {
+                            "gpu_compute_amount_unknown"
+                        } else {
+                            "gpu_compute_unknown_activity"
+                        }
+                        .into(),
+                        reason: gpu.compute_amount_unknown.clone().unwrap_or_else(|| {
+                            "the collector did not measure the external amount".into()
+                        }),
+                    },
+                };
+                note(
+                    &mut statuses,
+                    compute_key.clone(),
+                    path.code(),
+                    match &path {
+                        ComputePath::Measured => {
+                            "external GPU compute is measured from per-process samples".into()
+                        }
+                        ComputePath::Unknown { reason, .. } => reason.clone(),
                     },
                 );
+                compute_paths.insert(gpu.uuid.clone(), path);
                 if !telemetry_unknown {
                     let budget = match measured {
                         Some((external, own)) if external > 0 => {
@@ -1096,6 +1134,7 @@ impl PolicyEngine {
                             bounded(&compute_key, &view, &mut known);
                             view.satisfied = known.clone();
                             view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
+                            note_demand(&mut statuses, compute_key.clone(), &known, probe.as_ref());
                             if !known.is_empty() {
                                 satisfied.insert(compute_key.clone(), known);
                             }
@@ -1170,9 +1209,7 @@ impl PolicyEngine {
                 compute_status.target_share =
                     gpu_compute_budget.get(&gpu.uuid).map(|budget| budget.share);
                 compute_status.admission = Some(if telemetry_unknown {
-                    Admission::Held {
-                        reason: "GPU observation is unknown".into(),
-                    }
+                    Admission::held("gpu_observation_unknown")
                 } else {
                     compute_admission
                 });
@@ -1268,8 +1305,9 @@ impl PolicyEngine {
                     budget.gpu_memory_mib.insert(gpu.clone(), 0);
                     blocked_gpus.insert(gpu.clone());
                     unsafe_now = true;
-                    reasons.push(format!(
-                        "allocated GPU {gpu} is absent from the current inventory"
+                    reasons.push(ReasonCode::new(
+                        "gpu_absent",
+                        format!("allocated GPU {gpu} is absent from the current inventory"),
                     ));
                 }
             }
@@ -1874,11 +1912,18 @@ impl PolicyEngine {
                         _ => assumed,
                     }
                 };
-                let held = budget
-                    .own
-                    .unwrap_or_else(|| running.iter().map(|a| applied_duty(a)).sum());
+                let duties: Vec<u64> = running.iter().map(|a| applied_duty(a)).collect();
+                let held = budget.own.unwrap_or_else(|| duties.iter().sum());
                 if budget.own.is_none() {
                     statuses.entry(key.clone()).or_default().own = Some((held, held));
+                    if duties.iter().any(|duty| *duty < assumed) {
+                        note(
+                            &mut statuses,
+                            key.clone(),
+                            "applied_duty_credit",
+                            format!("own work is credited at the applied duty, {held} in total"),
+                        );
+                    }
                 }
                 let share = held / running.len() as u64;
                 let excess = held.saturating_sub(budget.share);
@@ -2034,6 +2079,49 @@ impl PolicyEngine {
                     }
                 }
             }
+            // A step that went down, or a cap or hint whose target rose, says
+            // why: its cause no longer holds as it did.
+            for ((id, key), before) in &self.ladder {
+                let next = ladder.get(&(id.clone(), key.clone()));
+                let after = next.map(|s| s.step);
+                let raised = next.is_some_and(|next| {
+                    next.step == before.step
+                        && matches!(next.step, YieldStep::Cap | YieldStep::Hint)
+                        && next.target > before.target
+                });
+                if before.step == YieldStep::None
+                    || (after.is_some_and(|step| step >= before.step) && !raised)
+                    || !input.allocations.iter().any(|a| &a.id == id)
+                {
+                    continue;
+                }
+                let code = match before.cause {
+                    YieldCause::ExternalGrowth => "step_reversed_contention_ended",
+                    YieldCause::FloorBreach => "step_reversed_floor_restored",
+                    YieldCause::UnknownMeasurement => "step_reversed_measurement_known",
+                    YieldCause::EnvelopeBreach => "step_reversed_envelope_restored",
+                    YieldCause::OperatorDrain
+                    | YieldCause::CoordinatorDrain
+                    | YieldCause::LeaseExpired => "step_reversed_drain_lifted",
+                };
+                note(
+                    &mut statuses,
+                    key.clone(),
+                    code,
+                    match (raised, next.and_then(|next| next.target)) {
+                        (true, Some(target)) => format!(
+                            "allocation {id}: {} target raised from {} to {target}",
+                            step_name(before.step),
+                            before.target.unwrap_or(0)
+                        ),
+                        _ => format!(
+                            "allocation {id}: {} relaxed to {}",
+                            step_name(before.step),
+                            step_name(after.unwrap_or(YieldStep::None))
+                        ),
+                    },
+                );
+            }
             for ((id, key), state) in &ladder {
                 if state.step == YieldStep::None {
                     continue;
@@ -2058,10 +2146,16 @@ impl PolicyEngine {
         let mut seen = BTreeSet::new();
         would_drain.retain(|id| seen.insert(id.clone()));
         if charged.cpu_millicores > budget.cpu_millicores {
-            reasons.push("managed CPU charges exceed scheduling budget".into());
+            reasons.push(ReasonCode::new(
+                "cpu_charges_exceed_budget",
+                "managed CPU charges exceed scheduling budget",
+            ));
         }
         if charged.ram_mib > budget.ram_mib {
-            reasons.push("managed RAM charges exceed scheduling budget".into());
+            reasons.push(ReasonCode::new(
+                "ram_charges_exceed_budget",
+                "managed RAM charges exceed scheduling budget",
+            ));
         }
         let legacy_expansion_allowed = !unsafe_now && cooled_down && would_drain.is_empty();
         // A reclaim episode on a memory resource starts when a floor breach or own
@@ -2219,10 +2313,10 @@ impl PolicyEngine {
         let cpu_ram_expansion_allowed = cpu_ram_expansion_allowed && !input.spool_full;
         if input.spool_full {
             headroom = Resources::default();
-            reasons.push(
-                "node spool budget exhausted; admission is blocked and no allocation is drained"
-                    .into(),
-            );
+            reasons.push(ReasonCode::new(
+                "admission_spool_exhausted",
+                "node spool budget exhausted; admission is blocked and no allocation is drained",
+            ));
         }
         let expansion_allowed = !input.spool_full
             && (legacy_expansion_allowed
@@ -2237,10 +2331,13 @@ impl PolicyEngine {
         }
         if !expansion_allowed {
             if cpu_ram_expansion_allowed {
-                reasons.push("independently stable CPU/RAM headroom permits CPU-only admission; GPU admission remains blocked".into());
+                reasons.push(ReasonCode::new("cpu_only_admission", "independently stable CPU/RAM headroom permits CPU-only admission; GPU admission remains blocked"));
             }
             if !unsafe_now && !cooled_down {
-                reasons.push("stable-capacity cooldown has not elapsed".into());
+                reasons.push(ReasonCode::new(
+                    "cooldown_pending",
+                    "stable-capacity cooldown has not elapsed",
+                ));
             }
         }
         // What each resource holds back and why (SC-016).
@@ -2394,7 +2491,17 @@ impl PolicyEngine {
             held_back.insert(ResourceKey::GpuCompute(gpu.uuid.clone()), held);
         }
         for (key, held) in held_back {
-            statuses.entry(key).or_default().held_back = Some(held);
+            let capacity = match &key {
+                ResourceKey::Cpu => cpu_capacity,
+                ResourceKey::Ram => snapshot.total_ram_mib,
+                ResourceKey::GpuMemory(uuid) => snapshot
+                    .gpus
+                    .iter()
+                    .find(|gpu| &gpu.uuid == uuid)
+                    .map_or(0, |gpu| gpu.total_memory_mib),
+                ResourceKey::GpuCompute(_) => GPU_COMPUTE_CAPACITY,
+            };
+            statuses.entry(key).or_default().held_back = Some(held.with_capacity(capacity));
         }
         // Admission per resource: blocked until its cause changes, held while it
         // waits for a measurement or a cooldown (FR-028, FR-038).
@@ -2403,33 +2510,29 @@ impl PolicyEngine {
                 .iter()
                 .any(|((_, k), state)| k == key && state.step > YieldStep::None)
         };
-        let blocked = |reason: &str| Admission::Blocked {
-            reason: reason.into(),
-        };
-        let held = |reason: &str| Admission::Held {
-            reason: reason.into(),
-        };
+        let blocked = Admission::blocked;
+        let held = Admission::held;
         let admission = |key: &ResourceKey,
                          unknown: bool,
                          gpu_reason: Option<&String>,
                          cooled_down: bool,
                          backed_off: bool| {
             if input.explicit_drain {
-                blocked("the node is draining")
+                blocked("admission_draining")
             } else if input.spool_full {
-                blocked("the node spool budget is exhausted")
+                blocked("admission_spool_exhausted")
             } else if breached.contains(key) {
-                blocked("the floor is breached")
+                blocked("admission_floor_breached")
             } else if unknown {
-                held("the measurement is unknown")
-            } else if let Some(reason) = gpu_reason {
-                held(reason)
+                held("admission_measurement_unknown")
+            } else if let Some(code) = gpu_reason {
+                held(code)
             } else if stepped(key) {
-                blocked("own work on this resource is yielding")
+                blocked("admission_own_work_yielding")
             } else if !cooled_down {
-                held("the resource is cooling down")
+                held("admission_cooling_down")
             } else if !backed_off {
-                held("the reclaim backoff applies")
+                held("admission_reclaim_backoff")
             } else {
                 Admission::Open
             }
@@ -2475,7 +2578,7 @@ impl PolicyEngine {
         for gpu in &snapshot.gpus {
             let key = ResourceKey::GpuCompute(gpu.uuid.clone());
             if stepped(&key) {
-                admissions.push((key, blocked("own work on this resource is yielding")));
+                admissions.push((key, blocked("admission_own_work_yielding")));
             }
         }
         for (key, state) in admissions {
@@ -2719,7 +2822,7 @@ impl PolicyEngine {
             status.effective_mode = Some(governing(key.kind()));
             status.measurement.get_or_insert(Measurement::Known);
         }
-        Ok(Decision {
+        let decision = Decision {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
             observe_only: true,
@@ -2728,7 +2831,8 @@ impl PolicyEngine {
             expansion_allowed,
             cpu_ram_expansion_allowed,
             would_drain,
-            reasons,
+            reasons: reasons.iter().map(|reason| reason.text.clone()).collect(),
+            reason_codes: reasons,
             resources: statuses,
             actions,
             exceptions: config.caution_options_on(snapshot),
@@ -2738,7 +2842,21 @@ impl PolicyEngine {
             cpu_admission_credit_millicores: cpu_credit
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
                 as i64,
-        })
+        };
+        // Every reported code is in the catalog, so tests fail on a new one (T113).
+        debug_assert!(
+            decision
+                .codes()
+                .iter()
+                .all(|code| crate::contention::reason_text(code).is_some()),
+            "uncatalogued reason codes: {:?}",
+            decision
+                .codes()
+                .into_iter()
+                .filter(|code| crate::contention::reason_text(code).is_none())
+                .collect::<Vec<_>>()
+        );
+        Ok(decision)
     }
 }
 
@@ -2760,10 +2878,13 @@ struct GpuComputeBudget {
     targets: BTreeMap<ContentionMode, u64>,
 }
 
-fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<String>) -> bool {
+fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<ReasonCode>) -> bool {
     let cpu = &kernel.cpu;
     let Some(ids) = &cpu.effective_cpu_ids else {
-        reasons.push("effective CPU set is unavailable; scoped CPU admission blocked".into());
+        reasons.push(ReasonCode::new(
+            "cpu_set_unknown",
+            "effective CPU set is unavailable; scoped CPU admission blocked",
+        ));
         return false;
     };
     let unique: BTreeSet<_> = ids.iter().copied().collect();
@@ -2791,7 +2912,7 @@ fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<String>) -> bool 
             .busy_interval_ms
             .is_some_and(|interval| interval > 0 && interval <= kernel.freshness_limit_ms);
     if !valid {
-        reasons.push(format!("scoped CPU telemetry missing, stale or inconsistent ({:?}); host-wide busy time cannot substitute for the effective CPU set", cpu.busy_status));
+        reasons.push(ReasonCode::new("cpu_scoped_telemetry_unknown", format!("scoped CPU telemetry missing, stale or inconsistent ({:?}); host-wide busy time cannot substitute for the effective CPU set", cpu.busy_status)));
     }
     valid
 }
@@ -2947,6 +3068,49 @@ fn mode_name(mode: crate::contention::ContentionMode) -> &'static str {
         crate::contention::ContentionMode::YieldFirst => "yield_first",
         crate::contention::ContentionMode::Neutral => "neutral",
         crate::contention::ContentionMode::Performance => "performance",
+    }
+}
+
+/// Say whether a small external demand is probed, a larger one watched, and
+/// which demands are recorded as satisfied (FR-021).
+fn note_demand(
+    statuses: &mut BTreeMap<ResourceKey, ResourceStatus>,
+    key: ResourceKey,
+    satisfied: &[(Option<u32>, u64)],
+    probe: Option<&crate::contention::DemandProbe>,
+) {
+    match probe {
+        Some(probe) if probe.watch => note(
+            statuses,
+            key.clone(),
+            "watching_larger_demand",
+            "own work holds the fair share while a larger external demand is watched".into(),
+        ),
+        Some(probe) => note(
+            statuses,
+            key.clone(),
+            "probing_demand",
+            format!(
+                "own work steps down to {} to learn whether a small external demand is satisfied",
+                probe.target
+            ),
+        ),
+        None => {}
+    }
+    if !satisfied.is_empty() {
+        let users: Vec<String> = satisfied
+            .iter()
+            .map(|(uid, demand)| match uid {
+                Some(uid) => format!("uid {uid} at {demand}"),
+                None => format!("unattributed usage at {demand}"),
+            })
+            .collect();
+        note(
+            statuses,
+            key,
+            "satisfied_demand",
+            format!("satisfied demand recorded: {}", users.join(", ")),
+        );
     }
 }
 

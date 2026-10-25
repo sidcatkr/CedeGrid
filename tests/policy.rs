@@ -2780,7 +2780,7 @@ fn a_ram_reclaim_backoff_holds_only_ram_admission() {
     };
     let admission = |key: ResourceKey| decision.resources[&key].admission.clone().unwrap();
     assert!(
-        matches!(&admission(ResourceKey::Ram), Admission::Held { reason } if reason.contains("backoff")),
+        matches!(&admission(ResourceKey::Ram), Admission::Held { code, .. } if code == "admission_reclaim_backoff"),
         "{:?}",
         admission(ResourceKey::Ram)
     );
@@ -3443,7 +3443,7 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
     let (step, target, path) = gpu_compute_target(Neutral, None);
     assert_eq!((step, target), (Some(Cap), Some(500)));
     assert!(
-        matches!(&path, Some(ComputePath::Unknown { reason }) if reason.contains("differs")),
+        matches!(&path, Some(ComputePath::Unknown { code, reason }) if code == "gpu_compute_amount_unknown" && reason.contains("differs")),
         "{path:?}"
     );
     assert_eq!(gpu_compute_target(YieldFirst, None).0, Some(Pause));
@@ -3698,7 +3698,7 @@ fn alternating_gpu_measurements_cause_at_most_one_step_change() {
     }
     assert!(changes <= 1, "{changes} cap changes");
     assert!(
-        matches!(&path, Some(ComputePath::Unknown { reason }) if reason.contains("recently inconsistent")),
+        matches!(&path, Some(ComputePath::Unknown { code, reason }) if code == "gpu_compute_recently_inconsistent" && reason.contains("recently inconsistent")),
         "{path:?}"
     );
 }

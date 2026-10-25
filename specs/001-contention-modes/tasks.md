@@ -863,20 +863,20 @@ each step.
 
 ### Tests for User Story 8 ⚠️
 
-- [ ] T109 [P] [US8] Add tests in `tests/cli.rs`:
+- [X] T109 [P] [US8] Add tests in `tests/cli.rs`:
   - `observe --samples 2 --no-state` JSON includes `resources`, `actions` and `exceptions`;
   - `doctor` shows the modes, floors, caution options with markers and settings, each
     resource's `held_back`, available steps and the legacy GPU interpretation.
-- [ ] T110 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
+- [X] T110 [P] [US8] Add a test in `tests/coordinator.rs`: the operator `status` shows each
   node's negotiated contention summary, with each resource's admission and `held_back`.
 
 ### Implementation for User Story 8
 
-- [ ] T111 [US8] Render the decision's resources, actions and exceptions, including each
+- [X] T111 [US8] Render the decision's resources, actions and exceptions, including each
   resource's `held_back`, in `observe` and `doctor` in `src/main.rs`.
-- [ ] T112 [US8] Include node contention summaries, with each resource's `held_back`, in the
+- [X] T112 [US8] Include node contention summaries, with each resource's `held_back`, in the
   coordinator status in `src/coordinator.rs`.
-- [ ] T113 [US8] Add a reason-code catalog in `src/contention.rs`: stable codes, each with one
+- [X] T113 [US8] Add a reason-code catalog in `src/contention.rs`: stable codes, each with one
   sentence of text.
 
 **Checkpoint**: every step change is explainable within one report interval (SC-010).

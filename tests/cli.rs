@@ -98,6 +98,89 @@ fn doctor_separates_selected_profile_from_requested_role_without_creating_state(
     assert!(!dir.path().join("state").exists());
 }
 
+/// `observe` and `doctor` show each resource's state, `held_back` and caution
+/// options (T109, FR-038, FR-068, FR-069).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn observe_and_doctor_show_each_resource() {
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let path = setup(dir.path());
+    let mut config = Config::load(&path).unwrap();
+    config.contention.max_mode = Some(cedegrid::contention::ContentionMode::Performance);
+    config
+        .contention
+        .acknowledge_caution
+        .insert("performance_mode".into());
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let output = run(&path, &["observe", "--samples", "2", "--no-state"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let samples: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(samples.len(), 2);
+    for sample in &samples {
+        let decision = &sample["decision"];
+        assert_eq!(decision["resources"]["cpu"]["mode"], "neutral");
+        assert!(decision["resources"]["cpu"]["held_back"].is_object());
+        assert!(decision["actions"].is_array());
+        assert_eq!(
+            decision["exceptions"],
+            serde_json::json!([{"name": "performance_mode", "marker": "caution"}])
+        );
+    }
+    let doctor = success_json(run(&path, &["doctor"]));
+    let cpu = &doctor["resources"]["cpu"];
+    assert_eq!(cpu["mode"], "neutral");
+    assert_eq!(cpu["effective_mode"], "neutral");
+    assert!(cpu["admission"]["state"].is_string());
+    assert!(cpu["held_back"]["capacity"].as_u64().unwrap() > 0);
+    assert!(cpu["held_back"]["percent"].is_object());
+    assert_eq!(doctor["max_mode"], "performance");
+    assert_eq!(doctor["caution_options"][0]["name"], "performance_mode");
+    assert_eq!(doctor["caution_options"][0]["marker"], "caution");
+    assert_eq!(
+        doctor["caution_options"][0]["settings"][0]["key"],
+        "contention.max_mode"
+    );
+    assert!(
+        doctor["available_steps"]["cpu"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("cap"))
+    );
+    assert!(doctor["floors"]["ram"]["effective_mib"].is_u64());
+    assert!(doctor["legacy_gpu"]["interpretation"].is_string());
+    let text = run(&path, &["doctor", "--text"]);
+    assert!(
+        text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let text = String::from_utf8_lossy(&text.stdout);
+    for expected in [
+        "cpu: Neutral",
+        "held back:",
+        "Floors",
+        "RAM floor",
+        "Caution options",
+        "[caution] performance_mode: contention.max_mode = performance",
+        "Available steps",
+        "Legacy GPU keys",
+    ] {
+        assert!(text.contains(expected), "{expected} in:\n{text}");
+    }
+    assert!(!dir.path().join("state").exists());
+}
+
 #[test]
 fn observation_without_state_is_read_only_and_honest_about_enforcement() {
     let dir = tempfile::tempdir().unwrap();

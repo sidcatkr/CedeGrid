@@ -448,21 +448,7 @@ fn caution_needed(config: &Config, host: Option<&Host>) -> Vec<CautionDetail> {
     }
 }
 
-/// Large numbers with a space between thousands, as consequence lines show them.
-fn group(value: u64) -> String {
-    let digits = value.to_string();
-    if value < 10_000 {
-        return digits;
-    }
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(' ');
-        }
-        out.push(ch);
-    }
-    out
-}
+use crate::explain::group;
 
 /// The configuration file and what it holds now.
 #[derive(Debug, Clone)]

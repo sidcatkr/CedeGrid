@@ -9,6 +9,7 @@ pub mod contention;
 pub mod coordinator;
 pub mod execution_model;
 mod execution_state;
+pub mod explain;
 pub mod kernel;
 pub mod launcher_terminal;
 pub mod managed_children;

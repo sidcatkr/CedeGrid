@@ -10,8 +10,11 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   "resources": {
     "cpu": {"mode": "neutral", "effective_mode": "neutral", "own": [3800, 4000], "external": 2900,
             "unattributed": 120, "target_share": 4000, "floor": 0,
-            "admission": {"state": "held", "reason": "the resource is cooling down"},
-            "measurement": {"state": "known"}, "held_back": {"margin": 400, "contention": 2700},
+            "admission": {"state": "held", "code": "admission_cooling_down",
+                          "reason": "The resource is cooling down after its last change."},
+            "measurement": {"state": "known"},
+            "held_back": {"margin": 400, "contention": 2700, "capacity": 8000,
+                          "percent": {"margin": 5.0, "contention": 33.8}},
             "reasons": [{"code": "contention_converging", "text": "..."}]},
     "gpu_memory:GPU-…": {"mode": "neutral", "activity": "quiet", "...": "..."}
   },
@@ -24,7 +27,8 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   "allocation_modes": {"a1": {"cpu": "yield_first", "ram": "neutral", "gpu_compute": "neutral",
                               "gpu_memory": "neutral"}},
   "would_drain": ["..."],
-  "reasons": ["..."]
+  "reasons": ["..."],
+  "reason_codes": [{"code": "cooldown_pending", "text": "..."}]
 }
 ```
 
@@ -36,16 +40,24 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from
   admission: `floor`, `reserve`, `margin`, `contention`, `peak`, `noise_tolerance`, `unknown`,
-  `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are left out (FR-069). The node
-  report carries the same object.
+  `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are left out (FR-069). `capacity` is
+  the resource's capacity and `percent` each cause's share of it, to one decimal. On GPU
+  compute, `compute_path` is `measured` or `unknown` with a `code`
+  (`gpu_compute_unknown_activity`, `gpu_compute_amount_unknown` or
+  `gpu_compute_recently_inconsistent`). The node report carries the same object.
+- Every code the decision reports is in the catalog `REASON_CODES` (`src/contention.rs`),
+  listed in `docs/guarantees.md`: resource `reasons`, `admission.code`, action codes and
+  causes, `held_back` causes as `held_back_<cause>`, the compute path, `exceptions` and
+  `reason_codes`. `reason_codes` carries the prose `reasons` with their codes. A debug
+  build asserts that every reported code is in the catalog.
 
 ## CLI
 
 | Command | Shows |
 |---|---|
-| `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers and the keys and values each covers (`caution_options`: name, marker, settings), each resource's admission and `held_back` (T111), available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
-| `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports, including `held_back` (T112) |
+| `observe` | One JSON object per sample: `snapshot` and `decision`, with `resources`, `actions` and `exceptions` always present |
+| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers and the keys and values each covers (`caution_options`: name, marker, settings), each resource's mode, usage, demand, target share, admission, steps, reasons and `held_back` (`resources`, `actions`, `reason_codes`, `max_mode`), the steps the configured backend offers per resource (`available_steps`), the interpretation of legacy GPU keys and their warnings. `--text` prints the same as readable text |
+| `status` (operator, coordinator) | Per-node `contention`: the negotiated summary with each resource's admission and `held_back`, or `"not negotiated"`; `status_page` node items carry the same |
 
 ## Reason codes
 
