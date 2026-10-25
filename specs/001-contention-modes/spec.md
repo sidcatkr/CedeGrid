@@ -77,6 +77,22 @@ thresholds.
   opportunistic work only: for CPU, paused, then the minimum duty after `pause_bound_s`.
 - Q: When does a worker see a target? → A: At once: the SDKs deliver the current target when a
   handler subscribes, and a managed child receives it when it starts.
+- Q: What justifies holding capacity back from own work? → A: Only how slowly the resource is
+  reclaimed. Capacity no workload wants must not sit idle, and no other workload may be harmed.
+  CPU and GPU compute, reclaimed within an interval, keep near-zero idle reserves; RAM and GPU
+  memory keep the floors (constitution 2.1.0).
+- Q: When is a memory floor breached? → A: When observed free memory is below the floor.
+  Running RAM work is judged on usage; GPU memory work on usage when it takes a hint, else at
+  max(request, observed). A charge-only shortfall blocks admission and steps nothing.
+- Q: What does a small steady external user cost own work? → A: Little. Under saturation a
+  contending principal whose unknown demand is below one margin step is probed: own work steps
+  down by the mode's margin per response window, and a principal that does not grow into the
+  freed capacity is recorded as satisfied. A larger demand gets the fair share at once.
+- Q: How does Performance behave under contention? → A: It keeps the larger of the fair share
+  and capacity minus observed external usage minus its margin, so it gives back what external
+  demand takes and never goes below the fair share.
+- Q: How is CPU charged for admission? → A: Running opportunistic work at its p95 usage over
+  60 s; pending and Guaranteed work at their requests. RAM and GPU memory stay request-based.
 
 ## Terms
 
@@ -90,12 +106,18 @@ thresholds.
   by lower user IDs is *background* demand, subtracted from capacity.
 - **Fair share**: a work-conserving, equal split of a contended resource among active
   principals. Capacity a principal does not use is available to the others.
-- **Margin**: capacity own work leaves unused for external demand to grow into. Margins are set
-  per mode and per resource.
+- **Margin**: capacity own work leaves unused for external demand to grow into, justified only
+  by how slowly the resource is reclaimed. Margins are set per mode and per resource: small on
+  CPU and GPU compute, and on memory the floors plus Yield First's 20%.
 - **Saturated**: busy at or above `saturation_percent` of capacity (default 98%).
 - **Contended**: a CPU or GPU compute resource is contended when it is saturated and an external
-  principal, or the unattributed principal, uses at least `principal_min_percent` of it, or when
-  it has external activity of unknown amount.
+  principal, or the unattributed principal, uses at least `principal_min_percent` of it without
+  its demand being known to be satisfied, or when it has external activity of unknown amount.
+- **Satisfied demand**: a principal's demand found by probing: the usage that did not grow into
+  capacity own work freed, plus hysteresis equal to the contention floor. It holds while the
+  principal's usage stays within it.
+- **Held back**: capacity kept from own work or from admission, by cause: floor, reserve,
+  margin, contention, peak, noise tolerance, unknown, cooldown, backoff and charge shortfall.
 - **No-harm floor**: a hard limit that applies in every mode, such as minimum available host RAM
   or minimum free memory per GPU device.
 - **Yield step**: one level of the graduated response, applied per allocation and per resource:
@@ -440,6 +462,12 @@ node reports with the expected per-resource values at each step.
   with a warning; it applies as configured only once confirmed. The warning comes at load, or,
   for a floor a percentage sets, when the agent first samples the host. Setup always records the
   entry.
+- **A job requested far more memory than it uses.** Free memory above the floor is no breach:
+  the job is never stepped, and admission on that resource stays blocked while its charge
+  exceeds the budget.
+- **A small steady external user beside own work that keeps the host busy.** It is probed once
+  and recorded as satisfied; own work keeps its target instead of cycling down to the fair
+  share.
 - **A configuration sets a removed option.** Floor policy `b` or `c`, or Neutral memory policy
   `b`, fails to load with a message that names the replacement settings.
 - **Terminal too small or lacking cursor control for the interface.** Setup falls back to
@@ -548,15 +576,20 @@ node reports with the expected per-resource values at each step.
     (FR-024). With own work held to its margin, the resource saturates only once external demand
     outgrows the margin. While own work holds more than capacity minus the margin, saturation
     may be its own doing: it is first capped to the margin, within the Neutral fair share, and
-    paused only if the resource stays contended. External activity that fits in the margin only
+    paused only if the resource stays contended. While a small demand is probed (FR-021), own
+    work steps down with the probe instead. External activity that fits in the margin only
     lowers the cap by its amount;
   - count unknown activity as external demand;
   - scale up slowly.
 - **FR-021**: Neutral MUST:
-  - let own work use idle capacity minus the Neutral margin (default 20%, between the
+  - let own work use idle capacity minus the Neutral margin (default 5%, between the
     Performance and Yield First margins) on CPU and GPU compute; memory keeps only the floors;
   - converge own work to its fair share under contention, and not step it below fair share
     except to keep a no-harm floor;
+  - under saturation, probe a contending principal whose unknown demand is below one margin
+    step: step own work down by the margin per response window, and record a principal whose
+    usage does not grow into the freed capacity as satisfied, after which it no longer contends
+    until its usage exceeds that demand; a larger demand gets the fair share at once;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission.
 
@@ -565,11 +598,13 @@ node reports with the expected per-resource values at each step.
   the granularity, is documented.
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin
-    (default 10%) on CPU and GPU compute; memory keeps only the floors;
+    (default 2%) on CPU and GPU compute; memory keeps only the floors;
   - scale up quickly;
   - when external demand grows, yield what is needed to restore the margin and floors within the
     mode's response time;
-  - on a contended compute resource, yield down to the Neutral fair share and never below it;
+  - on a contended compute resource, keep the larger of the Neutral fair share and capacity
+    minus observed external usage minus the margin: give back what external demand takes, and
+    never go below the fair share;
   - while external activity of unknown amount exists, hold own work to Neutral's fair share,
     counting that activity as one active principal.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
@@ -585,12 +620,13 @@ node reports with the expected per-resource values at each step.
 
   Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 512 MiB
   per GPU device, provisional). The GPU floor is also at least `gpu.reserve_vram_percent` (5%) of
-  the device. `doctor` shows every floor as it applies on the host, and a floor raised to twice
-  its minimum carries the reason code `small_floor_raised`. A smaller configured floor is raised
-  to the minimum with a load-time warning, and to twice the minimum unless the `small_floor`
-  entry confirms it (FR-054). A floor sized by `ram.reserve_percent` or
-  `gpu.reserve_vram_percent` is judged on the host, after the percentage is applied; its warning
-  comes when the agent first samples the host.
+  the device; `gpu.reserve_vram_mib` defaults to twice the minimum, so a default floor is never
+  near the minimum, and a fixed 3 GiB applies only when configured. `doctor` shows every floor as
+  it applies on the host, and a floor raised to twice its minimum carries the reason code
+  `small_floor_raised`. A smaller configured floor is raised to the minimum with a load-time
+  warning, and to twice the minimum unless the `small_floor` entry confirms it (FR-054). A floor
+  sized by `ram.reserve_percent` or `gpu.reserve_vram_percent` is judged on the host, after the
+  percentage is applied; its warning comes when the agent first samples the host.
 - **FR-024**: Guaranteed allocations:
   - MUST NOT be paused;
   - MAY be lowered in share and hinted;
@@ -614,14 +650,13 @@ node reports with the expected per-resource values at each step.
   - margins, response times and scale-up rates
   - tolerances, windows and deadlines, including the Guaranteed hint deadline, the RAM breach
     window, the critical floor share and hint deadline, the principal window,
-    `principal_leave_s` and `uid_min`, and the memory peak window
+    `principal_leave_s` and `uid_min`, the memory peak window and the CPU admission usage window
   - convergence targets
   - memory scale-up cooldowns and reclaim backoff
 
   Each is set per resource where it applies, defaults to the provisional value in this spec, and
   is documented. Margins are ordered as FR-065 requires. A margin below its default, or a
-  `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its default, is a
-  caution option (FR-045).
+  detection setting beyond its default (FR-045), is a caution option.
 
 **GPU sharing and placement**
 
@@ -666,9 +701,12 @@ node reports with the expected per-resource values at each step.
   resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
   interval (30, 10 or 2 s). GPU memory uses `gpu.scale_up_cooldown_ms` per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Until per-resource admission is placed on (US5),
-  CPU/RAM admission opens once both have cooled.
-- **FR-061**: A reclaim episode on a memory resource starts when any own allocation on it
-  enters the hint step or above. The n-th episode within `memory_peak_window_s` adds
+  CPU/RAM admission opens once both have cooled. For CPU admission, running opportunistic work
+  is charged at its p95 usage over `contention.cpu.admission_usage_window_s` (default 60 s);
+  pending and Guaranteed work keep their requests, and RAM and GPU memory admission stays
+  request-based.
+- **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
+  usage beyond its budget. The n-th episode within `memory_peak_window_s` adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
   (default 1 s doubling to 30 s); the first episode adds 1 s. A window without an episode clears
   the count.
@@ -743,7 +781,7 @@ node reports with the expected per-resource values at each step.
   | Performance mode | *caution* (yellow) | Own work keeps all idle capacity minus a small margin and grows quickly. Other workloads still get their fair share within the reclaim bounds, and floors still hold. |
   | A floor near its minimum | *caution* (yellow) | Less headroom is kept for other workloads' bursts. The enforced minimum and the out-of-memory preference still protect them. |
   | A margin below its default (`reduced_margin`) | *caution* (yellow) | Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold. |
-  | A detection threshold above its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` | *caution* (yellow) | Contention and external growth are recognized later, so own work holds capacity longer. Floors still hold. |
+  | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above it, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
 
 **Setup**
 
@@ -811,6 +849,30 @@ node reports with the expected per-resource values at each step.
   report the condition. It MUST NOT drain allocations because of it. Explicit operator drain
   keeps draining every allocation.
 
+**Work conservation**
+
+- **FR-066**: A memory floor breach MUST be observed free memory below the floor (RAM: available
+  memory; GPU: total minus used). Running RAM work is judged on usage. Running GPU memory work
+  is judged on usage when it is hint-ready, with its hint target as its cap, and at
+  max(request, observed) otherwise, since its growth cannot be bounded. A charge-only shortfall
+  MUST block admission on that resource and MUST NOT hint, drain or terminate running work.
+  Envelope breaches of running memory work use the same rule.
+- **FR-067**: The CPU idle reserve MUST be the larger of `cpu.reserve_physical_cores` (default
+  0) and the mode's margin of total capacity; the two never stack.
+- **FR-068**: Every configuration key MUST be classified as safe, bounded or caution, and a
+  test MUST fail for an unclassified key. `doctor` and setup MUST list, for each active caution
+  option, the keys and values it covers.
+- **FR-069**: `doctor` and `status` MUST show, per resource, how much is held back and why.
+- **FR-070**: `noise_tolerance_mib` MUST be at most 1024 MiB at load and at most half of each
+  device's effective floor when the agent starts; otherwise the agent refuses to start.
+  Settings that lengthen reclaim or let stale telemetry pass are bounded: `monitor.interval_ms`
+  and `kernel.monitor_interval_ms` at most 10 s, `kernel.freshness_intervals` at most 20,
+  `gpu.process_sample_max_age_ms` at most 60 s, `lifecycle.drain_timeout_ms` and
+  `lifecycle.term_grace_ms` at most 60 s.
+- **FR-071**: The resource-target file MUST carry an optional `allowance` per resource,
+  published continuously: what own work may grow to now. Both SDKs MUST offer
+  `on_resource_allowance`. Workers that ignore it keep working (implemented after US5).
+
 ### Key Entities
 
 - **Contention mode**: Yield First, Neutral or Performance. Configured per resource as a node
@@ -848,11 +910,12 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-002**: In every mode, CPU demanded by external work is returned within 2 monitor intervals
   of the demand appearing, including on a host that own work saturates: own CPU usage reaches the
   mode's contended target, which in Yield First is opportunistic work paused, then at the
-  minimum duty after `pause_bound_s`, and the fair share in Neutral and Performance. Where own
-  work saturated the resource before its first cap, Yield First's first step is a cap to the
-  margin within the fair share, so at least the fair share is back within the same bound. With
-  demand that fits in the margin, Yield First keeps its 25% margin free. No work is drained or
-  terminated when CPU is the only contended resource.
+  minimum duty after `pause_bound_s`, and the fair share in Neutral. Where own work saturated
+  the resource before its first cap, Yield First's first step is a cap to the margin within the
+  fair share, so at least the fair share is back within the same bound. Performance gives back
+  what external work takes, at least its margin per interval while that demand grows, and never
+  goes below the fair share. With demand that fits in the margin, Yield First keeps its 15%
+  margin free. No work is drained or terminated when CPU is the only contended resource.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
@@ -901,6 +964,14 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     the drain file, grace + 1 interval (2.5 s).
 - **SC-013**: Over generated observations of every resource, own work's target satisfies
   Yield First ≤ Neutral ≤ Performance in 100% of cases.
+- **SC-014**: On an idle host, own CPU utilization is at least 97% in Performance, 94% in
+  Neutral and 84% in Yield First, and own RAM and GPU memory are within 1% of capacity minus the
+  floor, minus Yield First's margin too.
+- **SC-015**: Beside a steady external user of 1–2%, own work's 5-minute average is at least 90%
+  of capacity minus that user and the margin, with no cap or pause cycling.
+- **SC-016**: `doctor` and `status` show, per resource, how much is held back and why: floor,
+  reserve, margin, contention, peak, noise tolerance, unknown, cooldown, backoff and charge
+  shortfall.
 
 ### Provisional thresholds
 
@@ -910,15 +981,18 @@ times assume the default 500 ms monitor interval.
 | Threshold | Default | Rationale |
 |---|---|---|
 | GPU memory noise tolerance | 256 MiB per device | Larger than typical driver and context jitter, and small next to common device sizes. It was the maintainer's proposal. |
-| Yield First margin | 25% of schedulable capacity per resource | Generous by design: it leaves a quarter of each resource free for other workloads to burst into. |
+| Yield First margin | 15% of compute, 20% of memory beyond the floor | Generous by design, yet compute is reclaimed within an interval, so it needs less than memory. |
 | Yield First response time | 3 monitor intervals (1.5 s) for escalating past a step that did not free the excess | One interval to observe, one to confirm, one to apply and measure. The first step applies at once, so contended CPU returns within 2 intervals (SC-002). |
 | CPU reclaim | 2 monitor intervals in every mode | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval. |
 | Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
 | Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
 | Performance scale-up | 1 step per 2 s | One heartbeat interval per step, which supports the 30 s ramp target. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
-| Neutral margin | 20% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand visible room without the Yield First reserve. |
-| Performance margin | 10% of schedulable capacity (CPU, GPU compute), plus the floors (memory) | Small, but above the known sampling error of a few percent, so measurement noise does not cause yields. |
+| Neutral margin | 5% of capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand room to show growth without idling compute that is reclaimed within an interval. |
+| Performance margin | 2% of capacity (CPU, GPU compute), plus the floors (memory) | The smallest room that still shows external growth; under contention Performance keeps what external demand does not take. |
+| CPU idle reserve | max(`cpu.reserve_physical_cores`, the mode's margin); reserve default 0 | A physical-core reserve and a margin both idle compute; one is enough. |
+| Probe hysteresis | The contention floor (1% of capacity) | A satisfied principal gets that much room to show growth before it contends again. |
+| CPU admission usage window | p95 over 60 s | CPU is compressible: caps and the kernel share it if everyone spikes, so admission follows recent usage rather than requests. |
 | Performance ramp | 80% of available minus margin within 30 s | Admission advances on the 2 s heartbeat and scale-up is damped. The originally proposed 90% in 10 s is unproven. |
 | Reclaim bound: RAM, GPU memory | Hint deadline + drain timeout + termination grace + 1 interval (10.5 s) | The sum of the existing deadlines; nothing else waits. |
 | Hint deadline | 5 s | Long enough for a cooperative worker to reach a safe point; short enough to bound memory reclaim. |
@@ -936,12 +1010,12 @@ times assume the default 500 ms monitor interval.
 | Saturation (`saturation_percent`) | 98% busy | Within the few percent of sampling error of full use; below it, external demand is still visible as usage. |
 | Neutral and Performance escalation (`reclaim_s`) | 5 s, compute only | How long a step has to free the contended amount before the next one; the first step applies at once. Memory moves on at the hint deadline. |
 | Drain timeout and termination grace | 3 s and 2 s | The existing `lifecycle.drain_timeout_ms` and `lifecycle.term_grace_ms`, which SC-012 adds up. |
-| Upper bounds | `hint_deadline_s` 30 s, `unknown_window_intervals` 20, `min_step_dwell_intervals` 10, `yield_first_response_intervals` 10, `reclaim_s` 60 s, `pause_bound_s` 60 s, `guaranteed_hint_deadline_s` 30 s, `ram.guaranteed_breach_window_s` 60 s | Keep every escalation bounded in time (constitution III) and every delay above the critical level. |
+| Upper bounds | `hint_deadline_s` 30 s, `unknown_window_intervals` 20, `min_step_dwell_intervals` 10, `yield_first_response_intervals` 10, `reclaim_s` 60 s, `pause_bound_s` 60 s, `guaranteed_hint_deadline_s` 30 s, `ram.guaranteed_breach_window_s` 60 s, `monitor.interval_ms` and `kernel.monitor_interval_ms` 10 s, `kernel.freshness_intervals` 20, `gpu.process_sample_max_age_ms` 60 s, `lifecycle.drain_timeout_ms` and `term_grace_ms` 60 s, `noise_tolerance_mib` 1024 MiB and half of each GPU floor | Keep every escalation bounded in time (constitution III) and every delay above the critical level. |
 | Unknown-measurement window | 3 monitor intervals | Matches today's freshness limit of 3 intervals for kernel observations. |
 | Step hysteresis | Reverse only below 50% of the trigger threshold; at least 3 intervals between step changes | Damps oscillation (SC-009) without delaying a real response by more than one confirmation interval. |
 | Pause bound | 10 s | Longer pauses risk worker and lease timeouts, so contention escalates to the next step instead. |
 | GPU quiet window | 20 monitor intervals (10 s) of healthy observation with no activity | Activity samples are only produced for non-zero use, so quiet must be shown by sustained absence over a complete inventory. |
-| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB), plus the new `gpu.reserve_vram_percent` (5%) | Reusing the existing settings keeps 0.2 configurations meaningful. The defaults meet the recommended sizing of at least max(2 GiB, 5% of RAM) and max(1 GiB, 5% of device memory), well above the enforced minimums; the GPU percentage covers devices above 60 GiB, where 3 GiB is less than 5%. |
+| No-harm floors | `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%); per GPU the larger of `gpu.reserve_vram_mib` (twice the minimum, 1 GiB) and `gpu.reserve_vram_percent` (5%) | Reusing the existing settings keeps 0.2 configurations meaningful. The defaults meet the recommended sizing of at least max(2 GiB, 5% of RAM) and max(1 GiB, 5% of device memory), above the enforced minimums; a fixed 3 GiB per GPU applies only when configured. |
 
 ## Assumptions
 

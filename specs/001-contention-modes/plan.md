@@ -74,7 +74,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance, small floors, margins below their defaults and detection thresholds above theirs are caution options that apply only once confirmed; the tuning knobs were classed in the third analysis pass (T143), and delay tunables stay bounded rather than caution because they are the reclaim bounds themselves. Negative nice is clamped to 0. No priority is ever raised. | Pass |
+| II. No harm in any mode (2.1.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance, small floors, margins below their defaults and detection thresholds above theirs are caution options that apply only once confirmed; the tuning knobs were classed in the third analysis pass (T143), and delay tunables stay bounded rather than caution because they are the reclaim bounds themselves. Negative nice is clamped to 0. No priority is ever raised. Work-conserving (2.1.0): margins are small on compute, the CPU reserve never stacks on the margin, a floor breach needs observed free memory below the floor, and every configuration key has a class (safe, bounded, caution) checked by a test. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -305,6 +305,39 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   supervisor writes the current target into a managed child's directory before the child starts.
 - **B14 Runtime `memory.high`.** A Polish task (T138): on a delegated cgroup, a RAM cap step that
   sets `memory.high` before the hint, verified by readback.
+
+## Utilization revisions before US5 (2026-10-25)
+
+Constitution 2.1.0 adds the work-conserving rule to Principle II. Each item lands with tests.
+
+- **U1 Real breaches.** `floor_breaches` holds keys whose observed free memory is below the
+  floor; running memory work is judged by `judged()`: RAM usage, GPU memory usage when
+  hint-ready, else the charge. Running-pass excess and envelope breaches use the judged total;
+  the pending pass and admission keep charges.
+- **U2 CPU reserve.** `own_allowance` runs on the whole CPU capacity, and the result is bounded
+  by capacity minus reserve minus external usage, so the idle reserve is the larger of the two.
+  `cpu.reserve_physical_cores` defaults to 0.
+- **U3 Margins.** 15/5/2% on compute; Yield First 20% on memory.
+- **U4 Performance.** Contended target `max(S, A − m_P·C)`; unknown activity keeps `S`. A cap
+  whose usage follows its target no longer escalates while the target moves down.
+- **U5 Probing.** `contention::probe_demand` keeps `DemandProbe` and satisfied records per
+  compute resource in `PolicyEngine`; `contended()` ignores satisfied principals and
+  `neutral_share` bounds them at their demand. A demand of a margin step or more skips probing,
+  which keeps SC-002 for real demand.
+- **U6 CPU admission.** `PolicyEngine.cpu_usage` keeps each running opportunistic allocation's
+  CPU samples over `admission_usage_window_s`; its CPU charge is their p95.
+- **U8 GPU floor.** `gpu.reserve_vram_mib` defaults to `2 × MIN_VRAM_FLOOR_MIB`, so the default
+  floor is max(twice the minimum, 5%) and never a near-minimum caution floor.
+- **U9 Backoff and leave.** Reclaim episodes span real breaches or usage excess; a held hint's
+  target rises while calm. Leaving principals are bounded at their usage in max-min.
+- **U10 Held back.** `HeldBack` per resource in `ResourceStatus` and the node report.
+- **U12 Test cleanup.** `namespace::control_dir_for` names the control directory; four test
+  files remove it with their temporary state roots unless the test failed.
+- **Group 1.** `config::KEY_CLASSES` with an enumeration test over the derived `Deserialize`
+  impls; `Config::caution_details`; `Config::validate_host` at the agent's first sample; upper
+  bounds for settings that lengthen reclaim.
+- **U7, U11, U13.** The allowance signal is specified now and implemented after US5 (T150); the
+  constitution amendment is above; T088 also measures how often GPU activity is Unknown.
 
 ## Complexity Tracking
 

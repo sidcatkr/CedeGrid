@@ -40,10 +40,14 @@ never let CedeGrid act on a process it does not own.
   - be chosen explicitly, with its consequence shown and a separate confirmation;
   - be recorded in configuration and reported in observability output while it is active;
   - leave Principle I and the floors intact.
+- **Work-conserving.** Within these limits, capacity no workload wants MUST NOT sit idle. A
+  reserve held back from own work is justified only by how slowly its resource can be
+  reclaimed. CPU and GPU compute are reclaimed within a monitor interval, so they keep
+  near-zero idle reserves; RAM and GPU memory keep the floors.
 
 Rationale: CedeGrid runs only on spare capacity, so running it must never make another workload
 fail. An operator may trade away their own work's progress, but never another workload's
-safety.
+safety. Capacity held back without a reclaim reason protects no workload.
 
 ### III. Unknown Is Never Silently Idle
 
@@ -178,4 +182,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 2.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-25
+**Version**: 2.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-25

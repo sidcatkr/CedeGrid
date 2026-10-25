@@ -10,7 +10,8 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   "resources": {
     "cpu": {"mode": "neutral", "effective_mode": "neutral", "own": [3800, 4000], "external": 2900,
             "unattributed": 120, "target_share": 4000, "floor": 0, "admission": "held",
-            "measurement": "known", "reasons": [{"code": "contention_converging", "text": "..."}]},
+            "measurement": "known", "held_back": {"margin": 400, "contention": 2700},
+            "reasons": [{"code": "contention_converging", "text": "..."}]},
     "gpu_memory:GPU-…": {"mode": "neutral", "activity": "quiet", "...": "..."}
   },
   "actions": [{"allocation_id": "a1", "resource": "cpu", "step": "cap", "target": 3000,
@@ -26,14 +27,18 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 
 - `would_drain` and the prose `reasons` remain for 0.2 readers and recorded replays.
   `would_drain` is derived from `actions` with step ≥ `drain`.
+- `held_back` lists, per resource and in resource units, what is kept from own work or from
+  admission: `floor`, `reserve`, `margin`, `contention`, `peak`, `noise_tolerance`, `unknown`,
+  `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are left out (FR-069). The node
+  report carries the same object.
 
 ## CLI
 
 | Command | Shows |
 |---|---|
 | `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
-| `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports |
+| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers and the keys and values each covers (`caution_options`: name, marker, settings), available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
+| `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports, including `held_back` (T112) |
 
 ## Reason codes
 

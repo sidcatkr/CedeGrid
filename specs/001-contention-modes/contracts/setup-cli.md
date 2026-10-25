@@ -47,7 +47,8 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
   option in `acknowledge_caution`.
 - **Fallback.** If the terminal cannot be driven (no cursor control or too small), setup uses
   line-based prompts on the TTY.
-- **Summary.** Shown before writing, listing every active caution option with its marker.
+- **Summary.** Shown before writing, listing every active caution option with its marker and
+  the keys and values it covers (FR-068).
 
 ## Writes
 

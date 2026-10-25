@@ -13,7 +13,7 @@ acknowledge_caution = []             # "performance_mode", "small_floor", "reduc
 guaranteed_hint_deadline_s = 5      # 1-30
 critical_floor_percent = 50         # a breach is critical below this share of the floor
 critical_hint_deadline_s = 1        # hint deadline on the critical path
-uid_min = 1000                      # lower user IDs are background demand
+uid_min = 1000                      # lower user IDs are background demand; above 1000 needs "relaxed_detection"
 principal_window_intervals = 4      # sustained intervals to join as a principal
 principal_leave_s = 60              # below the threshold this long, a principal leaves
 never_share_occupied_gpus = false   # true: no new own GPU work on devices with external contexts
@@ -21,10 +21,10 @@ never_share_occupied_gpus = false   # true: no new own GPU work on devices with 
 [contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
                                     # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode
-yield_first_margin_percent = 25     # below the default needs "reduced_margin", as for every margin
+yield_first_margin_percent = 15     # 20 on ram and gpu_memory; below the default needs "reduced_margin", as for every margin
 yield_first_response_intervals = 3  # cpu and gpu_compute only, 1-10
-neutral_margin_percent = 20         # cpu and gpu_compute only; YF >= neutral >= performance
-performance_margin_percent = 10     # cpu and gpu_compute only
+neutral_margin_percent = 5          # cpu and gpu_compute only; YF >= neutral >= performance
+performance_margin_percent = 2      # cpu and gpu_compute only
 neutral_convergence_s = 60
 neutral_tolerance_points = 15
 performance_ramp_s = 30
@@ -39,19 +39,25 @@ pause_bound_s = 10                  # cpu and gpu_compute only, 1-60
 scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
 scale_up_cooldown_ms = 10000        # cpu and ram only; admission wait; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends; above 1 needs "relaxed_detection"
+admission_usage_window_s = 60       # cpu only, 1-3600: running opportunistic CPU is admitted at its p95 usage over it
 
 [contention.ram]                    # also [contention.gpu_memory], except the breach window
-memory_peak_window_s = 300          # admission headroom uses the external peak over this window
+memory_peak_window_s = 300          # admission headroom uses the external peak over this window; shorter needs "relaxed_detection"
 reclaim_backoff_ms = 1000           # extra cooldown after a repeated reclaim episode, doubling
 reclaim_backoff_max_ms = 30000
 guaranteed_breach_window_s = 10     # ram only, 0-60: breach duration before Guaranteed drains
 
 [contention.gpu_memory]
-noise_tolerance_mib = 256           # above the default needs "relaxed_detection"
+noise_tolerance_mib = 256           # 0-1024 and at most half of each GPU floor; above the default needs "relaxed_detection"
 
 [contention.gpu_compute]
-quiet_window_intervals = 20
+quiet_window_intervals = 20         # shorter needs "relaxed_detection"
 ```
+
+Related node keys: `cpu.reserve_physical_cores` (default 0) is a minimum idle reserve under the
+mode's margin, never added to it; `gpu.reserve_vram_mib` defaults to twice the minimum floor.
+Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CLASSES`
+(FR-068).
 
 ## Scale-up cooldowns
 
@@ -86,9 +92,14 @@ quiet_window_intervals = 20
 - **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails
   with `ERR_CEDEGRID_CONFIG`, whose message carries `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and
   names the entry.
-- **A margin below its default, or a detection threshold above it.** Without `reduced_margin`
+- **A margin below its default, or a detection setting beyond it.** Without `reduced_margin`
   or `relaxed_detection` respectively, loading fails the same way, naming the settings and the
-  entry. Raising a margin or lowering a threshold needs nothing.
+  entry. Moving a setting toward leaving more to external demand needs nothing.
+- **Noise tolerance.** Above 1024 MiB, loading fails. When the agent starts, a tolerance above
+  half of any GPU's effective floor stops it with an error naming the device and its floor.
+- **Bounds.** `monitor.interval_ms` and `kernel.monitor_interval_ms` above 10000,
+  `kernel.freshness_intervals` above 20, `gpu.process_sample_max_age_ms` above 60000, and
+  `lifecycle.drain_timeout_ms` or `lifecycle.term_grace_ms` above 60000 fail to load.
 - **Floors.** `gpu.reserve_vram_percent` (default 5) makes each GPU floor at least that share of
   the device. A floor below its minimum (512 MiB of RAM, 512 MiB per GPU) is raised to it with a
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
@@ -96,7 +107,8 @@ quiet_window_intervals = 20
   first samples the host for a floor a percentage sets.
 - **Performance.** `max_mode = "performance"`, `default_mode = "performance"` or any
   per-resource Performance mode needs `performance_mode`.
-- **An active caution option.** `doctor` and `status` show it with its marker (FR-043).
+- **An active caution option.** `doctor` and `status` show it with its marker; `doctor` also
+  lists the keys and values it covers (FR-043, FR-068).
 - **Negative `cpu.nice`.** Warns, and is treated as 0.
 - **Modes.** Any per-resource `mode` above `max_mode` fails validation.
 

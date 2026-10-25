@@ -20,7 +20,8 @@ fsync, and renaming it over the target.
   "sequence": 7,
   "deadline_unix_ms": 1793000000000,
   "step": "hint",
-  "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-…": 10240}, "cpu_millicores": 2000}
+  "targets": {"ram_mib": 6144, "gpu_memory_mib": {"GPU-…": 10240}, "cpu_millicores": 2000},
+  "allowance": {"ram_mib": 20480, "gpu_memory_mib": {"GPU-…": 18432}, "cpu_millicores": 7000}
 }
 ```
 
@@ -31,6 +32,10 @@ fsync, and renaming it over the target.
   critical hint deadline.
 - **Relaxing.** A relaxed target is a new file with a higher `sequence`. An absent file means
   no target.
+- **Allowance.** Optional, published continuously, also without a target: per resource, what
+  own work may grow to now. A self-sizing worker can grow while the host is idle and shrink
+  before a hint is needed. Readers that do not know the key ignore it (FR-071; implemented
+  after US5).
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
   `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
   shows that the worker can read hints; the supervisor reports it as `hint_ready`, and
@@ -45,11 +50,14 @@ Both SDKs add the same API.
 - `WorkerContext.on_resource_target(callback)`: called at once with the current target when
   one exists, then once per new sequence, during `draining()` and `safe_point()` polls. Hook
   errors are isolated and logged.
+- `WorkerContext.on_resource_allowance(callback)`: the same delivery for `allowance` (after
+  US5).
 - `ResourceSignals.from_env()`: needs only the two environment variables. It is usable in
   managed children, which have no context.
 
 **TypeScript** (`npm/src/worker.ts`): `resourceTargets()`, `onResourceTarget(cb)`,
-`ResourceSignals.fromEnv()`, with the same immediate delivery.
+`onResourceAllowance(cb)` (after US5), `ResourceSignals.fromEnv()`, with the same immediate
+delivery.
 
 ## Managed children
 

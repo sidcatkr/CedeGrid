@@ -48,11 +48,11 @@ cargo test --locked --test supervision -- --test-threads=1
 2. Start a test-owned external CPU load.
 
 **Expected:**
-- A load that fits in the 25% margin leaves own work running, with any cap at most keeping the
+- A load that fits in the 15% margin leaves own work running, with any cap at most keeping the
   margin free.
 - A load that saturates the CPU (contended) pauses the opportunistic job within 2 monitor
-  intervals (SC-002); in Neutral or Performance, `observe` shows a `cap` at the fair share
-  instead.
+  intervals (SC-002); in Neutral, `observe` shows a `cap` at the fair share instead, and in
+  Performance a cap that follows what the load takes, never below the fair share.
 - No drain or termination occurs (SC-007). After the pause bound, the job resumes at the 5%
   minimum duty, as a hint for an SDK worker or a cap for a plain command, and stays there while
   the load lasts.

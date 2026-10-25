@@ -22,11 +22,11 @@ Serialization contracts are in [contracts/](contracts/).
 | `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a margin below its default without `reduced_margin`, or a `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its default without `relaxed_detection`, fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
+| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a margin below its default without `reduced_margin`, or a detection setting beyond its default without `relaxed_detection` (`saturation_percent`, `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above it, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
 | `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
-| `uid_min` | u32 | 1000 | FR-059 |
+| `uid_min` | u32 | 1000 | FR-059; above 1000 needs `relaxed_detection` |
 | `principal_window_intervals` | u32 | 4 | ≥ 1 (FR-059) |
 | `principal_leave_s` | u64 | 60 | 1–3600; a principal leaves after this long below the threshold (FR-059) |
 | `never_share_occupied_gpus` | bool | false | FR-064 |
@@ -37,7 +37,9 @@ Serialization contracts are in [contracts/](contracts/).
   `gpu.best_effort_external_processes` warns that the list is unused. `doctor` shows the
   interpretation.
 - `gpu.reserve_vram_percent` (u8, default 5, 0–100) sets the per-device floor to at least that
-  share of the device. `Config::floors` reports each floor on the host: configured, minimum,
+  share of the device; `gpu.reserve_vram_mib` defaults to twice the minimum (1024 MiB).
+- `cpu.reserve_physical_cores` defaults to 0 and is a minimum under the mode's margin, never
+  added to it (FR-067). `Config::floors` reports each floor on the host: configured, minimum,
   effective, near the minimum, confirmed and raised.
 - Floors below the minimum (512 MiB host RAM, 512 MiB per GPU device) are raised to it with a
   warning. A floor below twice its minimum is "near" it and, without `small_floor`, applies as
@@ -53,9 +55,9 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | Field | Applies to | Default | Validation |
 |---|---|---|---|
 | `mode` | all | inherits `default_mode` | ≤ `max_mode` |
-| `yield_first_margin_percent` | all | 25 | 1–90; on cpu and gpu_compute > `performance_margin_percent`; below 25 needs `reduced_margin` |
-| `neutral_margin_percent` | cpu, gpu_compute | 20 | between `performance_margin_percent` and `yield_first_margin_percent`; below 20 needs `reduced_margin` |
-| `performance_margin_percent` | cpu, gpu_compute | 10 | 0–50; below 10 needs `reduced_margin` |
+| `yield_first_margin_percent` | all | 15 (cpu, gpu_compute), 20 (ram, gpu_memory) | 1–90; on cpu and gpu_compute > `performance_margin_percent`; below its default needs `reduced_margin` |
+| `neutral_margin_percent` | cpu, gpu_compute | 5 | between `performance_margin_percent` and `yield_first_margin_percent`; below 5 needs `reduced_margin` |
+| `performance_margin_percent` | cpu, gpu_compute | 2 | 0–50; below 2 needs `reduced_margin` |
 | `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
 | `scale_up_step_interval_s` | all | 30 (Yield First), 10 (Neutral), 2 (Performance) | ≥ 1 |
 | `neutral_convergence_s` | all | 60 | ≥ 1; a success-criteria parameter read by the scenario tests and validation tools, not by the policy |
@@ -66,11 +68,12 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `unknown_window_intervals` | all | 3 | 1–20 |
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99; dwell 1–10 |
 | `pause_bound_s` | cpu, gpu_compute | 10 | 1–60 |
-| `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0; above 256 needs `relaxed_detection` |
-| `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
+| `noise_tolerance_mib` | gpu_memory | 256 | 0–1024, and at agent start at most half of each device's floor; above 256 needs `relaxed_detection` |
+| `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms`; below 20 needs `relaxed_detection` |
 | `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms`. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
-| `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060) |
+| `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060); below 300 needs `relaxed_detection` |
+| `admission_usage_window_s` | cpu | 60 | 1–3600; running opportunistic CPU is charged for admission at its p95 usage over this window (FR-034) |
 | `guaranteed_breach_window_s` | ram | 10 | 0–60 (FR-024) |
 | `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation; above 1 needs `relaxed_detection` |
 | `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated; above 98 needs `relaxed_detection` |
@@ -122,7 +125,9 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `floor` | No-harm floor |
 | `margin` | From the effective mode |
 | `fair_share` | Max-min share for the owner principal (Neutral) |
-| `contended` | CPU, GPU compute: saturated with an active external principal, or unknown activity |
+| `contended` | CPU, GPU compute: saturated with an active external principal whose demand is not known to be satisfied, or unknown activity |
+| `satisfied` | CPU, GPU compute: demands probing found satisfied, by principal: usage that did not grow into freed capacity plus the contention floor |
+| `probe` | CPU, GPU compute: while a small external demand is probed, the allowance stepping down by the mode's margin per response window (`DemandProbe`) |
 | `external_peak` | RAM, GPU memory: over `memory_peak_window_s`, the sum of each live listed external process's peak plus the peak of the external usage no listed process accounts for, for admission headroom |
 | `measurement` | `known`, `unknown{since}` or `inconsistent_within_tolerance` |
 | `activity` | GPU compute only: `quiet`, `active` or `unknown` |
@@ -157,8 +162,12 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - A pause ends at `pause_bound_s` even when nothing is contended: at the next step, else as a
     cap at the minimum duty marked `after_pause`, which does not escalate again while the
     contention lasts (FR-014).
-- **Relax.** While a resource is not contended, a held cap rises toward the mode's target at the
-  mode's scale-up rate, so own work recovers capacity that external demand no longer uses.
+- **Relax.** While a resource is not contended, a held cap or hint rises toward the mode's
+  target at the mode's scale-up rate, so own work recovers capacity that external demand no
+  longer uses.
+- **Effective cap.** A cap whose usage follows its target holds while the target moves down, as
+  in Performance and probing; it escalates only when usage stays above the cap past the
+  response time.
 - **Hold.** Unknown measurement or authority loss keeps the current step (FR-008, FR-015).
 - **Reverse.**
   - When external demand falls below `hysteresis_percent` of the trigger for the dwell time,
@@ -205,16 +214,47 @@ as `m_YF ≥ m_N ≥ m_P` (FR-065).
 
 | Resource and state | Yield First | Neutral | Performance |
 |---|---|---|---|
-| CPU, GPU compute, contended | 0 for opportunistic work | `S` | `S` |
-| CPU, GPU compute, contended, own usage above `C − m_YF·C` | `min(A − m_YF·C, S)` | `S` | `S` |
+| CPU, GPU compute, contended | 0 for opportunistic work | `S` | `max(S, A − m_P·C)` |
+| CPU, GPU compute, contended, own usage above `C − m_YF·C` | `min(A − m_YF·C, S)` | `S` | `max(S, A − m_P·C)` |
+| CPU, GPU compute, contended while probing at `p` | `min(A − m_YF·C, p)` | `max(S, p)` | `max(S, A − m_P·C, p)` |
+| CPU, GPU compute, unknown activity | 0 | `S` | `S` |
 | CPU, GPU compute, otherwise | `A − m_YF·C` | `A − m_N·C` | `A − m_P·C` |
 | RAM, GPU memory | `A − m_YF·C` | `A` | `A` |
 
-While own work holds more than `C − m_YF·C`, saturation may be its own doing, so Yield First
-caps to its margin first; activity of unknown amount still takes it to 0. Targets never go
-below 0. Guaranteed CPU is never capped below its request. Neutral and
-Performance share the fair share under contention and differ in idle margin (20% and 10%) and
-scale-up rate (10 s and 2 s per step).
+`C` is the whole capacity for CPU; the explicit physical-core reserve applies as
+`min(target, C − reserve − E)`, so the idle reserve is the larger of the reserve and the margin
+(FR-067). While own work holds more than `C − m_YF·C`, saturation may be its own doing, so
+Yield First caps to its margin first; activity of unknown amount still takes it to 0. `S`
+counts a satisfied principal at its satisfied demand. Targets never go below 0. Guaranteed CPU
+is never capped below its request. Neutral and Performance differ in idle margin (5% and 2%),
+in their contended target and in scale-up rate (10 s and 2 s per step).
+
+## DemandProbe (`src/contention.rs`, kept by `PolicyEngine` per compute resource)
+
+- `target`: the allowance while probing; it starts one margin step below own usage and steps
+  down once per response window while a probed principal grows into the freed capacity.
+- `stepped_at_ms`, `usage_at_step`: when it last stepped and the probed principals' usage then.
+- A probe starts only under saturation, for contending principals whose unknown demand is below
+  one margin step. At the end of a window, a principal whose usage did not grow beyond
+  `usage_at_step + floor` is satisfied at its usage plus the floor. A demand of a margin step or
+  more ends the probe, and the fair share applies at once.
+
+## HeldBack (`src/model.rs`, `ResourceStatus.held_back`, node report)
+
+Per resource, in resource units, zero amounts left out: `floor`, `reserve` (the CPU reserve
+where it exceeds the margin), `margin`, `contention` (left to contending external demand),
+`peak`, `noise_tolerance`, `unknown`, `cooldown`, `backoff`, `charge_shortfall` (admission
+capacity held by charges above usage) (FR-069).
+
+## Judged amounts (`src/policy.rs`)
+
+- Yielding judges running work on what it holds: CPU and RAM usage; GPU memory usage when the
+  allocation is hint-ready, else max(request, observed) (FR-066).
+- Admission charges: running opportunistic CPU at its p95 usage over
+  `admission_usage_window_s`; everything else at max(request, observed); pending reservations in
+  full (FR-034).
+- A floor breach is observed free memory below the floor; a charge beyond the budget only blocks
+  admission.
 
 ## AllocationContention (supervisor journal, `src/execution_state.rs`)
 
@@ -226,8 +266,16 @@ scale-up rate (10 s and 2 s per step).
 
 - Fields: `role`, `default_mode`, per-resource modes, `max_mode`, floor sizes, margins,
   `guaranteed_hint_deadline_s`, tuned thresholds, `acknowledge_caution`.
-- `risk(choice) -> none | caution`, with the FR-045 mapping: Performance on any resource and a
-  floor near its minimum are caution.
+- `risk(choice) -> none | caution`, with the FR-045 mapping: Performance on any resource, a
+  floor near its minimum, a margin below its default and a detection setting beyond its default
+  are caution. Setup lists, per acknowledged caution option, the keys and values it covers
+  (`Config::caution_details`).
+
+## Key classes (`src/config.rs`)
+
+`KEY_CLASSES` classifies every configuration key as `safe`, `bounded` or `caution(entry)`;
+`contention.*` stands for each resource section. A test enumerates every key from the
+configuration types and fails for one without a class (FR-068).
 
 ## Wire additions (negotiated, `src/protocol.rs`)
 
@@ -239,6 +287,7 @@ scale-up rate (10 s and 2 s per step).
 | `LaunchRequest.contention` | Per-task mode overrides |
 | `AllocationReport.yield_cause` | Why an allocation yielded |
 | `AllocationReport.hint_ready`, `AllocationReport.observes_drain` | Allocation readiness (FR-062) |
+| `ResourceContentionReport.held_back` | What the resource holds back and why (FR-069) |
 
 See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 
