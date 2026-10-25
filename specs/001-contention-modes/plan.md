@@ -282,9 +282,9 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   start time, from `Snapshot.external_processes`) and one for the rest of external usage per memory
   resource over `memory_peak_window_s`; a process's deque goes when it exits. Admission headroom
   uses the summed peaks, yielding uses current usage. CPU and RAM cooldowns are separate
-  (`scale_up_cooldown_ms` per resource, each from its own stable time). Until per-resource
-  admission is placed on (US5), CPU/RAM admission opens once both have cooled, because the
-  coordinator places against the node budget and flags. RAM and GPU memory add
+  (`scale_up_cooldown_ms` per resource, each from its own stable time), and each resource's
+  admission opens on its own; the 0.2 expansion flag still needs both, since every launch
+  reserves CPU and RAM. RAM and GPU memory add
   `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th reclaim
   episode within the peak window, the coordinator's retry pattern.
 - **B8 Reclaim bounds.** SC-002 and SC-012, with scenario tests in `tests/contention.rs`.

@@ -147,7 +147,8 @@ supervisor.
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
 each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2 s in
-Performance. CPU/RAM admission opens once both have cooled. GPU memory waits for
+Performance. Each resource's admission opens on its own, and placement needs every
+requested resource open; every launch reserves CPU and RAM. GPU memory waits for
 `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
 `gpu.scale_up_cooldown_ms`, else its mode's interval. On RAM and GPU memory, the n-th
 reclaim episode (a floor breach or own usage beyond the budget) within
