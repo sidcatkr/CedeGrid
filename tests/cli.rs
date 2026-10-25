@@ -481,3 +481,833 @@ fn replay_reads_snapshot_schemas_one_to_three() {
         );
     }
 }
+
+/// `cedegrid setup` without a terminal (T099, contracts/setup-cli.md).
+mod setup_non_interactive {
+    use super::*;
+    use std::process::Stdio;
+
+    fn setup_cmd(config: &Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(config)
+            .arg("setup")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    fn json(output: &Output) -> Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+    }
+
+    fn error_code(output: &Output) -> String {
+        json(output)["error"]["code"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn exit_codes_follow_the_contract_and_nothing_is_written_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        // 2: a new file needs a role.
+        let output = setup_cmd(&path, &["--non-interactive", "--json"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(error_code(&output), "ERR_CEDEGRID_SETUP_MISSING_CHOICE");
+        assert!(
+            json(&output)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--role")
+        );
+        assert!(!path.exists());
+        // 3: a caution option without its acknowledgement.
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "node",
+                "--default-mode",
+                "performance",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(error_code(&output), "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED");
+        assert!(
+            json(&output)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--acknowledge-caution performance_mode")
+        );
+        assert!(!path.exists());
+        // 4: a result that fails validation, here Neutral's margin below Performance's.
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "node",
+                "--margin",
+                "cpu.neutral=1",
+                "--acknowledge-caution",
+                "reduced_margin",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(4));
+        assert_eq!(error_code(&output), "ERR_CEDEGRID_CONFIG");
+        assert!(!path.exists());
+        // 0: acknowledged, written and valid.
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "node",
+                "--default-mode",
+                "performance",
+                "--acknowledge-caution",
+                "performance_mode",
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.contention.default_mode,
+            cedegrid::contention::ContentionMode::Performance
+        );
+        // The same choices again change nothing.
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--default-mode",
+                "performance",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(json(&output)["written"], false);
+    }
+
+    #[test]
+    fn margins_are_set_for_every_mode_and_validated_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--role",
+                "node",
+                "--margin",
+                "cpu.yield_first=20",
+                "--margin",
+                "cpu.neutral=8",
+                "--margin",
+                "cpu.performance=3",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let thresholds = Config::load(&path)
+            .unwrap()
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Cpu);
+        assert_eq!(
+            (
+                thresholds.yield_first_margin_percent,
+                thresholds.neutral_margin_percent,
+                thresholds.performance_margin_percent
+            ),
+            (20, 8, 3)
+        );
+        // Yield First below Neutral fails validation and writes nothing.
+        let before = fs::read(&path).unwrap();
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--margin",
+                "cpu.yield_first=6",
+                "--margin",
+                "cpu.neutral=7",
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn json_output_names_the_path_choices_and_caution_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "node",
+                "--max-mode",
+                "performance",
+                "--acknowledge-caution",
+                "performance_mode",
+            ],
+        );
+        let result = json(&output);
+        assert_eq!(result["written"], true);
+        assert_eq!(
+            Path::new(result["path"].as_str().unwrap()),
+            path.canonicalize().unwrap()
+        );
+        assert_eq!(result["choices"]["contention.max_mode"], "performance");
+        assert_eq!(
+            result["exceptions"],
+            json!([{"name": "performance_mode", "marker": "caution"}])
+        );
+    }
+
+    #[test]
+    fn setup_never_prompts_or_blocks_without_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(&path)
+            .args(["setup", "--role", "node"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        // stdin stays open and empty: a prompt would block.
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "setup blocked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success());
+        assert!(Config::load(&path).is_ok());
+    }
+
+    #[test]
+    fn a_missing_config_on_a_non_tty_never_offers_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.toml");
+        let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(&path)
+            .arg("validate")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.to_lowercase().contains("start setup"), "{text}");
+        assert!(!path.exists());
+    }
+
+    /// Client and coordinator files take their connection settings; node choices
+    /// are refused for them (T107).
+    #[test]
+    fn client_and_coordinator_roles_take_connection_settings_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = dir.path().join("client.toml");
+        let output = setup_cmd(
+            &client,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "client",
+                "--endpoint",
+                "https://192.0.2.1:7443",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            json(&output)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--ca-cert")
+        );
+        let output = setup_cmd(
+            &client,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "client",
+                "--default-mode",
+                "neutral",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(error_code(&output), "ERR_CEDEGRID_ARGUMENT");
+        let tls = [
+            "--ca-cert",
+            "tls/ca.pem",
+            "--certificate",
+            "tls/operator.pem",
+            "--private-key",
+            "tls/operator.key",
+        ];
+        let mut args = vec![
+            "--non-interactive",
+            "--role",
+            "client",
+            "--endpoint",
+            "https://192.0.2.1:7443",
+        ];
+        args.extend(tls);
+        assert!(setup_cmd(&client, &args).status.success());
+        let loaded: cedegrid::config::RuntimeClientConfig =
+            cedegrid::config::load_runtime(&client, RuntimeConfigKind::Client).unwrap();
+        assert_eq!(loaded.endpoint, "https://192.0.2.1:7443");
+        let coordinator = dir.path().join("coordinator.toml");
+        let mut args = vec![
+            "--non-interactive",
+            "--role",
+            "coordinator",
+            "--listen",
+            "127.0.0.1:7443",
+            "--state-dir",
+            "state",
+            "--operator-fingerprint",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ];
+        args.extend(tls);
+        let output = setup_cmd(&coordinator, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _: cedegrid::protocol::CoordinatorConfig =
+            cedegrid::config::load_runtime(&coordinator, RuntimeConfigKind::Coordinator).unwrap();
+        // A file keeps its role.
+        let output = setup_cmd(
+            &coordinator,
+            &["--non-interactive", "--json", "--role", "node"],
+        );
+        assert_eq!(output.status.code(), Some(2));
+    }
+
+    #[test]
+    fn unmanaged_settings_and_comments_are_preserved_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let original = "# Operator notes stay.\nconfig_version = 1\nnode_id = \"node-a\" # inline\n\n[monitor]\ninterval_ms = 500 # half a second\n\n[ram]\n# the fixed part of the floor\nreserve_mib = 8192 # keep\nreserve_percent = 5\n\n[contention]\ndefault_mode = \"neutral\" # chosen in 2026\n\n[contention.ram]\nhint_deadline_s = 5 # unmanaged here\n";
+        fs::write(&path, original).unwrap();
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--default-mode",
+                "yield_first",
+                "--ram-floor-mib",
+                "16384",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let written = fs::read_to_string(&path).unwrap();
+        let expected = original
+            .replace(
+                "default_mode = \"neutral\" # chosen in 2026",
+                "default_mode = \"yield_first\" # chosen in 2026",
+            )
+            .replace("reserve_mib = 8192 # keep", "reserve_mib = 16384 # keep");
+        assert_eq!(written, expected);
+    }
+}
+
+/// The terminal interface, driven through a pseudo-terminal (T100).
+#[cfg(unix)]
+mod setup_terminal {
+    use super::*;
+    use std::io::{Read, Write as _};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // Interface rows (src/setup.rs `node_fields`): Up from the top wraps to
+    // Cancel, then Review and write.
+    const DEFAULT_MODE: usize = 1;
+    const CPU_MODE: usize = 2;
+    const MAX_MODE: usize = 6;
+    const RAM_FLOOR: usize = 7;
+    const CPU_NEUTRAL_MARGIN: usize = 10;
+    const UP: &[u8] = b"\x1b[A";
+    const DOWN: &[u8] = b"\x1b[B";
+
+    struct Pty {
+        master: std::fs::File,
+        /// Kept open so the terminal outlives the session for the checks.
+        _slave: std::fs::File,
+        /// The terminal's settings before setup started.
+        initial: libc::termios,
+        child: std::process::Child,
+        output: Arc<Mutex<Vec<u8>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+
+    fn termios(file: &std::fs::File) -> libc::termios {
+        let mut value: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(file.as_raw_fd(), &mut value) }, 0);
+        value
+    }
+
+    impl Pty {
+        fn spawn(config: &Path, args: &[&str], env: &[(&str, &str)]) -> Self {
+            let (mut master, mut slave) = (0, 0);
+            let size = libc::winsize {
+                ws_row: 60,
+                ws_col: 140,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let opened = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut::<libc::termios>() as _,
+                    &size as *const libc::winsize as _,
+                )
+            };
+            assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+            let (master, slave) = unsafe {
+                (
+                    std::fs::File::from_raw_fd(master),
+                    std::fs::File::from_raw_fd(slave),
+                )
+            };
+            let initial = termios(&master);
+            let mut command = Command::new(env!("CARGO_BIN_EXE_cedegrid"));
+            command
+                .arg("--config")
+                .arg(config)
+                .args(args)
+                .env("TERM", "xterm")
+                .env_remove("NO_COLOR")
+                .stdin(slave.try_clone().unwrap())
+                .stdout(slave.try_clone().unwrap())
+                .stderr(slave.try_clone().unwrap());
+            for (key, value) in env {
+                command.env(key, value);
+            }
+            unsafe {
+                command.pre_exec(|| {
+                    libc::setsid();
+                    libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+                    Ok(())
+                });
+            }
+            let child = command.spawn().unwrap();
+            drop(command);
+            let output = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut reading = master.try_clone().unwrap();
+            let (sink, halt) = (output.clone(), stop.clone());
+            let reader = std::thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                while !halt.load(std::sync::atomic::Ordering::SeqCst) {
+                    let mut poll = libc::pollfd {
+                        fd: reading.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    if unsafe { libc::poll(&mut poll, 1, 50) } <= 0 {
+                        continue;
+                    }
+                    match reading.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => sink.lock().unwrap().extend_from_slice(&buffer[..n]),
+                    }
+                }
+            });
+            Pty {
+                master,
+                _slave: slave,
+                initial,
+                child,
+                output,
+                stop,
+                reader: Some(reader),
+            }
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+        }
+
+        fn wait_for(&self, needle: &str) {
+            let started = Instant::now();
+            while !self.text().contains(needle) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(20),
+                    "waited for {needle:?} in:\n{}",
+                    self.text()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        /// Send one key and give the interface time to redraw.
+        fn key(&mut self, bytes: &[u8]) {
+            let before = self.output.lock().unwrap().len();
+            self.master.write_all(bytes).unwrap();
+            self.master.flush().unwrap();
+            let started = Instant::now();
+            while self.output.lock().unwrap().len() == before
+                && started.elapsed() < Duration::from_secs(5)
+                && self.child.try_wait().unwrap().is_none()
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        fn keys(&mut self, bytes: &[u8], times: usize) {
+            for _ in 0..times {
+                self.key(bytes);
+            }
+        }
+
+        fn finish(mut self) -> (std::process::ExitStatus, String, libc::termios) {
+            let started = Instant::now();
+            let status = loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(20),
+                    "setup did not exit:\n{}",
+                    self.text()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            std::thread::sleep(Duration::from_millis(100));
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(reader) = self.reader.take() {
+                reader.join().unwrap();
+            }
+            // The master shares the terminal's settings and outlives the session.
+            let settings = termios(&self.master);
+            (status, self.text(), settings)
+        }
+    }
+
+    fn interface(config: &Path, env: &[(&str, &str)]) -> Pty {
+        let pty = Pty::spawn(config, &["setup", "--role", "node"], env);
+        pty.wait_for("Review and write");
+        pty
+    }
+
+    /// Open the row `index` levels below the top, from the top.
+    fn open(pty: &mut Pty, index: usize) {
+        pty.keys(DOWN, index);
+        pty.key(b"\r");
+    }
+
+    /// From the main screen, with the selection on `from`, review and write.
+    fn write_from(pty: &mut Pty, from: usize) {
+        pty.keys(UP, from + 2);
+        pty.key(b"\r");
+        pty.wait_for("Review before writing");
+        pty.key(b"\r");
+    }
+
+    #[test]
+    fn arrows_space_and_enter_choose_and_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = interface(&path, &[]);
+        open(&mut pty, DEFAULT_MODE);
+        pty.wait_for("holds the fair share");
+        // Options: Yield First, Neutral (current), Performance.
+        pty.key(UP);
+        pty.key(b" ");
+        pty.key(b"\r");
+        write_from(&mut pty, DEFAULT_MODE);
+        let (status, text, _) = pty.finish();
+        assert!(status.success(), "{text}");
+        assert_eq!(
+            Config::load(&path).unwrap().contention.default_mode,
+            cedegrid::contention::ContentionMode::YieldFirst
+        );
+    }
+
+    #[test]
+    fn a_caution_choice_needs_its_own_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = interface(&path, &[]);
+        // Options: same as default (current), Yield First, Neutral, Performance.
+        open(&mut pty, CPU_MODE);
+        pty.keys(DOWN, 3);
+        pty.key(b" ");
+        pty.key(b"\r");
+        pty.wait_for("Confirm a caution option");
+        pty.wait_for("follows what external work takes");
+        // Declining keeps the previous value.
+        pty.key(b"\r");
+        pty.wait_for("Review and write");
+        let text = pty.text();
+        let row = text[text.rfind("CPU mode").unwrap()..]
+            .lines()
+            .next()
+            .unwrap();
+        assert!(row.contains("same as default (Neutral)"), "{row}");
+        assert!(!row.contains("[caution]"), "{row}");
+        pty.key(b"\r");
+        pty.keys(DOWN, 3);
+        pty.key(b" ");
+        pty.key(b"\r");
+        pty.wait_for("Confirm a caution option");
+        pty.key(DOWN);
+        pty.key(b" ");
+        pty.key(b"\r");
+        write_from(&mut pty, CPU_MODE);
+        let (status, text, _) = pty.finish();
+        assert!(status.success(), "{text}");
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config
+                .contention
+                .mode(cedegrid::contention::ResourceKind::Cpu),
+            cedegrid::contention::ContentionMode::Performance
+        );
+        assert!(
+            config
+                .contention
+                .acknowledge_caution
+                .contains("performance_mode")
+        );
+    }
+
+    #[test]
+    fn esc_q_and_ctrl_c_write_nothing_and_restore_the_terminal() {
+        for key in [&b"\x1b"[..], b"q", b"\x03"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("node.toml");
+            fs::write(&path, "config_version = 1\n").unwrap();
+            let mut pty = interface(&path, &[]);
+            let before = pty.initial;
+            // A change made before cancelling is not written either.
+            open(&mut pty, DEFAULT_MODE);
+            pty.key(UP);
+            pty.key(b" ");
+            pty.key(b"\r");
+            pty.key(key);
+            let (status, text, after) = pty.finish();
+            assert_eq!(status.code(), Some(130), "{key:?}: {text}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "config_version = 1\n");
+            assert_eq!(after.c_lflag, before.c_lflag, "{key:?}");
+            assert_eq!(after.c_iflag, before.c_iflag, "{key:?}");
+            assert!(after.c_lflag & libc::ICANON != 0 && after.c_lflag & libc::ECHO != 0);
+        }
+    }
+
+    #[test]
+    fn sigterm_restores_the_terminal_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = interface(&path, &[]);
+        let before = pty.initial;
+        open(&mut pty, DEFAULT_MODE);
+        assert_eq!(
+            unsafe { libc::kill(pty.child.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let (status, text, after) = pty.finish();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{text}");
+        assert!(!path.exists());
+        assert_eq!(after.c_lflag, before.c_lflag);
+        assert_eq!(after.c_iflag, before.c_iflag);
+    }
+
+    #[test]
+    fn no_color_writes_no_escape_sequence_and_keeps_caution_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = interface(&path, &[("NO_COLOR", "1")]);
+        open(&mut pty, CPU_MODE);
+        pty.wait_for("Performance [caution]");
+        pty.key(b"q");
+        let (_, text, _) = pty.finish();
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.contains("[caution]"));
+        // With color the marker is yellow.
+        let mut pty = interface(&path, &[]);
+        open(&mut pty, CPU_MODE);
+        pty.wait_for("\x1b[33m[caution]\x1b[0m");
+        pty.key(b"q");
+        pty.finish();
+    }
+
+    /// SC-011: the interface and the flags write byte-identical files.
+    #[test]
+    fn the_interface_and_flags_write_identical_files() {
+        let start = "# Operator notes stay.\nconfig_version = 1\nnode_id = \"node-a\"\n\n[ram]\nreserve_mib = 8192 # fixed part\n";
+        type Steps = fn(&mut Pty);
+        let cases: [(&str, Option<&str>, Steps, &[&str]); 4] = [
+            ("neutral default", None, |pty| write_from(pty, 0), &[]),
+            (
+                "performance cap",
+                Some(start),
+                |pty| {
+                    // Options: no explicit cap (current), Neutral, Performance.
+                    open(pty, MAX_MODE);
+                    pty.keys(DOWN, 2);
+                    pty.key(b" ");
+                    pty.key(b"\r");
+                    pty.wait_for("Confirm a caution option");
+                    pty.key(DOWN);
+                    pty.key(b" ");
+                    pty.key(b"\r");
+                    write_from(pty, MAX_MODE);
+                },
+                &[
+                    "--max-mode",
+                    "performance",
+                    "--acknowledge-caution",
+                    "performance_mode",
+                ],
+            ),
+            (
+                "floor change",
+                Some(start),
+                |pty| {
+                    // Ascending options; 16 384 follows the current 8192.
+                    open(pty, RAM_FLOOR);
+                    pty.key(DOWN);
+                    pty.key(b" ");
+                    pty.key(b"\r");
+                    write_from(pty, RAM_FLOOR);
+                },
+                &["--ram-floor-mib", "16384"],
+            ),
+            (
+                "margin change",
+                Some(start),
+                |pty| {
+                    // Descending options; 7 precedes the default 5.
+                    open(pty, CPU_NEUTRAL_MARGIN);
+                    pty.key(UP);
+                    pty.key(b" ");
+                    pty.key(b"\r");
+                    write_from(pty, CPU_NEUTRAL_MARGIN);
+                },
+                &["--margin", "cpu.neutral=7"],
+            ),
+        ];
+        for (name, initial, steps, flags) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (by_keys, by_flags) = (dir.path().join("keys.toml"), dir.path().join("flags.toml"));
+            if let Some(initial) = initial {
+                fs::write(&by_keys, initial).unwrap();
+                fs::write(&by_flags, initial).unwrap();
+            }
+            let mut pty = interface(&by_keys, &[]);
+            steps(&mut pty);
+            let (status, text, _) = pty.finish();
+            assert!(status.success(), "{name}: {text}");
+            let mut args = vec!["setup", "--non-interactive", "--role", "node"];
+            args.extend_from_slice(flags);
+            let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+                .arg("--config")
+                .arg(&by_flags)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{name}: {output:?}");
+            let (keys, flags) = (fs::read(&by_keys).unwrap(), fs::read(&by_flags).unwrap());
+            assert_eq!(
+                String::from_utf8_lossy(&keys),
+                String::from_utf8_lossy(&flags),
+                "{name}"
+            );
+            if let Some(initial) = initial {
+                assert_ne!(keys, initial.as_bytes(), "{name} changed nothing");
+            }
+        }
+    }
+
+    /// Terminals without cursor control get line prompts with the same choices,
+    /// markers and confirmation (FR-055).
+    #[test]
+    fn line_prompts_serve_terminals_without_cursor_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = Pty::spawn(&path, &["setup", "--role", "node"], &[("TERM", "dumb")]);
+        pty.wait_for("Default mode: Neutral");
+        // Default mode: 3) Performance, a caution option.
+        pty.key(b"3\r");
+        pty.wait_for("Type yes to record performance_mode");
+        pty.key(b"yes\r");
+        // Keep every other value.
+        for _ in 0..22 {
+            pty.key(b"\r");
+        }
+        pty.wait_for("Write this configuration? [y/N]");
+        pty.key(b"y\r");
+        let (status, text, _) = pty.finish();
+        assert!(status.success(), "{text}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.contains("Performance [caution]"));
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.contention.default_mode,
+            cedegrid::contention::ContentionMode::Performance
+        );
+    }
+
+    #[test]
+    fn a_command_that_needs_a_missing_config_offers_setup_on_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.toml");
+        let mut pty = Pty::spawn(&path, &["validate"], &[]);
+        pty.wait_for("Start setup now? [y/N]");
+        pty.key(b"n\r");
+        let (status, text, _) = pty.finish();
+        assert!(!status.success(), "{text}");
+        assert!(!path.exists());
+    }
+}

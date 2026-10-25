@@ -201,6 +201,9 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Choose roles, modes, the node cap, floors and margins; opens the keyboard
+    /// interface on a terminal (contracts/setup-cli.md).
+    Setup(Box<cedegrid::setup::SetupArgs>),
 }
 
 #[derive(Subcommand)]
@@ -243,6 +246,8 @@ fn read_config(path: &Path) -> Result<Config> {
 
 /// The configuration and the load-time warnings an operator should see.
 fn read_config_reporting(path: &Path) -> Result<(Config, Vec<String>)> {
+    // On a terminal, a missing configuration offers setup; never without one.
+    cedegrid::setup::offer_for_missing(path)?;
     let canonical = path
         .canonicalize()
         .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
@@ -316,10 +321,12 @@ fn main() -> Result<()> {
                 | Command::Doctor { .. }
                 | Command::Observe { no_state: true, .. }
                 | Command::Replay { .. }
+                | Command::Setup(..)
         ),
         "ERR_CEDEGRID_UNSUPPORTED_PLATFORM: Windows supports client commands only"
     );
     match &cli.command {
+        Command::Setup(args) => std::process::exit(cedegrid::setup::main(&cli.config, args)),
         Command::StorageQualify { directory, profile } => {
             let profile = serde_json::from_value(serde_json::Value::String(profile.clone()))?;
             let report = cedegrid::storage_qualification::run(
@@ -582,7 +589,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Reconcile => emit(&cedegrid::agent::reconcile(&config)?),
         Command::Supervise { .. }
         | Command::StorageQualify { .. }
-        | Command::StorageQualificationChild { .. } => unreachable!(),
+        | Command::StorageQualificationChild { .. }
+        | Command::Setup(..) => unreachable!(),
         Command::Executions => {
             let store =
                 StateStore::open_read_only_with_profile(&config.state_dir, config.storage_profile)?;

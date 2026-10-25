@@ -805,18 +805,18 @@ never blocks, and caution choices need confirmation (quickstart §7).
 
 ### Tests for User Story 7 ⚠️
 
-- [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the caution mapping (B3): Yield First,
+- [X] T098 [P] [US7] Add unit tests in `src/setup.rs` for the caution mapping (B3): Yield First,
   Neutral, default floors and default margins have no marker; Performance on any resource, a
   floor below twice its minimum, a margin below its default and a detection setting beyond its
   default (FR-045) are `caution`.
-- [ ] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
+- [X] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
   - exit codes 2, 3 and 4 per `contracts/setup-cli.md`;
   - `--margin` for `yield_first`, `neutral` and `performance`, validated as YF ≥ N ≥ P;
   - `--json` output;
   - no prompt or blocking on a non-TTY;
   - a missing config on a non-TTY never offers setup;
   - unmanaged settings and comments preserved byte for byte.
-- [ ] T100 [US7] Add Unix PTY tests in `tests/cli.rs`:
+- [X] T100 [US7] Add Unix PTY tests in `tests/cli.rs`:
   - arrow, Space and Enter navigation;
   - the caution confirmation screen;
   - Esc, `q` and Ctrl-C write nothing and restore the terminal;
@@ -826,27 +826,27 @@ never blocks, and caution choices need confirmation (quickstart §7).
 
 ### Implementation for User Story 7
 
-- [ ] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor sizes, margin
+- [X] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor sizes, margin
   sizes for every mode, Guaranteed hint deadline, tolerances through `--set`), defaults from the
   current config, validation and the caution mapping in `src/setup.rs` (B3). The summary lists
   each active caution option with the keys and values it covers (`Config::caution_details`).
-- [ ] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
+- [X] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
   validate through `Config::load`, then rename atomically.
-- [ ] T103 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
+- [X] T103 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
   `contracts/setup-cli.md`, with JSON output and stable error codes.
-- [ ] T104 [US7] Implement the terminal interface in `src/setup.rs`:
+- [X] T104 [US7] Implement the terminal interface in `src/setup.rs`:
   - termios raw mode through `libc`, restored by a drop guard and on signals;
   - ANSI rendering;
   - keys, consequence lines, and the caution marker in SGR 33;
   - `NO_COLOR`, `TERM=dumb` and non-TTY detection;
   - the caution confirmation screen and the summary screen.
-- [ ] T105 [US7] Implement the line-based prompt fallback in `src/setup.rs`, for terminals
+- [X] T105 [US7] Implement the line-based prompt fallback in `src/setup.rs`, for terminals
   without cursor control or that are too small.
-- [ ] T106 [US7] In `src/main.rs`, offer setup on a TTY when a command needs a missing config.
+- [X] T106 [US7] In `src/main.rs`, offer setup on a TTY when a command needs a missing config.
   Never do this on a non-TTY.
-- [ ] T107 [US7] On Windows, setup configures client settings only and refuses node choices
+- [X] T107 [US7] On Windows, setup configures client settings only and refuses node choices
   with a clear error (`src/main.rs`, `src/setup.rs`).
-- [ ] T108 [US7] Add a short setup section to `README.md` that points to `docs/guarantees.md`
+- [X] T108 [US7] Add a short setup section to `README.md` that points to `docs/guarantees.md`
   for the caution marker.
 
 **Checkpoint**: new nodes are configured safely through setup.

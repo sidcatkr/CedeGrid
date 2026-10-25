@@ -642,7 +642,7 @@ pub struct ResourceContentionConfig {
 }
 
 impl ContentionConfig {
-    fn resource(&self, kind: crate::contention::ResourceKind) -> &ResourceContentionConfig {
+    pub fn resource(&self, kind: crate::contention::ResourceKind) -> &ResourceContentionConfig {
         use crate::contention::ResourceKind::*;
         match kind {
             Cpu => &self.cpu,
@@ -1762,14 +1762,40 @@ impl Config {
     pub fn caution_details(&self, snapshot: &crate::model::Snapshot) -> Vec<CautionDetail> {
         let floors = self.floors(snapshot);
         let small = |floor: &FloorStatus| floor.near_minimum && floor.confirmed;
+        self.caution_list(small(&floors.ram), floors.gpus.values().any(small))
+    }
+
+    /// Caution options the settings call for, acknowledged or not, with the settings
+    /// each covers, for setup. Floors are judged on the host where its sizes are
+    /// known, and from the settings alone otherwise.
+    pub fn caution_needed(
+        &self,
+        ram_total_mib: Option<u64>,
+        gpu_totals_mib: &[u64],
+    ) -> Vec<CautionDetail> {
+        let ram = match ram_total_mib {
+            Some(total) => self.ram_floor(total).near_minimum,
+            None => self.ram.reserve_percent == 0 && self.ram.reserve_mib < 2 * MIN_RAM_FLOOR_MIB,
+        };
+        let gpu = if gpu_totals_mib.is_empty() {
+            self.gpu.reserve_vram_percent == 0 && self.gpu.reserve_vram_mib < 2 * MIN_VRAM_FLOOR_MIB
+        } else {
+            gpu_totals_mib
+                .iter()
+                .any(|total| self.vram_floor(*total).near_minimum)
+        };
+        self.caution_list(ram, gpu)
+    }
+
+    fn caution_list(&self, ram_small: bool, gpu_small: bool) -> Vec<CautionDetail> {
         let mut small_floor = Vec::new();
-        if small(&floors.ram) {
+        if ram_small {
             small_floor.extend(nonzero_settings(&[
                 ("ram.reserve_mib", self.ram.reserve_mib),
                 ("ram.reserve_percent", u64::from(self.ram.reserve_percent)),
             ]));
         }
-        if floors.gpus.values().any(small) {
+        if gpu_small {
             small_floor.extend(nonzero_settings(&[
                 ("gpu.reserve_vram_mib", self.gpu.reserve_vram_mib),
                 (
