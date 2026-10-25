@@ -428,7 +428,7 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     (
         "cooldown_pending",
-        "The stable-capacity cooldown has not elapsed.",
+        "The node-wide cooldown behind the 0.2 expansion flags has not elapsed; each resource's admission keeps its own cooldown.",
     ),
     // What `held_back` holds, by cause.
     ("held_back_floor", "Memory kept free as the no-harm floor."),

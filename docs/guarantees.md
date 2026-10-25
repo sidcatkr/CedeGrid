@@ -169,7 +169,11 @@ each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2
 Performance. Each resource's admission opens on its own, and placement needs every
 requested resource open; every launch reserves CPU and RAM. GPU memory waits for
 `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
-`gpu.scale_up_cooldown_ms`, else its mode's interval. On RAM and GPU memory, the n-th
+`gpu.scale_up_cooldown_ms`, else its mode's interval, counted per device from the time that
+device became stable: its own external growth, its own measurement and its own charges reset
+it, and CPU or RAM state never does. No supported backend reports a GPU whose memory is host
+RAM, so no device is coupled to RAM. The node-wide cooldown remains only behind the 0.2
+expansion flags (`cooldown_pending`). On RAM and GPU memory, the n-th
 reclaim episode (a floor breach or own usage beyond the budget) within
 `memory_peak_window_s` adds `reclaim_backoff_ms` × 2^(n−1) to the cooldown, at most
 `reclaim_backoff_max_ms` (1 s doubling to 30 s by default); a peak window without one

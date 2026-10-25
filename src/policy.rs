@@ -868,15 +868,6 @@ impl PolicyEngine {
             }
         }
 
-        let host_capacity_safe = !input.explicit_drain
-            && !cpu_unknown
-            && !ram_unknown
-            && !cpu_held
-            && !ram_held
-            && cpu_capacity > 0
-            && snapshot.total_ram_mib > 0
-            && charged.cpu_millicores <= budget.cpu_millicores
-            && charged.ram_mib <= budget.ram_mib;
         let mut next_gpus = self.previous_gpus.clone();
         for value in next_gpus.values_mut() {
             value.stable_since = None;
@@ -1291,7 +1282,11 @@ impl PolicyEngine {
                         pids,
                         external_memory: next_baseline,
                         sample_id: gpu.compute_sample_id.max(previous.sample_id),
-                        stable_since: if !blocked_gpus.contains(&gpu.uuid) && host_capacity_safe {
+                        // A device's memory stability depends on that device alone,
+                        // never on CPU or RAM (FR-034). NVML reports no device whose
+                        // memory is host RAM, so no device keeps a RAM coupling.
+                        stable_since: if !blocked_gpus.contains(&gpu.uuid) && !input.explicit_drain
+                        {
                             Some(previous.stable_since.unwrap_or(now_monotonic_ms))
                         } else {
                             None
@@ -2286,7 +2281,7 @@ impl PolicyEngine {
         // including existing draining work and everything just recommended for drain.
         headroom.subtract_saturating(&charged);
         headroom.gpu_memory_mib.retain(|uuid, _| {
-            host_capacity_safe
+            !input.explicit_drain
                 && !blocked_gpus.contains(uuid)
                 && next_gpus
                     .get(uuid)

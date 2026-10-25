@@ -4594,3 +4594,142 @@ mod per_job_modes {
         );
     }
 }
+
+/// Each GPU's memory admission opens on its own cooldown, whatever CPU and RAM do
+/// (item 010 B1, FR-034).
+mod gpu_cooldown_alone {
+    use super::*;
+    use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
+
+    fn cfg(mode: ContentionMode) -> Config {
+        let mut cfg = config();
+        cfg.cpu.reserve_physical_cores = 0;
+        // The mode's own interval: 10 s in Neutral, 2 s in Performance.
+        cfg.gpu.scale_up_cooldown_ms = None;
+        cfg.contention.default_mode = mode;
+        cfg.contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        cfg
+    }
+
+    fn device(uuid: &str) -> GpuSnapshot {
+        let mut gpu = gpu_snapshot().gpus.remove(0);
+        gpu.uuid = uuid.into();
+        gpu.utilization_percent = Some(0);
+        gpu.used_memory_mib = Some(2000);
+        gpu
+    }
+
+    /// A saturated CPU: own work at 6000m beside an external user at 2000m, so the
+    /// job is over its CPU target and capped.
+    fn contended(cpu_known: bool) -> (Snapshot, PolicyInput) {
+        let mut snap = snapshot();
+        snap.gpu_inventory = CapabilityStatus::Available;
+        snap.gpus = vec![device("GPU-a"), device("GPU-b")];
+        snap.cpu_busy_millicores = cpu_known.then_some(8000);
+        snap.principals = Some(vec![
+            cpu_principal(1000, true, 0),
+            cpu_principal(2001, false, 2000),
+        ]);
+        let job = allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(1000, 100, 2000),
+            Some(resources(6000, 100, 2000)),
+        );
+        (
+            snap,
+            PolicyInput {
+                allocations: vec![job],
+                facts: rootless(&["job"]),
+                ..PolicyInput::default()
+            },
+        )
+    }
+
+    fn admission(decision: &Decision, key: ResourceKey) -> Admission {
+        decision.resources[&key].admission.clone().unwrap()
+    }
+
+    #[test]
+    fn gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu() {
+        for (mode, cooldown_ms) in [
+            (ContentionMode::Neutral, 10_000),
+            (ContentionMode::Performance, 2000),
+        ] {
+            let cfg = cfg(mode);
+            let (snap, input) = contended(true);
+            let mut engine = PolicyEngine::new();
+            let mut opened = None;
+            for i in 0..30u64 {
+                let now = i * 500;
+                let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+                assert!(
+                    decision
+                        .actions
+                        .iter()
+                        .any(|a| a.resource == ResourceKey::Cpu),
+                    "{mode:?}"
+                );
+                if opened.is_none()
+                    && admission(&decision, ResourceKey::GpuMemory("GPU-a".into()))
+                        == Admission::Open
+                {
+                    assert!(
+                        decision
+                            .admission_headroom
+                            .gpu_memory_mib
+                            .get("GPU-a")
+                            .copied()
+                            .unwrap_or(0)
+                            > 0
+                    );
+                    opened = Some(now);
+                }
+            }
+            assert_eq!(opened, Some(cooldown_ms), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_external_gpu_workload_resets_only_its_device() {
+        let cfg = cfg(ContentionMode::Neutral);
+        let (mut snap, input) = contended(true);
+        let mut engine = PolicyEngine::new();
+        for i in 0..=24u64 {
+            engine.evaluate(&cfg, &snap, &input, i * 500).unwrap();
+        }
+        snap.gpus[0].external_process_ids = Some(vec![987]);
+        snap.gpus[0].used_memory_mib = Some(6000);
+        let decision = engine.evaluate(&cfg, &snap, &input, 12_500).unwrap();
+        assert_ne!(
+            admission(&decision, ResourceKey::GpuMemory("GPU-a".into())),
+            Admission::Open
+        );
+        assert_eq!(
+            admission(&decision, ResourceKey::GpuMemory("GPU-b".into())),
+            Admission::Open
+        );
+    }
+
+    #[test]
+    fn an_unknown_cpu_reading_leaves_gpu_memory_counting() {
+        let cfg = cfg(ContentionMode::Neutral);
+        let (snap, input) = contended(false);
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        for i in 0..=20u64 {
+            last = Some(engine.evaluate(&cfg, &snap, &input, i * 500).unwrap());
+        }
+        let decision = last.unwrap();
+        assert_eq!(
+            admission(&decision, ResourceKey::GpuMemory("GPU-a".into())),
+            Admission::Open
+        );
+        assert_eq!(
+            admission(&decision, ResourceKey::Cpu).code(),
+            Some("admission_measurement_unknown")
+        );
+    }
+}
