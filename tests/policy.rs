@@ -2831,6 +2831,10 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
 fn memory_headroom_uses_the_external_peak_over_its_window() {
     let mut cfg = config();
     cfg.contention.ram.memory_peak_window_s = Some(10);
+    // A shorter window is a caution option.
+    cfg.contention
+        .acknowledge_caution
+        .insert("relaxed_detection".into());
     let mut engine = PolicyEngine::new();
     let mut headroom = |available: u64, now: u64| {
         let mut snap = snapshot();
@@ -2854,6 +2858,10 @@ fn memory_headroom_uses_the_external_peak_over_its_window() {
 fn a_quiet_gpu_context_counts_toward_the_device_peak() {
     let mut cfg = config();
     cfg.contention.gpu_memory.memory_peak_window_s = Some(10);
+    // A shorter window is a caution option.
+    cfg.contention
+        .acknowledge_caution
+        .insert("relaxed_detection".into());
     let mut engine = PolicyEngine::new();
     let mut headroom = |used: u64, now: u64| {
         // A healthy observation of one quiet external context, as in D3.
@@ -3002,4 +3010,37 @@ fn external_memory_peaks_follow_each_external_process() {
     assert_eq!(headroom(Some(1000), 60_000), 21_000);
     // It exits: its peak goes at once.
     assert_eq!(headroom(None, 60_500), 31_000);
+}
+
+/// External usage beyond the listed processes, such as processes past the
+/// collector's 64, shares one peak over the window and is never dropped (FR-060).
+#[test]
+fn external_usage_beyond_the_listed_processes_keeps_its_peak() {
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |unlisted: u64, now: u64| {
+        let mut snap = snapshot();
+        // 64 listed processes hold 100 MiB each.
+        snap.available_ram_mib = Some(32_000 - 6400 - unlisted);
+        snap.external_processes = Some(
+            (0..64)
+                .map(|i| ExternalProcessMemory {
+                    pid: 100 + i,
+                    start_time: 1,
+                    ram_mib: 100,
+                    gpu_memory_mib: BTreeMap::new(),
+                })
+                .collect(),
+        );
+        engine
+            .evaluate(&config(), &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .ram_mib
+    };
+    // 32000 MiB with a 1000 MiB floor; unlisted processes hold 3600 MiB more.
+    assert_eq!(headroom(3600, 0), 21_000);
+    // They exit: their usage stays in the shared peak for the 300 s window.
+    assert_eq!(headroom(0, 500), 21_000);
+    assert_eq!(headroom(0, 299_000), 21_000);
+    assert_eq!(headroom(0, 300_500), 24_600);
 }

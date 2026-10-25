@@ -2386,6 +2386,8 @@ struct AgentLoop<'a> {
     counted_drains: BTreeSet<String>,
     /// Host floor warnings already printed.
     floor_warnings: BTreeSet<String>,
+    /// Whether the first sample passed the host-dependent configuration checks.
+    host_checked: bool,
 }
 
 impl AgentLoop<'_> {
@@ -2899,6 +2901,13 @@ impl AgentLoop<'_> {
             .collector
             .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
+        // Limits that depend on the host are checked once; the agent stops if they fail.
+        if !self.host_checked {
+            config
+                .validate_host(&snapshot)
+                .context("configuration does not fit this host")?;
+            self.host_checked = true;
+        }
         // Percentage floors are judged on the host, so their warning comes here.
         for warning in config.host_floor_warnings(&snapshot) {
             if self.floor_warnings.insert(warning.clone()) {
@@ -3624,6 +3633,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         last_growth: start,
         counted_drains: BTreeSet::new(),
         floor_warnings: BTreeSet::new(),
+        host_checked: false,
     };
     for slot in attached {
         state

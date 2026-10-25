@@ -1702,6 +1702,23 @@ mod tests {
     }
 
     #[test]
+    fn at_most_the_64_largest_external_processes_are_listed() {
+        // 70 processes above 1% of RAM: the six smallest stay in the unlisted rest.
+        let processes: Vec<_> = (1..=70)
+            .map(|pid| process(pid, Some(1001), 0, 400 + u64::from(pid)))
+            .collect();
+        let listed = external_memory_processes(
+            &processes,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            32_000,
+        );
+        assert_eq!(listed.len(), 64);
+        assert!(listed.iter().all(|p| p.pid > 6), "{listed:?}");
+    }
+
+    #[test]
     fn external_processes_aggregate_into_principals_by_owner() {
         let processes = [
             process(1, Some(1000), 200, 10),

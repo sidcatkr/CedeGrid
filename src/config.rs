@@ -570,7 +570,7 @@ impl Default for ContentionConfig {
 }
 
 /// Caution options a file acknowledges by name (FR-051, FR-054).
-const ACKNOWLEDGEMENTS: [&str; 4] = [
+pub const ACKNOWLEDGEMENTS: [&str; 4] = [
     "performance_mode",
     "small_floor",
     "reduced_margin",
@@ -992,6 +992,10 @@ impl ContentionConfig {
                 "contention.{name}.principal_min_percent must be between 1 and 50"
             );
             ensure!(
+                t.noise_tolerance_mib <= 1024,
+                "contention.{name}.noise_tolerance_mib must be at most 1024"
+            );
+            ensure!(
                 t.guaranteed_breach_window_s <= 60,
                 "contention.{name}.guaranteed_breach_window_s must be between 0 and 60"
             );
@@ -1017,15 +1021,19 @@ impl ContentionConfig {
             ensure!(
                 settings.is_empty() || self.acknowledge_caution.contains(option),
                 "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED: {} beyond the default requires acknowledge_caution = [\"{option}\"]",
-                settings.join(", ")
+                settings
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         Ok(())
     }
 
     /// Margins below their defaults, which leave external demand less room
-    /// (constitution II).
-    fn reduced_margins(&self) -> Vec<String> {
+    /// (constitution II), as key and value.
+    fn reduced_margins(&self) -> Vec<(String, String)> {
         self.beyond_defaults(|t| {
             [
                 ("yield_first_margin_percent", t.yield_first_margin_percent),
@@ -1036,10 +1044,14 @@ impl ContentionConfig {
         })
     }
 
-    /// Detection thresholds above their defaults, which let more external demand
-    /// go unseen (constitution II).
-    fn relaxed_detection(&self) -> Vec<String> {
-        self.beyond_defaults(|t| {
+    /// Detection settings beyond their defaults, which let more external demand
+    /// go unseen or be forgotten sooner (constitution II), as key and value.
+    fn relaxed_detection(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        if self.uid_min > Self::default().uid_min {
+            result.push(("contention.uid_min".to_string(), self.uid_min.to_string()));
+        }
+        result.extend(self.beyond_defaults(|t| {
             [
                 ("saturation_percent", i64::from(t.saturation_percent)),
                 ("principal_min_percent", i64::from(t.principal_min_percent)),
@@ -1047,16 +1059,47 @@ impl ContentionConfig {
                     "noise_tolerance_mib",
                     i64::try_from(t.noise_tolerance_mib).unwrap_or(i64::MAX),
                 ),
+                (
+                    "memory_peak_window_s",
+                    -i64::try_from(t.memory_peak_window_s).unwrap_or(i64::MAX),
+                ),
+                (
+                    "quiet_window_intervals",
+                    -i64::from(t.quiet_window_intervals),
+                ),
             ]
-        })
+        }));
+        result
     }
 
-    /// Settings, as `contention.resource.key`, whose value exceeds the default;
-    /// `values` orders each so that larger lets own work hold more.
+    /// Explicit Performance settings, as key and value.
+    fn performance_settings(&self) -> Vec<(String, String)> {
+        use crate::contention::{ContentionMode::Performance, ResourceKind};
+        let mut result = Vec::new();
+        if self.default_mode == Performance {
+            result.push(("contention.default_mode".into(), "performance".into()));
+        }
+        if self.max_mode == Some(Performance) {
+            result.push(("contention.max_mode".into(), "performance".into()));
+        }
+        for kind in ResourceKind::ALL {
+            if self.resource(kind).mode == Some(Performance) {
+                result.push((
+                    format!("contention.{}.mode", kind.name()),
+                    "performance".into(),
+                ));
+            }
+        }
+        result
+    }
+
+    /// Settings, as `contention.resource.key` and value, beyond the default;
+    /// `values` orders each so that larger lets own work hold more, and reports
+    /// the magnitude.
     fn beyond_defaults<const N: usize>(
         &self,
         values: impl Fn(&crate::contention::ResourceThresholds) -> [(&'static str, i64); N],
-    ) -> Vec<String> {
+    ) -> Vec<(String, String)> {
         use crate::contention::{ResourceKind, ResourceThresholds};
         let mut result = Vec::new();
         for kind in ResourceKind::ALL {
@@ -1065,12 +1108,191 @@ impl ContentionConfig {
                 values(&self.thresholds(kind)).into_iter().zip(defaults)
             {
                 if value > default {
-                    result.push(format!("contention.{}.{key}", kind.name()));
+                    result.push((
+                        format!("contention.{}.{key}", kind.name()),
+                        value.unsigned_abs().to_string(),
+                    ));
                 }
             }
         }
         result
     }
+}
+
+/// How a configuration key can affect other workloads (constitution II).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyClass {
+    /// Affects only own work, or nothing at runtime.
+    Safe,
+    /// Range-checked so that the floors and reclaim bounds hold at any value.
+    Bounded,
+    /// Beyond its default it lets own work hold more capacity, and then needs the
+    /// named `acknowledge_caution` entry.
+    Caution(&'static str),
+}
+
+/// The class of every configuration key; `contention.*` stands for each
+/// resource section.
+pub const KEY_CLASSES: &[(&str, KeyClass)] = {
+    use KeyClass::{Bounded, Caution, Safe};
+    &[
+        ("schema_version", Safe),
+        ("node_id", Safe),
+        // Guaranteed work stays within FR-024: floors, the critical path, its CPU request.
+        ("node_mode", Bounded),
+        ("state_dir", Safe),
+        ("storage_profile", Safe),
+        ("monitor.interval_ms", Bounded),
+        ("cpu.nice", Safe),
+        ("cpu.reserve_physical_cores", Safe),
+        ("ram.reserve_mib", Caution("small_floor")),
+        ("ram.reserve_percent", Caution("small_floor")),
+        // Legacy keys that are read once or not at all (FR-031).
+        ("gpu.active_shrink_percent", Safe),
+        ("gpu.protective_shrink_percent", Safe),
+        ("gpu.best_effort_external_processes", Safe),
+        ("gpu.execution_mode", Safe),
+        ("gpu.process_sample_max_age_ms", Bounded),
+        ("gpu.reserve_vram_mib", Caution("small_floor")),
+        ("gpu.reserve_vram_percent", Caution("small_floor")),
+        // Admission waits: floors and peaks hold however short they are.
+        ("gpu.scale_up_cooldown_ms", Safe),
+        ("lifecycle.allocation_lease_ms", Safe),
+        ("lifecycle.drain_timeout_ms", Bounded),
+        ("lifecycle.heartbeat_interval_ms", Safe),
+        ("lifecycle.term_grace_ms", Bounded),
+        ("kernel.delegated_root", Safe),
+        ("kernel.enabled", Safe),
+        ("kernel.freshness_intervals", Bounded),
+        ("kernel.monitor_interval_ms", Bounded),
+        ("kernel.psi", Safe),
+        // Delegated cgroup settings act on own leaves only.
+        ("cgroup.allow_kill", Safe),
+        ("cgroup.authorized_controls", Safe),
+        ("cgroup.cpu_max.period_us", Safe),
+        ("cgroup.cpu_max.quota_us", Safe),
+        ("cgroup.cpu_weight", Safe),
+        ("cgroup.delegated_root", Safe),
+        ("cgroup.enabled", Safe),
+        ("cgroup.memory_high_mib", Safe),
+        ("cgroup.memory_max_mib", Safe),
+        ("execution.admission_timeout_ms", Safe),
+        ("execution.enabled", Safe),
+        ("execution.prepare_timeout_ms", Safe),
+        ("execution.release_confirm_timeout_ms", Safe),
+        ("contention.acknowledge_caution", Safe),
+        ("contention.critical_floor_percent", Bounded),
+        ("contention.critical_hint_deadline_s", Bounded),
+        ("contention.default_mode", Caution("performance_mode")),
+        ("contention.floor_policy", Safe),
+        ("contention.guaranteed_hint_deadline_s", Bounded),
+        ("contention.max_mode", Caution("performance_mode")),
+        ("contention.neutral_memory_policy", Safe),
+        ("contention.never_share_occupied_gpus", Safe),
+        ("contention.principal_leave_s", Bounded),
+        // Users not joined yet count toward the unattributed principal, which contends.
+        ("contention.principal_window_intervals", Safe),
+        ("contention.uid_min", Caution("relaxed_detection")),
+        ("contention.*.mode", Caution("performance_mode")),
+        (
+            "contention.*.yield_first_margin_percent",
+            Caution("reduced_margin"),
+        ),
+        (
+            "contention.*.neutral_margin_percent",
+            Caution("reduced_margin"),
+        ),
+        (
+            "contention.*.performance_margin_percent",
+            Caution("reduced_margin"),
+        ),
+        (
+            "contention.*.saturation_percent",
+            Caution("relaxed_detection"),
+        ),
+        (
+            "contention.*.principal_min_percent",
+            Caution("relaxed_detection"),
+        ),
+        (
+            "contention.*.noise_tolerance_mib",
+            Caution("relaxed_detection"),
+        ),
+        (
+            "contention.*.memory_peak_window_s",
+            Caution("relaxed_detection"),
+        ),
+        (
+            "contention.*.quiet_window_intervals",
+            Caution("relaxed_detection"),
+        ),
+        ("contention.*.guaranteed_breach_window_s", Bounded),
+        ("contention.*.hint_deadline_s", Bounded),
+        ("contention.*.hysteresis_percent", Bounded),
+        ("contention.*.min_step_dwell_intervals", Bounded),
+        ("contention.*.pause_bound_s", Bounded),
+        ("contention.*.reclaim_s", Bounded),
+        ("contention.*.unknown_window_intervals", Bounded),
+        ("contention.*.yield_first_response_intervals", Bounded),
+        // A held cap rises only toward the mode's target, however fast.
+        ("contention.*.scale_up_step_interval_s", Safe),
+        ("contention.*.scale_up_cooldown_ms", Safe),
+        ("contention.*.reclaim_backoff_ms", Safe),
+        ("contention.*.reclaim_backoff_max_ms", Safe),
+        // Success-criteria parameters, not read by the policy.
+        ("contention.*.neutral_convergence_s", Safe),
+        ("contention.*.neutral_tolerance_points", Safe),
+        ("contention.*.performance_ramp_s", Safe),
+        ("contention.*.performance_ramp_percent", Safe),
+    ]
+};
+
+/// A key as [`KEY_CLASSES`] names it: resource sections become `*`.
+pub fn key_pattern(key: &str) -> String {
+    match key.split('.').collect::<Vec<_>>().as_slice() {
+        ["contention", resource, field]
+            if crate::contention::ResourceKind::ALL
+                .iter()
+                .any(|kind| kind.name() == *resource) =>
+        {
+            format!("contention.*.{field}")
+        }
+        _ => key.to_string(),
+    }
+}
+
+/// The class of a dotted configuration key, if it has one.
+pub fn key_class(key: &str) -> Option<KeyClass> {
+    let pattern = key_pattern(key);
+    KEY_CLASSES
+        .iter()
+        .find(|(name, _)| *name == pattern)
+        .map(|(_, class)| *class)
+}
+
+/// The settings among `values` that are not zero, as key and value.
+fn nonzero_settings(values: &[(&str, u64)]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .filter(|(_, value)| *value != 0)
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+/// One setting a caution option covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CautionSetting {
+    pub key: String,
+    pub value: String,
+}
+
+/// An active caution option with the settings it covers (FR-043).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CautionDetail {
+    pub name: String,
+    pub marker: crate::model::RiskMarker,
+    pub settings: Vec<CautionSetting>,
 }
 
 /// One no-harm floor as it applies on a host (FR-023).
@@ -1492,6 +1714,65 @@ impl Config {
         result
     }
 
+    /// Active caution options on the observed host with the settings each covers,
+    /// for `doctor` and setup (FR-043).
+    pub fn caution_details(&self, snapshot: &crate::model::Snapshot) -> Vec<CautionDetail> {
+        let floors = self.floors(snapshot);
+        let small = |floor: &FloorStatus| floor.near_minimum && floor.confirmed;
+        let mut small_floor = Vec::new();
+        if small(&floors.ram) {
+            small_floor.extend(nonzero_settings(&[
+                ("ram.reserve_mib", self.ram.reserve_mib),
+                ("ram.reserve_percent", u64::from(self.ram.reserve_percent)),
+            ]));
+        }
+        if floors.gpus.values().any(small) {
+            small_floor.extend(nonzero_settings(&[
+                ("gpu.reserve_vram_mib", self.gpu.reserve_vram_mib),
+                (
+                    "gpu.reserve_vram_percent",
+                    u64::from(self.gpu.reserve_vram_percent),
+                ),
+            ]));
+        }
+        [
+            ("performance_mode", self.contention.performance_settings()),
+            ("small_floor", small_floor),
+            ("reduced_margin", self.contention.reduced_margins()),
+            ("relaxed_detection", self.contention.relaxed_detection()),
+        ]
+        .into_iter()
+        .filter(|(_, settings)| !settings.is_empty())
+        .map(|(name, settings)| CautionDetail {
+            name: name.into(),
+            marker: crate::model::RiskMarker::Caution,
+            settings: settings
+                .into_iter()
+                .map(|(key, value)| CautionSetting { key, value })
+                .collect(),
+        })
+        .collect()
+    }
+
+    /// Checks that need the host, run once when the agent starts. External GPU
+    /// memory growth within the noise tolerance goes unseen, so it must stay
+    /// within half of each device's floor.
+    pub fn validate_host(&self, snapshot: &crate::model::Snapshot) -> Result<()> {
+        let tolerance = self
+            .contention
+            .thresholds(crate::contention::ResourceKind::GpuMemory)
+            .noise_tolerance_mib;
+        for gpu in &snapshot.gpus {
+            let floor = self.vram_floor_mib(gpu.total_memory_mib);
+            ensure!(
+                tolerance.saturating_mul(2) <= floor,
+                "contention.gpu_memory.noise_tolerance_mib = {tolerance} exceeds half of the {floor} MiB floor of GPU {}",
+                gpu.uuid
+            );
+        }
+        Ok(())
+    }
+
     /// The launch-time nice value. Own priority is never raised above the default.
     pub fn effective_nice(&self) -> i32 {
         self.cpu.nice.max(0)
@@ -1522,8 +1803,8 @@ impl Config {
             "state_dir cannot be empty"
         );
         ensure!(
-            self.monitor.interval_ms > 0,
-            "monitor.interval_ms must be positive"
+            (1..=10_000).contains(&self.monitor.interval_ms),
+            "monitor.interval_ms must be between 1 and 10000"
         );
         self.kernel.validate().map_err(anyhow::Error::msg)?;
         self.cgroup.validate()?;
@@ -1552,8 +1833,8 @@ impl Config {
             "gpu.reserve_vram_percent must be between 0 and 100"
         );
         ensure!(
-            self.gpu.process_sample_max_age_ms > 0,
-            "gpu.process_sample_max_age_ms must be positive"
+            (1..=60_000).contains(&self.gpu.process_sample_max_age_ms),
+            "gpu.process_sample_max_age_ms must be between 1 and 60000"
         );
         ensure!(
             self.gpu.execution_mode != GpuExecutionMode::BestEffortOccupied
@@ -1595,6 +1876,11 @@ impl Config {
         ensure!(
             self.lifecycle.allocation_lease_ms > self.lifecycle.heartbeat_interval_ms,
             "lifecycle.allocation_lease_ms must exceed heartbeat_interval_ms"
+        );
+        // Both are part of the memory reclaim bound (SC-012).
+        ensure!(
+            self.lifecycle.drain_timeout_ms <= 60_000 && self.lifecycle.term_grace_ms <= 60_000,
+            "lifecycle.drain_timeout_ms and term_grace_ms must be at most 60000"
         );
         self.lifecycle
             .drain_timeout_ms

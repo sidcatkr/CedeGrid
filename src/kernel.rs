@@ -37,8 +37,13 @@ impl Default for KernelConfig {
 
 impl KernelConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.monitor_interval_ms == 0 || self.freshness_intervals == 0 {
-            return Err("kernel monitoring and freshness intervals must be positive".into());
+        if !(1..=10_000).contains(&self.monitor_interval_ms)
+            || !(1..=20).contains(&self.freshness_intervals)
+        {
+            return Err(
+                "kernel.monitor_interval_ms must be between 1 and 10000 and freshness_intervals between 1 and 20"
+                    .into(),
+            );
         }
         if self
             .monitor_interval_ms

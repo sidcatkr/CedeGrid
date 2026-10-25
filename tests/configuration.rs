@@ -600,6 +600,329 @@ fn contention_defaults_and_overrides_parse() {
     );
 }
 
+/// Every configuration key, found by driving the derived `Deserialize` impls one
+/// field at a time: structs report their field lists, anything else is a leaf.
+mod config_keys {
+    use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    use std::fmt;
+
+    #[derive(Debug)]
+    pub struct Stop;
+    impl fmt::Display for Stop {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("stop")
+        }
+    }
+    impl std::error::Error for Stop {}
+    impl de::Error for Stop {
+        fn custom<T: fmt::Display>(_: T) -> Self {
+            Stop
+        }
+    }
+
+    /// What one walk found at the end of its path.
+    #[derive(Default)]
+    pub struct Found {
+        pub fields: Option<Vec<&'static str>>,
+    }
+
+    struct Walk<'a> {
+        path: &'a [&'static str],
+        depth: usize,
+        found: &'a RefCell<Found>,
+    }
+
+    struct Fields<'a> {
+        walk: Option<Walk<'a>>,
+        key: Option<&'static str>,
+    }
+
+    impl<'de> MapAccess<'de> for Fields<'_> {
+        type Error = Stop;
+        fn next_key_seed<K: DeserializeSeed<'de>>(
+            &mut self,
+            seed: K,
+        ) -> Result<Option<K::Value>, Stop> {
+            match self.key.take() {
+                Some(key) => seed
+                    .deserialize(de::value::BorrowedStrDeserializer::<Stop>::new(key))
+                    .map(Some),
+                None => Ok(None),
+            }
+        }
+        fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Stop> {
+            seed.deserialize(self.walk.take().ok_or(Stop)?)
+        }
+    }
+
+    impl<'de> Deserializer<'de> for Walk<'_> {
+        type Error = Stop;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Stop> {
+            Err(Stop)
+        }
+        fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Stop> {
+            visitor.visit_some(self)
+        }
+        fn deserialize_newtype_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Stop> {
+            visitor.visit_newtype_struct(self)
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Stop> {
+            if self.depth == self.path.len() {
+                self.found.borrow_mut().fields = Some(fields.to_vec());
+                return Err(Stop);
+            }
+            let key = self.path[self.depth];
+            visitor.visit_map(Fields {
+                key: Some(key),
+                walk: Some(Walk {
+                    path: self.path,
+                    depth: self.depth + 1,
+                    found: self.found,
+                }),
+            })
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf unit unit_struct seq tuple tuple_struct map enum identifier
+            ignored_any
+        }
+    }
+
+    /// Dotted paths of every leaf key of `T`.
+    pub fn keys<T: for<'de> serde::Deserialize<'de>>() -> BTreeSet<String> {
+        let mut leaves = BTreeSet::new();
+        let mut queue: Vec<Vec<&'static str>> = vec![vec![]];
+        while let Some(path) = queue.pop() {
+            let found = RefCell::new(Found::default());
+            let _ = T::deserialize(Walk {
+                path: &path,
+                depth: 0,
+                found: &found,
+            });
+            match found.into_inner().fields {
+                Some(fields) => {
+                    for field in fields {
+                        let mut child = path.clone();
+                        child.push(field);
+                        queue.push(child);
+                    }
+                }
+                None => {
+                    leaves.insert(path.join("."));
+                }
+            }
+        }
+        leaves
+    }
+}
+
+/// A host for the floor and caution checks: RAM and GPUs by total memory.
+fn host(total_ram_mib: u64, gpus: &[u64]) -> cedegrid::model::Snapshot {
+    use cedegrid::model::*;
+    Snapshot {
+        schema_version: SCHEMA_VERSION,
+        node_id: "local".into(),
+        observed_at_unix_ms: 1,
+        cpu_capacity_millicores: 8000,
+        physical_cores: Some(4),
+        cpu_busy_millicores: Some(0),
+        cpu_busy_lower_millicores: None,
+        total_ram_mib,
+        available_ram_mib: Some(total_ram_mib),
+        gpu_inventory: if gpus.is_empty() {
+            CapabilityStatus::Unsupported
+        } else {
+            CapabilityStatus::Available
+        },
+        gpus: gpus
+            .iter()
+            .enumerate()
+            .map(|(i, total)| GpuSnapshot {
+                uuid: format!("GPU-{i}"),
+                total_memory_mib: *total,
+                used_memory_mib: Some(0),
+                utilization_percent: None,
+                external_process_ids: Some(vec![]),
+                external_compute: ComputeActivity::Idle,
+                compute_sample_id: None,
+                observation: None,
+                reserved_memory_mib: None,
+                free_memory_mib: None,
+                unattributed_memory_mib: None,
+            })
+            .collect(),
+        capabilities: Default::default(),
+        kernel: None,
+        principals: None,
+        external_processes: None,
+    }
+}
+
+/// Every configuration key is classified as safe, bounded or caution
+/// (constitution II); a key added without a class fails here.
+#[test]
+fn every_configuration_key_is_classified() {
+    use config::KeyClass;
+    let keys = config_keys::keys::<Config>();
+    assert!(keys.len() > 100, "{keys:?}");
+    let unclassified: Vec<_> = keys
+        .iter()
+        .filter(|key| config::key_class(key).is_none())
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "unclassified keys: {unclassified:?}"
+    );
+    // No class names a key that does not exist, and every caution class names an
+    // acknowledgement entry.
+    for (pattern, class) in config::KEY_CLASSES {
+        assert!(
+            keys.iter().any(|key| config::key_pattern(key) == *pattern),
+            "class for a missing key {pattern}"
+        );
+        if let KeyClass::Caution(entry) = class {
+            assert!(
+                config::ACKNOWLEDGEMENTS.contains(entry),
+                "{pattern}: {entry}"
+            );
+        }
+    }
+    for (key, class) in [
+        (
+            "contention.cpu.neutral_margin_percent",
+            KeyClass::Caution("reduced_margin"),
+        ),
+        (
+            "contention.gpu_memory.noise_tolerance_mib",
+            KeyClass::Caution("relaxed_detection"),
+        ),
+        ("contention.uid_min", KeyClass::Caution("relaxed_detection")),
+        ("contention.max_mode", KeyClass::Caution("performance_mode")),
+        ("ram.reserve_mib", KeyClass::Caution("small_floor")),
+        ("lifecycle.drain_timeout_ms", KeyClass::Bounded),
+        ("contention.ram.hint_deadline_s", KeyClass::Bounded),
+        ("cpu.nice", KeyClass::Safe),
+    ] {
+        assert_eq!(config::key_class(key), Some(class), "{key}");
+    }
+}
+
+/// Each active caution option lists the keys and values it covers, for `doctor`
+/// and setup.
+#[test]
+fn caution_details_list_the_keys_and_values_each_option_covers() {
+    let config = parse_node(
+        "[contention]\nacknowledge_caution = [\"performance_mode\", \"reduced_margin\", \"relaxed_detection\", \"small_floor\"]\nuid_min = 2000\n[contention.cpu]\nmode = \"performance\"\nneutral_margin_percent = 15\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[ram]\nreserve_mib = 600\nreserve_percent = 0",
+    )
+    .unwrap();
+    let details = config.caution_details(&host(32_000, &[]));
+    let settings = |name: &str| -> Vec<(String, String)> {
+        details
+            .iter()
+            .find(|detail| detail.name == name)
+            .unwrap_or_else(|| panic!("{name} missing: {details:?}"))
+            .settings
+            .iter()
+            .map(|setting| (setting.key.clone(), setting.value.clone()))
+            .collect()
+    };
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        settings("performance_mode"),
+        pairs(&[("contention.cpu.mode", "performance")])
+    );
+    assert_eq!(
+        settings("reduced_margin"),
+        pairs(&[("contention.cpu.neutral_margin_percent", "15")])
+    );
+    assert_eq!(
+        settings("relaxed_detection"),
+        pairs(&[
+            ("contention.uid_min", "2000"),
+            ("contention.gpu_memory.noise_tolerance_mib", "512"),
+        ])
+    );
+    assert_eq!(
+        settings("small_floor"),
+        pairs(&[("ram.reserve_mib", "600")])
+    );
+    // Without settings beyond their defaults, nothing is listed.
+    assert!(
+        parse_node("")
+            .unwrap()
+            .caution_details(&host(32_000, &[]))
+            .is_empty()
+    );
+}
+
+/// `noise_tolerance_mib` is at most 1024 MiB at load, and on the host at most
+/// half of every GPU's effective floor; the agent refuses to start otherwise.
+#[test]
+fn noise_tolerance_is_bounded_at_load_and_against_each_gpu_floor() {
+    let body = |noise: u64, floor: u64| {
+        format!(
+            "[contention]\nacknowledge_caution = [\"relaxed_detection\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = {noise}\n[gpu]\nreserve_vram_mib = {floor}\nreserve_vram_percent = 0"
+        )
+    };
+    assert!(parse_node(&body(1025, 4096)).is_err());
+    assert!(parse_node(&body(1024, 4096)).is_ok());
+    // A 1024 MiB floor allows at most 512 MiB.
+    let tight = parse_node(&body(600, 1024)).unwrap();
+    let error = format!(
+        "{:#}",
+        tight.validate_host(&host(32_000, &[8192])).unwrap_err()
+    );
+    assert!(error.contains("noise_tolerance_mib"), "{error}");
+    assert!(tight.validate_host(&host(32_000, &[])).is_ok());
+    let roomy = parse_node(&body(600, 2048)).unwrap();
+    assert!(roomy.validate_host(&host(32_000, &[8192, 24_576])).is_ok());
+    // The default tolerance fits every default floor.
+    assert!(
+        parse_node("")
+            .unwrap()
+            .validate_host(&host(32_000, &[8192, 24_576, 81_920]))
+            .is_ok()
+    );
+}
+
+/// Settings that lengthen reclaim or let stale telemetry pass are bounded.
+#[test]
+fn settings_that_lengthen_reclaim_are_bounded() {
+    for bad in [
+        "[monitor]\ninterval_ms = 10001",
+        "[lifecycle]\ndrain_timeout_ms = 60001",
+        "[lifecycle]\nterm_grace_ms = 60001",
+        "[kernel]\nmonitor_interval_ms = 10001",
+        "[kernel]\nfreshness_intervals = 21",
+        "[gpu]\nprocess_sample_max_age_ms = 60001",
+    ] {
+        assert!(parse_node(bad).is_err(), "accepted: {bad}");
+    }
+    for good in [
+        "[monitor]\ninterval_ms = 10000",
+        "[lifecycle]\ndrain_timeout_ms = 60000\nterm_grace_ms = 60000",
+        "[kernel]\nmonitor_interval_ms = 10000\nfreshness_intervals = 20",
+        "[gpu]\nprocess_sample_max_age_ms = 60000",
+    ] {
+        assert!(parse_node(good).is_ok(), "rejected: {good}");
+    }
+}
+
 /// Settings that let own work hold more capacity than their defaults are caution
 /// options (constitution II): a margin below its default, or a saturation,
 /// contention-floor or noise threshold above it.
@@ -634,15 +957,26 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
             "[contention.gpu_memory]\nnoise_tolerance_mib = 512",
             "relaxed_detection",
         ),
+        ("[contention]\nuid_min = 2000", "relaxed_detection"),
+        (
+            "[contention.ram]\nmemory_peak_window_s = 100",
+            "relaxed_detection",
+        ),
+        (
+            "[contention.gpu_compute]\nquiet_window_intervals = 10",
+            "relaxed_detection",
+        ),
     ] {
         let error = format!("{:#}", parse_node(setting).unwrap_err());
         assert!(
             error.contains("ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED") && error.contains(option),
             "{setting}: {error}"
         );
-        let config = parse_node(&format!(
-            "[contention]\nacknowledge_caution = [\"{option}\"]\n{setting}"
-        ))
+        let acknowledged = format!("[contention]\nacknowledge_caution = [\"{option}\"]\n");
+        let config = parse_node(&match setting.strip_prefix("[contention]\n") {
+            Some(rest) => format!("{acknowledged}{rest}"),
+            None => format!("{acknowledged}{setting}"),
+        })
         .unwrap();
         assert!(
             config.caution_options().iter().any(|o| o.name == option),
@@ -655,6 +989,9 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
         "[contention.cpu]\nyield_first_margin_percent = 40",
         "[contention.cpu]\nsaturation_percent = 90",
         "[contention.gpu_memory]\nnoise_tolerance_mib = 128",
+        "[contention]\nuid_min = 500",
+        "[contention.ram]\nmemory_peak_window_s = 600",
+        "[contention.gpu_compute]\nquiet_window_intervals = 40",
     ] {
         assert!(
             parse_node(setting).unwrap().caution_options().is_empty(),
