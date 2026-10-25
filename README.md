@@ -82,6 +82,43 @@ Relative paths resolve against the canonical configuration file directory.
 Configuration performs no environment interpolation or shell expansion. Jobs,
 RPC messages, worker context, checkpoint metadata, and results remain JSON.
 
+## Set up a node
+
+On a terminal, `setup` opens a keyboard interface:
+
+```sh
+cedegrid --config cedegrid.toml setup
+```
+
+Up and Down move, Space selects, Enter confirms, and Esc, `q` or Ctrl-C cancel without
+writing. Each option shows its consequence on this host. Setup starts from the current file
+and edits only the settings it manages, keeping comments and other settings byte for byte.
+It covers the role, the default mode and each resource's mode, the node cap, the RAM and GPU
+memory floors, the margins of each mode, the Guaranteed hint deadline and two tolerances.
+Without a terminal it never prompts, and the same choices come from flags:
+
+```sh
+cedegrid --config cedegrid.toml setup --non-interactive --json --role node \
+  --default-mode neutral --mode gpu_memory=yield_first --ram-floor-mib 16384 \
+  --margin cpu.neutral=7 --set gpu_memory.noise_tolerance_mib=128
+```
+
+The flags are `--role`, `--default-mode`, `--mode RESOURCE=MODE`, `--max-mode`,
+`--ram-floor-mib`, `--gpu-floor-mib`, `--margin RESOURCE.MODE=PERCENT`,
+`--guaranteed-hint-deadline-s`, `--set RESOURCE.KEY=VALUE` and `--acknowledge-caution`.
+Client and coordinator files take `--endpoint`, `--listen`, `--state-dir`,
+`--operator-fingerprint` and the TLS paths instead. The exit status is 0 when the file is
+written or unchanged, 2 for a missing or invalid choice, 3 for an unacknowledged caution
+option, 4 when the result does not load, and 130 when cancelled.
+
+`[caution]` marks an option that lets own work hold more capacity within the floors:
+Performance mode, a floor below twice its minimum, a margin below its default, and a detection
+setting beyond its default. In the interface it needs a separate confirmation, and with flags
+`--acknowledge-caution` naming the option. The choice is recorded in
+`contention.acknowledge_caution`. See [guarantees](docs/guarantees.md) for what each mode,
+floor and caution option does. The full contract is
+[setup-cli.md](specs/001-contention-modes/contracts/setup-cli.md).
+
 ## Select which work is managed
 
 Pool, job, and task IDs select submitted work. They are not process-name filters.
