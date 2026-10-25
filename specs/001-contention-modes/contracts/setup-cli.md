@@ -93,10 +93,11 @@ setup configures client settings only; node and coordinator setup is refused.
   the inline comment of an edited value. A key is edited only where the choice differs from the
   current value, in one fixed order.
 - `contention.acknowledge_caution` is written as the set of caution options the result calls
-  for that are acknowledged, by an earlier file entry, a flag or the confirmation screen. A new
-  or changed caution option needs a fresh acknowledgement. An unacknowledged floor near its
-  minimum that the file already had stays unacknowledged, so it keeps applying as twice the
-  minimum. `ram.reserve_percent` and
+  for that are acknowledged, by an earlier file entry, a flag or the confirmation screen. An
+  option the file does not acknowledge yet needs a flag or the confirmation when this run brings
+  it or changes what it covers; an entry the file already has covers the option, as it does for
+  hand edits. An unacknowledged floor near its minimum that the file already had stays
+  unacknowledged, so it keeps applying as twice the minimum. `ram.reserve_percent` and
   `gpu.reserve_vram_percent` are left as they are; the summary shows the resulting floors on this
   host.
 - It validates the result through the normal config load, then renames atomically.
