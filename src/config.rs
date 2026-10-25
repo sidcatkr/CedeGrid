@@ -570,7 +570,12 @@ impl Default for ContentionConfig {
 }
 
 /// Caution options a file acknowledges by name (FR-051, FR-054).
-const ACKNOWLEDGEMENTS: [&str; 2] = ["performance_mode", "small_floor"];
+const ACKNOWLEDGEMENTS: [&str; 4] = [
+    "performance_mode",
+    "small_floor",
+    "reduced_margin",
+    "relaxed_detection",
+];
 
 /// Floors are never smaller than these (FR-023).
 pub const MIN_RAM_FLOOR_MIB: u64 = 512;
@@ -776,7 +781,7 @@ impl ContentionConfig {
         }
         ensure!(
             self.neutral_memory_policy == NeutralMemoryPolicy::A,
-            "contention.neutral_memory_policy = \"b\" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib"
+            "contention.neutral_memory_policy = \"b\" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent, gpu.reserve_vram_mib and gpu.reserve_vram_percent"
         );
         for name in &self.acknowledge_caution {
             ensure!(
@@ -1005,7 +1010,66 @@ impl ContentionConfig {
                 );
             }
         }
+        for (option, settings) in [
+            ("reduced_margin", self.reduced_margins()),
+            ("relaxed_detection", self.relaxed_detection()),
+        ] {
+            ensure!(
+                settings.is_empty() || self.acknowledge_caution.contains(option),
+                "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED: {} beyond the default requires acknowledge_caution = [\"{option}\"]",
+                settings.join(", ")
+            );
+        }
         Ok(())
+    }
+
+    /// Margins below their defaults, which leave external demand less room
+    /// (constitution II).
+    fn reduced_margins(&self) -> Vec<String> {
+        self.beyond_defaults(|t| {
+            [
+                ("yield_first_margin_percent", t.yield_first_margin_percent),
+                ("neutral_margin_percent", t.neutral_margin_percent),
+                ("performance_margin_percent", t.performance_margin_percent),
+            ]
+            .map(|(key, value)| (key, -i64::from(value)))
+        })
+    }
+
+    /// Detection thresholds above their defaults, which let more external demand
+    /// go unseen (constitution II).
+    fn relaxed_detection(&self) -> Vec<String> {
+        self.beyond_defaults(|t| {
+            [
+                ("saturation_percent", i64::from(t.saturation_percent)),
+                ("principal_min_percent", i64::from(t.principal_min_percent)),
+                (
+                    "noise_tolerance_mib",
+                    i64::try_from(t.noise_tolerance_mib).unwrap_or(i64::MAX),
+                ),
+            ]
+        })
+    }
+
+    /// Settings, as `contention.resource.key`, whose value exceeds the default;
+    /// `values` orders each so that larger lets own work hold more.
+    fn beyond_defaults<const N: usize>(
+        &self,
+        values: impl Fn(&crate::contention::ResourceThresholds) -> [(&'static str, i64); N],
+    ) -> Vec<String> {
+        use crate::contention::{ResourceKind, ResourceThresholds};
+        let mut result = Vec::new();
+        for kind in ResourceKind::ALL {
+            let defaults = values(&ResourceThresholds::defaults(kind));
+            for ((key, value), (_, default)) in
+                values(&self.thresholds(kind)).into_iter().zip(defaults)
+            {
+                if value > default {
+                    result.push(format!("contention.{}.{key}", kind.name()));
+                }
+            }
+        }
+        result
     }
 }
 
@@ -1346,6 +1410,29 @@ impl Config {
         }
     }
 
+    /// Warnings for floors a percentage puts near the minimum on this host, which
+    /// the load-time warning cannot judge (FR-054).
+    pub fn host_floor_warnings(&self, snapshot: &crate::model::Snapshot) -> Vec<String> {
+        let floors = self.floors(snapshot);
+        let ram =
+            (self.ram.reserve_percent != 0).then(|| ("the RAM floor".to_string(), &floors.ram));
+        let gpus = floors
+            .gpus
+            .iter()
+            .filter(|_| self.gpu.reserve_vram_percent != 0)
+            .map(|(uuid, floor)| (format!("the floor of GPU {uuid}"), floor));
+        ram.into_iter()
+            .chain(gpus)
+            .filter(|(_, floor)| floor.raised)
+            .map(|(name, floor)| {
+                format!(
+                    "{name} of {} MiB is near its {} MiB minimum and applies as {} MiB; keep it with acknowledge_caution = [\"small_floor\"]",
+                    floor.configured_mib, floor.minimum_mib, floor.effective_mib
+                )
+            })
+            .collect()
+    }
+
     /// A floor below twice its minimum, judged from the settings alone; floors set
     /// by a percentage are judged on the host by [`Config::floors`].
     fn small_floor(&self) -> bool {
@@ -1389,6 +1476,18 @@ impl Config {
                 name: "small_floor".into(),
                 marker: RiskMarker::Caution,
             });
+        }
+        // Loading refuses these unacknowledged, so in effect means active.
+        for (name, settings) in [
+            ("reduced_margin", self.contention.reduced_margins()),
+            ("relaxed_detection", self.contention.relaxed_detection()),
+        ] {
+            if !settings.is_empty() {
+                result.push(ExceptionNotice {
+                    name: name.into(),
+                    marker: RiskMarker::Caution,
+                });
+            }
         }
         result
     }

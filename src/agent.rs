@@ -2384,6 +2384,8 @@ struct AgentLoop<'a> {
     last_growth: Instant,
     /// Slots whose drain already reduced the admitted parallelism.
     counted_drains: BTreeSet<String>,
+    /// Host floor warnings already printed.
+    floor_warnings: BTreeSet<String>,
 }
 
 impl AgentLoop<'_> {
@@ -2897,6 +2899,12 @@ impl AgentLoop<'_> {
             .collector
             .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
+        // Percentage floors are judged on the host, so their warning comes here.
+        for warning in config.host_floor_warnings(&snapshot) {
+            if self.floor_warnings.insert(warning.clone()) {
+                eprintln!("cedegrid: warning: {warning}");
+            }
+        }
         if self.last_spool_check.elapsed() >= Duration::from_secs(5) {
             self.spool_full =
                 spool_size(&config.state_dir.join("attempts"))? > agent.max_spool_bytes;
@@ -3615,6 +3623,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         admitted_parallelism: 0,
         last_growth: start,
         counted_drains: BTreeSet::new(),
+        floor_warnings: BTreeSet::new(),
     };
     for slot in attached {
         state

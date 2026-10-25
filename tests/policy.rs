@@ -13,14 +13,13 @@ fn config() -> Config {
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
-    // These accounting tests keep a 10% Neutral margin; the default margins are
-    // tested in tests/contention.rs.
+    // These accounting tests keep a 10% Neutral margin, a caution option; the
+    // default margins are tested in tests/contention.rs.
     result.contention.cpu.neutral_margin_percent = Some(10);
     // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
-    result
-        .contention
-        .acknowledge_caution
-        .insert("small_floor".into());
+    for option in ["reduced_margin", "small_floor"] {
+        result.contention.acknowledge_caution.insert(option.into());
+    }
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.reserve_vram_percent = 0;
     result.gpu.scale_up_cooldown_ms = 0;
@@ -2748,8 +2747,8 @@ fn cpu_principal(uid: u32, is_owner: bool, cpu_millicores: u64) -> PrincipalUsag
 }
 
 /// Principals (FR-059): system accounts are background demand; a new user joins
-/// only after the principal window and leaves only after the same window below
-/// half the threshold. Until it joins, its usage counts toward the unattributed
+/// only after the principal window and leaves only after `principal_leave_s`
+/// below the threshold. Until it joins, its usage counts toward the unattributed
 /// principal, so contention is still seen at once.
 #[test]
 fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {

@@ -70,7 +70,7 @@ fn shared_node_toml_contracts_execute() {
             assert!(!result.state_dir.exists());
         }
     }
-    assert_eq!(executed, 13);
+    assert_eq!(executed, 14);
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn contention_defaults_and_overrides_parse() {
         256
     );
     let parsed = parse_node(
-        "[contention]\ndefault_mode = \"yield_first\"\nacknowledge_caution = [\"performance_mode\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
+        "[contention]\ndefault_mode = \"yield_first\"\nacknowledge_caution = [\"performance_mode\", \"relaxed_detection\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
     )
     .unwrap()
     .contention;
@@ -598,6 +598,69 @@ fn contention_defaults_and_overrides_parse() {
             .noise_tolerance_mib,
         512
     );
+}
+
+/// Settings that let own work hold more capacity than their defaults are caution
+/// options (constitution II): a margin below its default, or a saturation,
+/// contention-floor or noise threshold above it.
+#[test]
+fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement() {
+    for (setting, option) in [
+        (
+            "[contention.cpu]\nneutral_margin_percent = 15",
+            "reduced_margin",
+        ),
+        (
+            "[contention.cpu]\nperformance_margin_percent = 5",
+            "reduced_margin",
+        ),
+        (
+            "[contention.gpu_compute]\nyield_first_margin_percent = 22",
+            "reduced_margin",
+        ),
+        (
+            "[contention.ram]\nyield_first_margin_percent = 20",
+            "reduced_margin",
+        ),
+        (
+            "[contention.cpu]\nsaturation_percent = 99",
+            "relaxed_detection",
+        ),
+        (
+            "[contention.cpu]\nprincipal_min_percent = 2",
+            "relaxed_detection",
+        ),
+        (
+            "[contention.gpu_memory]\nnoise_tolerance_mib = 512",
+            "relaxed_detection",
+        ),
+    ] {
+        let error = format!("{:#}", parse_node(setting).unwrap_err());
+        assert!(
+            error.contains("ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED") && error.contains(option),
+            "{setting}: {error}"
+        );
+        let config = parse_node(&format!(
+            "[contention]\nacknowledge_caution = [\"{option}\"]\n{setting}"
+        ))
+        .unwrap();
+        assert!(
+            config.caution_options().iter().any(|o| o.name == option),
+            "{setting}"
+        );
+    }
+    // Settings that leave more to external demand need nothing.
+    for setting in [
+        "[contention.cpu]\nperformance_margin_percent = 15",
+        "[contention.cpu]\nyield_first_margin_percent = 40",
+        "[contention.cpu]\nsaturation_percent = 90",
+        "[contention.gpu_memory]\nnoise_tolerance_mib = 128",
+    ] {
+        assert!(
+            parse_node(setting).unwrap().caution_options().is_empty(),
+            "{setting}"
+        );
+    }
 }
 
 #[test]
@@ -639,6 +702,10 @@ fn removed_floor_and_memory_policies_fail_naming_their_replacement() {
         (
             "[contention]\nneutral_memory_policy = \"b\"",
             "ram.reserve_mib",
+        ),
+        (
+            "[contention]\nneutral_memory_policy = \"b\"",
+            "gpu.reserve_vram_percent",
         ),
     ] {
         let error = format!("{:#}", parse_node(body).unwrap_err());
@@ -774,6 +841,20 @@ fn a_percentage_floor_near_its_minimum_is_judged_on_the_host() {
     );
     // On a larger host the same setting is not near the minimum.
     assert!(!confirmed.floors(&snapshot(128_000)).ram.near_minimum);
+    // The load cannot judge a percentage floor; the agent warns once it can.
+    let warnings = unconfirmed.host_floor_warnings(&snapshot(32_000));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("1024 MiB"), "{warnings:?}");
+    assert!(
+        unconfirmed
+            .host_floor_warnings(&snapshot(128_000))
+            .is_empty()
+    );
+    assert!(confirmed.host_floor_warnings(&snapshot(32_000)).is_empty());
+    // A floor the settings alone decide is warned about at load instead.
+    let fixed = load("[ram]\nreserve_mib = 600\nreserve_percent = 0");
+    assert!(fixed.floors(&snapshot(32_000)).ram.raised);
+    assert!(fixed.host_floor_warnings(&snapshot(32_000)).is_empty());
 }
 
 #[test]
