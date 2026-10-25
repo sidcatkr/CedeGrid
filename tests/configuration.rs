@@ -570,8 +570,22 @@ fn contention_defaults_and_overrides_parse() {
             cpu.neutral_margin_percent,
             cpu.performance_margin_percent
         ),
-        (25, 20, 10)
+        (15, 5, 2)
     );
+    let compute = defaults.thresholds(ResourceKind::GpuCompute);
+    assert_eq!(
+        (
+            compute.yield_first_margin_percent,
+            compute.neutral_margin_percent,
+            compute.performance_margin_percent
+        ),
+        (15, 5, 2)
+    );
+    for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+        assert_eq!(defaults.thresholds(kind).yield_first_margin_percent, 20);
+    }
+    // No CPU reserve stacks on the margin by default.
+    assert_eq!(Config::default().cpu.reserve_physical_cores, 0);
     assert_eq!(
         defaults
             .thresholds(ResourceKind::Ram)
@@ -823,7 +837,7 @@ fn every_configuration_key_is_classified() {
 #[test]
 fn caution_details_list_the_keys_and_values_each_option_covers() {
     let config = parse_node(
-        "[contention]\nacknowledge_caution = [\"performance_mode\", \"reduced_margin\", \"relaxed_detection\", \"small_floor\"]\nuid_min = 2000\n[contention.cpu]\nmode = \"performance\"\nneutral_margin_percent = 15\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[ram]\nreserve_mib = 600\nreserve_percent = 0",
+        "[contention]\nacknowledge_caution = [\"performance_mode\", \"reduced_margin\", \"relaxed_detection\", \"small_floor\"]\nuid_min = 2000\n[contention.cpu]\nmode = \"performance\"\nneutral_margin_percent = 3\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[ram]\nreserve_mib = 600\nreserve_percent = 0",
     )
     .unwrap();
     let details = config.caution_details(&host(32_000, &[]));
@@ -848,7 +862,7 @@ fn caution_details_list_the_keys_and_values_each_option_covers() {
     );
     assert_eq!(
         settings("reduced_margin"),
-        pairs(&[("contention.cpu.neutral_margin_percent", "15")])
+        pairs(&[("contention.cpu.neutral_margin_percent", "3")])
     );
     assert_eq!(
         settings("relaxed_detection"),
@@ -930,19 +944,19 @@ fn settings_that_lengthen_reclaim_are_bounded() {
 fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement() {
     for (setting, option) in [
         (
-            "[contention.cpu]\nneutral_margin_percent = 15",
+            "[contention.cpu]\nneutral_margin_percent = 3",
             "reduced_margin",
         ),
         (
-            "[contention.cpu]\nperformance_margin_percent = 5",
+            "[contention.cpu]\nperformance_margin_percent = 1",
             "reduced_margin",
         ),
         (
-            "[contention.gpu_compute]\nyield_first_margin_percent = 22",
+            "[contention.gpu_compute]\nyield_first_margin_percent = 12",
             "reduced_margin",
         ),
         (
-            "[contention.ram]\nyield_first_margin_percent = 20",
+            "[contention.ram]\nyield_first_margin_percent = 15",
             "reduced_margin",
         ),
         (
@@ -985,7 +999,7 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
     }
     // Settings that leave more to external demand need nothing.
     for setting in [
-        "[contention.cpu]\nperformance_margin_percent = 15",
+        "[contention.cpu]\nperformance_margin_percent = 4",
         "[contention.cpu]\nyield_first_margin_percent = 40",
         "[contention.cpu]\nsaturation_percent = 90",
         "[contention.gpu_memory]\nnoise_tolerance_mib = 128",
@@ -1125,9 +1139,14 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     // A percentage floor can exceed the minimum on a large host.
     let percent = load("[ram]\nreserve_mib = 0\nreserve_percent = 5");
     assert_eq!(percent.config.ram_floor_mib(32_000), 1600);
-    // The default GPU floor is 3 GiB or 5% of the device, whichever is larger.
-    assert_eq!(Config::default().vram_floor_mib(16_000), 3072);
-    assert_eq!(Config::default().vram_floor_mib(81_920), 4096);
+    // The default GPU floor is 5% of the device, at least twice the minimum, so a
+    // default is never a near-minimum caution floor; 3 GiB applies only when set.
+    for (total, floor) in [(8192, 1024), (16_000, 1024), (24_576, 1229), (81_920, 4096)] {
+        assert_eq!(Config::default().vram_floor_mib(total), floor, "{total}");
+        assert!(!Config::default().vram_floor(total).raised, "{total}");
+    }
+    let fixed = load("[gpu]\nreserve_vram_mib = 3072");
+    assert_eq!(fixed.config.vram_floor_mib(24_576), 3072);
     assert_eq!(Config::default().ram_floor_mib(64_000), 8192);
 }
 
@@ -1211,7 +1230,7 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention.cpu]\nsaturation_percent = 49",
         "[contention.ram]\nsaturation_percent = 90",
         "[contention.cpu]\nneutral_margin_percent = 26",
-        "[contention.cpu]\nneutral_margin_percent = 9",
+        "[contention.cpu]\nneutral_margin_percent = 1",
         "[contention.ram]\nneutral_margin_percent = 20",
         "[contention.cpu]\nmin_step_dwell_intervals = 11",
         "[contention.cpu]\nyield_first_response_intervals = 11",

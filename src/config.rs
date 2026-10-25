@@ -1365,13 +1365,14 @@ impl Default for MonitorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CpuConfig {
+    /// Physical cores kept idle; a minimum under the mode's margin, never added to it.
     pub reserve_physical_cores: u32,
     pub nice: i32,
 }
 impl Default for CpuConfig {
     fn default() -> Self {
         Self {
-            reserve_physical_cores: 2,
+            reserve_physical_cores: 0,
             nice: 10,
         }
     }
@@ -1417,6 +1418,8 @@ pub struct GpuConfig {
     /// Maximum interval since a successful driver timestamp baseline. A longer
     /// gap discards buffered history before process activity can be trusted again.
     pub process_sample_max_age_ms: u64,
+    /// Fixed part of each GPU floor. The default, twice the minimum, keeps a
+    /// default floor from ever being a near-minimum caution floor.
     pub reserve_vram_mib: u64,
     /// The per-device floor is also at least this share of the device (FR-023).
     pub reserve_vram_percent: u8,
@@ -1430,7 +1433,7 @@ impl Default for GpuConfig {
             execution_mode: GpuExecutionMode::Auto,
             best_effort_external_processes: std::collections::BTreeMap::new(),
             process_sample_max_age_ms: 2000,
-            reserve_vram_mib: 3072,
+            reserve_vram_mib: 2 * MIN_VRAM_FLOOR_MIB,
             reserve_vram_percent: 5,
             scale_up_cooldown_ms: 30_000,
             protective_shrink_percent: 25,

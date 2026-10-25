@@ -13,13 +13,14 @@ fn config() -> Config {
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
-    // These accounting tests keep a 10% Neutral margin, a caution option; the
-    // default margins are tested in tests/contention.rs.
+    // These accounting tests keep a 10% Neutral margin; the default margins are
+    // tested in tests/contention.rs.
     result.contention.cpu.neutral_margin_percent = Some(10);
     // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
-    for option in ["reduced_margin", "small_floor"] {
-        result.contention.acknowledge_caution.insert(option.into());
-    }
+    result
+        .contention
+        .acknowledge_caution
+        .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.reserve_vram_percent = 0;
     result.gpu.scale_up_cooldown_ms = 0;
@@ -93,14 +94,14 @@ fn scoped_cpu_busy_is_never_replaced_by_whole_host_busy() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 1700);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
     assert!(decision.expansion_allowed);
     // A missing host aggregate does not invalidate independently complete scope telemetry.
     snap.cpu_busy_millicores = None;
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 1700);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
 }
 
 #[test]
@@ -147,8 +148,8 @@ fn scoped_observed_usage_and_reservations_are_not_double_charged() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 2450);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1450);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2750);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1750);
 }
 
 #[test]
@@ -165,7 +166,7 @@ fn physical_core_reserve_uses_effective_smt_groups_not_host_average() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &PolicyInput::default(), 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 900);
+    assert_eq!(decision.managed_budget.cpu_millicores, 1000);
     cpu_missing_topology_blocks_unless_no_physical_reserve(snap);
 }
 
@@ -276,7 +277,7 @@ fn non_linux_and_explicitly_disabled_diagnostics_preserve_legacy_scope() {
             .unwrap()
             .managed_budget
             .cpu_millicores,
-        3400
+        4000
     );
     snap.kernel.as_mut().unwrap().runtime_os = "linux".into();
     let mut cfg = config();
@@ -287,7 +288,7 @@ fn non_linux_and_explicitly_disabled_diagnostics_preserve_legacy_scope() {
             .unwrap()
             .managed_budget
             .cpu_millicores,
-        3400
+        4000
     );
 }
 
@@ -444,7 +445,7 @@ fn cpu_yield_does_not_plan_an_ignored_guaranteed_release() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
-    assert_eq!(decision.managed_budget.cpu_millicores, 400);
+    assert_eq!(decision.managed_budget.cpu_millicores, 1000);
     // CPU excess pauses running work, since its cap target is zero, instead of
     // draining it; Guaranteed work within its request is not planned.
     assert!(decision.would_drain.is_empty());
@@ -473,7 +474,7 @@ fn guaranteed_pending_and_uncertain_capacity_is_never_free_headroom() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2400);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 3000);
     assert_eq!(decision.admission_headroom.ram_mib, 23000);
     assert!(decision.would_drain.is_empty());
     input.allocations[0].phase = AllocationPhase::Running;
@@ -605,9 +606,9 @@ fn running_reservation_and_observation_are_charged_once() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    // CPU external = 2000 - 1000, SMT reserve = 2000, Neutral margin = 10% of 6000, budget = 4400.
-    assert_eq!(decision.managed_budget.cpu_millicores, 4400);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1400);
+    // CPU external = 2000 - 1000, SMT reserve = 2000, larger than the 800 Neutral margin, budget = 5000.
+    assert_eq!(decision.managed_budget.cpu_millicores, 5000);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
     // Used RAM 6000 - own 4000 = external 2000; budget 29000 - charge 5000.
     assert_eq!(decision.managed_budget.ram_mib, 29_000);
     assert_eq!(decision.admission_headroom.ram_mib, 24_000);
@@ -628,7 +629,7 @@ fn observed_usage_above_reservation_is_fully_charged() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 3400);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 4000);
     assert_eq!(decision.admission_headroom.ram_mib, 25_000);
 }
 
@@ -646,7 +647,7 @@ fn pending_reservations_reduce_headroom_before_launch() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1900);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2500);
     assert_eq!(decision.admission_headroom.ram_mib, 23_000);
 }
 
@@ -664,7 +665,7 @@ fn already_draining_resources_are_not_released_by_recommendation() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1400);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
     assert!(decision.would_drain.is_empty());
 }
 
@@ -988,6 +989,41 @@ fn lost_gpu_inventory_yields_existing_gpu_allocations() {
     assert_eq!(decision.would_drain, ["gpu-worker"]);
 }
 
+/// The CPU idle reserve is the larger of the explicit reserve and the mode's
+/// margin of total capacity, never both.
+#[test]
+fn cpu_idle_reserve_is_the_larger_of_the_reserve_and_the_margin() {
+    use cedegrid::contention::ContentionMode::{self, *};
+    let mut snap = snapshot();
+    snap.cpu_capacity_millicores = 32_000;
+    snap.physical_cores = Some(16);
+    snap.cpu_busy_millicores = Some(0);
+    let allowance = |mode: ContentionMode, reserve: u32| {
+        let mut config = Config::default();
+        config.cpu.reserve_physical_cores = reserve;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        PolicyEngine::new()
+            .evaluate(&config, &snap, &PolicyInput::default(), 0)
+            .unwrap()
+            .managed_budget
+            .cpu_millicores
+    };
+    // Margins of 15%, 5% and 2% of 32 000 m are 4800, 1600 and 640 m; one and four
+    // reserved physical cores of 16 are 2000 and 8000 m.
+    for (reserve, expected) in [
+        (0, [27_200, 30_400, 31_360]),
+        (1, [27_200, 30_000, 30_000]),
+        (4, [24_000, 24_000, 24_000]),
+    ] {
+        let got = [YieldFirst, Neutral, Performance].map(|mode| allowance(mode, reserve));
+        assert_eq!(got, expected, "reserve {reserve}");
+    }
+}
+
 /// GPU memory: work that takes a hint is judged on usage, so a charge beyond the
 /// budget only blocks admission; work without a hint channel is judged at its
 /// charge, since its growth cannot be bounded.
@@ -1205,7 +1241,7 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         planned,
         [
             ("z", YieldStep::Drain, None),
-            ("a", YieldStep::Cap, Some(1400))
+            ("a", YieldStep::Cap, Some(2000))
         ]
         .into()
     );
@@ -1321,7 +1357,7 @@ proptest! {
         snap.cpu_busy_millicores = Some(observed + external);
         let input = PolicyInput { allocations: vec![allocation("worker", AllocationPhase::Running, resources(reserved, 0, 0), Some(resources(observed, 0, 0)))], ..PolicyInput::default() };
         let decision = PolicyEngine::new().evaluate(&config(), &snap, &input, 0).unwrap();
-        let budget = 6000 - 600 - external;
+        let budget = 6000 - external;
         prop_assert_eq!(decision.managed_budget.cpu_millicores, budget);
         prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget - reserved.max(observed));
     }
@@ -2341,11 +2377,11 @@ fn d4_cpu_contention_caps_instead_of_draining() {
     snap.cpu_busy_millicores = Some(4000);
     let alone = engine.evaluate(&config(), &snap, &input, 0).unwrap();
     assert!(alone.would_drain.is_empty() && alone.actions.is_empty());
-    assert_eq!(alone.managed_budget.cpu_millicores, 5400);
+    assert_eq!(alone.managed_budget.cpu_millicores, 6000);
     // Another workload starts using three cores.
     snap.cpu_busy_millicores = Some(7000);
     let contended = engine.evaluate(&config(), &snap, &input, 1000).unwrap();
-    assert_eq!(contended.managed_budget.cpu_millicores, 2400);
+    assert_eq!(contended.managed_budget.cpu_millicores, 3000);
     assert!(contended.would_drain.is_empty());
     assert_eq!(
         contended.actions,
@@ -2353,7 +2389,7 @@ fn d4_cpu_contention_caps_instead_of_draining() {
             allocation_id: "mine".into(),
             resource: cedegrid::contention::ResourceKey::Cpu,
             step: cedegrid::contention::YieldStep::Cap,
-            target: Some(2400),
+            target: Some(3000),
             cause: cedegrid::contention::YieldCause::ExternalGrowth,
             code: "yield_step_cap".into(),
             deadline_ms: None,
@@ -2401,9 +2437,9 @@ fn d5_sampling_skew_between_own_and_host_cpu_keeps_the_budget() {
         .evaluate(&config(), &snap, &two(2000, Some(2050)), 0)
         .unwrap();
     assert!(consistent.would_drain.is_empty() && consistent.actions.is_empty());
-    // 8000 - 2000 reserve - (4100 host upper - 4000 own lower) - the 600 margin.
-    assert_eq!(consistent.managed_budget.cpu_millicores, 5300);
-    assert_eq!(consistent.admission_headroom.cpu_millicores, 1300);
+    // 8000 - 2000 reserve - (4100 host upper - 4000 own lower); the reserve exceeds the margin.
+    assert_eq!(consistent.managed_budget.cpu_millicores, 5900);
+    assert_eq!(consistent.admission_headroom.cpu_millicores, 1900);
     assert!(codes(&consistent, "cpu").contains(&"inconsistent_within_tolerance".into()));
 }
 
@@ -2816,8 +2852,11 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
         facts: rootless(&["own"]),
         ..Default::default()
     };
+    // Without a CPU reserve the shares come from the whole 8000m.
+    let mut cfg = config();
+    cfg.cpu.reserve_physical_cores = 0;
     let mut engine = PolicyEngine::new();
-    // Saturated: own 4000m, root 1000m, two users. Schedulable capacity is 6000m.
+    // Saturated: own 4000m, root 1000m, two users.
     let mut share = |owner: PrincipalUsage, users: &[(u32, u64)], now: u64| {
         let mut snap = snapshot();
         snap.cpu_busy_millicores = Some(8000);
@@ -2828,10 +2867,8 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
                 .map(|(uid, usage)| cpu_principal(*uid, false, *usage)),
         );
         snap.principals = Some(principals);
-        engine
-            .evaluate(&config(), &snap, &own, now)
-            .unwrap()
-            .resources[&cedegrid::contention::ResourceKey::Cpu]
+        engine.evaluate(&cfg, &snap, &own, now).unwrap().resources
+            [&cedegrid::contention::ResourceKey::Cpu]
             .target_share
             .unwrap()
     };
@@ -2839,11 +2876,11 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
     let both = [(2001, 1500), (2002, 1500)];
     // Root's 1000m comes off the capacity; the new users form one principal at first.
     for now in [0, 500, 1000] {
-        assert_eq!(share(owner(), &both, now), 2500, "at {now}");
+        assert_eq!(share(owner(), &both, now), 3500, "at {now}");
     }
     // After four observations each user is its own principal.
-    // 5000m among three principals; the remainder goes to the owner.
-    assert_eq!(share(owner(), &both, 1500), 1667);
+    // 7000m among three principals; the remainder goes to the owner.
+    assert_eq!(share(owner(), &both, 1500), 2334);
     // A drop shorter than the 60 s leave window does not end membership.
     let dropped = [(2001, 0), (2002, 0)];
     let mut now = 2000;
@@ -2851,7 +2888,7 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
         share(owner(), &dropped, now);
         now += 500;
     }
-    assert_eq!(share(owner(), &both, now), 1667);
+    assert_eq!(share(owner(), &both, now), 2334);
     // 60 s below the threshold does: back to one pooled principal.
     now += 500;
     let left_at = now + 60_000;
@@ -2859,7 +2896,7 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
         share(owner(), &dropped, now);
         now += 500;
     }
-    assert_eq!(share(owner(), &both, now), 2500);
+    assert_eq!(share(owner(), &both, now), 3500);
     // The account CedeGrid runs as stays the owner principal below uid_min.
     let mut engine = PolicyEngine::new();
     let mut snap = snapshot();
@@ -2870,12 +2907,12 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
     ]);
     let mut decision = None;
     for now in [0, 500, 1000, 1500] {
-        decision = Some(engine.evaluate(&config(), &snap, &own, now).unwrap());
+        decision = Some(engine.evaluate(&cfg, &snap, &own, now).unwrap());
     }
-    // Two principals share 6000m; the account's unmanaged 500m comes off its share.
+    // Two principals share 8000m; the account's unmanaged 500m comes off its share.
     assert_eq!(
         decision.unwrap().resources[&cedegrid::contention::ResourceKey::Cpu].target_share,
-        Some(2500)
+        Some(3500)
     );
 }
 

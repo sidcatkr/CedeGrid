@@ -106,7 +106,7 @@
     {
       "id": "CFG-07-reduced-margin-unacknowledged",
       "kind": "node",
-      "toml": "config_version = 1\n[contention.cpu]\nneutral_margin_percent = 15\n",
+      "toml": "config_version = 1\n[contention.cpu]\nneutral_margin_percent = 3\n",
       "error": "ERR_CEDEGRID_CONFIG"
     },
     {

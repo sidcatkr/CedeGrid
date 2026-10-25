@@ -242,10 +242,12 @@ pub struct ResourceThresholds {
 impl ResourceThresholds {
     /// Provisional defaults from the spec, to validate on real hardware.
     pub fn defaults(kind: ResourceKind) -> Self {
+        // Compute is reclaimed within an interval, so its idle margins are small;
+        // memory keeps the floors, and Yield First keeps 20% more.
         Self {
-            yield_first_margin_percent: 25,
-            neutral_margin_percent: 20,
-            performance_margin_percent: 10,
+            yield_first_margin_percent: if kind.is_memory() { 20 } else { 15 },
+            neutral_margin_percent: 5,
+            performance_margin_percent: 2,
             yield_first_response_intervals: 3,
             scale_up_step_interval_s: None,
             neutral_convergence_s: 60,

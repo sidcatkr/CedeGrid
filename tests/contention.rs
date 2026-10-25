@@ -493,14 +493,15 @@ mod yield_first {
     use super::modes::*;
 
     #[test]
-    fn own_work_keeps_a_quarter_of_capacity_free_on_every_resource() {
-        for kind in [
-            ResourceKind::Cpu,
-            ResourceKind::Ram,
-            ResourceKind::GpuMemory,
+    fn own_work_keeps_its_margin_free_on_every_resource() {
+        // 15% of compute and 20% of memory beyond the floor.
+        for (kind, expected) in [
+            (ResourceKind::Cpu, 4800),
+            (ResourceKind::Ram, 4400),
+            (ResourceKind::GpuMemory, 4400),
         ] {
             let mut view = input(kind, ContentionMode::YieldFirst, 8000, 2000);
-            assert_eq!(allowance(&view), 4000, "{kind:?}");
+            assert_eq!(allowance(&view), expected, "{kind:?}");
             // To zero if needed.
             view.external = 7000;
             assert_eq!(allowance(&view), 0, "{kind:?}");
@@ -515,7 +516,7 @@ mod yield_first {
             8000,
             0,
         );
-        assert_eq!(allowance(&view), 6000);
+        assert_eq!(allowance(&view), 6800);
         view.unknown_activity = true;
         assert_eq!(allowance(&view), 0);
     }
@@ -586,7 +587,7 @@ mod neutral {
                 8000,
                 1000
             )),
-            5400
+            6600
         );
         // Saturated by a demanding principal: exactly the fair share, whatever own uses now.
         let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 6000);
@@ -597,7 +598,7 @@ mod neutral {
         // contention floor, is not contended: idle capacity minus the margin.
         view.external = 10;
         view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 10)]);
-        assert_eq!(allowance(&view), 6390);
+        assert_eq!(allowance(&view), 7590);
         // The account's unmanaged usage comes out of own work's share.
         view.external = 6500;
         view.principals = Some(vec![
@@ -624,7 +625,7 @@ mod neutral {
             &ResourceThresholds::defaults(ResourceKind::Cpu)
         ));
         view.mode = ContentionMode::YieldFirst;
-        assert_eq!(allowance(&view), 3000);
+        assert_eq!(allowance(&view), 3800);
     }
 
     #[test]
@@ -735,8 +736,8 @@ mod ordered_targets {
             // Saturation by own work alone is not contention.
             let mut alone = input(kind, ContentionMode::Neutral, 8000, 0);
             alone.saturated = true;
-            // Idle margins: 25% in Yield First, 20% in Neutral, 10% in Performance.
-            assert_eq!(targets(&alone), [6000, 6400, 7200], "{kind:?}");
+            // Idle margins: 15% in Yield First, 5% in Neutral, 2% in Performance.
+            assert_eq!(targets(&alone), [6800, 7600, 7840], "{kind:?}");
         }
     }
 
@@ -744,7 +745,7 @@ mod ordered_targets {
     fn memory_floors_bound_every_mode_and_yield_first_keeps_its_margin() {
         for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
             let view = input(kind, ContentionMode::Neutral, 8000, 2000);
-            assert_eq!(targets(&view), [4000, 6000, 6000], "{kind:?}");
+            assert_eq!(targets(&view), [4400, 6000, 6000], "{kind:?}");
         }
     }
 }
@@ -761,7 +762,7 @@ mod performance_and_guaranteed {
                 8000,
                 2000
             )),
-            5200
+            5840
         );
         assert_eq!(
             allowance(&input(
@@ -770,7 +771,7 @@ mod performance_and_guaranteed {
                 8000,
                 0
             )),
-            7200
+            7840
         );
         // Memory capacity is already above the floor; no margin is added.
         assert_eq!(
@@ -1609,22 +1610,17 @@ mod scenarios {
             world.tick(now);
             now += INTERVAL;
         }
-        // 5% of capacity, well inside the 25% margin.
+        // 5% of capacity, well inside the 15% margin.
         world.external = (1, 400);
+        let margin = CAPACITY * 15 / 100;
         for interval in 0..40 {
             let (own, external) = world.tick(now);
             assert_ne!(world.step, YieldStep::Pause, "at {now}: own {own}");
             assert_eq!(external, 400);
-            // After the step applies, own work keeps the 25% margin free beside the blip.
+            // After the step applies, own work keeps the margin free beside the blip.
             if interval >= 2 {
-                assert!(
-                    own + 400 + CAPACITY / 4 <= CAPACITY + CAPACITY / 100,
-                    "{own}"
-                );
-                assert!(
-                    own + CAPACITY / 100 >= CAPACITY - 400 - CAPACITY / 4,
-                    "{own}"
-                );
+                assert!(own + 400 + margin <= CAPACITY + CAPACITY / 100, "{own}");
+                assert!(own + CAPACITY / 100 >= CAPACITY - 400 - margin, "{own}");
             }
             now += INTERVAL;
         }
@@ -1664,9 +1660,9 @@ mod scenarios {
     #[test]
     fn a_held_cap_rises_again_when_external_demand_shrinks() {
         for (mode, target) in [
-            (ContentionMode::YieldFirst, 5000),
-            (ContentionMode::Neutral, 5400),
-            (ContentionMode::Performance, 6200),
+            (ContentionMode::YieldFirst, 5800),
+            (ContentionMode::Neutral, 6600),
+            (ContentionMode::Performance, 6840),
         ] {
             let mut world = World::new(mode, (64, 8000));
             let mut now = 0;
@@ -1679,7 +1675,7 @@ mod scenarios {
                 world.tick(now);
                 now += INTERVAL;
             }
-            // Idle capacity minus the margin: 8000 - 1000 - 25% or 10% of 8000.
+            // Idle capacity minus the margin: 8000 - 1000 - 15%, 5% or 2% of 8000.
             world.external = (1, 1000);
             let shrunk = now;
             let mut recovered = None;

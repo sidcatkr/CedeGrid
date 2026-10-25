@@ -9,7 +9,7 @@ storage_profile = "wal_full"
 interval_ms = 500
 
 [cpu]
-reserve_physical_cores = 2
+reserve_physical_cores = 0
 nice = 10
 
 [ram]
@@ -18,7 +18,8 @@ reserve_percent = 5
 
 [gpu]
 execution_mode = "auto"
-reserve_vram_mib = 3072
+reserve_vram_mib = 1024
+reserve_vram_percent = 5
 scale_up_cooldown_ms = 30000
 protective_shrink_percent = 25
 active_shrink_percent = 50

@@ -732,7 +732,6 @@ impl PolicyEngine {
         // What own work may hold before the mode's target applies: for memory, what
         // keeps the floor free.
         let mut floor_available: BTreeMap<ResourceKey, u64> = BTreeMap::new();
-        let cpu_schedulable = cpu_capacity.saturating_sub(cpu_reserve);
         let cpu_total = cpu_capacity.min(cpu_ceiling);
         // A saturated host suppresses measured external usage.
         let saturation = u64::from(
@@ -746,12 +745,14 @@ impl PolicyEngine {
         if !cpu_unknown && !cpu_held {
             floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
             let (members, background) =
-                principals(ResourceKey::Cpu, cpu_schedulable, &|p| p.cpu_millicores);
+                principals(ResourceKey::Cpu, cpu_capacity, &|p| p.cpu_millicores);
+            // The idle reserve is the larger of the explicit reserve and the mode's
+            // margin of total capacity; the two never stack.
             budget.cpu_millicores = own_allowance(
                 &ModeInput {
                     kind: ResourceKind::Cpu,
                     mode: governing(ResourceKind::Cpu),
-                    capacity: cpu_schedulable,
+                    capacity: cpu_capacity,
                     external: statuses
                         .get(&ResourceKey::Cpu)
                         .and_then(|s| s.external)
@@ -767,8 +768,8 @@ impl PolicyEngine {
                 },
                 &config.contention.thresholds(ResourceKind::Cpu),
             )
-            // An ancestor quota bounds own work after external usage is subtracted.
-            .min(cpu_ceiling);
+            // Capacity minus the reserve and external usage, within the ancestor quota.
+            .min(budget.cpu_millicores);
         }
         if !ram_unknown && !ram_held {
             floor_available.insert(ResourceKey::Ram, budget.ram_mib);
