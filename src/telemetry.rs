@@ -41,6 +41,7 @@ pub struct Collector {
     gpu_quiet: BTreeMap<String, QuietState>,
     gpu_memory_tolerance_mib: u64,
     quiet_window_intervals: u32,
+    attribution_tolerance_percent: u8,
     /// Every visible process, for principal aggregation only.
     processes: System,
     /// External context memory per device and PID from the last GPU sample.
@@ -234,6 +235,10 @@ impl Collector {
                 crate::contention::ResourceKind::GpuCompute,
             )
             .quiet_window_intervals,
+            attribution_tolerance_percent: crate::contention::ResourceThresholds::defaults(
+                crate::contention::ResourceKind::GpuCompute,
+            )
+            .attribution_tolerance_percent,
             processes: System::new(),
             external_gpu_memory: BTreeMap::new(),
             tracked_external: BTreeSet::new(),
@@ -310,6 +315,10 @@ impl Collector {
             config.monitor.interval_ms,
             config.gpu.process_sample_max_age_ms,
         );
+        collector.attribution_tolerance_percent = config
+            .contention
+            .thresholds(crate::contention::ResourceKind::GpuCompute)
+            .attribution_tolerance_percent;
         Ok(collector)
     }
 
@@ -647,7 +656,7 @@ impl Collector {
                 });
             capabilities.insert(format!("gpu:{uuid}:processes"), capability(
                 if external_process_ids.is_some() { CapabilityStatus::Available } else { CapabilityStatus::Unknown },
-                format!("Compute and graphics enumeration must both succeed; Only registry-verified managed identities are excluded; all other PIDs remain external. Compute error: {:?}; graphics error: {:?}", compute.err(), graphics.err()),
+                format!("Compute and graphics enumeration must both succeed; Only registry-verified managed identities are excluded; all other PIDs remain external. Compute error: {:?}; graphics error: {:?}", compute.as_ref().err(), graphics.as_ref().err()),
             ));
             if accounting_known {
                 self.gpu_accounting_known.insert(uuid.clone());
@@ -677,6 +686,28 @@ impl Collector {
             );
             let external_compute =
                 quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
+            // The MPS control daemon may serve any device; its server and clients
+            // appear in the device's process lists.
+            let mps = self
+                .processes
+                .processes()
+                .values()
+                .any(|process| is_mps_process(&process.name().to_string_lossy()))
+                || compute
+                    .iter()
+                    .chain(&graphics)
+                    .flatten()
+                    .filter_map(|pid| process_name(*pid))
+                    .any(|name| is_mps_process(&name));
+            let compute_amount = measure_compute(
+                external_process_ids.as_deref(),
+                &self.managed_pids,
+                activity_baseline,
+                &samples,
+                utilization_percent,
+                mps,
+                self.attribution_tolerance_percent,
+            );
             if let Some(cursor) = next_cursor {
                 // An unchanged timestamp never refreshes the age of the baseline.
                 if previous.is_none() || baseline.is_none_or(|(old, _)| cursor > old) {
@@ -734,6 +765,18 @@ impl Collector {
                 reserved_memory_mib: memory.map(|memory| memory.reserved_mib),
                 free_memory_mib: memory.map(|memory| memory.free_mib),
                 unattributed_memory_mib,
+                external_compute_milli: match &compute_amount {
+                    ComputeAmount::Measured { external, .. } => Some(*external),
+                    ComputeAmount::Unknown(_) => None,
+                },
+                own_compute_milli: match &compute_amount {
+                    ComputeAmount::Measured { own, .. } => Some(*own),
+                    ComputeAmount::Unknown(_) => None,
+                },
+                compute_amount_unknown: match compute_amount {
+                    ComputeAmount::Measured { .. } => None,
+                    ComputeAmount::Unknown(reason) => Some(reason),
+                },
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -1043,6 +1086,97 @@ fn classify_activity(
         _ => ComputeActivity::Unknown,
     };
     (activity, fresh_id, next)
+}
+
+/// External and own GPU compute of one interval, in thousandths of device time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComputeAmount {
+    Measured { external: u64, own: u64 },
+    Unknown(String),
+}
+
+/// MPS runs its clients in one shared context, so per-process samples do not
+/// attribute compute to them.
+fn is_mps_process(name: &str) -> bool {
+    name.starts_with("nvidia-cuda-mps")
+}
+
+/// The command name of a process, read-only, where the platform exposes it.
+fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|name| name.trim().to_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The interval's GPU compute per side from fresh per-process samples: each PID's
+/// average, capped at 100%, own PIDs being the verified managed ones, all others
+/// external. The amount is trusted only when the sum is within `tolerance` points
+/// of device utilization over the same interval (FR-021).
+fn measure_compute(
+    external: Option<&[u32]>,
+    own: &BTreeSet<u32>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    device: Option<u32>,
+    mps: bool,
+    tolerance: u8,
+) -> ComputeAmount {
+    let unknown = |reason: &str| ComputeAmount::Unknown(reason.into());
+    if mps {
+        return unknown(
+            "an MPS daemon or server shares the device, so per-process samples do not attribute compute",
+        );
+    }
+    let Some(device) = device else {
+        return unknown("device utilization is unavailable");
+    };
+    if external.is_none() {
+        return unknown("the device's process inventory is incomplete");
+    }
+    let Some(previous) = previous else {
+        return unknown("no fresh per-process sample baseline");
+    };
+    let samples: &[ProcessUtilizationSample] = match samples {
+        Ok(samples) => samples,
+        Err(NvmlError::NotFound) => &[],
+        Err(error) => {
+            return ComputeAmount::Unknown(format!(
+                "per-process utilization is unavailable: {error:?}"
+            ));
+        }
+    };
+    let mut per_pid: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
+    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+        let (sum, count) = per_pid.entry(sample.pid).or_default();
+        *sum += u64::from(sample.sm_util.min(100));
+        *count += 1;
+    }
+    let (mut external_percent, mut own_percent) = (0u64, 0u64);
+    for (pid, (sum, count)) in per_pid {
+        if own.contains(&pid) {
+            own_percent += sum / count;
+        } else {
+            external_percent += sum / count;
+        }
+    }
+    let total = external_percent + own_percent;
+    if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
+        return ComputeAmount::Unknown(format!(
+            "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
+        ));
+    }
+    ComputeAmount::Measured {
+        external: external_percent.min(100) * 10,
+        own: own_percent.min(100) * 10,
+    }
 }
 
 fn error_status(error: &NvmlError) -> CapabilityStatus {
@@ -1772,6 +1906,103 @@ mod tests {
             enc_util: 0,
             dec_util: 0,
         }
+    }
+
+    /// External GPU compute is measured from fresh per-process samples, averaged
+    /// per PID and capped at 100, when their sum is within the tolerance of device
+    /// utilization; otherwise, and without support, a baseline, a complete
+    /// inventory or with MPS, it stays unknown (FR-021).
+    #[test]
+    fn external_gpu_compute_is_measured_only_when_samples_account_for_the_device() {
+        let own = BTreeSet::from([7]);
+        let ok = |samples: Vec<ProcessUtilizationSample>| -> std::result::Result<_, NvmlError> {
+            Ok(samples)
+        };
+        let measure = |samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+                       device: Option<u32>| {
+            measure_compute(Some(&[42]), &own, Some(100), samples, device, false, 15)
+        };
+        // One external PID at 5% beside own work at 94%, on a device at 100%.
+        let five = ok(vec![
+            gpu_sample(42, 110, 5),
+            gpu_sample(7, 110, 94),
+            gpu_sample(42, 120, 5),
+            gpu_sample(7, 120, 94),
+            // Older than the cursor: not this interval.
+            gpu_sample(42, 90, 100),
+        ]);
+        assert_eq!(
+            measure(&five, Some(100)),
+            ComputeAmount::Measured {
+                external: 50,
+                own: 940
+            }
+        );
+        // At 40%, averaged over the PID's fresh samples.
+        let forty = ok(vec![
+            gpu_sample(42, 110, 30),
+            gpu_sample(42, 120, 50),
+            gpu_sample(7, 110, 60),
+            gpu_sample(7, 120, 60),
+        ]);
+        assert_eq!(
+            measure(&forty, Some(100)),
+            ComputeAmount::Measured {
+                external: 400,
+                own: 600
+            }
+        );
+        // Within 15 points of the device it is measured; beyond, unknown.
+        assert!(matches!(
+            measure(&forty, Some(85)),
+            ComputeAmount::Measured { .. }
+        ));
+        assert!(
+            matches!(measure(&forty, Some(84)), ComputeAmount::Unknown(reason) if reason.contains("differs"))
+        );
+        // No fresh samples on a busy device are no evidence; on an idle one, zero.
+        let none = Err(NvmlError::NotFound);
+        assert!(matches!(
+            measure(&none, Some(60)),
+            ComputeAmount::Unknown(_)
+        ));
+        assert_eq!(
+            measure(&none, Some(3)),
+            ComputeAmount::Measured {
+                external: 0,
+                own: 0
+            }
+        );
+        // Unsupported queries, an incomplete inventory, no baseline and MPS.
+        assert!(matches!(
+            measure(&Err(NvmlError::NotSupported), Some(100)),
+            ComputeAmount::Unknown(_)
+        ));
+        assert!(matches!(measure(&five, None), ComputeAmount::Unknown(_)));
+        assert!(matches!(
+            measure_compute(None, &own, Some(100), &five, Some(100), false, 15),
+            ComputeAmount::Unknown(_)
+        ));
+        assert!(matches!(
+            measure_compute(Some(&[42]), &own, None, &five, Some(100), false, 15),
+            ComputeAmount::Unknown(_)
+        ));
+        assert!(matches!(
+            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15),
+            ComputeAmount::Unknown(reason) if reason.contains("MPS")
+        ));
+        // A PID above 100 counts as 100.
+        let over = ok(vec![gpu_sample(42, 110, 250)]);
+        assert_eq!(
+            measure(&over, Some(100)),
+            ComputeAmount::Measured {
+                external: 1000,
+                own: 0
+            }
+        );
+        assert!(is_mps_process("nvidia-cuda-mps-server"));
+        assert!(is_mps_process("nvidia-cuda-mps-control"));
+        assert!(!is_mps_process("python3"));
     }
 
     #[test]

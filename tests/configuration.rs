@@ -774,6 +774,9 @@ fn host(total_ram_mib: u64, gpus: &[u64]) -> cedegrid::model::Snapshot {
                 reserved_memory_mib: None,
                 free_memory_mib: None,
                 unattributed_memory_mib: None,
+                external_compute_milli: None,
+                own_compute_milli: None,
+                compute_amount_unknown: None,
             })
             .collect(),
         capabilities: Default::default(),
@@ -931,6 +934,34 @@ fn gpu_memory_cooldown_precedence() {
     .unwrap();
     assert_eq!(both.gpu_memory_cooldown_ms(Neutral), 2000);
     assert!(parse_node("[contention.gpu_compute]\nscale_up_cooldown_ms = 2000").is_err());
+}
+
+/// The GPU compute attribution tolerance is bounded at 1-30 points and applies to
+/// GPU compute only (FR-021).
+#[test]
+fn the_gpu_compute_attribution_tolerance_is_bounded() {
+    let body = |section: &str, value: u32| {
+        format!("[contention.{section}]\nattribution_tolerance_percent = {value}")
+    };
+    assert!(parse_node(&body("gpu_compute", 0)).is_err());
+    assert!(parse_node(&body("gpu_compute", 31)).is_err());
+    assert!(parse_node(&body("cpu", 15)).is_err());
+    let config = parse_node(&body("gpu_compute", 30)).unwrap();
+    assert_eq!(
+        config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::GpuCompute)
+            .attribution_tolerance_percent,
+        30
+    );
+    assert_eq!(
+        parse_node("")
+            .unwrap()
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::GpuCompute)
+            .attribution_tolerance_percent,
+        15
+    );
 }
 
 /// Settings that lengthen reclaim or let stale telemetry pass are bounded.

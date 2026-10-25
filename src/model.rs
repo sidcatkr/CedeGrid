@@ -221,6 +221,16 @@ pub struct GpuSnapshot {
     /// Memory that is neither attributed to own work nor proven external (schema 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattributed_memory_mib: Option<u64>,
+    /// External GPU compute this interval, in thousandths of device time, when fresh
+    /// per-process samples account for device utilization; None is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_compute_milli: Option<u64>,
+    /// Own GPU compute this interval, in the same unit, when the amount is measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_compute_milli: Option<u64>,
+    /// Why the external compute amount is unknown, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_amount_unknown: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,6 +471,19 @@ pub struct HeldBack {
     /// Admission capacity held by charges above usage.
     #[serde(skip_serializing_if = "is_zero")]
     pub charge_shortfall: u64,
+    /// GPU compute: whether the external amount was measured, or why it is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_path: Option<ComputePath>,
+}
+
+/// The path a device's GPU compute share took (FR-021).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "path", rename_all = "snake_case")]
+pub enum ComputePath {
+    /// Fresh per-process samples accounted for device utilization.
+    Measured,
+    /// External activity of unknown amount: one principal (FR-021).
+    Unknown { reason: String },
 }
 
 fn is_zero(value: &u64) -> bool {

@@ -308,6 +308,9 @@ fn gpu_snapshot() -> Snapshot {
         reserved_memory_mib: None,
         free_memory_mib: None,
         unattributed_memory_mib: None,
+        external_compute_milli: None,
+        own_compute_milli: None,
+        compute_amount_unknown: None,
     });
     result
 }
@@ -3334,6 +3337,147 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
     );
     assert_eq!(step(Neutral, Quiet, opportunistic), None);
     assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
+}
+
+/// One evaluation of a lone running GPU job beside external GPU compute: a
+/// measured `external` amount (own work using the rest of the device at full
+/// utilization), or an unknown amount. Returns the job's GPU compute cap target and
+/// the path held_back reports.
+fn gpu_compute_target(
+    mode: cedegrid::contention::ContentionMode,
+    external: Option<u64>,
+) -> (
+    Option<cedegrid::contention::YieldStep>,
+    Option<u64>,
+    Option<ComputePath>,
+) {
+    let key = cedegrid::contention::ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        mode,
+        ComputeActivity::Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    snap.gpus[0].utilization_percent = Some(100);
+    snap.gpus[0].external_compute_milli = external;
+    snap.gpus[0].own_compute_milli = external.map(|external| 1000 - external);
+    if external.is_none() {
+        snap.gpus[0].compute_amount_unknown =
+            Some("summed per-process utilization differs from the device".into());
+    }
+    let decision = PolicyEngine::new()
+        .evaluate(
+            &cfg,
+            &snap,
+            &PolicyInput {
+                allocations: vec![allocation(
+                    "job",
+                    AllocationPhase::Running,
+                    resources(100, 100, 2000),
+                    Some(resources(100, 100, 2000)),
+                )],
+                facts: rootless(&["job"]),
+                ..PolicyInput::default()
+            },
+            0,
+        )
+        .unwrap();
+    let action = decision.actions.iter().find(|a| a.resource == key);
+    (
+        action.map(|a| a.step),
+        action.and_then(|a| a.target),
+        decision.resources[&key]
+            .held_back
+            .as_ref()
+            .and_then(|held| held.compute_path.clone()),
+    )
+}
+
+/// A measured external GPU compute amount takes the CPU paths on a saturated
+/// device (FR-021, FR-022): Performance keeps capacity minus the external amount
+/// minus its 2% margin, never below the fair share; Neutral gives the fair share
+/// at once. Yield First probes a demand below its 15% margin step, stepping to
+/// capacity minus the user minus the margin, and pauses for a larger one while
+/// own work below capacity minus the margin does not cause the saturation. An
+/// unknown amount keeps the one-principal share, and held_back names the path.
+#[test]
+fn measured_external_gpu_compute_takes_the_cpu_paths() {
+    use cedegrid::contention::{
+        ContentionMode::*,
+        YieldStep::{Cap, Pause},
+    };
+    for (external, performance, yield_first) in [
+        (50, 930, (Some(Cap), Some(800))),
+        (400, 580, (Some(Pause), None)),
+    ] {
+        assert_eq!(
+            gpu_compute_target(Performance, Some(external)),
+            (Some(Cap), Some(performance), Some(ComputePath::Measured)),
+            "{external}"
+        );
+        assert_eq!(
+            gpu_compute_target(YieldFirst, Some(external)),
+            (yield_first.0, yield_first.1, Some(ComputePath::Measured)),
+            "{external}"
+        );
+        assert_eq!(
+            gpu_compute_target(Neutral, Some(external)),
+            (Some(Cap), Some(500), Some(ComputePath::Measured)),
+            "{external}"
+        );
+    }
+    let (step, target, path) = gpu_compute_target(Neutral, None);
+    assert_eq!((step, target), (Some(Cap), Some(500)));
+    assert!(
+        matches!(&path, Some(ComputePath::Unknown { reason }) if reason.contains("differs")),
+        "{path:?}"
+    );
+    assert_eq!(gpu_compute_target(YieldFirst, None).0, Some(Pause));
+}
+
+/// Neutral learns that a measured 5% external user is satisfied once own work
+/// holds the fair share and the device has capacity to spare, and own work then
+/// runs at capacity minus the user minus the 5% margin (FR-021).
+#[test]
+fn neutral_learns_a_measured_gpu_user_is_satisfied() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let mut cap: Option<u64> = None;
+    let mut now = 0;
+    while now <= 60_000 {
+        // Own work wants 950 and runs at its cap; the user takes 50.
+        let own = cap.unwrap_or(950).min(950);
+        snap.gpus[0].own_compute_milli = Some(own);
+        snap.gpus[0].external_compute_milli = Some(50);
+        snap.gpus[0].utilization_percent = Some(((own + 50) / 10) as u32);
+        let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+        cap = decision
+            .actions
+            .iter()
+            .find(|a| a.resource == key)
+            .and_then(|a| a.target);
+        now += 500;
+    }
+    assert_eq!(cap.unwrap_or(1000), 900);
 }
 
 /// Running own work is not drained because a device becomes occupied, even with

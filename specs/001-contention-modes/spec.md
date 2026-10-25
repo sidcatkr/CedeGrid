@@ -605,14 +605,23 @@ node reports with the expected per-resource values at each step.
     then watched for one response window from the interval after: if the host has capacity to
     spare at its end and the principal's usage stayed within its baseline plus the contention
     floor, it is recorded as satisfied the same way, else it keeps its share. A satisfied
-    principal that leaves keeps its record and rejoins at once when it returns. Unknown
-    activity, including GPU compute activity whose amount is not measured, is never recorded;
+    principal that leaves keeps its record and rejoins at once when it returns. Activity of
+    unknown amount is never recorded;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission.
 
   No-harm floors take precedence over fair share for RAM and GPU memory. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
-  the granularity, is documented.
+  the granularity, is documented. External GPU compute MUST be measured, in thousandths of
+  device time, from each external process's average fresh per-process utilization, capped at
+  100%, when the summed per-process utilization of all processes is within
+  `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
+  utilization over the same interval. It MUST stay activity of unknown amount when either query
+  is unsupported, samples are not fresh, the process inventory is incomplete, or an MPS control
+  daemon or server is present. A measured amount takes the CPU paths: one principal of that
+  amount, saturation at `saturation_percent` of device utilization, probing and satisfied
+  records; admission still follows FR-026 and FR-027. The node report's held-back breakdown
+  states, per device, whether the amount was measured or why it is unknown.
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin
     (default 2%) on CPU and GPU compute; memory keeps only the floors;

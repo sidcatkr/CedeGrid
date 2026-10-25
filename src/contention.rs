@@ -241,6 +241,9 @@ pub struct ResourceThresholds {
     /// CPU: running opportunistic work is charged for admission at its p95 usage
     /// over this window (FR-034).
     pub admission_usage_window_s: u64,
+    /// GPU compute: summed per-process utilization within this many points of
+    /// device utilization makes the external amount measured (FR-021).
+    pub attribution_tolerance_percent: u8,
 }
 
 impl ResourceThresholds {
@@ -274,6 +277,7 @@ impl ResourceThresholds {
             reclaim_backoff_ms: 1000,
             reclaim_backoff_max_ms: 30_000,
             admission_usage_window_s: 60,
+            attribution_tolerance_percent: 15,
         }
     }
 

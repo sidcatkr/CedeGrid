@@ -637,6 +637,8 @@ pub struct ResourceContentionConfig {
     pub reclaim_backoff_max_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_usage_window_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution_tolerance_percent: Option<u8>,
 }
 
 impl ContentionConfig {
@@ -728,6 +730,9 @@ impl ContentionConfig {
             admission_usage_window_s: set
                 .admission_usage_window_s
                 .unwrap_or(defaults.admission_usage_window_s),
+            attribution_tolerance_percent: set
+                .attribution_tolerance_percent
+                .unwrap_or(defaults.attribution_tolerance_percent),
         }
     }
 
@@ -869,6 +874,11 @@ impl ContentionConfig {
                 set.quiet_window_intervals.is_some(),
             )?;
             applies(
+                "attribution_tolerance_percent",
+                &[GpuCompute],
+                set.attribution_tolerance_percent.is_some(),
+            )?;
+            applies(
                 "scale_up_cooldown_ms",
                 &[Cpu, Ram, GpuMemory],
                 set.scale_up_cooldown_ms.is_some(),
@@ -1004,6 +1014,10 @@ impl ContentionConfig {
             ensure!(
                 t.noise_tolerance_mib <= 1024,
                 "contention.{name}.noise_tolerance_mib must be at most 1024"
+            );
+            ensure!(
+                (1..=30).contains(&t.attribution_tolerance_percent),
+                "contention.{name}.attribution_tolerance_percent must be between 1 and 30"
             );
             ensure!(
                 (1..=3600).contains(&t.admission_usage_window_s),
@@ -1242,6 +1256,7 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
             Caution("relaxed_detection"),
         ),
         ("contention.*.guaranteed_breach_window_s", Bounded),
+        ("contention.*.attribution_tolerance_percent", Bounded),
         ("contention.*.hint_deadline_s", Bounded),
         ("contention.*.hysteresis_percent", Bounded),
         ("contention.*.min_step_dwell_intervals", Bounded),

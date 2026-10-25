@@ -721,7 +721,17 @@ context, under Neutral and Performance (quickstart §5).
     together with what follows from it: the default `gpu.reserve_vram_mib` (twice the minimum),
     the "1 GiB" default text, the critical level's lower bound and the noise-tolerance bound;
   - measure over a real session how often GPU activity is Unknown, and record it with the
-    evidence.
+    evidence;
+  - record how closely summed per-process `sm_util` tracks device utilization under 1, 2 and 4
+    concurrent processes on each target GPU, and set the default
+    `contention.gpu_compute.attribution_tolerance_percent` (15, provisional) from it.
+- [X] T152 [US5] Measure external GPU compute instead of treating all activity as an unknown
+  amount (FR-021): each external PID's average fresh `sm_util`, capped at 100, summed in
+  thousandths of the device, trusted when all processes' sum is within
+  `attribution_tolerance_percent` of device utilization and no MPS daemon or server is present
+  (`src/telemetry.rs`); a measured amount takes the CPU paths, and `held_back.compute_path`
+  names each device's path (`src/policy.rs`, `src/model.rs`, `src/config.rs`). Tests in the
+  telemetry unit tests, `tests/policy.rs` and `tests/configuration.rs`.
 
 **Checkpoint**: GPU work no longer needs an empty device.
 

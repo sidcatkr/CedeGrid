@@ -75,9 +75,16 @@ compute activity, own GPU work gets a compute share by pausing it for part of ea
 period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
 and kernels already submitted keep running, so the effective granularity is the period
 plus the longest kernel. A process with a CPU cap and a GPU compute share runs one cycle
-at the smaller duty; Guaranteed work takes no GPU compute step. Activity of unknown
-amount first holds these steps and escalates after the unknown window. An empty-device
-pass is not evidence of occupied-device sharing. See
+at the smaller duty; Guaranteed work takes no GPU compute step. External compute is
+measured when fresh per-process samples, summed over every process on the device, are
+within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
+utilization; a measured amount takes the CPU paths, so own work keeps capacity minus
+that amount minus the mode's margin under Performance, and its fair share or a learned
+satisfied demand under Neutral. Unsupported queries, stale samples, an incomplete
+process list or MPS leave it activity of unknown amount, one principal, which first
+holds these steps and escalates after the unknown window. Each device's held-back
+breakdown says which path it took and why. An empty-device pass is not evidence of
+occupied-device sharing. See
 [GPU operation](coordinator-work.md#gpu-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
@@ -129,26 +136,25 @@ demand. A larger demand gets the fair share at once and is then watched for one 
 window: if the host has capacity to spare and its usage stayed within its baseline plus
 the contention floor, it is recorded the same way, so own work scales back up at the
 normal rate and stays up; a recorded user that returns rejoins at once. Activity of
-unknown amount, as GPU compute activity is today, is never recorded. On contended
-compute, Yield First pauses opportunistic work, and after `pause_bound_s` (10 s) keeps
-it at the 5% minimum duty while the contention lasts; while a small demand is probed it
-steps down with the probe instead. While own work holds more than capacity minus Yield
-First's margin, saturation may be its own doing, so Yield First first caps it to the
-margin within the fair share and pauses only if the contention remains. Neutral holds
-the max-min fair share. Performance keeps the larger of the fair share and capacity
-minus observed external usage minus its margin: it gives back what external demand takes
-and never goes below the fair share; activity of unknown amount holds it to the fair
-share. Otherwise Yield First keeps 15% of capacity free, Neutral 5% and Performance 2%;
-the margins are validated as Yield First ≥ Neutral ≥ Performance, and Neutral and
-Performance also differ in how fast they scale up (10 s and 2 s per step). On memory,
-Yield First keeps 20% free beyond the floor and the other modes only the floor. The CPU
-idle reserve is the larger of `cpu.reserve_physical_cores` (default 0) and the mode's
-margin; the two never stack. The margins are configurable per resource. In every mode,
-contended CPU returns within 2 monitor intervals except in Performance, which follows
-what external work takes: the first step applies at once. While a resource is not
-contended, a held cap or hint rises again toward the mode's target at the mode's
-scale-up rate. A Guaranteed allocation's CPU is never capped below its request, by the
-policy or by its supervisor.
+unknown amount is never recorded. On contended compute, Yield First pauses opportunistic
+work, and after `pause_bound_s` (10 s) keeps it at the 5% minimum duty while the
+contention lasts; while a small demand is probed it steps down with the probe instead.
+While own work holds more than capacity minus Yield First's margin, saturation may be
+its own doing, so Yield First first caps it to the margin within the fair share and
+pauses only if the contention remains. Neutral holds the max-min fair share. Performance
+keeps the larger of the fair share and capacity minus observed external usage minus its
+margin: it gives back what external demand takes and never goes below the fair share;
+activity of unknown amount holds it to the fair share. Otherwise Yield First keeps 15%
+of capacity free, Neutral 5% and Performance 2%; the margins are validated as Yield
+First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
+scale up (10 s and 2 s per step). On memory, Yield First keeps 20% free beyond the floor
+and the other modes only the floor. The CPU idle reserve is the larger of
+`cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
+margins are configurable per resource. In every mode, contended CPU returns within 2
+monitor intervals except in Performance, which follows what external work takes: the
+first step applies at once. While a resource is not contended, a held cap or hint rises
+again toward the mode's target at the mode's scale-up rate. A Guaranteed allocation's
+CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,

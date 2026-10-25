@@ -136,6 +136,8 @@ mode = "neutral"
 Yield First admits new GPU work only on a quiet device. Neutral and Performance also
 admit on a device with active external compute or activity of unknown amount, and give
 own work a compute share by pausing it for part of each monitor interval.
+When per-process samples account for device utilization, the external amount is measured
+and own work keeps what that amount leaves, minus the mode's margin.
 `never_share_occupied_gpus` refuses new work on a device with external contexts or an
 unknown process list; running work is not drained for that alone. Unknown GPU memory or
 attribution blocks admission. GPU memory never pauses: it lowers the target, hints, then

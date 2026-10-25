@@ -814,7 +814,8 @@ impl PolicyEngine {
         let mut blocked_gpus = BTreeSet::new();
         // Each device's GPU compute allowance and whether it is contended, and the
         // devices whose external activity is unknown.
-        let mut gpu_compute_budget: BTreeMap<String, (u64, bool)> = BTreeMap::new();
+        let mut gpu_compute_budget: BTreeMap<String, GpuComputeBudget> = BTreeMap::new();
+        let mut compute_paths: BTreeMap<String, ComputePath> = BTreeMap::new();
         let mut gpu_activity_unknown: BTreeSet<String> = BTreeSet::new();
         // Why GPU admission is blocked on a device, for its admission state.
         let mut gpu_block_reasons: BTreeMap<String, String> = BTreeMap::new();
@@ -951,39 +952,133 @@ impl PolicyEngine {
                     reasons.push(format!("GPU {}: {reason}; GPU admission blocked", gpu.uuid));
                     gpu_block_reasons.insert(gpu.uuid.clone(), reason.clone());
                 }
-                // GPU compute shares apply under external activity, which counts
-                // as one principal of unknown amount; own GPU usage is not measured
-                // per process, so idle-device margins act through admission only.
+                // A measured external amount takes the CPU paths (FR-021, FR-022):
+                // one principal of that amount, saturation from device utilization,
+                // probing and satisfied records. Without one, external activity counts
+                // as one principal of unknown amount. Margins on an idle device act
+                // through admission only.
                 let compute_key = ResourceKey::GpuCompute(gpu.uuid.clone());
-                let contended_compute =
-                    matches!(activity, ComputeActivity::Active | ComputeActivity::Unknown);
+                let compute_thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
+                let measured = gpu.external_compute_milli.map(|external| {
+                    (
+                        external.min(GPU_COMPUTE_CAPACITY),
+                        gpu.own_compute_milli
+                            .unwrap_or(GPU_COMPUTE_CAPACITY)
+                            .min(GPU_COMPUTE_CAPACITY),
+                    )
+                });
+                compute_paths.insert(
+                    gpu.uuid.clone(),
+                    match measured {
+                        Some(_) => ComputePath::Measured,
+                        None => ComputePath::Unknown {
+                            reason: gpu.compute_amount_unknown.clone().unwrap_or_else(|| {
+                                "the collector did not measure the external amount".into()
+                            }),
+                        },
+                    },
+                );
                 if !telemetry_unknown {
-                    let share = if contended_compute {
-                        own_allowance(
-                            &ModeInput {
+                    let budget = match measured {
+                        Some((external, own)) if external > 0 => {
+                            let mode = governing(ResourceKind::GpuCompute);
+                            let mut view = ModeInput {
                                 kind: ResourceKind::GpuCompute,
-                                mode: governing(ResourceKind::GpuCompute),
+                                mode,
                                 capacity: GPU_COMPUTE_CAPACITY,
-                                external: 0,
-                                own: GPU_COMPUTE_CAPACITY,
+                                external,
+                                own,
                                 principals: None,
                                 background: 0,
-                                saturated: false,
-                                unknown_activity: true,
-                                satisfied: vec![],
+                                saturated: gpu.utilization_percent.is_some_and(|busy| {
+                                    busy >= u32::from(compute_thresholds.saturation_percent)
+                                }),
+                                unknown_activity: false,
+                                satisfied: self
+                                    .satisfied
+                                    .get(&compute_key)
+                                    .cloned()
+                                    .unwrap_or_default(),
                                 probe: None,
-                            },
-                            &config.contention.thresholds(ResourceKind::GpuCompute),
-                        )
-                    } else {
-                        GPU_COMPUTE_CAPACITY
+                            };
+                            let response_ms = LadderTiming::new(
+                                &compute_thresholds,
+                                mode,
+                                config.monitor.interval_ms,
+                            )
+                            .response_ms;
+                            let (known, probe) = crate::contention::probe_demand(
+                                &view,
+                                &compute_thresholds,
+                                self.probes.get(&compute_key),
+                                response_ms,
+                                now_monotonic_ms,
+                            );
+                            view.satisfied = known.clone();
+                            view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
+                            if !known.is_empty() {
+                                satisfied.insert(compute_key.clone(), known);
+                            }
+                            if let Some(probe) = probe {
+                                probes.insert(compute_key.clone(), probe);
+                            }
+                            GpuComputeBudget {
+                                share: own_allowance(&view, &compute_thresholds),
+                                contended: crate::contention::contended(&view, &compute_thresholds),
+                                external,
+                                own: Some(own),
+                            }
+                        }
+                        Some(_) => GpuComputeBudget {
+                            share: GPU_COMPUTE_CAPACITY,
+                            contended: false,
+                            external: 0,
+                            own: None,
+                        },
+                        None if matches!(
+                            activity,
+                            ComputeActivity::Active | ComputeActivity::Unknown
+                        ) =>
+                        {
+                            GpuComputeBudget {
+                                share: own_allowance(
+                                    &ModeInput {
+                                        kind: ResourceKind::GpuCompute,
+                                        mode: governing(ResourceKind::GpuCompute),
+                                        capacity: GPU_COMPUTE_CAPACITY,
+                                        external: 0,
+                                        own: GPU_COMPUTE_CAPACITY,
+                                        principals: None,
+                                        background: 0,
+                                        saturated: false,
+                                        unknown_activity: true,
+                                        satisfied: vec![],
+                                        probe: None,
+                                    },
+                                    &compute_thresholds,
+                                ),
+                                contended: true,
+                                external: GPU_COMPUTE_CAPACITY,
+                                own: None,
+                            }
+                        }
+                        None => GpuComputeBudget {
+                            share: GPU_COMPUTE_CAPACITY,
+                            contended: false,
+                            external: 0,
+                            own: None,
+                        },
                     };
-                    gpu_compute_budget.insert(gpu.uuid.clone(), (share, contended_compute));
+                    gpu_compute_budget.insert(gpu.uuid.clone(), budget);
                 }
                 let compute_status = statuses.entry(compute_key).or_default();
                 compute_status.activity = Some(activity);
+                if let Some((external, own)) = measured {
+                    compute_status.external = Some(external);
+                    compute_status.own = Some((own, own));
+                }
                 compute_status.target_share =
-                    gpu_compute_budget.get(&gpu.uuid).map(|(share, _)| *share);
+                    gpu_compute_budget.get(&gpu.uuid).map(|budget| budget.share);
                 compute_status.admission = Some(if telemetry_unknown {
                     Admission::Held {
                         reason: "GPU observation is unknown".into(),
@@ -1616,7 +1711,7 @@ impl PolicyEngine {
             // device shares it equally, and each allocation's cap target is its
             // share minus what the device has to free. Compute is reclaimed within
             // an interval, so it is never drained for GPU compute alone.
-            for (uuid, (allowance, contended)) in &gpu_compute_budget {
+            for (uuid, budget) in &gpu_compute_budget {
                 let key = ResourceKey::GpuCompute(uuid.clone());
                 let kind = ResourceKind::GpuCompute;
                 let running: Vec<&Allocation> = input
@@ -1630,13 +1725,18 @@ impl PolicyEngine {
                 if running.is_empty() {
                     continue;
                 }
-                let share = GPU_COMPUTE_CAPACITY / running.len() as u64;
-                let held = share * running.len() as u64;
-                let excess = held.saturating_sub(*allowance);
-                let external = if *contended { GPU_COMPUTE_CAPACITY } else { 0 };
+                // Own work on a device shares what it holds equally: its measured
+                // usage, else the whole device.
+                let held = budget.own.unwrap_or(GPU_COMPUTE_CAPACITY);
+                let share = held / running.len() as u64;
+                let excess = held.saturating_sub(budget.share);
+                // While calm, a held cap rises toward its usage plus its part of
+                // what the mode allows beyond own usage.
+                let spare_share = budget.share.saturating_sub(held) / running.len() as u64;
+                let external = budget.external;
                 // Activity of unknown amount first holds the steps, as any unknown
                 // measurement does, and escalates after the unknown window (FR-008).
-                let unknown = gpu_activity_unknown.contains(uuid);
+                let unknown = budget.own.is_none() && gpu_activity_unknown.contains(uuid);
                 if unknown {
                     let since = self
                         .unknown_since
@@ -1709,11 +1809,11 @@ impl PolicyEngine {
                             external,
                             measurement_known,
                             cause,
-                            usage: None,
+                            usage: budget.own.map(|_| share),
                             target: Some(if contended_victim {
                                 share.saturating_sub(remaining)
                             } else {
-                                share
+                                share.saturating_add(spare_share)
                             }),
                         },
                         &timing,
@@ -2114,6 +2214,27 @@ impl PolicyEngine {
             }
             held_back.insert(key, held);
         }
+        // GPU compute: what own work leaves beside external compute, and whether
+        // its amount was measured or why not (FR-021).
+        for gpu in &snapshot.gpus {
+            let mut held = HeldBack {
+                compute_path: compute_paths.get(&gpu.uuid).cloned(),
+                ..HeldBack::default()
+            };
+            match gpu_compute_budget.get(&gpu.uuid) {
+                Some(budget) => {
+                    let left = GPU_COMPUTE_CAPACITY.saturating_sub(budget.share);
+                    match (budget.own, budget.contended) {
+                        (Some(_), true) => held.contention = left.saturating_sub(budget.external),
+                        (Some(_), false) => held.margin = left.saturating_sub(budget.external),
+                        (None, true) => held.unknown = left,
+                        (None, false) => {}
+                    }
+                }
+                None => held.unknown = GPU_COMPUTE_CAPACITY,
+            }
+            held_back.insert(ResourceKey::GpuCompute(gpu.uuid.clone()), held);
+        }
         for (key, held) in held_back {
             statuses.entry(key).or_default().held_back = Some(held);
         }
@@ -2259,6 +2380,18 @@ impl PolicyEngine {
 
 /// GPU compute is accounted in thousandths of one device's time.
 const GPU_COMPUTE_CAPACITY: u64 = 1000;
+
+/// One device's GPU compute for own work, in thousandths of device time.
+struct GpuComputeBudget {
+    /// What own work may hold on the device.
+    share: u64,
+    contended: bool,
+    /// External compute: measured, the whole device for activity of unknown
+    /// amount, or zero.
+    external: u64,
+    /// Own compute, when measured.
+    own: Option<u64>,
+}
 
 fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<String>) -> bool {
     let cpu = &kernel.cpu;
