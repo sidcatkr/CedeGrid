@@ -208,6 +208,14 @@ cargo test --locked --test managed_supervision -- readiness hint_carries guarant
 cargo test --locked --lib terminate_sends_term_at_once_and_kill_after_the_grace
 ```
 
+## Phase 6b and US5 checks
+
+Container evidence, not host qualification, at 6d8e8c5 in the same Docker Desktop container
+(aarch64, kernel 7.0.12-linuxkit, Rust 1.98.1, Python 3.11): fmt and clippy passed, the serial
+suite passed 575 tests with 9 ignored, and both Python suites passed (184 and 52). GPU
+admission, duty-cycling and placement are covered by unit and integration tests only; the
+native GPU evidence stays with T088.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
