@@ -90,6 +90,9 @@ enum Event {
         hint_ready: bool,
         #[serde(default)]
         observes_drain: bool,
+        /// The targets applied; an older supervisor reports none.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
     },
     State {
         applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
@@ -458,6 +461,7 @@ impl SupervisorControl for PipeControl {
                 detail,
                 hint_ready,
                 observes_drain,
+                applied_targets,
             } => Event::Adjusted {
                 sequence,
                 applied,
@@ -465,6 +469,7 @@ impl SupervisorControl for PipeControl {
                 detail,
                 hint_ready,
                 observes_drain,
+                applied_targets,
             },
             supervision::SupervisorReport::State {
                 applied,
@@ -892,6 +897,8 @@ struct ChildSlot {
     unavailable: BTreeMap<crate::contention::ResourceKey, BTreeSet<crate::contention::YieldStep>>,
     /// Steps the supervisor reported applied, and the last acknowledged sequence.
     applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+    /// The targets the supervisor reported applied.
+    applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
     applied_sequence: u64,
     /// Readiness as the supervisor last reported it (FR-062).
     hint_ready: bool,
@@ -928,6 +935,7 @@ impl ChildSlot {
             hint_ready: self.hint_ready,
             observes_drain: self.observes_drain,
             applied: self.applied.clone(),
+            applied_targets: self.applied_targets.clone(),
         }
     }
 }
@@ -1250,6 +1258,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         unavailable: BTreeMap::new(),
         applied: BTreeMap::new(),
         applied_sequence: 0,
+        applied_targets: BTreeMap::new(),
         hint_ready: false,
         observes_drain: false,
         drain_sent_at: None,
@@ -1296,6 +1305,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
                 slot.sent_steps = steps.clone();
                 slot.seed = Some(steps);
                 slot.applied = applied;
+                slot.applied_targets = targets;
                 return Ok(slot);
             }
             Ok(_) => {}
@@ -1822,6 +1832,7 @@ async fn start_assignment(
         unavailable: BTreeMap::new(),
         applied: BTreeMap::new(),
         applied_sequence: 0,
+        applied_targets: BTreeMap::new(),
         hint_ready: false,
         observes_drain: false,
         drain_sent_at: None,
@@ -2492,22 +2503,26 @@ impl AgentLoop<'_> {
                         unavailable,
                         hint_ready,
                         observes_drain,
+                        applied_targets,
                         ..
                     }) => {
                         for (key, steps) in unavailable {
                             slot.unavailable.entry(key).or_default().extend(steps);
                         }
                         slot.applied = applied;
+                        slot.applied_targets = applied_targets;
                         slot.applied_sequence = slot.applied_sequence.max(sequence);
                         slot.note_readiness(hint_ready, observes_drain);
                     }
                     Ok(Event::State {
                         applied,
+                        targets,
                         hint_ready,
                         observes_drain,
                         ..
                     }) => {
                         slot.applied = applied;
+                        slot.applied_targets = targets;
                         slot.note_readiness(hint_ready, observes_drain);
                     }
                     Ok(Event::Readiness {
@@ -4872,6 +4887,7 @@ mod drain_tests {
             unavailable: BTreeMap::new(),
             applied: BTreeMap::new(),
             applied_sequence: 0,
+            applied_targets: BTreeMap::new(),
             hint_ready: false,
             observes_drain: false,
             drain_sent_at: None,

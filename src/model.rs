@@ -345,6 +345,9 @@ pub struct AllocationFacts {
     /// The steps the supervisor reported applied, per resource.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+    /// The cap or hint targets the supervisor reported applied, per resource.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

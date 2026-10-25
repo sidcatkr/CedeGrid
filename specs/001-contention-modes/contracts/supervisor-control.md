@@ -39,7 +39,7 @@ These are new:
 
 | Event | Fields |
 |---|---|
-| `adjusted` | `sequence`, `applied: {<ResourceKey>: step}`, `unavailable: {<ResourceKey>: [step]}`, `hint_ready`, `observes_drain`, `detail` |
+| `adjusted` | `sequence`, `applied: {<ResourceKey>: step}`, `applied_targets: {<ResourceKey>: target}` (optional; the cap or hint targets applied), `unavailable: {<ResourceKey>: [step]}`, `hint_ready`, `observes_drain`, `detail` |
 | `state` | `applied`, `targets`, `hint_ready`, `observes_drain`, `authority: "connected" \| "lost"` |
 | `readiness` | `hint_ready`, `observes_drain`; sent when either changes |
 

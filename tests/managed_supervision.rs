@@ -1146,6 +1146,20 @@ while not (d/'stop').exists():
             (Some(YieldStep::None), false)
         ]
     );
+    // Each report carries the target the supervisor applied.
+    let targets: Vec<Option<u64>> = script
+        .reports
+        .iter()
+        .map(|report| match report {
+            supervision::SupervisorReport::Adjusted {
+                applied_targets, ..
+            } => applied_targets
+                .get(&cedegrid::contention::ResourceKey::Ram)
+                .copied(),
+            other => panic!("unexpected report {other:?}"),
+        })
+        .collect();
+    assert_eq!(targets, [Some(100), Some(50), None]);
     let seen: Vec<serde_json::Value> =
         serde_json::from_str(&fs::read_to_string(dir.path().join("seen")).unwrap()).unwrap();
     let first = seen

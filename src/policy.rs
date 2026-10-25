@@ -1788,16 +1788,23 @@ impl PolicyEngine {
                 // reports applied, since the duty cycle is own actuation. Unknown
                 // activity and unreported duties keep the whole device (FR-008).
                 let assumed = GPU_COMPUTE_CAPACITY / running.len() as u64;
+                // Credit the larger of the target the supervisor applied and the
+                // current one, so a lowered target counts only once applied.
                 let applied_duty = |allocation: &Allocation| -> u64 {
                     let state = self.ladder.get(&(allocation.id.clone(), key.clone()));
-                    let applied = input
-                        .facts
-                        .get(&allocation.id)
-                        .and_then(|facts| facts.applied.get(&key));
+                    let facts = input.facts.get(&allocation.id);
+                    let applied = facts.and_then(|facts| facts.applied.get(&key));
                     match (unknown, state, applied) {
                         (false, Some(state), Some(step)) if *step == state.step => {
                             match state.step {
-                                YieldStep::Cap => assumed.min(state.target.unwrap_or(assumed)),
+                                YieldStep::Cap => {
+                                    let current = state.target.unwrap_or(assumed);
+                                    let ran = facts
+                                        .and_then(|facts| facts.applied_targets.get(&key))
+                                        .copied()
+                                        .unwrap_or(current);
+                                    assumed.min(ran.max(current))
+                                }
                                 YieldStep::Pause => 0,
                                 _ => assumed,
                             }
@@ -1808,6 +1815,9 @@ impl PolicyEngine {
                 let held = budget
                     .own
                     .unwrap_or_else(|| running.iter().map(|a| applied_duty(a)).sum());
+                if budget.own.is_none() {
+                    statuses.entry(key.clone()).or_default().own = Some((held, held));
+                }
                 let share = held / running.len() as u64;
                 let excess = held.saturating_sub(budget.share);
                 // While calm, a held cap rises toward its usage plus its part of

@@ -288,6 +288,10 @@ pub enum SupervisorReport {
         hint_ready: bool,
         #[serde(default)]
         observes_drain: bool,
+        /// The cap or hint target applied per resource, so the policy credits
+        /// own work at what runs, not at what it asked for.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        applied_targets: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
     },
     State {
         applied: std::collections::BTreeMap<
@@ -1204,6 +1208,14 @@ mod unix {
                         detail: details.join("; "),
                         hint_ready,
                         observes_drain,
+                        applied_targets: contention
+                            .applied
+                            .iter()
+                            .filter(|(_, step)| step.step != YieldStep::None)
+                            .filter_map(|(key, step)| {
+                                step.target.map(|target| (key.clone(), target))
+                            })
+                            .collect(),
                     });
                 }
                 SupervisorCommand::Allowance { allowance } => {
