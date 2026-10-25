@@ -3686,6 +3686,56 @@ fn legacy_agents_are_placed_by_the_0_2_fields() {
     assert!(run(&|r| r.expansion_allowed = false).is_empty());
 }
 
+/// A legacy and a negotiated agent in one pool: each is placed by its own report,
+/// the legacy one by the 0.2 fields and the negotiated one by per-resource admission.
+#[test]
+fn legacy_and_negotiated_agents_are_placed_by_their_own_reports() {
+    use cedegrid::contention::ResourceKey;
+    let run = |negotiated_ram_open: bool| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        let mut p = pool();
+        p.node_ids = vec!["node".into(), "other".into()];
+        p.max_workers = 8;
+        c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+            .unwrap();
+        submit_tasks(
+            &mut c,
+            "job",
+            0,
+            (0..4).map(|i| task(&format!("t{i}"))).collect(),
+            100,
+        );
+        // The legacy agent sends 0.2 fields only; the negotiated one also states
+        // admission per resource, with the legacy flags still set.
+        let legacy = report(100);
+        let mut modern = negotiated(100, &[]);
+        modern.node_id = "other".into();
+        if !negotiated_ram_open {
+            resource(&mut modern, ResourceKey::Ram).admission = held();
+        }
+        let other = Principal::Node {
+            node_id: "other".into(),
+        };
+        let Response::Heartbeat { reply: first } = c
+            .handle_at(&node(), Request::Heartbeat { report: legacy }, 100)
+            .unwrap()
+        else {
+            panic!()
+        };
+        let Response::Heartbeat { reply: second } = c
+            .handle_at(&other, Request::Heartbeat { report: modern }, 100)
+            .unwrap()
+        else {
+            panic!()
+        };
+        (first.assignments.len(), second.assignments.len())
+    };
+    // Each node has a 2000m budget for 1000m tasks.
+    assert_eq!(run(true), (2, 2));
+    assert_eq!(run(false), (2, 0));
+}
+
 /// Admission for a resource stays closed while own work on it is above step zero,
 /// whatever the report's admission says (FR-028).
 #[test]
