@@ -344,7 +344,7 @@ fn node_config(
     config.cpu.reserve_physical_cores = 0;
     config.ram.reserve_mib = 0;
     config.ram.reserve_percent = 0;
-    config.gpu.scale_up_cooldown_ms = 0;
+    config.gpu.scale_up_cooldown_ms = Some(0);
     config.contention.cpu.scale_up_cooldown_ms = Some(0);
     config.contention.ram.scale_up_cooldown_ms = Some(0);
     // Constrained Linux validation can use the normal 500ms observation cadence.

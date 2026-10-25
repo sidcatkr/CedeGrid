@@ -59,16 +59,23 @@ sample periods; reading every 500 ms need not produce independent samples.
 - Stable headroom permits incremental expansion only after the configured cooldown.
   The coordinator reserves each launch before dispatch and the agent rechecks locally.
 
-Until GPU admission follows the contention modes (T085), the legacy GPU capability modes
-keep their 0.2 effect on admission. Auto selects only fresh activity telemetry or
-conservative non-sharing behavior on a reliably observed empty device. Explicit
-contention-aware mode requires the former; non-sharing mode freezes expansion and drains
-affected opportunistic work when external contexts appear. Unknown basic observations
-block the device. Auto/non-sharing GPU assignments must be opportunistic because full
-yield conflicts with guaranteed continuity; CPU-only guaranteed work remains
-independent. The coordinator rejects incompatible placement and the agent verifies the
-contract before authorization. An empty-device pass is not evidence of occupied-device
-sharing. See [GPU operation](coordinator-work.md#gpu-capability-modes).
+GPU admission follows each device's GPU compute mode, by one rule the policy and the
+launch recheck share: Yield First admits only on a quiet device; Neutral and Performance
+admit on quiet or active devices and under activity of unknown amount, which counts as
+one principal; unknown GPU memory blocks; and `contention.never_share_occupied_gpus`
+refuses new work on a device with external contexts or an unknown process list. Own work
+already running on a device that becomes occupied is not drained for that alone. The
+launch recheck also refuses a request that would leave less than the device's floor
+free. Missing GPU observation holds the current steps as an unknown measurement instead
+of yielding fully, so Guaranteed GPU work needs no special contract. Under external
+compute activity, own GPU work gets a compute share by pausing it for part of each
+period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
+and kernels already submitted keep running, so the effective granularity is the period
+plus the longest kernel. A process with a CPU cap and a GPU compute share runs one cycle
+at the smaller duty; Guaranteed work takes no GPU compute step. Activity of unknown
+amount first holds these steps and escalates after the unknown window. An empty-device
+pass is not evidence of occupied-device sharing. See
+[GPU operation](coordinator-work.md#gpu-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.
@@ -135,16 +142,17 @@ supervisor.
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
 each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2 s in
-Performance. CPU/RAM admission opens once both have cooled. `gpu.scale_up_cooldown_ms`
-applies to GPU memory only. On RAM and GPU memory, the n-th reclaim episode (a floor
-breach or own usage beyond the budget) within `memory_peak_window_s` adds
-`reclaim_backoff_ms` × 2^(n−1) to the cooldown, at most `reclaim_backoff_max_ms` (1 s
-doubling to 30 s by default); a peak window without one resets it. Admission headroom
-for memory subtracts the peak of external usage over `memory_peak_window_s` (300 s),
-including the memory of quiet GPU contexts. Each external GPU context and each external
-process holding at least 1% of RAM keeps its own peak while it lives, identified by PID
-and start time, and its peak is dropped when it exits; other external usage keeps one
-peak. Yielding follows current usage.
+Performance. CPU/RAM admission opens once both have cooled. GPU memory waits for
+`contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
+`gpu.scale_up_cooldown_ms`, else its mode's interval. On RAM and GPU memory, the n-th
+reclaim episode (a floor breach or own usage beyond the budget) within
+`memory_peak_window_s` adds `reclaim_backoff_ms` × 2^(n−1) to the cooldown, at most
+`reclaim_backoff_max_ms` (1 s doubling to 30 s by default); a peak window without one
+resets it. Admission headroom for memory subtracts the peak of external usage over
+`memory_peak_window_s` (300 s), including the memory of quiet GPU contexts. Each
+external GPU context and each external process holding at least 1% of RAM keeps its own
+peak while it lives, identified by PID and start time, and its peak is dropped when it
+exits; other external usage keeps one peak. Yielding follows current usage.
 
 
 Memory contention starts with a resource target for workers that read targets
@@ -222,9 +230,7 @@ names the replacement: `contention_aware` and `best_effort_occupied` set GPU com
 GPU memory to Neutral unless their mode is set, `conservative_non_sharing` sets
 `contention.never_share_occupied_gpus = true`, and `auto` changes nothing. A non-empty
 `gpu.best_effort_external_processes` is reported as unused. `doctor` shows the
-interpretation and every load-time warning. Until GPU admission follows the modes,
-`gpu.execution_mode` also keeps its 0.2 effect on GPU admission, and
-`contention.never_share_occupied_gpus` uses the 0.2 non-sharing path.
+interpretation and every load-time warning. `gpu.execution_mode` has no other effect.
 
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.

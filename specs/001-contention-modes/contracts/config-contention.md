@@ -37,7 +37,7 @@ hysteresis_percent = 50
 min_step_dwell_intervals = 3        # 1-10
 pause_bound_s = 10                  # cpu and gpu_compute only, 1-60
 scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
-scale_up_cooldown_ms = 10000        # cpu and ram only; admission wait; unset, the mode's scale-up interval
+scale_up_cooldown_ms = 10000        # cpu, ram and gpu_memory; admission wait; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends; above 1 needs "relaxed_detection"
 admission_usage_window_s = 60       # cpu only, 1-3600: running opportunistic CPU is admitted at its p95 usage over it
 
@@ -66,7 +66,9 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
   for RAM. Each resource waits only for its own cooldown.
 - Unset, each takes its resource's mode scale-up interval: 30000 in Yield First, 10000 in Neutral
   and 2000 in Performance, or `scale_up_step_interval_s` × 1000 when that is set.
-- GPU memory keeps `gpu.scale_up_cooldown_ms`, which no longer affects CPU or RAM (FR-034).
+- GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
+  `gpu.scale_up_cooldown_ms`, else the mode's scale-up interval; neither affects CPU or RAM
+  (FR-034).
 - RAM and GPU memory add a reclaim backoff: after a reclaim episode on the resource, each further
   episode within `memory_peak_window_s` doubles an extra delay, from `reclaim_backoff_ms` up to
   `reclaim_backoff_max_ms` (FR-061).

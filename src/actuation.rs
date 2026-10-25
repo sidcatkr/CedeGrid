@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 const MIN_DUTY: f64 = 0.05;
 
 /// Rootless mechanisms (research R4): a SIGSTOP/SIGCONT duty cycle for a CPU cap
-/// and SIGSTOP for a pause, both through owned handles. Lower share and memory
+/// and for a GPU compute share, and SIGSTOP for a pause, all through owned
+/// handles. One cycle serves both caps at the smaller duty. Lower share and memory
 /// caps have no rootless runtime mechanism; hints need resource targets (US4).
 pub struct RootlessActuator {
     class: AllocationClass,
@@ -20,7 +21,11 @@ pub struct RootlessActuator {
     /// Resources that asked for a pause.
     paused: BTreeSet<ResourceKind>,
     stopped: bool,
+    /// The share of each period that meets the CPU cap.
     duty: f64,
+    /// The share of each period a GPU compute cap allows: its target in
+    /// thousandths of the device's time.
+    gpu_duty: f64,
     phase_started: Instant,
     /// CPU time and instant at the start of the current running phase.
     run_mark: Option<(Duration, Instant)>,
@@ -36,6 +41,7 @@ impl RootlessActuator {
             paused: BTreeSet::new(),
             stopped: false,
             duty: 1.0,
+            gpu_duty: 1.0,
             phase_started: Instant::now(),
             run_mark: None,
         }
@@ -58,6 +64,12 @@ impl RootlessActuator {
         Ok(())
     }
 
+    /// The share of each period the family runs under the applied caps.
+    pub fn duty(&self) -> f64 {
+        let cpu = if self.cap.is_some() { self.duty } else { 1.0 };
+        cpu.min(self.gpu_duty)
+    }
+
     /// Bring the family to the state the applied steps require.
     fn enforce(&mut self, family: &mut dyn Family) -> Result<()> {
         if !self.paused.is_empty() {
@@ -74,9 +86,12 @@ impl Actuator for RootlessActuator {
         let mut steps = BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]);
         match kind {
             ResourceKind::Cpu => {}
-            ResourceKind::GpuCompute => {
+            // A GPU compute share is a pause duty cycle; Guaranteed work is never
+            // paused (FR-024).
+            ResourceKind::GpuCompute if self.class == AllocationClass::Guaranteed => {
                 steps.insert(YieldStep::Cap);
             }
+            ResourceKind::GpuCompute => {}
             ResourceKind::Ram | ResourceKind::GpuMemory => {
                 steps.extend([YieldStep::Cap, YieldStep::Pause]);
             }
@@ -105,6 +120,11 @@ impl Actuator for RootlessActuator {
             YieldStep::Pause => {
                 self.paused.insert(kind);
             }
+            YieldStep::Cap if kind == ResourceKind::GpuCompute => {
+                self.paused.remove(&kind);
+                let target = target.unwrap_or(500);
+                self.gpu_duty = (target as f64 / 1000.0).clamp(MIN_DUTY, 1.0);
+            }
             YieldStep::Cap => {
                 self.paused.remove(&kind);
                 let target = target.unwrap_or(self.requested_cpu / 2);
@@ -117,6 +137,9 @@ impl Actuator for RootlessActuator {
                     self.cap = None;
                     self.duty = 1.0;
                 }
+                if kind == ResourceKind::GpuCompute {
+                    self.gpu_duty = 1.0;
+                }
             }
         }
         self.enforce(family)?;
@@ -124,17 +147,19 @@ impl Actuator for RootlessActuator {
     }
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
-        let Some(target) = self.cap.filter(|_| self.paused.is_empty()) else {
+        if !self.paused.is_empty() || (self.cap.is_none() && self.gpu_duty >= 1.0) {
             return Ok(());
-        };
+        }
         let elapsed = self.phase_started.elapsed();
         if !self.stopped {
-            if elapsed < self.period.mul_f64(self.duty) {
+            if elapsed < self.period.mul_f64(self.duty()) {
                 return Ok(());
             }
             // Measure the family's unthrottled rate over this running phase and
             // set the share of the next period it may run.
-            if let (Some((start_cpu, start)), Some(cpu)) = (self.run_mark, family.cpu_time()) {
+            if let (Some(target), Some((start_cpu, start)), Some(cpu)) =
+                (self.cap, self.run_mark, family.cpu_time())
+            {
                 let running = start.elapsed().as_secs_f64();
                 if running > 0.0 {
                     let rate = cpu.saturating_sub(start_cpu).as_secs_f64() / running * 1000.0;
@@ -145,11 +170,11 @@ impl Actuator for RootlessActuator {
                     }
                 }
             }
-            if self.duty < 1.0 {
+            if self.duty() < 1.0 {
                 self.stop(family)?;
             }
             self.phase_started = Instant::now();
-        } else if elapsed >= self.period.mul_f64(1.0 - self.duty) {
+        } else if elapsed >= self.period.mul_f64(1.0 - self.duty()) {
             self.resume(family)?;
             self.phase_started = Instant::now();
         }
@@ -160,6 +185,7 @@ impl Actuator for RootlessActuator {
         self.paused.clear();
         self.cap = None;
         self.duty = 1.0;
+        self.gpu_duty = 1.0;
         if self.stopped {
             family.signal(signal::CONT)?;
             self.stopped = false;
@@ -367,5 +393,90 @@ impl TargetChannel {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution_model::ProcessIdentity;
+    use crate::model::Resources;
+
+    #[derive(Default)]
+    struct Recorder {
+        signals: Vec<i32>,
+    }
+
+    impl Family for Recorder {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            Vec::new()
+        }
+        fn signal(&mut self, signal: i32) -> Result<()> {
+            self.signals.push(signal);
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            None
+        }
+    }
+
+    fn actuator(class: AllocationClass) -> RootlessActuator {
+        RootlessActuator::new(&ActuatorSettings {
+            class,
+            requested: Resources {
+                cpu_millicores: 1000,
+                ..Resources::default()
+            },
+            period: Duration::from_millis(100),
+        })
+    }
+
+    /// A GPU compute cap is a pause duty cycle at the target's share of the device;
+    /// with a CPU cap too, one cycle runs at the smaller duty (FR-021).
+    #[test]
+    fn gpu_compute_cap_shares_the_cpu_duty_cycle() {
+        let mut family = Recorder::default();
+        let mut actuator = actuator(AllocationClass::Opportunistic);
+        assert!(
+            !actuator
+                .unavailable(ResourceKind::GpuCompute)
+                .contains(&YieldStep::Cap)
+                || !cfg!(unix)
+        );
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(250),
+            )
+            .unwrap();
+        assert_eq!(actuator.duty(), 0.25);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(750))
+            .unwrap();
+        assert_eq!(actuator.duty(), 0.25);
+        actuator
+            .apply(&mut family, ResourceKind::GpuCompute, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(actuator.duty(), 0.75);
+        // The minimum duty still applies.
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(0),
+            )
+            .unwrap();
+        assert_eq!(actuator.duty(), MIN_DUTY);
+    }
+
+    /// Guaranteed work takes neither a GPU compute cap nor a pause (FR-024).
+    #[test]
+    fn guaranteed_gpu_compute_steps_are_unavailable() {
+        let unavailable =
+            actuator(AllocationClass::Guaranteed).unavailable(ResourceKind::GpuCompute);
+        assert!(unavailable.contains(&YieldStep::Cap) && unavailable.contains(&YieldStep::Pause));
     }
 }

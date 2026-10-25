@@ -37,25 +37,6 @@ node session alone does not free capacity. Rejoin can remain blocked until absen
 is established. Strict nodes advertise `storage.durable_local`; replayable nodes
 advertise `storage.replayable_local`.
 
-## Explicit occupied GPU mode
-
-`gpu.execution_mode: best_effort_occupied` allows only opportunistic GPU work
-alongside independently tracked, explicitly authorized external competitors. Set
-`gpu.best_effort_external_processes` to a map from actual GPU UUID to identity
-records containing `pid`, `boot_id`, `start_ticks` and `uid`. The collector verifies
-all compute and graphics contexts against those device-scoped identities before
-and after collection. Same user, process name or numeric PID alone is insufficient;
-competitors stay external and are never adopted or signaled.
-
-Activity may remain active or unknown in this explicit mode. Basic inventory,
-memory and device-access observations must still be valid. New or mismatched
-contexts block admission and require yielding; headroom, reserves, external memory
-growth, cooldown and verified cleanup remain enforced. There is no production
-switch that fabricates idle telemetry. Tests may inject unavailable activity and
-must identify that as injected evidence. This mode cannot promise interference-free
-sharing or prevent every external allocation race. Actual occupied-hardware
-validation remains pending; default `auto` is unchanged.
-
 ## Source034 readiness
 
 The storage and GPU modes are reusable configuration-driven core behavior. Native
@@ -136,35 +117,38 @@ that. Host power loss and filesystem-daemon failure are outside this bounded tes
 Known-local filesystems still depend on the OS/storage honoring their documented
 synchronization semantics. See [guarantee boundaries](guarantees.md).
 
-## GPU capability modes
+## GPU modes
 
-Configure the existing node policy; execution still requires explicit opt-in:
+GPU compute and GPU memory follow the contention modes; execution still requires
+explicit opt-in:
 
 ```toml
-[gpu]
-execution_mode = "conservative_non_sharing"
-process_sample_max_age_ms = 2000
+[contention]
+never_share_occupied_gpus = false
+
+[contention.gpu_compute]
+mode = "neutral"
+
+[contention.gpu_memory]
+mode = "neutral"
 ```
 
-`auto` is the default and chooses only observed capabilities. `contention_aware`
-requires fresh process-activity evidence and refuses missing evidence instead of
-silently selecting a weaker mode. `conservative_non_sharing` requires reliable
-compute and graphics inventory, memory observations and device accessibility; it
-admits only devices without external contexts. A new external context freezes
-expansion and requests full opportunistic yield on that device. Missing or stale
-basic observations block admission and also require conservative yielding. A later
-complete empty inventory plus the configured stable-headroom cooldown permits
-recovery. Device utilization alone identifies neither external activity nor idle
-capacity. Process telemetry `NotFound`, unsupported, permission errors and stale
-cursor responses remain distinct diagnostics.
+Yield First admits new GPU work only on a quiet device. Neutral and Performance also
+admit on a device with active external compute or activity of unknown amount, and give
+own work a compute share by pausing it for part of each monitor interval.
+`never_share_occupied_gpus` refuses new work on a device with external contexts or an
+unknown process list; running work is not drained for that alone. Unknown GPU memory or
+attribution blocks admission. GPU memory never pauses: it lowers the target, hints, then
+drains. Device utilization alone identifies neither external activity nor idle capacity.
+Process telemetry `NotFound`, unsupported, permission errors and stale cursor responses
+remain distinct diagnostics.
 
-Auto and conservative non-sharing modes reject guaranteed GPU assignments because
-full reactive yield cannot preserve that allocation class's continuity contract.
-The coordinator's `gpu_guaranteed_allowed` report field defaults false when absent
-and prevents incompatible placement. The agent independently checks the selected
-GPU and class before launch authorization. Explicit contention-aware mode does not
-remove normal headroom, freshness, reserve, or uncertainty checks. Guaranteed CPU
-work remains available independently of GPU eligibility.
+Guaranteed GPU work takes no GPU compute step, so it is allowed in every mode. Agents
+report `gpu_guaranteed_allowed: true`; the coordinator treats the field as false when an
+older agent omits it. Before launch authorization the agent rechecks the selected device
+with the same admission rule on a fresh observation. The legacy `gpu.execution_mode` and
+`gpu.best_effort_external_processes` are interpreted at load time, as
+[guarantees](guarantees.md) describes.
 
 Inspect `doctor`, `observe --no-state`, and node reports before execution. Each GPU
 snapshot's `observation` includes the entry-point/status, cursor and latest driver

@@ -18,161 +18,62 @@ use crate::contention::{
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
-/// Select only behavior supported by the current observation. Legacy recordings
-/// retain their original interpretation instead of inferring missing capability.
-pub fn effective_gpu_capability(
-    config: &Config,
-    observed_at_unix_ms: u64,
-    gpu: &GpuSnapshot,
-) -> Option<GpuExecutionCapability> {
-    use crate::config::GpuExecutionMode;
-    use GpuExecutionCapability::*;
-    let basic = gpu.total_memory_mib > 0
+/// Whether a device's basic observation can be trusted this interval: inventory,
+/// memory use and process list, and no stale or insufficient observation.
+fn gpu_observable(observed_at_unix_ms: u64, gpu: &GpuSnapshot) -> bool {
+    gpu.total_memory_mib > 0
         && gpu
             .used_memory_mib
             .is_some_and(|used| used <= gpu.total_memory_mib)
-        && gpu.external_process_ids.is_some();
-    let observation = gpu.observation.as_ref();
-    if !basic
-        || observation.is_some_and(|o| {
+        && gpu.external_process_ids.is_some()
+        && !gpu.observation.as_ref().is_some_and(|o| {
             o.observed_at_unix_ms != observed_at_unix_ms
-                || o.capability == InsufficientObservability
-        })
-    {
-        return Some(InsufficientObservability);
-    }
-    let fresh = observation.is_some_and(|o| {
-        o.capability == ContentionAware
-            && o.fresh_after_baseline
-            && o.query_cursor_us > 0
-            && o.newest_sample_timestamp_us
-                .is_some_and(|v| v > o.query_cursor_us)
-            && o.baseline_age_ms
-                .is_some_and(|age| age <= config.gpu.process_sample_max_age_ms)
-    });
-    // A Quiet class is positive evidence from healthy observation over a window,
-    // not the absence of samples, so it qualifies like a fresh sample (research R8).
-    let healthy = observation.is_some_and(|o| o.capability == ContentionAware);
-    let evidence = fresh || (gpu.external_compute == ComputeActivity::Quiet && healthy);
-    // Until GPU admission follows the modes (T085), the new key uses the existing
-    // non-sharing path (FR-064).
-    if config.contention.never_share_occupied_gpus {
-        return Some(ConservativeNonSharing);
-    }
-    match config.gpu.execution_mode {
-        GpuExecutionMode::Auto => observation.map(|_| {
-            if evidence {
-                ContentionAware
-            } else {
-                ConservativeNonSharing
-            }
-        }),
-        // Explicit contention-aware mode needs healthy observation; unknown activity
-        // then blocks admission and holds instead of forcing a full yield.
-        GpuExecutionMode::ContentionAware => Some(if healthy {
-            ContentionAware
-        } else {
-            InsufficientObservability
-        }),
-        GpuExecutionMode::ConservativeNonSharing => Some(ConservativeNonSharing),
-        GpuExecutionMode::BestEffortOccupied => Some(
-            if best_effort_identity_contract(config, observed_at_unix_ms, gpu) {
-                BestEffortOccupied
-            } else {
-                InsufficientObservability
-            },
-        ),
-    }
-}
-
-/// Pure verification of collector evidence against this operator's exact device
-/// contract. Unavailable evidence, extra contexts, PID reuse, and stale snapshots
-/// never turn into permission. Activity remains independently Active/Unknown.
-fn best_effort_identity_contract(
-    config: &Config,
-    observed_at_unix_ms: u64,
-    gpu: &GpuSnapshot,
-) -> bool {
-    let Some(allowed) = config.gpu.best_effort_external_processes.get(&gpu.uuid) else {
-        return false;
-    };
-    let Some(observation) = gpu.observation.as_ref() else {
-        return false;
-    };
-    let Some(verified) = observation.best_effort_external_processes.as_ref() else {
-        return false;
-    };
-    let Some(pids) = gpu.external_process_ids.as_ref() else {
-        return false;
-    };
-    let unique: BTreeSet<_> = pids.iter().copied().collect();
-    !allowed.is_empty()
-        && observation.observed_at_unix_ms == observed_at_unix_ms
-        && unique.len() == pids.len()
-        && verified.len() == unique.len()
-        && unique.iter().all(|pid| {
-            verified
-                .iter()
-                .filter(|identity| identity.pid == *pid)
-                .count()
-                == 1
-        })
-        && verified.iter().all(|identity| {
-            identity.pid > 0
-                && identity.start_ticks > 0
-                && !identity.boot_id.trim().is_empty()
-                && allowed.contains(identity)
+                || o.capability == GpuExecutionCapability::InsufficientObservability
         })
 }
 
-/// Automatic full yield conflicts with Guaranteed continuity. Reject the contract
-/// before preparation, including Auto which may enter non-sharing after startup.
+/// The launch recheck on a fresh observation: each requested device must admit
+/// own GPU work by the rule the policy applies (FR-026, FR-027, FR-064), and the
+/// request must leave the device's floor free.
 pub fn validate_gpu_launch_contract(
     config: &Config,
     snapshot: &Snapshot,
     resources: &Resources,
-    class: crate::execution_model::AllocationClass,
+    _class: crate::execution_model::AllocationClass,
 ) -> Result<()> {
     if resources.gpu_memory_mib.is_empty() {
         return Ok(());
     }
     ensure!(
-        class != crate::execution_model::AllocationClass::Guaranteed
-            || config.gpu.execution_mode == crate::config::GpuExecutionMode::ContentionAware,
-        "Guaranteed GPU continuity conflicts with Auto/conservative_non_sharing/best_effort_occupied yielding; use an opportunistic allocation or explicitly qualified contention_aware policy"
-    );
-    ensure!(
         snapshot.gpu_inventory == CapabilityStatus::Available,
         "GPU launch requires available device inventory"
     );
-    for uuid in resources.gpu_memory_mib.keys() {
+    let mode = config.contention.mode(ResourceKind::GpuCompute);
+    for (uuid, requested) in &resources.gpu_memory_mib {
         let gpu = snapshot
             .gpus
             .iter()
             .find(|g| &g.uuid == uuid)
             .with_context(|| format!("GPU {uuid} is absent from the current inventory"))?;
-        let capability = effective_gpu_capability(config, snapshot.observed_at_unix_ms, gpu);
-        ensure!(
-            capability != Some(GpuExecutionCapability::InsufficientObservability),
-            "GPU {uuid} lacks the observation required by its configured execution mode"
+        let admission = crate::contention::gpu_admission(
+            mode,
+            gpu.external_compute,
+            gpu.external_process_ids.as_ref().map(Vec::len),
+            gpu_observable(snapshot.observed_at_unix_ms, gpu),
+            config.contention.never_share_occupied_gpus,
         );
-        if capability == Some(GpuExecutionCapability::ConservativeNonSharing) {
-            ensure!(
-                gpu.external_process_ids.as_ref().is_some_and(Vec::is_empty),
-                "GPU {uuid} conservative non-sharing launch requires a complete empty external inventory"
+        if let Admission::Held { reason } | Admission::Blocked { reason } = admission {
+            anyhow::bail!(
+                "GPU {uuid} is not admitted by mode {mode:?} at the launch recheck: {reason}"
             );
         }
-        let mode = config.contention.mode(ResourceKind::GpuCompute);
-        // Active devices stay blocked in every mode, as in policy admission, until
-        // the US5 floors protect external usage.
-        let admitted = matches!(
-            gpu.external_compute,
-            ComputeActivity::Idle | ComputeActivity::Quiet
-        );
+        let floor = config.vram_floor_mib(gpu.total_memory_mib);
+        let free = gpu
+            .total_memory_mib
+            .saturating_sub(gpu.used_memory_mib.unwrap_or(gpu.total_memory_mib));
         ensure!(
-            capability == Some(GpuExecutionCapability::BestEffortOccupied) || admitted,
-            "GPU {uuid} external activity {:?} is not admitted by mode {mode:?} at the launch recheck",
-            gpu.external_compute
+            *requested <= free.saturating_sub(floor),
+            "GPU {uuid} request of {requested} MiB would leave less than its {floor} MiB floor free"
         );
     }
     Ok(())
@@ -885,6 +786,10 @@ impl PolicyEngine {
             value.stable_since = None;
         }
         let mut blocked_gpus = BTreeSet::new();
+        // Each device's GPU compute allowance and whether it is contended, and the
+        // devices whose external activity is unknown.
+        let mut gpu_compute_budget: BTreeMap<String, (u64, bool)> = BTreeMap::new();
+        let mut gpu_activity_unknown: BTreeSet<String> = BTreeSet::new();
         // Why GPU admission is blocked on a device, for its admission state.
         let mut gpu_block_reasons: BTreeMap<String, String> = BTreeMap::new();
         if snapshot.gpu_inventory != CapabilityStatus::Available {
@@ -899,17 +804,6 @@ impl PolicyEngine {
             }
         } else {
             for gpu in &snapshot.gpus {
-                let mode = effective_gpu_capability(config, snapshot.observed_at_unix_ms, gpu);
-                if let Some(mode) = mode {
-                    reasons.push(format!(
-                        "GPU {} execution capability {:?}; configured {:?}",
-                        gpu.uuid, mode, config.gpu.execution_mode
-                    ));
-                }
-                let best_effort = mode == Some(GpuExecutionCapability::BestEffortOccupied);
-                if best_effort {
-                    reasons.push(format!("GPU {} best_effort_occupied explicitly permits only verified external identities; external activity remains {:?}, interference and slowdown are unmeasured, no hard GPU isolation or continuity guarantee", gpu.uuid, gpu.external_compute));
-                }
                 let key = ResourceKey::GpuMemory(gpu.uuid.clone());
                 // No growth or new-PID event without a prior observation of this device
                 // by this engine; an allocation's first observation is a baseline too.
@@ -991,73 +885,92 @@ impl PolicyEngine {
                 let fresh_sample = gpu.compute_sample_id.is_some_and(|sample| {
                     previous.sample_id.is_none_or(|previous| sample > previous)
                 });
-                let activity_unknown = !best_effort
-                    && (gpu.external_compute == ComputeActivity::Unknown
-                        || (!pids.is_empty() && !fresh_sample));
-                let telemetry_unknown = mode
-                    == Some(GpuExecutionCapability::InsufficientObservability)
-                    || gpu.used_memory_mib.is_none()
-                    || gpu.external_process_ids.is_none()
+                let activity_unknown = gpu.external_compute == ComputeActivity::Unknown
+                    || (!pids.is_empty() && !fresh_sample);
+                let telemetry_unknown = !gpu_observable(snapshot.observed_at_unix_ms, gpu)
                     || unknown_own > 0
                     || gpu.used_memory_mib.is_some_and(|used| observed > used);
-                let active = !best_effort && gpu.external_compute == ComputeActivity::Active;
                 let breached = current_charge > memory_budget;
                 let protection_event = new_external || memory_growth;
-                let unknown = activity_unknown || telemetry_unknown;
-                let non_sharing_conflict = mode
-                    == Some(GpuExecutionCapability::ConservativeNonSharing)
-                    && (!pids.is_empty() || gpu.external_process_ids.is_none());
-                // The configured non-sharing contract and missing observation yield
-                // fully; everything else blocks admission and yields only on a real
-                // budget breach.
-                let full_yield = non_sharing_conflict
-                    || mode == Some(GpuExecutionCapability::InsufficientObservability);
-                let block_reason = if full_yield {
-                    Some("the non-sharing contract or missing observation applies")
-                } else if unknown {
-                    Some("external activity or memory attribution is unknown")
+                let activity = if activity_unknown {
+                    gpu_activity_unknown.insert(gpu.uuid.clone());
+                    ComputeActivity::Unknown
+                } else {
+                    gpu.external_compute
+                };
+                // The same rule the launch recheck applies (FR-026, FR-027, FR-064).
+                let compute_admission = crate::contention::gpu_admission(
+                    governing(ResourceKind::GpuCompute),
+                    activity,
+                    gpu.external_process_ids.as_ref().map(Vec::len),
+                    !telemetry_unknown,
+                    config.contention.never_share_occupied_gpus,
+                );
+                let block_reason = if telemetry_unknown {
+                    Some("GPU memory or its attribution is unknown".to_string())
                 } else if protection_event {
-                    Some("a new external workload or external memory growth appeared")
-                } else if active {
-                    Some("external compute is active")
+                    Some("a new external workload or external memory growth appeared".into())
                 } else if breached {
-                    Some("own charges exceed the device budget")
+                    Some("own charges exceed the memory reserve or allocation budget".into())
+                } else if let Admission::Held { reason } | Admission::Blocked { reason } =
+                    &compute_admission
+                {
+                    Some(reason.clone())
                 } else {
                     None
                 };
-                if let Some(reason) = block_reason {
-                    gpu_block_reasons.insert(gpu.uuid.clone(), reason.into());
-                }
-                if full_yield {
+                if let Some(reason) = &block_reason {
                     blocked_gpus.insert(gpu.uuid.clone());
                     unsafe_now = true;
-                    reasons.push(format!("GPU {} conservative non-sharing/insufficient observation: full opportunistic yield; no new GPU work until complete empty inventory and stable cooldown", gpu.uuid));
+                    reasons.push(format!("GPU {}: {reason}; GPU admission blocked", gpu.uuid));
+                    gpu_block_reasons.insert(gpu.uuid.clone(), reason.clone());
                 }
-                if protection_event || unknown || active || breached {
-                    blocked_gpus.insert(gpu.uuid.clone());
-                    unsafe_now = true;
-                    if protection_event {
-                        reasons.push(format!("GPU {} new external workload or external memory growth beyond the noise tolerance; GPU admission blocked", gpu.uuid));
-                    }
-                    if active {
-                        reasons.push(format!("GPU {} external compute activity; utilization percentage is not an interference measurement", gpu.uuid));
-                    }
-                    if unknown {
-                        reasons.push(format!("GPU {} external activity or memory attribution unknown; expansion blocked", gpu.uuid));
-                    }
-                    if breached {
-                        reasons.push(format!(
-                            "GPU {} memory reserve or allocation budget breached",
-                            gpu.uuid
-                        ));
-                    }
+                // GPU compute shares apply under external activity, which counts
+                // as one principal of unknown amount; own GPU usage is not measured
+                // per process, so idle-device margins act through admission only.
+                let compute_key = ResourceKey::GpuCompute(gpu.uuid.clone());
+                let contended_compute =
+                    matches!(activity, ComputeActivity::Active | ComputeActivity::Unknown);
+                if !telemetry_unknown {
+                    let share = if contended_compute {
+                        own_allowance(
+                            &ModeInput {
+                                kind: ResourceKind::GpuCompute,
+                                mode: governing(ResourceKind::GpuCompute),
+                                capacity: GPU_COMPUTE_CAPACITY,
+                                external: 0,
+                                own: GPU_COMPUTE_CAPACITY,
+                                principals: None,
+                                background: 0,
+                                saturated: false,
+                                unknown_activity: true,
+                                satisfied: vec![],
+                                probe: None,
+                            },
+                            &config.contention.thresholds(ResourceKind::GpuCompute),
+                        )
+                    } else {
+                        GPU_COMPUTE_CAPACITY
+                    };
+                    gpu_compute_budget.insert(gpu.uuid.clone(), (share, contended_compute));
                 }
+                let compute_status = statuses.entry(compute_key).or_default();
+                compute_status.activity = Some(activity);
+                compute_status.target_share =
+                    gpu_compute_budget.get(&gpu.uuid).map(|(share, _)| *share);
+                compute_status.admission = Some(if telemetry_unknown {
+                    Admission::Held {
+                        reason: "GPU observation is unknown".into(),
+                    }
+                } else {
+                    compute_admission
+                });
                 let envelope_gpu = input
                     .envelope
                     .as_ref()
                     .map(|e| e.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0));
-                let gpu_budget = if full_yield || telemetry_unknown {
-                    if full_yield { 0 } else { memory_budget }
+                let gpu_budget = if telemetry_unknown {
+                    memory_budget
                 } else {
                     floor_available.insert(key.clone(), memory_budget);
                     let vram_floor = config.vram_floor(gpu.total_memory_mib);
@@ -1153,8 +1066,10 @@ impl PolicyEngine {
         } else {
             Some(self.stable_since.unwrap_or(now_monotonic_ms))
         };
-        let cooled_down = stable_since
-            .is_some_and(|since| now_monotonic_ms - since >= config.gpu.scale_up_cooldown_ms);
+        let cooled_down = stable_since.is_some_and(|since| {
+            now_monotonic_ms - since
+                >= config.gpu_memory_cooldown_ms(governing(ResourceKind::GpuMemory))
+        });
         if input.explicit_drain {
             budget = Resources::default();
         }
@@ -1641,6 +1556,168 @@ impl PolicyEngine {
                     }
                 }
             }
+            // GPU compute shares by pause duty cycle (FR-021, FR-022): own work on a
+            // device shares it equally, and each allocation's cap target is its
+            // share minus what the device has to free. Compute is reclaimed within
+            // an interval, so it is never drained for GPU compute alone.
+            for (uuid, (allowance, contended)) in &gpu_compute_budget {
+                let key = ResourceKey::GpuCompute(uuid.clone());
+                let kind = ResourceKind::GpuCompute;
+                let running: Vec<&Allocation> = input
+                    .allocations
+                    .iter()
+                    .filter(|a| {
+                        a.phase == AllocationPhase::Running
+                            && a.requested.gpu_memory_mib.contains_key(uuid)
+                    })
+                    .collect();
+                if running.is_empty() {
+                    continue;
+                }
+                let share = GPU_COMPUTE_CAPACITY / running.len() as u64;
+                let held = share * running.len() as u64;
+                let excess = held.saturating_sub(*allowance);
+                let external = if *contended { GPU_COMPUTE_CAPACITY } else { 0 };
+                // Activity of unknown amount first holds the steps, as any unknown
+                // measurement does, and escalates after the unknown window (FR-008).
+                let unknown = gpu_activity_unknown.contains(uuid);
+                if unknown {
+                    let since = self
+                        .unknown_since
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(now_monotonic_ms);
+                    unknown_since.insert(key.clone(), since);
+                }
+                let measurement_known = !unknown
+                    || unknown_since.get(&key).is_some_and(|since| {
+                        now_monotonic_ms.saturating_sub(*since) >= window(kind)
+                    });
+                let cause = if unknown {
+                    YieldCause::UnknownMeasurement
+                } else {
+                    YieldCause::ExternalGrowth
+                };
+                let timing = LadderTiming::new(
+                    &config.contention.thresholds(kind),
+                    governing(kind),
+                    interval_ms,
+                );
+                // No backend lowers a GPU compute share, and a worker's resource
+                // targets carry no GPU compute amount.
+                let unavailable_of = |id: &str| {
+                    let mut steps = input
+                        .facts
+                        .get(id)
+                        .and_then(|f| f.unavailable.get(&key))
+                        .cloned()
+                        .unwrap_or_default();
+                    steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
+                    steps
+                };
+                let guaranteed =
+                    |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
+                let mut victims: Vec<VictimFacts> = running
+                    .iter()
+                    .filter(|a| {
+                        allocation_unknown_since.get(&a.id).is_none_or(|start| {
+                            now_monotonic_ms.saturating_sub(*start) >= window(kind)
+                        })
+                    })
+                    .map(|a| VictimFacts {
+                        id: a.id.clone(),
+                        controllable: !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable),
+                        frees: true,
+                        pending: false,
+                        guaranteed: guaranteed(a),
+                        progress_lost_ms: input.facts.get(&a.id).map_or(0, |f| f.progress_lost_ms),
+                        amount: share,
+                    })
+                    .collect();
+                victim_order(&mut victims, excess);
+                let mut remaining = excess;
+                let mut planned = BTreeSet::new();
+                for victim in victims {
+                    planned.insert(victim.id.clone());
+                    let state = self.ladder.get(&(victim.id.clone(), key.clone()));
+                    let contended_victim = remaining > 0;
+                    let decision = plan_step(
+                        state,
+                        &LadderInput {
+                            kind,
+                            guaranteed: victim.guaranteed,
+                            allow_drain: false,
+                            unavailable: unavailable_of(&victim.id),
+                            excess: if contended_victim { remaining } else { 0 },
+                            external,
+                            measurement_known,
+                            cause,
+                            usage: None,
+                            target: Some(if contended_victim {
+                                share.saturating_sub(remaining)
+                            } else {
+                                share
+                            }),
+                        },
+                        &timing,
+                        now_monotonic_ms,
+                    );
+                    if !decision.skipped.is_empty() {
+                        note(
+                            &mut statuses,
+                            key.clone(),
+                            "step_skipped_unavailable",
+                            format!(
+                                "allocation {}: unavailable steps {:?} were skipped",
+                                victim.id, decision.skipped
+                            ),
+                        );
+                    }
+                    let before = state.map_or(YieldStep::None, |s| s.step);
+                    if let Some(next) = decision.state {
+                        if next.step > before {
+                            let freed = match next.step {
+                                YieldStep::Cap => {
+                                    share.saturating_sub(next.target.unwrap_or(share))
+                                }
+                                YieldStep::Pause => share,
+                                _ => 0,
+                            };
+                            remaining = remaining.saturating_sub(freed);
+                        }
+                        ladder.insert((victim.id.clone(), key.clone()), next);
+                    }
+                }
+                for ((id, step_key), state) in &self.ladder {
+                    if step_key != &key || planned.contains(id) {
+                        continue;
+                    }
+                    let Some(allocation) = input.allocations.iter().find(|a| &a.id == id) else {
+                        continue;
+                    };
+                    let decision = plan_step(
+                        Some(state),
+                        &LadderInput {
+                            kind,
+                            guaranteed: guaranteed(allocation),
+                            allow_drain: false,
+                            unavailable: unavailable_of(id),
+                            excess: 0,
+                            external,
+                            measurement_known: measurement_known
+                                && !unknown_allocations.contains(id),
+                            cause,
+                            target: None,
+                            usage: None,
+                        },
+                        &timing,
+                        now_monotonic_ms,
+                    );
+                    if let Some(next) = decision.state {
+                        ladder.insert((id.clone(), key.clone()), next);
+                    }
+                }
+            }
             for ((id, key), state) in &ladder {
                 if state.step == YieldStep::None {
                     continue;
@@ -1808,8 +1885,7 @@ impl PolicyEngine {
                     .is_some_and(|since| {
                         now_monotonic_ms - since
                             >= config
-                                .gpu
-                                .scale_up_cooldown_ms
+                                .gpu_memory_cooldown_ms(governing(ResourceKind::GpuMemory))
                                 .saturating_add(backoff_ms(&ResourceKey::GpuMemory(uuid.clone())))
                     })
         });
@@ -1970,7 +2046,7 @@ impl PolicyEngine {
                     .saturating_sub(held.peak);
                 let since = next_gpus.get(&gpu.uuid).and_then(|p| p.stable_since);
                 let elapsed = since.map(|since| now_monotonic_ms - since);
-                let cooldown = config.gpu.scale_up_cooldown_ms;
+                let cooldown = config.gpu_memory_cooldown_ms(governing(ResourceKind::GpuMemory));
                 (held.cooldown, held.backoff) = withheld(
                     pre,
                     elapsed.is_some_and(|ms| ms >= cooldown),
@@ -2053,7 +2129,7 @@ impl PolicyEngine {
                 .get(&gpu.uuid)
                 .and_then(|p| p.stable_since)
                 .map(|since| now_monotonic_ms - since);
-            let cooldown = config.gpu.scale_up_cooldown_ms;
+            let cooldown = config.gpu_memory_cooldown_ms(governing(ResourceKind::GpuMemory));
             let state = admission(
                 &key,
                 false,
@@ -2062,6 +2138,12 @@ impl PolicyEngine {
                 elapsed.is_some_and(|ms| ms >= cooldown.saturating_add(backoff_ms(&key))),
             );
             admissions.push((key, state));
+        }
+        for gpu in &snapshot.gpus {
+            let key = ResourceKey::GpuCompute(gpu.uuid.clone());
+            if stepped(&key) {
+                admissions.push((key, blocked("own work on this resource is yielding")));
+            }
         }
         for (key, state) in admissions {
             statuses.entry(key).or_default().admission = Some(state);
@@ -2117,6 +2199,9 @@ impl PolicyEngine {
         })
     }
 }
+
+/// GPU compute is accounted in thousandths of one device's time.
+const GPU_COMPUTE_CAPACITY: u64 = 1000;
 
 fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<String>) -> bool {
     let cpu = &kernel.cpu;

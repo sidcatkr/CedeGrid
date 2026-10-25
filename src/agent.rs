@@ -3235,8 +3235,8 @@ impl AgentLoop<'_> {
             boot_id,
             observed_at_unix_ms: snapshot.observed_at_unix_ms,
             managed_budget: schedulable_budget(decision),
-            gpu_guaranteed_allowed: config.gpu.execution_mode
-                == crate::config::GpuExecutionMode::ContentionAware,
+            // No mode fully yields GPU work any more, so Guaranteed GPU work fits.
+            gpu_guaranteed_allowed: true,
             expansion_allowed: admission_safe && self.stopping.is_none() && !self.spool_full,
             gpu_expansion_allowed: decision.expansion_allowed
                 && self.stopping.is_none()
@@ -4413,7 +4413,7 @@ mod agent_transport_tests {
     fn unrelated_gpu_uncertainty_does_not_block_cpu_only_scope() {
         use crate::model::*;
         let mut config = Config::default();
-        config.gpu.scale_up_cooldown_ms = 0;
+        config.gpu.scale_up_cooldown_ms = Some(0);
         config.contention.cpu.scale_up_cooldown_ms = Some(0);
         config.contention.ram.scale_up_cooldown_ms = Some(0);
         config.cpu.reserve_physical_cores = 0;

@@ -711,7 +711,8 @@ node reports with the expected per-resource values at each step.
 - **FR-033**: Recorded snapshots and policy inputs from 0.2 MUST remain replayable.
 - **FR-034**: Scale-up timing MUST be configured per resource and counted from the time that
   resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
-  interval (30, 10 or 2 s). GPU memory uses `gpu.scale_up_cooldown_ms` per device. RAM and GPU
+  interval (30, 10 or 2 s). GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
+  set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Until per-resource admission is placed on (US5),
   CPU/RAM admission opens once both have cooled. For CPU admission, running opportunistic work
   is charged at its p95 usage over `contention.cpu.admission_usage_window_s` (default 60 s);

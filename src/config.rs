@@ -870,7 +870,7 @@ impl ContentionConfig {
             )?;
             applies(
                 "scale_up_cooldown_ms",
-                &[Cpu, Ram],
+                &[Cpu, Ram, GpuMemory],
                 set.scale_up_cooldown_ms.is_some(),
             )?;
             applies(
@@ -1438,7 +1438,10 @@ pub struct GpuConfig {
     pub reserve_vram_mib: u64,
     /// The per-device floor is also at least this share of the device (FR-023).
     pub reserve_vram_percent: u8,
-    pub scale_up_cooldown_ms: u64,
+    /// Legacy GPU memory cooldown; `contention.gpu_memory.scale_up_cooldown_ms`
+    /// wins, and unset, the mode's interval applies (FR-034).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_up_cooldown_ms: Option<u64>,
     pub protective_shrink_percent: u8,
     pub active_shrink_percent: u8,
 }
@@ -1450,7 +1453,7 @@ impl Default for GpuConfig {
             process_sample_max_age_ms: 2000,
             reserve_vram_mib: 2 * MIN_VRAM_FLOOR_MIB,
             reserve_vram_percent: 5,
-            scale_up_cooldown_ms: 30_000,
+            scale_up_cooldown_ms: None,
             protective_shrink_percent: 25,
             active_shrink_percent: 50,
         }
@@ -1789,6 +1792,20 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    /// How long GPU memory must stay stable before own work is admitted to it:
+    /// `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
+    /// `gpu.scale_up_cooldown_ms`, else the mode's scale-up interval (FR-034).
+    pub fn gpu_memory_cooldown_ms(&self, mode: crate::contention::ContentionMode) -> u64 {
+        let thresholds = self
+            .contention
+            .thresholds(crate::contention::ResourceKind::GpuMemory);
+        self.contention
+            .gpu_memory
+            .scale_up_cooldown_ms
+            .or(self.gpu.scale_up_cooldown_ms)
+            .unwrap_or_else(|| thresholds.cooldown_ms(mode))
     }
 
     /// The launch-time nice value. Own priority is never raised above the default.

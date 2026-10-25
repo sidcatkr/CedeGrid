@@ -23,7 +23,7 @@ fn config() -> Config {
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.reserve_vram_percent = 0;
-    result.gpu.scale_up_cooldown_ms = 0;
+    result.gpu.scale_up_cooldown_ms = Some(0);
     scale_up_cooldowns(&mut result, 0);
     result
 }
@@ -308,6 +308,14 @@ fn gpu_snapshot() -> Snapshot {
         free_memory_mib: None,
         unattributed_memory_mib: None,
     });
+    result
+}
+
+/// A config whose GPU compute runs in Yield First, where external activity holds
+/// GPU admission (FR-026).
+fn yield_first_gpu() -> Config {
+    let mut result = config();
+    result.contention.gpu_compute.mode = Some(cedegrid::contention::ContentionMode::YieldFirst);
     result
 }
 
@@ -767,18 +775,22 @@ fn low_total_utilization_does_not_override_external_compute_activity() {
     let decision = PolicyEngine::new()
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
-    // Activity, not total utilization, decides: GPU admission is blocked. Without a
-    // memory breach the running work is not drained; GPU compute steps come later.
+    // Activity, not total utilization, decides: the device is contended, so own GPU
+    // work gets half of it. Without a memory breach nothing is drained.
     assert_eq!(decision.managed_budget.gpu_memory_mib["GPU-test"], 14_000);
-    assert!(decision.admission_headroom.gpu_memory_mib.is_empty());
     assert!(decision.would_drain.is_empty());
-    assert!(!decision.expansion_allowed);
-    assert!(
-        decision
-            .reasons
-            .iter()
-            .any(|r| r.contains("external compute activity"))
-    );
+    let share = decision
+        .actions
+        .iter()
+        .find(|a| a.resource == "gpu_compute:GPU-test".parse().unwrap())
+        .map(|a| a.target);
+    assert_eq!(share, Some(Some(500)));
+    // Yield First admits only on a quiet device.
+    let held = PolicyEngine::new()
+        .evaluate(&yield_first_gpu(), &snap, &input, 0)
+        .unwrap();
+    assert!(held.admission_headroom.gpu_memory_mib.is_empty());
+    assert!(!held.expansion_allowed);
 }
 
 #[test]
@@ -795,15 +807,16 @@ fn repeated_driver_sample_does_not_compound_shrink_or_prove_idle() {
         )],
         ..PolicyInput::default()
     };
+    let cfg = yield_first_gpu();
     let mut engine = PolicyEngine::new();
-    let first = engine.evaluate(&config(), &snap, &input, 0).unwrap();
-    let second = engine.evaluate(&config(), &snap, &input, 500).unwrap();
+    let first = engine.evaluate(&cfg, &snap, &input, 0).unwrap();
+    let second = engine.evaluate(&cfg, &snap, &input, 500).unwrap();
     assert_eq!(
         first.managed_budget.gpu_memory_mib,
         second.managed_budget.gpu_memory_mib
     );
     snap.gpus[0].external_compute = ComputeActivity::Idle;
-    let stale_idle = engine.evaluate(&config(), &snap, &input, 90_000).unwrap();
+    let stale_idle = engine.evaluate(&cfg, &snap, &input, 90_000).unwrap();
     assert!(!stale_idle.expansion_allowed);
 }
 
@@ -813,29 +826,30 @@ fn out_of_order_compute_sample_cannot_prove_recovery() {
     snap.gpus[0].compute_sample_id = Some(30);
     snap.gpus[0].external_process_ids = Some(vec![321]);
     snap.gpus[0].external_compute = ComputeActivity::Active;
+    let cfg = yield_first_gpu();
     let mut engine = PolicyEngine::new();
     engine
-        .evaluate(&config(), &snap, &PolicyInput::default(), 0)
+        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
         .unwrap();
     snap.gpus[0].compute_sample_id = Some(29);
     snap.gpus[0].external_compute = ComputeActivity::Idle;
     assert!(
         !engine
-            .evaluate(&config(), &snap, &PolicyInput::default(), 1)
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 1)
             .unwrap()
             .expansion_allowed
     );
     snap.gpus[0].compute_sample_id = Some(30);
     assert!(
         !engine
-            .evaluate(&config(), &snap, &PolicyInput::default(), 2)
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 2)
             .unwrap()
             .expansion_allowed
     );
     snap.gpus[0].compute_sample_id = Some(31);
     assert!(
         engine
-            .evaluate(&config(), &snap, &PolicyInput::default(), 3)
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 3)
             .unwrap()
             .expansion_allowed
     );
@@ -855,7 +869,7 @@ fn unknown_external_activity_blocks_expansion_and_holds() {
         ..PolicyInput::default()
     };
     let decision = PolicyEngine::new()
-        .evaluate(&config(), &snap, &input, 0)
+        .evaluate(&yield_first_gpu(), &snap, &input, 0)
         .unwrap();
     // An unknown measurement first holds the current step (FR-008).
     assert!(decision.would_drain.is_empty() && decision.actions.is_empty());
@@ -1101,7 +1115,7 @@ fn vram_reserve_breach_yields_even_when_gpu_is_idle() {
 #[test]
 fn custom_cooldown_requires_continuously_known_spare_capacity() {
     let mut config = config();
-    config.gpu.scale_up_cooldown_ms = 137;
+    config.gpu.scale_up_cooldown_ms = Some(137);
     let mut engine = PolicyEngine::new();
     let mut snap = snapshot();
     assert!(
@@ -1147,7 +1161,7 @@ fn custom_cooldown_requires_continuously_known_spare_capacity() {
 #[test]
 fn cpu_pressure_resets_recovery_cooldown() {
     let mut cfg = config();
-    cfg.gpu.scale_up_cooldown_ms = 100;
+    cfg.gpu.scale_up_cooldown_ms = Some(100);
     let mut engine = PolicyEngine::new();
     engine
         .evaluate(&cfg, &snapshot(), &PolicyInput::default(), 0)
@@ -1375,8 +1389,8 @@ proptest! {
 
 #[test]
 fn cpu_ram_stability_survives_gpu_uncertainty_without_reusing_retained_gpu_cap() {
-    let mut cfg = config();
-    cfg.gpu.scale_up_cooldown_ms = 137;
+    let mut cfg = yield_first_gpu();
+    cfg.gpu.scale_up_cooldown_ms = Some(137);
     scale_up_cooldowns(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
@@ -1452,7 +1466,7 @@ fn cpu_ram_fallback_fails_closed_for_missing_stale_excess_and_drain_evidence() {
         assert_eq!(decision.admission_headroom.ram_mib, 0);
     }
     let mut cfg = config();
-    cfg.gpu.scale_up_cooldown_ms = 137;
+    cfg.gpu.scale_up_cooldown_ms = Some(137);
     scale_up_cooldowns(&mut cfg, 137);
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
@@ -1516,110 +1530,6 @@ fn gpu_observation(snap: &Snapshot, capability: GpuExecutionCapability) -> GpuOb
 }
 
 #[test]
-fn non_sharing_admits_empty_then_fully_yields_and_recovers_after_confirmed_release() {
-    let mut cfg = config();
-    cfg.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ConservativeNonSharing;
-    cfg.gpu.scale_up_cooldown_ms = 137;
-    let mut snap = gpu_snapshot();
-    snap.gpus[0].used_memory_mib = Some(0);
-    snap.gpus[0].compute_sample_id = None;
-    snap.gpus[0].observation = Some(gpu_observation(
-        &snap,
-        GpuExecutionCapability::ConservativeNonSharing,
-    ));
-    let mut policy = PolicyEngine::new();
-    let first = policy
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-        .unwrap();
-    assert!(!first.expansion_allowed);
-    let ready = policy
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 137)
-        .unwrap();
-    assert!(ready.expansion_allowed);
-    assert!(ready.admission_headroom.gpu_memory_mib["GPU-test"] > 0);
-    let mut input = PolicyInput {
-        allocations: vec![
-            allocation(
-                "a",
-                AllocationPhase::Running,
-                resources(100, 100, 2000),
-                Some(resources(100, 100, 2000)),
-            ),
-            allocation(
-                "b",
-                AllocationPhase::Running,
-                resources(100, 100, 2000),
-                Some(resources(100, 100, 2000)),
-            ),
-        ],
-        ..Default::default()
-    };
-    snap.gpus[0].used_memory_mib = Some(5000);
-    snap.gpus[0].external_process_ids = Some(vec![999]);
-    snap.gpus[0].external_compute = ComputeActivity::Unknown;
-    let yielding = policy.evaluate(&cfg, &snap, &input, 138).unwrap();
-    assert_eq!(yielding.would_drain, ["a", "b"]);
-    assert_eq!(yielding.managed_budget.gpu_memory_mib["GPU-test"], 0);
-    assert!(yielding.admission_headroom.gpu_memory_mib.is_empty());
-    for allocation in &mut input.allocations {
-        allocation.phase = AllocationPhase::Draining;
-    }
-    let draining = policy.evaluate(&cfg, &snap, &input, 139).unwrap();
-    assert!(draining.admission_headroom.gpu_memory_mib.is_empty());
-    snap.gpus[0].used_memory_mib = Some(0);
-    snap.gpus[0].external_process_ids = Some(vec![]);
-    snap.gpus[0].external_compute = ComputeActivity::Idle;
-    let released = policy
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 140)
-        .unwrap();
-    assert!(released.admission_headroom.gpu_memory_mib.is_empty());
-    assert!(
-        policy
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 1276)
-            .unwrap()
-            .admission_headroom
-            .gpu_memory_mib
-            .is_empty(),
-        "the cooldown plus 1 s of reclaim backoff (FR-061)"
-    );
-    assert!(
-        policy
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 1277)
-            .unwrap()
-            .admission_headroom
-            .gpu_memory_mib["GPU-test"]
-            > 0
-    );
-}
-
-#[test]
-fn auto_unknown_external_activity_uses_non_sharing_full_yield() {
-    let mut snap = gpu_snapshot();
-    snap.gpus[0].external_process_ids = Some(vec![77]);
-    snap.gpus[0].external_compute = ComputeActivity::Unknown;
-    snap.gpus[0].compute_sample_id = None;
-    snap.gpus[0].observation = Some(gpu_observation(
-        &snap,
-        GpuExecutionCapability::ConservativeNonSharing,
-    ));
-    let input = PolicyInput {
-        allocations: vec![allocation(
-            "worker",
-            AllocationPhase::Running,
-            resources(100, 100, 6000),
-            Some(resources(100, 100, 6000)),
-        )],
-        ..Default::default()
-    };
-    let d = PolicyEngine::new()
-        .evaluate(&config(), &snap, &input, 0)
-        .unwrap();
-    assert_eq!(d.would_drain, ["worker"]);
-    assert_eq!(d.managed_budget.gpu_memory_mib["GPU-test"], 0);
-    assert!(d.admission_headroom.gpu_memory_mib.is_empty());
-}
-
-#[test]
 fn one_unobservable_device_does_not_block_another_qualified_device() {
     let mut snap = gpu_snapshot();
     snap.gpus[0].uuid = "GPU-bad".into();
@@ -1671,7 +1581,7 @@ fn coordinator_budget_never_reuses_an_ineligible_device_protection_cap() {
         ..Default::default()
     };
     let d = PolicyEngine::new()
-        .evaluate(&config(), &snap, &input, 0)
+        .evaluate(&yield_first_gpu(), &snap, &input, 0)
         .unwrap();
     assert!(d.managed_budget.gpu_memory_mib["GPU-bad"] > 0);
     let offered = cedegrid::policy::schedulable_budget(&d);
@@ -1679,67 +1589,33 @@ fn coordinator_budget_never_reuses_an_ineligible_device_protection_cap() {
     assert!(offered.gpu_memory_mib["GPU-test"] > 0);
 }
 
+/// Utilization never decides GPU admission; an external context with activity of
+/// unknown amount holds Yield First, whatever the utilization (research R8).
 #[test]
-fn explicit_sharing_needs_healthy_process_observation_and_never_infers_from_utilization() {
-    use cedegrid::config::GpuExecutionMode;
-    let mut cfg = config();
-    cfg.gpu.execution_mode = GpuExecutionMode::ContentionAware;
+fn utilization_never_decides_gpu_admission() {
+    let cfg = yield_first_gpu();
     let mut snap = gpu_snapshot();
     snap.gpus[0].used_memory_mib = Some(0);
-    for utilization in [Some(0), Some(100), None] {
-        snap.gpus[0].utilization_percent = utilization;
-        let d = PolicyEngine::new()
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-            .unwrap();
-        assert!(d.admission_headroom.gpu_memory_mib.is_empty());
-    }
-    let mut observation = gpu_observation(&snap, GpuExecutionCapability::ContentionAware);
-    observation.activity_api_status = "NVML_SUCCESS".into();
-    observation.fresh_after_baseline = true;
-    observation.newest_sample_timestamp_us = Some(101);
-    snap.gpus[0].observation = Some(observation.clone());
-    assert!(
+    let headroom = |snap: &Snapshot| {
         PolicyEngine::new()
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-            .unwrap()
-            .admission_headroom
-            .gpu_memory_mib["GPU-test"]
-            > 0
-    );
-    // Health does not depend on fresh samples: an empty, idle device stays
-    // admissible when its cursor ages out (research R8)...
-    observation.baseline_age_ms = Some(cfg.gpu.process_sample_max_age_ms + 1);
-    observation.fresh_after_baseline = false;
-    snap.gpus[0].observation = Some(observation);
-    assert!(
-        PolicyEngine::new()
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-            .unwrap()
-            .admission_headroom
-            .gpu_memory_mib["GPU-test"]
-            > 0
-    );
-    // ...while an external context with unknown activity blocks admission.
-    snap.gpus[0].external_process_ids = Some(vec![987]);
-    snap.gpus[0].external_compute = ComputeActivity::Unknown;
-    assert!(
-        PolicyEngine::new()
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
+            .evaluate(&cfg, snap, &PolicyInput::default(), 0)
             .unwrap()
             .admission_headroom
             .gpu_memory_mib
-            .is_empty()
-    );
-    // Without healthy observation the explicit mode yields fully.
-    snap.gpus[0].observation.as_mut().unwrap().capability =
-        GpuExecutionCapability::ConservativeNonSharing;
-    snap.gpus[0].external_process_ids = Some(vec![]);
-    snap.gpus[0].external_compute = ComputeActivity::Idle;
-    let d = PolicyEngine::new()
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-        .unwrap();
-    assert!(d.admission_headroom.gpu_memory_mib.is_empty());
-    assert_eq!(d.managed_budget.gpu_memory_mib["GPU-test"], 0);
+            .get("GPU-test")
+            .copied()
+            .unwrap_or(0)
+    };
+    for utilization in [Some(0), Some(100), None] {
+        snap.gpus[0].utilization_percent = utilization;
+        assert_eq!(headroom(&snap), 15_000, "{utilization:?}");
+    }
+    snap.gpus[0].external_process_ids = Some(vec![987]);
+    snap.gpus[0].external_compute = ComputeActivity::Unknown;
+    for utilization in [Some(0), Some(100), None] {
+        snap.gpus[0].utilization_percent = utilization;
+        assert_eq!(headroom(&snap), 0, "{utilization:?}");
+    }
 }
 
 #[test]
@@ -1754,47 +1630,6 @@ fn stale_gpu_observation_blocks_only_that_device() {
         .unwrap();
     assert!(d.cpu_ram_expansion_allowed);
     assert!(d.admission_headroom.gpu_memory_mib.is_empty());
-}
-
-#[test]
-fn guaranteed_gpu_rejects_conflicting_non_sharing_contract_before_launch() {
-    use cedegrid::config::GpuExecutionMode;
-    use cedegrid::execution_model::AllocationClass;
-    let mut cfg = config();
-    let snap = gpu_snapshot();
-    for mode in [
-        GpuExecutionMode::Auto,
-        GpuExecutionMode::ConservativeNonSharing,
-    ] {
-        cfg.gpu.execution_mode = mode;
-        assert!(
-            cedegrid::policy::validate_gpu_launch_contract(
-                &cfg,
-                &snap,
-                &resources(1, 1, 1),
-                AllocationClass::Guaranteed
-            )
-            .is_err()
-        );
-        assert!(
-            cedegrid::policy::validate_gpu_launch_contract(
-                &cfg,
-                &snap,
-                &resources(1, 1, 0),
-                AllocationClass::Guaranteed
-            )
-            .is_ok()
-        );
-        assert!(
-            cedegrid::policy::validate_gpu_launch_contract(
-                &cfg,
-                &snap,
-                &resources(1, 1, 1),
-                AllocationClass::Opportunistic
-            )
-            .is_ok()
-        );
-    }
 }
 
 #[test]
@@ -1813,52 +1648,40 @@ fn legacy_gpu_record_and_config_readers_remain_compatible() {
 
 #[test]
 fn launch_recheck_refuses_an_external_context_appearing_after_empty_device_offer() {
-    use cedegrid::config::GpuExecutionMode;
+    // With never_share_occupied_gpus, an offer made on an empty device is refused at
+    // the launch recheck once an external context appears (FR-064).
     let mut cfg = config();
+    cfg.contention.never_share_occupied_gpus = true;
     let mut snap = gpu_snapshot();
     snap.gpus[0].used_memory_mib = Some(0);
-    snap.gpus[0].observation = Some(gpu_observation(
-        &snap,
-        GpuExecutionCapability::ConservativeNonSharing,
-    ));
-    for mode in [
-        GpuExecutionMode::Auto,
-        GpuExecutionMode::ConservativeNonSharing,
-    ] {
-        cfg.gpu.execution_mode = mode;
-        snap.gpus[0].external_process_ids = Some(vec![]);
-        assert!(
-            cedegrid::policy::validate_gpu_launch_contract(
-                &cfg,
-                &snap,
-                &resources(1, 1, 500),
-                AllocationClass::Opportunistic
-            )
-            .is_ok()
-        );
-        // Even a contradictory Idle flag cannot overrule the non-sharing inventory contract.
-        snap.gpus[0].external_process_ids = Some(vec![987]);
-        let error = cedegrid::policy::validate_gpu_launch_contract(
+    snap.gpus[0].external_process_ids = Some(vec![]);
+    let check = |snap: &Snapshot| {
+        cedegrid::policy::validate_gpu_launch_contract(
             &cfg,
-            &snap,
+            snap,
             &resources(1, 1, 500),
             AllocationClass::Opportunistic,
         )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("complete empty external inventory")
-        );
-    }
+    };
+    assert!(check(&snap).is_ok());
+    // Even a contradictory Idle flag cannot overrule the inventory.
+    snap.gpus[0].external_process_ids = Some(vec![987]);
+    let error = check(&snap).unwrap_err();
+    assert!(
+        error.to_string().contains("never_share_occupied_gpus"),
+        "{error}"
+    );
 }
 
 /// Pinned until US5 floors protect external usage; the US5 task that adds those
 /// floors inverts this test for Neutral and Performance.
 #[test]
-fn launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist() {
+fn launch_recheck_admits_active_external_compute_except_in_yield_first() {
     use cedegrid::contention::ContentionMode;
     let mut cfg = config();
+    cfg.contention
+        .acknowledge_caution
+        .insert("performance_mode".into());
     let mut snap = gpu_snapshot();
     snap.gpus[0].external_process_ids = Some(vec![987]);
     snap.gpus[0].external_compute = ComputeActivity::Active;
@@ -1866,24 +1689,22 @@ fn launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exis
     observation.fresh_after_baseline = true;
     observation.newest_sample_timestamp_us = Some(101);
     snap.gpus[0].observation = Some(observation);
-    for mode in [
-        ContentionMode::YieldFirst,
-        ContentionMode::Neutral,
-        ContentionMode::Performance,
-    ] {
-        cfg.contention.default_mode = mode;
-        let error = cedegrid::policy::validate_gpu_launch_contract(
-            &cfg,
-            &snap,
+    let check = |cfg: &Config, snap: &Snapshot| {
+        cedegrid::policy::validate_gpu_launch_contract(
+            cfg,
+            snap,
             &resources(1, 1, 500),
             AllocationClass::Opportunistic,
         )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("external activity Active"),
-            "{mode:?}: {error}"
-        );
+    };
+    // The floors and the peak headroom protect the external usage (T087a).
+    for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+        cfg.contention.default_mode = mode;
+        check(&cfg, &snap).unwrap();
     }
+    cfg.contention.default_mode = ContentionMode::YieldFirst;
+    let error = check(&cfg, &snap).unwrap_err();
+    assert!(error.to_string().contains("quiet device"), "{error}");
     // Quiet stays admitted in every mode.
     snap.gpus[0].external_compute = ComputeActivity::Quiet;
     for mode in [
@@ -1892,289 +1713,8 @@ fn launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exis
         ContentionMode::Performance,
     ] {
         cfg.contention.default_mode = mode;
-        cedegrid::policy::validate_gpu_launch_contract(
-            &cfg,
-            &snap,
-            &resources(1, 1, 500),
-            AllocationClass::Opportunistic,
-        )
-        .unwrap();
+        check(&cfg, &snap).unwrap();
     }
-}
-
-fn best_effort_fixture() -> (Config, Snapshot) {
-    let mut cfg = config();
-    cfg.gpu.execution_mode = GpuExecutionMode::BestEffortOccupied;
-    cfg.gpu.scale_up_cooldown_ms = 100;
-    let identity = ExternalGpuProcessIdentity {
-        pid: 4242,
-        boot_id: "fixture-boot".into(),
-        start_ticks: 87654,
-        uid: 1000,
-    };
-    cfg.gpu
-        .best_effort_external_processes
-        .insert("GPU-test".into(), vec![identity.clone()]);
-    let mut snap = gpu_snapshot();
-    snap.gpus[0].external_process_ids = Some(vec![identity.pid]);
-    snap.gpus[0].external_compute = ComputeActivity::Unknown;
-    snap.gpus[0].compute_sample_id = None;
-    let mut observation = gpu_observation(&snap, GpuExecutionCapability::ConservativeNonSharing);
-    observation.activity_api_status = "NotSupported".into();
-    observation.best_effort_external_processes = Some(vec![identity]);
-    snap.gpus[0].observation = Some(observation);
-    (cfg, snap)
-}
-
-#[test]
-fn best_effort_occupied_is_explicit_and_unknown_activity_remains_unknown() {
-    let (mut cfg, snap) = best_effort_fixture();
-    assert_eq!(
-        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]),
-        Some(GpuExecutionCapability::BestEffortOccupied)
-    );
-    let mut engine = PolicyEngine::new();
-    let first = engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-        .unwrap();
-    assert!(first.admission_headroom.gpu_memory_mib.is_empty());
-    engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 1)
-        .unwrap();
-    let ready = engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 101)
-        .unwrap();
-    assert_eq!(ready.admission_headroom.gpu_memory_mib["GPU-test"], 9000);
-    assert_eq!(snap.gpus[0].external_compute, ComputeActivity::Unknown);
-    assert!(
-        ready
-            .reasons
-            .iter()
-            .any(|r| r.contains("interference and slowdown are unmeasured"))
-    );
-    assert!(ready.reasons.iter().any(|r| r.contains("remains Unknown")));
-    for mode in [
-        GpuExecutionMode::Auto,
-        GpuExecutionMode::ConservativeNonSharing,
-        GpuExecutionMode::ContentionAware,
-    ] {
-        cfg.gpu.execution_mode = mode;
-        let mut engine = PolicyEngine::new();
-        engine
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-            .unwrap();
-        let strict = engine
-            .evaluate(&cfg, &snap, &PolicyInput::default(), 1000)
-            .unwrap();
-        assert!(strict.admission_headroom.gpu_memory_mib.is_empty());
-        assert_ne!(
-            cedegrid::policy::effective_gpu_capability(
-                &cfg,
-                snap.observed_at_unix_ms,
-                &snap.gpus[0]
-            ),
-            Some(GpuExecutionCapability::BestEffortOccupied)
-        );
-    }
-}
-
-#[test]
-fn best_effort_launch_recheck_accepts_only_scoped_verified_opportunistic_contract() {
-    use cedegrid::policy::validate_gpu_launch_contract;
-    let (cfg, mut snap) = best_effort_fixture();
-    for activity in [
-        ComputeActivity::Unknown,
-        ComputeActivity::Active,
-        ComputeActivity::Idle,
-    ] {
-        snap.gpus[0].external_compute = activity;
-        validate_gpu_launch_contract(
-            &cfg,
-            &snap,
-            &resources(0, 0, 500),
-            AllocationClass::Opportunistic,
-        )
-        .unwrap();
-        assert!(
-            validate_gpu_launch_contract(
-                &cfg,
-                &snap,
-                &resources(0, 0, 500),
-                AllocationClass::Guaranteed
-            )
-            .is_err()
-        );
-    }
-    snap.gpus[0]
-        .external_process_ids
-        .as_mut()
-        .unwrap()
-        .push(4243);
-    assert!(
-        validate_gpu_launch_contract(
-            &cfg,
-            &snap,
-            &resources(0, 0, 500),
-            AllocationClass::Opportunistic
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn best_effort_identity_or_basic_telemetry_loss_fully_yields() {
-    let (cfg, original) = best_effort_fixture();
-    let input = PolicyInput {
-        allocations: vec![allocation(
-            "managed",
-            AllocationPhase::Running,
-            resources(0, 0, 2000),
-            Some(resources(0, 0, 2000)),
-        )],
-        ..Default::default()
-    };
-    for case in 0..13 {
-        let mut snap = original.clone();
-        let gpu = &mut snap.gpus[0];
-        match case {
-            0 => {
-                gpu.observation
-                    .as_mut()
-                    .unwrap()
-                    .best_effort_external_processes = None
-            }
-            1 => {
-                gpu.observation
-                    .as_mut()
-                    .unwrap()
-                    .best_effort_external_processes
-                    .as_mut()
-                    .unwrap()[0]
-                    .pid += 1
-            }
-            2 => {
-                gpu.observation
-                    .as_mut()
-                    .unwrap()
-                    .best_effort_external_processes
-                    .as_mut()
-                    .unwrap()[0]
-                    .start_ticks += 1
-            }
-            3 => gpu
-                .observation
-                .as_mut()
-                .unwrap()
-                .best_effort_external_processes
-                .as_mut()
-                .unwrap()[0]
-                .boot_id
-                .push('x'),
-            4 => {
-                gpu.observation
-                    .as_mut()
-                    .unwrap()
-                    .best_effort_external_processes
-                    .as_mut()
-                    .unwrap()[0]
-                    .uid += 1
-            }
-            5 => gpu.external_process_ids.as_mut().unwrap().push(9999),
-            6 => gpu.external_process_ids = None,
-            7 => gpu.used_memory_mib = None,
-            8 => {
-                gpu.total_memory_mib = 0;
-                gpu.used_memory_mib = None;
-                gpu.observation.as_mut().unwrap().capability =
-                    GpuExecutionCapability::InsufficientObservability;
-            }
-            9 => {
-                gpu.observation.as_mut().unwrap().capability =
-                    GpuExecutionCapability::InsufficientObservability
-            }
-            10 => gpu.observation.as_mut().unwrap().observed_at_unix_ms += 1,
-            11 => gpu.uuid = "GPU-not-authorized".into(),
-            12 => {
-                gpu.observation
-                    .as_mut()
-                    .unwrap()
-                    .best_effort_external_processes = Some(vec![])
-            }
-            _ => unreachable!(),
-        }
-        let decision = PolicyEngine::new()
-            .evaluate(&cfg, &snap, &input, 0)
-            .unwrap();
-        assert_eq!(
-            decision.managed_budget.gpu_memory_mib["GPU-test"], 0,
-            "case {case}"
-        );
-        assert!(
-            decision.admission_headroom.gpu_memory_mib.is_empty(),
-            "case {case}"
-        );
-        assert_eq!(decision.would_drain, ["managed"], "case {case}");
-    }
-}
-
-#[test]
-fn best_effort_memory_growth_preserves_yield_reserves_and_retained_charges() {
-    let (cfg, mut snap) = best_effort_fixture();
-    let mut engine = PolicyEngine::new();
-    engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
-        .unwrap();
-    engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 1)
-        .unwrap();
-    engine
-        .evaluate(&cfg, &snap, &PolicyInput::default(), 101)
-        .unwrap();
-    // Own 2000 MiB is independently attributed; the competitor's 6000 MiB stays external.
-    snap.gpus[0].used_memory_mib = Some(8000);
-    snap.gpus[0].external_compute = ComputeActivity::Active;
-    let mut input = PolicyInput {
-        allocations: vec![
-            allocation(
-                "managed",
-                AllocationPhase::Running,
-                resources(0, 0, 3000),
-                Some(resources(0, 0, 2000)),
-            ),
-            allocation(
-                "pending",
-                AllocationPhase::Pending,
-                resources(0, 0, 500),
-                None,
-            ),
-        ],
-        ..Default::default()
-    };
-    let running = engine.evaluate(&cfg, &snap, &input, 102).unwrap();
-    assert_eq!(running.managed_budget.gpu_memory_mib["GPU-test"], 9000);
-    assert_eq!(running.admission_headroom.gpu_memory_mib["GPU-test"], 5500);
-    assert!(running.would_drain.is_empty());
-    // The competitor grows to 12000 MiB: 3000 MiB remain for 3500 MiB of charges.
-    snap.gpus[0].used_memory_mib = Some(14_000);
-    let growth = engine.evaluate(&cfg, &snap, &input, 103).unwrap();
-    assert!(growth.admission_headroom.gpu_memory_mib.is_empty());
-    assert_eq!(growth.would_drain, ["pending"]);
-    assert!(
-        growth
-            .reasons
-            .iter()
-            .any(|r| r.contains("external memory growth"))
-    );
-    input.allocations[0].phase = AllocationPhase::Draining;
-    let draining = engine.evaluate(&cfg, &snap, &input, 104).unwrap();
-    assert!(draining.admission_headroom.gpu_memory_mib.is_empty());
-    assert!(draining.managed_budget.gpu_memory_mib["GPU-test"] < 3500);
-    input.allocations[0].observed = None;
-    let unknown_own = engine.evaluate(&cfg, &snap, &input, 105).unwrap();
-    assert!(unknown_own.admission_headroom.gpu_memory_mib.is_empty());
-    // Charged at max(3000 request, 2000 last known) as own work, never external.
-    assert_eq!(unknown_own.managed_budget.gpu_memory_mib["GPU-test"], 4000);
-    assert!(codes(&unknown_own, "gpu_memory:GPU-test").contains(&"allocation_unknown_hold".into()));
 }
 
 #[test]
@@ -2182,7 +1722,18 @@ fn best_effort_mode_config_rejects_empty_and_partial_authorization() {
     let empty: GpuConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(empty.execution_mode, GpuExecutionMode::Auto);
     assert!(empty.best_effort_external_processes.is_empty());
-    let (mut cfg, _) = best_effort_fixture();
+    // The list is still validated, as in 0.2, although it is no longer used (FR-031).
+    let mut cfg = config();
+    cfg.gpu.execution_mode = GpuExecutionMode::BestEffortOccupied;
+    cfg.gpu.best_effort_external_processes.insert(
+        "GPU-test".into(),
+        vec![ExternalGpuProcessIdentity {
+            pid: 4242,
+            boot_id: "fixture-boot".into(),
+            start_ticks: 87654,
+            uid: 1000,
+        }],
+    );
     cfg.validate().unwrap();
     cfg.gpu
         .best_effort_external_processes
@@ -2310,7 +1861,7 @@ fn d2_vram_changes_below_the_noise_tolerance_are_not_growth() {
 fn d3_a_quiet_external_context_admits_gpu_work() {
     let mut cfg = config();
     cfg.gpu.execution_mode = GpuExecutionMode::Auto;
-    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    cfg.gpu.scale_up_cooldown_ms = Some(60_000);
     // One external process holds 2 GiB of 24 GiB and has been quiet over the window.
     let mut snap = large_gpu_snapshot(2048, vec![4242]);
     snap.gpus[0].external_compute = ComputeActivity::Quiet;
@@ -2324,14 +1875,6 @@ fn d3_a_quiet_external_context_admits_gpu_work() {
     fresh.fresh_after_baseline = true;
     for observation in [stale, fresh] {
         snap.gpus[0].observation = Some(observation);
-        assert_eq!(
-            cedegrid::policy::effective_gpu_capability(
-                &cfg,
-                snap.observed_at_unix_ms,
-                &snap.gpus[0]
-            ),
-            Some(GpuExecutionCapability::ContentionAware)
-        );
         let mut engine = PolicyEngine::new();
         for (now, offered) in [(0, false), (30_000, false), (60_000, true), (120_000, true)] {
             snap.gpus[0].compute_sample_id = Some(now + 1);
@@ -2349,7 +1892,9 @@ fn d3_a_quiet_external_context_admits_gpu_work() {
         )
         .unwrap();
     }
+    // Activity of unknown amount holds Yield First.
     snap.gpus[0].external_compute = ComputeActivity::Unknown;
+    cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
     assert!(
         cedegrid::policy::validate_gpu_launch_contract(
             &cfg,
@@ -2666,7 +2211,7 @@ fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
 fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
     use cedegrid::contention::ContentionMode;
     let mut cfg = config();
-    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    cfg.gpu.scale_up_cooldown_ms = Some(60_000);
     for set in [&mut cfg.contention.cpu, &mut cfg.contention.ram] {
         set.scale_up_cooldown_ms = Some(5000);
     }
@@ -3197,7 +2742,7 @@ fn a_quiet_gpu_context_counts_toward_the_device_peak() {
 #[test]
 fn cpu_and_ram_cool_down_independently() {
     let mut cfg = config();
-    cfg.gpu.scale_up_cooldown_ms = 60_000;
+    cfg.gpu.scale_up_cooldown_ms = Some(60_000);
     cfg.contention.cpu.scale_up_cooldown_ms = Some(6000);
     cfg.contention.ram.scale_up_cooldown_ms = Some(2000);
     let mut engine = PolicyEngine::new();
@@ -3265,22 +2810,6 @@ fn repeated_ram_reclaim_episodes_back_off_exponentially() {
     assert_eq!(delays, [1000, 2000, 4000]);
 }
 
-/// Until GPU admission follows the modes, `never_share_occupied_gpus` uses the
-/// existing non-sharing path, so the legacy key's replacement takes effect (FR-064).
-#[test]
-fn never_share_occupied_gpus_uses_the_non_sharing_path() {
-    let mut cfg = config();
-    let snap = large_gpu_snapshot(2048, vec![4242]);
-    let auto =
-        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]);
-    assert_ne!(auto, Some(GpuExecutionCapability::ConservativeNonSharing));
-    cfg.contention.never_share_occupied_gpus = true;
-    assert_eq!(
-        cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]),
-        Some(GpuExecutionCapability::ConservativeNonSharing)
-    );
-}
-
 /// External memory peaks follow each external process: a live process keeps its
 /// peak for the window, and its peak goes the moment it exits (FR-060).
 #[test]
@@ -3346,4 +2875,285 @@ fn external_usage_beyond_the_listed_processes_keeps_its_peak() {
     assert_eq!(headroom(0, 500), 21_000);
     assert_eq!(headroom(0, 299_000), 21_000);
     assert_eq!(headroom(0, 300_500), 24_600);
+}
+
+/// US5: one device's admission under a mode, activity, external contexts and
+/// memory observation, as the policy reports it on GPU compute and the headroom
+/// it offers.
+fn us5_device(
+    mode: cedegrid::contention::ContentionMode,
+    activity: ComputeActivity,
+    pids: Option<Vec<u32>>,
+    used: Option<u64>,
+    never_share: bool,
+) -> (Config, Snapshot) {
+    let mut cfg = config();
+    cfg.contention.default_mode = mode;
+    cfg.contention
+        .acknowledge_caution
+        .insert("performance_mode".into());
+    cfg.contention.never_share_occupied_gpus = never_share;
+    let mut snap = gpu_snapshot();
+    snap.gpus[0].external_compute = activity;
+    snap.gpus[0].external_process_ids = pids;
+    snap.gpus[0].used_memory_mib = used;
+    (cfg, snap)
+}
+
+fn us5_admission(cfg: &Config, snap: &Snapshot) -> (cedegrid::contention::Admission, u64) {
+    use cedegrid::contention::ResourceKey;
+    let decision = PolicyEngine::new()
+        .evaluate(cfg, snap, &PolicyInput::default(), 0)
+        .unwrap();
+    let compute = decision.resources[&ResourceKey::GpuCompute("GPU-test".into())]
+        .admission
+        .clone()
+        .unwrap();
+    let headroom = decision
+        .admission_headroom
+        .gpu_memory_mib
+        .get("GPU-test")
+        .copied()
+        .unwrap_or(0);
+    (compute, headroom)
+}
+
+/// GPU admission follows the device's mode (FR-026, FR-027, FR-064): Neutral and
+/// Performance admit on quiet or active devices and under activity of unknown
+/// amount, which counts as one principal; Yield First requires a quiet device;
+/// unknown memory blocks; with `never_share_occupied_gpus` an occupied device or
+/// an unknown process list blocks.
+#[test]
+fn gpu_admission_follows_the_mode() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{Admission, ContentionMode::*};
+    for mode in [Neutral, Performance] {
+        for activity in [Idle, Quiet, Active, Unknown] {
+            let (cfg, snap) = us5_device(mode, activity, Some(vec![987]), Some(6000), false);
+            let (admission, headroom) = us5_admission(&cfg, &snap);
+            assert_eq!(admission, Admission::Open, "{mode:?} {activity:?}");
+            // 16000 - 1000 floor - 6000 external.
+            assert_eq!(headroom, 9000, "{mode:?} {activity:?}");
+        }
+    }
+    for (activity, open) in [
+        (Idle, true),
+        (Quiet, true),
+        (Active, false),
+        (Unknown, false),
+    ] {
+        let (cfg, snap) = us5_device(YieldFirst, activity, Some(vec![987]), Some(6000), false);
+        let (admission, headroom) = us5_admission(&cfg, &snap);
+        assert_eq!(
+            admission == Admission::Open,
+            open,
+            "{activity:?}: {admission:?}"
+        );
+        assert_eq!(headroom > 0, open, "{activity:?}");
+    }
+    let (cfg, snap) = us5_device(Neutral, Quiet, Some(vec![]), None, false);
+    let (admission, headroom) = us5_admission(&cfg, &snap);
+    assert_ne!(admission, Admission::Open);
+    assert_eq!(headroom, 0);
+    for (pids, open) in [
+        (Some(vec![]), true),
+        (Some(vec![987]), false),
+        (None, false),
+    ] {
+        let (cfg, snap) = us5_device(Neutral, Quiet, pids.clone(), Some(6000), true);
+        let (admission, _) = us5_admission(&cfg, &snap);
+        assert_eq!(
+            admission == Admission::Open,
+            open,
+            "{pids:?}: {admission:?}"
+        );
+    }
+}
+
+/// The launch recheck applies the same admission to the job's effective mode on a
+/// fresh observation, and refuses a request that would leave less than the floor
+/// free (FR-026, FR-027).
+#[test]
+fn launch_recheck_admits_by_mode_within_the_floor() {
+    use ComputeActivity::*;
+    use cedegrid::contention::ContentionMode::*;
+    let check = |cfg: &Config, snap: &Snapshot, mib: u64| {
+        cedegrid::policy::validate_gpu_launch_contract(
+            cfg,
+            snap,
+            &resources(1, 1, mib),
+            AllocationClass::Opportunistic,
+        )
+    };
+    for mode in [YieldFirst, Neutral, Performance] {
+        for activity in [Idle, Quiet, Active, Unknown] {
+            let (cfg, snap) = us5_device(mode, activity, Some(vec![987]), Some(6000), false);
+            let admitted = mode != YieldFirst || matches!(activity, Idle | Quiet);
+            assert_eq!(
+                check(&cfg, &snap, 500).is_ok(),
+                admitted,
+                "{mode:?} {activity:?}"
+            );
+        }
+    }
+    let (cfg, snap) = us5_device(Neutral, Active, Some(vec![987]), Some(6000), false);
+    // 16000 - 6000 used - 1000 floor leaves 9000.
+    assert!(check(&cfg, &snap, 9000).is_ok());
+    assert!(check(&cfg, &snap, 9001).is_err());
+    let (cfg, snap) = us5_device(Neutral, Quiet, Some(vec![987]), Some(6000), true);
+    assert!(check(&cfg, &snap, 500).is_err());
+    let (cfg, snap) = us5_device(Neutral, Quiet, Some(vec![]), None, false);
+    assert!(check(&cfg, &snap, 500).is_err());
+    // Guaranteed GPU work no longer needs a legacy contention-aware contract.
+    let (cfg, snap) = us5_device(Neutral, Quiet, Some(vec![987]), Some(6000), false);
+    cedegrid::policy::validate_gpu_launch_contract(
+        &cfg,
+        &snap,
+        &resources(1, 1, 500),
+        AllocationClass::Guaranteed,
+    )
+    .unwrap();
+}
+
+/// The policy's GPU admission and the launch recheck call the same pure function,
+/// so they agree on every combination (T087b).
+#[test]
+fn policy_and_launch_recheck_agree_on_gpu_admission() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{Admission, ContentionMode::*};
+    for mode in [YieldFirst, Neutral, Performance] {
+        for activity in [Idle, Quiet, Active, Unknown] {
+            for pids in [Some(vec![]), Some(vec![987]), None] {
+                for never_share in [false, true] {
+                    let (cfg, snap) =
+                        us5_device(mode, activity, pids.clone(), Some(6000), never_share);
+                    let (admission, _) = us5_admission(&cfg, &snap);
+                    let recheck = cedegrid::policy::validate_gpu_launch_contract(
+                        &cfg,
+                        &snap,
+                        &resources(1, 1, 500),
+                        AllocationClass::Opportunistic,
+                    );
+                    assert_eq!(
+                        admission == Admission::Open,
+                        recheck.is_ok(),
+                        "{mode:?} {activity:?} {pids:?} {never_share}: {admission:?} {recheck:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Own GPU work gets a compute share under contention by pause duty-cycling
+/// (FR-021, FR-022): with external compute active, Neutral and Performance cap a
+/// lone allocation at half the device and Yield First pauses it; a quiet device
+/// takes no step; Guaranteed work takes none (FR-024).
+#[test]
+fn gpu_compute_shares_follow_the_mode_under_contention() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let step = |mode, activity, class| {
+        let (cfg, mut snap) = us5_device(mode, activity, Some(vec![987]), Some(8000), false);
+        snap.gpus[0].compute_sample_id = Some(1);
+        let mut job = allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        );
+        job.class = class;
+        let decision = PolicyEngine::new()
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![job],
+                    facts: rootless(&["job"]),
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap();
+        decision
+            .actions
+            .iter()
+            .find(|a| a.resource == key)
+            .map(|a| (a.step, a.target))
+    };
+    let opportunistic = AllocationClass::Opportunistic;
+    assert_eq!(
+        step(Neutral, Active, opportunistic),
+        Some((YieldStep::Cap, Some(500)))
+    );
+    assert_eq!(
+        step(Performance, Active, opportunistic),
+        Some((YieldStep::Cap, Some(500)))
+    );
+    assert_eq!(
+        step(YieldFirst, Active, opportunistic).map(|s| s.0),
+        Some(YieldStep::Pause)
+    );
+    assert_eq!(step(Neutral, Quiet, opportunistic), None);
+    assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
+}
+
+/// Running own work is not drained because a device becomes occupied, even with
+/// `never_share_occupied_gpus` (FR-064); missing GPU observation holds it as an
+/// unknown measurement instead of a full yield (constitution III).
+#[test]
+fn occupation_and_lost_observation_do_not_drain_running_gpu_work() {
+    use cedegrid::contention::ContentionMode::Neutral;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let (cfg, snap) = us5_device(
+        Neutral,
+        ComputeActivity::Quiet,
+        Some(vec![987]),
+        Some(8000),
+        true,
+    );
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snap, &input, 0)
+        .unwrap();
+    assert!(decision.would_drain.is_empty(), "{:?}", decision.actions);
+    let (cfg, mut snap) = us5_device(Neutral, ComputeActivity::Unknown, None, Some(8000), false);
+    snap.gpus[0].observation = Some(gpu_observation(
+        &snap,
+        GpuExecutionCapability::InsufficientObservability,
+    ));
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snap, &input, 0)
+        .unwrap();
+    assert!(decision.would_drain.is_empty(), "{:?}", decision.actions);
+}
+
+/// Without a legacy `gpu.scale_up_cooldown_ms`, GPU memory admission opens after
+/// the mode's cooldown, 10 s in Neutral, instead of 30 s (FR-034).
+#[test]
+fn gpu_memory_admission_waits_for_the_mode_cooldown() {
+    let mut cfg = config();
+    cfg.gpu.scale_up_cooldown_ms = None;
+    let snap = gpu_snapshot();
+    let mut engine = PolicyEngine::new();
+    for (now, open) in [(0, false), (9500, false), (10_000, true)] {
+        let headroom = engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .gpu_memory_mib
+            .get("GPU-test")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(headroom > 0, open, "at {now}");
+    }
 }

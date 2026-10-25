@@ -23,24 +23,19 @@ collectors can produce the same versioned snapshot contract for AMD, Intel, othe
 operating systems, or administrator-provided telemetry. Unknown capability remains
 unknown until an adapter supplies defensible evidence.
 
-GPU configuration selects `auto`, `contention_aware`, or
-`conservative_non_sharing`, with explicit `best_effort_occupied` for authorized
-external identities under the narrower [GPU contract](coordinator-work.md#explicit-occupied-gpu-mode). The collector records exact NVML status, driver cursor
-and sample timestamp in microseconds, observation age, and the resulting capability.
-Auto uses fresh activity evidence when it is available; otherwise it can use a
-reliably observed empty device. Non-sharing mode admits only an empty external
-inventory and drains all opportunistic work on the affected device when an external
-context appears. Missing basic inventory/memory observation blocks that device.
-Explicit contention-aware mode does not silently fall back, and occupied devices
-with unknown activity remain blocked in default modes. These are admission and reactive protection
-policies, not VRAM partitions or guarantees against every external allocation race.
+GPU compute and GPU memory follow the per-resource contention modes. The collector
+records exact NVML status, driver cursor and sample timestamp in microseconds,
+observation age, and the resulting capability. Yield First admits new GPU work only on
+a quiet device; Neutral and Performance also admit on an active device and share compute
+by pause duty-cycling. Missing basic inventory or memory observation blocks that device.
+These are admission and reactive protection policies, not VRAM partitions or guarantees
+against every external allocation race.
 
-Non-sharing full yield conflicts with guaranteed GPU continuity. Auto/non-sharing
-GPU work must therefore be opportunistic; CPU-only guaranteed work is unaffected.
-The coordinator receives a separate GPU-guaranteed eligibility flag, with absent
-older fields interpreted as false, and the agent rechecks the contract before
-preparation. Local `supervise` remains CPU-only; GPU execution uses the continuously
-observed agent path. See [GPU operation](coordinator-work.md#gpu-capability-modes).
+Guaranteed GPU work takes no GPU compute step, so it is allowed in every mode. The
+coordinator treats an absent `gpu_guaranteed_allowed` field from an older agent as false,
+and the agent rechecks the device before preparation. Local `supervise` remains
+CPU-only; GPU execution uses the continuously observed agent path. See
+[GPU operation](coordinator-work.md#gpu-modes).
 
 The implemented version-one coordinator-agent API uses HTTPS mutual TLS with
 certificate-bound node/operator identities. It carries stable task/assignment IDs,

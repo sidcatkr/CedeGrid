@@ -489,7 +489,7 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
             "printf managed > \"$CEDEGRID_OUTPUT_DIR/marker\"".into(),
         ],
     );
-    local.config.gpu.scale_up_cooldown_ms = 0;
+    local.config.gpu.scale_up_cooldown_ms = Some(0);
     local.config.contention.cpu.scale_up_cooldown_ms = Some(0);
     local.config.contention.ram.scale_up_cooldown_ms = Some(0);
     local.config.lifecycle.heartbeat_interval_ms = 200;
@@ -1137,7 +1137,7 @@ impl Service {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let mut local = spec(dir.path(), class, argv);
-        local.config.gpu.scale_up_cooldown_ms = 0;
+        local.config.gpu.scale_up_cooldown_ms = Some(0);
         local.config.contention.cpu.scale_up_cooldown_ms = Some(0);
         local.config.contention.ram.scale_up_cooldown_ms = Some(0);
         local.config.lifecycle.heartbeat_interval_ms = 400;

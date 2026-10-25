@@ -15,7 +15,7 @@ pub fn config() -> Config {
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.reserve_vram_percent = 0;
-    result.gpu.scale_up_cooldown_ms = 0;
+    result.gpu.scale_up_cooldown_ms = Some(0);
     result
 }
 
@@ -116,6 +116,42 @@ mod ladder {
             state = next;
         }
         (state, changes)
+    }
+
+    /// Pause and cap are never used for GPU memory, whatever the backend offers
+    /// (FR-011).
+    #[test]
+    fn gpu_memory_never_pauses_or_caps() {
+        let timing = timing(ResourceKind::GpuMemory, ContentionMode::Neutral);
+        for unavailable in [BTreeSet::new(), BTreeSet::from([YieldStep::Hint])] {
+            let (_, changes) = run(None, &timing, 0..60, |_| LadderInput {
+                unavailable: unavailable.clone(),
+                ..input(ResourceKind::GpuMemory, 1000, 4000)
+            });
+            assert!(!changes.is_empty());
+            assert!(
+                changes.iter().all(|(_, step)| !matches!(
+                    step,
+                    YieldStep::LowerShare | YieldStep::Cap | YieldStep::Pause
+                )),
+                "{changes:?}"
+            );
+        }
+    }
+
+    /// GPU compute shares are approximated by pausing, so Guaranteed work takes
+    /// neither a GPU compute cap nor a pause (FR-024).
+    #[test]
+    fn guaranteed_gpu_compute_takes_no_cap_or_pause() {
+        let timing = timing(ResourceKind::GpuCompute, ContentionMode::Neutral);
+        let (_, changes) = run(None, &timing, 0..40, |_| LadderInput {
+            guaranteed: true,
+            allow_drain: false,
+            unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+            target: Some(500),
+            ..input(ResourceKind::GpuCompute, 500, 1000)
+        });
+        assert!(changes.is_empty(), "{changes:?}");
     }
 
     /// A cap whose usage follows its target holds while the target moves down, as

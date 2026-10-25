@@ -641,7 +641,7 @@ context, under Neutral and Performance (quickstart §5).
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs` (including FR-064:
+- [X] T083 [P] [US5] Add launch-contract tests by mode in `tests/policy.rs` (including FR-064:
   `never_share_occupied_gpus` blocks an occupied device in every mode):
   - Neutral and Performance admit on quiet or active devices within the floors, and under
     activity of unknown amount, which counts as one principal (FR-021);
@@ -656,7 +656,7 @@ context, under Neutral and Performance (quickstart §5).
 
 ### Implementation for User Story 5
 
-- [ ] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
+- [X] T085 [US5] Implement per-device GPU admission in `src/contention.rs` and `src/policy.rs`
   (`validate_gpu_launch_contract` by mode). Replace the legacy `GpuExecutionMode` steering with
   the FR-031 interpretation from T136, and block devices with external contexts or unknown
   processes when `never_share_occupied_gpus` is set (FR-064); running own work on a device that
@@ -668,30 +668,30 @@ context, under Neutral and Performance (quickstart §5).
   `NodeReport.contention` from their own cooldowns, and drop the both-cooled rule for
   `cpu_ram_expansion_allowed` in `src/policy.rs`. Test in `tests/policy.rs` and
   `tests/coordinator.rs`: a RAM reclaim backoff blocks only RAM-requesting placement.
-- [ ] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
+- [X] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
   external usage. Batch 2 blocks Active in every mode at the launch recheck in
   `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 admission by mode and the T135 peak
   headroom protect it, invert the
   regression test `launch_recheck_blocks_active_external_compute_in_every_mode_until_floors_exist`
   in `tests/policy.rs` for Neutral and Performance, keeping Yield First blocked. Do not open
   this before the floors exist.
-- [ ] T087b [US5] Make T087a's launch recheck call the same pure admission function as the policy,
+- [X] T087b [US5] Make T087a's launch recheck call the same pure admission function as the policy,
   on a fresh observation, so the two cannot disagree (`src/policy.rs`, `src/agent.rs`). Test in
   `tests/policy.rs`.
-- [ ] T087c [US5] Regression check that pause is never used for GPU memory contention (memory skips
+- [X] T087c [US5] Regression check that pause is never used for GPU memory contention (memory skips
   steps 1–3 since T043): the ladder skips pause on GPU memory
   for every backend, with a test in `tests/contention.rs` (FR-011).
-- [ ] T087d [US5] Approximate the GPU compute fair share by pause duty-cycling of own GPU work in
+- [X] T087d [US5] Approximate the GPU compute fair share by pause duty-cycling of own GPU work in
   `src/actuation.rs` and `src/policy.rs`, and document the granularity (one monitor interval,
   5% minimum duty, plus the longest running kernel) in `docs/guarantees.md` (FR-021). A process
   with both a CPU cap and a GPU compute cap runs one duty cycle at the smaller duty; GPU compute
   steps are unavailable for Guaranteed work (FR-024). Tests first in `tests/contention.rs` and
   the actuation unit tests.
-- [ ] T087e [US5] Apply the utilization rules to GPU compute: targets through `own_allowance`
+- [X] T087e [US5] Apply the utilization rules to GPU compute: targets through `own_allowance`
   with demand probing and Performance's contended target (FR-021, FR-022). GPU memory already
   yields on real breaches and judged usage (T145) and keeps per-process peaks (T128); add a
   regression check. Tests first in `tests/policy.rs`.
-- [ ] T087f [US5] Replace the legacy 30 s `gpu.scale_up_cooldown_ms` for GPU memory admission
+- [X] T087f [US5] Replace the legacy 30 s `gpu.scale_up_cooldown_ms` for GPU memory admission
   with the per-mode cooldown (`contention.gpu_memory.scale_up_cooldown_ms`, default the mode's
   scale-up interval) plus the reclaim backoff, in `src/config.rs` (allow the key on gpu_memory)
   and `src/policy.rs`. Precedence: `contention.gpu_memory.scale_up_cooldown_ms` when set, else a

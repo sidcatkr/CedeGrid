@@ -408,7 +408,8 @@ const LADDER: [YieldStep; 5] = [
 
 impl LadderInput {
     /// Whether a step can apply here. Memory starts at the hint; Guaranteed work is
-    /// never paused and drained only when a floor policy allows it.
+    /// never paused, so it takes no GPU compute cap either, which is a pause duty
+    /// cycle, and is drained only when a floor policy allows it.
     fn applies(&self, step: YieldStep) -> bool {
         !(self.kind.is_memory()
             && matches!(
@@ -416,6 +417,7 @@ impl LadderInput {
                 YieldStep::LowerShare | YieldStep::Cap | YieldStep::Pause
             )
             || self.guaranteed && step == YieldStep::Pause
+            || self.guaranteed && self.kind == ResourceKind::GpuCompute && step == YieldStep::Cap
             || step == YieldStep::Drain && !self.allow_drain)
     }
 
@@ -899,6 +901,39 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
         && contending_principals(input, thresholds)
             .into_iter()
             .any(|(uid, usage)| satisfied_demand(input, uid, usage).is_none())
+}
+
+/// Whether own GPU work may be admitted to a device now (FR-026, FR-027, FR-064).
+/// The policy and the launch recheck both call it, so they cannot disagree.
+/// `external_contexts` is `None` when the process list is unknown.
+pub fn gpu_admission(
+    mode: ContentionMode,
+    activity: crate::model::ComputeActivity,
+    external_contexts: Option<usize>,
+    memory_known: bool,
+    never_share: bool,
+) -> Admission {
+    use crate::model::ComputeActivity::*;
+    if !memory_known {
+        return Admission::Blocked {
+            reason: "GPU memory or its attribution is unknown".into(),
+        };
+    }
+    if never_share && external_contexts != Some(0) {
+        return Admission::Blocked {
+            reason: "never_share_occupied_gpus refuses a device with external contexts".into(),
+        };
+    }
+    match (mode, activity) {
+        (ContentionMode::YieldFirst, Active) => Admission::Held {
+            reason: "Yield First admits only on a quiet device".into(),
+        },
+        (ContentionMode::YieldFirst, Unknown) => Admission::Held {
+            reason: "Yield First admits only on a quiet device, and activity is unknown".into(),
+        },
+        // Neutral and Performance count activity of unknown amount as one principal.
+        _ => Admission::Open,
+    }
 }
 
 /// A probe of small external demand on one compute resource (FR-021).

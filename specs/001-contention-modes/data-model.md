@@ -70,7 +70,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `pause_bound_s` | cpu, gpu_compute | 10 | 1–60 |
 | `noise_tolerance_mib` | gpu_memory | 256 | 0–1024, and at agent start at most half of each device's floor; above 256 needs `relaxed_detection` |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms`; below 20 needs `relaxed_detection` |
-| `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms`. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
+| `scale_up_cooldown_ms` | cpu, ram, gpu_memory | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). On GPU memory a set legacy `gpu.scale_up_cooldown_ms` applies when this key is unset. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
 | `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060); below 300 needs `relaxed_detection` |
 | `admission_usage_window_s` | cpu | 60 | 1–3600; running opportunistic CPU is charged for admission at its p95 usage over this window (FR-034) |

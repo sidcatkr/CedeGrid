@@ -277,7 +277,7 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
             reserve_percent: 0,
         },
         gpu: GpuConfig {
-            scale_up_cooldown_ms: 0,
+            scale_up_cooldown_ms: Some(0),
             ..Default::default()
         },
         contention: cedegrid::config::ContentionConfig {

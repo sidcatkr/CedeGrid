@@ -337,7 +337,7 @@ def run_case(args, directory, profile, profile_name, cpu, scenario, seed):
     config = copy.deepcopy(profile)
     execution_id = "comparison-" + uuid.uuid4().hex
     config["state_dir"] = str(directory / "state")
-    original_cooldown = config["gpu"]["scale_up_cooldown_ms"]
+    original_cooldown = config["gpu"].get("scale_up_cooldown_ms")
     config["gpu"]["scale_up_cooldown_ms"] = 0
     for kind, value in scale_up_cooldowns(0).items():
         config.setdefault("contention", {}).setdefault(kind, {}).update(value)

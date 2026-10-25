@@ -914,6 +914,25 @@ fn noise_tolerance_is_bounded_at_load_and_against_each_gpu_floor() {
     );
 }
 
+/// GPU memory admission waits for its own cooldown: a set
+/// `contention.gpu_memory.scale_up_cooldown_ms` wins, else a set legacy
+/// `gpu.scale_up_cooldown_ms`, else the mode's scale-up interval (FR-034).
+#[test]
+fn gpu_memory_cooldown_precedence() {
+    use cedegrid::contention::ContentionMode::*;
+    let defaults = parse_node("").unwrap();
+    assert_eq!(defaults.gpu_memory_cooldown_ms(Neutral), 10_000);
+    assert_eq!(defaults.gpu_memory_cooldown_ms(YieldFirst), 30_000);
+    let legacy = parse_node("[gpu]\nscale_up_cooldown_ms = 45000").unwrap();
+    assert_eq!(legacy.gpu_memory_cooldown_ms(Neutral), 45_000);
+    let both = parse_node(
+        "[gpu]\nscale_up_cooldown_ms = 45000\n[contention.gpu_memory]\nscale_up_cooldown_ms = 2000",
+    )
+    .unwrap();
+    assert_eq!(both.gpu_memory_cooldown_ms(Neutral), 2000);
+    assert!(parse_node("[contention.gpu_compute]\nscale_up_cooldown_ms = 2000").is_err());
+}
+
 /// Settings that lengthen reclaim or let stale telemetry pass are bounded.
 #[test]
 fn settings_that_lengthen_reclaim_are_bounded() {
