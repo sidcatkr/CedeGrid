@@ -2352,6 +2352,7 @@ fn node_contention_report(
     NodeContentionReport {
         resources,
         exceptions: config.caution_options(),
+        max_mode: Some(config.contention.max_mode()),
     }
 }
 

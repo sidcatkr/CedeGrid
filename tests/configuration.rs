@@ -684,7 +684,10 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     };
     assert!(warned(&raised, &["ram.reserve_mib", "512"]));
     assert!(warned(&raised, &["gpu.reserve_vram_mib", "256"]));
-    assert!(warned(&raised, &["acknowledge_caution = [\"small_floor\"]"]));
+    assert!(warned(
+        &raised,
+        &["acknowledge_caution = [\"small_floor\"]"]
+    ));
     assert!(raised.config.caution_options().is_empty());
     let acknowledged = load(&format!(
         "{small_floors}\n[contention]\nacknowledge_caution = [\"small_floor\"]"

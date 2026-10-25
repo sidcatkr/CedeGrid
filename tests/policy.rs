@@ -2652,6 +2652,15 @@ fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
         .unwrap();
     let mode = |id: &str, kind| decision.allocation_modes[id][&kind];
     assert_eq!(mode("fast", ResourceKind::Cpu), ContentionMode::Neutral);
+    // A mode the cap refuses is reported with a reason code and the node's cap.
+    assert_eq!(decision.max_mode, Some(ContentionMode::Neutral));
+    let capped: Vec<_> = decision.resources[&ResourceKey::Cpu]
+        .reasons
+        .iter()
+        .filter(|r| r.code == "mode_capped")
+        .collect();
+    assert_eq!(capped.len(), 1, "{capped:?}");
+    assert!(capped[0].text.contains("fast") && capped[0].text.contains("neutral"));
     assert_eq!(
         mode("gentle", ResourceKind::Cpu),
         ContentionMode::YieldFirst

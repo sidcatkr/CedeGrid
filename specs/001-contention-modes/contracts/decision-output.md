@@ -18,6 +18,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
               {"allocation_id": "a2", "resource": "ram", "step": "hint", "target": 6144,
                "cause": "floor_breach", "code": "yield_step_hint", "deadline_ms": 5000}],
   "exceptions": [{"name": "performance_mode", "marker": "caution"}],
+  "max_mode": "neutral",
   "would_drain": ["..."],
   "reasons": ["..."]
 }

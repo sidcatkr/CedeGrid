@@ -54,6 +54,7 @@ fn observation() -> (Snapshot, Decision) {
         actions: vec![],
         exceptions: vec![],
         allocation_modes: Default::default(),
+        max_mode: None,
     };
     (snapshot, decision)
 }

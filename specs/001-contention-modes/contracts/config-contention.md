@@ -98,6 +98,8 @@ quiet_window_intervals = 20
 {"contention": {"modes": {"cpu": "performance", "gpu_memory": "neutral"}}}
 ```
 
-- The effective mode is `min(requested, node max_mode)` and is reported per allocation.
+- The effective mode is `min(requested, node max_mode)` and is reported per allocation. A
+  request above the cap adds the reason code `mode_capped`, and the decision and node report
+  carry the cap as `max_mode`.
 - Overrides are placed only on agents that advertise `contention/1`
   ([wire-negotiation.md](wire-negotiation.md)).

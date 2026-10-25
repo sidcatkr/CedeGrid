@@ -353,6 +353,45 @@ impl PolicyEngine {
                 (a.id.clone(), modes)
             })
             .collect();
+        // A requested mode above the node cap runs at the cap; say so (FR-030).
+        let cap = config.contention.max_mode();
+        for allocation in &input.allocations {
+            for (kind, requested) in &allocation.modes {
+                if *requested <= cap {
+                    continue;
+                }
+                let keys: Vec<ResourceKey> = match kind {
+                    ResourceKind::Cpu => vec![ResourceKey::Cpu],
+                    ResourceKind::Ram => vec![ResourceKey::Ram],
+                    ResourceKind::GpuCompute => allocation
+                        .requested
+                        .gpu_memory_mib
+                        .keys()
+                        .map(|uuid| ResourceKey::GpuCompute(uuid.clone()))
+                        .collect(),
+                    ResourceKind::GpuMemory => allocation
+                        .requested
+                        .gpu_memory_mib
+                        .keys()
+                        .map(|uuid| ResourceKey::GpuMemory(uuid.clone()))
+                        .collect(),
+                };
+                for key in keys {
+                    note(
+                        &mut statuses,
+                        key,
+                        "mode_capped",
+                        format!(
+                            "allocation {} requested {}; the node cap is {}, so it runs in {}",
+                            allocation.id,
+                            mode_name(*requested),
+                            mode_name(cap),
+                            mode_name(cap)
+                        ),
+                    );
+                }
+            }
+        }
         let governing = |kind: ResourceKind| {
             allocation_modes
                 .values()
@@ -1676,6 +1715,7 @@ impl PolicyEngine {
             actions,
             exceptions: config.caution_options(),
             allocation_modes,
+            max_mode: Some(cap),
         })
     }
 }
@@ -1859,6 +1899,14 @@ fn step_name(step: YieldStep) -> &'static str {
         YieldStep::Hint => "hint",
         YieldStep::Drain => "drain",
         YieldStep::Terminate => "terminate",
+    }
+}
+
+fn mode_name(mode: crate::contention::ContentionMode) -> &'static str {
+    match mode {
+        crate::contention::ContentionMode::YieldFirst => "yield_first",
+        crate::contention::ContentionMode::Neutral => "neutral",
+        crate::contention::ContentionMode::Performance => "performance",
     }
 }
 

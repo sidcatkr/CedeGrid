@@ -333,6 +333,9 @@ pub struct Decision {
         String,
         BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
     >,
+    /// The node's cap on the most aggressive mode a job may request (FR-030).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mode: Option<crate::contention::ContentionMode>,
 }
 
 /// A stable machine-readable code plus one sentence for people. Tests and tools

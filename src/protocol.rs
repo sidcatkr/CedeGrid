@@ -161,6 +161,9 @@ pub struct NodeReport {
 pub struct NodeContentionReport {
     pub resources: BTreeMap<crate::contention::ResourceKey, ResourceContentionReport>,
     pub exceptions: Vec<crate::model::ExceptionNotice>,
+    /// The node's cap on job-requested modes (FR-030).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_mode: Option<crate::contention::ContentionMode>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
