@@ -252,7 +252,9 @@ in their contended target and in scale-up rate (10 s and 2 s per step).
   saturated, each whose usage stayed within `usage_at_step + floor` is satisfied at its usage
   plus the floor.
 - A record holds while the principal's usage stays within it, also while it is not listed. A
-  user with a record rejoins as a principal at once, without the principal window.
+  user with a record rejoins as a principal at once, without the principal window. At most 64
+  records are kept per resource key; past that, those whose principals were seen longest ago
+  are dropped first (`PolicyEngine` keeps when each recorded principal was last seen).
 
 ## HeldBack (`src/model.rs`, `ResourceStatus.held_back`, node report)
 

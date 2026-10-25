@@ -147,6 +147,8 @@ pub struct PolicyEngine {
     satisfied: BTreeMap<ResourceKey, Vec<(Option<u32>, u64)>>,
     /// Probes of small external demand in progress, per compute resource.
     probes: BTreeMap<ResourceKey, crate::contention::DemandProbe>,
+    /// When each principal with a satisfied record was last seen, per resource.
+    principal_seen: BTreeMap<ResourceKey, BTreeMap<Option<u32>, u64>>,
     /// Running opportunistic CPU usage over the admission window, per allocation,
     /// with the time of its first sample.
     cpu_usage: BTreeMap<String, (u64, std::collections::VecDeque<(u64, u64)>)>,
@@ -699,6 +701,27 @@ impl PolicyEngine {
             .is_some_and(|busy| busy.saturating_mul(100) >= cpu_total.saturating_mul(saturation));
         let mut satisfied = BTreeMap::new();
         let mut probes = BTreeMap::new();
+        let mut principal_seen = BTreeMap::new();
+        // Satisfied records keep at most the most recently seen principals.
+        let mut bounded =
+            |key: &ResourceKey, view: &ModeInput, known: &mut Vec<(Option<u32>, u64)>| {
+                let mut seen = self.principal_seen.get(key).cloned().unwrap_or_default();
+                let mut accounted = view.background;
+                for (principal, usage) in view.principals.iter().flatten() {
+                    accounted = accounted.saturating_add(*usage);
+                    if !principal.is_owner && *usage > 0 {
+                        seen.insert(principal.uid, now_monotonic_ms);
+                    }
+                }
+                if view.external > accounted {
+                    seen.insert(None, now_monotonic_ms);
+                }
+                crate::contention::bound_satisfied(known, &seen);
+                seen.retain(|uid, _| known.iter().any(|(principal, _)| principal == uid));
+                if !seen.is_empty() {
+                    principal_seen.insert(key.clone(), seen);
+                }
+            };
         if !cpu_unknown && !cpu_held {
             floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
             let (members, background) =
@@ -730,13 +753,14 @@ impl PolicyEngine {
             };
             let response_ms =
                 LadderTiming::new(&thresholds, mode, config.monitor.interval_ms).response_ms;
-            let (known, probe) = crate::contention::probe_demand(
+            let (mut known, probe) = crate::contention::probe_demand(
                 &view,
                 &thresholds,
                 self.probes.get(&ResourceKey::Cpu),
                 response_ms,
                 now_monotonic_ms,
             );
+            bounded(&ResourceKey::Cpu, &view, &mut known);
             view.satisfied = known.clone();
             // A watch keeps own work at the fair share; only a probe sets a target.
             view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
@@ -1007,13 +1031,14 @@ impl PolicyEngine {
                                 config.monitor.interval_ms,
                             )
                             .response_ms;
-                            let (known, probe) = crate::contention::probe_demand(
+                            let (mut known, probe) = crate::contention::probe_demand(
                                 &view,
                                 &compute_thresholds,
                                 self.probes.get(&compute_key),
                                 response_ms,
                                 now_monotonic_ms,
                             );
+                            bounded(&compute_key, &view, &mut known);
                             view.satisfied = known.clone();
                             view.probe = probe.as_ref().filter(|p| !p.watch).map(|p| p.target);
                             if !known.is_empty() {
@@ -2335,6 +2360,7 @@ impl PolicyEngine {
         self.reclaiming = reclaiming;
         self.satisfied = satisfied;
         self.probes = probes;
+        self.principal_seen = principal_seen;
         self.cpu_usage = cpu_usage;
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;

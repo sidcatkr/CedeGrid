@@ -994,6 +994,24 @@ pub struct DemandProbe {
     pub baselined: bool,
 }
 
+/// Satisfied records kept per resource key (FR-021).
+pub const SATISFIED_RECORD_LIMIT: usize = 64;
+
+/// Records never expire, but at most `SATISFIED_RECORD_LIMIT` are kept: past the
+/// bound, those whose principals were seen longest ago go first, and a principal
+/// never seen counts as the oldest.
+pub fn bound_satisfied(
+    records: &mut Vec<(Option<u32>, u64)>,
+    last_seen: &BTreeMap<Option<u32>, u64>,
+) {
+    if records.len() <= SATISFIED_RECORD_LIMIT {
+        return;
+    }
+    records.sort_by_key(|(uid, _)| std::cmp::Reverse(last_seen.get(uid).copied()));
+    records.truncate(SATISFIED_RECORD_LIMIT);
+    records.sort();
+}
+
 /// One interval of demand probing on a compute resource. Under saturation, a
 /// contending principal whose demand is unknown and smaller than one margin step
 /// is probed: own work steps down by the mode's margin per response window, and a

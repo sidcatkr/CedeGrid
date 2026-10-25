@@ -605,8 +605,9 @@ node reports with the expected per-resource values at each step.
     then watched for one response window from the interval after: if the host has capacity to
     spare at its end and the principal's usage stayed within its baseline plus the contention
     floor, it is recorded as satisfied the same way, else it keeps its share. A satisfied
-    principal that leaves keeps its record and rejoins at once when it returns. Activity of
-    unknown amount is never recorded;
+    principal that leaves keeps its record and rejoins at once when it returns. Records do not
+    expire, but at most 64 are kept per resource: past that, the record whose principal was seen
+    longest ago is dropped. Activity of unknown amount is never recorded;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission.
 

@@ -2280,3 +2280,25 @@ mod hints {
         assert_eq!(steps[1].1.map(|a| a.0), Some(YieldStep::Drain), "{steps:?}");
     }
 }
+
+/// Satisfied records are kept without expiry, at most 64 per resource key: past
+/// the bound, the records whose principals were seen longest ago go first, and a
+/// principal never seen counts as the oldest (FR-021).
+#[test]
+fn satisfied_records_keep_the_64_most_recently_seen_principals() {
+    use cedegrid::contention::{SATISFIED_RECORD_LIMIT, bound_satisfied};
+    assert_eq!(SATISFIED_RECORD_LIMIT, 64);
+    let mut records: Vec<(Option<u32>, u64)> = (0..70).map(|uid| (Some(uid), 100)).collect();
+    records.push((None, 50));
+    // UIDs 0-69 were last seen at time uid; the unattributed principal never.
+    let last_seen: BTreeMap<Option<u32>, u64> =
+        (0..70).map(|uid| (Some(uid), u64::from(uid))).collect();
+    bound_satisfied(&mut records, &last_seen);
+    assert_eq!(records.len(), 64);
+    let kept: Vec<Option<u32>> = records.iter().map(|(uid, _)| *uid).collect();
+    assert_eq!(kept, (6..70).map(Some).collect::<Vec<_>>());
+    // Within the bound nothing is dropped.
+    let mut few = vec![(Some(1), 10), (None, 20)];
+    bound_satisfied(&mut few, &BTreeMap::new());
+    assert_eq!(few.len(), 2);
+}
