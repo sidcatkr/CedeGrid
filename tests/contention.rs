@@ -1523,6 +1523,45 @@ mod scenarios {
         }
     }
 
+    /// Yield First's contended state means external demand exceeds the free margin,
+    /// not any external activity: a small blip fits in the margin and never pauses
+    /// own work, while demand beyond the margin does (FR-020).
+    #[test]
+    fn yield_first_pauses_only_when_external_demand_exceeds_its_margin() {
+        let mut world = World::new(ContentionMode::YieldFirst, (64, 8000));
+        let mut now = 0;
+        while now < 5000 {
+            world.tick(now);
+            now += INTERVAL;
+        }
+        // 5% of capacity, well inside the 25% margin.
+        world.external = (1, 400);
+        for interval in 0..40 {
+            let (own, external) = world.tick(now);
+            assert_ne!(world.step, YieldStep::Pause, "at {now}: own {own}");
+            assert_eq!(external, 400);
+            // After the step applies, own work keeps the 25% margin free beside the blip.
+            if interval >= 2 {
+                assert!(
+                    own + 400 + CAPACITY / 4 <= CAPACITY + CAPACITY / 100,
+                    "{own}"
+                );
+                assert!(
+                    own + CAPACITY / 100 >= CAPACITY - 400 - CAPACITY / 4,
+                    "{own}"
+                );
+            }
+            now += INTERVAL;
+        }
+        // Demand beyond the margin is contention: own work pauses within 2 intervals.
+        world.external = (5, 4000);
+        world.tick(now);
+        now += INTERVAL;
+        world.tick(now);
+        assert_eq!(world.step, YieldStep::Pause);
+        assert!(!world.drained);
+    }
+
     /// While a resource is not contended, a held cap rises again toward the mode's
     /// target at the mode's scale-up rate (FR-013, FR-020).
     #[test]

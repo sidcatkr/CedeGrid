@@ -74,7 +74,7 @@ thresholds.
 - Q: What may happen to a Guaranteed allocation? → A: It is never paused. Its CPU is never
   capped below its request; usage above the request may be capped. Its memory is released only
   under floor policy A, as the last step. Yield First's "down to zero" applies to opportunistic
-  work only.
+  work only, and for CPU it means paused, then the minimum duty after `pause_bound_s`.
 - Q: When does a worker see a target? → A: At once: the SDKs deliver the current target when a
   handler subscribes, and a managed child receives it when it starts.
 
@@ -203,9 +203,9 @@ compare own usage over time with that mode's definition, including unknown and o
 
 1. **Given** Yield First, **When** external demand rises by any measurable amount beyond noise,
    **Then** own work steps down promptly, keeping the mode's generous margin free. **When** the
-   resource is contended, **Then** opportunistic work goes to zero within 2 monitor intervals, for
-   up to the pause bound and then at the minimum duty, while Guaranteed work keeps its CPU
-   request. **When** activity is unknown, **Then** it counts
+   resource is contended, **Then** opportunistic CPU work is paused within 2 monitor intervals,
+   then runs at the minimum duty after `pause_bound_s`, while Guaranteed work keeps its CPU
+   request. **When** external demand fits in the margin, **Then** nothing is paused. **When** activity is unknown, **Then** it counts
    as external demand.
 2. **Given** Neutral and one contending principal, **When** both principals want more than the
    capacity, **Then** own work converges to its fair share and does not yield below it, except
@@ -535,8 +535,10 @@ node reports with the expected per-resource values at each step.
   - limit own work to capacity external demand is not using, minus a generous margin;
   - step down within the mode's response time on any external increase beyond the measurement
     tolerance;
-  - on a contended compute resource, take opportunistic work to zero, for up to the pause bound
-    and then at the minimum duty (FR-014); Guaranteed work keeps its CPU request (FR-024);
+  - on a contended compute resource, that is when external demand exceeds the free margin,
+    take opportunistic work down: for CPU, paused, then the minimum duty after `pause_bound_s`
+    (FR-014); Guaranteed work keeps its CPU request (FR-024). External activity that fits in the
+    margin only lowers the cap by its amount;
   - count unknown activity as external demand;
   - scale up slowly.
 - **FR-021**: Neutral MUST:
@@ -825,8 +827,8 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     or one missing allocation measurement.
 - **SC-002**: In every mode, CPU demanded by external work is returned within 2 monitor intervals
   of the demand appearing, including on a host that own work saturates: own CPU usage reaches the
-  mode's contended target, which is zero opportunistic usage in Yield First, for up to the pause
-  bound, and the fair share in Neutral and Performance. With demand that fits in the margin, Yield First keeps its 25% margin
+  mode's contended target, which in Yield First is opportunistic work paused, then at the
+  minimum duty after `pause_bound_s`, and the fair share in Neutral and Performance. With demand that fits in the margin, Yield First keeps its 25% margin
   free. No work is drained or terminated when CPU is the only contended resource.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance

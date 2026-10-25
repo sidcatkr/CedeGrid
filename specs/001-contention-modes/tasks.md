@@ -597,6 +597,11 @@ context, under Neutral and Performance (quickstart §5).
   processes when `never_share_occupied_gpus` is set (FR-064).
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
+- [ ] T086a [US5] Split the interim combined CPU/RAM admission per resource (decision 52): once
+  T086 places by per-resource admission, report CPU and RAM admission separately in
+  `NodeReport.contention` from their own cooldowns, and drop the both-cooled rule for
+  `cpu_ram_expansion_allowed` in `src/policy.rs`. Test in `tests/policy.rs` and
+  `tests/coordinator.rs`: a RAM reclaim backoff blocks only RAM-requesting placement.
 - [ ] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
   external usage. Batch 2 blocks Active in every mode at the launch recheck in
   `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 admission by mode and the T135 peak
@@ -824,6 +829,10 @@ each step.
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
   unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
   then starts at a cap where a delegated cgroup allows it.
+- [ ] T141 Add PSI `cpu.some` as a secondary saturation signal next to `saturation_percent`
+  (follow-up, not blocking): read it in `src/kernel.rs` (read-only), treat the CPU as saturated
+  when either signal says so, keep unknown PSI as no extra evidence, and test it in
+  `tests/contention.rs` and `tests/kernel.rs`.
 
 ---
 
