@@ -286,6 +286,9 @@ pub struct PrincipalUsage {
     pub ram_mib: u64,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub gpu_memory_mib: BTreeMap<String, u64>,
+    /// Measured GPU compute per device, in thousandths of device time.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_compute_milli: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -270,7 +270,9 @@ reports its `admission`: open, held or blocked, with a reason (FR-028, FR-038).
 
 `external_compute_milli` and `own_compute_milli`, in thousandths of device time, when fresh
 per-process samples account for device utilization; else `compute_amount_unknown` with the
-reason. Older recordings have none of them and take the unknown path.
+reason. Older recordings have none of them and take the unknown path. `PrincipalUsage`
+carries `gpu_compute_milli` per device, the measured compute of that UID's external
+processes; a PID whose UID cannot be read stays in the unattributed remainder.
 
 ## Judged amounts (`src/policy.rs`)
 

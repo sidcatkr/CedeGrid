@@ -622,9 +622,11 @@ node reports with the expected per-resource values at each step.
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
   utilization over the same interval. It MUST stay activity of unknown amount when either query
   is unsupported, samples are not fresh, the process inventory is incomplete, or an MPS control
-  daemon or server is present. A measured amount takes the CPU paths: one principal of that
-  amount, saturation at `saturation_percent` of device utilization, probing and satisfied
-  records; admission still follows FR-026 and FR-027. The node report's held-back breakdown
+  daemon or server is present. A measured amount takes the CPU paths: external processes are
+  principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
+  window as CPU, a PID whose UID cannot be read is unattributed, saturation is at
+  `saturation_percent` of device utilization, and probing and satisfied records apply;
+  admission still follows FR-026 and FR-027. The node report's held-back breakdown
   states, per device, whether the amount was measured or why it is unknown.
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin

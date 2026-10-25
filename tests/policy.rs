@@ -3503,6 +3503,58 @@ fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
     }
 }
 
+/// External GPU compute is grouped by UID, as CPU principals are: two external
+/// users each wanting half the device leave Neutral own work a third (FR-021).
+#[test]
+fn external_gpu_users_are_principals_by_uid() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Active,
+        Some(vec![987, 988]),
+        Some(8000),
+        false,
+    );
+    snap.gpus[0].utilization_percent = Some(100);
+    snap.gpus[0].external_compute_milli = Some(666);
+    snap.gpus[0].own_compute_milli = Some(334);
+    let user = |uid: u32, amount: u64| PrincipalUsage {
+        uid: Some(uid),
+        gpu_compute_milli: BTreeMap::from([("GPU-test".into(), amount)]),
+        ..PrincipalUsage::default()
+    };
+    snap.principals = Some(vec![
+        PrincipalUsage {
+            uid: Some(1000),
+            is_owner: true,
+            ..PrincipalUsage::default()
+        },
+        user(2000, 333),
+        user(3000, 333),
+    ]);
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let mut engine = PolicyEngine::new();
+    let mut share = None;
+    let mut now = 0;
+    while now <= 30_000 {
+        snap.gpus[0].compute_sample_id = Some(now + 1);
+        share = engine.evaluate(&cfg, &snap, &input, now).unwrap().resources[&key].target_share;
+        now += 500;
+    }
+    // A third of 1000; max-min hands the remainder to own work.
+    assert_eq!(share, Some(334));
+}
+
 /// Neutral learns that a measured 5% external user is satisfied once own work
 /// holds the fair share and the device has capacity to spare, and own work then
 /// runs at capacity minus the user minus the 5% margin (FR-021).

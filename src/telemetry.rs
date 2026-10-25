@@ -46,6 +46,8 @@ pub struct Collector {
     processes: System,
     /// External context memory per device and PID from the last GPU sample.
     external_gpu_memory: BTreeMap<String, BTreeMap<u32, u64>>,
+    /// Measured external GPU compute per device and PID from the last GPU sample.
+    external_gpu_compute: BTreeMap<String, BTreeMap<u32, u64>>,
     /// External processes listed for memory peaks, by PID and start time.
     tracked_external: BTreeSet<(u32, u64)>,
 }
@@ -126,6 +128,7 @@ pub fn external_memory_processes(
 pub fn aggregate_principals(
     processes: &[ProcessSample],
     gpu_memory: &BTreeMap<String, BTreeMap<u32, u64>>,
+    gpu_compute: &BTreeMap<String, BTreeMap<u32, u64>>,
     owner_uid: Option<u32>,
     managed: &BTreeSet<u32>,
 ) -> Vec<PrincipalUsage> {
@@ -167,6 +170,23 @@ pub fn aggregate_principals(
             .entry(uuid.clone())
             .or_default();
             *usage = usage.saturating_add(*mib);
+        }
+    }
+    // A PID whose owner cannot be read stays with the unattributed principal.
+    for (uuid, processes) in gpu_compute {
+        for (pid, milli) in processes {
+            if managed.contains(pid) {
+                continue;
+            }
+            let usage = entry(
+                &mut principals,
+                owners.get(pid).copied().flatten(),
+                owner_uid,
+            )
+            .gpu_compute_milli
+            .entry(uuid.clone())
+            .or_default();
+            *usage = usage.saturating_add(*milli);
         }
     }
     principals.into_values().collect()
@@ -241,6 +261,7 @@ impl Collector {
             .attribution_tolerance_percent,
             processes: System::new(),
             external_gpu_memory: BTreeMap::new(),
+            external_gpu_compute: BTreeMap::new(),
             tracked_external: BTreeSet::new(),
         })
     }
@@ -290,6 +311,7 @@ impl Collector {
             aggregate_principals(
                 &samples,
                 &self.external_gpu_memory,
+                &self.external_gpu_compute,
                 owner_uid(),
                 &self.managed_pids,
             ),
@@ -419,6 +441,7 @@ impl Collector {
         self.managed_gpu_usage.clear();
         self.gpu_accounting_known.clear();
         self.external_gpu_memory.clear();
+        self.external_gpu_compute.clear();
         let (gpu_inventory, gpus) = self.sample_gpus(&mut capabilities, observed_at_unix_ms);
         let (principals, external_processes) = match self.sample_principals() {
             Some((principals, external)) => (Some(principals), Some(external)),
@@ -699,7 +722,7 @@ impl Collector {
                     .flatten()
                     .filter_map(|pid| process_name(*pid))
                     .any(|name| is_mps_process(&name));
-            let compute_amount = measure_compute(
+            let (compute_amount, compute_by_pid) = measure_compute(
                 external_process_ids.as_deref(),
                 &self.managed_pids,
                 activity_baseline,
@@ -708,6 +731,10 @@ impl Collector {
                 mps,
                 self.attribution_tolerance_percent,
             );
+            if matches!(compute_amount, ComputeAmount::Measured { .. }) {
+                self.external_gpu_compute
+                    .insert(uuid.clone(), compute_by_pid);
+            }
             if let Some(cursor) = next_cursor {
                 // An unchanged timestamp never refreshes the age of the baseline.
                 if previous.is_none() || baseline.is_none_or(|(old, _)| cursor > old) {
@@ -1128,8 +1155,8 @@ fn measure_compute(
     device: Option<u32>,
     mps: bool,
     tolerance: u8,
-) -> ComputeAmount {
-    let unknown = |reason: &str| ComputeAmount::Unknown(reason.into());
+) -> (ComputeAmount, BTreeMap<u32, u64>) {
+    let unknown = |reason: &str| (ComputeAmount::Unknown(reason.into()), BTreeMap::new());
     if mps {
         return unknown(
             "an MPS daemon or server shares the device, so per-process samples do not attribute compute",
@@ -1148,9 +1175,12 @@ fn measure_compute(
         Ok(samples) => samples,
         Err(NvmlError::NotFound) => &[],
         Err(error) => {
-            return ComputeAmount::Unknown(format!(
-                "per-process utilization is unavailable: {error:?}"
-            ));
+            return (
+                ComputeAmount::Unknown(format!(
+                    "per-process utilization is unavailable: {error:?}"
+                )),
+                BTreeMap::new(),
+            );
         }
     };
     let mut per_pid: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
@@ -1160,23 +1190,31 @@ fn measure_compute(
         *count += 1;
     }
     let (mut external_percent, mut own_percent) = (0u64, 0u64);
+    let mut by_pid = BTreeMap::new();
     for (pid, (sum, count)) in per_pid {
         if own.contains(&pid) {
             own_percent += sum / count;
         } else {
             external_percent += sum / count;
+            by_pid.insert(pid, (sum / count).min(100) * 10);
         }
     }
     let total = external_percent + own_percent;
     if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
-        return ComputeAmount::Unknown(format!(
-            "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
-        ));
+        return (
+            ComputeAmount::Unknown(format!(
+                "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
+            )),
+            BTreeMap::new(),
+        );
     }
-    ComputeAmount::Measured {
-        external: external_percent.min(100) * 10,
-        own: own_percent.min(100) * 10,
-    }
+    (
+        ComputeAmount::Measured {
+            external: external_percent.min(100) * 10,
+            own: own_percent.min(100) * 10,
+        },
+        by_pid,
+    )
 }
 
 fn error_status(error: &NvmlError) -> CapabilityStatus {
@@ -1868,7 +1906,12 @@ mod tests {
             // PID 99 is outside the visible process table, so its owner is unreadable.
             BTreeMap::from([(2, 512), (99, 256)]),
         )]);
-        let principals = aggregate_principals(&processes, &gpu, Some(1000), &BTreeSet::from([6]));
+        let compute = BTreeMap::from([(
+            "GPU-a".to_string(),
+            BTreeMap::from([(1, 50), (2, 400), (6, 300), (99, 100)]),
+        )]);
+        let principals =
+            aggregate_principals(&processes, &gpu, &compute, Some(1000), &BTreeSet::from([6]));
         assert_eq!(
             principals,
             vec![
@@ -1878,6 +1921,7 @@ mod tests {
                     cpu_millicores: 120,
                     ram_mib: 3,
                     gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 256)]),
+                    gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 100)]),
                 },
                 PrincipalUsage {
                     uid: Some(1000),
@@ -1885,6 +1929,7 @@ mod tests {
                     cpu_millicores: 200,
                     ram_mib: 10,
                     gpu_memory_mib: BTreeMap::new(),
+                    gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 50)]),
                 },
                 PrincipalUsage {
                     uid: Some(1001),
@@ -1892,6 +1937,7 @@ mod tests {
                     cpu_millicores: 400,
                     ram_mib: 50,
                     gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 512)]),
+                    gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 400)]),
                 },
             ]
         );
@@ -1920,7 +1966,7 @@ mod tests {
         };
         let measure = |samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
                        device: Option<u32>| {
-            measure_compute(Some(&[42]), &own, Some(100), samples, device, false, 15)
+            measure_compute(Some(&[42]), &own, Some(100), samples, device, false, 15).0
         };
         // One external PID at 5% beside own work at 94%, on a device at 100%.
         let five = ok(vec![
@@ -1980,15 +2026,15 @@ mod tests {
         ));
         assert!(matches!(measure(&five, None), ComputeAmount::Unknown(_)));
         assert!(matches!(
-            measure_compute(None, &own, Some(100), &five, Some(100), false, 15),
+            measure_compute(None, &own, Some(100), &five, Some(100), false, 15).0,
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, None, &five, Some(100), false, 15),
+            measure_compute(Some(&[42]), &own, None, &five, Some(100), false, 15).0,
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15),
+            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15).0,
             ComputeAmount::Unknown(reason) if reason.contains("MPS")
         ));
         // A PID above 100 counts as 100.

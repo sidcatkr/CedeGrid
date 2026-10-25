@@ -1006,14 +1006,19 @@ impl PolicyEngine {
                     let budget = match measured {
                         Some((external, own)) if external > 0 => {
                             let mode = governing(ResourceKind::GpuCompute);
+                            // External users are principals by UID, as on CPU.
+                            let (members, background) =
+                                principals(compute_key.clone(), GPU_COMPUTE_CAPACITY, &|p| {
+                                    p.gpu_compute_milli.get(&gpu.uuid).copied().unwrap_or(0)
+                                });
                             let mut view = ModeInput {
                                 kind: ResourceKind::GpuCompute,
                                 mode,
                                 capacity: GPU_COMPUTE_CAPACITY,
                                 external,
                                 own,
-                                principals: None,
-                                background: 0,
+                                principals: members,
+                                background,
                                 saturated: gpu.utilization_percent.is_some_and(|busy| {
                                     busy >= u32::from(compute_thresholds.saturation_percent)
                                 }),
