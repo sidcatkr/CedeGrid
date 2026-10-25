@@ -14,6 +14,17 @@ pub enum ContentionMode {
 }
 
 impl ContentionMode {
+    /// How far a memory allowance may rise per scale-up interval, in percent of
+    /// capacity. A mechanism constant: memory keeps only the floor under Neutral
+    /// and Performance, so no margin sizes it there.
+    pub fn memory_allowance_step_percent(self) -> u8 {
+        match self {
+            ContentionMode::YieldFirst => 20,
+            ContentionMode::Neutral => 5,
+            ContentionMode::Performance => 2,
+        }
+    }
+
     pub const ALL: [ContentionMode; 3] = [
         ContentionMode::YieldFirst,
         ContentionMode::Neutral,

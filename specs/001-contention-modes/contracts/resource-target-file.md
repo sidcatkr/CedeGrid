@@ -53,7 +53,9 @@ fsync, and renaming it over the target.
   (CPU) or `noise_tolerance_mib` (memory). Falls publish together, at once, when the sum over
   the allocations of their published values above their current allowances passes one
   threshold. A rise publishes at most once per scale-up interval, by at most one scale-up step
-  (the mode's margin of capacity), and only beyond one threshold.
+  (the mode's margin of capacity on CPU; on memory a mechanism constant of 20%, 5% or 2% of
+  capacity per mode, since Neutral and Performance keep only the floor there), and only beyond
+  one threshold.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
   `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
   shows that the worker can read hints; the supervisor reports it as `hint_ready`, and

@@ -577,6 +577,9 @@ pub const ACKNOWLEDGEMENTS: [&str; 4] = [
     "relaxed_detection",
 ];
 
+/// Why memory has no Neutral or Performance margin.
+pub const MEMORY_FLOOR_ONLY: &str = "memory keeps only the floor under Neutral and Performance; only yield_first_margin_percent applies";
+
 /// Floors are never smaller than these (FR-023).
 pub const MIN_RAM_FLOOR_MIB: u64 = 512;
 pub const MIN_VRAM_FLOOR_MIB: u64 = 512;
@@ -843,16 +846,22 @@ impl ContentionConfig {
                 );
                 Ok(())
             };
-            applies(
-                "performance_margin_percent",
-                &[Cpu, GpuCompute],
-                set.performance_margin_percent.is_some(),
-            )?;
-            applies(
-                "neutral_margin_percent",
-                &[Cpu, GpuCompute],
-                set.neutral_margin_percent.is_some(),
-            )?;
+            for (field, present) in [
+                (
+                    "performance_margin_percent",
+                    set.performance_margin_percent.is_some(),
+                ),
+                (
+                    "neutral_margin_percent",
+                    set.neutral_margin_percent.is_some(),
+                ),
+            ] {
+                ensure!(
+                    !present || !kind.is_memory(),
+                    "contention.{name}.{field} does not apply: {}",
+                    MEMORY_FLOOR_ONLY
+                );
+            }
             applies(
                 "yield_first_response_intervals",
                 &[Cpu, GpuCompute],

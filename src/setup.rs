@@ -330,13 +330,17 @@ impl Choices {
                     "--margin takes a whole percentage, not {percent:?}"
                 ))
             })?;
-            choices.margins.insert(
-                (
-                    parse_resource(resource, "--margin")?,
-                    parse_mode(mode, "--margin")?,
-                ),
-                percent,
+            let (kind, mode) = (
+                parse_resource(resource, "--margin")?,
+                parse_mode(mode, "--margin")?,
             );
+            if kind.is_memory() && mode != ContentionMode::YieldFirst {
+                return Err(argument(format!(
+                    "--margin {key} does not apply: {}",
+                    crate::config::MEMORY_FLOOR_ONLY
+                )));
+            }
+            choices.margins.insert((kind, mode), percent);
         }
         choices.guaranteed_hint_deadline_s = args.guaranteed_hint_deadline_s;
         for pair in &args.sets {
@@ -1174,7 +1178,10 @@ pub fn node_fields() -> Vec<Field> {
     fields.extend([Field::MaxMode, Field::RamFloor, Field::GpuFloor]);
     for kind in ResourceKind::ALL {
         for mode in ContentionMode::ALL {
-            fields.push(Field::Margin(kind, mode));
+            // Memory keeps only the floor under Neutral and Performance.
+            if !kind.is_memory() || mode == ContentionMode::YieldFirst {
+                fields.push(Field::Margin(kind, mode));
+            }
         }
     }
     fields.extend([
@@ -1480,7 +1487,13 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
                 margin(kind, mode),
                 ram_floor(config)
             ),
-            ResourceKind::Ram => format!("keeps the floor free; {}", ram_floor(config)),
+            ResourceKind::Ram => match host {
+                Some(host) => format!(
+                    "keeps the floor only ({} MiB on this host)",
+                    group(config.ram_floor_mib(host.ram_mib))
+                ),
+                None => "keeps the floor only".into(),
+            },
             ResourceKind::GpuCompute => format!(
                 "keeps {}% of each GPU's compute free; {}",
                 margin(kind, mode),
@@ -1491,7 +1504,14 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
                 margin(kind, mode),
                 gpu_floor(config)
             ),
-            ResourceKind::GpuMemory => format!("keeps the floor free; {}", gpu_floor(config)),
+            ResourceKind::GpuMemory => match host.map(|host| host.gpus.first()) {
+                Some(Some((uuid, total))) => format!(
+                    "keeps the floor only ({} MiB on {uuid})",
+                    group(config.vram_floor_mib(*total))
+                ),
+                Some(None) => "keeps the floor only (no GPU on this host)".into(),
+                None => "keeps the floor only".into(),
+            },
         }
     };
     let with = |apply: &dyn Fn(&mut Config)| {
@@ -1539,14 +1559,9 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
                 "keeps {percent}% of each GPU's compute free in {}",
                 mode_label(mode)
             ),
-            _ if mode == ContentionMode::YieldFirst => format!(
+            _ => format!(
                 "keeps {percent}% of {} beyond the floor free in Yield First",
                 resource_label(kind)
-            ),
-            _ => format!(
-                "allowances rise by {percent}% of {} per step in {}",
-                resource_label(kind),
-                mode_label(mode)
             ),
         },
         (Field::HintDeadline, Pick::Number(seconds)) => format!(
@@ -2534,8 +2549,8 @@ mod tests {
             Some("small_floor")
         );
         // Margins: the default and larger ones carry no marker; smaller is caution.
-        for kind in ResourceKind::ALL {
-            for mode in ContentionMode::ALL {
+        for field in node_fields() {
+            if let Field::Margin(kind, mode) = field {
                 let default = u64::from(margin_of(&ResourceThresholds::defaults(kind), mode).1);
                 assert_eq!(
                     risk(&plain, Field::Margin(kind, mode), Pick::Number(default)),
@@ -2599,6 +2614,30 @@ mod tests {
             consequence(Field::GpuFloor, Pick::Number(1024), &config, Some(&host)),
             "GPU memory floor 1229 MiB on GPU-a"
         );
+        // Memory keeps only the floor under Neutral and Performance (item 009 B).
+        assert_eq!(
+            consequence(
+                Field::Mode(ResourceKind::Ram),
+                Pick::Mode(ContentionMode::Neutral),
+                &config,
+                Some(&host)
+            ),
+            "keeps the floor only (13 108 MiB on this host)"
+        );
+        assert_eq!(
+            consequence(
+                Field::Mode(ResourceKind::GpuMemory),
+                Pick::Mode(ContentionMode::Performance),
+                &config,
+                Some(&host)
+            ),
+            "keeps the floor only (1229 MiB on GPU-a)"
+        );
+        for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+            for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+                assert!(!node_fields().contains(&Field::Margin(kind, mode)));
+            }
+        }
     }
 
     /// Every option the interface offers maps to a key the configuration accepts,
@@ -2617,11 +2656,7 @@ mod tests {
                 field.apply(&mut choices, pick);
                 choices.acknowledge = ACKNOWLEDGEMENTS.iter().map(|s| s.to_string()).collect();
                 let result = plan(&plain.path, &choices, Some(&host()));
-                // A single margin may break yield_first >= neutral >= performance;
-                // everything else must load.
-                if !matches!(field, Field::Margin(..)) {
-                    assert!(result.is_ok(), "{field:?} {pick:?}: {:?}", result.err());
-                }
+                assert!(result.is_ok(), "{field:?} {pick:?}: {:?}", result.err());
             }
         }
     }

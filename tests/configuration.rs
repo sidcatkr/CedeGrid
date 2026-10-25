@@ -1511,3 +1511,33 @@ fn job_contention_cases_parse_and_validate_alike() {
         }
     }
 }
+
+/// Memory keeps only the floor under Neutral and Performance, so those margins do
+/// not exist for RAM and GPU memory (item 009 B).
+#[test]
+fn memory_has_no_neutral_or_performance_margin() {
+    for resource in ["ram", "gpu_memory"] {
+        for key in ["neutral_margin_percent", "performance_margin_percent"] {
+            let error = format!(
+                "{:#}",
+                parse_node(&format!("[contention.{resource}]\n{key} = 5")).unwrap_err()
+            );
+            assert!(
+                error.contains("keeps only the floor under Neutral and Performance"),
+                "{resource}.{key}: {error}"
+            );
+        }
+    }
+    // Yield First's memory margin is not ordered against margins that do not apply.
+    let config = parse_node(
+        "[contention]\nacknowledge_caution = [\"reduced_margin\"]\n[contention.ram]\nyield_first_margin_percent = 3",
+    )
+    .unwrap();
+    assert_eq!(
+        config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Ram)
+            .yield_first_margin_percent,
+        3
+    );
+}

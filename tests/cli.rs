@@ -736,6 +736,55 @@ mod setup_non_interactive {
         assert!(!path.exists());
     }
 
+    /// Memory margins exist for Yield First only (item 009 B).
+    #[test]
+    fn memory_neutral_and_performance_margins_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        for margin in [
+            "ram.neutral=5",
+            "ram.performance=2",
+            "gpu_memory.neutral=5",
+            "gpu_memory.performance=2",
+        ] {
+            let output = setup_cmd(
+                &path,
+                &[
+                    "--non-interactive",
+                    "--json",
+                    "--role",
+                    "node",
+                    "--margin",
+                    margin,
+                ],
+            );
+            assert_eq!(output.status.code(), Some(2), "{margin}");
+            assert_eq!(error_code(&output), "ERR_CEDEGRID_ARGUMENT");
+            assert!(
+                json(&output)["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("keeps only the floor under Neutral and Performance"),
+                "{margin}"
+            );
+            assert!(!path.exists());
+        }
+        assert!(
+            setup_cmd(
+                &path,
+                &[
+                    "--non-interactive",
+                    "--role",
+                    "node",
+                    "--margin",
+                    "ram.yield_first=30"
+                ],
+            )
+            .status
+            .success()
+        );
+    }
+
     /// Client and coordinator files take their connection settings; node choices
     /// are refused for them (T107).
     #[test]
@@ -1174,6 +1223,16 @@ mod setup_terminal {
         let (_, text, _) = pty.finish();
         assert!(!text.contains('\x1b'), "{text:?}");
         assert!(text.contains("[caution]"));
+        // Memory keeps only the floor under Neutral and Performance (item 009 B).
+        assert!(text.contains("RAM margin, Yield First"));
+        for row in [
+            "RAM margin, Neutral",
+            "RAM margin, Performance",
+            "GPU memory margin, Neutral",
+            "GPU memory margin, Performance",
+        ] {
+            assert!(!text.contains(row), "{row}");
+        }
         // With color the marker is yellow.
         let mut pty = interface(&path, &[]);
         open(&mut pty, CPU_MODE);
@@ -1283,7 +1342,7 @@ mod setup_terminal {
         pty.wait_for("Type yes to record performance_mode");
         pty.key(b"yes\r");
         // Keep every other value.
-        for _ in 0..22 {
+        for _ in 0..18 {
             pty.key(b"\r");
         }
         pty.wait_for("Write this configuration? [y/N]");

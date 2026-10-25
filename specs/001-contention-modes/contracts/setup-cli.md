@@ -51,7 +51,9 @@ setup configures client settings only; node and coordinator setup is refused.
 | Esc, `q`, Ctrl-C | Cancel; nothing is written and the terminal is restored |
 
 - **Rows.** Role, default mode, the mode of each resource, the node cap, the RAM and GPU memory
-  floors, the three margins of each resource, the Guaranteed hint deadline, the GPU memory
+  floors, the three margins of CPU and GPU compute and the Yield First margin of RAM and GPU
+  memory (memory keeps only the floor under Neutral and Performance, so
+  `--margin ram.neutral=…` and the like exit 2), the Guaranteed hint deadline, the GPU memory
   noise tolerance and the GPU compute attribution tolerance, then "Review and write" and
   "Cancel". Up from the first row wraps to the last. Enter or Space opens a row; on its option
   screen Space marks an option and Enter confirms the marked one. Each row starts at the

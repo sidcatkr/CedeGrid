@@ -2571,12 +2571,16 @@ impl PolicyEngine {
                 };
                 // Each job rises at its own mode's pace.
                 let step_of = |mode: ContentionMode| {
-                    let margin = match mode {
-                        ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
-                        ContentionMode::Neutral => thresholds.neutral_margin_percent,
-                        ContentionMode::Performance => thresholds.performance_margin_percent,
+                    let percent = if kind.is_memory() {
+                        mode.memory_allowance_step_percent()
+                    } else {
+                        match mode {
+                            ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
+                            ContentionMode::Neutral => thresholds.neutral_margin_percent,
+                            ContentionMode::Performance => thresholds.performance_margin_percent,
+                        }
                     };
-                    (capacity.saturating_mul(u64::from(margin)) / 100).max(threshold + 1)
+                    (capacity.saturating_mul(u64::from(percent)) / 100).max(threshold + 1)
                 };
                 let mode_of = |a: &Allocation| allocation_modes[&a.id][&kind];
                 // The room is shared equally, but no job is invited above its own

@@ -187,8 +187,10 @@ current cap or hint target and the operator envelope, never below a Guaranteed r
 and only current usage while a measurement is unknown. If every allocation grows to its
 allowance at once, the totals stay within the mode's allowance. One publish threshold in
 total is held back: falls publish together once the published values exceed the current
-allowances by more than it, and a rise moves at most one step, the mode's margin of
-capacity, per scale-up interval.
+allowances by more than it, and a rise moves at most one step per scale-up interval: the
+mode's margin of capacity on CPU, and a fixed 20%, 5% or 2% of capacity in Yield First,
+Neutral or Performance on memory, which keeps only the floor under Neutral and Performance
+and so has no margin there.
 
 A job may request a mode per resource (`LaunchRequest.contention`); it runs at the less
 aggressive of that mode and `contention.max_mode`. The owner's aggregate on a resource
