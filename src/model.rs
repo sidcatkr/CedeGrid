@@ -327,6 +327,9 @@ pub struct AllocationFacts {
     /// The worker polls the drain file: it acked targets or used the supervisor socket.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub observes_drain: bool,
+    /// The steps the supervisor reported applied, per resource.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

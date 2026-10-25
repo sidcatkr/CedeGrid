@@ -1750,18 +1750,40 @@ impl PolicyEngine {
                 if running.is_empty() {
                     continue;
                 }
+                // Activity of unknown amount first holds the steps, as any unknown
+                // measurement does, and escalates after the unknown window (FR-008).
+                let unknown = budget.own.is_none() && gpu_activity_unknown.contains(uuid);
                 // Own work on a device shares what it holds equally: its measured
-                // usage, else the whole device.
-                let held = budget.own.unwrap_or(GPU_COMPUTE_CAPACITY);
+                // usage, else the whole device, but at most a duty its supervisor
+                // reports applied, since the duty cycle is own actuation. Unknown
+                // activity and unreported duties keep the whole device (FR-008).
+                let assumed = GPU_COMPUTE_CAPACITY / running.len() as u64;
+                let applied_duty = |allocation: &Allocation| -> u64 {
+                    let state = self.ladder.get(&(allocation.id.clone(), key.clone()));
+                    let applied = input
+                        .facts
+                        .get(&allocation.id)
+                        .and_then(|facts| facts.applied.get(&key));
+                    match (unknown, state, applied) {
+                        (false, Some(state), Some(step)) if *step == state.step => {
+                            match state.step {
+                                YieldStep::Cap => assumed.min(state.target.unwrap_or(assumed)),
+                                YieldStep::Pause => 0,
+                                _ => assumed,
+                            }
+                        }
+                        _ => assumed,
+                    }
+                };
+                let held = budget
+                    .own
+                    .unwrap_or_else(|| running.iter().map(|a| applied_duty(a)).sum());
                 let share = held / running.len() as u64;
                 let excess = held.saturating_sub(budget.share);
                 // While calm, a held cap rises toward its usage plus its part of
                 // what the mode allows beyond own usage.
                 let spare_share = budget.share.saturating_sub(held) / running.len() as u64;
                 let external = budget.external;
-                // Activity of unknown amount first holds the steps, as any unknown
-                // measurement does, and escalates after the unknown window (FR-008).
-                let unknown = budget.own.is_none() && gpu_activity_unknown.contains(uuid);
                 if unknown {
                     let since = self
                         .unknown_since

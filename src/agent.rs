@@ -918,6 +918,7 @@ impl ChildSlot {
             unavailable: self.unavailable.clone(),
             hint_ready: self.hint_ready,
             observes_drain: self.observes_drain,
+            applied: self.applied.clone(),
         }
     }
 }

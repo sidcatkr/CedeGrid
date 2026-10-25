@@ -609,7 +609,10 @@ node reports with the expected per-resource values at each step.
     expire, but at most 64 are kept per resource: past that, the record whose principal was seen
     longest ago is dropped. Activity of unknown amount is never recorded;
   - let external demand reclaim anything above fair share;
-  - count unknown activity as one active principal without blocking admission.
+  - count unknown activity as one active principal without blocking admission. On GPU compute,
+    a duty cycle the supervisor reports applied counts as what own work holds, so a cap at the
+    fair share is met; FR-008's hold-then-escalate applies to unknown activity from a telemetry
+    failure or a missing observation and to a duty not reported applied.
 
   No-harm floors take precedence over fair share for RAM and GPU memory. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so

@@ -3436,6 +3436,73 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
     assert_eq!(gpu_compute_target(YieldFirst, None).0, Some(Pause));
 }
 
+/// Under GPU activity of unknown amount, Neutral and Performance hold the fair
+/// share: once the supervisor reports the duty cycle applied, own work holds at
+/// most that duty, so the cap at the share is met and never escalates; for 5
+/// minutes after the first step own work stays at 500 and is never paused.
+#[test]
+fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
+    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    for mode in [Neutral, Performance] {
+        let (cfg, mut snap) = us5_device(
+            mode,
+            ComputeActivity::Active,
+            Some(vec![987]),
+            Some(8000),
+            false,
+        );
+        snap.gpus[0].compute_amount_unknown = Some("not measured".into());
+        let mut engine = PolicyEngine::new();
+        let mut applied: Option<YieldStep> = None;
+        let mut targets = vec![];
+        let mut now = 0;
+        while now < 300_000 {
+            snap.gpus[0].compute_sample_id = Some(now + 1);
+            let mut facts = rootless(&["job"]);
+            if let Some(step) = applied {
+                facts
+                    .get_mut("job")
+                    .unwrap()
+                    .applied
+                    .insert(key.clone(), step);
+            }
+            let decision = engine
+                .evaluate(
+                    &cfg,
+                    &snap,
+                    &PolicyInput {
+                        allocations: vec![allocation(
+                            "job",
+                            AllocationPhase::Running,
+                            resources(100, 100, 2000),
+                            Some(resources(100, 100, 2000)),
+                        )],
+                        facts,
+                        ..PolicyInput::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            let action = decision.actions.iter().find(|a| a.resource == key);
+            // The supervisor applies each step it is sent.
+            applied = action.map(|a| a.step);
+            targets.push(action.map(|a| (a.step, a.target)));
+            now += 500;
+        }
+        assert_eq!(targets[0], Some((YieldStep::Cap, Some(500))), "{mode:?}");
+        assert!(
+            targets
+                .iter()
+                .all(|t| *t == Some((YieldStep::Cap, Some(500)))),
+            "{mode:?}: {:?}",
+            targets
+                .iter()
+                .find(|t| **t != Some((YieldStep::Cap, Some(500))))
+        );
+    }
+}
+
 /// Neutral learns that a measured 5% external user is satisfied once own work
 /// holds the fair share and the device has capacity to spare, and own work then
 /// runs at capacity minus the user minus the 5% margin (FR-021).
