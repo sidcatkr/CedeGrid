@@ -458,8 +458,8 @@ node reports with the expected per-resource values at each step.
   reports the caution option as active.
 - **Configuration edited by hand to lower a margin or relax detection.** A margin below its
   default, or a detection setting beyond its default (FR-045: `saturation_percent`,
-  `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above it, `memory_peak_window_s`
-  or `quiet_window_intervals` below it), fails to load unless the file contains the entry
+  `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent`
+  above it, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load unless the file contains the entry
   `reduced_margin` or `relaxed_detection`. With the entry, CedeGrid reports the caution option as
   active.
 - **A floor set near its minimum, or below it.** A floor is "near" its minimum below twice the
@@ -827,7 +827,7 @@ node reports with the expected per-resource values at each step.
   | Performance mode | *caution* (yellow) | Own work keeps all idle capacity minus a small margin and grows quickly. Other workloads still get their fair share within the reclaim bounds, and floors still hold. |
   | A floor near its minimum | *caution* (yellow) | Less headroom is kept for other workloads' bursts. The enforced minimum and the out-of-memory preference still protect them. |
   | A margin below its default (`reduced_margin`) | *caution* (yellow) | Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold. |
-  | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib` or `uid_min` above it, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
+  | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
 
 **Setup**
 

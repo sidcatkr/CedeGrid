@@ -1095,6 +1095,10 @@ impl ContentionConfig {
                     "quiet_window_intervals",
                     -i64::from(t.quiet_window_intervals),
                 ),
+                (
+                    "attribution_tolerance_percent",
+                    i64::from(t.attribution_tolerance_percent),
+                ),
             ]
         }));
         result
@@ -1256,7 +1260,10 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
             Caution("relaxed_detection"),
         ),
         ("contention.*.guaranteed_breach_window_s", Bounded),
-        ("contention.*.attribution_tolerance_percent", Bounded),
+        (
+            "contention.*.attribution_tolerance_percent",
+            Caution("relaxed_detection"),
+        ),
         ("contention.*.hint_deadline_s", Bounded),
         ("contention.*.hysteresis_percent", Bounded),
         ("contention.*.min_step_dwell_intervals", Bounded),

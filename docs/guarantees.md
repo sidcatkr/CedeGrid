@@ -253,8 +253,9 @@ names the replacement settings. Every configuration key is classified as safe, b
 or caution. Four options are marked *caution* because they let own work hold more
 capacity within the floors: Performance mode, a floor below twice its minimum, a margin
 below its default, and a detection setting beyond its default (`saturation_percent`,
-`principal_min_percent`, `noise_tolerance_mib` or `contention.uid_min` above it,
-`memory_peak_window_s` or `quiet_window_intervals` below it). Performance needs
+`principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min` or
+`contention.gpu_compute.attribution_tolerance_percent` above it, `memory_peak_window_s` or
+`quiet_window_intervals` below it). Performance needs
 `contention.acknowledge_caution = ["performance_mode"]` to load, a lower margin needs
 `"reduced_margin"` and a higher detection threshold needs `"relaxed_detection"`. A floor
 below twice its minimum without `"small_floor"` loads, so 0.2 files keep loading, but is

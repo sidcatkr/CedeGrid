@@ -825,6 +825,10 @@ fn every_configuration_key_is_classified() {
             KeyClass::Caution("relaxed_detection"),
         ),
         ("contention.uid_min", KeyClass::Caution("relaxed_detection")),
+        (
+            "contention.gpu_compute.attribution_tolerance_percent",
+            KeyClass::Caution("relaxed_detection"),
+        ),
         ("contention.max_mode", KeyClass::Caution("performance_mode")),
         ("ram.reserve_mib", KeyClass::Caution("small_floor")),
         ("lifecycle.drain_timeout_ms", KeyClass::Bounded),
@@ -840,7 +844,7 @@ fn every_configuration_key_is_classified() {
 #[test]
 fn caution_details_list_the_keys_and_values_each_option_covers() {
     let config = parse_node(
-        "[contention]\nacknowledge_caution = [\"performance_mode\", \"reduced_margin\", \"relaxed_detection\", \"small_floor\"]\nuid_min = 2000\n[contention.cpu]\nmode = \"performance\"\nneutral_margin_percent = 3\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[ram]\nreserve_mib = 600\nreserve_percent = 0",
+        "[contention]\nacknowledge_caution = [\"performance_mode\", \"reduced_margin\", \"relaxed_detection\", \"small_floor\"]\nuid_min = 2000\n[contention.cpu]\nmode = \"performance\"\nneutral_margin_percent = 3\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.gpu_compute]\nattribution_tolerance_percent = 20\n[ram]\nreserve_mib = 600\nreserve_percent = 0",
     )
     .unwrap();
     let details = config.caution_details(&host(32_000, &[]));
@@ -871,6 +875,7 @@ fn caution_details_list_the_keys_and_values_each_option_covers() {
         settings("relaxed_detection"),
         pairs(&[
             ("contention.uid_min", "2000"),
+            ("contention.gpu_compute.attribution_tolerance_percent", "20"),
             ("contention.gpu_memory.noise_tolerance_mib", "512"),
         ])
     );
@@ -946,7 +951,12 @@ fn the_gpu_compute_attribution_tolerance_is_bounded() {
     assert!(parse_node(&body("gpu_compute", 0)).is_err());
     assert!(parse_node(&body("gpu_compute", 31)).is_err());
     assert!(parse_node(&body("cpu", 15)).is_err());
-    let config = parse_node(&body("gpu_compute", 30)).unwrap();
+    // Above the default it trusts less consistent samples: relaxed detection.
+    let config = parse_node(&format!(
+        "[contention]\nacknowledge_caution = [\"relaxed_detection\"]\n{}",
+        body("gpu_compute", 30)
+    ))
+    .unwrap();
     assert_eq!(
         config
             .contention
@@ -1030,6 +1040,10 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
             "[contention.gpu_compute]\nquiet_window_intervals = 10",
             "relaxed_detection",
         ),
+        (
+            "[contention.gpu_compute]\nattribution_tolerance_percent = 20",
+            "relaxed_detection",
+        ),
     ] {
         let error = format!("{:#}", parse_node(setting).unwrap_err());
         assert!(
@@ -1056,6 +1070,7 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
         "[contention]\nuid_min = 500",
         "[contention.ram]\nmemory_peak_window_s = 600",
         "[contention.gpu_compute]\nquiet_window_intervals = 40",
+        "[contention.gpu_compute]\nattribution_tolerance_percent = 10",
     ] {
         assert!(
             parse_node(setting).unwrap().caution_options().is_empty(),

@@ -52,7 +52,7 @@ noise_tolerance_mib = 256           # 0-1024 and at most half of each GPU floor;
 
 [contention.gpu_compute]
 quiet_window_intervals = 20         # shorter needs "relaxed_detection"
-attribution_tolerance_percent = 15  # 1-30: per-process sum within this of device utilization is measured
+attribution_tolerance_percent = 15  # 1-30: per-process sum within this of device utilization is measured; above 15 needs "relaxed_detection"
 ```
 
 Related node keys: `cpu.reserve_physical_cores` (default 0) is a minimum idle reserve under the
