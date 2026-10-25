@@ -394,13 +394,14 @@ Guaranteed rules.
 - [X] T068 [US3] Apply the envelope and spool rules in `src/agent.rs`: replace the
   `slots.keys()` all-drain with per-resource envelope restoration, and make spool exhaustion
   block admission only.
-- [X] T069 [US3] (*the key is `scale_up_cooldown_ms` per resource since T135*) Decouple CPU and RAM scale-up from `gpu.scale_up_cooldown_ms`, using
-  `cpu_ram_scale_up_cooldown_ms`, in `src/policy.rs` and in the launch-slot ramp in
-  `src/agent.rs` (audit M1).
+- [X] T069 [US3] (*the key is `scale_up_cooldown_ms` per resource since T135*) Decouple CPU
+  and RAM scale-up from `gpu.scale_up_cooldown_ms`, using `cpu_ram_scale_up_cooldown_ms`, in
+  `src/policy.rs` and in the launch-slot ramp in `src/agent.rs` (audit M1).
 - [X] T070 [US3] Resolve the effective mode per allocation and resource as min(requested,
   `max_mode`), in `src/contention.rs` and `src/agent.rs`.
-- [X] T071 [US3] (*SC-002 and SC-004 revised; T125 adds the new bounds*) Add time-stepped scenario tests in `tests/contention.rs` for SC-002, SC-003
-  and SC-004 with the provisional defaults.
+- [X] T071 [US3] (*SC-002 and SC-004 revised; T125 adds the new bounds*) Add time-stepped
+  scenario tests in `tests/contention.rs` for SC-002, SC-003 and SC-004 with the provisional
+  defaults.
 
 **Checkpoint**: the three modes behave as specified on CPU, RAM, GPU compute and GPU memory.
 
@@ -471,7 +472,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   - `floor_policy = "b"` and `"c"` and `neutral_memory_policy = "b"` fail to load, and each
     message names its replacement;
   - Performance on any resource without `acknowledge_caution = ["performance_mode"]` fails with
-    `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`, and loads with it;
+    `ERR_CEDEGRID_CONFIG` carrying `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`, and loads with it;
   - a floor below its minimum is raised to it with a warning; a floor near its minimum without
     `small_floor` warns and still loads;
   - `guaranteed_hint_deadline_s` (1–30) and `ram.guaranteed_breach_window_s` (0–60, RAM only)
@@ -504,7 +505,8 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   - a user ID below `uid_min` is background and never a principal;
   - a new user joins only after `principal_window_intervals`, and counts toward the unattributed
     principal meanwhile;
-  - a principal leaves only after the window below half the threshold;
+  - a principal leaves only after `principal_leave_s` below the threshold (*revised from half
+    the threshold for the window; see T142*);
   - the owner stays a principal below `uid_min`; unreadable owners stay one principal.
 - [X] T128 [P] Add memory tests in `tests/policy.rs` (B7):
   - RAM and GPU memory headroom use the external peak over `memory_peak_window_s`, including a
@@ -564,6 +566,29 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
   - `never_share_occupied_gpus` uses the existing non-sharing path until T085;
   - the supervisor accepts a Guaranteed envelope drain on memory only.
 
+- [X] T142 Record the pre-US5 decisions, with tests:
+  - a mode the node cap refuses is reported with `mode_capped` and the cap (FR-030;
+    `tests/policy.rs`);
+  - Neutral's own 20% idle margin, validated YF ≥ N ≥ P (FR-021, FR-065;
+    `tests/configuration.rs`, `tests/contention.rs`);
+  - the 512 MiB GPU floor minimum and `gpu.reserve_vram_percent` (FR-023;
+    `tests/configuration.rs`);
+  - `principal_leave_s` (FR-059; `tests/policy.rs`);
+  - external memory peaks per external process, dropped when it exits (FR-060;
+    `tests/policy.rs`, `examples/gpu-pressure.json`);
+  - `acknowledge_danger` renamed `acknowledge_caution`;
+  - the actuation tests in `tests/supervision.rs` wait for observed conditions with a deadline.
+- [X] T143 Resolve the third `/speckit-analyze` pass in `src/contention.rs`, `src/policy.rs`,
+  `src/config.rs` and `src/agent.rs`, with tests in `tests/contention.rs` and
+  `tests/configuration.rs`:
+  - Yield First caps own work that saturated the resource itself to the margin, within the fair
+    share, before it pauses (FR-020; `ModeInput.own`);
+  - a margin below its default needs `reduced_margin`, and a `saturation_percent`,
+    `principal_min_percent` or `noise_tolerance_mib` above its default needs
+    `relaxed_detection` (FR-045, FR-054, constitution II);
+  - the agent warns once when a percentage puts a floor near its minimum on the host (FR-023);
+  - the removed Neutral memory policy names `gpu.reserve_vram_percent` (FR-042).
+
 **Checkpoint**: US5 starts from ordered targets, one floor policy and readiness-based hints.
 
 ---
@@ -597,7 +622,7 @@ context, under Neutral and Performance (quickstart §5).
   processes when `never_share_occupied_gpus` is set (FR-064).
 - [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
-- [ ] T086a [US5] Split the interim combined CPU/RAM admission per resource (decision 52): once
+- [ ] T086a [US5] Split the interim combined CPU/RAM admission per resource (plan B7): once
   T086 places by per-resource admission, report CPU and RAM admission separately in
   `NodeReport.contention` from their own cooldowns, and drop the both-cooled rule for
   `cpu_ram_expansion_allowed` in `src/policy.rs`. Test in `tests/policy.rs` and
@@ -626,7 +651,10 @@ context, under Neutral and Performance (quickstart §5).
     context, including 100 consecutive launches on the shared device;
   - record the evidence for SC-006 and the VRAM part of SC-001 in `docs/validation.md`;
   - measure the GPU memory a fresh external CUDA context takes on each target GPU, and raise
-    `MIN_VRAM_FLOOR_MIB` in `src/config.rs` (512 MiB, provisional) to at least the largest value.
+    `MIN_VRAM_FLOOR_MIB` in `src/config.rs` (512 MiB, provisional) to at least the largest value,
+    updating every place that states the 512 MiB GPU minimum in the same change: FR-023 and its
+    rationale in `spec.md`, `data-model.md`, `contracts/config-contention.md`,
+    `docs/guarantees.md`, and the tests in `tests/configuration.rs` and `tests/contention.rs`.
 
 **Checkpoint**: GPU work no longer needs an empty device.
 
@@ -679,9 +707,9 @@ workers behave unchanged (quickstart §8).
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
 - [ ] T097 [US6] Add the worker-context keys `resource_target_file` and `capabilities`, the
-  target-file format, and the negotiated optional fields (including `AllocationReport.hint_ready` and
-  `observes_drain` from T133; T139 already added the removed-option config cases) to the shared contract fixture
-  `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
+  target-file format, and the negotiated optional fields (including `AllocationReport.hint_ready`
+  and `observes_drain` from T133; T139 already added the removed-option config cases) to the
+  shared contract fixture `tests/contracts/cedegrid-0.2.json` and to the cross-SDK interop checks
   (`python/tests/numeric_interop.py`, `npm/tests/numeric-interop.ts`).
 
 **Checkpoint**: in-place adoption without breaking deployments.
@@ -699,10 +727,12 @@ never blocks, and caution choices need confirmation (quickstart §7).
 ### Tests for User Story 7 ⚠️
 
 - [ ] T098 [P] [US7] Add unit tests in `src/setup.rs` for the caution mapping (B3): Yield First,
-  Neutral and default floors have no marker; Performance on any resource and a floor below
-  twice its minimum are `caution`.
+  Neutral, default floors and default margins have no marker; Performance on any resource, a
+  floor below twice its minimum, a margin below its default and a detection threshold above its
+  default are `caution`.
 - [ ] T099 [P] [US7] Add tests in `tests/cli.rs` for `setup --non-interactive`:
   - exit codes 2, 3 and 4 per `contracts/setup-cli.md`;
+  - `--margin` for `yield_first`, `neutral` and `performance`, validated as YF ≥ N ≥ P;
   - `--json` output;
   - no prompt or blocking on a non-TTY;
   - a missing config on a non-TTY never offers setup;
@@ -717,9 +747,9 @@ never blocks, and caution choices need confirmation (quickstart §7).
 
 ### Implementation for User Story 7
 
-- [ ] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor and margin
-  sizes, Guaranteed hint deadline, tolerances through `--set`), defaults from the current config, validation and the caution
-  mapping in `src/setup.rs` (B3).
+- [ ] T101 [US7] Implement setup choices (role, per-resource modes, node cap, floor sizes, margin
+  sizes for every mode, Guaranteed hint deadline, tolerances through `--set`), defaults from the
+  current config, validation and the caution mapping in `src/setup.rs` (B3).
 - [ ] T102 [US7] Implement the `toml_edit` writer in `src/setup.rs`: edit only managed tables,
   validate through `Config::load`, then rename atomically.
 - [ ] T103 [US7] Add the `setup` subcommand and flags in `src/main.rs` per
@@ -779,6 +809,7 @@ each step.
   documents the items it implemented, and this task reviews the whole document:
   - floors and their minimums;
   - floor policy A, the removed options and the caution options;
+  - the reason-code catalog, including `mode_capped` and `small_floor_raised`;
   - the Guaranteed deadline and RAM window, the critical floor path, principals by `uid_min`,
     peak headroom and reclaim backoff, `never_share_occupied_gpus`;
   - modes;
@@ -830,8 +861,10 @@ each step.
   unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
   then starts at a cap where a delegated cgroup allows it.
 - [ ] T141 Add PSI `cpu.some` as a secondary saturation signal next to `saturation_percent`
-  (follow-up, not blocking): read it in `src/kernel.rs` (read-only), treat the CPU as saturated
-  when either signal says so, keep unknown PSI as no extra evidence, and test it in
+  (follow-up, not blocking). *Spec amendment required first*: amend Saturated and Contended in
+  the spec's Terms, `data-model.md` and `docs/guarantees.md`, and add the PSI native gate to
+  [native-gates.md](native-gates.md). Then read it in `src/kernel.rs` (read-only), treat the CPU
+  as saturated when either signal says so, keep unknown PSI as no extra evidence, and test it in
   `tests/contention.rs` and `tests/kernel.rs`.
 
 ---

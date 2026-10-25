@@ -73,8 +73,8 @@ thresholds.
   on the critical floor path. These bounds are provisional and configurable.
 - Q: What may happen to a Guaranteed allocation? → A: It is never paused. Its CPU is never
   capped below its request; usage above the request may be capped. Its memory is released only
-  under floor policy A, as the last step. Yield First's "down to zero" applies to opportunistic
-  work only, and for CPU it means paused, then the minimum duty after `pause_bound_s`.
+  under floor policy A, as the last step. Yield First's contended target applies to
+  opportunistic work only: for CPU, paused, then the minimum duty after `pause_bound_s`.
 - Q: When does a worker see a target? → A: At once: the SDKs deliver the current target when a
   handler subscribes, and a managed child receives it when it starts.
 
@@ -205,7 +205,8 @@ compare own usage over time with that mode's definition, including unknown and o
    **Then** own work steps down promptly, keeping the mode's generous margin free. **When** the
    resource is contended, **Then** opportunistic CPU work is paused within 2 monitor intervals,
    then runs at the minimum duty after `pause_bound_s`, while Guaranteed work keeps its CPU
-   request. **When** external demand fits in the margin, **Then** nothing is paused. **When** activity is unknown, **Then** it counts
+   request. **When** external demand fits in the margin, **Then** nothing is paused, also when own
+   work saturated the resource before its cap. **When** activity is unknown, **Then** it counts
    as external demand.
 2. **Given** Neutral and one contending principal, **When** both principals want more than the
    capacity, **Then** own work converges to its fair share and does not yield below it, except
@@ -320,10 +321,10 @@ previous release.
 
 ### User Story 7 - Set up a node interactively or from the command line (Priority: P2)
 
-An operator runs setup and is guided through the choices: node role, per-resource modes, node
-cap, floor and margin sizes, and the Guaranteed hint deadline. On a terminal the default is an interactive,
-keyboard-driven interface. Scripts, agents and non-TTY sessions pass the same choices as
-command-line flags. Either way, the result is written to the configuration file and can be
+An operator runs setup and is guided through the choices: node role, per-resource modes, node cap,
+floor and margin sizes, and the Guaranteed hint deadline. On a terminal the default is an
+interactive, keyboard-driven interface. Scripts, agents and non-TTY sessions pass the same choices
+as command-line flags. Either way, the result is written to the configuration file and can be
 changed later.
 
 **Why this priority**: modes and caution options are only safe if operators see what each
@@ -429,10 +430,16 @@ node reports with the expected per-resource values at each step.
 - **Configuration edited by hand to select Performance.** Loading fails unless the file also
   contains the acknowledgement entry `performance_mode`. With the entry, CedeGrid loads it and
   reports the caution option as active.
+- **Configuration edited by hand to lower a margin or relax detection.** A margin below its
+  default, or a `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its
+  default, fails to load unless the file contains the entry `reduced_margin` or
+  `relaxed_detection`. With the entry, CedeGrid reports the caution option as active.
 - **A floor set near its minimum, or below it.** A floor is "near" its minimum below twice the
   minimum. A floor below the minimum is raised to it. A floor near the minimum without the
   `small_floor` entry still loads, so 0.2 files keep loading, but is raised to twice the minimum
-  with a warning; it applies as configured only once confirmed. Setup always records the entry.
+  with a warning; it applies as configured only once confirmed. The warning comes at load, or,
+  for a floor a percentage sets, when the agent first samples the host. Setup always records the
+  entry.
 - **A configuration sets a removed option.** Floor policy `b` or `c`, or Neutral memory policy
   `b`, fails to load with a message that names the replacement settings.
 - **Terminal too small or lacking cursor control for the interface.** Setup falls back to
@@ -475,11 +482,12 @@ node reports with the expected per-resource values at each step.
   requires positive evidence over a sustained, configurable window of healthy observation.
 - **FR-059**: Principals MUST be the CedeGrid account plus user IDs at or above `uid_min`
   (default 1000) whose usage of a resource has stayed at or above `principal_min_percent` for
-  `principal_window_intervals`. A principal MUST leave only after its usage has stayed below
-  that threshold for `principal_leave_s` (default 60 s). Until then, a user's usage counts toward the single
+  `principal_window_intervals`. Until a user joins, its usage counts toward the single
   unattributed principal, which unreadable owners share; that principal contends once its usage
-  reaches `principal_min_percent`. Usage by user IDs below `uid_min` MUST count as background
-  external demand: it is subtracted from capacity and never forms a principal.
+  reaches `principal_min_percent`. A principal MUST leave only after its usage has stayed below
+  that threshold for `principal_leave_s` (default 60 s). Usage by user IDs below `uid_min` MUST
+  count as background external demand: it is subtracted from capacity and never forms a
+  principal.
 - **FR-060**: Admission headroom for RAM and GPU memory MUST use the peak of external usage over
   `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Peaks are
   kept per external process, identified by PID and start time: a live process keeps its peak for
@@ -535,15 +543,18 @@ node reports with the expected per-resource values at each step.
   - limit own work to capacity external demand is not using, minus a generous margin;
   - step down within the mode's response time on any external increase beyond the measurement
     tolerance;
-  - on a contended compute resource, that is when external demand exceeds the free margin,
-    take opportunistic work down: for CPU, paused, then the minimum duty after `pause_bound_s`
-    (FR-014); Guaranteed work keeps its CPU request (FR-024). External activity that fits in the
-    margin only lowers the cap by its amount;
+  - on a contended compute resource (see Terms), take opportunistic work down: for CPU, paused,
+    then the minimum duty after `pause_bound_s` (FR-014); Guaranteed work keeps its CPU request
+    (FR-024). With own work held to its margin, the resource saturates only once external demand
+    outgrows the margin. While own work holds more than capacity minus the margin, saturation
+    may be its own doing: it is first capped to the margin, within the Neutral fair share, and
+    paused only if the resource stays contended. External activity that fits in the margin only
+    lowers the cap by its amount;
   - count unknown activity as external demand;
   - scale up slowly.
 - **FR-021**: Neutral MUST:
   - let own work use idle capacity minus the Neutral margin (default 20%, between the
-    Performance and Yield First margins);
+    Performance and Yield First margins) on CPU and GPU compute; memory keeps only the floors;
   - converge own work to its fair share under contention, and not step it below fair share
     except to keep a no-harm floor;
   - let external demand reclaim anything above fair share;
@@ -553,7 +564,8 @@ node reports with the expected per-resource values at each step.
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
   the granularity, is documented.
 - **FR-022**: Performance MUST:
-  - let own work use all capacity external demand is not using, minus a small safety margin;
+  - let own work use all capacity external demand is not using, minus a small safety margin
+    (default 10%) on CPU and GPU compute; memory keeps only the floors;
   - scale up quickly;
   - when external demand grows, yield what is needed to restore the margin and floors within the
     mode's response time;
@@ -573,10 +585,12 @@ node reports with the expected per-resource values at each step.
 
   Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 512 MiB
   per GPU device, provisional). The GPU floor is also at least `gpu.reserve_vram_percent` (5%) of
-  the device. `doctor` shows every floor as it applies on the host, and a raised floor carries the
-  reason code `small_floor_raised`. A smaller configured floor is raised to the minimum with a load-time warning,
-  and to twice the minimum unless the `small_floor` entry confirms it (FR-054). A RAM floor sized
-  by `ram.reserve_percent` is judged on the host, after the percentage is applied.
+  the device. `doctor` shows every floor as it applies on the host, and a floor raised to twice
+  its minimum carries the reason code `small_floor_raised`. A smaller configured floor is raised
+  to the minimum with a load-time warning, and to twice the minimum unless the `small_floor`
+  entry confirms it (FR-054). A floor sized by `ram.reserve_percent` or
+  `gpu.reserve_vram_percent` is judged on the host, after the percentage is applied; its warning
+  comes when the agent first samples the host.
 - **FR-024**: Guaranteed allocations:
   - MUST NOT be paused;
   - MAY be lowered in share and hinted;
@@ -599,13 +613,15 @@ node reports with the expected per-resource values at each step.
   hard-coded constant. This covers:
   - margins, response times and scale-up rates
   - tolerances, windows and deadlines, including the Guaranteed hint deadline, the RAM breach
-    window, the critical floor share and hint deadline, the principal window and `uid_min`, and
-    the memory peak window
+    window, the critical floor share and hint deadline, the principal window,
+    `principal_leave_s` and `uid_min`, and the memory peak window
   - convergence targets
   - memory scale-up cooldowns and reclaim backoff
 
   Each is set per resource where it applies, defaults to the provisional value in this spec, and
-  is documented. The Yield First margin MUST be larger than the Performance margin.
+  is documented. Margins are ordered as FR-065 requires. A margin below its default, or a
+  `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its default, is a
+  caution option (FR-045).
 
 **GPU sharing and placement**
 
@@ -726,6 +742,8 @@ node reports with the expected per-resource values at each step.
   | Yield First, Neutral, default floors | none | Floors hold in every mode. Own work is released before others are affected. |
   | Performance mode | *caution* (yellow) | Own work keeps all idle capacity minus a small margin and grows quickly. Other workloads still get their fair share within the reclaim bounds, and floors still hold. |
   | A floor near its minimum | *caution* (yellow) | Less headroom is kept for other workloads' bursts. The enforced minimum and the out-of-memory preference still protect them. |
+  | A margin below its default (`reduced_margin`) | *caution* (yellow) | Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold. |
+  | A detection threshold above its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` | *caution* (yellow) | Contention and external growth are recognized later, so own work holds capacity longer. Floors still hold. |
 
 **Setup**
 
@@ -743,7 +761,8 @@ node reports with the expected per-resource values at each step.
   The remaining thresholds keep their defaults unless changed by flags or in the file.
 - **FR-048**: The interface MUST be usable with the keyboard alone: arrow keys move, Space toggles
   or selects, Enter confirms. It MUST NOT require a mouse.
-- **FR-049**: Each mode, floor and hint-deadline option MUST show a one-line consequence.
+- **FR-049**: Each mode, floor, margin, threshold and hint-deadline option MUST show a one-line
+  consequence.
   - Default options MUST be uncolored and unmarked.
   - *Caution* options MUST be yellow.
   - Every marked option MUST also show the text label `[caution]`, so color is never the only
@@ -755,8 +774,8 @@ node reports with the expected per-resource values at each step.
   restates the consequence:
   - in the interface, a separate confirmation step;
   - in non-interactive use, an acknowledgement flag that names the option;
-  - in a hand-edited file, an `acknowledge_caution` entry that names the option (`performance_mode`
-    or `small_floor`).
+  - in a hand-edited file, an `acknowledge_caution` entry that names the option
+    (`performance_mode`, `small_floor`, `reduced_margin` or `relaxed_detection`).
 - **FR-052**: Setup MUST offer every interactive choice as a command-line flag. On a non-TTY it
   MUST NOT prompt or block. It MUST:
   - take values from flags and the existing configuration;
@@ -767,9 +786,10 @@ node reports with the expected per-resource values at each step.
   atomically and preserve all settings it does not manage.
 - **FR-054**: Re-running setup MUST start from the current configuration. Hand edits MUST have
   the same effect as setup choices. Performance selected by hand without the `performance_mode`
-  entry MUST fail to load with an error naming the missing entry. A floor near its minimum
-  without the `small_floor` entry MUST load, so that 0.2 files keep loading (FR-031), and MUST
-  apply as twice the minimum, with a warning naming the entry.
+  entry, and a margin or detection threshold beyond its default without `reduced_margin` or
+  `relaxed_detection`, MUST fail to load with an error naming the missing entry. A floor near its
+  minimum without the `small_floor` entry MUST load, so that 0.2 files keep loading (FR-031), and
+  MUST apply as twice the minimum, with a warning naming the entry (FR-023).
 - **FR-055**: Cancelling setup MUST write nothing and MUST restore the terminal. If the interface
   cannot drive the terminal, setup MUST fall back to line-based prompts.
 
@@ -828,8 +848,11 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-002**: In every mode, CPU demanded by external work is returned within 2 monitor intervals
   of the demand appearing, including on a host that own work saturates: own CPU usage reaches the
   mode's contended target, which in Yield First is opportunistic work paused, then at the
-  minimum duty after `pause_bound_s`, and the fair share in Neutral and Performance. With demand that fits in the margin, Yield First keeps its 25% margin
-  free. No work is drained or terminated when CPU is the only contended resource.
+  minimum duty after `pause_bound_s`, and the fair share in Neutral and Performance. Where own
+  work saturated the resource before its first cap, Yield First's first step is a cap to the
+  margin within the fair share, so at least the fair share is back within the same bound. With
+  demand that fits in the margin, Yield First keeps its 25% margin free. No work is drained or
+  terminated when CPU is the only contended resource.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
@@ -918,7 +941,7 @@ times assume the default 500 ms monitor interval.
 | Step hysteresis | Reverse only below 50% of the trigger threshold; at least 3 intervals between step changes | Damps oscillation (SC-009) without delaying a real response by more than one confirmation interval. |
 | Pause bound | 10 s | Longer pauses risk worker and lease timeouts, so contention escalates to the next step instead. |
 | GPU quiet window | 20 monitor intervals (10 s) of healthy observation with no activity | Activity samples are only produced for non-zero use, so quiet must be shown by sustained absence over a complete inventory. |
-| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB), plus the new `gpu.reserve_vram_percent` (5%) | Reusing the existing settings keeps 0.2 configurations meaningful. The defaults are at least max(2 GiB, 5% of RAM) and max(1 GiB, 5% of device memory); the GPU percentage covers devices above 60 GiB, where 3 GiB is less than 5%. |
+| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB), plus the new `gpu.reserve_vram_percent` (5%) | Reusing the existing settings keeps 0.2 configurations meaningful. The defaults meet the recommended sizing of at least max(2 GiB, 5% of RAM) and max(1 GiB, 5% of device memory), well above the enforced minimums; the GPU percentage covers devices above 60 GiB, where 3 GiB is less than 5%. |
 
 ## Assumptions
 

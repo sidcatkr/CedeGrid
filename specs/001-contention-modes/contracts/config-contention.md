@@ -9,7 +9,7 @@ default_mode = "neutral"            # "yield_first" | "neutral" | "performance"
 max_mode = "neutral"                # node cap; jobs run at min(requested, max_mode); unset, the most aggressive node mode
 floor_policy = "a"                  # the only value; "b" and "c" fail to load
 neutral_memory_policy = "a"         # the only value; "b" fails to load
-acknowledge_caution = []             # "performance_mode", "small_floor" [caution]
+acknowledge_caution = []             # "performance_mode", "small_floor", "reduced_margin", "relaxed_detection" [caution]
 guaranteed_hint_deadline_s = 5      # 1-30
 critical_floor_percent = 50         # a breach is critical below this share of the floor
 critical_hint_deadline_s = 1        # hint deadline on the critical path
@@ -21,10 +21,10 @@ never_share_occupied_gpus = false   # true: no new own GPU work on devices with 
 [contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
                                     # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode
-yield_first_margin_percent = 25
+yield_first_margin_percent = 25     # below the default needs "reduced_margin", as for every margin
 yield_first_response_intervals = 3  # cpu and gpu_compute only, 1-10
 neutral_margin_percent = 20         # cpu and gpu_compute only; YF >= neutral >= performance
-performance_margin_percent = 10
+performance_margin_percent = 10     # cpu and gpu_compute only
 neutral_convergence_s = 60
 neutral_tolerance_points = 15
 performance_ramp_s = 30
@@ -32,13 +32,13 @@ performance_ramp_percent = 80
 reclaim_s = 5                       # cpu and gpu_compute only, 1-60: Neutral and Performance escalation time
 hint_deadline_s = 5                 # 1-30
 unknown_window_intervals = 3        # 1-20
-saturation_percent = 98             # cpu and gpu_compute only
+saturation_percent = 98             # cpu and gpu_compute only; above the default needs "relaxed_detection"
 hysteresis_percent = 50
 min_step_dwell_intervals = 3        # 1-10
 pause_bound_s = 10                  # cpu and gpu_compute only, 1-60
 scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
 scale_up_cooldown_ms = 10000        # cpu and ram only; admission wait; unset, the mode's scale-up interval
-principal_min_percent = 1           # usage from which a principal contends for a fair share
+principal_min_percent = 1           # usage from which a principal contends; above 1 needs "relaxed_detection"
 
 [contention.ram]                    # also [contention.gpu_memory], except the breach window
 memory_peak_window_s = 300          # admission headroom uses the external peak over this window
@@ -47,7 +47,7 @@ reclaim_backoff_max_ms = 30000
 guaranteed_breach_window_s = 10     # ram only, 0-60: breach duration before Guaranteed drains
 
 [contention.gpu_memory]
-noise_tolerance_mib = 256
+noise_tolerance_mib = 256           # above the default needs "relaxed_detection"
 
 [contention.gpu_compute]
 quiet_window_intervals = 20
@@ -82,13 +82,18 @@ quiet_window_intervals = 20
 - **Removed options.** `floor_policy = "b"` or `"c"` fails with
   `contention.floor_policy = "<v>" was removed: Guaranteed memory is released last under policy A; tune contention.guaranteed_hint_deadline_s and contention.ram.guaranteed_breach_window_s`.
   `neutral_memory_policy = "b"` fails with
-  `contention.neutral_memory_policy = "b" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib`.
-- **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails with
-  `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`.
+  `contention.neutral_memory_policy = "b" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent, gpu.reserve_vram_mib and gpu.reserve_vram_percent`.
+- **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails
+  with `ERR_CEDEGRID_CONFIG`, whose message carries `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and
+  names the entry.
+- **A margin below its default, or a detection threshold above it.** Without `reduced_margin`
+  or `relaxed_detection` respectively, loading fails the same way, naming the settings and the
+  entry. Raising a margin or lowering a threshold needs nothing.
 - **Floors.** `gpu.reserve_vram_percent` (default 5) makes each GPU floor at least that share of
   the device. A floor below its minimum (512 MiB of RAM, 512 MiB per GPU) is raised to it with a
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
-  the minimum with a warning.
+  the minimum with a warning: at load when the settings alone decide it, or once when the agent
+  first samples the host for a floor a percentage sets.
 - **Performance.** `max_mode = "performance"`, `default_mode = "performance"` or any
   per-resource Performance mode needs `performance_mode`.
 - **An active caution option.** `doctor` and `status` show it with its marker (FR-043).

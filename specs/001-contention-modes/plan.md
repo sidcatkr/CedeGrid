@@ -74,7 +74,7 @@ graduated, reversible yield ladder. Six pieces carry it:
 | Principle | How the plan complies | Result |
 |---|---|---|
 | I. External processes untouchable | Every actuator targets verified own pidfds, or a cgroup leaf whose membership equals the verified PID set (R4). An actuation audit hook records each target identity. Tests cover PID reuse, foreign PIDs in a leaf, and supervisor restart (FR-002). | Pass |
-| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance and small floors are caution options that apply only once confirmed. Negative nice is clamped to 0. No priority is ever raised. | Pass |
+| II. No harm in any mode (2.0.0) | Floors hold in every mode, above enforced minimums. Floor policies B and C and Neutral memory policy B are removed, and configurations that set them fail to load. Every own process gets `oom_score_adj` 1000. Delay tunables are bounded (hint deadlines ≤ 30 s, RAM breach window ≤ 60 s, unknown window ≤ 20 intervals, step dwell and Yield First response ≤ 10 intervals, `reclaim_s` and pause bound ≤ 60 s) and act only above the critical level, which never drops below the minimum floor; below it the critical path takes over. Performance, small floors, margins below their defaults and detection thresholds above theirs are caution options that apply only once confirmed; the tuning knobs were classed in the third analysis pass (T143), and delay tunables stay bounded rather than caution because they are the reclaim bounds themselves. Negative nice is clamped to 0. No priority is ever raised. | Pass |
 | III. Unknown never silently idle | Unknown measurements hold the step and then escalate after a bounded, configurable window. GPU activity is classified quiet, active or unknown, and quiet needs positive evidence (R8). | Pass |
 | IV. Pure, deterministic policy | `contention.rs` is pure and deterministic. Effects stay in the agent and the supervisors. Decisions carry reason codes. | Pass |
 | V. Rootless and user space | No privilege. cgroup writes stay in the delegated subtree, with readback. Without cgroups the ladder uses steps that need no privilege. | Pass |
@@ -253,34 +253,39 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   accepts `performance_mode` and `small_floor`. An unset `max_mode` is the most
   aggressive node mode, so no job reaches Performance unless the operator chose it.
 - **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
-  Guaranteed hint deadline. Performance and small floors are caution options with confirmation.
-- **B4 Ordered targets.** `own_allowance` uses the table in [data-model.md](data-model.md#mode-targets-contentionown_allowance),
-  with a Neutral idle margin of its own (20%, between Yield First's and Performance's, decided
-  after the review).
+  Guaranteed hint deadline. Performance, small floors, margins below their defaults and detection
+  thresholds above theirs are caution options with confirmation.
+- **B4 Ordered targets.** `own_allowance` uses the table in
+  [data-model.md](data-model.md#mode-targets-contentionown_allowance), with a Neutral idle margin
+  of its own (20%, between Yield First's and Performance's, decided after the review).
   "Contended" replaces "saturated": saturation plus an active external principal, or unknown
   activity. Under contention Yield First targets zero for opportunistic work, which the ladder
-  applies as a pause, not a cap to the 5% minimum duty. While a resource is not contended, a held
-  cap rises toward the target at the mode's scale-up rate. A proptest checks
-  `YF ≤ N ≤ P` over generated `ModeInput`s.
+  applies as a pause first, then after `pause_bound_s` as a cap or hint at the 5% minimum duty
+  (FR-014). While own work holds more than capacity minus the Yield First margin
+  (`ModeInput.own`), saturation may be its own doing, so Yield First caps to the margin within
+  the fair share first. While a resource is not contended, a held cap rises toward the target at
+  the mode's scale-up rate. A proptest checks `YF ≤ N ≤ P` over generated `ModeInput`s.
 - **B5 Readiness.** The supervisor tracks `hint_ready` (any acked family directory) and
   `observes_drain` (acked, or the worker used the supervisor socket), sends `readiness` on change
   and includes both in `adjusted` and `state`. The agent keeps them in `AllocationFacts` and the
   negotiated `AllocationReport`. The policy offers `hint` only to hint-ready allocations, which
-  removes the refused-hint retry (deviation 36). The critical floor path uses
+  removes the refused-hint retry. The critical floor path uses
   `critical_hint_deadline_s`, drains non-ready allocations at once, and sends `terminate` to
   allocations that do not observe the drain file.
-- **B6 Principals.** `PolicyEngine` keeps per-UID admission state (`principal_window_intervals`,
-  leaving below half of `principal_min_percent`). `ModeInput` gains `background`, the usage of
-  UIDs below `uid_min`, which max-min subtracts from capacity. UIDs not admitted yet fall into the
-  unattributed principal, so contention is detected on the first observation.
+- **B6 Principals.** `PolicyEngine` keeps per-UID admission state (joining after
+  `principal_window_intervals`, leaving after `principal_leave_s` below `principal_min_percent`).
+  `ModeInput` gains `background`, the usage of UIDs below `uid_min`, which max-min subtracts from
+  capacity. UIDs not admitted yet fall into the unattributed principal, so contention is detected
+  on the first observation.
 - **B7 Memory headroom.** `PolicyEngine` keeps a max-deque per listed external process (PID and
-  start time, from `Snapshot.external_processes`) and one for the rest of external usage per
-  memory resource over `memory_peak_window_s`; a process's deque goes when it exits. Admission
-  headroom uses the summed peaks, yielding uses current usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource, each from its
-  own stable time). Until per-resource admission is placed on (US5), CPU/RAM admission opens once
-  both have cooled, because the coordinator places against the node budget and flags. RAM and GPU
-  memory add `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th
-  reclaim episode within the peak window, the coordinator's retry pattern.
+  start time, from `Snapshot.external_processes`) and one for the rest of external usage per memory
+  resource over `memory_peak_window_s`; a process's deque goes when it exits. Admission headroom
+  uses the summed peaks, yielding uses current usage. CPU and RAM cooldowns are separate
+  (`scale_up_cooldown_ms` per resource, each from its own stable time). Until per-resource
+  admission is placed on (US5), CPU/RAM admission opens once both have cooled, because the
+  coordinator places against the node budget and flags. RAM and GPU memory add
+  `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th reclaim
+  episode within the peak window, the coordinator's retry pattern.
 - **B8 Reclaim bounds.** SC-002 and SC-012, with scenario tests in `tests/contention.rs`.
 - **B9 Legacy GPU keys.** `Config::legacy_gpu()` returns the interpretation and warnings
   (FR-031); `doctor` prints them. The admission effect of `never_share_occupied_gpus`, and

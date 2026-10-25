@@ -9,10 +9,10 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
     [--mode RESOURCE=MODE]...            # RESOURCE: cpu|ram|gpu_compute|gpu_memory
     [--max-mode MODE]
     [--ram-floor-mib N] [--gpu-floor-mib N]
-    [--margin RESOURCE.MODE=PERCENT]...  # MODE: yield_first|performance
+    [--margin RESOURCE.MODE=PERCENT]...  # MODE: yield_first|neutral|performance; YF >= N >= P
     [--guaranteed-hint-deadline-s N]
     [--set RESOURCE.KEY=VALUE]...        # tuned thresholds, e.g. gpu_memory.noise_tolerance_mib=512
-    [--acknowledge-caution performance_mode|small_floor]...
+    [--acknowledge-caution performance_mode|small_floor|reduced_margin|relaxed_detection]...
 ```
 
 ## Modes
@@ -38,7 +38,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum |
+  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum; a margin below its default; a saturation, contention-floor or noise threshold above its default |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain.
@@ -52,8 +52,9 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 ## Writes
 
 - Setup edits only `[contention]`, the `role`-related tables, `ram.reserve_mib` and
-  `gpu.reserve_vram_mib`, and preserves everything else byte for byte. `ram.reserve_percent` is
-  left as it is; the summary shows the resulting floor on this host.
+  `gpu.reserve_vram_mib`, and preserves everything else byte for byte. `ram.reserve_percent` and
+  `gpu.reserve_vram_percent` are left as they are; the summary shows the resulting floors on this
+  host.
 - It validates the result through the normal config load, then renames atomically.
 
 ## Exit status and JSON

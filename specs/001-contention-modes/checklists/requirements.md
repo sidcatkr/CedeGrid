@@ -56,7 +56,8 @@
   both the same day. Checklist state is unchanged (16/16).
 - Iteration 4 (analyze remediation, 2026-10-24): FR-051 and FR-054 and the hand-edit edge case
   now require an acknowledgement entry for danger options, as constitution Principle II
-  requires. Neutral and Performance scale-up rows were added to the Provisional thresholds
+  requires (*superseded: constitution 2.0.0 has caution options only, acknowledged with
+  `acknowledge_caution`*). Neutral and Performance scale-up rows were added to the Provisional thresholds
   table. Checklist state is unchanged (16/16).
 - Iteration 5 (maintainer revisions before US5, 2026-10-25), with constitution 2.0.0:
   - Q2 and Q3 above are superseded. Floor policy A is the only floor policy, and floors always

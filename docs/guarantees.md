@@ -84,27 +84,29 @@ again from free capacity. Unknown observations prohibit optimistic admission.
 Each resource runs in a contention mode, and for every resource and observation the
 targets are ordered: Yield First ≤ Neutral ≤ Performance. CPU and GPU compute are
 *contended* when they are saturated (busy at or above `saturation_percent`, 98% by
-default, of capacity) and an external
-principal uses at least `principal_min_percent` of them, or when external activity of
-unknown amount exists. Principals are the account CedeGrid runs as, whatever its UID,
-and users at or above `contention.uid_min` (1000) that have used at least
-`principal_min_percent` for `contention.principal_window_intervals` (4) observations;
-they leave after `contention.principal_leave_s` (60 s) below it. Until a user
-joins, its usage counts toward one unattributed principal, together with processes
-whose owner cannot be read, so contention is seen at once. A host that mounts `/proc`
-with `hidepid=2` always takes this path for other accounts. Usage by lower UIDs is
-background demand: it comes off the capacity and never contends. On contended compute,
-Yield First pauses opportunistic work, and after `pause_bound_s` (10 s) keeps it at the
-5% minimum duty while the contention lasts; Neutral and Performance hold the max-min
-fair share among these principals. Otherwise Yield First keeps 25% of schedulable
-capacity free, Neutral keeps 20% free and Performance 10%; the margins are validated as
-Yield First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast
-they scale up (10 s and 2 s per step). On memory, Yield First keeps 25% free beyond the floor
-and the other modes only the floor. The margins are configurable per resource. In
-every mode, contended CPU returns within 2 monitor intervals: the first step applies
-at once. While a resource is not contended, a held cap rises again toward the mode's
-target at the mode's scale-up rate. A Guaranteed allocation's CPU is never capped
-below its request, by the policy or by its supervisor.
+default, of capacity) and an external principal uses at least `principal_min_percent` of
+them, or when external activity of unknown amount exists. Principals are the account
+CedeGrid runs as, whatever its UID, and users at or above `contention.uid_min` (1000)
+that have used at least `principal_min_percent` for
+`contention.principal_window_intervals` (4) observations; they leave after
+`contention.principal_leave_s` (60 s) below it. Until a user joins, its usage counts
+toward one unattributed principal, together with processes whose owner cannot be read,
+so contention is seen at once. A host that mounts `/proc` with `hidepid=2` always takes
+this path for other accounts. Usage by lower UIDs is background demand: it comes off the
+capacity and never contends. On contended compute, Yield First pauses opportunistic
+work, and after `pause_bound_s` (10 s) keeps it at the 5% minimum duty while the
+contention lasts; Neutral and Performance hold the max-min fair share among these
+principals. While own work holds more than capacity minus Yield First's margin,
+saturation may be its own doing, so Yield First first caps it to the margin within the
+fair share and pauses only if the contention remains. Otherwise Yield First keeps 25% of
+schedulable capacity free, Neutral keeps 20% free and Performance 10%; the margins are
+validated as Yield First ≥ Neutral ≥ Performance, and Neutral and Performance also
+differ in how fast they scale up (10 s and 2 s per step). On memory, Yield First keeps
+25% free beyond the floor and the other modes only the floor. The margins are
+configurable per resource. In every mode, contended CPU returns within 2 monitor
+intervals: the first step applies at once. While a resource is not contended, a held cap
+rises again toward the mode's target at the mode's scale-up rate. A Guaranteed
+allocation's CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
@@ -164,12 +166,16 @@ unprivileged equivalent and claim none.
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
 failed GPU allocation. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
-names the replacement settings. Two options are marked *caution* because they let own
-work hold more capacity within the floors: Performance mode and a floor below twice its
-minimum. Performance needs `contention.acknowledge_caution = ["performance_mode"]` to
-load. A floor below twice its minimum without `"small_floor"` loads, so 0.2 files keep
-loading, but is raised to twice the minimum with a warning; it applies as configured
-only once confirmed. `doctor`, `status` and node reports list active caution options. Without
+names the replacement settings. Four options are marked *caution* because they let own
+work hold more capacity within the floors: Performance mode, a floor below twice its
+minimum, a margin below its default, and a `saturation_percent`, `principal_min_percent`
+or `noise_tolerance_mib` above its default. Performance needs
+`contention.acknowledge_caution = ["performance_mode"]` to load, a lower margin needs
+`"reduced_margin"` and a higher detection threshold needs `"relaxed_detection"`. A floor
+below twice its minimum without `"small_floor"` loads, so 0.2 files keep loading, but is
+raised to twice the minimum with a warning, given at load or, for a floor a percentage
+sets, when the agent first samples the host; it applies as configured only once
+confirmed. `doctor`, `status` and node reports list active caution options. Without
 `contention.max_mode`, a job may request at most the node's most aggressive configured
 mode, so no job runs in Performance unless the operator chose it.
 Policy recordings without an allocation class retain the legacy opportunistic

@@ -18,7 +18,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
               {"allocation_id": "a2", "resource": "ram", "step": "hint", "target": 6144,
                "cause": "floor_breach", "code": "yield_step_hint", "deadline_ms": 5000}],
   "exceptions": [{"name": "performance_mode", "marker": "caution"}],
-  "max_mode": "neutral",
+  "max_mode": "performance",
   "would_drain": ["..."],
   "reasons": ["..."]
 }
@@ -32,7 +32,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 | Command | Shows |
 |---|---|
 | `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host, active caution options with markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
+| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host with their markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
 | `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports |
 
 ## Reason codes

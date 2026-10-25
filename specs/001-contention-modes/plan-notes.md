@@ -189,7 +189,7 @@ additive with serde defaults.
 ```toml
 [contention]
 default_mode = "neutral"          # yield_first | neutral | performance
-max_mode = "performance"          # node cap
+max_mode = "performance"          # node cap; superseded: unset is the most aggressive node mode
 floor_policy = "a"                # only "a" since 2026-10-25
 neutral_memory_policy = "a"       # only "a" since 2026-10-25
 acknowledge_caution = []           # "performance_mode", "small_floor" since 2026-10-25
@@ -209,7 +209,8 @@ quiet_window_intervals = 20
 
 - Per-job overrides belong in the job/task spec, which is JSON, as optional per-resource `mode`
   fields. They are capability-gated on the wire (see the compatibility notes).
-- Floors reuse `ram.reserve_mib` / `ram.reserve_percent` and `gpu.reserve_vram_mib`.
+- Floors reuse `ram.reserve_mib` / `ram.reserve_percent` and `gpu.reserve_vram_mib`
+  (superseded: `gpu.reserve_vram_percent` was added, spec FR-023).
 - `gpu.scale_up_cooldown_ms` stays for GPU. CPU and RAM get their own cooldown keys.
 
 ## Setup implementation candidates

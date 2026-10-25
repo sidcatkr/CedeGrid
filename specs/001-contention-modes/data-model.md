@@ -22,7 +22,7 @@ Serialization contracts are in [contracts/](contracts/).
 | `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_caution` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
+| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a margin below its default without `reduced_margin`, or a `saturation_percent`, `principal_min_percent` or `noise_tolerance_mib` above its default without `relaxed_detection`, fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
 | `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
@@ -41,7 +41,9 @@ Serialization contracts are in [contracts/](contracts/).
   effective, near the minimum, confirmed and raised.
 - Floors below the minimum (512 MiB host RAM, 512 MiB per GPU device) are raised to it with a
   warning. A floor below twice its minimum is "near" it and, without `small_floor`, applies as
-  twice the minimum.
+  twice the minimum. The load warns when the settings alone decide this; for a floor a
+  percentage sets, the agent warns once when it first samples the host
+  (`Config::host_floor_warnings`).
 - A negative `cpu.nice` warns and is treated as 0 (R5).
 
 ## ResourceThresholds (`src/config.rs`)
@@ -51,9 +53,9 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | Field | Applies to | Default | Validation |
 |---|---|---|---|
 | `mode` | all | inherits `default_mode` | ≤ `max_mode` |
-| `yield_first_margin_percent` | all | 25 | 1–90; > `performance_margin_percent` |
-| `neutral_margin_percent` | cpu, gpu_compute | 20 | between `performance_margin_percent` and `yield_first_margin_percent` |
-| `performance_margin_percent` | cpu, gpu_compute | 10 | 0–50 |
+| `yield_first_margin_percent` | all | 25 | 1–90; on cpu and gpu_compute > `performance_margin_percent`; below 25 needs `reduced_margin` |
+| `neutral_margin_percent` | cpu, gpu_compute | 20 | between `performance_margin_percent` and `yield_first_margin_percent`; below 20 needs `reduced_margin` |
+| `performance_margin_percent` | cpu, gpu_compute | 10 | 0–50; below 10 needs `reduced_margin` |
 | `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
 | `scale_up_step_interval_s` | all | 30 (Yield First), 10 (Neutral), 2 (Performance) | ≥ 1 |
 | `neutral_convergence_s` | all | 60 | ≥ 1; a success-criteria parameter read by the scenario tests and validation tools, not by the policy |
@@ -64,17 +66,17 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `unknown_window_intervals` | all | 3 | 1–20 |
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99; dwell 1–10 |
 | `pause_bound_s` | cpu, gpu_compute | 10 | 1–60 |
-| `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0 |
+| `noise_tolerance_mib` | gpu_memory | 256 | ≥ 0; above 256 needs `relaxed_detection` |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms` |
 | `scale_up_cooldown_ms` | cpu, ram | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). GPU memory keeps `gpu.scale_up_cooldown_ms`. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
 | `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060) |
 | `guaranteed_breach_window_s` | ram | 10 | 0–60 (FR-024) |
-| `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation |
-| `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated |
+| `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation; above 1 needs `relaxed_detection` |
+| `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated; above 98 needs `relaxed_detection` |
 
 Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
-`gpu.reserve_vram_mib`.
+`gpu.reserve_vram_mib`, plus the new `gpu.reserve_vram_percent`.
 
 ## Principal (`src/contention.rs`)
 
@@ -204,10 +206,13 @@ as `m_YF ≥ m_N ≥ m_P` (FR-065).
 | Resource and state | Yield First | Neutral | Performance |
 |---|---|---|---|
 | CPU, GPU compute, contended | 0 for opportunistic work | `S` | `S` |
+| CPU, GPU compute, contended, own usage above `C − m_YF·C` | `min(A − m_YF·C, S)` | `S` | `S` |
 | CPU, GPU compute, otherwise | `A − m_YF·C` | `A − m_N·C` | `A − m_P·C` |
 | RAM, GPU memory | `A − m_YF·C` | `A` | `A` |
 
-Targets never go below 0. Guaranteed CPU is never capped below its request. Neutral and
+While own work holds more than `C − m_YF·C`, saturation may be its own doing, so Yield First
+caps to its margin first; activity of unknown amount still takes it to 0. Targets never go
+below 0. Guaranteed CPU is never capped below its request. Neutral and
 Performance share the fair share under contention and differ in idle margin (20% and 10%) and
 scale-up rate (10 s and 2 s per step).
 
