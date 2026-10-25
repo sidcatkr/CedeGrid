@@ -95,8 +95,9 @@ impl supervision::SupervisorControl for ChangingChildPolicy {
                     "fresh_after_baseline":false,"freshness_decision":"fixture_without_new_samples"}}],
             "capabilities":{}
         }))?;
+        // The FR-031 reading of the legacy conservative non-sharing mode.
         let mut config = cedegrid::config::Config::default();
-        config.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ConservativeNonSharing;
+        config.contention.never_share_occupied_gpus = true;
         cedegrid::policy::validate_gpu_launch_contract(
             &config,
             &snapshot,
@@ -337,8 +338,11 @@ fn guaranteed_child_final_gpu_check_is_not_superseded_by_parent_policy_poll() {
                         "fresh_after_baseline":true,"freshness_decision":"fixture_fresh"}}],
                 "capabilities":{}
             }))?;
+            // Yield First admits only on a quiet device, so unknown activity refuses
+            // the final check; Neutral would admit it as one principal.
             let mut config = cedegrid::config::Config::default();
-            config.gpu.execution_mode = cedegrid::config::GpuExecutionMode::ContentionAware;
+            config.contention.gpu_compute.mode =
+                Some(cedegrid::contention::ContentionMode::YieldFirst);
             cedegrid::policy::validate_gpu_launch_contract(
                 &config,
                 &snapshot,
