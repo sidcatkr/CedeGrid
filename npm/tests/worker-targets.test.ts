@@ -189,3 +189,17 @@ test('target file interop cases', () => {
     }
     finally { f.done(); }
 });
+
+test('worker context cases', () => {
+    const cases = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).worker_context_cases;
+    for (const c of cases) {
+        const context = { ...c.context, schema_version: BigInt(c.context.schema_version), generation: BigInt(c.context.generation) };
+        if (!c.accepted) {
+            assert.throws(() => new WorkerContext(context, transport), Error, c.id);
+            continue;
+        }
+        const worker = new WorkerContext(context, transport);
+        assert.equal(worker.context.resource_target_file ?? null, c.resource_target_file, c.id);
+        assert.deepEqual(worker.context.capabilities ?? [], c.capabilities, c.id);
+    }
+});

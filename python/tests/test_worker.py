@@ -213,6 +213,18 @@ class ResourceTargetTests(unittest.TestCase):
                 'ram_mib':allowance.ram_mib,'gpu_memory_mib':allowance.gpu_memory_mib}
             self.assertEqual(got_targets, case['targets'], case['id'])
             self.assertEqual(got_allowance, case['allowance'], case['id'])
+    def test_worker_context_cases(self):
+        import json
+        from cedegrid.errors import ValidationError
+        fixture = json.loads((Path(__file__).resolve().parents[2]/'tests/contracts/cedegrid-0.2.json').read_text())
+        for case in fixture['worker_context_cases']:
+            if not case['accepted']:
+                with self.assertRaises(ValidationError, msg=case['id']):
+                    WorkerContext(case['context'], self.root/'drain', client=SupervisorFixture())
+                continue
+            context = WorkerContext(case['context'], self.root/'drain', client=SupervisorFixture())
+            self.assertEqual(context.context.get('resource_target_file'), case['resource_target_file'], case['id'])
+            self.assertEqual(context.context.get('capabilities', []), case['capabilities'], case['id'])
     def test_a_newer_file_version_is_treated_as_absent(self):
         self.write(9, version=2, ram_mib=1)
         self.assertIsNone(self.context.resource_targets())

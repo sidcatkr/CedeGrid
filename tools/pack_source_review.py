@@ -138,6 +138,7 @@ ALLOWLIST = (
     'tests/contracts/cedegrid-0.2.json',
     'tests/fixtures/0.2/heartbeat_reply.json',
     'tests/fixtures/0.2/node_report.json',
+    'tests/fixtures/0.2/node.toml',
     'tests/coordinator.rs',
     'tests/distributed_service.rs',
     'tests/execution_state.rs',

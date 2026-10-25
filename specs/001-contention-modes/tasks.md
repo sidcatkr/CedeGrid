@@ -747,7 +747,7 @@ workers behave unchanged (quickstart §8).
 
 ### Tests for User Story 6 ⚠️
 
-- [ ] T089 [P] [US6] Add tests in `tests/configuration.rs`:
+- [X] T089 [P] [US6] Add tests in `tests/configuration.rs`:
   - every `examples/*.toml` and 0.2 config loads unchanged;
   - Neutral is the default;
   - legacy keys are interpreted per FR-031 (covered by T129);
@@ -777,14 +777,14 @@ workers behave unchanged (quickstart §8).
   held to its own mode's target.
 - [ ] T094 [US6] Let the Python and TypeScript clients accept the optional `contention` field in
   job specs, and send it only when set (`python/cedegrid/client.py`, `npm/src/client.ts`).
-- [ ] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
+- [X] T095 [US6] Make `observe` and `replay` in `src/main.rs` read snapshot schemas 1–3.
 - [ ] T096 [US6] Add `CHANGELOG.md` entries for:
   - the Neutral default;
   - the interpreted legacy GPU keys;
   - the removed floor and Neutral memory policies;
   - the envelope and spool behavior;
   - the `cpu.nice` clamp.
-- [ ] T097 [US6] Add the worker-context keys `resource_target_file` and `capabilities`, the
+- [X] T097 [US6] Add the worker-context keys `resource_target_file` and `capabilities`, the
   target-file format, and the negotiated optional fields (including `AllocationReport.hint_ready`
   and `observes_drain` from T133, and `held_back` from T149; T139 and T144 already added the
   removed-option and bound config cases) to the shared contract fixture

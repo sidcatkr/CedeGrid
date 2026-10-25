@@ -1,5 +1,5 @@
 use cedegrid::config::{Config, RuntimeConfigKind, serialize_runtime};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     fs,
     path::Path,
@@ -447,4 +447,37 @@ fn configured_rollback_profile_is_used_through_execution_history_and_restart() {
         fs::read_to_string(dir.path().join("marker")).unwrap(),
         "completed"
     );
+}
+
+/// Replay reads recorded snapshots of schemas 1-3 and refuses a newer one (FR-033).
+#[test]
+fn replay_reads_snapshot_schemas_one_to_three() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("node.toml");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/node.toml"),
+        &config,
+    )
+    .unwrap();
+    let trace: Vec<Value> = serde_json::from_slice(
+        &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/gpu-pressure.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let frames = |schema: u64| -> Vec<Value> {
+        let mut frame = trace[0].clone();
+        frame["snapshot"]["schema_version"] = json!(schema);
+        vec![frame]
+    };
+    for schema in [1, 2, 3, 4] {
+        let path = dir.path().join(format!("schema-{schema}.json"));
+        fs::write(&path, serde_json::to_vec(&frames(schema)).unwrap()).unwrap();
+        let output = run(&config, &["replay", path.to_str().unwrap()]);
+        assert_eq!(
+            output.status.success(),
+            schema <= 3,
+            "schema {schema}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

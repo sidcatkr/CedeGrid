@@ -1422,3 +1422,46 @@ fn the_supervisor_writes_the_target_files_the_sdks_read() {
         assert_eq!(serde_json::to_value(&target).unwrap(), file, "{id}");
     }
 }
+
+/// The shipped node example and the 0.2 node example load unchanged, and without
+/// mode settings every resource runs Neutral (FR-031).
+#[test]
+fn the_shipped_and_0_2_node_configs_load_unchanged_in_neutral() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        root.join("examples/node.toml"),
+        root.join("tests/fixtures/0.2/node.toml"),
+    ] {
+        let config = Config::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        for kind in ResourceKind::ALL {
+            assert_eq!(
+                config.contention.mode(kind),
+                ContentionMode::Neutral,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(config.contention.max_mode(), ContentionMode::Neutral);
+    }
+}
+
+/// A negotiated heartbeat with per-resource admission, held-back amounts,
+/// allocation readiness and the worker limit parses and round-trips; the 0.2
+/// report fixture still parses (FR-032).
+#[test]
+fn negotiated_report_fields_round_trip_beside_the_0_2_report() {
+    use cedegrid::protocol::Request;
+    for case in contract()["negotiated_report_cases"].as_array().unwrap() {
+        let request: Request = serde_json::from_value(case["request"].clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            case["request"],
+            "{}",
+            case["id"]
+        );
+    }
+    let old: Request = serde_json::from_str(include_str!("fixtures/0.2/node_report.json")).unwrap();
+    assert!(matches!(old, Request::Heartbeat { .. }));
+}

@@ -27,6 +27,7 @@ include = [
     "/examples/*.rs",
     "/tests/contracts/*.json",
     "/tests/fixtures/0.2/*.json",
+    "/tests/fixtures/0.2/*.toml",
     "/npm/src/**/*.ts",
     "/npm/tests/**/*.ts",
     "/npm/scripts/*",
