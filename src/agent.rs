@@ -4467,6 +4467,7 @@ mod agent_transport_tests {
                 detail: "lost child inventory".into(),
             }],
             detail: "owned fixture".into(),
+            modes: Default::default(),
         };
         assert!(!recovery_allows_release(&record));
         record.identity.as_mut().unwrap().boot_id = "verified-previous-test-boot".into();

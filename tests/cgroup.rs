@@ -169,6 +169,7 @@ fn authorized_native_empty_leaf_preparation_and_cleanup() {
         input_artifacts: vec![],
         required_controls: vec!["cpu.weight".into()],
         allow_fallback: false,
+        contention: None,
     };
     let gate = backend.prepare(&request).unwrap();
     assert!(gate.cgroup_path.as_ref().unwrap().exists());

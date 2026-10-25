@@ -93,6 +93,7 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         input_artifacts: vec![],
         required_controls: vec!["process_handle".into()],
         allow_fallback: false,
+        contention: None,
     };
     let capacity = request.resources.clone();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
