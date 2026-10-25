@@ -217,10 +217,9 @@ loaded with `include_str!`).
 
 ## Interim rules
 
-- **Mixed modes.** Until jobs can request a mode (T093), the least aggressive effective mode among
-  the running allocations on a resource governs that resource's target. Because targets are
-  ordered (FR-065), this is the most conservative target. T093a replaces it with the target model
-  below.
+- **Mixed modes.** Until jobs could request a mode (T093), the least aggressive effective mode
+  among the running allocations on a resource governed that resource's target. T093a replaced it
+  with the target model below.
 
 ## Target model with per-job modes (T093a, US6)
 
@@ -237,6 +236,11 @@ loaded with `include_str!`).
   Guaranteed one (FR-024); tiers order the caps, pauses and hints.
 - **Test.** Two jobs in different modes on one resource: the Yield First job yields first and is
   held to its own target; the Performance job keeps the rest of the aggregate.
+- **Pace.** Each job's steps respond and rise at its own mode's pace (response window and
+  scale-up interval).
+- **Allowance.** A job's allowance is also bounded by its own mode's target: the room is shared
+  equally, no job is invited above its own target, and the room that bound leaves goes to the
+  others. Each allowance rises at its own mode's step and interval.
 
 ## Revisions before US5 (2026-10-25)
 

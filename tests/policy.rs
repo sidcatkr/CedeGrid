@@ -2339,10 +2339,11 @@ fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
     );
     assert_eq!(mode("plain", ResourceKind::Cpu), ContentionMode::Neutral);
     assert_eq!(mode("fast", ResourceKind::Ram), ContentionMode::Neutral);
-    // The least aggressive effective mode on a resource governs its target.
+    // The node mode governs a resource's aggregate; per-job modes order yielding
+    // inside it (T093a).
     let cpu = &decision.resources[&ResourceKey::Cpu];
     assert_eq!(cpu.mode, Some(ContentionMode::Neutral));
-    assert_eq!(cpu.effective_mode, Some(ContentionMode::YieldFirst));
+    assert_eq!(cpu.effective_mode, Some(ContentionMode::Neutral));
     // Without a configured cap, no job reaches Performance unless the operator chose it.
     let modes = |cfg: &Config| {
         PolicyEngine::new()
@@ -4221,5 +4222,375 @@ mod allowance {
                 );
             }
         }
+    }
+
+    /// Node Neutral, capped at Performance, with per-job modes on CPU and RAM.
+    fn mixed(jobs: Vec<Allocation>, external: (u64, u64), node: ContentionMode) -> Decision {
+        let mut cfg = cfg(node);
+        cfg.contention.max_mode = Some(ContentionMode::Performance);
+        let snap = host(&jobs, external.0, external.1);
+        PolicyEngine::new()
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    facts: facts(&jobs),
+                    allocations: jobs,
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap()
+    }
+
+    fn moded(mut job: Allocation, mode: ContentionMode) -> Allocation {
+        job.modes = BTreeMap::from([
+            (cedegrid::contention::ResourceKind::Cpu, mode),
+            (cedegrid::contention::ResourceKind::Ram, mode),
+        ]);
+        job
+    }
+
+    proptest! {
+        /// Under per-job modes, growing to every allowance at once still stays
+        /// within the node mode's allowance, and no job is invited above its own
+        /// mode's target (T093a).
+        #[test]
+        fn growing_to_every_allowance_at_once_stays_within_the_mode_with_mixed_modes(
+            usages in proptest::collection::vec((0u64..250, 0u64..800, any::<bool>(), 0usize..3), 1..=32),
+            external_cpu in 0u64..2500,
+            external_ram in 0u64..6000,
+        ) {
+            let jobs: Vec<Allocation> = usages
+                .iter()
+                .enumerate()
+                .map(|(i, (cpu, ram, guaranteed, mode))| {
+                    let class = if *guaranteed { AllocationClass::Guaranteed } else { AllocationClass::Opportunistic };
+                    moded(job(&format!("job-{i}"), *cpu, *ram, class), ContentionMode::ALL[*mode])
+                })
+                .collect();
+            let plain: Vec<Allocation> = jobs.iter().cloned().map(|mut j| { j.modes.clear(); j }).collect();
+            let mut previous: Option<BTreeMap<String, ResourceAmounts>> = None;
+            for node in ContentionMode::ALL {
+                let decision = mixed(jobs.clone(), (external_cpu, external_ram), node);
+                if !decision.actions.is_empty() {
+                    previous = None;
+                    continue;
+                }
+                // The aggregate is the node mode's.
+                let alone = mixed(plain.clone(), (external_cpu, external_ram), node);
+                prop_assert_eq!(&decision.managed_budget, &alone.managed_budget);
+                let allowances = decision.allowances.clone();
+                let held = |j: &Allocation, pick: &dyn Fn(&Resources) -> u64| -> u64 {
+                    pick(j.observed.as_ref().unwrap()).max(
+                        if j.class == AllocationClass::Guaranteed { pick(&j.requested) } else { 0 },
+                    )
+                };
+                let total = |pick: &dyn Fn(&Resources) -> u64| -> u64 {
+                    jobs.iter().map(|j| held(j, pick)).sum()
+                };
+                let sum = |pick: &dyn Fn(&ResourceAmounts) -> u64| -> u64 {
+                    allowances.values().map(pick).sum::<u64>()
+                };
+                prop_assert!(
+                    sum(&|a| a.cpu_millicores.unwrap_or(0))
+                        <= decision.managed_budget.cpu_millicores.max(total(&|r| r.cpu_millicores)),
+                    "{node:?} cpu {allowances:?} budget {:?}", decision.managed_budget
+                );
+                prop_assert!(
+                    sum(&|a| a.ram_mib.unwrap_or(0))
+                        <= decision.managed_budget.ram_mib.max(total(&|r| r.ram_mib)),
+                    "{node:?} ram {allowances:?} budget {:?}", decision.managed_budget
+                );
+                // Each job's own mode's target, as a node in that mode computes it.
+                for j in &jobs {
+                    let mode = j.modes[&cedegrid::contention::ResourceKind::Cpu].min(ContentionMode::Performance);
+                    let own = mixed(plain.clone(), (external_cpu, external_ram), mode).managed_budget;
+                    let amounts = &allowances[&j.id];
+                    prop_assert!(
+                        amounts.cpu_millicores.unwrap() <= own.cpu_millicores.max(held(j, &|r| r.cpu_millicores)),
+                        "{node:?} {} cpu {:?} own {}", j.id, amounts, own.cpu_millicores
+                    );
+                    prop_assert!(
+                        amounts.ram_mib.unwrap() <= own.ram_mib.max(held(j, &|r| r.ram_mib)),
+                        "{node:?} {} ram {:?} own {}", j.id, amounts, own.ram_mib
+                    );
+                }
+                if let Some(previous) = &previous {
+                    for (id, amounts) in &allowances {
+                        let before = &previous[id];
+                        prop_assert!(before.cpu_millicores <= amounts.cpu_millicores, "{node:?} {id}");
+                        prop_assert!(before.ram_mib <= amounts.ram_mib, "{node:?} {id}");
+                    }
+                }
+                previous = Some(allowances);
+            }
+        }
+    }
+
+    /// When the aggregate shrinks, the Yield First job's allowance falls first: it
+    /// is bounded by its own mode's target, and the room that bound leaves goes to
+    /// the Performance job (T093a).
+    #[test]
+    fn yield_first_allowances_fall_first_when_the_aggregate_shrinks() {
+        let jobs = || {
+            vec![
+                moded(
+                    job("gentle", 5500, 1000, AllocationClass::Opportunistic),
+                    ContentionMode::YieldFirst,
+                ),
+                moded(
+                    job("eager", 300, 1000, AllocationClass::Opportunistic),
+                    ContentionMode::Performance,
+                ),
+            ]
+        };
+        let cpu = |external: u64| {
+            let decision = mixed(jobs(), (external, 0), ContentionMode::Neutral);
+            assert!(decision.actions.is_empty(), "{:?}", decision.actions);
+            let a = &decision.allowances;
+            (
+                a["gentle"].cpu_millicores.unwrap(),
+                a["eager"].cpu_millicores.unwrap(),
+            )
+        };
+        // 8000m, Neutral's 5% margin, one 80m threshold: 720m of room. Yield First's
+        // target, 8000 less 15% less external, leaves the gentle job 300m, then 100m.
+        assert_eq!(cpu(1000), (5800, 720));
+        assert_eq!(cpu(1200), (5600, 720));
+    }
+}
+
+/// The target model with per-job modes (T093a, plan.md): the owner's aggregate on a
+/// resource comes from the node mode and cap; per-job modes order who yields inside
+/// it, Yield First first, and each job is also held to its own mode's target.
+mod per_job_modes {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKind, YieldStep};
+
+    const CPU: u64 = 8000;
+
+    /// Node default Neutral with the default margins, capped at Performance.
+    pub(super) fn cfg() -> Config {
+        let mut cfg = config();
+        cfg.cpu.reserve_physical_cores = 0;
+        cfg.contention.cpu.neutral_margin_percent = None;
+        cfg.contention.default_mode = ContentionMode::Neutral;
+        cfg.contention.max_mode = Some(ContentionMode::Performance);
+        cfg.contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        cfg
+    }
+
+    /// Max-min fair shares of the CPU among demands.
+    pub(super) fn schedule(demands: &[u64]) -> Vec<u64> {
+        let mut given = vec![0u64; demands.len()];
+        let mut left = CPU;
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        while left > 0 && !open.is_empty() {
+            let each = (left / open.len() as u64).max(1);
+            let mut next = vec![];
+            for i in open {
+                let take = (demands[i] - given[i]).min(each).min(left);
+                given[i] += take;
+                left -= take;
+                if given[i] < demands[i] {
+                    next.push(i);
+                }
+            }
+            open = next;
+        }
+        given
+    }
+
+    pub(super) struct Job {
+        pub id: &'static str,
+        pub mode: Option<ContentionMode>,
+        pub class: AllocationClass,
+        pub request: u64,
+        /// What the job would use without a cap.
+        pub wants: u64,
+    }
+
+    pub(super) struct Interval {
+        pub usage: Vec<u64>,
+        pub aggregate: u64,
+        pub shadow_aggregate: u64,
+        pub actions: Vec<YieldAction>,
+    }
+
+    /// Runs the policy with the supervisor applying every cap and pause at once,
+    /// beside a shadow engine that sees the same hosts without per-job modes.
+    pub(super) fn simulate(jobs: &[Job], external: u64, intervals: u64) -> Vec<Interval> {
+        let cfg = cfg();
+        let (mut engine, mut shadow) = (PolicyEngine::new(), PolicyEngine::new());
+        let mut actions: Vec<YieldAction> = vec![];
+        let mut out = vec![];
+        for i in 0..intervals {
+            let limit = |id: &str| {
+                actions
+                    .iter()
+                    .find(|a| a.allocation_id == id)
+                    .map_or(CPU, |a| match a.step {
+                        YieldStep::Cap => a.target.unwrap_or(CPU),
+                        YieldStep::Pause => 0,
+                        _ => CPU,
+                    })
+            };
+            let mut demands = vec![external];
+            demands.extend(jobs.iter().map(|j| j.wants.min(limit(j.id))));
+            let given = schedule(&demands);
+            let allocations: Vec<Allocation> = jobs
+                .iter()
+                .zip(&given[1..])
+                .map(|(job, used)| {
+                    let mut a = allocation(
+                        job.id,
+                        AllocationPhase::Running,
+                        resources(job.request, 100, 0),
+                        Some(resources(*used, 100, 0)),
+                    );
+                    a.class = job.class;
+                    if let Some(mode) = job.mode {
+                        a.modes = BTreeMap::from([(ResourceKind::Cpu, mode)]);
+                    }
+                    a
+                })
+                .collect();
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = Some(given.iter().sum::<u64>().min(CPU));
+            let mut principals = vec![super::cpu_principal(1000, true, 0)];
+            if external > 0 {
+                principals.push(super::cpu_principal(2001, false, given[0]));
+            }
+            snap.principals = Some(principals);
+            let ids: Vec<&str> = jobs.iter().map(|j| j.id).collect();
+            let input = PolicyInput {
+                facts: rootless(&ids),
+                allocations: allocations.clone(),
+                ..PolicyInput::default()
+            };
+            let now = i * 500;
+            let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+            let plain = PolicyInput {
+                allocations: allocations
+                    .into_iter()
+                    .map(|mut a| {
+                        a.modes.clear();
+                        a
+                    })
+                    .collect(),
+                ..input
+            };
+            let shadow_decision = shadow.evaluate(&cfg, &snap, &plain, now).unwrap();
+            actions = decision.actions.clone();
+            out.push(Interval {
+                usage: given[1..].to_vec(),
+                aggregate: decision.managed_budget.cpu_millicores,
+                shadow_aggregate: shadow_decision.managed_budget.cpu_millicores,
+                actions: decision.actions,
+            });
+        }
+        out
+    }
+
+    pub(super) fn average(run: &[Interval], job: usize) -> u64 {
+        run.iter().map(|i| i.usage[job]).sum::<u64>() / run.len() as u64
+    }
+
+    fn pair(gentle_class: AllocationClass, eager_wants: u64) -> [Job; 2] {
+        [
+            Job {
+                id: "gentle",
+                mode: Some(ContentionMode::YieldFirst),
+                class: gentle_class,
+                request: 1000,
+                wants: CPU,
+            },
+            Job {
+                id: "eager",
+                mode: Some(ContentionMode::Performance),
+                class: AllocationClass::Opportunistic,
+                request: 1000,
+                wants: eager_wants,
+            },
+        ]
+    }
+
+    /// Two jobs in different modes on one resource: the Yield First job yields
+    /// first and is held to its own mode's target, the Performance job keeps the
+    /// rest, and the aggregate is the node mode's.
+    #[test]
+    fn the_yield_first_job_yields_first_and_the_aggregate_is_the_node_modes() {
+        for external in [0, 1000] {
+            let run = simulate(&pair(AllocationClass::Opportunistic, CPU), external, 240);
+            for (i, interval) in run.iter().enumerate() {
+                assert_eq!(
+                    interval.aggregate, interval.shadow_aggregate,
+                    "external {external}, interval {i}"
+                );
+            }
+            let first = run.iter().find(|i| !i.actions.is_empty()).unwrap();
+            assert!(
+                first.actions.iter().all(|a| a.allocation_id == "gentle"),
+                "external {external}: {:?}",
+                first.actions
+            );
+            // Settled over the last minute: the Performance job holds the
+            // aggregate less what the Yield First job keeps.
+            let settled = &run[120..];
+            let (gentle, eager) = (average(settled, 0), average(settled, 1));
+            let aggregate = settled.last().unwrap().aggregate;
+            assert!(
+                gentle + eager <= aggregate + CPU / 100,
+                "external {external}: {gentle} + {eager} against {aggregate}"
+            );
+            assert!(
+                eager + gentle + CPU / 10 >= aggregate,
+                "external {external}: {gentle} + {eager} against {aggregate}"
+            );
+            assert!(eager > gentle, "external {external}: {gentle} {eager}");
+            if external > 0 {
+                // Contended, Yield First's target is zero: a pause, then at most
+                // the minimum duty once the pause bound passes (FR-014).
+                assert!(
+                    settled.iter().all(|i| i.usage[0] <= CPU * 5 / 100),
+                    "external {external}: gentle {:?}",
+                    settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// With room in the aggregate, a Yield First job is still held to its own
+    /// mode's target: capacity less Yield First's 15% idle margin.
+    #[test]
+    fn a_yield_first_job_is_held_to_its_own_target_below_the_aggregate() {
+        let run = simulate(&pair(AllocationClass::Opportunistic, 200), 0, 240);
+        let settled = &run[120..];
+        let gentle = settled.iter().map(|i| i.usage[0]).max().unwrap();
+        assert!(gentle <= CPU * 85 / 100, "{gentle}");
+        assert!(
+            average(settled, 0) + CPU / 10 >= CPU * 85 / 100,
+            "{}",
+            average(settled, 0)
+        );
+        assert_eq!(
+            settled.last().unwrap().aggregate,
+            settled.last().unwrap().shadow_aggregate
+        );
+    }
+
+    /// A Guaranteed job keeps its CPU request in every tier (FR-024).
+    #[test]
+    fn a_guaranteed_yield_first_job_keeps_its_cpu_request() {
+        let run = simulate(&pair(AllocationClass::Guaranteed, CPU), 1000, 240);
+        let settled = &run[120..];
+        assert!(
+            settled.iter().all(|i| i.usage[0] >= 1000),
+            "{:?}",
+            settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
+        );
     }
 }

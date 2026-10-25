@@ -13,6 +13,14 @@ pub enum ContentionMode {
     Performance,
 }
 
+impl ContentionMode {
+    pub const ALL: [ContentionMode; 3] = [
+        ContentionMode::YieldFirst,
+        ContentionMode::Neutral,
+        ContentionMode::Performance,
+    ];
+}
+
 /// The four resource families a mode applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -716,6 +724,8 @@ pub struct VictimFacts {
     /// Whether reducing this allocation frees the contended resource.
     pub frees: bool,
     pub pending: bool,
+    /// The job's effective mode on the resource: its yield tier.
+    pub mode: ContentionMode,
     pub guaranteed: bool,
     /// Time since the last accepted checkpoint, else since start.
     pub progress_lost_ms: u64,
@@ -724,7 +734,8 @@ pub struct VictimFacts {
 }
 
 /// Order candidates by least cost and drop uncontrollable ones: freeing the
-/// resource, pending before running, opportunistic before Guaranteed, least
+/// resource, pending before running, then by tier (Yield First, Neutral,
+/// Performance), and within a tier opportunistic before Guaranteed, least
 /// progress lost, best fit for `needed`, then assignment ID.
 pub fn victim_order(candidates: &mut Vec<VictimFacts>, needed: u64) {
     candidates.retain(|c| c.controllable);
@@ -739,6 +750,7 @@ pub fn victim_order(candidates: &mut Vec<VictimFacts>, needed: u64) {
         (
             !a.frees,
             !a.pending,
+            a.mode,
             a.guaranteed,
             a.progress_lost_ms,
             fit(a),
@@ -747,6 +759,7 @@ pub fn victim_order(candidates: &mut Vec<VictimFacts>, needed: u64) {
             .cmp(&(
                 !b.frees,
                 !b.pending,
+                b.mode,
                 b.guaranteed,
                 b.progress_lost_ms,
                 fit(b),

@@ -190,6 +190,15 @@ total is held back: falls publish together once the published values exceed the 
 allowances by more than it, and a rise moves at most one step, the mode's margin of
 capacity, per scale-up interval.
 
+A job may request a mode per resource (`LaunchRequest.contention`); it runs at the less
+aggressive of that mode and `contention.max_mode`. The owner's aggregate on a resource
+still comes from the node mode: per-job modes only order who yields inside it, Yield First
+first, then Neutral, then Performance, with the cost order within a tier. Each job is also
+held to its own mode's target, and steps and allowance rises follow its own mode's pace.
+Every opportunistic allocation drains before any Guaranteed one, and a Guaranteed
+allocation keeps its CPU request in every tier. An allowance is at most what the job's own
+mode's target leaves it, and the room that bound leaves goes to the others.
+
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the
 target at the hint deadline, 5 s by default, leads to a drain. Each supervisor reports

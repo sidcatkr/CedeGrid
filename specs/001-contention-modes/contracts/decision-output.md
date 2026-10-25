@@ -21,11 +21,17 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
                "cause": "floor_breach", "code": "yield_step_hint", "deadline_ms": 5000}],
   "exceptions": [{"name": "performance_mode", "marker": "caution"}],
   "max_mode": "performance",
+  "allocation_modes": {"a1": {"cpu": "yield_first", "ram": "neutral", "gpu_compute": "neutral",
+                              "gpu_memory": "neutral"}},
   "would_drain": ["..."],
   "reasons": ["..."]
 }
 ```
 
+- `allocation_modes` is each allocation's effective mode per resource, `min(requested,
+  max_mode)`. A resource's `effective_mode` is the node's, which sets the aggregate; per-job
+  modes order yielding inside it. A request above the cap adds `mode_capped` to the resource's
+  reasons.
 - `would_drain` and the prose `reasons` remain for 0.2 readers and recorded replays.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from

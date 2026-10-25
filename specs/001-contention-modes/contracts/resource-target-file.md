@@ -42,6 +42,8 @@ fsync, and renaming it over the target.
     reservations, less one publish threshold in total, shared over the running allocations on
     that resource; the mode's allowance is `own_allowance` for CPU, and for RAM and GPU memory
     the budget above the floor, less Yield First's margin;
+  - at most what its own mode's target leaves it under per-job modes; the room that bound
+    leaves is shared over the others, and each rises at its own mode's step and interval;
   - at most its cap or hint target while one applies, and its usage while paused;
   - at most the operator envelope; for Guaranteed work, never below the request;
   - only its current usage while the resource's measurement is unknown.

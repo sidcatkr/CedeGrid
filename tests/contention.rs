@@ -453,7 +453,7 @@ mod ladder {
 }
 
 mod victims {
-    use cedegrid::contention::{VictimFacts, victim_order};
+    use cedegrid::contention::{ContentionMode, VictimFacts, victim_order};
 
     fn facts(id: &str) -> VictimFacts {
         VictimFacts {
@@ -461,6 +461,7 @@ mod victims {
             controllable: true,
             frees: true,
             pending: false,
+            mode: ContentionMode::Neutral,
             guaranteed: false,
             progress_lost_ms: 0,
             amount: 1000,
@@ -489,17 +490,25 @@ mod victims {
         let mut pending = facts("b");
         pending.pending = true;
         assert_eq!(order(vec![facts("a"), pending], 500), ["b", "a"]);
-        // 3. Opportunistic before Guaranteed.
+        // 3. By tier: Yield First, then Neutral, then Performance (T093a).
+        let mut eager = facts("a");
+        eager.mode = ContentionMode::Performance;
+        let mut gentle = facts("c");
+        gentle.mode = ContentionMode::YieldFirst;
+        gentle.guaranteed = true;
+        gentle.progress_lost_ms = 60_000;
+        assert_eq!(order(vec![eager, facts("b"), gentle], 500), ["c", "b", "a"]);
+        // 4. Within a tier, opportunistic before Guaranteed.
         let mut guaranteed = facts("a");
         guaranteed.guaranteed = true;
         assert_eq!(order(vec![guaranteed, facts("b")], 500), ["b", "a"]);
-        // 4. Least progress lost since the last checkpoint.
+        // 5. Least progress lost since the last checkpoint.
         let mut long = facts("a");
         long.progress_lost_ms = 60_000;
         let mut recent = facts("b");
         recent.progress_lost_ms = 1_000;
         assert_eq!(order(vec![long, recent], 500), ["b", "a"]);
-        // 5. Best fit: the smallest amount that covers the need, else the largest.
+        // 6. Best fit: the smallest amount that covers the need, else the largest.
         let mut small = facts("a");
         small.amount = 400;
         let mut fits = facts("b");
@@ -511,7 +520,7 @@ mod victims {
             ["b", "c", "a"]
         );
         assert_eq!(order(vec![small, large], 9000), ["c", "a"]);
-        // 6. Assignment ID breaks the remaining ties.
+        // 7. Assignment ID breaks the remaining ties.
         assert_eq!(order(vec![facts("b"), facts("a")], 500), ["a", "b"]);
     }
 

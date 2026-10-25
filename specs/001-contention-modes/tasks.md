@@ -769,7 +769,7 @@ workers behave unchanged (quickstart §8).
 - [X] T093 [US6] Add the optional `LaunchRequest.contention` field (skipped when None) in
   `src/execution_model.rs`. In `src/coordinator.rs`, strip it for agents without
   `contention/1`, and place tasks with overrides only on capable agents.
-- [ ] T093a [US6] Replace the interim mixed-mode rule with the target model in plan.md (B11): the
+- [X] T093a [US6] Replace the interim mixed-mode rule with the target model in plan.md (B11): the
   owner's aggregate share comes from the node mode and cap, and per-job modes set the yield
   order inside it (Yield First, then Neutral, then Performance), with `victim_order` within a
   tier, in `src/contention.rs` and `src/policy.rs`. Add a regression test in `tests/policy.rs`

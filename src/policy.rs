@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    Admission, LadderInput, LadderTiming, Measurement, ModeInput, Principal, ResourceKey,
-    ResourceKind, StepState, VictimFacts, YieldCause, YieldStep, guaranteed_may_drain,
-    own_allowance, plan_step, victim_order,
+    Admission, ContentionMode, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
+    ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts, YieldCause, YieldStep,
+    guaranteed_may_drain, own_allowance, plan_step, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -284,8 +284,7 @@ impl PolicyEngine {
             charged.add_checked(&charge)?;
             charges.insert(allocation.id.clone(), charge);
         }
-        // Each allocation runs at min(requested, node cap); the least aggressive
-        // effective mode among running work governs a resource's target.
+        // Each allocation runs at min(requested, node cap).
         let allocation_modes: BTreeMap<
             String,
             BTreeMap<ResourceKind, crate::contention::ContentionMode>,
@@ -346,12 +345,23 @@ impl PolicyEngine {
                 }
             }
         }
-        let governing = |kind: ResourceKind| {
-            allocation_modes
-                .values()
-                .map(|modes| modes[&kind])
-                .min()
-                .unwrap_or_else(|| config.contention.mode(kind))
+        // The owner's aggregate on a resource comes from the node mode and cap;
+        // per-job modes only order who yields inside it and bound each job.
+        let governing = |kind: ResourceKind| config.contention.mode(kind).min(cap);
+        // Each mode's target per resource, which bounds the jobs in that mode.
+        let mut mode_targets: BTreeMap<ResourceKey, BTreeMap<ContentionMode, u64>> =
+            BTreeMap::new();
+        let targets_of = |view: &ModeInput, thresholds: &ResourceThresholds, limit: u64| {
+            ContentionMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    let view = ModeInput {
+                        mode,
+                        ..view.clone()
+                    };
+                    (mode, own_allowance(&view, thresholds).min(limit))
+                })
+                .collect::<BTreeMap<_, _>>()
         };
         let mut cpu_held = unknown_charge.cpu_millicores > 0;
         let mut ram_held = unknown_charge.ram_mib > 0;
@@ -774,6 +784,10 @@ impl PolicyEngine {
             if let Some(probe) = probe {
                 probes.insert(ResourceKey::Cpu, probe);
             }
+            mode_targets.insert(
+                ResourceKey::Cpu,
+                targets_of(&view, &thresholds, budget.cpu_millicores),
+            );
             // The idle reserve is the larger of the explicit reserve and the mode's
             // margin of total capacity; the two never stack.
             budget.cpu_millicores = own_allowance(&view, &thresholds)
@@ -784,33 +798,45 @@ impl PolicyEngine {
             floor_available.insert(ResourceKey::Ram, budget.ram_mib);
             let capacity = snapshot.total_ram_mib.saturating_sub(ram_reserve);
             let (members, background) = principals(ResourceKey::Ram, capacity, &|p| p.ram_mib);
-            budget.ram_mib = own_allowance(
-                &ModeInput {
-                    kind: ResourceKind::Ram,
-                    mode: governing(ResourceKind::Ram),
-                    capacity,
-                    external: statuses
-                        .get(&ResourceKey::Ram)
-                        .and_then(|s| s.external)
-                        .unwrap_or(0),
-                    own: statuses
-                        .get(&ResourceKey::Ram)
-                        .and_then(|s| s.own)
-                        .map_or(0, |(lower, _)| lower),
-                    principals: members,
-                    background,
-                    saturated: false,
-                    unknown_activity: false,
-                    satisfied: vec![],
-                    probe: None,
-                },
-                &config.contention.thresholds(ResourceKind::Ram),
-            );
+            let view = ModeInput {
+                kind: ResourceKind::Ram,
+                mode: governing(ResourceKind::Ram),
+                capacity,
+                external: statuses
+                    .get(&ResourceKey::Ram)
+                    .and_then(|s| s.external)
+                    .unwrap_or(0),
+                own: statuses
+                    .get(&ResourceKey::Ram)
+                    .and_then(|s| s.own)
+                    .map_or(0, |(lower, _)| lower),
+                principals: members,
+                background,
+                saturated: false,
+                unknown_activity: false,
+                satisfied: vec![],
+                probe: None,
+            };
+            let thresholds = config.contention.thresholds(ResourceKind::Ram);
+            mode_targets.insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
+            budget.ram_mib = own_allowance(&view, &thresholds);
         }
         // The operator envelope bounds own work per resource (FR-057).
         if let Some(envelope) = &input.envelope {
             budget.cpu_millicores = budget.cpu_millicores.min(envelope.cpu_millicores);
             budget.ram_mib = budget.ram_mib.min(envelope.ram_mib);
+            for (key, limit) in [
+                (ResourceKey::Cpu, envelope.cpu_millicores),
+                (ResourceKey::Ram, envelope.ram_mib),
+            ] {
+                for target in mode_targets
+                    .get_mut(&key)
+                    .into_iter()
+                    .flat_map(|t| t.values_mut())
+                {
+                    *target = (*target).min(limit);
+                }
+            }
         }
         for (key, floor) in [
             (ResourceKey::Cpu, cpu_reserve),
@@ -1081,6 +1107,11 @@ impl PolicyEngine {
                                 contended: crate::contention::contended(&view, &compute_thresholds),
                                 external,
                                 own: Some(own),
+                                targets: targets_of(
+                                    &view,
+                                    &compute_thresholds,
+                                    GPU_COMPUTE_CAPACITY,
+                                ),
                             }
                         }
                         Some(_) => GpuComputeBudget {
@@ -1088,32 +1119,36 @@ impl PolicyEngine {
                             contended: false,
                             external: 0,
                             own: None,
+                            targets: BTreeMap::new(),
                         },
                         None if matches!(
                             activity,
                             ComputeActivity::Active | ComputeActivity::Unknown
                         ) =>
                         {
+                            let view = ModeInput {
+                                kind: ResourceKind::GpuCompute,
+                                mode: governing(ResourceKind::GpuCompute),
+                                capacity: GPU_COMPUTE_CAPACITY,
+                                external: 0,
+                                own: GPU_COMPUTE_CAPACITY,
+                                principals: None,
+                                background: 0,
+                                saturated: false,
+                                unknown_activity: true,
+                                satisfied: vec![],
+                                probe: None,
+                            };
                             GpuComputeBudget {
-                                share: own_allowance(
-                                    &ModeInput {
-                                        kind: ResourceKind::GpuCompute,
-                                        mode: governing(ResourceKind::GpuCompute),
-                                        capacity: GPU_COMPUTE_CAPACITY,
-                                        external: 0,
-                                        own: GPU_COMPUTE_CAPACITY,
-                                        principals: None,
-                                        background: 0,
-                                        saturated: false,
-                                        unknown_activity: true,
-                                        satisfied: vec![],
-                                        probe: None,
-                                    },
-                                    &compute_thresholds,
-                                ),
+                                share: own_allowance(&view, &compute_thresholds),
                                 contended: true,
                                 external: GPU_COMPUTE_CAPACITY,
                                 own: None,
+                                targets: targets_of(
+                                    &view,
+                                    &compute_thresholds,
+                                    GPU_COMPUTE_CAPACITY,
+                                ),
                             }
                         }
                         None => GpuComputeBudget {
@@ -1121,6 +1156,7 @@ impl PolicyEngine {
                             contended: false,
                             external: 0,
                             own: None,
+                            targets: BTreeMap::new(),
                         },
                     };
                     gpu_compute_budget.insert(gpu.uuid.clone(), budget);
@@ -1182,22 +1218,25 @@ impl PolicyEngine {
                     let (members, background) = principals(key.clone(), capacity, &|p| {
                         p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
                     });
-                    own_allowance(
-                        &ModeInput {
-                            kind: ResourceKind::GpuMemory,
-                            mode: governing(ResourceKind::GpuMemory),
-                            capacity,
-                            external: external.unwrap_or(0),
-                            own: observed,
-                            principals: members,
-                            background,
-                            saturated: false,
-                            unknown_activity: false,
-                            satisfied: vec![],
-                            probe: None,
-                        },
-                        &config.contention.thresholds(ResourceKind::GpuMemory),
-                    )
+                    let view = ModeInput {
+                        kind: ResourceKind::GpuMemory,
+                        mode: governing(ResourceKind::GpuMemory),
+                        capacity,
+                        external: external.unwrap_or(0),
+                        own: observed,
+                        principals: members,
+                        background,
+                        saturated: false,
+                        unknown_activity: false,
+                        satisfied: vec![],
+                        probe: None,
+                    };
+                    let thresholds = config.contention.thresholds(ResourceKind::GpuMemory);
+                    mode_targets.insert(
+                        key.clone(),
+                        targets_of(&view, &thresholds, envelope_gpu.unwrap_or(u64::MAX)),
+                    );
+                    own_allowance(&view, &thresholds)
                 };
                 let gpu_budget = envelope_gpu.map_or(gpu_budget, |limit| gpu_budget.min(limit));
                 budget.gpu_memory_mib.insert(gpu.uuid.clone(), gpu_budget);
@@ -1474,6 +1513,17 @@ impl PolicyEngine {
                             .min(thresholds.reclaim_backoff_max_ms);
                     }
                 }
+                // Each job yields and rises at its own mode's pace.
+                let timing_for = |mode: ContentionMode| {
+                    let paced =
+                        LadderTiming::new(&config.contention.thresholds(kind), mode, interval_ms);
+                    LadderTiming {
+                        response_ms: paced.response_ms,
+                        scale_up_ms: paced.scale_up_ms,
+                        ..timing.clone()
+                    }
+                };
+                let mode_of = |a: &Allocation| allocation_modes[&a.id][&kind];
                 let usage_of =
                     |a: &Allocation| -> u64 { a.observed.as_ref().map_or(0, |o| o.cpu_millicores) };
                 // Pending reservations are cancelled by their charge. CPU in use is
@@ -1539,6 +1589,12 @@ impl PolicyEngine {
                         0
                     }
                 };
+                // What a job's own mode allows it here; Guaranteed keeps its CPU request.
+                let ceiling = |a: &Allocation| {
+                    mode_targets
+                        .get(&key)
+                        .map(|targets| targets[&mode_of(a)].max(kept_cpu(a)))
+                };
                 // What the mode allows beyond current usage, shared by the caps,
                 // pauses and hints on this resource so they can rise again while calm.
                 let held_back = self
@@ -1593,6 +1649,7 @@ impl PolicyEngine {
                                 controllable: !facts(&a.id).uncontrollable,
                                 frees: amount > 0,
                                 pending: pending_pass,
+                                mode: mode_of(a),
                                 guaranteed: guaranteed(a),
                                 progress_lost_ms: facts(&a.id).progress_lost_ms,
                                 amount,
@@ -1603,14 +1660,17 @@ impl PolicyEngine {
                     let mut remaining = needed;
                     for victim in victims {
                         planned.insert(victim.id.clone());
-                        let kept = input
-                            .allocations
-                            .iter()
-                            .find(|a| a.id == victim.id)
-                            .map_or(0, kept_cpu);
+                        let allocation = input.allocations.iter().find(|a| a.id == victim.id);
+                        let kept = allocation.map_or(0, kept_cpu);
+                        // A running job above its own mode's target yields the
+                        // difference even while the aggregate has room.
+                        let limit = allocation.and_then(ceiling).filter(|_| !pending_pass);
+                        let own_excess =
+                            limit.map_or(0, |limit| (victim.amount + kept).saturating_sub(limit));
+                        let excess = remaining.max(own_excess);
                         let state = self.ladder.get(&(victim.id.clone(), key.clone()));
                         // A Guaranteed hint waits the Guaranteed hint deadline (FR-024).
-                        let mut victim_timing = timing.clone();
+                        let mut victim_timing = timing_for(victim.mode);
                         if victim.guaranteed && kind.is_memory() && !critical {
                             victim_timing.hint_deadline_ms = config
                                 .contention
@@ -1631,7 +1691,7 @@ impl PolicyEngine {
                                 YieldStep::Hint,
                             ]);
                         }
-                        let contended = remaining > 0 && victim.frees;
+                        let contended = excess > 0 && victim.frees;
                         let decision = plan_step(
                             state,
                             &LadderInput {
@@ -1650,7 +1710,7 @@ impl PolicyEngine {
                                     pending_pass || kind != ResourceKind::Cpu
                                 },
                                 unavailable,
-                                excess: if contended { remaining } else { 0 },
+                                excess: if contended { excess } else { 0 },
                                 external,
                                 measurement_known,
                                 cause,
@@ -1658,14 +1718,16 @@ impl PolicyEngine {
                                     .then(|| victim.amount.saturating_add(kept)),
                                 // What the allocation may use: while contended, a cap
                                 // or hint target; while calm, its usage plus its share
-                                // of the spare, toward which a held cap rises.
+                                // of the spare, toward which a held cap rises; never
+                                // above its own mode's target.
                                 target: Some(
                                     if contended {
-                                        victim.amount.saturating_sub(remaining)
+                                        victim.amount.saturating_sub(excess)
                                     } else {
                                         victim.amount.saturating_add(spare_share)
                                     }
-                                    .saturating_add(kept),
+                                    .saturating_add(kept)
+                                    .min(limit.unwrap_or(u64::MAX)),
                                 ),
                             },
                             &victim_timing,
@@ -1754,7 +1816,7 @@ impl PolicyEngine {
                             target: None,
                             usage: None,
                         },
-                        &timing,
+                        &timing_for(mode_of(allocation)),
                         now_monotonic_ms,
                     );
                     if let Some(next) = decision.state {
@@ -1841,11 +1903,11 @@ impl PolicyEngine {
                 } else {
                     YieldCause::ExternalGrowth
                 };
-                let timing = LadderTiming::new(
-                    &config.contention.thresholds(kind),
-                    governing(kind),
-                    interval_ms,
-                );
+                // Each job yields and rises at its own mode's pace.
+                let timing_for = |mode: ContentionMode| {
+                    LadderTiming::new(&config.contention.thresholds(kind), mode, interval_ms)
+                };
+                let mode_of = |a: &Allocation| allocation_modes[&a.id][&kind];
                 // No backend lowers a GPU compute share, and a worker's resource
                 // targets carry no GPU compute amount.
                 let unavailable_of = |id: &str| {
@@ -1872,6 +1934,7 @@ impl PolicyEngine {
                         controllable: !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable),
                         frees: true,
                         pending: false,
+                        mode: mode_of(a),
                         guaranteed: guaranteed(a),
                         progress_lost_ms: input.facts.get(&a.id).map_or(0, |f| f.progress_lost_ms),
                         amount: share,
@@ -1883,7 +1946,12 @@ impl PolicyEngine {
                 for victim in victims {
                     planned.insert(victim.id.clone());
                     let state = self.ladder.get(&(victim.id.clone(), key.clone()));
-                    let contended_victim = remaining > 0;
+                    // A job above its own mode's share yields the difference even
+                    // while the aggregate has room.
+                    let limit = budget.targets.get(&victim.mode).copied();
+                    let excess =
+                        remaining.max(limit.map_or(0, |limit| share.saturating_sub(limit)));
+                    let contended_victim = excess > 0;
                     let decision = plan_step(
                         state,
                         &LadderInput {
@@ -1892,18 +1960,21 @@ impl PolicyEngine {
                             guaranteed: victim.guaranteed,
                             allow_drain: false,
                             unavailable: unavailable_of(&victim.id),
-                            excess: if contended_victim { remaining } else { 0 },
+                            excess: if contended_victim { excess } else { 0 },
                             external,
                             measurement_known,
                             cause,
                             usage: budget.own.map(|_| share),
-                            target: Some(if contended_victim {
-                                share.saturating_sub(remaining)
-                            } else {
-                                share.saturating_add(spare_share)
-                            }),
+                            target: Some(
+                                if contended_victim {
+                                    share.saturating_sub(excess)
+                                } else {
+                                    share.saturating_add(spare_share)
+                                }
+                                .min(limit.unwrap_or(u64::MAX)),
+                            ),
                         },
-                        &timing,
+                        &timing_for(victim.mode),
                         now_monotonic_ms,
                     );
                     if !decision.skipped.is_empty() {
@@ -1955,7 +2026,7 @@ impl PolicyEngine {
                             target: None,
                             usage: None,
                         },
-                        &timing,
+                        &timing_for(mode_of(allocation)),
                         now_monotonic_ms,
                     );
                     if let Some(next) = decision.state {
@@ -2498,29 +2569,57 @@ impl PolicyEngine {
                     (capacity.saturating_mul(u64::from(thresholds.principal_min_percent)) / 100)
                         .max(1)
                 };
-                let mode = governing(kind);
-                let margin = match mode {
-                    crate::contention::ContentionMode::YieldFirst => {
-                        thresholds.yield_first_margin_percent
-                    }
-                    crate::contention::ContentionMode::Neutral => thresholds.neutral_margin_percent,
-                    crate::contention::ContentionMode::Performance => {
-                        thresholds.performance_margin_percent
-                    }
+                // Each job rises at its own mode's pace.
+                let step_of = |mode: ContentionMode| {
+                    let margin = match mode {
+                        ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
+                        ContentionMode::Neutral => thresholds.neutral_margin_percent,
+                        ContentionMode::Performance => thresholds.performance_margin_percent,
+                    };
+                    (capacity.saturating_mul(u64::from(margin)) / 100).max(threshold + 1)
                 };
-                let step = (capacity.saturating_mul(u64::from(margin)) / 100).max(threshold + 1);
-                let scale_up_ms = thresholds.scale_up_interval_s(mode).saturating_mul(1000);
-                let share = mode_allowance
+                let mode_of = |a: &Allocation| allocation_modes[&a.id][&kind];
+                // The room is shared equally, but no job is invited above its own
+                // mode's target; what that bound leaves goes to the others.
+                let room = mode_allowance
                     .saturating_sub(taken)
-                    .saturating_sub(threshold)
-                    / running.len() as u64;
+                    .saturating_sub(threshold);
+                let headroom = |a: &Allocation| {
+                    mode_targets.get(&key).map_or(u64::MAX, |targets| {
+                        targets[&mode_of(a)].saturating_sub(held(a))
+                    })
+                };
+                let mut shares: BTreeMap<&str, u64> = BTreeMap::new();
+                loop {
+                    let open: Vec<&&Allocation> = running
+                        .iter()
+                        .filter(|a| !shares.contains_key(a.id.as_str()))
+                        .collect();
+                    if open.is_empty() {
+                        break;
+                    }
+                    let left = room.saturating_sub(shares.values().sum());
+                    let equal = left / open.len() as u64;
+                    let bound: Vec<&&&Allocation> =
+                        open.iter().filter(|a| headroom(a) < equal).collect();
+                    if bound.is_empty() {
+                        for a in open {
+                            shares.insert(&a.id, equal);
+                        }
+                        break;
+                    }
+                    for a in bound {
+                        shares.insert(&a.id, headroom(a));
+                    }
+                }
                 let mut current = Vec::with_capacity(running.len());
-                for allocation in running {
+                for allocation in &running {
+                    let allocation = *allocation;
                     // An unknown measurement invites no growth.
                     let mut value = if unknown {
                         held(allocation)
                     } else {
-                        held(allocation).saturating_add(share)
+                        held(allocation).saturating_add(shares[allocation.id.as_str()])
                     };
                     match ladder.get(&(allocation.id.clone(), key.clone())) {
                         Some(state) if matches!(state.step, YieldStep::Cap | YieldStep::Hint) => {
@@ -2537,19 +2636,23 @@ impl PolicyEngine {
                     if guaranteed(allocation) {
                         value = value.max(pick(&allocation.requested));
                     }
-                    current.push((allocation.id.clone(), value));
+                    current.push((allocation.id.clone(), value, mode_of(allocation)));
                 }
                 // Falls publish together once their summed drift passes the one
                 // threshold; each rise is rate-limited on its own.
                 let drift = current
                     .iter()
-                    .filter_map(|(id, value)| {
+                    .filter_map(|(id, value, _)| {
                         self.allowance_published
                             .get(&(id.clone(), key.clone()))
                             .map(|(previous, _)| previous.saturating_sub(*value))
                     })
                     .fold(0u64, u64::saturating_add);
-                for (allocation_id, value) in current {
+                for (allocation_id, value, mode) in current {
+                    let (step, scale_up_ms) = (
+                        step_of(mode),
+                        thresholds.scale_up_interval_s(mode).saturating_mul(1000),
+                    );
                     let id = (allocation_id.clone(), key.clone());
                     let published = match self.allowance_published.get(&id).copied() {
                         None => (value, now_monotonic_ms),
@@ -2648,6 +2751,9 @@ struct GpuComputeBudget {
     external: u64,
     /// Own compute, when measured.
     own: Option<u64>,
+    /// Each mode's share, which bounds the jobs in that mode; empty when no
+    /// external work contends.
+    targets: BTreeMap<ContentionMode, u64>,
 }
 
 fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<String>) -> bool {
