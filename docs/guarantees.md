@@ -87,11 +87,11 @@ only after `quiet_window_intervals` consecutive measured intervals. Unsupported 
 stale samples, an incomplete process list or MPS leave it activity of unknown amount,
 one principal, under which Neutral and Performance hold the fair share: once the
 supervisor reports a duty cycle applied, own work counts as holding at most that duty,
-so the cap at the share is met and does not escalate. Unknown activity from a telemetry
-failure or a missing observation, and a duty cycle not reported applied, first hold the
-steps and escalate after the unknown window. Each device's held-back breakdown says
-which path it took and why. An empty-device pass is not evidence of occupied-device
-sharing. See
+at the larger of the target the supervisor reports applied and the current one, so the
+cap at the share is met and does not escalate. Unknown activity from a telemetry failure
+or a missing observation, and a duty cycle not reported applied, first hold the steps
+and escalate after the unknown window. Each device's held-back breakdown says which path
+it took and why. An empty-device pass is not evidence of occupied-device sharing. See
 [GPU operation](coordinator-work.md#gpu-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
