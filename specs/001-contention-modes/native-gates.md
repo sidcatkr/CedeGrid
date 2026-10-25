@@ -194,11 +194,12 @@ copied to a named volume there; Docker's overlay filesystem is refused by design
 Container evidence, not host qualification, at 8128cbf in the same Docker Desktop container
 (aarch64, kernel 7.0.12-linuxkit, Rust 1.98.1, Python 3.11): fmt and clippy passed, the serial
 suite ran 533 tests with 532 passed, 1 failed and 9 ignored, and both Python suites passed. The
-failure, `pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reported`, is a timing
-flake of the sample-at-a-time actuation tests in `tests/supervision.rs`. They sample a 1 s
-counter worker at fixed offsets, and fail about one run in four in this container. The same flake
-occurs at 0ad75e1, before these revisions, in sibling tests (2 of 8 runs). A full run at
-c710915 passed with 527 tests and 9 ignored. The readiness, terminate and target-deadline paths
+failure, `pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reported`, was a timing
+flake of the actuation tests in `tests/supervision.rs`, which sampled a 1 s counter worker at
+fixed offsets and failed about one run in four here (2 of 8 runs at 0ad75e1). They now wait for
+observed conditions with a deadline, and the worker runs until the test stops it. The
+supervision test binary then passed 20 consecutive runs of 25 tests in this container. A full
+run at c710915 passed with 527 tests and 9 ignored. The readiness, terminate and target-deadline paths
 need no delegated cgroup or GPU, so they are covered here:
 
 ```sh

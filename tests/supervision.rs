@@ -851,25 +851,22 @@ fn kill_waits_a_minimum_term_grace_after_the_first_sigterm_actually_sent() {
 mod actuation {
     use super::*;
     use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+    use std::collections::VecDeque;
     use supervision::{SupervisorCommand, SupervisorReport};
 
     fn python() -> String {
         std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into())
     }
 
-    /// A single-process worker that bumps a counter file for `seconds`.
-    fn counter_worker(dir: &Path, seconds: f64, busy: bool) -> Vec<String> {
+    /// A single-process worker that bumps a counter file until a `stop` file
+    /// appears, so time spent paused does not end it. Writes are atomic renames.
+    fn counter_worker(busy: bool) -> Vec<String> {
         let body = if busy {
-            format!(
-                "import time\nend=time.monotonic()+{seconds}\ni=0\nwhile time.monotonic()<end:\n    i+=1\n    if i%20000==0: open('counter','w').write(str(i))\n"
-            )
+            "import os, time\nend=time.monotonic()+60\ni=0\nwhile time.monotonic()<end:\n    i+=1\n    if i%20000==0:\n        open('counter.tmp','w').write(str(i))\n        os.replace('counter.tmp','counter')\n        if os.path.exists('stop'): break\n"
         } else {
-            format!(
-                "import time\nend=time.monotonic()+{seconds}\ni=0\nwhile time.monotonic()<end:\n    i+=1\n    open('counter','w').write(str(i))\n    time.sleep(0.02)\n"
-            )
+            "import os, time\nend=time.monotonic()+60\ni=0\nwhile time.monotonic()<end and not os.path.exists('stop'):\n    i+=1\n    open('counter.tmp','w').write(str(i))\n    os.replace('counter.tmp','counter')\n    time.sleep(0.02)\n"
         };
-        let _ = dir;
-        vec![python(), "-c".into(), body]
+        vec![python(), "-c".into(), body.into()]
     }
 
     fn read_counter(path: &Path) -> u64 {
@@ -894,45 +891,176 @@ mod actuation {
         }
     }
 
-    /// Sends scripted adjustments at given times after the first poll and samples
-    /// counters at given times, recording every report.
-    struct Script {
-        started: Option<Instant>,
-        commands: Vec<(u64, SupervisorCommand)>,
-        samples: Vec<(u64, PathBuf)>,
-        sampled: Vec<(u64, u64)>,
+    /// What phases observe: elapsed time, every report and named counter samples.
+    #[derive(Default)]
+    struct Seen {
+        now_ms: u64,
         reports: Vec<SupervisorReport>,
+        adjusted_ms: BTreeMap<u64, u64>,
+        marks: BTreeMap<&'static str, (u64, u64)>,
+    }
+    impl Seen {
+        /// Reads a counter and keeps it, with the time, under `name`.
+        fn record(&mut self, name: &'static str, path: &Path) -> u64 {
+            let value = read_counter(path);
+            self.marks.insert(name, (self.now_ms, value));
+            value
+        }
+        fn mark(&self, name: &str) -> u64 {
+            self.marks[name].1
+        }
+        fn since(&self, name: &str) -> u64 {
+            self.now_ms - self.marks[name].0
+        }
+        fn adjusted(&self, sequence: u64) -> bool {
+            self.adjusted_ms.contains_key(&sequence)
+        }
+        fn since_adjusted(&self, sequence: u64) -> u64 {
+            self.now_ms - self.adjusted_ms[&sequence]
+        }
+        fn rate(&self, from: &str, to: &str) -> f64 {
+            let ((t0, v0), (t1, v1)) = (self.marks[from], self.marks[to]);
+            v1.saturating_sub(v0) as f64 / t1.saturating_sub(t0).max(1) as f64
+        }
+    }
+
+    /// Polled until it returns the commands to send; then the next phase starts.
+    type Phase = Box<dyn FnMut(&mut Seen) -> Option<Vec<SupervisorCommand>>>;
+
+    fn wait(mut until: impl FnMut(&mut Seen) -> bool + 'static) -> Phase {
+        Box::new(move |seen| until(seen).then(Vec::new))
+    }
+
+    fn send(command: SupervisorCommand) -> Phase {
+        let mut command = Some(command);
+        Box::new(move |_| command.take().map(|command| vec![command]))
+    }
+
+    fn running(path: &Path) -> Phase {
+        let path = path.to_path_buf();
+        wait(move |_| read_counter(&path) > 0)
+    }
+
+    fn record(counters: &[(&'static str, &Path)]) -> Phase {
+        let counters: Vec<_> = counters
+            .iter()
+            .map(|(name, path)| (*name, path.to_path_buf()))
+            .collect();
+        wait(move |seen| {
+            for (name, path) in &counters {
+                seen.record(name, path);
+            }
+            true
+        })
+    }
+
+    /// Waits until the counter is `by` past the `from` mark and keeps it as `name`.
+    fn advances(name: &'static str, path: &Path, from: &'static str, by: u64) -> Phase {
+        let path = path.to_path_buf();
+        wait(move |seen| seen.record(name, &path) >= seen.mark(from) + by)
+    }
+
+    /// Waits `ms` past the `from` mark and keeps the counter as `name`.
+    fn after(name: &'static str, path: &Path, from: &'static str, ms: u64) -> Phase {
+        let path = path.to_path_buf();
+        wait(move |seen| seen.since(from) >= ms && seen.record(name, &path) > 0)
+    }
+
+    /// Waits until the counter has not changed for `quiet_ms`.
+    fn settled(path: &Path, quiet_ms: u64) -> Phase {
+        let path = path.to_path_buf();
+        let mut last: Option<(u64, u64)> = None;
+        wait(move |seen| {
+            let value = read_counter(&path);
+            match last {
+                Some((previous, since)) if previous == value => seen.now_ms - since >= quiet_ms,
+                _ => {
+                    last = Some((value, seen.now_ms));
+                    false
+                }
+            }
+        })
+    }
+
+    const PHASE_DEADLINE_MS: u64 = 20_000;
+
+    /// Drives the supervisor through phases that wait for observed conditions,
+    /// each within `PHASE_DEADLINE_MS`. When the phases end or one times out, it
+    /// resumes the worker and creates the `stop` file that ends it.
+    struct Script {
+        started: Instant,
+        phase_started_ms: u64,
+        phases: VecDeque<Phase>,
+        completed: usize,
+        stop: PathBuf,
+        stopped: bool,
+        failure: Option<String>,
+        seen: Seen,
     }
     impl Script {
-        fn new(commands: Vec<(u64, SupervisorCommand)>, samples: Vec<(u64, PathBuf)>) -> Self {
+        fn new(dir: &Path, phases: Vec<Phase>) -> Self {
             Self {
-                started: None,
-                commands,
-                samples,
-                sampled: vec![],
-                reports: vec![],
+                started: Instant::now(),
+                phase_started_ms: 0,
+                phases: phases.into(),
+                completed: 0,
+                stop: dir.join("stop"),
+                stopped: false,
+                failure: None,
+                seen: Seen::default(),
             }
+        }
+
+        fn finish(&mut self) -> Vec<SupervisorCommand> {
+            self.stopped = true;
+            if let Err(error) = fs::write(&self.stop, b"") {
+                self.failure.get_or_insert(format!("stop file: {error}"));
+            }
+            vec![adjust(1_000_000, YieldStep::None, None)]
+        }
+
+        fn check(&self) {
+            if let Some(failure) = &self.failure {
+                panic!("{failure}");
+            }
+            assert!(
+                self.phases.is_empty(),
+                "the worker ended in phase {}: {:?}",
+                self.completed,
+                self.seen.reports
+            );
         }
     }
     impl supervision::SupervisorControl for Script {
         fn poll(&mut self) -> Result<Vec<SupervisorCommand>> {
-            let elapsed = self
-                .started
-                .get_or_insert_with(Instant::now)
-                .elapsed()
-                .as_millis() as u64;
-            while self.samples.first().is_some_and(|(at, _)| *at <= elapsed) {
-                let (at, path) = self.samples.remove(0);
-                self.sampled.push((at, read_counter(&path)));
+            self.seen.now_ms = self.started.elapsed().as_millis() as u64;
+            if self.stopped {
+                return Ok(vec![]);
             }
-            let mut due = vec![];
-            while self.commands.first().is_some_and(|(at, _)| *at <= elapsed) {
-                due.push(self.commands.remove(0).1);
+            let Some(phase) = self.phases.front_mut() else {
+                return Ok(self.finish());
+            };
+            if let Some(commands) = phase(&mut self.seen) {
+                self.phases.pop_front();
+                self.completed += 1;
+                self.phase_started_ms = self.seen.now_ms;
+                return Ok(commands);
             }
-            Ok(due)
+            if self.seen.now_ms - self.phase_started_ms > PHASE_DEADLINE_MS {
+                self.failure = Some(format!(
+                    "phase {} timed out: {:?}",
+                    self.completed, self.seen.reports
+                ));
+                return Ok(self.finish());
+            }
+            Ok(vec![])
         }
         fn report(&mut self, report: SupervisorReport) -> Result<()> {
-            self.reports.push(report);
+            if let SupervisorReport::Adjusted { sequence, .. } = &report {
+                let now = self.started.elapsed().as_millis() as u64;
+                self.seen.adjusted_ms.insert(*sequence, now);
+            }
+            self.seen.reports.push(report);
             Ok(())
         }
     }
@@ -972,29 +1100,33 @@ mod actuation {
         let temp = TempDir::new().unwrap();
         let mut req = request(temp.path());
         req.class = AllocationClass::Opportunistic;
-        req.argv = counter_worker(temp.path(), 2.5, false);
+        req.argv = counter_worker(false);
         // A same-user process outside manager ownership must never be touched.
         let unrelated_dir = TempDir::new().unwrap();
         let mut unrelated = Command::new(python())
-            .args(["-c", "import time\ni=0\nwhile True:\n    i+=1\n    open('counter','w').write(str(i))\n    time.sleep(0.02)\n"])
+            .args(["-c", "import os, time\ni=0\nwhile True:\n    i+=1\n    open('counter.tmp','w').write(str(i))\n    os.replace('counter.tmp','counter')\n    time.sleep(0.02)\n"])
             .current_dir(unrelated_dir.path())
             .spawn()
             .unwrap();
         let mine = temp.path().join("counter");
         let theirs = unrelated_dir.path().join("counter");
         let mut script = Script::new(
+            temp.path(),
             vec![
-                (400, adjust(1, YieldStep::Pause, None)),
-                (1200, adjust(2, YieldStep::None, None)),
-            ],
-            vec![
-                (550, mine.clone()),
-                (1100, mine.clone()),
-                (550, theirs.clone()),
-                (1100, theirs.clone()),
+                running(&mine),
+                running(&theirs),
+                send(adjust(1, YieldStep::Pause, None)),
+                wait(|seen| seen.adjusted(1)),
+                // A write in flight when the pause lands may still complete.
+                settled(&mine, 200),
+                record(&[("mine_paused", &mine), ("theirs_paused", &theirs)]),
+                advances("theirs_later", &theirs, "theirs_paused", 10),
+                record(&[("mine_later", &mine)]),
+                send(adjust(2, YieldStep::None, None)),
+                wait(|seen| seen.adjusted(2)),
+                advances("mine_resumed", &mine, "mine_later", 1),
             ],
         );
-        script.samples.sort_by_key(|(at, _)| *at);
         let result = run_controlled(
             &req,
             &long_lease(),
@@ -1006,24 +1138,27 @@ mod actuation {
         unrelated.kill().unwrap();
         unrelated.wait().unwrap();
         let outcome = result.unwrap();
+        script.check();
         assert!(unrelated_alive);
         assert_eq!(outcome.exit_code, Some(0));
         assert!(!outcome.yielded);
-        let (applied, _) = adjusted(&script.reports, 1);
+        let (applied, _) = adjusted(&script.seen.reports, 1);
         assert_eq!(applied[&ResourceKey::Cpu], YieldStep::Pause);
-        let (applied, _) = adjusted(&script.reports, 2);
+        let (applied, _) = adjusted(&script.seen.reports, 2);
         assert_eq!(applied[&ResourceKey::Cpu], YieldStep::None);
-        // Samples were taken in time order: mine, theirs at 550 and again at 1100.
-        let values: Vec<u64> = script.sampled.iter().map(|(_, v)| *v).collect();
-        let (mine_paused, theirs_paused) = (values[0], values[1]);
-        let (mine_later, theirs_later) = (values[2], values[3]);
+        let mark = |name| script.seen.mark(name);
         assert_eq!(
-            mine_paused, mine_later,
+            mark("mine_paused"),
+            mark("mine_later"),
             "the paused worker must not progress"
         );
         assert!(
-            theirs_later > theirs_paused,
+            mark("theirs_later") > mark("theirs_paused"),
             "an unrelated process is never paused"
+        );
+        assert!(
+            mark("mine_resumed") > mark("mine_later"),
+            "resume continues the worker"
         );
     }
 
@@ -1031,40 +1166,40 @@ mod actuation {
     fn pause_is_refused_for_guaranteed_work_and_unavailable_steps_are_reported() {
         let temp = TempDir::new().unwrap();
         let mut req = request(temp.path());
-        req.argv = counter_worker(temp.path(), 1.0, false);
+        req.argv = counter_worker(false);
+        let counter = temp.path().join("counter");
         let mut script = Script::new(
+            temp.path(),
             vec![
-                (200, adjust(1, YieldStep::Pause, None)),
-                (
-                    300,
-                    SupervisorCommand::Adjust {
-                        sequence: 2,
-                        resources: BTreeMap::from([
-                            (
-                                ResourceKey::Cpu,
-                                StepRequest {
-                                    step: YieldStep::LowerShare,
-                                    target: None,
-                                    cause: YieldCause::ExternalGrowth,
-                                    deadline_ms: None,
-                                },
-                            ),
-                            (
-                                ResourceKey::Ram,
-                                StepRequest {
-                                    step: YieldStep::Hint,
-                                    target: Some(1),
-                                    cause: YieldCause::ExternalGrowth,
-                                    deadline_ms: None,
-                                },
-                            ),
-                        ]),
-                    },
-                ),
-            ],
-            vec![
-                (250, temp.path().join("counter")),
-                (700, temp.path().join("counter")),
+                running(&counter),
+                send(adjust(1, YieldStep::Pause, None)),
+                wait(|seen| seen.adjusted(1)),
+                send(SupervisorCommand::Adjust {
+                    sequence: 2,
+                    resources: BTreeMap::from([
+                        (
+                            ResourceKey::Cpu,
+                            StepRequest {
+                                step: YieldStep::LowerShare,
+                                target: None,
+                                cause: YieldCause::ExternalGrowth,
+                                deadline_ms: None,
+                            },
+                        ),
+                        (
+                            ResourceKey::Ram,
+                            StepRequest {
+                                step: YieldStep::Hint,
+                                target: Some(1),
+                                cause: YieldCause::ExternalGrowth,
+                                deadline_ms: None,
+                            },
+                        ),
+                    ]),
+                }),
+                wait(|seen| seen.adjusted(2)),
+                record(&[("refused", &counter)]),
+                advances("later", &counter, "refused", 10),
             ],
         );
         let outcome = run_controlled(
@@ -1075,15 +1210,16 @@ mod actuation {
             &mut script,
         )
         .unwrap();
+        script.check();
         assert_eq!(outcome.exit_code, Some(0));
-        let (applied, unavailable) = adjusted(&script.reports, 1);
+        let (applied, unavailable) = adjusted(&script.seen.reports, 1);
         assert_eq!(applied.get(&ResourceKey::Cpu), Some(&YieldStep::None));
         assert_eq!(unavailable[&ResourceKey::Cpu], [YieldStep::Pause]);
-        let (_, unavailable) = adjusted(&script.reports, 2);
+        let (_, unavailable) = adjusted(&script.seen.reports, 2);
         assert_eq!(unavailable[&ResourceKey::Cpu], [YieldStep::LowerShare]);
         assert_eq!(unavailable[&ResourceKey::Ram], [YieldStep::Hint]);
         assert!(
-            script.sampled[1].1 > script.sampled[0].1,
+            script.seen.mark("later") > script.seen.mark("refused"),
             "Guaranteed work kept running"
         );
     }
@@ -1094,20 +1230,24 @@ mod actuation {
         let mut req = request(temp.path());
         req.class = AllocationClass::Opportunistic;
         req.resources.cpu_millicores = 1000;
-        req.argv = counter_worker(temp.path(), 4.0, true);
+        req.argv = counter_worker(true);
         let counter = temp.path().join("counter");
         let mut script = Script::new(
+            temp.path(),
             vec![
-                (1000, adjust(1, YieldStep::Cap, Some(250))),
-                (3000, adjust(2, YieldStep::None, None)),
-            ],
-            vec![
-                (300, counter.clone()),
-                (900, counter.clone()),
-                (1800, counter.clone()),
-                (2900, counter.clone()),
-                (3200, counter.clone()),
-                (3800, counter.clone()),
+                running(&counter),
+                record(&[("free0", &counter)]),
+                after("free1", &counter, "free0", 1000),
+                send(adjust(1, YieldStep::Cap, Some(250))),
+                wait(|seen| seen.adjusted(1)),
+                // Two duty periods let the cap take hold.
+                wait(|seen| seen.since_adjusted(1) >= 200),
+                record(&[("capped0", &counter)]),
+                after("capped1", &counter, "capped0", 1000),
+                send(adjust(2, YieldStep::None, None)),
+                wait(|seen| seen.adjusted(2)),
+                record(&[("resumed0", &counter)]),
+                after("resumed1", &counter, "resumed0", 1000),
             ],
         );
         let outcome = run_controlled(
@@ -1118,16 +1258,13 @@ mod actuation {
             &mut script,
         )
         .unwrap();
+        script.check();
         assert_eq!(outcome.exit_code, Some(0));
-        let (applied, _) = adjusted(&script.reports, 1);
+        let (applied, _) = adjusted(&script.seen.reports, 1);
         assert_eq!(applied[&ResourceKey::Cpu], YieldStep::Cap);
-        let rate = |a: usize, b: usize| {
-            let ((t0, v0), (t1, v1)) = (script.sampled[a], script.sampled[b]);
-            (v1.saturating_sub(v0)) as f64 / (t1 - t0) as f64
-        };
-        let free = rate(0, 1);
-        let capped = rate(2, 3);
-        let resumed = rate(4, 5);
+        let free = script.seen.rate("free0", "free1");
+        let capped = script.seen.rate("capped0", "capped1");
+        let resumed = script.seen.rate("resumed0", "resumed1");
         assert!(capped < 0.6 * free, "free {free} capped {capped}");
         assert!(resumed > 0.7 * free, "free {free} resumed {resumed}");
     }
