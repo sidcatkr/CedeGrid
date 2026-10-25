@@ -159,7 +159,7 @@ failed GPU allocation. The former floor policies `b` and `c` and Neutral memory 
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Two options are marked *caution* because they let own
 work hold more capacity within the floors: Performance mode and a floor below twice its
-minimum. Performance needs `contention.acknowledge_danger = ["performance_mode"]` to
+minimum. Performance needs `contention.acknowledge_caution = ["performance_mode"]` to
 load. A floor below twice its minimum without `"small_floor"` loads, so 0.2 files keep
 loading, but is raised to twice the minimum with a warning; it applies as configured
 only once confirmed. `doctor`, `status` and node reports list active caution options. Without

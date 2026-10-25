@@ -523,7 +523,7 @@ pub struct ContentionConfig {
     pub max_mode: Option<crate::contention::ContentionMode>,
     pub floor_policy: FloorPolicy,
     pub neutral_memory_policy: NeutralMemoryPolicy,
-    pub acknowledge_danger: std::collections::BTreeSet<String>,
+    pub acknowledge_caution: std::collections::BTreeSet<String>,
     /// How long a hint-ready Guaranteed allocation may take to release memory
     /// before it is drained (FR-024).
     pub guaranteed_hint_deadline_s: u64,
@@ -551,7 +551,7 @@ impl Default for ContentionConfig {
             max_mode: None,
             floor_policy: FloorPolicy::A,
             neutral_memory_policy: NeutralMemoryPolicy::A,
-            acknowledge_danger: Default::default(),
+            acknowledge_caution: Default::default(),
             guaranteed_hint_deadline_s: 5,
             critical_floor_percent: 50,
             critical_hint_deadline_s: 1,
@@ -770,10 +770,10 @@ impl ContentionConfig {
             self.neutral_memory_policy == NeutralMemoryPolicy::A,
             "contention.neutral_memory_policy = \"b\" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib"
         );
-        for name in &self.acknowledge_danger {
+        for name in &self.acknowledge_caution {
             ensure!(
                 ACKNOWLEDGEMENTS.contains(&name.as_str()),
-                "contention.acknowledge_danger has unknown entry {name:?}"
+                "contention.acknowledge_caution has unknown entry {name:?}"
             );
         }
         ensure!(
@@ -781,8 +781,8 @@ impl ContentionConfig {
             "contention.default_mode cannot be more aggressive than contention.max_mode"
         );
         ensure!(
-            !self.performance_chosen() || self.acknowledge_danger.contains("performance_mode"),
-            "ERR_CEDEGRID_DANGER_UNACKNOWLEDGED: Performance mode requires acknowledge_danger = [\"performance_mode\"]"
+            !self.performance_chosen() || self.acknowledge_caution.contains("performance_mode"),
+            "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED: Performance mode requires acknowledge_caution = [\"performance_mode\"]"
         );
         ensure!(
             (1..=30).contains(&self.guaranteed_hint_deadline_s),
@@ -1170,9 +1170,9 @@ impl Config {
                 self.gpu.reserve_vram_mib
             ));
         }
-        if self.small_floor() && !self.contention.acknowledge_danger.contains("small_floor") {
+        if self.small_floor() && !self.contention.acknowledge_caution.contains("small_floor") {
             warnings.push(format!(
-                "a no-harm floor near its minimum is raised to twice the minimum ({} MiB of RAM, {} MiB per GPU); keep it with acknowledge_danger = [\"small_floor\"]",
+                "a no-harm floor near its minimum is raised to twice the minimum ({} MiB of RAM, {} MiB per GPU); keep it with acknowledge_caution = [\"small_floor\"]",
                 2 * MIN_RAM_FLOOR_MIB,
                 2 * MIN_VRAM_FLOOR_MIB
             ));
@@ -1263,7 +1263,7 @@ impl Config {
     /// A floor near its minimum is a caution option: without its acknowledgement
     /// it is raised to twice the minimum, so it is never active unconfirmed.
     fn confirmed_floor(&self, floor: u64, minimum: u64) -> u64 {
-        if self.contention.acknowledge_danger.contains("small_floor") {
+        if self.contention.acknowledge_caution.contains("small_floor") {
             floor
         } else {
             floor.max(2 * minimum)
@@ -1286,7 +1286,7 @@ impl Config {
                 marker: RiskMarker::Caution,
             });
         }
-        if self.small_floor() && self.contention.acknowledge_danger.contains("small_floor") {
+        if self.small_floor() && self.contention.acknowledge_caution.contains("small_floor") {
             result.push(ExceptionNotice {
                 name: "small_floor".into(),
                 marker: RiskMarker::Caution,

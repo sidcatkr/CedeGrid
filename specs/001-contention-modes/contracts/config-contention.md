@@ -9,7 +9,7 @@ default_mode = "neutral"            # "yield_first" | "neutral" | "performance"
 max_mode = "neutral"                # node cap; jobs run at min(requested, max_mode); unset, the most aggressive node mode
 floor_policy = "a"                  # the only value; "b" and "c" fail to load
 neutral_memory_policy = "a"         # the only value; "b" fails to load
-acknowledge_danger = []             # "performance_mode", "small_floor" [caution]
+acknowledge_caution = []             # "performance_mode", "small_floor" [caution]
 guaranteed_hint_deadline_s = 5      # 1-30
 critical_floor_percent = 50         # a breach is critical below this share of the floor
 critical_hint_deadline_s = 1        # hint deadline on the critical path
@@ -81,8 +81,8 @@ quiet_window_intervals = 20
   `contention.floor_policy = "<v>" was removed: Guaranteed memory is released last under policy A; tune contention.guaranteed_hint_deadline_s and contention.ram.guaranteed_breach_window_s`.
   `neutral_memory_policy = "b"` fails with
   `contention.neutral_memory_policy = "b" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib`.
-- **Performance without `acknowledge_danger` containing `performance_mode`.** Loading fails with
-  `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`.
+- **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails with
+  `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`.
 - **Floors.** A floor below its minimum (512 MiB of RAM, 256 MiB per GPU) is raised to it with a
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
   the minimum with a warning.

@@ -12,7 +12,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
     [--margin RESOURCE.MODE=PERCENT]...  # MODE: yield_first|performance
     [--guaranteed-hint-deadline-s N]
     [--set RESOURCE.KEY=VALUE]...        # tuned thresholds, e.g. gpu_memory.noise_tolerance_mib=512
-    [--acknowledge-danger performance_mode|small_floor]...
+    [--acknowledge-caution performance_mode|small_floor]...
 ```
 
 ## Modes
@@ -44,7 +44,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
   `TERM=dumb`. The labels always remain.
 - **Caution confirmation.** Choosing a caution option opens a separate screen that restates the
   consequence and needs an explicit "yes". Declining restores the default. Confirming records the
-  option in `acknowledge_danger`.
+  option in `acknowledge_caution`.
 - **Fallback.** If the terminal cannot be driven (no cursor control or too small), setup uses
   line-based prompts on the TTY.
 - **Summary.** Shown before writing, listing every active caution option with its marker.
@@ -62,7 +62,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
 |---|---|---|
 | 0 | — | Written, or unchanged |
 | 2 | `ERR_CEDEGRID_SETUP_MISSING_CHOICE` | A required choice is missing in non-interactive mode; the message names the flag |
-| 3 | `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` | A caution option was chosen without `--acknowledge-danger <option>` |
+| 3 | `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` | A caution option was chosen without `--acknowledge-caution <option>` |
 | 4 | `ERR_CEDEGRID_CONFIG` | The result failed validation, as configuration loading reports it; nothing was written |
 | 130 | — | Cancelled interactively |
 

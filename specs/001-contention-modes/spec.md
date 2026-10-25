@@ -746,7 +746,7 @@ node reports with the expected per-resource values at each step.
   restates the consequence:
   - in the interface, a separate confirmation step;
   - in non-interactive use, an acknowledgement flag that names the option;
-  - in a hand-edited file, an `acknowledge_danger` entry that names the option (`performance_mode`
+  - in a hand-edited file, an `acknowledge_caution` entry that names the option (`performance_mode`
     or `small_floor`).
 - **FR-052**: Setup MUST offer every interactive choice as a command-line flag. On a non-TTY it
   MUST NOT prompt or block. It MUST:

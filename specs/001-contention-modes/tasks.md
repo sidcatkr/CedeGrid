@@ -470,8 +470,8 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 - [X] T122 [P] Add tests in `tests/configuration.rs` (B1, B2):
   - `floor_policy = "b"` and `"c"` and `neutral_memory_policy = "b"` fail to load, and each
     message names its replacement;
-  - Performance on any resource without `acknowledge_danger = ["performance_mode"]` fails with
-    `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED`, and loads with it;
+  - Performance on any resource without `acknowledge_caution = ["performance_mode"]` fails with
+    `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`, and loads with it;
   - a floor below its minimum is raised to it with a warning; a floor near its minimum without
     `small_floor` warns and still loads;
   - `guaranteed_hint_deadline_s` (1–30) and `ram.guaranteed_breach_window_s` (0–60, RAM only)
@@ -522,7 +522,7 @@ review answers are in [review-pre-us5.md](review-pre-us5.md).
 ### Implementation for the revisions
 
 - [X] T131 Remove floor policies B and C, Neutral memory policy B and the OOM exemption (B1, B2):
-  validation messages, `acknowledge_danger` entries, floor minimums, the new Guaranteed keys and
+  validation messages, `acknowledge_caution` entries, floor minimums, the new Guaranteed keys and
   the implicit node cap in `src/config.rs`; `guaranteed_oom_victim` in
   `src/supervision.rs` and its callers; exceptions and markers in `src/model.rs`;
   `NodeContentionReport` in `src/protocol.rs`; `docs/guarantees.md`.

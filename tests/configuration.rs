@@ -576,7 +576,7 @@ fn contention_defaults_and_overrides_parse() {
         256
     );
     let parsed = parse_node(
-        "[contention]\ndefault_mode = \"yield_first\"\nacknowledge_danger = [\"performance_mode\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
+        "[contention]\ndefault_mode = \"yield_first\"\nacknowledge_caution = [\"performance_mode\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 512\n[contention.cpu]\nmode = \"performance\"",
     )
     .unwrap()
     .contention;
@@ -608,8 +608,8 @@ fn contention_validation_rejects_out_of_range_and_unknown_settings() {
         "[contention]\nbogus = 1",
         "[contention.cpu]\nbogus = 1",
         "[contention.cpu]\nnoise_tolerance_mib = 5",
-        "[contention]\nacknowledge_danger = [\"something_else\"]",
-        "[contention]\nacknowledge_danger = [\"floor_policy_c\"]",
+        "[contention]\nacknowledge_caution = [\"something_else\"]",
+        "[contention]\nacknowledge_caution = [\"floor_policy_c\"]",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }
@@ -624,7 +624,7 @@ fn removed_floor_and_memory_policies_fail_naming_their_replacement() {
             "contention.guaranteed_hint_deadline_s",
         ),
         (
-            "[contention]\nfloor_policy = \"c\"\nacknowledge_danger = [\"floor_policy_c\"]",
+            "[contention]\nfloor_policy = \"c\"\nacknowledge_caution = [\"floor_policy_c\"]",
             "contention.ram.guaranteed_breach_window_s",
         ),
         (
@@ -646,16 +646,16 @@ fn performance_needs_its_acknowledgement() {
     for (body, acknowledged) in [
         (
             "[contention]\ndefault_mode = \"performance\"",
-            "[contention]\ndefault_mode = \"performance\"\nacknowledge_danger = [\"performance_mode\"]",
+            "[contention]\ndefault_mode = \"performance\"\nacknowledge_caution = [\"performance_mode\"]",
         ),
         (
             "[contention.gpu_memory]\nmode = \"performance\"",
-            "[contention]\nacknowledge_danger = [\"performance_mode\"]\n[contention.gpu_memory]\nmode = \"performance\"",
+            "[contention]\nacknowledge_caution = [\"performance_mode\"]\n[contention.gpu_memory]\nmode = \"performance\"",
         ),
     ] {
         let error = format!("{:#}", parse_node(body).unwrap_err());
         assert!(
-            error.contains("ERR_CEDEGRID_DANGER_UNACKNOWLEDGED")
+            error.contains("ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED")
                 && error.contains("performance_mode"),
             "{body}: {error}"
         );
@@ -684,16 +684,16 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     };
     assert!(warned(&raised, &["ram.reserve_mib", "512"]));
     assert!(warned(&raised, &["gpu.reserve_vram_mib", "256"]));
-    assert!(warned(&raised, &["acknowledge_danger = [\"small_floor\"]"]));
+    assert!(warned(&raised, &["acknowledge_caution = [\"small_floor\"]"]));
     assert!(raised.config.caution_options().is_empty());
     let acknowledged = load(&format!(
-        "{small_floors}\n[contention]\nacknowledge_danger = [\"small_floor\"]"
+        "{small_floors}\n[contention]\nacknowledge_caution = [\"small_floor\"]"
     ));
     assert_eq!(acknowledged.config.ram_floor_mib(32_000), 512);
     assert_eq!(acknowledged.config.vram_floor_mib(), 256);
     assert!(!warned(
         &acknowledged,
-        &["acknowledge_danger = [\"small_floor\"]"]
+        &["acknowledge_caution = [\"small_floor\"]"]
     ));
     assert!(
         acknowledged
@@ -752,7 +752,7 @@ fn negative_cpu_nice_warns_and_is_treated_as_zero() {
     assert_eq!(loaded.config.cpu.nice, 0);
     assert!(loaded.warnings.iter().any(|w| w.contains("cpu.nice")));
     let loaded = Config::parse_reporting(
-        "config_version = 1\n[contention]\ndefault_mode = \"performance\"\nacknowledge_danger = [\"performance_mode\"]\n",
+        "config_version = 1\n[contention]\ndefault_mode = \"performance\"\nacknowledge_caution = [\"performance_mode\"]\n",
         &location,
     )
     .unwrap();

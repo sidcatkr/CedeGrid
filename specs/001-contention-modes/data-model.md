@@ -22,7 +22,7 @@ Serialization contracts are in [contracts/](contracts/).
 | `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_danger` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). The key keeps its name, as the maintainer asked; it now confirms caution options |
+| `acknowledge_caution` | set of `performance_mode`, `small_floor` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
 | `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
@@ -203,7 +203,7 @@ Performance differ in scale-up rate (10 s and 2 s per step), not in target.
 ## SetupChoices (`src/setup.rs`)
 
 - Fields: `role`, `default_mode`, per-resource modes, `max_mode`, floor sizes, margins,
-  `guaranteed_hint_deadline_s`, tuned thresholds, `acknowledge_danger`.
+  `guaranteed_hint_deadline_s`, tuned thresholds, `acknowledge_caution`.
 - `risk(choice) -> none | caution`, with the FR-045 mapping: Performance on any resource and a
   floor near its minimum are caution.
 

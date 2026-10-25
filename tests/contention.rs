@@ -11,7 +11,7 @@ pub fn config() -> Config {
     // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
     result
         .contention
-        .acknowledge_danger
+        .acknowledge_caution
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.scale_up_cooldown_ms = 0;
@@ -1368,7 +1368,7 @@ mod scenarios {
             config.contention.default_mode = mode;
             config
                 .contention
-                .acknowledge_danger
+                .acknowledge_caution
                 .insert("performance_mode".into());
             Self {
                 config,
@@ -1569,7 +1569,7 @@ mod scenarios {
         config.contention.default_mode = ContentionMode::Performance;
         config
             .contention
-            .acknowledge_danger
+            .acknowledge_caution
             .insert("performance_mode".into());
         let mut engine = PolicyEngine::new();
         let mut jobs: Vec<Allocation> = vec![];

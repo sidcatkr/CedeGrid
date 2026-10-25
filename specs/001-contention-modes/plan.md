@@ -248,8 +248,9 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   is removed: the gate sets `oom_score_adj` 1000 for every own process. New keys:
   `guaranteed_hint_deadline_s` and `ram.guaranteed_breach_window_s`. Floor minimums are a
   runtime clamp with a warning, so 0.2 files keep loading; an unconfirmed floor below twice its
-  minimum applies as twice the minimum. `acknowledge_danger` keeps its name, as the maintainer
-  asked, and now accepts `performance_mode` and `small_floor`. An unset `max_mode` is the most
+  minimum applies as twice the minimum. `acknowledge_danger` is renamed `acknowledge_caution`,
+  with `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`, without an alias since it was never released, and
+  accepts `performance_mode` and `small_floor`. An unset `max_mode` is the most
   aggressive node mode, so no job reaches Performance unless the operator chose it.
 - **B3 Setup.** The interface offers modes, the node cap, floor and margin sizes, and the
   Guaranteed hint deadline. Performance and small floors are caution options with confirmation.

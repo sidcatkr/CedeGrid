@@ -16,7 +16,7 @@ fn config() -> Config {
     // A 1000 MiB floor is near the 512 MiB minimum; the tests confirm it.
     result
         .contention
-        .acknowledge_danger
+        .acknowledge_caution
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
     result.gpu.scale_up_cooldown_ms = 0;
@@ -2606,7 +2606,7 @@ fn cpu_ram_expansion_follows_its_own_cooldown_not_the_gpu_one() {
     let mut cfg = config();
     cfg.contention.default_mode = ContentionMode::Performance;
     cfg.contention
-        .acknowledge_danger
+        .acknowledge_caution
         .insert("performance_mode".into());
     cfg.contention.cpu.scale_up_cooldown_ms = None;
     cfg.contention.ram.scale_up_cooldown_ms = None;
@@ -2674,7 +2674,7 @@ fn effective_mode_is_the_lesser_of_request_and_node_cap_per_allocation() {
     chosen.contention.max_mode = Some(ContentionMode::Performance);
     chosen
         .contention
-        .acknowledge_danger
+        .acknowledge_caution
         .insert("performance_mode".into());
     assert_eq!(modes(&chosen), ContentionMode::Performance);
 }

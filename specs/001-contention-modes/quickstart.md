@@ -99,11 +99,11 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s python/tests -p 'test_w
 
 ```sh
 cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance
-cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance --acknowledge-danger performance_mode
+cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance --acknowledge-caution performance_mode
 ```
 
 **Expected:**
-- The first command exits 3 with `ERR_CEDEGRID_DANGER_UNACKNOWLEDGED` and writes nothing.
+- The first command exits 3 with `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and writes nothing.
 - The second writes the file and reports the `performance_mode` option as `caution`.
 - With `NO_COLOR=1`, the interface's output contains no escape sequences but keeps the
   `[caution]` label.

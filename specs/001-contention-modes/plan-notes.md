@@ -192,7 +192,7 @@ default_mode = "neutral"          # yield_first | neutral | performance
 max_mode = "performance"          # node cap
 floor_policy = "a"                # only "a" since 2026-10-25
 neutral_memory_policy = "a"       # only "a" since 2026-10-25
-acknowledge_danger = []           # "performance_mode", "small_floor" since 2026-10-25
+acknowledge_caution = []           # "performance_mode", "small_floor" since 2026-10-25
 
 [contention.cpu]                  # also: ram, gpu_compute, gpu_memory
 mode = "neutral"                  # optional per-resource override of default_mode
@@ -240,7 +240,7 @@ quiet_window_intervals = 20
 
 - One flag per choice, for example `--default-mode`, `--max-mode`, `--floor-policy` and
   `--neutral-memory-policy`, plus per-resource overrides.
-- `--acknowledge-danger performance_mode|small_floor` is required for caution options.
+- `--acknowledge-caution performance_mode|small_floor` is required for caution options.
 - `--non-interactive` forces flag-only mode even on a TTY.
 - `--json` gives machine-readable output.
 - The exit status is non-zero when a required choice or acknowledgement is missing.
