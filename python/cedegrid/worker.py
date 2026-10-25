@@ -94,24 +94,47 @@ class ResourceTargets:
     gpu_memory_mib: dict = field(default_factory=dict)
 
 
-def _read_targets(path: Path) -> ResourceTargets | None:
-    """Parse a target file; a missing, invalid or newer-version file is no target."""
+@dataclass(frozen=True)
+class ResourceAllowance:
+    """What own work may grow to now (FR-071). Unset amounts carry none."""
+    sequence: int
+    cpu_millicores: int | None = None
+    ram_mib: int | None = None
+    gpu_memory_mib: dict = field(default_factory=dict)
+
+
+def _amounts(value):
+    """The per-resource amounts of a target or allowance object, or None."""
+    def amount(v): return type(v) is int and v >= 0
+    if not isinstance(value, dict):
+        return None
+    cpu, ram, gpu = value.get("cpu_millicores"), value.get("ram_mib"), value.get("gpu_memory_mib", {})
+    if not ((cpu is None or amount(cpu)) and (ram is None or amount(ram)) and isinstance(gpu, dict)
+            and all(type(k) is str and amount(v) for k, v in gpu.items())):
+        return None
+    return cpu, ram, dict(gpu)
+
+
+def _read_signals(path: Path):
+    """Parse a target file into (targets, allowance). A missing, invalid or
+    newer-version file is neither; sequence 0 means no target was published yet,
+    and an invalid allowance is ignored without losing the target."""
     from .codec import parse_json
     try:
         value = parse_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
-        return None
+        return None, None
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
-        return None
-    sequence, deadline, step, targets = (value.get(k) for k in ("sequence", "deadline_unix_ms", "step", "targets"))
+        return None, None
+    sequence, deadline, step = (value.get(k) for k in ("sequence", "deadline_unix_ms", "step"))
     def amount(v): return type(v) is int and v >= 0
-    if not (amount(sequence) and amount(deadline) and type(step) is str and isinstance(targets, dict)):
-        return None
-    cpu, ram, gpu = targets.get("cpu_millicores"), targets.get("ram_mib"), targets.get("gpu_memory_mib", {})
-    if not ((cpu is None or amount(cpu)) and (ram is None or amount(ram)) and isinstance(gpu, dict)
-            and all(type(k) is str and amount(v) for k, v in gpu.items())):
-        return None
-    return ResourceTargets(sequence, deadline, step, cpu, ram, dict(gpu))
+    targets = _amounts(value.get("targets"))
+    if not (amount(sequence) and amount(deadline) and type(step) is str and targets is not None):
+        return None, None
+    allowance, allowance_sequence = _amounts(value.get("allowance")), value.get("allowance_sequence", 0)
+    allowance = (ResourceAllowance(allowance_sequence, *allowance)
+                 if allowance is not None and amount(allowance_sequence) and allowance_sequence > 0 else None)
+    return (ResourceTargets(sequence, deadline, step, *targets) if sequence > 0 else None), allowance
 
 
 class ResourceSignals:
@@ -121,16 +144,23 @@ class ResourceSignals:
         self.drain_file = Path(drain_file) if drain_file else None
         self.target_file = Path(target_file) if target_file else None
         self._hooks, self._notified, self._acked = [], None, None
+        self._allowance_hooks, self._allowance_notified = [], None
 
     @classmethod
     def from_env(cls):
         return cls(os.environ.get("CEDEGRID_DRAIN_FILE") or None,
                    os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE") or None)
 
-    def resource_targets(self) -> ResourceTargets | None:
-        targets = _read_targets(self.target_file) if self.target_file else None
+    def _read(self):
+        targets, allowance = _read_signals(self.target_file) if self.target_file else (None, None)
         self._acknowledge(targets.sequence if targets else 0)
-        return targets
+        return targets, allowance
+
+    def resource_targets(self) -> ResourceTargets | None:
+        return self._read()[0]
+
+    def resource_allowance(self) -> ResourceAllowance | None:
+        return self._read()[1]
 
     def on_resource_target(self, callback):
         """Call `callback(targets)` now with the current target, then once per new one."""
@@ -145,13 +175,32 @@ class ResourceSignals:
         else:
             self._call(callback, targets)
 
+    def on_resource_allowance(self, callback):
+        """Call `callback(allowance)` now with the current allowance, then once per
+        new one. Allowance changes never call target hooks, nor targets these."""
+        if not callable(callback):
+            raise ValueError("resource-allowance callback must be callable")
+        self._allowance_hooks.append(callback)
+        allowance = self.resource_allowance()
+        if allowance is None:
+            return
+        if self._allowance_notified is None or allowance.sequence > self._allowance_notified:
+            self.poll()
+        else:
+            self._call(callback, allowance)
+
     def poll(self) -> ResourceTargets | None:
-        """Read the targets and call each hook once per new sequence."""
-        targets = self.resource_targets()
+        """Read the file and call each hook once per new sequence of its kind."""
+        targets, allowance = self._read()
         if targets is not None and (self._notified is None or targets.sequence > self._notified):
             self._notified = targets.sequence
             for callback in list(self._hooks):
                 self._call(callback, targets)
+        if allowance is not None and (self._allowance_notified is None
+                                      or allowance.sequence > self._allowance_notified):
+            self._allowance_notified = allowance.sequence
+            for callback in list(self._allowance_hooks):
+                self._call(callback, allowance)
         return targets
 
     def draining(self) -> bool:
@@ -235,6 +284,14 @@ class WorkerContext:
         """Call `callback(targets)` now with the current target, then once per new
         target, during drain polls."""
         self._signals.on_resource_target(callback)
+
+    def resource_allowance(self) -> ResourceAllowance | None:
+        return self._signals.resource_allowance()
+
+    def on_resource_allowance(self, callback):
+        """Call `callback(allowance)` now with the current allowance, then once per
+        new one, during drain polls (FR-071)."""
+        self._signals.on_resource_allowance(callback)
 
     def draining(self):
         self._signals.poll()

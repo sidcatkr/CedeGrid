@@ -1397,3 +1397,28 @@ fn legacy_gpu_execution_modes_are_interpreted_with_a_warning() {
     );
     assert!(!best_effort.config.legacy_gpu().interpretation.is_empty());
 }
+
+/// The supervisor writes the target files the SDKs read: a fresh channel with an
+/// allowance writes exactly TF-01, and every valid case round-trips through the
+/// writer's type (contracts/resource-target-file.md, FR-071).
+#[test]
+fn the_supervisor_writes_the_target_files_the_sdks_read() {
+    use cedegrid::actuation::{ResourceTarget, TARGET_FILE, TargetChannel};
+    let cases = contract()["target_file_cases"].as_array().unwrap().clone();
+    let case = |id: &str| cases.iter().find(|c| c["id"] == id).unwrap().clone();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let mut channel = TargetChannel::new(5000);
+    let tf01 = case("TF-01");
+    assert!(
+        channel.set_allowance(serde_json::from_value(tf01["file"]["allowance"].clone()).unwrap())
+    );
+    channel.publish_allowance(&[dir.path().to_owned()]).unwrap();
+    let written: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(TARGET_FILE)).unwrap()).unwrap();
+    assert_eq!(written, tf01["file"]);
+    for id in ["TF-01", "TF-02", "TF-03"] {
+        let file = case(id)["file"].clone();
+        let target: ResourceTarget = serde_json::from_value(file.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&target).unwrap(), file, "{id}");
+    }
+}

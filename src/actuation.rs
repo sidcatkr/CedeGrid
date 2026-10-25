@@ -243,7 +243,9 @@ const TARGET_TEMPORARY: &str = ".resource-target.json.tmp";
 /// Per-resource amounts in a target file; unset amounts carry no target.
 pub type TargetAmounts = crate::model::ResourceAmounts;
 
-/// A target file (contracts/resource-target-file.md).
+/// A target file (contracts/resource-target-file.md). `sequence` counts target
+/// and step changes; `allowance_sequence` counts allowance changes apart, so an
+/// allowance-only change never reads as a new target.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceTarget {
     pub version: u32,
@@ -251,6 +253,14 @@ pub struct ResourceTarget {
     pub deadline_unix_ms: u64,
     pub step: YieldStep,
     pub targets: TargetAmounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<TargetAmounts>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub allowance_sequence: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Write a target file atomically: a temporary file in the same directory,
@@ -309,6 +319,10 @@ pub struct TargetChannel {
     /// Each hint's target and the deadline the policy enforces for it.
     hints: std::collections::BTreeMap<crate::contention::ResourceKey, (u64, u64)>,
     deadline_ms: u64,
+    /// The deadline last published, kept by allowance-only rewrites.
+    deadline_unix_ms: u64,
+    allowance: Option<TargetAmounts>,
+    allowance_sequence: u64,
 }
 
 impl TargetChannel {
@@ -343,8 +357,36 @@ impl TargetChannel {
         self.hints.insert(key, hint) != Some(hint)
     }
 
+    /// Set the allowance (FR-071); true when it changed.
+    pub fn set_allowance(&mut self, allowance: TargetAmounts) -> bool {
+        let changed = self.allowance.as_ref() != Some(&allowance);
+        self.allowance = Some(allowance);
+        changed
+    }
+
+    /// Write the current allowance with the next allowance sequence; the target
+    /// sequence, step and deadline stay as last published.
+    pub fn publish_allowance(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
+        self.allowance_sequence += 1;
+        self.write(directories)
+    }
+
     /// Write the current hints with the next sequence; no hints relax them.
     pub fn publish(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
+        self.sequence += 1;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        // The earliest hint deadline is the one the next step follows.
+        self.deadline_unix_ms = (now.as_millis() as u64).saturating_add(
+            self.hints
+                .values()
+                .map(|(_, deadline)| *deadline)
+                .min()
+                .unwrap_or(self.deadline_ms),
+        );
+        self.write(directories)
+    }
+
+    fn write(&self, directories: &[std::path::PathBuf]) -> Result<()> {
         use crate::contention::ResourceKey;
         let mut targets = TargetAmounts::default();
         for (key, (amount, _)) in &self.hints {
@@ -358,25 +400,18 @@ impl TargetChannel {
                 ResourceKey::GpuCompute(_) => {}
             }
         }
-        self.sequence += 1;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
         let target = ResourceTarget {
             version: 1,
             sequence: self.sequence,
-            // The earliest hint deadline is the one the next step follows.
-            deadline_unix_ms: (now.as_millis() as u64).saturating_add(
-                self.hints
-                    .values()
-                    .map(|(_, deadline)| *deadline)
-                    .min()
-                    .unwrap_or(self.deadline_ms),
-            ),
+            deadline_unix_ms: self.deadline_unix_ms,
             step: if self.hints.is_empty() {
                 YieldStep::None
             } else {
                 YieldStep::Hint
             },
             targets,
+            allowance: self.allowance.clone(),
+            allowance_sequence: self.allowance_sequence,
         };
         let mut result = Ok(());
         for directory in directories {

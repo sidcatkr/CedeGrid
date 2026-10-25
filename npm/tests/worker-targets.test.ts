@@ -135,3 +135,57 @@ test('the ack records the highest sequence seen', () => {
     }
     finally { f.done(); }
 });
+
+test('allowance hooks fire now and on each change, apart from targets', () => {
+    const f = fixture();
+    try {
+        const targets: bigint[] = [];
+        const allowances: Array<[bigint, bigint | undefined]> = [];
+        f.context.onResourceTarget(t => targets.push(t.sequence));
+        f.context.onResourceAllowance(a => allowances.push([a.sequence, a.ramMib]));
+        assert.deepEqual([targets, allowances], [[], []]);
+        const file: Record<string, unknown> = { version: 1, sequence: 0, deadline_unix_ms: 0, step: 'none', targets: {}, allowance: { ram_mib: 20480 }, allowance_sequence: 1 };
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        // An allowance without a target calls no target hook; the ack still starts at 0.
+        assert.deepEqual([targets, allowances], [[], [[1n, 20480n]]]);
+        assert.equal(f.context.resourceTargets(), null);
+        assert.equal(f.ack(), '0');
+        // An allowance-only change calls only the allowance hook.
+        Object.assign(file, { allowance: { ram_mib: 16384 }, allowance_sequence: 2 });
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        f.context.draining();
+        assert.deepEqual([targets, allowances], [[], [[1n, 20480n], [2n, 16384n]]]);
+        // A target change calls only the target hook, and the ack follows it.
+        Object.assign(file, { sequence: 1, step: 'hint', targets: { ram_mib: 8192 }, deadline_unix_ms: 1793000000000 });
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        assert.deepEqual([targets, allowances], [[1n], [[1n, 20480n], [2n, 16384n]]]);
+        assert.equal(f.ack(), '1');
+        // A late subscriber receives the current allowance at once.
+        const late: bigint[] = [];
+        f.context.onResourceAllowance(a => late.push(a.sequence));
+        assert.deepEqual(late, [2n]);
+        assert.equal(f.context.resourceAllowance()!.ramMib, 16384n);
+    }
+    finally { f.done(); }
+});
+
+test('target file interop cases', () => {
+    const cases = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).target_file_cases;
+    const f = fixture();
+    try {
+        const number = (value?: bigint) => value === undefined ? null : Number(value);
+        const gpu = (amounts: Record<string, bigint>) => Object.fromEntries(Object.entries(amounts).map(([k, v]) => [k, Number(v)]));
+        for (const c of cases) {
+            writeFileSync(f.targetFile, JSON.stringify(c.file));
+            const signals = new ResourceSignals(undefined, f.targetFile);
+            const t = signals.resourceTargets();
+            const a = signals.resourceAllowance();
+            assert.deepEqual(t && { sequence: Number(t.sequence), deadline_unix_ms: Number(t.deadlineUnixMs), step: t.step, cpu_millicores: number(t.cpuMillicores), ram_mib: number(t.ramMib), gpu_memory_mib: gpu(t.gpuMemoryMib) }, c.targets, c.id);
+            assert.deepEqual(a && { sequence: Number(a.sequence), cpu_millicores: number(a.cpuMillicores), ram_mib: number(a.ramMib), gpu_memory_mib: gpu(a.gpuMemoryMib) }, c.allowance, c.id);
+        }
+    }
+    finally { f.done(); }
+});

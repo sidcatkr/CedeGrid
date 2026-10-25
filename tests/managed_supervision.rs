@@ -1365,3 +1365,115 @@ while not (d/'stop').exists():
         "70"
     );
 }
+
+/// Sends allowance updates and one hint once the worker is ready, paced so the
+/// worker polls between them.
+struct AllowanceScript {
+    dir: std::path::PathBuf,
+    commands: Vec<supervision::SupervisorCommand>,
+    sent: usize,
+    last: Option<std::time::Instant>,
+}
+impl supervision::SupervisorControl for AllowanceScript {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        if !self.dir.join("ready").exists()
+            || self
+                .last
+                .is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(300))
+        {
+            return Ok(vec![]);
+        }
+        self.last = Some(std::time::Instant::now());
+        if self.sent == self.commands.len() {
+            fs::write(self.dir.join("stop"), "").unwrap();
+            return Ok(vec![]);
+        }
+        self.sent += 1;
+        Ok(vec![self.commands[self.sent - 1].clone()])
+    }
+}
+
+fn allowance(ram_mib: u64, cpu_millicores: u64) -> supervision::SupervisorCommand {
+    supervision::SupervisorCommand::Allowance {
+        allowance: cedegrid::model::ResourceAmounts {
+            cpu_millicores: Some(cpu_millicores),
+            ram_mib: Some(ram_mib),
+            gpu_memory_mib: BTreeMap::new(),
+        },
+    }
+}
+
+/// The supervisor publishes the allowance in the target file with its own
+/// sequence, also without a target. An allowance-only change calls only the
+/// allowance callback, a hint only the target callback, and a managed child
+/// started later finds the current allowance in its first file (FR-071).
+#[test]
+fn allowances_publish_apart_from_targets_and_reach_managed_children() {
+    use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(
+        dir.path(),
+        r#"
+import json,sys,time
+from pathlib import Path
+from cedegrid import ResourceSignals, spawn_managed
+d=Path.cwd();signals=ResourceSignals.from_env();targets=[];allowances=[]
+signals.on_resource_target(lambda t: targets.append([t.sequence,t.step,t.ram_mib]))
+signals.on_resource_allowance(lambda a: allowances.append([a.sequence,a.ram_mib,a.cpu_millicores]))
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    signals.draining()
+    time.sleep(0.005)
+code="import pathlib;from cedegrid import ResourceSignals;a=ResourceSignals.from_env().resource_allowance();pathlib.Path(%r,'child-seen').write_text(str(None if a is None else a.ram_mib))" % str(d)
+child=spawn_managed([sys.executable,'-c',code],single_process=True,no_escape=True)
+child.wait(timeout=6,poll_interval=.01)
+(d/'seen').write_text(json.dumps({'targets':targets,'allowances':allowances}))
+"#,
+    );
+    let mut script = AllowanceScript {
+        dir: dir.path().to_owned(),
+        commands: vec![
+            allowance(1000, 2000),
+            allowance(900, 2000),
+            supervision::SupervisorCommand::Adjust {
+                sequence: 1,
+                resources: BTreeMap::from([(
+                    ResourceKey::Ram,
+                    StepRequest {
+                        step: YieldStep::Hint,
+                        target: Some(500),
+                        cause: YieldCause::FloorBreach,
+                        deadline_ms: None,
+                    },
+                )]),
+            },
+            allowance(800, 1500),
+        ],
+        sent: 0,
+        last: None,
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut script,
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    let seen: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("seen")).unwrap()).unwrap();
+    assert_eq!(seen["targets"], serde_json::json!([[1, "hint", 500]]));
+    assert_eq!(
+        seen["allowances"],
+        serde_json::json!([[1, 1000, 2000], [2, 900, 2000], [3, 800, 1500]])
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("child-seen")).unwrap(),
+        "800"
+    );
+}

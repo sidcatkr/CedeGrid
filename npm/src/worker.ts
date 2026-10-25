@@ -182,39 +182,64 @@ export interface ResourceTargets {
     ramMib?: bigint;
     gpuMemoryMib: Record<string, bigint>;
 }
-/** Parse a target file; a missing, invalid or newer-version file is no target. */
-function readTargets(path: string): ResourceTargets | null {
+/** What own work may grow to now (FR-071). Unset amounts carry none. */
+export interface ResourceAllowance {
+    sequence: bigint;
+    cpuMillicores?: bigint;
+    ramMib?: bigint;
+    gpuMemoryMib: Record<string, bigint>;
+}
+const amount = (v: unknown): v is bigint => typeof v === 'bigint' && v >= 0n;
+/** The per-resource amounts of a target or allowance object, or null. */
+function amounts(value: any): { cpu?: bigint; ram?: bigint; gpu: Record<string, bigint> } | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
+    const { cpu_millicores: cpu, ram_mib: ram, gpu_memory_mib: gpu = {} } = value;
+    if ((cpu !== undefined && !amount(cpu)) || (ram !== undefined && !amount(ram)) || !gpu || typeof gpu !== 'object' || Array.isArray(gpu) || !Object.values(gpu).every(amount))
+        return null;
+    return { cpu, ram, gpu: { ...gpu } };
+}
+/** Parse a target file into targets and allowance. A missing, invalid or
+ * newer-version file is neither; sequence 0 means no target was published yet,
+ * and an invalid allowance is ignored without losing the target. */
+function readSignals(path: string): [ResourceTargets | null, ResourceAllowance | null] {
     let value: any;
     try {
         value = parseJson(readFileSync(path, 'utf8'));
     }
     catch {
-        return null;
+        return [null, null];
     }
-    const amount = (v: unknown): v is bigint => typeof v === 'bigint' && v >= 0n;
     if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1n)
-        return null;
-    const { sequence, deadline_unix_ms: deadline, step, targets } = value;
-    if (!amount(sequence) || !amount(deadline) || typeof step !== 'string' || !targets || typeof targets !== 'object' || Array.isArray(targets))
-        return null;
-    const { cpu_millicores: cpu, ram_mib: ram, gpu_memory_mib: gpu = {} } = targets;
-    if ((cpu !== undefined && !amount(cpu)) || (ram !== undefined && !amount(ram)) || !gpu || typeof gpu !== 'object' || Array.isArray(gpu) || !Object.values(gpu).every(amount))
-        return null;
-    return { sequence, deadlineUnixMs: deadline, step, cpuMillicores: cpu, ramMib: ram, gpuMemoryMib: { ...gpu } };
+        return [null, null];
+    const { sequence, deadline_unix_ms: deadline, step } = value;
+    const targets = amounts(value.targets);
+    if (!amount(sequence) || !amount(deadline) || typeof step !== 'string' || !targets)
+        return [null, null];
+    const allowance = amounts(value.allowance);
+    const allowanceSequence = value.allowance_sequence ?? 0n;
+    return [
+        sequence > 0n ? { sequence, deadlineUnixMs: deadline, step, cpuMillicores: targets.cpu, ramMib: targets.ram, gpuMemoryMib: targets.gpu } : null,
+        allowance && amount(allowanceSequence) && allowanceSequence > 0n ? { sequence: allowanceSequence, cpuMillicores: allowance.cpu, ramMib: allowance.ram, gpuMemoryMib: allowance.gpu } : null,
+    ];
 }
 /** Drain and resource-target signals from CEDEGRID_DRAIN_FILE and
  * CEDEGRID_RESOURCE_TARGET_FILE alone, so managed children can use them. */
 export class ResourceSignals {
     private readonly hooks: Array<(targets: ResourceTargets) => void> = [];
+    private readonly allowanceHooks: Array<(allowance: ResourceAllowance) => void> = [];
     private notified?: bigint;
+    private allowanceNotified?: bigint;
     private acked?: bigint;
     constructor(readonly drainFile?: string, readonly targetFile?: string) { }
     static fromEnv(): ResourceSignals { return new ResourceSignals(process.env.CEDEGRID_DRAIN_FILE || undefined, process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined); }
-    resourceTargets(): ResourceTargets | null {
-        const targets = this.targetFile ? readTargets(this.targetFile) : null;
-        this.acknowledge(targets ? targets.sequence : 0n);
-        return targets;
+    private read(): [ResourceTargets | null, ResourceAllowance | null] {
+        const signals = this.targetFile ? readSignals(this.targetFile) : [null, null] as [null, null];
+        this.acknowledge(signals[0] ? signals[0].sequence : 0n);
+        return signals;
     }
+    resourceTargets(): ResourceTargets | null { return this.read()[0]; }
+    resourceAllowance(): ResourceAllowance | null { return this.read()[1]; }
     /** Call `callback` now with the current target, then once per new one. */
     onResourceTarget(callback: (targets: ResourceTargets) => void): void {
         if (typeof callback !== 'function')
@@ -228,18 +253,37 @@ export class ResourceSignals {
         else
             ResourceSignals.call(callback, targets);
     }
-    /** Read the targets and call each hook once per new sequence. */
+    /** Call `callback` now with the current allowance, then once per new one.
+     * Allowance changes never call target hooks, nor targets these. */
+    onResourceAllowance(callback: (allowance: ResourceAllowance) => void): void {
+        if (typeof callback !== 'function')
+            throw new ValidationError('resource-allowance callback must be a function');
+        this.allowanceHooks.push(callback);
+        const allowance = this.resourceAllowance();
+        if (!allowance)
+            return;
+        if (this.allowanceNotified === undefined || allowance.sequence > this.allowanceNotified)
+            this.poll();
+        else
+            ResourceSignals.call(callback, allowance);
+    }
+    /** Read the file and call each hook once per new sequence of its kind. */
     poll(): ResourceTargets | null {
-        const targets = this.resourceTargets();
+        const [targets, allowance] = this.read();
         if (targets && (this.notified === undefined || targets.sequence > this.notified)) {
             this.notified = targets.sequence;
             for (const callback of [...this.hooks])
                 ResourceSignals.call(callback, targets);
         }
+        if (allowance && (this.allowanceNotified === undefined || allowance.sequence > this.allowanceNotified)) {
+            this.allowanceNotified = allowance.sequence;
+            for (const callback of [...this.allowanceHooks])
+                ResourceSignals.call(callback, allowance);
+        }
         return targets;
     }
     /** A failing hook is logged and never stops the poll. */
-    private static call(callback: (targets: ResourceTargets) => void, targets: ResourceTargets): void {
+    private static call<T>(callback: (value: T) => void, targets: T): void {
         try {
             callback(targets);
         }
@@ -290,6 +334,9 @@ export class WorkerContext {
     resourceTargets(): ResourceTargets | null { return this.signals.resourceTargets(); }
     /** Call `callback(targets)` once per new target, during drain polls. */
     onResourceTarget(callback: (targets: ResourceTargets) => void): void { this.signals.onResourceTarget(callback); }
+    resourceAllowance(): ResourceAllowance | null { return this.signals.resourceAllowance(); }
+    /** Call `callback(allowance)` now, then once per new allowance, during drain polls (FR-071). */
+    onResourceAllowance(callback: (allowance: ResourceAllowance) => void): void { this.signals.onResourceAllowance(callback); }
     draining(): boolean { this.signals.poll(); const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
         this.drainNotified = true;
         for (const callback of this.drainHooks)

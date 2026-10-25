@@ -331,6 +331,10 @@ pub enum SupervisorCommand {
     },
     /// Report the currently applied steps.
     Query,
+    /// Publish what own work may grow to now (FR-071).
+    Allowance {
+        allowance: crate::model::ResourceAmounts,
+    },
 }
 #[cfg(unix)]
 struct LocalControl;
@@ -952,9 +956,9 @@ mod unix {
                 }
                 SupervisorCommand::Drain => lifecycle.request_drain(elapsed),
                 SupervisorCommand::AgentLost => lifecycle.agent_failed(elapsed),
-                command @ (SupervisorCommand::Adjust { .. } | SupervisorCommand::Query) => {
-                    runtime.push(command)
-                }
+                command @ (SupervisorCommand::Adjust { .. }
+                | SupervisorCommand::Query
+                | SupervisorCommand::Allowance { .. }) => runtime.push(command),
             }
         }
         runtime
@@ -1201,6 +1205,13 @@ mod unix {
                         hint_ready,
                         observes_drain,
                     });
+                }
+                SupervisorCommand::Allowance { allowance } => {
+                    if targets.set_allowance(allowance)
+                        && let Err(error) = targets.publish_allowance(directories)
+                    {
+                        eprintln!("resource allowance unavailable: {error:#}");
+                    }
                 }
                 SupervisorCommand::Query => {
                     let _ = control.report(SupervisorReport::State {

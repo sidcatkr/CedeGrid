@@ -167,6 +167,52 @@ class ResourceTargetTests(unittest.TestCase):
             empty = ResourceSignals.from_env()
         self.assertIsNone(empty.resource_targets())
         self.assertFalse(empty.draining())
+    def write_file(self, value):
+        import json
+        self.target_file.write_text(json.dumps(value))
+    def test_allowance_hooks_fire_now_and_on_each_change_apart_from_targets(self):
+        targets, allowances = [], []
+        self.context.on_resource_target(lambda t: targets.append(t.sequence))
+        self.context.on_resource_allowance(lambda a: allowances.append((a.sequence, a.ram_mib)))
+        self.assertEqual((targets, allowances), ([], []))
+        file = {'version':1,'sequence':0,'deadline_unix_ms':0,'step':'none','targets':{},
+                'allowance':{'ram_mib':20480},'allowance_sequence':1}
+        self.write_file(file)
+        self.context.draining()
+        # An allowance without a target calls no target hook; the ack still starts at 0.
+        self.assertEqual((targets, allowances), ([], [(1, 20480)]))
+        self.assertIsNone(self.context.resource_targets())
+        self.assertEqual(self.ack.read_text().strip(), '0')
+        # An allowance-only change calls only the allowance hook.
+        file.update(allowance={'ram_mib':16384}, allowance_sequence=2)
+        self.write_file(file); self.context.draining(); self.context.draining()
+        self.assertEqual((targets, allowances), ([], [(1, 20480), (2, 16384)]))
+        # A target change calls only the target hook, and the ack follows it.
+        file.update(sequence=1, step='hint', targets={'ram_mib':8192}, deadline_unix_ms=1793000000000)
+        self.write_file(file); self.context.draining()
+        self.assertEqual((targets, allowances), ([1], [(1, 20480), (2, 16384)]))
+        self.assertEqual(self.ack.read_text().strip(), '1')
+        # A late subscriber receives the current allowance at once.
+        late = []
+        self.context.on_resource_allowance(lambda a: late.append(a.sequence))
+        self.assertEqual(late, [2])
+        self.assertEqual(self.context.resource_allowance().ram_mib, 16384)
+    def test_target_file_interop_cases(self):
+        import json
+        from cedegrid import ResourceSignals
+        fixture = json.loads((Path(__file__).resolve().parents[2]/'tests/contracts/cedegrid-0.2.json').read_text())
+        for case in fixture['target_file_cases']:
+            self.write_file(case['file'])
+            signals = ResourceSignals(None, self.target_file)
+            targets, allowance = signals.resource_targets(), signals.resource_allowance()
+            got_targets = None if targets is None else {
+                'sequence':targets.sequence,'deadline_unix_ms':targets.deadline_unix_ms,'step':targets.step,
+                'cpu_millicores':targets.cpu_millicores,'ram_mib':targets.ram_mib,'gpu_memory_mib':targets.gpu_memory_mib}
+            got_allowance = None if allowance is None else {
+                'sequence':allowance.sequence,'cpu_millicores':allowance.cpu_millicores,
+                'ram_mib':allowance.ram_mib,'gpu_memory_mib':allowance.gpu_memory_mib}
+            self.assertEqual(got_targets, case['targets'], case['id'])
+            self.assertEqual(got_allowance, case['allowance'], case['id'])
     def test_a_newer_file_version_is_treated_as_absent(self):
         self.write(9, version=2, ram_mib=1)
         self.assertIsNone(self.context.resource_targets())

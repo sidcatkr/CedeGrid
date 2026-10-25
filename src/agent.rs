@@ -144,6 +144,10 @@ enum Control {
     },
     /// Ask for the applied steps.
     Query,
+    /// What the allocation may grow to now, for its resource-target file (FR-071).
+    Allowance {
+        allowance: crate::model::ResourceAmounts,
+    },
     /// The agent's latest GPU observation. Supervisors run no collector of
     /// their own; GPU launch rechecks use this (research R1).
     Observation {
@@ -394,7 +398,7 @@ impl SupervisorControl for PipeControl {
                     self.observation = Some((*snapshot, Instant::now()));
                 }
                 // Nothing runs before authorization, so there is nothing to adjust.
-                Control::Adjust { .. } | Control::Query => {}
+                Control::Adjust { .. } | Control::Query | Control::Allowance { .. } => {}
                 Control::Authorize {
                     lease,
                     expires_monotonic_ms,
@@ -599,6 +603,9 @@ impl PipeControl {
                     resources,
                 }),
                 Ok(Incoming::Control(Control::Query)) => commands.push(SupervisorCommand::Query),
+                Ok(Incoming::Control(Control::Allowance { allowance })) => {
+                    commands.push(SupervisorCommand::Allowance { allowance })
+                }
                 Ok(Incoming::Control(Control::Authorize { .. })) => {}
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
                 // Authority returns when a controller reattaches (research R2).
@@ -898,6 +905,8 @@ struct ChildSlot {
     /// The last `adjust` sent and its sequence.
     adjust_sequence: u64,
     sent_steps: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
+    /// The allowance last sent to the supervisor (FR-071).
+    sent_allowance: Option<crate::model::ResourceAmounts>,
     /// Steps learned from a reattached supervisor, to seed the policy authority.
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
 }
@@ -1249,6 +1258,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         last_checkpoint_at: None,
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
+        sent_allowance: None,
         seed: None,
     };
     send(&mut slot, &Control::Query)?;
@@ -1820,6 +1830,7 @@ async fn start_assignment(
         last_checkpoint_at: None,
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
+        sent_allowance: None,
         seed: None,
     })
 }
@@ -3064,6 +3075,24 @@ impl AgentLoop<'_> {
             };
             if send(slot, &message).is_ok() {
                 slot.sent_steps = steps;
+            }
+        }
+        // The allowance goes to each supervisor when the published value changes.
+        for (id, slot) in self.slots.iter_mut() {
+            if slot.exited || slot.sequence == 0 || slot.drain_sent_at.is_some() {
+                continue;
+            }
+            let Some(allowance) = decision.allowances.get(id.as_str()) else {
+                continue;
+            };
+            if slot.sent_allowance.as_ref() == Some(allowance) {
+                continue;
+            }
+            let message = Control::Allowance {
+                allowance: allowance.clone(),
+            };
+            if send(slot, &message).is_ok() {
+                slot.sent_allowance = Some(allowance.clone());
             }
         }
         Ok(())
@@ -4851,6 +4880,7 @@ mod drain_tests {
             last_checkpoint_at: None,
             adjust_sequence: 0,
             sent_steps: BTreeMap::new(),
+            sent_allowance: None,
             seed: None,
         }
     }
