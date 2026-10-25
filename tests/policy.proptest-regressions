@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc e7db5899b6bfe9437e67c0ebd9765026be9d8e06cd49351eaba3f4683e03ef6e # shrinks to reserved = 0, observed = 0, external = 0
 cc 5e823cc29a7e500985c3ca570b988c3fc728e5272fe230a1e35aca20a6fce1b5 # shrinks to a = 1421, b = 1980
+cc f0763d9404e2b1ab13c9a8985a5c1d9717742f5587833c75943b3f8b933a35a2 # shrinks to reserved = 1207, observed = 0, external = 0

@@ -717,9 +717,12 @@ node reports with the expected per-resource values at each step.
   set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Each resource's admission opens on its own cooldown.
   For CPU admission, running opportunistic work is charged at its p95 usage over
-  `contention.cpu.admission_usage_window_s` (default 60 s); pending work is charged in full,
-  Guaranteed work at max(request, observed), and RAM and GPU memory admission stays
-  request-based. Coordinator placement and the agent's launch check MUST admit CPU the same way.
+  `contention.cpu.admission_usage_window_s` (default 60 s) once it has a full window of samples,
+  and at max(request, observed) before that, so work in its startup phase is never
+  under-charged; pending work is charged in full, Guaranteed work at max(request, observed), and
+  RAM and GPU memory admission stays request-based. Coordinator placement and the agent's launch
+  check MUST admit CPU the same way. RAM admission and the agent's worker limit bound how many
+  jobs this CPU credit can admit.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`

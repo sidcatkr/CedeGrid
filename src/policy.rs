@@ -147,8 +147,9 @@ pub struct PolicyEngine {
     satisfied: BTreeMap<ResourceKey, Vec<(Option<u32>, u64)>>,
     /// Probes of small external demand in progress, per compute resource.
     probes: BTreeMap<ResourceKey, crate::contention::DemandProbe>,
-    /// Running opportunistic CPU usage over the admission window, per allocation.
-    cpu_usage: BTreeMap<String, std::collections::VecDeque<(u64, u64)>>,
+    /// Running opportunistic CPU usage over the admission window, per allocation,
+    /// with the time of its first sample.
+    cpu_usage: BTreeMap<String, (u64, std::collections::VecDeque<(u64, u64)>)>,
 }
 
 /// One user's way into or out of the principals on one resource (FR-059):
@@ -235,22 +236,25 @@ impl PolicyEngine {
                     managed_observed.add_checked(observed)?;
                     charge = Resources::charge(&charge, Some(observed));
                     // CPU is compressible: running opportunistic work is admitted
-                    // against its recent usage, not its request.
+                    // against its recent usage, not its request, once a full window
+                    // shows it past its startup phase.
                     if allocation.class == crate::execution_model::AllocationClass::Opportunistic
                         && allocation.phase == AllocationPhase::Running
                     {
-                        let mut samples = self
+                        let (since, mut samples) = self
                             .cpu_usage
                             .get(&allocation.id)
                             .cloned()
-                            .unwrap_or_default();
+                            .unwrap_or((now_monotonic_ms, Default::default()));
                         samples
                             .retain(|(at, _)| now_monotonic_ms.saturating_sub(*at) < cpu_window_ms);
                         samples.push_back((now_monotonic_ms, observed.cpu_millicores));
-                        let usage = p95(samples.iter().map(|(_, usage)| *usage));
-                        cpu_credit += i128::from(charge.cpu_millicores) - i128::from(usage);
-                        charge.cpu_millicores = usage;
-                        cpu_usage.insert(allocation.id.clone(), samples);
+                        if now_monotonic_ms.saturating_sub(since) >= cpu_window_ms {
+                            let usage = p95(samples.iter().map(|(_, usage)| *usage));
+                            cpu_credit += i128::from(charge.cpu_millicores) - i128::from(usage);
+                            charge.cpu_millicores = usage;
+                        }
+                        cpu_usage.insert(allocation.id.clone(), (since, samples));
                     }
                     if !self.last_observed.contains_key(&allocation.id) {
                         first_observed_gpus.extend(charge.gpu_memory_mib.keys().cloned());

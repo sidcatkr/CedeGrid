@@ -73,7 +73,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `scale_up_cooldown_ms` | cpu, ram, gpu_memory | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). On GPU memory a set legacy `gpu.scale_up_cooldown_ms` applies when this key is unset. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
 | `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060); below 300 needs `relaxed_detection` |
-| `admission_usage_window_s` | cpu | 60 | 1–3600; running opportunistic CPU is charged for admission at its p95 usage over this window (FR-034) |
+| `admission_usage_window_s` | cpu | 60 | 1–3600; running opportunistic CPU is charged for admission at its p95 usage over this window, once it has a full window of samples (FR-034) |
 | `guaranteed_breach_window_s` | ram | 10 | 0–60 (FR-024) |
 | `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation; above 1 needs `relaxed_detection` |
 | `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated; above 98 needs `relaxed_detection` |
@@ -255,8 +255,8 @@ reports its `admission`: open, held or blocked, with a reason (FR-028, FR-038).
 - Yielding judges running work on what it holds: CPU and RAM usage; GPU memory usage when the
   allocation is hint-ready, else max(request, observed) (FR-066).
 - Admission charges: running opportunistic CPU at its p95 usage over
-  `admission_usage_window_s`; everything else at max(request, observed); pending reservations in
-  full (FR-034).
+  `admission_usage_window_s`, once it has a full window of samples; everything else at
+  max(request, observed); pending reservations in full (FR-034).
 - A floor breach is observed free memory below the floor; a charge beyond the budget only blocks
   admission.
 

@@ -149,7 +149,8 @@ fn scoped_observed_usage_and_reservations_are_not_double_charged() {
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
     assert_eq!(decision.managed_budget.cpu_millicores, 2750);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
+    // One observation is no full usage window: the request is charged once.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1750);
 }
 
 #[test]
@@ -616,8 +617,8 @@ fn running_reservation_and_observation_are_charged_once() {
         .unwrap();
     // CPU external = 2000 - 1000, SMT reserve = 2000, larger than the 800 Neutral margin, budget = 5000.
     assert_eq!(decision.managed_budget.cpu_millicores, 5000);
-    // Running opportunistic CPU is charged at its usage, not its request.
-    assert_eq!(decision.admission_headroom.cpu_millicores, 4000);
+    // One observation is no full usage window: max(request, observed) is charged once.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
     // Used RAM 6000 - own 4000 = external 2000; budget 29000 - charge 5000.
     assert_eq!(decision.managed_budget.ram_mib, 29_000);
     assert_eq!(decision.admission_headroom.ram_mib, 24_000);
@@ -701,8 +702,9 @@ fn existing_drain_does_not_trigger_unnecessary_additional_drain() {
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
     assert!(decision.would_drain.is_empty());
-    // The draining 3000m stay charged; the idle running one is charged at its usage.
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1000);
+    // Both stay charged at their reservations: the running one has no full usage
+    // window yet.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 0);
 }
 
 #[test]
@@ -1376,9 +1378,8 @@ proptest! {
         let decision = PolicyEngine::new().evaluate(&config(), &snap, &input, 0).unwrap();
         let budget = 6000 - external;
         prop_assert_eq!(decision.managed_budget.cpu_millicores, budget);
-        // Running opportunistic CPU is charged at its usage, whatever it reserved.
-        let _ = reserved;
-        prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget - observed);
+        // One observation is no full usage window: max(request, observed), once.
+        prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget.saturating_sub(reserved.max(observed)));
     }
 
     #[test]
@@ -2707,8 +2708,8 @@ fn a_ram_reclaim_backoff_holds_only_ram_admission() {
 }
 
 /// CPU admission charges running opportunistic work at its p95 usage over the
-/// admission window, not its request; pending and Guaranteed work keep their
-/// requests.
+/// admission window, not its request, once it has a full window of samples;
+/// pending and Guaranteed work keep their requests.
 #[test]
 fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
     let mut guaranteed = allocation(
@@ -2747,12 +2748,16 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
             .admission_headroom
             .cpu_millicores
     };
-    // Charges: the opportunistic usage, the Guaranteed request and the pending one.
+    // Until a full window of samples, a job in its startup phase is charged its
+    // request.
     let mut now = 0;
-    while now < 30_000 {
-        assert_eq!(headroom(1000, now), 5500 - 1000 - 1000 - 500, "at {now}");
+    while now < 60_000 {
+        assert_eq!(headroom(1000, now), 5500 - 4000 - 1000 - 500, "at {now}");
         now += 500;
     }
+    // Then: the opportunistic usage, the Guaranteed request and the pending one.
+    assert_eq!(headroom(1000, now), 5500 - 1000 - 1000 - 500);
+    now += 500;
     // More than 5% of the window at 3000m sets the p95.
     for _ in 0..10 {
         headroom(3000, now);
@@ -2796,9 +2801,21 @@ fn the_schedulable_budget_admits_cpu_by_recent_usage() {
     };
     let mut snap = snapshot();
     snap.cpu_busy_millicores = Some(1000 + 500 + 500);
-    let decision = PolicyEngine::new()
-        .evaluate(&config(), &snap, &input, 0)
-        .unwrap();
+    let mut engine = PolicyEngine::new();
+    let mut evaluate = |now| engine.evaluate(&config(), &snap, &input, now).unwrap();
+    // A job 10 s old earns no credit: it is charged its request.
+    let young = evaluate(10_000);
+    assert_eq!(young.cpu_admission_credit_millicores, 0);
+    assert_eq!(
+        cedegrid::policy::schedulable_budget(&young).cpu_millicores,
+        young.managed_budget.cpu_millicores
+    );
+    let mut now = 10_000;
+    while now < 70_000 {
+        now += 500;
+        evaluate(now);
+    }
+    let decision = evaluate(now);
     // A 5500m budget; admission charges 1000 + 1000 + 500, requests 4000 + 1000 + 500.
     assert_eq!(decision.admission_headroom.cpu_millicores, 3000);
     let schedulable = cedegrid::policy::schedulable_budget(&decision);

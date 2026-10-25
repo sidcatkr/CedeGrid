@@ -91,13 +91,15 @@ CPU uses millicores of logical CPU time: 1,000 millicores equals one logical CPU
 Physical-core reserves are mapped conservatively using available topology.
 For admission, each running or draining allocation is charged the greater of its request
 and observed usage once, except that running opportunistic CPU is charged at its p95
-usage over `contention.cpu.admission_usage_window_s` (60 s): CPU is compressible, so
-caps and the kernel share it if everyone spikes. The reported schedulable CPU budget
-adds what running opportunistic work is charged above that usage, so the coordinator and
-the launch check, which charge requests, admit the same. A pending allocation consumes
-its full reservation. Yielding judges running work on what it holds: CPU and RAM usage,
-and GPU memory usage for work that takes a hint, else its charge, since its growth
-cannot be bounded.
+usage over `contention.cpu.admission_usage_window_s` (60 s) once it has a full window of
+samples, so work in its startup phase is charged its request: CPU is compressible, so
+caps and the kernel share it if everyone spikes. RAM admission and the agent's worker
+limit bound how many jobs this admits. The reported schedulable CPU budget adds what
+running opportunistic work is charged above that usage, so the coordinator and the
+launch check, which charge requests, admit the same. A pending allocation consumes its
+full reservation. Yielding judges running work on what it holds: CPU and RAM usage, and
+GPU memory usage for work that takes a hint, else its charge, since its growth cannot be
+bounded.
 Subtract attributed managed usage from total system usage before classifying the
 remaining usage as external; do not subtract both the usage and the entire reservation
 again from free capacity. Unknown observations prohibit optimistic admission.
