@@ -1836,6 +1836,138 @@ impl PolicyEngine {
                 reasons.push("stable-capacity cooldown has not elapsed".into());
             }
         }
+        // What each resource holds back and why (SC-U3).
+        let shortfall = |pick: &dyn Fn(&Resources) -> u64, ready_only: bool| -> u64 {
+            input
+                .allocations
+                .iter()
+                .filter(|a| a.phase == AllocationPhase::Running)
+                .filter(|a| !ready_only || input.facts.get(&a.id).is_some_and(|f| f.hint_ready))
+                .filter_map(|a| {
+                    a.observed
+                        .as_ref()
+                        .map(|o| pick(&charges[&a.id]).saturating_sub(pick(o)))
+                })
+                .fold(0u64, u64::saturating_add)
+        };
+        let withheld = |pre: u64, cooled_down: bool, backed_off: bool| -> (u64, u64) {
+            if !cooled_down {
+                (pre, 0)
+            } else if !backed_off {
+                (0, pre)
+            } else {
+                (0, 0)
+            }
+        };
+        let external_of =
+            |key: &ResourceKey| statuses.get(key).and_then(|s| s.external).unwrap_or(0);
+        let mut held_back: BTreeMap<ResourceKey, HeldBack> = BTreeMap::new();
+        {
+            let available = cpu_capacity.saturating_sub(external_of(&ResourceKey::Cpu));
+            let mut held = HeldBack::default();
+            if cpu_unknown || cpu_held {
+                held.unknown = available;
+            } else {
+                let thresholds = config.contention.thresholds(ResourceKind::Cpu);
+                let percent = match governing(ResourceKind::Cpu) {
+                    crate::contention::ContentionMode::YieldFirst => {
+                        thresholds.yield_first_margin_percent
+                    }
+                    crate::contention::ContentionMode::Neutral => thresholds.neutral_margin_percent,
+                    crate::contention::ContentionMode::Performance => {
+                        thresholds.performance_margin_percent
+                    }
+                };
+                let margin = cpu_capacity.saturating_mul(u64::from(percent)) / 100;
+                let target = available.saturating_sub(budget.cpu_millicores);
+                held.reserve = if cpu_reserve > margin {
+                    cpu_reserve.min(target)
+                } else {
+                    0
+                };
+                held.margin = target.saturating_sub(held.reserve).min(margin);
+                held.contention = target.saturating_sub(held.reserve + held.margin);
+                let pre = budget.cpu_millicores.saturating_sub(charged.cpu_millicores);
+                held.cooldown = if cpu_allowed { 0 } else { pre };
+                held.charge_shortfall = shortfall(&|r| r.cpu_millicores, false);
+            }
+            held_back.insert(ResourceKey::Cpu, held);
+        }
+        {
+            let available = snapshot
+                .total_ram_mib
+                .saturating_sub(external_of(&ResourceKey::Ram));
+            let mut held = HeldBack {
+                floor: ram_reserve,
+                ..HeldBack::default()
+            };
+            if ram_unknown || ram_held {
+                held.unknown = available.saturating_sub(ram_reserve);
+            } else {
+                held.margin = available
+                    .saturating_sub(ram_reserve)
+                    .saturating_sub(budget.ram_mib);
+                held.peak = peak_excess.get(&ResourceKey::Ram).copied().unwrap_or(0);
+                let pre = budget
+                    .ram_mib
+                    .saturating_sub(charged.ram_mib)
+                    .saturating_sub(held.peak);
+                (held.cooldown, held.backoff) = withheld(
+                    pre,
+                    cooled(ram_stable_since, ResourceKind::Ram, 0),
+                    ram_allowed,
+                );
+                held.charge_shortfall = shortfall(&|r| r.ram_mib, false);
+            }
+            held_back.insert(ResourceKey::Ram, held);
+        }
+        for gpu in &snapshot.gpus {
+            let key = ResourceKey::GpuMemory(gpu.uuid.clone());
+            let floor = config.vram_floor_mib(gpu.total_memory_mib);
+            let available = gpu
+                .total_memory_mib
+                .saturating_sub(floor)
+                .saturating_sub(external_of(&key));
+            let allowance = budget.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0);
+            let mut held = HeldBack {
+                floor,
+                noise_tolerance: config
+                    .contention
+                    .thresholds(ResourceKind::GpuMemory)
+                    .noise_tolerance_mib
+                    .saturating_add(gpu.unattributed_memory_mib.unwrap_or(0)),
+                ..HeldBack::default()
+            };
+            if statuses
+                .get(&key)
+                .is_some_and(|s| s.measurement == Some(Measurement::Unknown))
+            {
+                held.unknown = available;
+            } else {
+                held.margin = available.saturating_sub(allowance);
+                held.peak = peak_excess.get(&key).copied().unwrap_or(0);
+                let pre = allowance
+                    .saturating_sub(charged.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0))
+                    .saturating_sub(held.peak);
+                let since = next_gpus.get(&gpu.uuid).and_then(|p| p.stable_since);
+                let elapsed = since.map(|since| now_monotonic_ms - since);
+                let cooldown = config.gpu.scale_up_cooldown_ms;
+                (held.cooldown, held.backoff) = withheld(
+                    pre,
+                    elapsed.is_some_and(|ms| ms >= cooldown),
+                    elapsed.is_some_and(|ms| ms >= cooldown.saturating_add(backoff_ms(&key))),
+                );
+                let uuid = gpu.uuid.clone();
+                held.charge_shortfall = shortfall(
+                    &move |r: &Resources| r.gpu_memory_mib.get(&uuid).copied().unwrap_or(0),
+                    true,
+                );
+            }
+            held_back.insert(key, held);
+        }
+        for (key, held) in held_back {
+            statuses.entry(key).or_default().held_back = Some(held);
+        }
         self.last_now = Some(now_monotonic_ms);
         self.node_id = Some(snapshot.node_id.clone());
         self.stable_since = stable_since;

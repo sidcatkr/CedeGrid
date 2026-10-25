@@ -1,10 +1,30 @@
 use cedegrid::{execution_model::*, managed_children::*, model::Resources, state::StateStore};
 use std::{collections::BTreeMap, path::PathBuf};
-fn dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(".managed-child-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap()
+/// A temporary state root in the checkout. Its namespace control directory, a
+/// sibling, is removed with it unless the test failed.
+struct StateDir(tempfile::TempDir);
+impl std::ops::Deref for StateDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &tempfile::TempDir {
+        &self.0
+    }
+}
+impl Drop for StateDir {
+    fn drop(&mut self) {
+        if !std::thread::panicking()
+            && let Ok(control) = cedegrid::namespace::control_dir_for(self.0.path())
+        {
+            let _ = std::fs::remove_dir_all(control);
+        }
+    }
+}
+fn dir() -> StateDir {
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".managed-child-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    )
 }
 fn setup(path: &std::path::Path) -> (StateStore, ExecutionRecord, LaunchRequest) {
     let store = StateStore::open(path).unwrap();

@@ -80,15 +80,7 @@ impl Namespace {
     #[cfg(unix)]
     pub fn new(root: &Path) -> Result<Self> {
         let root = canonical_location(root, true)?;
-        let leaf = root
-            .file_name()
-            .context("namespace leaf missing")?
-            .to_str()
-            .context("namespace leaf must be UTF-8")?;
-        let control = root
-            .parent()
-            .context("namespace parent missing")?
-            .join(format!(".{leaf}.cedegrid-control"));
+        let control = control_path(&root)?;
         private_directory(&control)?;
         for name in ["owner.lock", "admission.lock", "lifecycle.lock"] {
             let _ = lock_file(&control.join(name))?;
@@ -338,6 +330,21 @@ impl Maintenance {
         drop(_admission);
         Ok((NamespaceOwner { _file: _owner }, guard))
     }
+}
+/// The control directory a namespace keeps beside its state root.
+pub fn control_dir_for(root: &Path) -> Result<PathBuf> {
+    control_path(&canonical_location(root, false)?)
+}
+fn control_path(root: &Path) -> Result<PathBuf> {
+    let leaf = root
+        .file_name()
+        .context("namespace leaf missing")?
+        .to_str()
+        .context("namespace leaf must be UTF-8")?;
+    Ok(root
+        .parent()
+        .context("namespace parent missing")?
+        .join(format!(".{leaf}.cedegrid-control")))
 }
 fn canonical_location(root: &Path, create_parent: bool) -> Result<PathBuf> {
     ensure!(

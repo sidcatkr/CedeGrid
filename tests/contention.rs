@@ -1812,6 +1812,81 @@ mod scenarios {
         }
     }
 
+    /// SC-U1: on an idle host own work uses at least 97% of the CPU in Performance,
+    /// 94% in Neutral and 84% in Yield First, and memory within 1% of capacity
+    /// minus the floor, minus Yield First's margin too.
+    #[test]
+    fn sc_u1_own_work_uses_an_idle_host() {
+        use cedegrid::contention::{ModeInput, ResourceKind, own_allowance};
+        for (mode, percent) in [
+            (ContentionMode::YieldFirst, 84),
+            (ContentionMode::Neutral, 94),
+            (ContentionMode::Performance, 97),
+        ] {
+            let mut world = World::new(mode, (64, 8000));
+            let (average, _, paused) = steady(&mut world, 0, 600);
+            assert!(average * 100 >= CAPACITY * percent, "{mode:?}: {average}");
+            assert!(!paused, "{mode:?}");
+        }
+        // Memory with the default floors: 256 GiB of RAM and 8, 24 and 80 GiB GPUs.
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
+            let mut config = Config::default();
+            config.contention.default_mode = mode;
+            config
+                .contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            let keep = |capacity: u64| {
+                if mode == ContentionMode::YieldFirst {
+                    capacity - capacity * 20 / 100
+                } else {
+                    capacity
+                }
+            };
+            let mut host = snapshot(0);
+            host.total_ram_mib = 262_144;
+            host.available_ram_mib = Some(262_144);
+            let ram = PolicyEngine::new()
+                .evaluate(&config, &host, &PolicyInput::default(), 0)
+                .unwrap()
+                .managed_budget
+                .ram_mib;
+            let goal = keep(262_144 - config.ram_floor_mib(262_144));
+            assert!(
+                ram.abs_diff(goal) * 100 <= goal,
+                "{mode:?} RAM {ram} {goal}"
+            );
+            for total in [8192, 24_576, 81_920] {
+                let capacity = total - config.vram_floor_mib(total);
+                let allowance = own_allowance(
+                    &ModeInput {
+                        kind: ResourceKind::GpuMemory,
+                        mode,
+                        capacity,
+                        external: 0,
+                        own: 0,
+                        principals: None,
+                        background: 0,
+                        saturated: false,
+                        unknown_activity: false,
+                        satisfied: vec![],
+                        probe: None,
+                    },
+                    &config.contention.thresholds(ResourceKind::GpuMemory),
+                );
+                let goal = keep(capacity);
+                assert!(
+                    allowance.abs_diff(goal) * 100 <= goal,
+                    "{mode:?} GPU {total}: {allowance} {goal}"
+                );
+            }
+        }
+    }
+
     /// A small external user on a resource own work keeps saturated is probed: its
     /// demand is recorded as satisfied and own work stays near its target instead
     /// of cycling down to the fair share. When its usage rises, it contends again

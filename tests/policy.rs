@@ -2919,6 +2919,38 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
     );
 }
 
+/// Decisions show, per resource, how much is held back from own work and why,
+/// for `doctor` and `status` (SC-U3).
+#[test]
+fn decisions_show_what_each_resource_holds_back_and_why() {
+    use cedegrid::contention::ResourceKey;
+    let mut cfg = config();
+    cfg.contention.ram.scale_up_cooldown_ms = Some(10_000);
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(0, 5000, 0),
+            Some(resources(0, 4000, 0)),
+        )],
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snapshot(), &input, 0)
+        .unwrap();
+    let held = |key: ResourceKey| decision.resources[&key].held_back.clone().unwrap();
+    // CPU: one reserved physical core of four, 2000m, exceeds the 10% margin.
+    let cpu = held(ResourceKey::Cpu);
+    assert_eq!((cpu.reserve, cpu.margin), (2000, 0), "{cpu:?}");
+    // RAM: the 1000 MiB floor; the job's 1000 MiB above its usage; admission
+    // waits for the 10 s cooldown with 24 000 MiB free beyond the charges.
+    let ram = held(ResourceKey::Ram);
+    assert_eq!(ram.floor, 1000, "{ram:?}");
+    assert_eq!(ram.charge_shortfall, 1000, "{ram:?}");
+    assert_eq!(ram.cooldown, 24_000, "{ram:?}");
+    assert_eq!(ram.unknown, 0, "{ram:?}");
+}
+
 /// Repeated memory reclaim lengthens the RAM cooldown by backoff, and five quiet
 /// minutes reset it (FR-061).
 #[test]

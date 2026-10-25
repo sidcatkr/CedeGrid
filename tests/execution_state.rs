@@ -5,8 +5,27 @@ use cedegrid::{
 };
 use std::collections::BTreeMap;
 
-fn store() -> (tempfile::TempDir, StateStore) {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+/// A temporary state root in the checkout. Its namespace control directory, a
+/// sibling, is removed with it unless the test failed.
+struct StateDir(tempfile::TempDir);
+impl std::ops::Deref for StateDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &tempfile::TempDir {
+        &self.0
+    }
+}
+impl Drop for StateDir {
+    fn drop(&mut self) {
+        if !std::thread::panicking()
+            && let Ok(control) = cedegrid::namespace::control_dir_for(self.0.path())
+        {
+            let _ = std::fs::remove_dir_all(control);
+        }
+    }
+}
+
+fn store() -> (StateDir, StateStore) {
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let store = StateStore::open(dir.path()).unwrap();
     (dir, store)
 }
@@ -443,10 +462,12 @@ fn assigned_multi_gpu_request_checks_every_requested_uuid_with_pending_charges()
 
 #[test]
 fn local_and_remote_reservations_cannot_exceed_or_change_task_attempt_cap() {
-    let d = tempfile::Builder::new()
-        .prefix(".attempt-limit-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap();
+    let d = StateDir(
+        tempfile::Builder::new()
+            .prefix(".attempt-limit-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    );
     let s = StateStore::open(d.path()).unwrap();
     let mut r = request("bounded", "first");
     r.max_attempts = Some(1);
@@ -468,7 +489,7 @@ fn local_and_remote_reservations_cannot_exceed_or_change_task_attempt_cap() {
 #[test]
 fn rollback_profile_preserves_launch_barrier_and_uncertain_capacity_across_reopen() {
     use cedegrid::state::StorageProfile;
-    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let store =
         StateStore::open_with_profile(directory.path(), StorageProfile::DeleteExtra).unwrap();
     let pending = store

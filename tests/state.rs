@@ -7,9 +7,27 @@ use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
-use tempfile::TempDir;
 
-fn storage_dir() -> TempDir {
+/// A temporary state root in the checkout. Its namespace control directory, a
+/// sibling, is removed with it unless the test failed.
+struct StateDir(tempfile::TempDir);
+impl std::ops::Deref for StateDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &tempfile::TempDir {
+        &self.0
+    }
+}
+impl Drop for StateDir {
+    fn drop(&mut self) {
+        if !std::thread::panicking()
+            && let Ok(control) = cedegrid::namespace::control_dir_for(self.0.path())
+        {
+            let _ = std::fs::remove_dir_all(control);
+        }
+    }
+}
+
+fn storage_dir() -> StateDir {
     // Prefer the actual project filesystem: /tmp may be volatile or a container
     // overlay, both deliberately unsupported for this durable store.
     let current = std::env::current_dir().unwrap();
@@ -17,10 +35,12 @@ fn storage_dir() -> TempDir {
         preflight(&current).unwrap().supported,
         "state integration tests require a verified local disk filesystem"
     );
-    tempfile::Builder::new()
-        .prefix(".state-test-")
-        .tempdir_in(current)
-        .unwrap()
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".state-test-")
+            .tempdir_in(current)
+            .unwrap(),
+    )
 }
 
 fn observation() -> (Snapshot, Decision) {

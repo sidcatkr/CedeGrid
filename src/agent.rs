@@ -2345,6 +2345,7 @@ fn node_contention_report(
                     external: status.external,
                     target_share: status.target_share,
                     step_summary,
+                    held_back: status.held_back.clone(),
                 },
             ))
         })

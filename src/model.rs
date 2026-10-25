@@ -411,8 +411,51 @@ pub struct ResourceStatus {
     pub activity: Option<ComputeActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<crate::contention::Admission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<HeldBack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<ReasonCode>,
+}
+
+/// What a resource keeps from own work or from admission, and why, in resource
+/// units (SC-U3). Zero amounts are left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HeldBack {
+    /// The no-harm floor (memory).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub floor: u64,
+    /// The explicit CPU reserve where it exceeds the mode's margin.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reserve: u64,
+    /// The mode's idle margin.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub margin: u64,
+    /// Capacity left to contending external demand under contention.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub contention: u64,
+    /// External memory peak above current external usage (admission).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub peak: u64,
+    /// External GPU memory growth tolerated as noise.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub noise_tolerance: u64,
+    /// Capacity withheld while the measurement is unknown or held.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unknown: u64,
+    /// Admission headroom withheld until the resource has cooled down.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub cooldown: u64,
+    /// Admission headroom withheld by the reclaim backoff.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub backoff: u64,
+    /// Admission capacity held by charges above usage.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub charge_shortfall: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// A caution option that is active, with its marker (FR-043).
