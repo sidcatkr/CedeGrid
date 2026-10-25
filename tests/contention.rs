@@ -466,6 +466,7 @@ mod modes {
             mode,
             capacity,
             external,
+            own: 0,
             principals: None,
             background: 0,
             saturated: false,
@@ -682,6 +683,7 @@ mod ordered_targets {
             owner_unmanaged in 0u64..5000,
             saturated in any::<bool>(),
             unknown_activity in any::<bool>(),
+            own in 0u64..120_000,
         ) {
             let external = capacity * external_share / 100;
             let mut principals = vec![principal(Some(1000), owner_unmanaged)];
@@ -690,11 +692,31 @@ mod ordered_targets {
                 principals: observed.then_some(principals),
                 saturated,
                 unknown_activity,
+                own,
                 ..input(kind, ContentionMode::Neutral, capacity, external)
             };
             let [yield_first, neutral, performance] = targets(&view);
             prop_assert!(yield_first <= neutral, "{view:?}: {yield_first} > {neutral}");
             prop_assert!(neutral <= performance, "{view:?}: {neutral} > {performance}");
+        }
+    }
+
+    /// Saturation while own work holds more than capacity minus Yield First's
+    /// margin may be own work's doing, so it caps to the margin within the fair
+    /// share; held within its margin, saturation means external demand outgrew it.
+    #[test]
+    fn own_saturation_beside_a_small_external_user_caps_before_it_pauses() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let mut view = input(kind, ContentionMode::Neutral, 8000, 160);
+            view.saturated = true;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 160)]);
+            view.own = 7840;
+            // 8000 - 160 - 25% is 5840; the fair share beside one other principal is 4000.
+            assert_eq!(targets(&view), [4000, 4000, 4000], "{kind:?}");
+            view.own = 5840;
+            view.external = 2160;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 2160)]);
+            assert_eq!(targets(&view), [0, 4000, 4000], "{kind:?}");
         }
     }
 
@@ -1523,9 +1545,9 @@ mod scenarios {
         }
     }
 
-    /// Yield First's contended state means external demand exceeds the free margin,
-    /// not any external activity: a small blip fits in the margin and never pauses
-    /// own work, while demand beyond the margin does (FR-020).
+    /// With own work held to its margin, Yield First pauses only once external
+    /// demand outgrows the margin: a small blip fits in it and never pauses own
+    /// work, while demand beyond the margin does (FR-020).
     #[test]
     fn yield_first_pauses_only_when_external_demand_exceeds_its_margin() {
         let mut world = World::new(ContentionMode::YieldFirst, (64, 8000));
@@ -1559,6 +1581,28 @@ mod scenarios {
         now += INTERVAL;
         world.tick(now);
         assert_eq!(world.step, YieldStep::Pause);
+        assert!(!world.drained);
+    }
+
+    /// Own work that saturates the host itself is capped to the margin, not paused,
+    /// when a small external user appears beside it (FR-020).
+    #[test]
+    fn yield_first_does_not_pause_own_saturation_for_a_small_external_user() {
+        let mut world = World::new(ContentionMode::YieldFirst, (64, 8000));
+        world.external = (1, 400);
+        let mut now = 0;
+        let mut last = (0, 0);
+        for _ in 0..40 {
+            last = world.tick(now);
+            assert_ne!(world.step, YieldStep::Pause, "at {now}: {last:?}");
+            now += INTERVAL;
+        }
+        let (own, external) = last;
+        assert_eq!(external, 400);
+        assert!(
+            own > 0 && own + 400 + CAPACITY / 4 <= CAPACITY + CAPACITY / 100,
+            "{own}"
+        );
         assert!(!world.drained);
     }
 

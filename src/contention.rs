@@ -725,6 +725,8 @@ pub struct ModeInput {
     pub capacity: u64,
     /// Usage within that capacity that is not own work.
     pub external: u64,
+    /// Own work's usage, its lower bound where only bounds are known.
+    pub own: u64,
     /// Unmanaged usage per principal, the owner included; `None` when unobserved.
     /// Users that are not principals yet are left out and count as unattributed.
     pub principals: Option<Vec<(Principal, u64)>>,
@@ -777,11 +779,21 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
     let margin = |percent: u8| input.capacity.saturating_mul(u64::from(percent)) / 100;
     let available = input.capacity.saturating_sub(input.external);
     let contended = contended(input, thresholds);
+    let yield_first_margin = margin(thresholds.yield_first_margin_percent);
     match input.mode {
-        ContentionMode::YieldFirst if contended => 0,
-        ContentionMode::YieldFirst => {
-            available.saturating_sub(margin(thresholds.yield_first_margin_percent))
+        // Own work holding more than capacity minus the margin may cause the
+        // saturation itself: it caps to the margin, within the fair share, first.
+        ContentionMode::YieldFirst
+            if contended
+                && !input.unknown_activity
+                && input.own > input.capacity.saturating_sub(yield_first_margin) =>
+        {
+            available
+                .saturating_sub(yield_first_margin)
+                .min(neutral_share(input, thresholds))
         }
+        ContentionMode::YieldFirst if contended => 0,
+        ContentionMode::YieldFirst => available.saturating_sub(yield_first_margin),
         _ if input.kind.is_memory() => available,
         _ if contended => neutral_share(input, thresholds),
         ContentionMode::Neutral => {

@@ -745,6 +745,10 @@ impl PolicyEngine {
                         .get(&ResourceKey::Cpu)
                         .and_then(|s| s.external)
                         .unwrap_or(0),
+                    own: statuses
+                        .get(&ResourceKey::Cpu)
+                        .and_then(|s| s.own)
+                        .map_or(0, |(lower, _)| lower),
                     principals: members,
                     background,
                     saturated: cpu_saturated,
@@ -768,6 +772,10 @@ impl PolicyEngine {
                         .get(&ResourceKey::Ram)
                         .and_then(|s| s.external)
                         .unwrap_or(0),
+                    own: statuses
+                        .get(&ResourceKey::Ram)
+                        .and_then(|s| s.own)
+                        .map_or(0, |(lower, _)| lower),
                     principals: members,
                     background,
                     saturated: false,
@@ -996,6 +1004,7 @@ impl PolicyEngine {
                             mode: governing(ResourceKind::GpuMemory),
                             capacity,
                             external: external.unwrap_or(0),
+                            own: observed,
                             principals: members,
                             background,
                             saturated: false,
