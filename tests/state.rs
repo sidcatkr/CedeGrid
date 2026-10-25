@@ -39,6 +39,7 @@ fn observation() -> (Snapshot, Decision) {
         capabilities: BTreeMap::new(),
         kernel: None,
         principals: None,
+        external_processes: None,
     };
     let decision = Decision {
         schema_version: 1,

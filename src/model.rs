@@ -245,6 +245,23 @@ pub struct Snapshot {
     /// Unmanaged usage by process owner (research R12); `None` when not observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principals: Option<Vec<PrincipalUsage>>,
+    /// External processes whose memory the policy tracks for admission peaks
+    /// (FR-060); `None` when not observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_processes: Option<Vec<ExternalProcessMemory>>,
+}
+
+/// One external process's memory, identified by PID and start time so that a
+/// reused PID is another process.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExternalProcessMemory {
+    pub pid: u32,
+    /// Seconds since the epoch; 0 when the process table does not show it.
+    pub start_time: u64,
+    pub ram_mib: u64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_memory_mib: BTreeMap<String, u64>,
 }
 
 /// Usage of the processes one owner runs, outside managed work.

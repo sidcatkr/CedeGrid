@@ -753,6 +753,7 @@ fn a_percentage_floor_near_its_minimum_is_judged_on_the_host() {
         capabilities: Default::default(),
         kernel: None,
         principals: None,
+        external_processes: None,
     };
     // 2% of 32000 MiB is 640 MiB: near the minimum.
     let body = "[ram]\nreserve_mib = 0\nreserve_percent = 2";

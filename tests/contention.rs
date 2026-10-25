@@ -35,6 +35,7 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
         capabilities: BTreeMap::new(),
         kernel: None,
         principals: None,
+        external_processes: None,
     }
 }
 

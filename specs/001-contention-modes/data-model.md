@@ -99,6 +99,16 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `hint_ready` | The worker acknowledged its target file (FR-062) |
 | `observes_drain` | The worker acknowledged its target file or used the supervisor socket, so it polls the drain file (FR-062) |
 
+## ExternalProcessMemory (`src/model.rs`, `Snapshot.external_processes`)
+
+- Fields: `pid`, `start_time` (seconds since the epoch, 0 when unknown), `ram_mib`,
+  `gpu_memory_mib{uuid: mib}`. PID and start time identify the process, so a reused PID is
+  another process.
+- The collector lists every external GPU context and every external process holding at least
+  1% of host RAM. A listed process stays listed while it lives, so its peak lasts until it
+  exits; at most the 64 largest are kept. The field is optional, so older recordings replay
+  with one peak for all external usage.
+
 ## ResourceView (`src/contention.rs`, built from `Snapshot` + `PolicyInput`)
 
 | Field | Meaning |
@@ -111,7 +121,7 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `margin` | From the effective mode |
 | `fair_share` | Max-min share for the owner principal (Neutral) |
 | `contended` | CPU, GPU compute: saturated with an active external principal, or unknown activity |
-| `external_peak` | RAM, GPU memory: peak external usage over `memory_peak_window_s`, for admission headroom |
+| `external_peak` | RAM, GPU memory: over `memory_peak_window_s`, the sum of each live listed external process's peak plus the peak of the external usage no listed process accounts for, for admission headroom |
 | `measurement` | `known`, `unknown{since}` or `inconsistent_within_tolerance` |
 | `activity` | GPU compute only: `quiet`, `active` or `unknown` |
 | `admission` | `open`, `held{reason}` or `blocked{reason}` |

@@ -273,9 +273,10 @@ Decided by the maintainer after the review in [review-pre-us5.md](review-pre-us5
   leaving below half of `principal_min_percent`). `ModeInput` gains `background`, the usage of
   UIDs below `uid_min`, which max-min subtracts from capacity. UIDs not admitted yet fall into the
   unattributed principal, so contention is detected on the first observation.
-- **B7 Memory headroom.** `PolicyEngine` keeps a max-deque of external usage per memory
-  resource over `memory_peak_window_s`; admission headroom uses the peak, yielding uses current
-  usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource, each from its
+- **B7 Memory headroom.** `PolicyEngine` keeps a max-deque per listed external process (PID and
+  start time, from `Snapshot.external_processes`) and one for the rest of external usage per
+  memory resource over `memory_peak_window_s`; a process's deque goes when it exits. Admission
+  headroom uses the summed peaks, yielding uses current usage. CPU and RAM cooldowns are separate (`scale_up_cooldown_ms` per resource, each from its
   own stable time). Until per-resource admission is placed on (US5), CPU/RAM admission opens once
   both have cooled, because the coordinator places against the node budget and flags. RAM and GPU
   memory add `reclaim_backoff_ms × 2^(n−1)`, at most `reclaim_backoff_max_ms`, after the n-th

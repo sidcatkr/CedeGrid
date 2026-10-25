@@ -44,6 +44,7 @@ fn snapshot() -> Snapshot {
         capabilities: BTreeMap::new(),
         kernel: None,
         principals: None,
+        external_processes: None,
     }
 }
 
@@ -2968,4 +2969,38 @@ fn never_share_occupied_gpus_uses_the_non_sharing_path() {
         cedegrid::policy::effective_gpu_capability(&cfg, snap.observed_at_unix_ms, &snap.gpus[0]),
         Some(GpuExecutionCapability::ConservativeNonSharing)
     );
+}
+
+/// External memory peaks follow each external process: a live process keeps its
+/// peak for the window, and its peak goes the moment it exits (FR-060).
+#[test]
+fn external_memory_peaks_follow_each_external_process() {
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |job_mib: Option<u64>, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(32_000 - job_mib.unwrap_or(0));
+        snap.external_processes = Some(
+            job_mib
+                .map(|ram_mib| ExternalProcessMemory {
+                    pid: 100,
+                    start_time: 1,
+                    ram_mib,
+                    gpu_memory_mib: BTreeMap::new(),
+                })
+                .into_iter()
+                .collect(),
+        );
+        engine
+            .evaluate(&config(), &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .ram_mib
+    };
+    // 32000 MiB with a 1000 MiB floor; an external job holds 10000 MiB.
+    assert_eq!(headroom(Some(10_000), 0), 21_000);
+    // It shrinks but lives: its peak keeps admission closed.
+    assert_eq!(headroom(Some(1000), 500), 21_000);
+    assert_eq!(headroom(Some(1000), 60_000), 21_000);
+    // It exits: its peak goes at once.
+    assert_eq!(headroom(None, 60_500), 31_000);
 }

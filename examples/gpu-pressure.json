@@ -122,7 +122,16 @@
           "compute_sample_id": 101
         }
       ],
-      "capabilities": {}
+      "capabilities": {},
+      "external_processes": [
+        {
+          "pid": 4242,
+          "start_time": 1793000000,
+          "gpu_memory_mib": {
+            "example-gpu": 16384
+          }
+        }
+      ]
     },
     "input": {
       "allocations": [
@@ -243,6 +252,160 @@
           }
         }
       ],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 125500,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 125500,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 21504,
+          "utilization_percent": 0,
+          "external_process_ids": [
+            4343
+          ],
+          "external_compute": "idle",
+          "compute_sample_id": 201
+        }
+      ],
+      "capabilities": {},
+      "external_processes": [
+        {
+          "pid": 4343,
+          "start_time": 1793000100,
+          "gpu_memory_mib": {
+            "example-gpu": 21504
+          }
+        }
+      ]
+    },
+    "input": {
+      "allocations": [],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 157000,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 157000,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 2048,
+          "utilization_percent": 0,
+          "external_process_ids": [
+            4343
+          ],
+          "external_compute": "idle",
+          "compute_sample_id": 202
+        }
+      ],
+      "capabilities": {},
+      "external_processes": [
+        {
+          "pid": 4343,
+          "start_time": 1793000100,
+          "gpu_memory_mib": {
+            "example-gpu": 2048
+          }
+        }
+      ]
+    },
+    "input": {
+      "allocations": [],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 188500,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 188500,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 2048,
+          "utilization_percent": 0,
+          "external_process_ids": [
+            4343
+          ],
+          "external_compute": "idle",
+          "compute_sample_id": 203
+        }
+      ],
+      "capabilities": {},
+      "external_processes": [
+        {
+          "pid": 4343,
+          "start_time": 1793000100,
+          "gpu_memory_mib": {
+            "example-gpu": 2048
+          }
+        }
+      ]
+    },
+    "input": {
+      "allocations": [],
+      "explicit_drain": false
+    }
+  },
+  {
+    "elapsed_ms": 220000,
+    "snapshot": {
+      "schema_version": 1,
+      "node_id": "example-node",
+      "observed_at_unix_ms": 220000,
+      "cpu_capacity_millicores": 16000,
+      "physical_cores": 8,
+      "cpu_busy_millicores": 2000,
+      "total_ram_mib": 65536,
+      "available_ram_mib": 60000,
+      "gpu_inventory": "available",
+      "gpus": [
+        {
+          "uuid": "example-gpu",
+          "total_memory_mib": 24576,
+          "used_memory_mib": 0,
+          "utilization_percent": 0,
+          "external_process_ids": [],
+          "external_compute": "idle",
+          "compute_sample_id": 204
+        }
+      ],
+      "capabilities": {},
+      "external_processes": []
+    },
+    "input": {
+      "allocations": [],
       "explicit_drain": false
     }
   }

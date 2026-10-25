@@ -151,7 +151,7 @@ fn synthetic_replay_explains_pressure_without_affecting_live_system() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 9);
     assert_eq!(rows[1]["decision"]["expansion_allowed"], true);
     assert_eq!(rows[2]["decision"]["expansion_allowed"], false);
     assert!(
@@ -160,13 +160,16 @@ fn synthetic_replay_explains_pressure_without_affecting_live_system() {
             .unwrap()
             .is_empty()
     );
-    // The external GPU memory peak at 31.5 s holds GPU headroom back for the
-    // 300 s peak window (FR-060), so GPU admission stays closed at 94 s.
-    assert_eq!(rows[4]["decision"]["expansion_allowed"], false);
-    assert_eq!(
-        rows[4]["decision"]["admission_headroom"]["gpu_memory_mib"]["example-gpu"],
-        0
-    );
+    // The external job of 31.5 s has exited, so its memory peak no longer holds
+    // GPU admission back (FR-060).
+    assert_eq!(rows[4]["decision"]["expansion_allowed"], true);
+    let gpu_headroom = |row: usize| {
+        rows[row]["decision"]["admission_headroom"]["gpu_memory_mib"]["example-gpu"].as_u64()
+    };
+    // A live external job that shrank keeps its peak: GPU headroom stays at zero.
+    assert_eq!(gpu_headroom(7), Some(0));
+    // Once it exits, admission reopens.
+    assert!(gpu_headroom(8).is_some_and(|mib| mib > 0));
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 

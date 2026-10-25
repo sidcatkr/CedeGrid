@@ -226,8 +226,12 @@ pub struct PolicyEngine {
     floor_breach_since: BTreeMap<ResourceKey, u64>,
     /// Users on their way into or out of the principals, per resource (FR-059).
     principal_counts: BTreeMap<(ResourceKey, u32), PrincipalCount>,
-    /// External memory usage over the peak window, as a decreasing deque (FR-060).
+    /// External memory not listed per process, over the peak window, as a
+    /// decreasing deque (FR-060).
     external_peaks: BTreeMap<ResourceKey, std::collections::VecDeque<(u64, u64)>>,
+    /// Each listed external process's memory over the window, by resource, PID and
+    /// start time; an entry goes when the process is no longer listed.
+    process_peaks: BTreeMap<(ResourceKey, u32, u64), std::collections::VecDeque<(u64, u64)>>,
     /// Starts of recent reclaim episodes per memory resource, and the resources
     /// with one in progress (FR-061).
     reclaim_episodes: BTreeMap<ResourceKey, Vec<u64>>,
@@ -1617,8 +1621,12 @@ impl PolicyEngine {
         let cpu_ram_expansion_allowed = cpu_allowed && ram_allowed;
         // Memory admission uses the external peak over its window; yielding uses
         // current usage (FR-060).
+        // Each listed external process keeps its own peak while it lives and loses
+        // it when it exits; the rest of external usage keeps one peak (FR-060).
         let mut external_peaks = BTreeMap::new();
+        let mut process_peaks = BTreeMap::new();
         let mut peak_excess = BTreeMap::new();
+        let listed = snapshot.external_processes.as_deref().unwrap_or_default();
         for (key, status) in &statuses {
             let (true, Some(external)) = (key.kind().is_memory(), status.external) else {
                 continue;
@@ -1628,18 +1636,38 @@ impl PolicyEngine {
                 .thresholds(key.kind())
                 .memory_peak_window_s
                 .saturating_mul(1000);
+            let usage_of = |process: &crate::model::ExternalProcessMemory| match key {
+                ResourceKey::Ram => process.ram_mib,
+                ResourceKey::GpuMemory(uuid) => {
+                    process.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
+                }
+                _ => 0,
+            };
+            let mut listed_total = 0u64;
+            let mut peak = 0u64;
+            for process in listed {
+                let id = (key.clone(), process.pid, process.start_time);
+                let usage = usage_of(process);
+                if usage == 0 && !self.process_peaks.contains_key(&id) {
+                    continue;
+                }
+                listed_total = listed_total.saturating_add(usage);
+                let mut samples = self.process_peaks.get(&id).cloned().unwrap_or_default();
+                peak = peak.saturating_add(window_peak(
+                    &mut samples,
+                    now_monotonic_ms,
+                    usage,
+                    window_ms,
+                ));
+                process_peaks.insert(id, samples);
+            }
             let mut samples = self.external_peaks.get(key).cloned().unwrap_or_default();
-            while samples
-                .front()
-                .is_some_and(|(at, _)| now_monotonic_ms.saturating_sub(*at) >= window_ms)
-            {
-                samples.pop_front();
-            }
-            while samples.back().is_some_and(|(_, usage)| *usage <= external) {
-                samples.pop_back();
-            }
-            samples.push_back((now_monotonic_ms, external));
-            let peak = samples.front().map_or(external, |(_, usage)| *usage);
+            peak = peak.saturating_add(window_peak(
+                &mut samples,
+                now_monotonic_ms,
+                external.saturating_sub(listed_total),
+                window_ms,
+            ));
             peak_excess.insert(key.clone(), peak.saturating_sub(external));
             external_peaks.insert(key.clone(), samples);
         }
@@ -1710,6 +1738,7 @@ impl PolicyEngine {
         self.ram_stable_since = ram_stable_since;
         self.principal_counts = principal_counts;
         self.external_peaks = external_peaks;
+        self.process_peaks = process_peaks;
         self.reclaim_episodes = reclaim_episodes;
         self.reclaiming = reclaiming;
         self.previous_gpus = next_gpus;
@@ -1987,4 +2016,24 @@ impl PrincipalCount {
             *self = Self::default();
         }
     }
+}
+
+/// Add a sample to a decreasing deque of the last `window_ms` and return the peak.
+fn window_peak(
+    samples: &mut std::collections::VecDeque<(u64, u64)>,
+    now_ms: u64,
+    value: u64,
+    window_ms: u64,
+) -> u64 {
+    while samples
+        .front()
+        .is_some_and(|(at, _)| now_ms.saturating_sub(*at) >= window_ms)
+    {
+        samples.pop_front();
+    }
+    while samples.back().is_some_and(|(_, usage)| *usage <= value) {
+        samples.pop_back();
+    }
+    samples.push_back((now_ms, value));
+    samples.front().map_or(value, |(_, usage)| *usage)
 }

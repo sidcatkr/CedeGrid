@@ -115,7 +115,10 @@ allocation at the hint step or above) within `memory_peak_window_s` adds
 `reclaim_backoff_ms` × 2^(n−1) to the cooldown, at most `reclaim_backoff_max_ms`
 (1 s doubling to 30 s by default). Admission headroom for memory subtracts the peak of
 external usage over `memory_peak_window_s` (300 s), including the memory of quiet GPU
-contexts; yielding follows current usage.
+contexts. Each external GPU context and each external process holding at least 1% of RAM
+keeps its own peak while it lives, identified by PID and start time, and its peak is
+dropped when it exits; other external usage keeps one peak. Yielding follows current
+usage.
 
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the

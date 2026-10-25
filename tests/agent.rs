@@ -1784,6 +1784,7 @@ mod operator_limits {
             capabilities: BTreeMap::new(),
             kernel: None,
             principals: None,
+            external_processes: None,
         }
     }
 

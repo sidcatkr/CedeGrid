@@ -481,8 +481,10 @@ node reports with the expected per-resource values at each step.
   reaches `principal_min_percent`. Usage by user IDs below `uid_min` MUST count as background
   external demand: it is subtracted from capacity and never forms a principal.
 - **FR-060**: Admission headroom for RAM and GPU memory MUST use the peak of external usage over
-  `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Yield
-  decisions use current usage.
+  `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Peaks are
+  kept per external process, identified by PID and start time: a live process keeps its peak for
+  the window, and its peak is dropped as soon as it exits. External usage that no listed process
+  accounts for keeps one peak. Yield decisions use current usage.
 
 **Graduated yielding**
 

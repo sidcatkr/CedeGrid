@@ -45,6 +45,8 @@ pub struct Collector {
     processes: System,
     /// External context memory per device and PID from the last GPU sample.
     external_gpu_memory: BTreeMap<String, BTreeMap<u32, u64>>,
+    /// External processes listed for memory peaks, by PID and start time.
+    tracked_external: BTreeSet<(u32, u64)>,
 }
 
 /// One visible process as principal aggregation sees it.
@@ -55,6 +57,65 @@ pub struct ProcessSample {
     pub uid: Option<u32>,
     pub cpu_millicores: u64,
     pub ram_mib: u64,
+    /// Seconds since the epoch; with the PID it identifies the process.
+    pub start_time: u64,
+}
+
+/// External processes whose memory the policy tracks for admission peaks
+/// (FR-060): every external GPU context and every process holding at least 1% of
+/// host RAM. Once listed, a process stays listed while it lives, so its peak lasts
+/// until it exits. At most the 64 largest are kept.
+pub fn external_memory_processes(
+    processes: &[ProcessSample],
+    gpu_memory: &BTreeMap<String, BTreeMap<u32, u64>>,
+    managed: &BTreeSet<u32>,
+    tracked: &BTreeSet<(u32, u64)>,
+    total_ram_mib: u64,
+) -> Vec<crate::model::ExternalProcessMemory> {
+    const LIMIT: usize = 64;
+    let threshold = (total_ram_mib / 100).max(1);
+    let started: BTreeMap<u32, u64> = processes.iter().map(|p| (p.pid, p.start_time)).collect();
+    let mut listed: BTreeMap<(u32, u64), crate::model::ExternalProcessMemory> = BTreeMap::new();
+    for process in processes {
+        let id = (process.pid, process.start_time);
+        if managed.contains(&process.pid) || (process.ram_mib < threshold && !tracked.contains(&id))
+        {
+            continue;
+        }
+        listed.insert(
+            id,
+            crate::model::ExternalProcessMemory {
+                pid: process.pid,
+                start_time: process.start_time,
+                ram_mib: process.ram_mib,
+                gpu_memory_mib: BTreeMap::new(),
+            },
+        );
+    }
+    for (uuid, contexts) in gpu_memory {
+        for (pid, mib) in contexts {
+            if managed.contains(pid) {
+                continue;
+            }
+            let start_time = started.get(pid).copied().unwrap_or(0);
+            let entry = listed.entry((*pid, start_time)).or_insert_with(|| {
+                crate::model::ExternalProcessMemory {
+                    pid: *pid,
+                    start_time,
+                    ..Default::default()
+                }
+            });
+            entry.gpu_memory_mib.insert(uuid.clone(), *mib);
+        }
+    }
+    let mut result: Vec<_> = listed.into_values().collect();
+    if result.len() > LIMIT {
+        result
+            .sort_by_key(|p| std::cmp::Reverse(p.ram_mib + p.gpu_memory_mib.values().sum::<u64>()));
+        result.truncate(LIMIT);
+        result.sort_by_key(|p| (p.pid, p.start_time));
+    }
+    result
 }
 
 /// Group unmanaged processes into principals by owner UID (research R12).
@@ -175,11 +236,19 @@ impl Collector {
             .quiet_window_intervals,
             processes: System::new(),
             external_gpu_memory: BTreeMap::new(),
+            tracked_external: BTreeSet::new(),
         })
     }
 
-    /// Read-only usage of every visible process, grouped by owner.
-    fn sample_principals(&mut self) -> Option<Vec<PrincipalUsage>> {
+    /// Read-only usage of every visible process, grouped by owner, and the external
+    /// processes tracked for memory peaks.
+    #[allow(clippy::type_complexity)]
+    fn sample_principals(
+        &mut self,
+    ) -> Option<(
+        Vec<PrincipalUsage>,
+        Vec<crate::model::ExternalProcessMemory>,
+    )> {
         if !sysinfo::IS_SUPPORTED_SYSTEM {
             return None;
         }
@@ -201,13 +270,25 @@ impl Collector {
                 // sysinfo reports percent of one CPU; 100% is 1000 millicores.
                 cpu_millicores: (f64::from(process.cpu_usage()) * 10.0).round() as u64,
                 ram_mib: process.memory() / MIB,
+                start_time: process.start_time(),
             })
             .collect();
-        Some(aggregate_principals(
+        let external = external_memory_processes(
             &samples,
             &self.external_gpu_memory,
-            owner_uid(),
             &self.managed_pids,
+            &self.tracked_external,
+            self.system.total_memory() / MIB,
+        );
+        self.tracked_external = external.iter().map(|p| (p.pid, p.start_time)).collect();
+        Some((
+            aggregate_principals(
+                &samples,
+                &self.external_gpu_memory,
+                owner_uid(),
+                &self.managed_pids,
+            ),
+            external,
         ))
     }
 
@@ -330,7 +411,10 @@ impl Collector {
         self.gpu_accounting_known.clear();
         self.external_gpu_memory.clear();
         let (gpu_inventory, gpus) = self.sample_gpus(&mut capabilities, observed_at_unix_ms);
-        let principals = self.sample_principals();
+        let (principals, external_processes) = match self.sample_principals() {
+            Some((principals, external)) => (Some(principals), Some(external)),
+            None => (None, None),
+        };
         Ok(Snapshot {
             schema_version: SCHEMA_VERSION,
             node_id: self.node_id.clone(),
@@ -346,6 +430,7 @@ impl Collector {
             capabilities,
             kernel: Some(self.kernel.sample()),
             principals,
+            external_processes,
         })
     }
 
@@ -1567,7 +1652,53 @@ mod tests {
             uid,
             cpu_millicores,
             ram_mib,
+            start_time: u64::from(pid) * 10,
         }
+    }
+
+    #[test]
+    fn external_memory_processes_are_tracked_while_they_live() {
+        // 1% of 32000 MiB is 320 MiB.
+        let processes = [
+            process(1, Some(1000), 0, 4000),
+            process(2, Some(1001), 0, 100),
+            process(3, Some(1001), 0, 50),
+            // Managed work is own work, never external.
+            process(6, Some(1000), 0, 9000),
+        ];
+        let gpu = BTreeMap::from([("GPU-a".to_string(), BTreeMap::from([(3, 512)]))]);
+        let managed = BTreeSet::from([6]);
+        let listed = |tracked: &BTreeSet<(u32, u64)>, processes: &[ProcessSample]| {
+            external_memory_processes(processes, &gpu, &managed, tracked, 32_000)
+        };
+        let first = listed(&BTreeSet::new(), &processes);
+        let ids: Vec<_> = first.iter().map(|p| (p.pid, p.start_time)).collect();
+        // The large process and every GPU context, by identity.
+        assert_eq!(ids, [(1, 10), (3, 30)]);
+        assert_eq!(first[1].gpu_memory_mib["GPU-a"], 512);
+        // Once listed, a process stays while it lives, however small it gets.
+        let tracked: BTreeSet<_> = ids.into_iter().collect();
+        let shrunk = [
+            process(1, Some(1000), 0, 10),
+            process(2, Some(1001), 0, 100),
+        ];
+        let gpu_gone = BTreeMap::new();
+        let second = external_memory_processes(&shrunk, &gpu_gone, &managed, &tracked, 32_000);
+        assert_eq!(
+            second
+                .iter()
+                .map(|p| (p.pid, p.ram_mib))
+                .collect::<Vec<_>>(),
+            [(1, 10)]
+        );
+        // A reused PID with another start time is another process.
+        let reused = [ProcessSample {
+            start_time: 99,
+            ..process(1, Some(1000), 0, 10)
+        }];
+        assert!(
+            external_memory_processes(&reused, &gpu_gone, &managed, &tracked, 32_000).is_empty()
+        );
     }
 
     #[test]
