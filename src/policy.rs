@@ -238,6 +238,10 @@ pub struct PolicyEngine {
     /// with one in progress (FR-061).
     reclaim_episodes: BTreeMap<ResourceKey, Vec<u64>>,
     reclaiming: BTreeSet<ResourceKey>,
+    /// Demands found satisfied by probing, per compute resource (FR-021).
+    satisfied: BTreeMap<ResourceKey, Vec<(Option<u32>, u64)>>,
+    /// Probes of small external demand in progress, per compute resource.
+    probes: BTreeMap<ResourceKey, crate::contention::DemandProbe>,
 }
 
 /// One user's way into or out of the principals on one resource (FR-059):
@@ -742,34 +746,59 @@ impl PolicyEngine {
         );
         let cpu_saturated = cpu_busy
             .is_some_and(|busy| busy.saturating_mul(100) >= cpu_total.saturating_mul(saturation));
+        let mut satisfied = BTreeMap::new();
+        let mut probes = BTreeMap::new();
         if !cpu_unknown && !cpu_held {
             floor_available.insert(ResourceKey::Cpu, budget.cpu_millicores);
             let (members, background) =
                 principals(ResourceKey::Cpu, cpu_capacity, &|p| p.cpu_millicores);
+            let thresholds = config.contention.thresholds(ResourceKind::Cpu);
+            let mode = governing(ResourceKind::Cpu);
+            let mut view = ModeInput {
+                kind: ResourceKind::Cpu,
+                mode,
+                capacity: cpu_capacity,
+                external: statuses
+                    .get(&ResourceKey::Cpu)
+                    .and_then(|s| s.external)
+                    .unwrap_or(0),
+                own: statuses
+                    .get(&ResourceKey::Cpu)
+                    .and_then(|s| s.own)
+                    .map_or(0, |(lower, _)| lower),
+                principals: members,
+                background,
+                saturated: cpu_saturated,
+                unknown_activity: false,
+                satisfied: self
+                    .satisfied
+                    .get(&ResourceKey::Cpu)
+                    .cloned()
+                    .unwrap_or_default(),
+                probe: None,
+            };
+            let response_ms =
+                LadderTiming::new(&thresholds, mode, config.monitor.interval_ms).response_ms;
+            let (known, probe) = crate::contention::probe_demand(
+                &view,
+                &thresholds,
+                self.probes.get(&ResourceKey::Cpu),
+                response_ms,
+                now_monotonic_ms,
+            );
+            view.satisfied = known.clone();
+            view.probe = probe.as_ref().map(|p| p.target);
+            if !known.is_empty() {
+                satisfied.insert(ResourceKey::Cpu, known);
+            }
+            if let Some(probe) = probe {
+                probes.insert(ResourceKey::Cpu, probe);
+            }
             // The idle reserve is the larger of the explicit reserve and the mode's
             // margin of total capacity; the two never stack.
-            budget.cpu_millicores = own_allowance(
-                &ModeInput {
-                    kind: ResourceKind::Cpu,
-                    mode: governing(ResourceKind::Cpu),
-                    capacity: cpu_capacity,
-                    external: statuses
-                        .get(&ResourceKey::Cpu)
-                        .and_then(|s| s.external)
-                        .unwrap_or(0),
-                    own: statuses
-                        .get(&ResourceKey::Cpu)
-                        .and_then(|s| s.own)
-                        .map_or(0, |(lower, _)| lower),
-                    principals: members,
-                    background,
-                    saturated: cpu_saturated,
-                    unknown_activity: false,
-                },
-                &config.contention.thresholds(ResourceKind::Cpu),
-            )
-            // Capacity minus the reserve and external usage, within the ancestor quota.
-            .min(budget.cpu_millicores);
+            budget.cpu_millicores = own_allowance(&view, &thresholds)
+                // Capacity minus the reserve and external usage, within the ancestor quota.
+                .min(budget.cpu_millicores);
         }
         if !ram_unknown && !ram_held {
             floor_available.insert(ResourceKey::Ram, budget.ram_mib);
@@ -792,6 +821,8 @@ impl PolicyEngine {
                     background,
                     saturated: false,
                     unknown_activity: false,
+                    satisfied: vec![],
+                    probe: None,
                 },
                 &config.contention.thresholds(ResourceKind::Ram),
             );
@@ -1029,6 +1060,8 @@ impl PolicyEngine {
                             background,
                             saturated: false,
                             unknown_activity: false,
+                            satisfied: vec![],
+                            probe: None,
                         },
                         &config.contention.thresholds(ResourceKind::GpuMemory),
                     )
@@ -1782,6 +1815,8 @@ impl PolicyEngine {
         self.process_peaks = process_peaks;
         self.reclaim_episodes = reclaim_episodes;
         self.reclaiming = reclaiming;
+        self.satisfied = satisfied;
+        self.probes = probes;
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;
         self.last_observed = last_observed;

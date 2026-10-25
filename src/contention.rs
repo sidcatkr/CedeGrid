@@ -1,5 +1,6 @@
 //! Pure, deterministic contention modes, resource views and yield-step planning.
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// How much spare capacity own work may use and how fast it gives it back.
@@ -520,10 +521,19 @@ pub fn plan_step(
         // The cap that ended a pause is the last CPU step for a worker without a
         // hint, as the hint is for one with it: it never pauses again (FR-014).
         let after_pause = state.is_some_and(|s| s.after_pause);
+        // A cap whose usage follows its target is working; excess left while the
+        // target moves down, as in Performance and probing, is no reason to go on.
+        let cap_effective = current == YieldStep::Cap
+            && state
+                .and_then(|s| s.target)
+                .zip(input.usage)
+                .is_some_and(|(target, usage)| {
+                    usage.saturating_mul(100) <= target.saturating_mul(105)
+                });
         // A hint waits for its deadline, never just the response time (FR-037).
         let due = since_change >= timing.dwell_ms
             && (current == YieldStep::None
-                || current != YieldStep::Hint && persisted >= timing.response_ms
+                || current != YieldStep::Hint && !cap_effective && persisted >= timing.response_ms
                 || pause_bound
                 || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
             || input.unavailable.contains(&current)
@@ -739,6 +749,12 @@ pub struct ModeInput {
     pub saturated: bool,
     /// Activity of unknown amount, such as unsampled GPU compute.
     pub unknown_activity: bool,
+    /// Principals whose demand probing found satisfied, by UID (`None`: the
+    /// unattributed principal), with that demand: observed usage plus hysteresis.
+    pub satisfied: Vec<(Option<u32>, u64)>,
+    /// While a small external demand is probed, the allowance stepping down by the
+    /// mode's margin per response window (FR-021).
+    pub probe: Option<u64>,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -782,7 +798,12 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
     let available = input.capacity.saturating_sub(input.external);
     let contended = contended(input, thresholds);
     let yield_first_margin = margin(thresholds.yield_first_margin_percent);
+    let probe = input.probe.filter(|_| !input.unknown_activity);
     match input.mode {
+        // While a small demand is probed, Yield First steps down with the probe.
+        ContentionMode::YieldFirst if contended && probe.is_some() => available
+            .saturating_sub(yield_first_margin)
+            .min(probe.unwrap_or(0)),
         // Own work holding more than capacity minus the margin may cause the
         // saturation itself: it caps to the margin, within the fair share, first.
         ContentionMode::YieldFirst
@@ -797,7 +818,14 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
         ContentionMode::YieldFirst if contended => 0,
         ContentionMode::YieldFirst => available.saturating_sub(yield_first_margin),
         _ if input.kind.is_memory() => available,
-        _ if contended => neutral_share(input, thresholds),
+        // Performance gives back what external demand takes, never below the fair
+        // share; activity of unknown amount holds it to the share.
+        ContentionMode::Performance if contended && !input.unknown_activity => {
+            neutral_share(input, thresholds)
+                .max(available.saturating_sub(margin(thresholds.performance_margin_percent)))
+                .max(probe.unwrap_or(0))
+        }
+        _ if contended => neutral_share(input, thresholds).max(probe.unwrap_or(0)),
         ContentionMode::Neutral => {
             available.saturating_sub(margin(thresholds.neutral_margin_percent))
         }
@@ -817,9 +845,42 @@ fn principal_floor(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
         .max(1)
 }
 
+/// External principals using at least the contention floor, by UID (`None`: the
+/// unattributed usage that stands for one), with their usage.
+pub fn contending_principals(
+    input: &ModeInput,
+    thresholds: &ResourceThresholds,
+) -> Vec<(Option<u32>, u64)> {
+    let floor = principal_floor(input, thresholds);
+    let mut result = Vec::new();
+    let mut accounted = input.background;
+    for (principal, usage) in input.principals.iter().flatten() {
+        accounted = accounted.saturating_add(*usage);
+        if !principal.is_owner && *usage >= floor {
+            result.push((principal.uid, *usage));
+        }
+    }
+    let unattributed = input.external.saturating_sub(accounted);
+    if unattributed >= floor {
+        result.push((None, unattributed));
+    }
+    result
+}
+
+/// The demand probing found satisfied for a principal, while its usage stays
+/// within it.
+fn satisfied_demand(input: &ModeInput, uid: Option<u32>, usage: u64) -> Option<u64> {
+    input
+        .satisfied
+        .iter()
+        .find(|(principal, demand)| *principal == uid && usage <= *demand)
+        .map(|(_, demand)| *demand)
+}
+
 /// Compute is contended when external activity of unknown amount exists, or when
 /// the resource is saturated and an external principal, or the unattributed
-/// usage that stands for one, uses at least the contention floor.
+/// usage that stands for one, uses at least the contention floor without its
+/// demand being known to be satisfied.
 pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
     if input.kind.is_memory() {
         return false;
@@ -827,18 +888,121 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
     if input.unknown_activity {
         return true;
     }
-    if !input.saturated {
-        return false;
-    }
+    input.saturated
+        && contending_principals(input, thresholds)
+            .into_iter()
+            .any(|(uid, usage)| satisfied_demand(input, uid, usage).is_none())
+}
+
+/// A probe of small external demand on one compute resource (FR-021).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DemandProbe {
+    /// The allowance while probing.
+    pub target: u64,
+    /// When the target last stepped down.
+    pub stepped_at_ms: u64,
+    /// The probed principals' usage when it did.
+    pub usage_at_step: BTreeMap<Option<u32>, u64>,
+}
+
+/// One interval of demand probing on a compute resource. Under saturation, a
+/// contending principal whose demand is unknown and smaller than one margin step
+/// is probed: own work steps down by the mode's margin per response window, and a
+/// principal whose usage does not grow into the freed capacity is recorded as
+/// satisfied at its usage plus hysteresis (the contention floor). A record holds
+/// while usage stays within it. A larger demand gets the fair share at once.
+/// Returns the satisfied records and the probe that continues, if any.
+pub fn probe_demand(
+    input: &ModeInput,
+    thresholds: &ResourceThresholds,
+    probe: Option<&DemandProbe>,
+    response_ms: u64,
+    now_ms: u64,
+) -> (Vec<(Option<u32>, u64)>, Option<DemandProbe>) {
     let floor = principal_floor(input, thresholds);
-    let mut accounted = input.background;
-    for (principal, usage) in input.principals.iter().flatten() {
-        accounted = accounted.saturating_add(*usage);
-        if !principal.is_owner && *usage >= floor {
-            return true;
+    let usage_of = |uid: Option<u32>| -> Option<u64> {
+        let mut accounted = input.background;
+        let mut found = None;
+        for (principal, usage) in input.principals.iter().flatten() {
+            accounted = accounted.saturating_add(*usage);
+            if !principal.is_owner && uid.is_some() && principal.uid == uid {
+                found = Some(*usage);
+            }
+        }
+        match uid {
+            Some(_) => found,
+            None => Some(input.external.saturating_sub(accounted)),
+        }
+    };
+    let mut satisfied: Vec<(Option<u32>, u64)> = input
+        .satisfied
+        .iter()
+        .filter(|(uid, demand)| usage_of(*uid).is_some_and(|usage| usage <= *demand))
+        .copied()
+        .collect();
+    if input.kind.is_memory() || input.unknown_activity {
+        return (satisfied, None);
+    }
+    let percent = match input.mode {
+        ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
+        ContentionMode::Neutral => thresholds.neutral_margin_percent,
+        ContentionMode::Performance => thresholds.performance_margin_percent,
+    };
+    let step = (input.capacity.saturating_mul(u64::from(percent)) / 100).max(1);
+    let known = |uid: Option<u32>, satisfied: &[(Option<u32>, u64)]| {
+        satisfied.iter().any(|(principal, _)| *principal == uid)
+    };
+    let unknown: BTreeMap<Option<u32>, u64> = if input.saturated {
+        contending_principals(input, thresholds)
+            .into_iter()
+            .filter(|(uid, _)| !known(*uid, &satisfied))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    // A demand of a margin step or more is real contention: no probing.
+    if unknown.values().any(|usage| *usage >= step) {
+        return (satisfied, None);
+    }
+    let Some(probe) = probe else {
+        if unknown.is_empty() {
+            return (satisfied, None);
+        }
+        let started = DemandProbe {
+            target: input.own.saturating_sub(step),
+            stepped_at_ms: now_ms,
+            usage_at_step: unknown,
+        };
+        return (satisfied, Some(started));
+    };
+    if now_ms.saturating_sub(probe.stepped_at_ms) < response_ms {
+        return (satisfied, Some(probe.clone()));
+    }
+    // The window is over: who grew into the freed capacity, even after the step
+    // ended the saturation?
+    let mut grown = BTreeMap::new();
+    for (uid, before) in probe.usage_at_step.iter().chain(unknown.iter()) {
+        if known(*uid, &satisfied) || grown.contains_key(uid) {
+            continue;
+        }
+        let usage = usage_of(*uid).unwrap_or(0);
+        if usage <= before.saturating_add(floor) {
+            if usage >= floor || probe.usage_at_step.contains_key(uid) {
+                satisfied.push((*uid, usage.saturating_add(floor)));
+            }
+        } else {
+            grown.insert(*uid, usage);
         }
     }
-    input.external.saturating_sub(accounted) >= floor
+    if grown.is_empty() {
+        return (satisfied, None);
+    }
+    let stepped = DemandProbe {
+        target: probe.target.saturating_sub(step),
+        stepped_at_ms: now_ms,
+        usage_at_step: grown,
+    };
+    (satisfied, Some(stepped))
 }
 
 /// Own work's max-min share: the owner principal's share minus the account's
@@ -847,7 +1011,14 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
 /// as unreadable owners, is one more principal (research R12).
 fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     let floor = principal_floor(input, thresholds);
-    let demand = |usage: u64| (!(input.saturated && usage >= floor)).then_some(usage);
+    // A principal whose demand is known to be satisfied wants that much.
+    let demand = |uid: Option<u32>, usage: u64| {
+        if input.saturated && usage >= floor {
+            satisfied_demand(input, uid, usage)
+        } else {
+            Some(usage)
+        }
+    };
     let mut demands = vec![None];
     let mut owner_unmanaged = 0u64;
     let mut attributed = 0u64;
@@ -856,7 +1027,7 @@ fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
             owner_unmanaged = owner_unmanaged.saturating_add(*usage);
         } else {
             attributed = attributed.saturating_add(*usage);
-            demands.push(demand(*usage));
+            demands.push(demand(principal.uid, *usage));
         }
     }
     let unattributed = input.external.saturating_sub(
@@ -865,7 +1036,7 @@ fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
             .saturating_add(input.background),
     );
     if unattributed >= floor {
-        demands.push(demand(unattributed));
+        demands.push(demand(None, unattributed));
     }
     if input.unknown_activity {
         demands.push(None);

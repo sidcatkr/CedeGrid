@@ -118,6 +118,31 @@ mod ladder {
         (state, changes)
     }
 
+    /// A cap whose usage follows its target holds while the target moves down, as
+    /// in Performance and probing; usage that stays above the cap escalates after
+    /// the response time.
+    #[test]
+    fn an_effective_cap_holds_while_its_target_moves_down() {
+        let timing = timing(ResourceKind::Cpu, ContentionMode::Performance);
+        let at = |follows: bool| {
+            move |now: u64| {
+                let target = 7000u64.saturating_sub(now / INTERVAL * 100).max(4000);
+                let usage = if follows { target + 100 } else { 8000 };
+                LadderInput {
+                    unavailable: BTreeSet::from([YieldStep::LowerShare]),
+                    target: Some(target),
+                    usage: Some(usage),
+                    ..input(ResourceKind::Cpu, usage.saturating_sub(target), 1000)
+                }
+            }
+        };
+        let (state, changes) = run(None, &timing, 0..40, at(true));
+        assert_eq!(changes, [(0, YieldStep::Cap)]);
+        assert_eq!(state.unwrap().target, Some(4000));
+        let (_, changes) = run(None, &timing, 0..40, at(false));
+        assert_eq!(changes[..2], [(0, YieldStep::Cap), (5000, YieldStep::Pause)]);
+    }
+
     #[test]
     fn steps_escalate_in_order_and_memory_starts_at_hint() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
@@ -471,6 +496,8 @@ mod modes {
             background: 0,
             saturated: false,
             unknown_activity: false,
+            satisfied: vec![],
+            probe: None,
         }
     }
 
@@ -685,6 +712,8 @@ mod ordered_targets {
             saturated in any::<bool>(),
             unknown_activity in any::<bool>(),
             own in 0u64..120_000,
+            satisfied in prop::collection::vec((prop_oneof![Just(None), (0u32..3000).prop_map(Some)], 0u64..60_000), 0..3),
+            probe in prop::option::of(0u64..120_000),
         ) {
             let external = capacity * external_share / 100;
             let mut principals = vec![principal(Some(1000), owner_unmanaged)];
@@ -694,12 +723,53 @@ mod ordered_targets {
                 saturated,
                 unknown_activity,
                 own,
+                satisfied,
+                probe,
                 ..input(kind, ContentionMode::Neutral, capacity, external)
             };
             let [yield_first, neutral, performance] = targets(&view);
             prop_assert!(yield_first <= neutral, "{view:?}: {yield_first} > {neutral}");
             prop_assert!(neutral <= performance, "{view:?}: {neutral} > {performance}");
         }
+    }
+
+    /// A principal whose demand probing found satisfied no longer contends and is
+    /// bounded at that demand; usage above it contends again (FR-021).
+    #[test]
+    fn a_satisfied_principal_is_bounded_and_no_longer_contends() {
+        let thresholds = ResourceThresholds::defaults(ResourceKind::Cpu);
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 120);
+        view.saturated = true;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 120)]);
+        view.satisfied = vec![(Some(2000), 200)];
+        assert!(!contended(&view, &thresholds));
+        // Idle targets: 8000 - 120 minus 15%, 5% or 2% of 8000.
+        assert_eq!(targets(&view), [6680, 7480, 7720]);
+        // Usage above the recorded demand contends again.
+        view.external = 300;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 300)]);
+        assert!(contended(&view, &thresholds));
+        assert_eq!(targets(&view), [0, 4000, 7540]);
+        // The unattributed principal is probed the same way.
+        let mut pooled = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 120);
+        pooled.saturated = true;
+        pooled.principals = Some(vec![principal(Some(1000), 0)]);
+        pooled.satisfied = vec![(None, 200)];
+        assert!(!contended(&pooled, &thresholds));
+    }
+
+    /// While a small demand is probed, own work steps down from its level instead
+    /// of falling to the fair share (FR-021, FR-022).
+    #[test]
+    fn a_probe_steps_down_instead_of_falling_to_the_fair_share() {
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 120);
+        view.saturated = true;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 120)]);
+        view.own = 7880;
+        view.probe = Some(7480);
+        // Yield First keeps its margin, at most the probe; Neutral holds the probe;
+        // Performance keeps what external demand does not take.
+        assert_eq!(targets(&view), [6680, 7480, 7720]);
     }
 
     /// Saturation while own work holds more than capacity minus Yield First's
@@ -712,12 +782,13 @@ mod ordered_targets {
             view.saturated = true;
             view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 160)]);
             view.own = 7840;
-            // 8000 - 160 - 25% is 5840; the fair share beside one other principal is 4000.
-            assert_eq!(targets(&view), [4000, 4000, 4000], "{kind:?}");
-            view.own = 5840;
-            view.external = 2160;
-            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 2160)]);
-            assert_eq!(targets(&view), [0, 4000, 4000], "{kind:?}");
+            // 8000 - 160 - 15% is 6640; the fair share beside one other principal is
+            // 4000; Performance keeps 8000 - 160 - 2%.
+            assert_eq!(targets(&view), [4000, 4000, 7680], "{kind:?}");
+            view.own = 6640;
+            view.external = 1360;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 1360)]);
+            assert_eq!(targets(&view), [0, 4000, 6480], "{kind:?}");
         }
     }
 
@@ -788,6 +859,25 @@ mod performance_and_guaranteed {
             LadderTiming::new(&thresholds, ContentionMode::Performance, 500).scale_up_ms,
             2000
         );
+    }
+
+    /// Contended Performance keeps what external demand does not take, never less
+    /// than the fair share; unknown activity holds it to the fair share (FR-022).
+    #[test]
+    fn contended_performance_gives_back_only_what_external_demand_takes() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let mut view = input(kind, ContentionMode::Performance, 8000, 600);
+            view.saturated = true;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 600)]);
+            // 8000 - 600 - 2% is 7240, above the fair share of 4000.
+            assert_eq!(allowance(&view), 7240, "{kind:?}");
+            view.external = 6000;
+            view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 6000)]);
+            assert_eq!(allowance(&view), 4000, "{kind:?}");
+            let mut unknown = input(kind, ContentionMode::Performance, 8000, 0);
+            unknown.unknown_activity = true;
+            assert_eq!(allowance(&unknown), 4000, "{kind:?}");
+        }
     }
 
     #[test]
@@ -1584,16 +1674,26 @@ mod scenarios {
                 now += INTERVAL;
             }
             world.external = (5, 5000);
-            world.tick(now);
-            // Until the pause bound, the CPU stays returned.
+            let (_, mut previous) = world.tick(now);
+            // Until the pause bound, the CPU stays returned. Performance gives back
+            // what external work takes, at least its margin per interval, and never
+            // goes below the fair share.
             for _ in 1..18 {
                 now += INTERVAL;
                 let (own, external) = world.tick(now);
                 let returned = match mode {
                     ContentionMode::YieldFirst => own == 0 && external == 5000,
-                    _ => own <= 4000 + CAPACITY / 100 && external + CAPACITY / 100 >= 4000,
+                    ContentionMode::Neutral => {
+                        own <= 4000 + CAPACITY / 100 && external + CAPACITY / 100 >= 4000
+                    }
+                    ContentionMode::Performance => {
+                        own + CAPACITY / 100 >= 4000
+                            && (external >= previous + CAPACITY * 2 / 100
+                                || external + CAPACITY / 100 >= 4000)
+                    }
                 };
                 assert!(returned, "{mode:?} at {now}: own {own} external {external}");
+                previous = external;
             }
             assert!(!world.drained, "{mode:?}");
         }
@@ -1649,10 +1749,75 @@ mod scenarios {
         let (own, external) = last;
         assert_eq!(external, 400);
         assert!(
-            own > 0 && own + 400 + CAPACITY / 4 <= CAPACITY + CAPACITY / 100,
+            own > 0 && own + 400 + CAPACITY * 15 / 100 <= CAPACITY + CAPACITY / 100,
             "{own}"
         );
         assert!(!world.drained);
+    }
+
+    /// Runs the world for `intervals` and returns own work's average, the number of
+    /// step changes and whether own work was ever paused.
+    fn steady(world: &mut World, from: u64, intervals: u64) -> (u64, u32, bool) {
+        let (mut total, mut changes, mut paused) = (0, 0, false);
+        let mut last = world.step;
+        for i in 0..intervals {
+            let (own, _) = world.tick(from + i * INTERVAL);
+            total += own;
+            if world.step != last {
+                changes += 1;
+                last = world.step;
+            }
+            paused |= world.step == YieldStep::Pause;
+        }
+        (total / intervals, changes, paused)
+    }
+
+    /// SC-U2: beside a steady external user of 1.5% or 2%, own work keeps at least
+    /// 90% of capacity minus that user and the margin over 5 minutes, without cap
+    /// or pause cycles.
+    #[test]
+    fn sc_u2_a_steady_small_external_user_leaves_own_work_its_share() {
+        for (mode, margin) in [
+            (ContentionMode::YieldFirst, 15),
+            (ContentionMode::Neutral, 5),
+            (ContentionMode::Performance, 2),
+        ] {
+            for user in [CAPACITY * 15 / 1000, CAPACITY * 2 / 100] {
+                let mut world = World::new(mode, (64, 8000));
+                world.external = (1, user);
+                let (average, changes, paused) = steady(&mut world, 0, 600);
+                let goal = (CAPACITY - user - CAPACITY * margin / 100) * 9 / 10;
+                assert!(average >= goal, "{mode:?} {user}: {average} < {goal}");
+                assert!(!paused, "{mode:?} {user}");
+                assert!(changes <= 2, "{mode:?} {user}: {changes} step changes");
+            }
+        }
+    }
+
+    /// A small external user on a resource own work keeps saturated is probed: its
+    /// demand is recorded as satisfied and own work stays near its target instead
+    /// of cycling down to the fair share. When its usage rises, it contends again
+    /// (FR-021).
+    #[test]
+    fn a_satisfied_small_demand_stops_the_probe_and_rising_usage_restarts_it() {
+        let mut world = World::new(ContentionMode::Neutral, (64, 8000));
+        // Saturated at Neutral's own target: 7480 + 120 is 95%.
+        world.config.contention.cpu.saturation_percent = Some(95);
+        world.external = (1, 120);
+        let (average, changes, paused) = steady(&mut world, 0, 600);
+        let goal = (CAPACITY - 120 - CAPACITY * 5 / 100) * 9 / 10;
+        assert!(average >= goal, "{average} < {goal}");
+        assert!(!paused);
+        assert!(changes <= 3, "{changes} step changes");
+        // A demanding user gets its fair share within 2 intervals.
+        world.external = (8, 8000);
+        let mut now = 600 * INTERVAL;
+        world.tick(now);
+        for _ in 0..4 {
+            now += INTERVAL;
+            let (own, _) = world.tick(now);
+            assert!(own <= 4000 + CAPACITY / 100, "at {now}: {own}");
+        }
     }
 
     /// While a resource is not contended, a held cap rises again toward the mode's
