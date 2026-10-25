@@ -242,6 +242,8 @@ pub struct PolicyEngine {
     satisfied: BTreeMap<ResourceKey, Vec<(Option<u32>, u64)>>,
     /// Probes of small external demand in progress, per compute resource.
     probes: BTreeMap<ResourceKey, crate::contention::DemandProbe>,
+    /// Running opportunistic CPU usage over the admission window, per allocation.
+    cpu_usage: BTreeMap<String, std::collections::VecDeque<(u64, u64)>>,
 }
 
 /// One user's way into or out of the principals on one resource (FR-059):
@@ -312,6 +314,12 @@ impl PolicyEngine {
         let mut unknown_allocations = BTreeSet::new();
         let mut first_observed_gpus = BTreeSet::new();
         let mut last_observed = BTreeMap::new();
+        let mut cpu_usage = BTreeMap::new();
+        let cpu_window_ms = config
+            .contention
+            .thresholds(ResourceKind::Cpu)
+            .admission_usage_window_s
+            .saturating_mul(1000);
         let mut reasons = Vec::new();
         let mut statuses: BTreeMap<ResourceKey, ResourceStatus> = BTreeMap::new();
         for allocation in &input.allocations {
@@ -320,6 +328,22 @@ impl PolicyEngine {
                 if let Some(observed) = &allocation.observed {
                     managed_observed.add_checked(observed)?;
                     charge = Resources::charge(&charge, Some(observed));
+                    // CPU is compressible: running opportunistic work is admitted
+                    // against its recent usage, not its request.
+                    if allocation.class == crate::execution_model::AllocationClass::Opportunistic
+                        && allocation.phase == AllocationPhase::Running
+                    {
+                        let mut samples = self
+                            .cpu_usage
+                            .get(&allocation.id)
+                            .cloned()
+                            .unwrap_or_default();
+                        samples
+                            .retain(|(at, _)| now_monotonic_ms.saturating_sub(*at) < cpu_window_ms);
+                        samples.push_back((now_monotonic_ms, observed.cpu_millicores));
+                        charge.cpu_millicores = p95(samples.iter().map(|(_, usage)| *usage));
+                        cpu_usage.insert(allocation.id.clone(), samples);
+                    }
                     if !self.last_observed.contains_key(&allocation.id) {
                         first_observed_gpus.extend(charge.gpu_memory_mib.keys().cloned());
                     }
@@ -1152,6 +1176,8 @@ impl PolicyEngine {
         let mut hint_deadlines: BTreeMap<(String, ResourceKey), u64> = BTreeMap::new();
         let mut actions = Vec::new();
         let mut breached: BTreeSet<ResourceKey> = BTreeSet::new();
+        // Memory resources with a floor breach or own usage beyond the budget.
+        let mut memory_reclaim: BTreeSet<ResourceKey> = BTreeSet::new();
         let mut floor_breach_since = BTreeMap::new();
         if input.explicit_drain {
             // Explicit node drain keeps its all-allocation stop semantics.
@@ -1383,16 +1409,22 @@ impl PolicyEngine {
                         0
                     }
                 };
-                // CPU the mode allows beyond current usage, shared by the caps and
-                // pauses on this resource so they can rise again while calm.
+                // What the mode allows beyond current usage, shared by the caps,
+                // pauses and hints on this resource so they can rise again while calm.
                 let held_back = self
                     .ladder
                     .iter()
                     .filter(|((_, k), state)| {
-                        k == &key && matches!(state.step, YieldStep::Cap | YieldStep::Pause)
+                        k == &key
+                            && matches!(
+                                state.step,
+                                YieldStep::Cap | YieldStep::Pause | YieldStep::Hint
+                            )
                     })
                     .count() as u64;
-                let spare_share = if kind == ResourceKind::Cpu && held_back > 0 {
+                let spare_share = if held_back == 0 {
+                    0
+                } else if kind == ResourceKind::Cpu {
                     let usage = input
                         .allocations
                         .iter()
@@ -1401,8 +1433,11 @@ impl PolicyEngine {
                         .fold(unknown_charge.cpu_millicores, u64::saturating_add);
                     budget.cpu_millicores.saturating_sub(usage) / held_back
                 } else {
-                    0
+                    amount_of(&budget).saturating_sub(judged_total) / held_back
                 };
+                if kind.is_memory() && (floor_breach || usage_excess > 0) {
+                    memory_reclaim.insert(key.clone());
+                }
                 let mut planned = BTreeSet::new();
                 for pending_pass in [true, false] {
                     let needed = if pending_pass {
@@ -1617,14 +1652,10 @@ impl PolicyEngine {
             reasons.push("managed RAM charges exceed scheduling budget".into());
         }
         let legacy_expansion_allowed = !unsafe_now && cooled_down && would_drain.is_empty();
-        // A reclaim episode on a memory resource starts when any allocation on it
-        // enters the hint step or above; recent episodes lengthen the memory
-        // cooldown by exponential backoff (FR-061).
-        let reclaiming: BTreeSet<ResourceKey> = ladder
-            .iter()
-            .filter(|((_, key), state)| key.kind().is_memory() && state.step >= YieldStep::Hint)
-            .map(|((_, key), _)| key.clone())
-            .collect();
+        // A reclaim episode on a memory resource starts when a floor breach or own
+        // usage beyond the budget appears there; recent episodes lengthen the memory
+        // cooldown by exponential backoff, and a quiet peak window resets it (FR-061).
+        let reclaiming = memory_reclaim;
         let mut reclaim_episodes: BTreeMap<ResourceKey, Vec<u64>> = BTreeMap::new();
         for key in self.reclaim_episodes.keys().chain(reclaiming.iter()) {
             let window_ms = config
@@ -1817,6 +1848,7 @@ impl PolicyEngine {
         self.reclaiming = reclaiming;
         self.satisfied = satisfied;
         self.probes = probes;
+        self.cpu_usage = cpu_usage;
         self.previous_gpus = next_gpus;
         self.last_kernel_cpu_sample = next_kernel_cpu_sample;
         self.last_observed = last_observed;
@@ -2092,6 +2124,17 @@ impl PrincipalCount {
             *self = Self::default();
         }
     }
+}
+
+/// The 95th percentile by nearest rank; 0 for no values.
+fn p95(values: impl Iterator<Item = u64>) -> u64 {
+    let mut values: Vec<u64> = values.collect();
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = (values.len() * 95).div_ceil(100);
+    values[rank.saturating_sub(1)]
 }
 
 /// Add a sample to a decreasing deque of the last `window_ms` and return the peak.

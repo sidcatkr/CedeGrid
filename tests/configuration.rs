@@ -1237,6 +1237,9 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention.cpu]\nreclaim_s = 61",
         "[contention.cpu]\npause_bound_s = 61",
         "[contention.ram]\nreclaim_s = 5",
+        "[contention.cpu]\nadmission_usage_window_s = 0",
+        "[contention.cpu]\nadmission_usage_window_s = 3601",
+        "[contention.ram]\nadmission_usage_window_s = 60",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

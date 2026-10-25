@@ -238,6 +238,9 @@ pub struct ResourceThresholds {
     /// the maximum (FR-061).
     pub reclaim_backoff_ms: u64,
     pub reclaim_backoff_max_ms: u64,
+    /// CPU: running opportunistic work is charged for admission at its p95 usage
+    /// over this window (FR-034).
+    pub admission_usage_window_s: u64,
 }
 
 impl ResourceThresholds {
@@ -270,6 +273,7 @@ impl ResourceThresholds {
             saturation_percent: 98,
             reclaim_backoff_ms: 1000,
             reclaim_backoff_max_ms: 30_000,
+            admission_usage_window_s: 60,
         }
     }
 
@@ -585,13 +589,13 @@ pub fn plan_step(
     {
         return decision;
     }
-    // While nothing is contended, a held cap rises toward what the mode allows now,
-    // one move per scale-up interval, and a pause becomes such a cap.
+    // While nothing is contended, a held cap or hint rises toward what the mode
+    // allows now, one move per scale-up interval, and a pause becomes such a cap.
     if let Some(allowed) = input.target
         && since_change >= timing.dwell_ms.max(timing.scale_up_ms)
     {
         let raise = match current {
-            YieldStep::Cap => held.target.is_some_and(|target| allowed > target),
+            YieldStep::Cap | YieldStep::Hint => held.target.is_some_and(|target| allowed > target),
             YieldStep::Pause => {
                 allowed > 0
                     && input.applies(YieldStep::Cap)
@@ -600,7 +604,9 @@ pub fn plan_step(
             _ => false,
         };
         if raise {
-            held.step = YieldStep::Cap;
+            if current == YieldStep::Pause {
+                held.step = YieldStep::Cap;
+            }
             held.target = Some(allowed);
             held.entered_at_ms = now_ms;
             held.calm_since_ms = None;

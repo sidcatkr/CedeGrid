@@ -140,7 +140,10 @@ mod ladder {
         assert_eq!(changes, [(0, YieldStep::Cap)]);
         assert_eq!(state.unwrap().target, Some(4000));
         let (_, changes) = run(None, &timing, 0..40, at(false));
-        assert_eq!(changes[..2], [(0, YieldStep::Cap), (5000, YieldStep::Pause)]);
+        assert_eq!(
+            changes[..2],
+            [(0, YieldStep::Cap), (5000, YieldStep::Pause)]
+        );
     }
 
     #[test]
@@ -633,6 +636,21 @@ mod neutral {
             principal(Some(2000), 6000),
         ]);
         assert_eq!(allowance(&view), 3500);
+    }
+
+    /// A principal in its leave window uses little: max-min hands what it does not
+    /// use to the others (FR-059, FR-021).
+    #[test]
+    fn a_leaving_principals_unused_share_is_redistributed() {
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 9000, 4500);
+        view.saturated = true;
+        view.principals = Some(vec![
+            principal(Some(1000), 0),
+            principal(Some(2000), 4500),
+            principal(Some(2001), 0),
+        ]);
+        // 2001 is still a member but uses nothing: own work and 2000 split 9000.
+        assert_eq!(allowance(&view), 4500);
     }
 
     #[test]

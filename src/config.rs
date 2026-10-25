@@ -635,6 +635,8 @@ pub struct ResourceContentionConfig {
     pub reclaim_backoff_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_backoff_max_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_usage_window_s: Option<u64>,
 }
 
 impl ContentionConfig {
@@ -723,6 +725,9 @@ impl ContentionConfig {
             reclaim_backoff_max_ms: set
                 .reclaim_backoff_max_ms
                 .unwrap_or(defaults.reclaim_backoff_max_ms),
+            admission_usage_window_s: set
+                .admission_usage_window_s
+                .unwrap_or(defaults.admission_usage_window_s),
         }
     }
 
@@ -879,6 +884,11 @@ impl ContentionConfig {
                 &[Cpu, GpuCompute],
                 set.saturation_percent.is_some(),
             )?;
+            applies(
+                "admission_usage_window_s",
+                &[Cpu],
+                set.admission_usage_window_s.is_some(),
+            )?;
             for (field, present) in [
                 ("memory_peak_window_s", set.memory_peak_window_s.is_some()),
                 ("reclaim_backoff_ms", set.reclaim_backoff_ms.is_some()),
@@ -994,6 +1004,10 @@ impl ContentionConfig {
             ensure!(
                 t.noise_tolerance_mib <= 1024,
                 "contention.{name}.noise_tolerance_mib must be at most 1024"
+            );
+            ensure!(
+                (1..=3600).contains(&t.admission_usage_window_s),
+                "contention.{name}.admission_usage_window_s must be between 1 and 3600"
             );
             ensure!(
                 t.guaranteed_breach_window_s <= 60,
@@ -1233,6 +1247,7 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ("contention.*.min_step_dwell_intervals", Bounded),
         ("contention.*.pause_bound_s", Bounded),
         ("contention.*.reclaim_s", Bounded),
+        ("contention.*.admission_usage_window_s", Bounded),
         ("contention.*.unknown_window_intervals", Bounded),
         ("contention.*.yield_first_response_intervals", Bounded),
         // A held cap rises only toward the mode's target, however fast.

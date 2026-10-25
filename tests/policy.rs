@@ -149,7 +149,7 @@ fn scoped_observed_usage_and_reservations_are_not_double_charged() {
         .evaluate(&config(), &snap, &input, 0)
         .unwrap();
     assert_eq!(decision.managed_budget.cpu_millicores, 2750);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 1750);
+    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
 }
 
 #[test]
@@ -608,7 +608,8 @@ fn running_reservation_and_observation_are_charged_once() {
         .unwrap();
     // CPU external = 2000 - 1000, SMT reserve = 2000, larger than the 800 Neutral margin, budget = 5000.
     assert_eq!(decision.managed_budget.cpu_millicores, 5000);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 2000);
+    // Running opportunistic CPU is charged at its usage, not its request.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 4000);
     // Used RAM 6000 - own 4000 = external 2000; budget 29000 - charge 5000.
     assert_eq!(decision.managed_budget.ram_mib, 29_000);
     assert_eq!(decision.admission_headroom.ram_mib, 24_000);
@@ -692,8 +693,8 @@ fn existing_drain_does_not_trigger_unnecessary_additional_drain() {
         .evaluate(&config(), &snapshot(), &input, 0)
         .unwrap();
     assert!(decision.would_drain.is_empty());
-    assert!(!decision.expansion_allowed);
-    assert_eq!(decision.admission_headroom.cpu_millicores, 0);
+    // The draining 3000m stay charged; the idle running one is charged at its usage.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 1000);
 }
 
 #[test]
@@ -1359,7 +1360,9 @@ proptest! {
         let decision = PolicyEngine::new().evaluate(&config(), &snap, &input, 0).unwrap();
         let budget = 6000 - external;
         prop_assert_eq!(decision.managed_budget.cpu_millicores, budget);
-        prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget - reserved.max(observed));
+        // Running opportunistic CPU is charged at its usage, whatever it reserved.
+        let _ = reserved;
+        prop_assert_eq!(decision.admission_headroom.cpu_millicores, budget - observed);
     }
 
     #[test]
@@ -2914,6 +2917,115 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
         decision.unwrap().resources[&cedegrid::contention::ResourceKey::Cpu].target_share,
         Some(3500)
     );
+}
+
+/// Repeated memory reclaim lengthens the RAM cooldown by backoff, and five quiet
+/// minutes reset it (FR-061).
+#[test]
+fn reclaim_backoff_doubles_and_resets_after_a_quiet_period() {
+    let mut engine = PolicyEngine::new();
+    // The job's own growth breaches the floor, so no external peak holds
+    // admission; 2000 MiB stay external throughout.
+    let mut evaluate = |job: u64, now: u64| {
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(0, 4000, 0),
+                Some(resources(0, job, 0)),
+            )],
+            facts: BTreeMap::from([(
+                "job".into(),
+                AllocationFacts {
+                    hint_ready: true,
+                    observes_drain: true,
+                    ..AllocationFacts::default()
+                },
+            )]),
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(32_000 - 2000 - job);
+        engine.evaluate(&config(), &snap, &input, now).unwrap()
+    };
+    // How long RAM admission stays closed after a breach that starts at `start`
+    // and clears half a second later.
+    let mut cycle = |start: u64| -> u64 {
+        assert!(
+            !evaluate(29_300, start).actions.is_empty(),
+            "no reclaim at {start}"
+        );
+        let cleared = start + 500;
+        let mut now = cleared;
+        while evaluate(4000, now).admission_headroom.ram_mib == 0 {
+            now += 500;
+            assert!(now < start + 60_000, "closed since {start}");
+        }
+        now - cleared
+    };
+    assert_eq!(cycle(0), 1000);
+    assert_eq!(cycle(60_000), 2000);
+    assert_eq!(cycle(120_000), 4000);
+    // Five quiet minutes after the last episode reset it.
+    assert_eq!(cycle(120_000 + 300_000 + 5000), 1000);
+}
+
+/// CPU admission charges running opportunistic work at its p95 usage over the
+/// admission window, not its request; pending and Guaranteed work keep their
+/// requests.
+#[test]
+fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
+    let mut guaranteed = allocation(
+        "guaranteed",
+        AllocationPhase::Running,
+        resources(1000, 0, 0),
+        Some(resources(500, 0, 0)),
+    );
+    guaranteed.class = AllocationClass::Guaranteed;
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |usage: u64, now: u64| {
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "opportunistic",
+                    AllocationPhase::Running,
+                    resources(4000, 0, 0),
+                    Some(resources(usage, 0, 0)),
+                ),
+                guaranteed.clone(),
+                allocation(
+                    "pending",
+                    AllocationPhase::Pending,
+                    resources(500, 0, 0),
+                    None,
+                ),
+            ],
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        // 500m external on 8000m with a 2000m reserve: a 5500m budget.
+        snap.cpu_busy_millicores = Some(usage + 500 + 500);
+        engine
+            .evaluate(&config(), &snap, &input, now)
+            .unwrap()
+            .admission_headroom
+            .cpu_millicores
+    };
+    // Charges: the opportunistic usage, the Guaranteed request and the pending one.
+    let mut now = 0;
+    while now < 30_000 {
+        assert_eq!(headroom(1000, now), 5500 - 1000 - 1000 - 500, "at {now}");
+        now += 500;
+    }
+    // More than 5% of the window at 3000m sets the p95.
+    for _ in 0..10 {
+        headroom(3000, now);
+        now += 500;
+    }
+    assert_eq!(headroom(1000, now), 5500 - 3000 - 1000 - 500);
+    // Once those samples leave the 60 s window, the charge falls with usage.
+    now += 60_500;
+    assert_eq!(headroom(500, now), 5500 - 500 - 1000 - 500);
 }
 
 /// Admission headroom for memory uses the external peak over the peak window,
