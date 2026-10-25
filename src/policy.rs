@@ -2403,7 +2403,7 @@ impl PolicyEngine {
         // The allowance (FR-071): what each running allocation may grow to now
         // without causing a step. Its usage plus an equal part of the room under
         // the mode's allowance after pending reservations, less one publish
-        // threshold each, so values a small fall leaves published stay within it.
+        // threshold in total, which covers the falls left unpublished.
         let mut allowances: BTreeMap<String, ResourceAmounts> = BTreeMap::new();
         let mut allowance_published = BTreeMap::new();
         {
@@ -2502,8 +2502,9 @@ impl PolicyEngine {
                 let scale_up_ms = thresholds.scale_up_interval_s(mode).saturating_mul(1000);
                 let share = mode_allowance
                     .saturating_sub(taken)
-                    .saturating_sub(threshold.saturating_mul(running.len() as u64))
+                    .saturating_sub(threshold)
                     / running.len() as u64;
+                let mut current = Vec::with_capacity(running.len());
                 for allocation in running {
                     // An unknown measurement invites no growth.
                     let mut value = if unknown {
@@ -2526,10 +2527,23 @@ impl PolicyEngine {
                     if guaranteed(allocation) {
                         value = value.max(pick(&allocation.requested));
                     }
-                    let id = (allocation.id.clone(), key.clone());
+                    current.push((allocation.id.clone(), value));
+                }
+                // Falls publish together once their summed drift passes the one
+                // threshold; each rise is rate-limited on its own.
+                let drift = current
+                    .iter()
+                    .filter_map(|(id, value)| {
+                        self.allowance_published
+                            .get(&(id.clone(), key.clone()))
+                            .map(|(previous, _)| previous.saturating_sub(*value))
+                    })
+                    .fold(0u64, u64::saturating_add);
+                for (allocation_id, value) in current {
+                    let id = (allocation_id.clone(), key.clone());
                     let published = match self.allowance_published.get(&id).copied() {
                         None => (value, now_monotonic_ms),
-                        Some((previous, _)) if value + threshold < previous => {
+                        Some((previous, _)) if value < previous && drift > threshold => {
                             (value, now_monotonic_ms)
                         }
                         Some((previous, rose_at))
@@ -2541,7 +2555,7 @@ impl PolicyEngine {
                         Some(kept) => kept,
                     };
                     allowance_published.insert(id, published);
-                    let amounts = allowances.entry(allocation.id.clone()).or_default();
+                    let amounts = allowances.entry(allocation_id).or_default();
                     match &key {
                         ResourceKey::Cpu => amounts.cpu_millicores = Some(published.0),
                         ResourceKey::Ram => amounts.ram_mib = Some(published.0),

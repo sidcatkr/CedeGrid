@@ -3852,6 +3852,11 @@ mod allowance {
         snap
     }
 
+    fn facts(jobs: &[Allocation]) -> BTreeMap<String, AllocationFacts> {
+        let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+        rootless(&ids)
+    }
+
     fn evaluate(mode: ContentionMode, jobs: Vec<Allocation>, external: (u64, u64)) -> Decision {
         let snap = host(&jobs, external.0, external.1);
         PolicyEngine::new()
@@ -3859,8 +3864,8 @@ mod allowance {
                 &cfg(mode),
                 &snap,
                 &PolicyInput {
+                    facts: facts(&jobs),
                     allocations: jobs,
-                    facts: rootless(&["a", "b", "c", "d"]),
                     ..PolicyInput::default()
                 },
                 0,
@@ -3874,21 +3879,20 @@ mod allowance {
         /// same state Yield First <= Neutral <= Performance per allocation.
         #[test]
         fn growing_to_every_allowance_at_once_stays_within_the_mode(
-            usages in proptest::collection::vec((0u64..2500, 0u64..6000, any::<bool>()), 1..4),
+            usages in proptest::collection::vec((0u64..250, 0u64..800, any::<bool>()), 1..=32),
             pending in 0u64..1500,
             external_cpu in 0u64..2500,
             external_ram in 0u64..6000,
         ) {
-            let ids = ["a", "b", "c", "d"];
             let mut jobs: Vec<Allocation> = usages
                 .iter()
                 .enumerate()
                 .map(|(i, (cpu, ram, guaranteed))| {
                     let class = if *guaranteed { AllocationClass::Guaranteed } else { AllocationClass::Opportunistic };
-                    job(ids[i], *cpu, *ram, class)
+                    job(&format!("job-{i}"), *cpu, *ram, class)
                 })
                 .collect();
-            jobs.push(allocation("d", AllocationPhase::Pending, resources(pending, pending, 0), None));
+            jobs.push(allocation("pending", AllocationPhase::Pending, resources(pending, pending, 0), None));
             let mut previous: Option<BTreeMap<String, ResourceAmounts>> = None;
             for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral, ContentionMode::Performance] {
                 let decision = evaluate(mode, jobs.clone(), (external_cpu, external_ram));
@@ -3950,11 +3954,11 @@ mod allowance {
         let budget = &decision.managed_budget;
         let a = &decision.allowances["a"];
         let b = &decision.allowances["b"];
-        // The room is shared equally, less one publish threshold per allocation.
-        let cpu_room = budget.cpu_millicores - 1500 - 2 * 80;
+        // The room, less one publish threshold in total, is shared equally.
+        let cpu_room = budget.cpu_millicores - 1500 - 80;
         assert_eq!(a.cpu_millicores, Some(1000 + cpu_room / 2));
         assert_eq!(b.cpu_millicores, Some(500 + cpu_room / 2));
-        let ram_room = budget.ram_mib - 3000 - 2 * 256;
+        let ram_room = budget.ram_mib - 3000 - 256;
         assert_eq!(a.ram_mib, Some(2000 + ram_room / 2));
         // A Guaranteed allocation using less than its request keeps the request.
         let mut guaranteed = job("c", 100, 100, AllocationClass::Guaranteed);
@@ -4037,6 +4041,55 @@ mod allowance {
         assert!(
             rises.windows(2).all(|w| w[1].0 - w[0].0 >= 10_000),
             "{rises:?}"
+        );
+    }
+
+    /// The reserve is one publish threshold in total: small falls on eight
+    /// allocations that drift less than one threshold in sum publish nothing, and
+    /// the fall that passes it publishes every stale allocation at once.
+    #[test]
+    fn small_falls_publish_once_their_sum_passes_one_threshold() {
+        let cfg = cfg(ContentionMode::Neutral);
+        let mut engine = PolicyEngine::new();
+        let jobs: Vec<Allocation> = (0..8)
+            .map(|i| {
+                job(
+                    &format!("job-{i}"),
+                    200,
+                    1000,
+                    AllocationClass::Opportunistic,
+                )
+            })
+            .collect();
+        let mut run = |external: u64, now: u64| -> Vec<u64> {
+            let snap = host(&jobs, external, 0);
+            let decision = engine
+                .evaluate(
+                    &cfg,
+                    &snap,
+                    &PolicyInput {
+                        facts: facts(&jobs),
+                        allocations: jobs.clone(),
+                        ..PolicyInput::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            jobs.iter()
+                .map(|j| decision.allowances[&j.id].cpu_millicores.unwrap())
+                .collect()
+        };
+        let first = run(0, 0);
+        // External CPU grows 32m at a time: each allowance falls 4m.
+        assert_eq!(run(32, 500), first, "a 32m drift publishes nothing");
+        assert_eq!(run(64, 1000), first, "a 64m drift publishes nothing");
+        let fallen = run(96, 1500);
+        assert!(
+            fallen
+                .iter()
+                .zip(&first)
+                .all(|(now, before)| now + 12 == *before),
+            "a 96m drift publishes every stale allocation: {first:?} -> {fallen:?}"
         );
     }
 

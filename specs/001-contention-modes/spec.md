@@ -917,8 +917,9 @@ node reports with the expected per-resource values at each step.
 - **FR-071**: The resource-target file MUST carry an optional `allowance` per resource (CPU,
   RAM, each GPU's memory): what the allocation may grow to now without causing a step, with its
   own `allowance_sequence`. If every running allocation grows to its allowance at once, the
-  totals MUST stay within the mode's allowance, apart from what running work already holds; a
-  fall MUST publish at once and a rise at most one scale-up step per scale-up interval. Both
+  totals MUST stay within the mode's allowance, apart from what running work already holds;
+  falls MUST publish once their summed drift passes one publish threshold, the only reserve, and
+  a rise at most one scale-up step per scale-up interval. Both
   SDKs MUST offer `on_resource_allowance`, which an allowance-only change calls instead of the
   target callback. Workers that ignore it keep working.
 

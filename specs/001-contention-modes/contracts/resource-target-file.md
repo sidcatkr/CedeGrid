@@ -39,18 +39,19 @@ fsync, and renaming it over the target.
   allowance-only rewrite keeps `sequence`, `step`, `targets` and `deadline_unix_ms`. Readers
   that do not know the keys ignore them (FR-071). The policy sets it as follows:
   - its usage, plus its equal part of the room under the mode's allowance after pending
-    reservations, shared over the running allocations on that resource, less one publish
-    threshold each; the mode's allowance is `own_allowance` for CPU, and for RAM and GPU memory
+    reservations, less one publish threshold in total, shared over the running allocations on
+    that resource; the mode's allowance is `own_allowance` for CPU, and for RAM and GPU memory
     the budget above the floor, less Yield First's margin;
   - at most its cap or hint target while one applies, and its usage while paused;
   - at most the operator envelope; for Guaranteed work, never below the request;
   - only its current usage while the resource's measurement is unknown.
 
   If every running allocation grows to its allowance at once, the totals stay within the mode's
-  allowance, apart from what running work already holds. A fall publishes at once; a rise at
-  most once per scale-up interval, by at most one scale-up step (the mode's margin of
-  capacity); only a change beyond the contention floor (CPU) or `noise_tolerance_mib` (memory)
-  publishes.
+  allowance, apart from what running work already holds. The threshold is the contention floor
+  (CPU) or `noise_tolerance_mib` (memory). Falls publish together, at once, when the sum over
+  the allocations of their published values above their current allowances passes one
+  threshold. A rise publishes at most once per scale-up interval, by at most one scale-up step
+  (the mode's margin of capacity), and only beyond one threshold.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
   `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
   shows that the worker can read hints; the supervisor reports it as `hint_ready`, and
