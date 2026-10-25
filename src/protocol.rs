@@ -179,7 +179,7 @@ pub struct ResourceContentionReport {
     /// Allocations at each yield step above none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub step_summary: BTreeMap<crate::contention::YieldStep, u32>,
-    /// What the resource holds back and why (SC-U3).
+    /// What the resource holds back and why (SC-016).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_back: Option<crate::model::HeldBack>,
 }

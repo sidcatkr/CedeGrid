@@ -418,7 +418,7 @@ pub struct ResourceStatus {
 }
 
 /// What a resource keeps from own work or from admission, and why, in resource
-/// units (SC-U3). Zero amounts are left out.
+/// units (SC-016). Zero amounts are left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HeldBack {

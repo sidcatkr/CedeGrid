@@ -104,6 +104,18 @@
       "error": "ERR_CEDEGRID_CONFIG"
     },
     {
+      "id": "CFG-07-noise-tolerance-bound",
+      "kind": "node",
+      "toml": "config_version = 1\n[contention]\nacknowledge_caution = [\"relaxed_detection\"]\n[contention.gpu_memory]\nnoise_tolerance_mib = 1025\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
+      "id": "CFG-07-monitor-interval-bound",
+      "kind": "node",
+      "toml": "config_version = 1\n[monitor]\ninterval_ms = 10001\n",
+      "error": "ERR_CEDEGRID_CONFIG"
+    },
+    {
       "id": "CFG-07-reduced-margin-unacknowledged",
       "kind": "node",
       "toml": "config_version = 1\n[contention.cpu]\nneutral_margin_percent = 3\n",

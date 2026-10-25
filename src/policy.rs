@@ -1,7 +1,8 @@
 //! Deterministic, effect-free admission and yielding recommendations.
 //!
 //! For admission, running/draining allocations are charged max(reservation,
-//! observed), dimension by dimension, and pending reservations in full. Yielding
+//! observed), dimension by dimension, except running opportunistic CPU at its p95
+//! usage over the admission window, and pending reservations in full. Yielding
 //! judges running work on what it holds: CPU and RAM usage, and GPU memory usage
 //! for work that takes a hint. GPU utilization is auxiliary telemetry and is
 //! deliberately never a predicate for contention.
@@ -10,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    LadderInput, LadderTiming, Measurement, ModeInput, Principal, ResourceKey, ResourceKind,
-    StepState, VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
-    victim_order,
+    Admission, LadderInput, LadderTiming, Measurement, ModeInput, Principal, ResourceKey,
+    ResourceKind, StepState, VictimFacts, YieldCause, YieldStep, guaranteed_may_drain,
+    own_allowance, plan_step, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -884,6 +885,8 @@ impl PolicyEngine {
             value.stable_since = None;
         }
         let mut blocked_gpus = BTreeSet::new();
+        // Why GPU admission is blocked on a device, for its admission state.
+        let mut gpu_block_reasons: BTreeMap<String, String> = BTreeMap::new();
         if snapshot.gpu_inventory != CapabilityStatus::Available {
             reasons.push(format!(
                 "GPU inventory {:?}; GPU admission blocked, CPU-only capacity remains eligible",
@@ -1009,6 +1012,22 @@ impl PolicyEngine {
                 // budget breach.
                 let full_yield = non_sharing_conflict
                     || mode == Some(GpuExecutionCapability::InsufficientObservability);
+                let block_reason = if full_yield {
+                    Some("the non-sharing contract or missing observation applies")
+                } else if unknown {
+                    Some("external activity or memory attribution is unknown")
+                } else if protection_event {
+                    Some("a new external workload or external memory growth appeared")
+                } else if active {
+                    Some("external compute is active")
+                } else if breached {
+                    Some("own charges exceed the device budget")
+                } else {
+                    None
+                };
+                if let Some(reason) = block_reason {
+                    gpu_block_reasons.insert(gpu.uuid.clone(), reason.into());
+                }
                 if full_yield {
                     blocked_gpus.insert(gpu.uuid.clone());
                     unsafe_now = true;
@@ -1836,7 +1855,7 @@ impl PolicyEngine {
                 reasons.push("stable-capacity cooldown has not elapsed".into());
             }
         }
-        // What each resource holds back and why (SC-U3).
+        // What each resource holds back and why (SC-016).
         let shortfall = |pick: &dyn Fn(&Resources) -> u64, ready_only: bool| -> u64 {
             input
                 .allocations
@@ -1967,6 +1986,85 @@ impl PolicyEngine {
         }
         for (key, held) in held_back {
             statuses.entry(key).or_default().held_back = Some(held);
+        }
+        // Admission per resource: blocked until its cause changes, held while it
+        // waits for a measurement or a cooldown (FR-028, FR-038).
+        let stepped = |key: &ResourceKey| {
+            ladder
+                .iter()
+                .any(|((_, k), state)| k == key && state.step > YieldStep::None)
+        };
+        let blocked = |reason: &str| Admission::Blocked {
+            reason: reason.into(),
+        };
+        let held = |reason: &str| Admission::Held {
+            reason: reason.into(),
+        };
+        let admission = |key: &ResourceKey,
+                         unknown: bool,
+                         gpu_reason: Option<&String>,
+                         cooled_down: bool,
+                         backed_off: bool| {
+            if input.explicit_drain {
+                blocked("the node is draining")
+            } else if input.spool_full {
+                blocked("the node spool budget is exhausted")
+            } else if breached.contains(key) {
+                blocked("the floor is breached")
+            } else if unknown {
+                held("the measurement is unknown")
+            } else if let Some(reason) = gpu_reason {
+                held(reason)
+            } else if stepped(key) {
+                blocked("own work on this resource is yielding")
+            } else if !cooled_down {
+                held("the resource is cooling down")
+            } else if !backed_off {
+                held("the reclaim backoff applies")
+            } else {
+                Admission::Open
+            }
+        };
+        let mut admissions = vec![
+            (
+                ResourceKey::Cpu,
+                admission(
+                    &ResourceKey::Cpu,
+                    cpu_unknown || cpu_held,
+                    None,
+                    cpu_allowed,
+                    true,
+                ),
+            ),
+            (
+                ResourceKey::Ram,
+                admission(
+                    &ResourceKey::Ram,
+                    ram_unknown || ram_held,
+                    None,
+                    cooled(ram_stable_since, ResourceKind::Ram, 0),
+                    ram_allowed,
+                ),
+            ),
+        ];
+        for gpu in &snapshot.gpus {
+            let key = ResourceKey::GpuMemory(gpu.uuid.clone());
+            let elapsed = next_gpus
+                .get(&gpu.uuid)
+                .and_then(|p| p.stable_since)
+                .map(|since| now_monotonic_ms - since);
+            let cooldown = config.gpu.scale_up_cooldown_ms;
+            let state = admission(
+                &key,
+                false,
+                gpu_block_reasons.get(&gpu.uuid),
+                elapsed.is_some_and(|ms| ms >= cooldown),
+                elapsed.is_some_and(|ms| ms >= cooldown.saturating_add(backoff_ms(&key))),
+            );
+            admissions.push((key, state));
+        }
+        for (key, state) in admissions {
+            statuses.entry(key).or_default().admission = Some(state);
         }
         self.last_now = Some(now_monotonic_ms);
         self.node_id = Some(snapshot.node_id.clone());

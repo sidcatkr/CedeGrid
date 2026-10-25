@@ -2920,7 +2920,7 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
 }
 
 /// Decisions show, per resource, how much is held back from own work and why,
-/// for `doctor` and `status` (SC-U3).
+/// for `doctor` and `status` (SC-016).
 #[test]
 fn decisions_show_what_each_resource_holds_back_and_why() {
     use cedegrid::contention::ResourceKey;
@@ -2949,6 +2949,74 @@ fn decisions_show_what_each_resource_holds_back_and_why() {
     assert_eq!(ram.charge_shortfall, 1000, "{ram:?}");
     assert_eq!(ram.cooldown, 24_000, "{ram:?}");
     assert_eq!(ram.unknown, 0, "{ram:?}");
+}
+
+/// Each resource reports its admission: open, held while it waits for a
+/// measurement or a cooldown, or blocked while own work on it yields or its floor
+/// is breached (FR-028, FR-038).
+#[test]
+fn each_resource_reports_its_admission() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let admission =
+        |decision: &Decision, key: ResourceKey| decision.resources[&key].admission.clone().unwrap();
+    let calm = PolicyEngine::new()
+        .evaluate(&config(), &snapshot(), &PolicyInput::default(), 0)
+        .unwrap();
+    assert_eq!(admission(&calm, ResourceKey::Cpu), Admission::Open);
+    assert_eq!(admission(&calm, ResourceKey::Ram), Admission::Open);
+    // Own work above its CPU allowance is capped: CPU admission is blocked.
+    let mut busy = snapshot();
+    busy.cpu_busy_millicores = Some(8000);
+    let stepped = PolicyEngine::new()
+        .evaluate(
+            &config(),
+            &busy,
+            &PolicyInput {
+                allocations: vec![allocation(
+                    "job",
+                    AllocationPhase::Running,
+                    resources(1000, 0, 0),
+                    Some(resources(7000, 0, 0)),
+                )],
+                facts: rootless(&["job"]),
+                ..PolicyInput::default()
+            },
+            0,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            admission(&stepped, ResourceKey::Cpu),
+            Admission::Blocked { .. }
+        ),
+        "{:?}",
+        stepped.resources[&ResourceKey::Cpu]
+    );
+    // A breached RAM floor blocks RAM admission; unknown CPU telemetry holds CPU.
+    let mut breached = snapshot();
+    breached.available_ram_mib = Some(700);
+    breached.cpu_busy_millicores = None;
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &breached, &PolicyInput::default(), 0)
+        .unwrap();
+    assert!(matches!(
+        admission(&decision, ResourceKey::Ram),
+        Admission::Blocked { .. }
+    ));
+    assert!(matches!(
+        admission(&decision, ResourceKey::Cpu),
+        Admission::Held { .. }
+    ));
+    // RAM waits for its cooldown.
+    let mut cfg = config();
+    cfg.contention.ram.scale_up_cooldown_ms = Some(10_000);
+    let cooling = PolicyEngine::new()
+        .evaluate(&cfg, &snapshot(), &PolicyInput::default(), 0)
+        .unwrap();
+    assert!(matches!(
+        admission(&cooling, ResourceKey::Ram),
+        Admission::Held { .. }
+    ));
 }
 
 /// Repeated memory reclaim lengthens the RAM cooldown by backoff, and five quiet

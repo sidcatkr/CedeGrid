@@ -4518,6 +4518,41 @@ mod negotiation_tests {
         }
     }
 
+    /// The node report carries every resource the decision reports, with its
+    /// admission and what it holds back.
+    #[test]
+    fn the_contention_report_carries_each_resource() {
+        let config = Config::default();
+        let snapshot = crate::model::Snapshot {
+            schema_version: crate::model::SCHEMA_VERSION,
+            node_id: config.node_id.clone(),
+            observed_at_unix_ms: 1,
+            cpu_capacity_millicores: 8000,
+            physical_cores: Some(4),
+            cpu_busy_millicores: Some(1000),
+            cpu_busy_lower_millicores: None,
+            total_ram_mib: 32_000,
+            available_ram_mib: Some(30_000),
+            gpu_inventory: crate::model::CapabilityStatus::Unsupported,
+            gpus: vec![],
+            capabilities: Default::default(),
+            kernel: None,
+            principals: None,
+            external_processes: None,
+        };
+        let decision = crate::policy::PolicyEngine::new()
+            .evaluate(&config, &snapshot, &Default::default(), 0)
+            .unwrap();
+        let report = node_contention_report(&config, &decision);
+        for key in [
+            crate::contention::ResourceKey::Cpu,
+            crate::contention::ResourceKey::Ram,
+        ] {
+            let resource = report.resources.get(&key).expect("resource missing");
+            assert!(resource.held_back.is_some(), "{key}");
+        }
+    }
+
     fn report() -> NodeReport {
         NodeReport {
             node_id: "node".into(),

@@ -70,7 +70,7 @@ fn shared_node_toml_contracts_execute() {
             assert!(!result.state_dir.exists());
         }
     }
-    assert_eq!(executed, 14);
+    assert_eq!(executed, 16);
 }
 
 #[test]

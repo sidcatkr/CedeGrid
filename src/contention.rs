@@ -794,9 +794,10 @@ pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
 
 /// What a mode lets own work hold on one resource this interval (FR-020 to
 /// FR-022, FR-065). On contended compute, Yield First takes opportunistic work to
-/// zero and Neutral and Performance hold the fair share. Otherwise each keeps its
-/// own margin free, 25%, 20% and 10% by default, validated as YF ≥ N ≥ P, so the
-/// targets are ordered YF ≤ N ≤ P on every resource.
+/// zero, Neutral holds the fair share and Performance keeps what external demand
+/// does not take, never less than the fair share. Otherwise each keeps its own
+/// margin free, 15%, 5% and 2% of compute by default, validated as YF ≥ N ≥ P, so
+/// the targets are ordered YF ≤ N ≤ P on every resource.
 /// Memory floors are already outside `capacity`, and memory keeps no margin
 /// beyond them except Yield First's.
 pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {

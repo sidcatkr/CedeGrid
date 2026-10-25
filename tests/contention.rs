@@ -1790,11 +1790,11 @@ mod scenarios {
         (total / intervals, changes, paused)
     }
 
-    /// SC-U2: beside a steady external user of 1.5% or 2%, own work keeps at least
+    /// SC-015: beside a steady external user of 1.5% or 2%, own work keeps at least
     /// 90% of capacity minus that user and the margin over 5 minutes, without cap
     /// or pause cycles.
     #[test]
-    fn sc_u2_a_steady_small_external_user_leaves_own_work_its_share() {
+    fn sc_015_a_steady_small_external_user_leaves_own_work_its_share() {
         for (mode, margin) in [
             (ContentionMode::YieldFirst, 15),
             (ContentionMode::Neutral, 5),
@@ -1812,11 +1812,11 @@ mod scenarios {
         }
     }
 
-    /// SC-U1: on an idle host own work uses at least 97% of the CPU in Performance,
+    /// SC-014: on an idle host own work uses at least 97% of the CPU in Performance,
     /// 94% in Neutral and 84% in Yield First, and memory within 1% of capacity
     /// minus the floor, minus Yield First's margin too.
     #[test]
-    fn sc_u1_own_work_uses_an_idle_host() {
+    fn sc_014_own_work_uses_an_idle_host() {
         use cedegrid::contention::{ModeInput, ResourceKind, own_allowance};
         for (mode, percent) in [
             (ContentionMode::YieldFirst, 84),
