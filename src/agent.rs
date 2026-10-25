@@ -2351,7 +2351,7 @@ fn node_contention_report(
         .collect();
     NodeContentionReport {
         resources,
-        exceptions: config.caution_options(),
+        exceptions: decision.exceptions.clone(),
         max_mode: Some(config.contention.max_mode()),
     }
 }

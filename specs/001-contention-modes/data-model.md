@@ -28,6 +28,7 @@ Serialization contracts are in [contracts/](contracts/).
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
 | `uid_min` | u32 | 1000 | FR-059 |
 | `principal_window_intervals` | u32 | 4 | ≥ 1 (FR-059) |
+| `principal_leave_s` | u64 | 60 | 1–3600; a principal leaves after this long below the threshold (FR-059) |
 | `never_share_occupied_gpus` | bool | false | FR-064 |
 | `[contention.<resource>]` | ResourceThresholds | per-resource defaults | Validation below |
 
@@ -35,7 +36,10 @@ Serialization contracts are in [contracts/](contracts/).
   explicit mode, with one warning per load for every value except `auto`. A non-empty
   `gpu.best_effort_external_processes` warns that the list is unused. `doctor` shows the
   interpretation.
-- Floors below the minimum (512 MiB host RAM, 256 MiB per GPU device) are raised to it with a
+- `gpu.reserve_vram_percent` (u8, default 5, 0–100) sets the per-device floor to at least that
+  share of the device. `Config::floors` reports each floor on the host: configured, minimum,
+  effective, near the minimum, confirmed and raised.
+- Floors below the minimum (512 MiB host RAM, 512 MiB per GPU device) are raised to it with a
   warning. A floor below twice its minimum is "near" it and, without `small_floor`, applies as
   twice the minimum.
 - A negative `cpu.nice` warns and is treated as 0 (R5).
@@ -81,7 +85,7 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - the owner is always a principal;
   - a user ID below `uid_min` is background;
   - a user ID at or above it is admitted after `principal_window_intervals` at or above
-    `principal_min_percent`, and leaves after the same window below half of it;
+    `principal_min_percent`, and leaves after `principal_leave_s` below it;
   - usage of user IDs not admitted yet, and of unreadable owners, forms the unattributed
     principal.
 

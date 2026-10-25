@@ -533,8 +533,10 @@ pub struct ContentionConfig {
     pub critical_hint_deadline_s: u64,
     /// User IDs below this are system accounts: background demand (FR-059).
     pub uid_min: u32,
-    /// Consecutive observations a user needs to join, or leave, the principals.
+    /// Consecutive observations a user needs to join the principals.
     pub principal_window_intervals: u32,
+    /// How long a principal's usage must stay below the threshold before it leaves.
+    pub principal_leave_s: u64,
     /// Never start own GPU work on a device with external contexts, in any mode
     /// (FR-064).
     pub never_share_occupied_gpus: bool,
@@ -557,6 +559,7 @@ impl Default for ContentionConfig {
             critical_hint_deadline_s: 1,
             uid_min: 1000,
             principal_window_intervals: 4,
+            principal_leave_s: 60,
             never_share_occupied_gpus: false,
             cpu: Default::default(),
             ram: Default::default(),
@@ -571,7 +574,7 @@ const ACKNOWLEDGEMENTS: [&str; 2] = ["performance_mode", "small_floor"];
 
 /// Floors are never smaller than these (FR-023).
 pub const MIN_RAM_FLOOR_MIB: u64 = 512;
-pub const MIN_VRAM_FLOOR_MIB: u64 = 256;
+pub const MIN_VRAM_FLOOR_MIB: u64 = 512;
 
 /// Settings an operator wrote for one resource; unset keys keep their defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -801,6 +804,10 @@ impl ContentionConfig {
             self.principal_window_intervals >= 1,
             "contention.principal_window_intervals must be at least 1"
         );
+        ensure!(
+            (1..=3600).contains(&self.principal_leave_s),
+            "contention.principal_leave_s must be between 1 and 3600"
+        );
         let shortest_hint = [Ram, GpuMemory]
             .into_iter()
             .map(|kind| self.thresholds(kind).hint_deadline_s)
@@ -1002,6 +1009,28 @@ impl ContentionConfig {
     }
 }
 
+/// One no-harm floor as it applies on a host (FR-023).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloorStatus {
+    /// The larger of the fixed and the percentage setting.
+    pub configured_mib: u64,
+    pub minimum_mib: u64,
+    pub effective_mib: u64,
+    /// Below twice the minimum: a caution option.
+    pub near_minimum: bool,
+    /// `acknowledge_caution` contains `small_floor`.
+    pub confirmed: bool,
+    /// Near the minimum and unconfirmed, so it applies as twice the minimum.
+    pub raised: bool,
+}
+
+/// Every floor on a host, as `doctor` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloorReport {
+    pub ram: FloorStatus,
+    pub gpus: std::collections::BTreeMap<String, FloorStatus>,
+}
+
 /// How a legacy GPU setting was read (FR-031).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LegacyGpu {
@@ -1103,6 +1132,8 @@ pub struct GpuConfig {
     /// gap discards buffered history before process activity can be trusted again.
     pub process_sample_max_age_ms: u64,
     pub reserve_vram_mib: u64,
+    /// The per-device floor is also at least this share of the device (FR-023).
+    pub reserve_vram_percent: u8,
     pub scale_up_cooldown_ms: u64,
     pub protective_shrink_percent: u8,
     pub active_shrink_percent: u8,
@@ -1114,6 +1145,7 @@ impl Default for GpuConfig {
             best_effort_external_processes: std::collections::BTreeMap::new(),
             process_sample_max_age_ms: 2000,
             reserve_vram_mib: 3072,
+            reserve_vram_percent: 5,
             scale_up_cooldown_ms: 30_000,
             protective_shrink_percent: 25,
             active_shrink_percent: 50,
@@ -1182,7 +1214,7 @@ impl Config {
         }
         if self.gpu.reserve_vram_mib < MIN_VRAM_FLOOR_MIB {
             warnings.push(format!(
-                "gpu.reserve_vram_mib = {} is below the {MIN_VRAM_FLOOR_MIB} MiB minimum floor; each GPU floor is {MIN_VRAM_FLOOR_MIB} MiB",
+                "gpu.reserve_vram_mib = {} is below the {MIN_VRAM_FLOOR_MIB} MiB minimum floor; each GPU floor is at least {MIN_VRAM_FLOOR_MIB} MiB",
                 self.gpu.reserve_vram_mib
             ));
         }
@@ -1257,39 +1289,89 @@ impl Config {
         }
     }
 
-    /// The RAM floor on a host with `total_mib` of RAM, never below the minimum.
-    pub fn ram_floor_mib(&self, total_mib: u64) -> u64 {
+    /// The RAM floor on a host with `total_mib` of RAM (FR-023).
+    pub fn ram_floor(&self, total_mib: u64) -> FloorStatus {
         let percent = total_mib
             .saturating_mul(u64::from(self.ram.reserve_percent))
             .div_ceil(100);
-        self.confirmed_floor(
-            self.ram.reserve_mib.max(percent).max(MIN_RAM_FLOOR_MIB),
-            MIN_RAM_FLOOR_MIB,
-        )
+        self.floor_status(self.ram.reserve_mib.max(percent), MIN_RAM_FLOOR_MIB)
     }
 
-    /// The per-device GPU memory floor, never below the minimum.
-    pub fn vram_floor_mib(&self) -> u64 {
-        self.confirmed_floor(
-            self.gpu.reserve_vram_mib.max(MIN_VRAM_FLOOR_MIB),
-            MIN_VRAM_FLOOR_MIB,
-        )
+    /// The floor on a GPU device with `total_mib` of memory (FR-023).
+    pub fn vram_floor(&self, total_mib: u64) -> FloorStatus {
+        let percent = total_mib
+            .saturating_mul(u64::from(self.gpu.reserve_vram_percent))
+            .div_ceil(100);
+        self.floor_status(self.gpu.reserve_vram_mib.max(percent), MIN_VRAM_FLOOR_MIB)
     }
 
-    /// A floor near its minimum is a caution option: without its acknowledgement
-    /// it is raised to twice the minimum, so it is never active unconfirmed.
-    fn confirmed_floor(&self, floor: u64, minimum: u64) -> u64 {
-        if self.contention.acknowledge_caution.contains("small_floor") {
-            floor
-        } else {
-            floor.max(2 * minimum)
+    pub fn ram_floor_mib(&self, total_mib: u64) -> u64 {
+        self.ram_floor(total_mib).effective_mib
+    }
+
+    pub fn vram_floor_mib(&self, total_mib: u64) -> u64 {
+        self.vram_floor(total_mib).effective_mib
+    }
+
+    /// A floor never goes below its minimum. Near the minimum it is a caution
+    /// option: without its acknowledgement it applies as twice the minimum, so it
+    /// is never active unconfirmed.
+    fn floor_status(&self, configured_mib: u64, minimum_mib: u64) -> FloorStatus {
+        let floor = configured_mib.max(minimum_mib);
+        let near_minimum = floor < 2 * minimum_mib;
+        let confirmed = self.contention.acknowledge_caution.contains("small_floor");
+        FloorStatus {
+            configured_mib,
+            minimum_mib,
+            effective_mib: if near_minimum && !confirmed {
+                2 * minimum_mib
+            } else {
+                floor
+            },
+            near_minimum,
+            confirmed,
+            raised: near_minimum && !confirmed,
         }
     }
 
-    /// A floor below twice its minimum, judged from the settings alone.
+    /// Every floor as it applies on the observed host, for `doctor` and reports.
+    pub fn floors(&self, snapshot: &crate::model::Snapshot) -> FloorReport {
+        FloorReport {
+            ram: self.ram_floor(snapshot.total_ram_mib),
+            gpus: snapshot
+                .gpus
+                .iter()
+                .map(|gpu| (gpu.uuid.clone(), self.vram_floor(gpu.total_memory_mib)))
+                .collect(),
+        }
+    }
+
+    /// A floor below twice its minimum, judged from the settings alone; floors set
+    /// by a percentage are judged on the host by [`Config::floors`].
     fn small_floor(&self) -> bool {
         (self.ram.reserve_percent == 0 && self.ram.reserve_mib < 2 * MIN_RAM_FLOOR_MIB)
-            || self.gpu.reserve_vram_mib < 2 * MIN_VRAM_FLOOR_MIB
+            || (self.gpu.reserve_vram_percent == 0
+                && self.gpu.reserve_vram_mib < 2 * MIN_VRAM_FLOOR_MIB)
+    }
+
+    /// Active caution options on the observed host, with floors judged after their
+    /// percentages are applied (FR-043).
+    pub fn caution_options_on(
+        &self,
+        snapshot: &crate::model::Snapshot,
+    ) -> Vec<crate::model::ExceptionNotice> {
+        let floors = self.floors(snapshot);
+        let small = std::iter::once(&floors.ram)
+            .chain(floors.gpus.values())
+            .any(|floor| floor.near_minimum && floor.confirmed);
+        let mut result = self.caution_options();
+        if small && !result.iter().any(|option| option.name == "small_floor") {
+            result.push(crate::model::ExceptionNotice {
+                name: "small_floor".into(),
+                marker: crate::model::RiskMarker::Caution,
+            });
+        }
+        result
     }
 
     /// Active caution options with their markers (FR-043, FR-045).
@@ -1365,6 +1447,10 @@ impl Config {
         ensure!(
             self.ram.reserve_percent <= 100,
             "ram.reserve_percent must be between 0 and 100"
+        );
+        ensure!(
+            self.gpu.reserve_vram_percent <= 100,
+            "gpu.reserve_vram_percent must be between 0 and 100"
         );
         ensure!(
             self.gpu.process_sample_max_age_ms > 0,

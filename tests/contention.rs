@@ -14,6 +14,7 @@ pub fn config() -> Config {
         .acknowledge_caution
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
+    result.gpu.reserve_vram_percent = 0;
     result.gpu.scale_up_cooldown_ms = 0;
     result
 }
@@ -1151,6 +1152,28 @@ mod guaranteed_policy {
         // The critical path skips the window: the critical hint deadline, or at once.
         assert_eq!(drained(&|_| critical(), true, 3000), Some(1000));
         assert_eq!(drained(&|_| critical(), false, 3000), Some(0));
+    }
+
+    /// Even the longest RAM breach window never delays the critical path (FR-063).
+    #[test]
+    fn the_longest_ram_breach_window_is_skipped_in_the_critical_zone() {
+        let mut config = config();
+        config.contention.ram.guaranteed_breach_window_s = Some(60);
+        for (hint_ready, expected) in [(true, 1000), (false, 0)] {
+            let first = first_steps(
+                &config,
+                &|_| critical(),
+                vec![ram(
+                    "g",
+                    AllocationClass::Guaranteed,
+                    AllocationPhase::Running,
+                    8000,
+                )],
+                BTreeMap::from([("g".into(), ready(hint_ready, true))]),
+                3000,
+            );
+            assert_eq!(first.get(&("g".into(), YieldStep::Drain)), Some(&expected));
+        }
     }
 
     fn step(decision: &Decision, id: &str) -> Option<(YieldStep, YieldCause)> {

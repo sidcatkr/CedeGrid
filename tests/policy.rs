@@ -22,6 +22,7 @@ fn config() -> Config {
         .acknowledge_caution
         .insert("small_floor".into());
     result.gpu.reserve_vram_mib = 1000;
+    result.gpu.reserve_vram_percent = 0;
     result.gpu.scale_up_cooldown_ms = 0;
     scale_up_cooldowns(&mut result, 0);
     result
@@ -2789,16 +2790,22 @@ fn system_accounts_are_background_and_users_join_and_leave_after_a_window() {
     // After four observations each user is its own principal.
     // 5000m among three principals; the remainder goes to the owner.
     assert_eq!(share(owner(), &both, 1500), 1667);
-    // A short drop does not end membership.
+    // A drop shorter than the 60 s leave window does not end membership.
     let dropped = [(2001, 0), (2002, 0)];
-    share(owner(), &dropped, 2000);
-    share(owner(), &dropped, 2500);
-    assert_eq!(share(owner(), &both, 3000), 1667);
-    // Four observations below half the threshold do: back to one pooled principal.
-    for now in [3500, 4000, 4500, 5000] {
+    let mut now = 2000;
+    while now < 61_500 {
         share(owner(), &dropped, now);
+        now += 500;
     }
-    assert_eq!(share(owner(), &both, 5500), 2500);
+    assert_eq!(share(owner(), &both, now), 1667);
+    // 60 s below the threshold does: back to one pooled principal.
+    now += 500;
+    let left_at = now + 60_000;
+    while now <= left_at {
+        share(owner(), &dropped, now);
+        now += 500;
+    }
+    assert_eq!(share(owner(), &both, now), 2500);
     // The account CedeGrid runs as stays the owner principal below uid_min.
     let mut engine = PolicyEngine::new();
     let mut snap = snapshot();

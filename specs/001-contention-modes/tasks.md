@@ -619,7 +619,9 @@ context, under Neutral and Performance (quickstart §5).
   authorized Linux host with an NVIDIA device; commands in [native-gates.md](native-gates.md).*
   - run quickstart §5 on Linux + NVIDIA with `CEDEGRID_TEST_GPU_UUID` and an idle external
     context, including 100 consecutive launches on the shared device;
-  - record the evidence for SC-006 and the VRAM part of SC-001 in `docs/validation.md`.
+  - record the evidence for SC-006 and the VRAM part of SC-001 in `docs/validation.md`;
+  - measure the GPU memory a fresh external CUDA context takes on each target GPU, and raise
+    `MIN_VRAM_FLOOR_MIB` in `src/config.rs` (512 MiB, provisional) to at least the largest value.
 
 **Checkpoint**: GPU work no longer needs an empty device.
 

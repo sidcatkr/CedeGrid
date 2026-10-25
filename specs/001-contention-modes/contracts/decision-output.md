@@ -32,7 +32,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 | Command | Shows |
 |---|---|
 | `observe` | Per-resource `resources` from the decision for each sample, in the JSON output |
-| `doctor` | Configured and effective modes, floors and their minimums, active caution options with markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
+| `doctor` | Configured and effective modes, each floor on this host (`floors`: configured, minimum, effective, near the minimum, confirmed, raised), active caution options judged on this host, active caution options with markers, available actuation steps per resource, the interpretation of legacy GPU keys and their warnings |
 | `status` (operator, coordinator) | Per-node `contention` summary from negotiated node reports |
 
 ## Reason codes

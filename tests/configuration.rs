@@ -678,13 +678,13 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     let load = |body: &str| {
         Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location).unwrap()
     };
-    // Below the minimum, a floor is raised to it; near the minimum and unconfirmed,
-    // to twice the minimum, so a caution option is never active unconfirmed.
-    let small_floors =
-        "[ram]\nreserve_mib = 100\nreserve_percent = 0\n[gpu]\nreserve_vram_mib = 100";
+    // Below the minimum (512 MiB of RAM, 512 MiB per GPU), a floor is raised to it;
+    // near the minimum and unconfirmed, to twice the minimum, so a caution option is
+    // never active unconfirmed.
+    let small_floors = "[ram]\nreserve_mib = 100\nreserve_percent = 0\n[gpu]\nreserve_vram_mib = 100\nreserve_vram_percent = 0";
     let raised = load(small_floors);
     assert_eq!(raised.config.ram_floor_mib(32_000), 1024);
-    assert_eq!(raised.config.vram_floor_mib(), 512);
+    assert_eq!(raised.config.vram_floor_mib(16_000), 1024);
     let warned = |loaded: &cedegrid::config::LoadedConfig, words: &[&str]| {
         loaded
             .warnings
@@ -692,17 +692,18 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
             .any(|w| words.iter().all(|word| w.contains(word)))
     };
     assert!(warned(&raised, &["ram.reserve_mib", "512"]));
-    assert!(warned(&raised, &["gpu.reserve_vram_mib", "256"]));
+    assert!(warned(&raised, &["gpu.reserve_vram_mib", "512"]));
     assert!(warned(
         &raised,
         &["acknowledge_caution = [\"small_floor\"]"]
     ));
     assert!(raised.config.caution_options().is_empty());
+    assert!(raised.config.ram_floor(32_000).raised);
     let acknowledged = load(&format!(
         "{small_floors}\n[contention]\nacknowledge_caution = [\"small_floor\"]"
     ));
     assert_eq!(acknowledged.config.ram_floor_mib(32_000), 512);
-    assert_eq!(acknowledged.config.vram_floor_mib(), 256);
+    assert_eq!(acknowledged.config.vram_floor_mib(16_000), 512);
     assert!(!warned(
         &acknowledged,
         &["acknowledge_caution = [\"small_floor\"]"]
@@ -720,7 +721,58 @@ fn floors_are_raised_to_their_minimum_and_small_floors_warn() {
     // A percentage floor can exceed the minimum on a large host.
     let percent = load("[ram]\nreserve_mib = 0\nreserve_percent = 5");
     assert_eq!(percent.config.ram_floor_mib(32_000), 1600);
-    assert_eq!(Config::default().vram_floor_mib(), 3072);
+    // The default GPU floor is 3 GiB or 5% of the device, whichever is larger.
+    assert_eq!(Config::default().vram_floor_mib(16_000), 3072);
+    assert_eq!(Config::default().vram_floor_mib(81_920), 4096);
+    assert_eq!(Config::default().ram_floor_mib(64_000), 8192);
+}
+
+/// A floor sized by a percentage is judged on the host: near its minimum it is a
+/// caution option when confirmed and raised when not (FR-023, FR-043).
+#[test]
+fn a_percentage_floor_near_its_minimum_is_judged_on_the_host() {
+    use cedegrid::model::*;
+    let (_root, location) = node_location();
+    let load = |body: &str| {
+        Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location)
+            .unwrap()
+            .config
+    };
+    let snapshot = |total_ram_mib| Snapshot {
+        schema_version: SCHEMA_VERSION,
+        node_id: "local".into(),
+        observed_at_unix_ms: 1,
+        cpu_capacity_millicores: 8000,
+        physical_cores: Some(4),
+        cpu_busy_millicores: Some(0),
+        cpu_busy_lower_millicores: None,
+        total_ram_mib,
+        available_ram_mib: Some(total_ram_mib),
+        gpu_inventory: CapabilityStatus::Unsupported,
+        gpus: vec![],
+        capabilities: Default::default(),
+        kernel: None,
+        principals: None,
+    };
+    // 2% of 32000 MiB is 640 MiB: near the minimum.
+    let body = "[ram]\nreserve_mib = 0\nreserve_percent = 2";
+    let unconfirmed = load(body);
+    let floors = unconfirmed.floors(&snapshot(32_000));
+    assert!(floors.ram.near_minimum && floors.ram.raised);
+    assert_eq!(floors.ram.effective_mib, 1024);
+    assert!(unconfirmed.caution_options_on(&snapshot(32_000)).is_empty());
+    let confirmed = load(&format!(
+        "{body}\n[contention]\nacknowledge_caution = [\"small_floor\"]"
+    ));
+    assert_eq!(confirmed.floors(&snapshot(32_000)).ram.effective_mib, 640);
+    assert!(
+        confirmed
+            .caution_options_on(&snapshot(32_000))
+            .iter()
+            .any(|option| option.name == "small_floor")
+    );
+    // On a larger host the same setting is not near the minimum.
+    assert!(!confirmed.floors(&snapshot(128_000)).ram.near_minimum);
 }
 
 #[test]

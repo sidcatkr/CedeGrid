@@ -234,13 +234,14 @@ pub struct PolicyEngine {
     reclaiming: BTreeSet<ResourceKey>,
 }
 
-/// Consecutive observations of one user on one resource at or above the
-/// principal threshold, or below half of it (FR-059).
+/// One user's way into or out of the principals on one resource (FR-059):
+/// consecutive observations at or above the threshold, and since when it has been
+/// below it.
 #[derive(Debug, Clone, Copy, Default)]
 struct PrincipalCount {
     admitted: bool,
     above: u32,
-    below: u32,
+    below_since_ms: Option<u64>,
 }
 
 impl PolicyEngine {
@@ -576,6 +577,24 @@ impl PolicyEngine {
             reasons.push("CPU busy telemetry unavailable; CPU admission blocked".into());
         }
         let ram_reserve = config.ram_floor_mib(snapshot.total_ram_mib);
+        // An unconfirmed floor near its minimum applies as twice the minimum (FR-054).
+        let raised_note = |floor: &crate::config::FloorStatus, what: &str| {
+            format!(
+                "the {what} floor of {} MiB is near its {} MiB minimum and applies as {} MiB until acknowledge_caution confirms small_floor",
+                floor.configured_mib.max(floor.minimum_mib),
+                floor.minimum_mib,
+                floor.effective_mib
+            )
+        };
+        let ram_floor = config.ram_floor(snapshot.total_ram_mib);
+        if ram_floor.raised {
+            note(
+                &mut statuses,
+                ResourceKey::Ram,
+                "small_floor_raised",
+                raised_note(&ram_floor, "RAM"),
+            );
+        }
         // A floor breach is critical once free memory falls below this level, which
         // never goes below the minimum floor (FR-063).
         let critical_level = |floor: u64, minimum: u64| {
@@ -650,6 +669,7 @@ impl PolicyEngine {
             )) / 100)
                 .max(1);
             let window = config.contention.principal_window_intervals;
+            let leave_ms = config.contention.principal_leave_s.saturating_mul(1000);
             let mut members = Vec::new();
             let mut background = 0u64;
             let mut seen = BTreeSet::new();
@@ -672,7 +692,7 @@ impl PolicyEngine {
                             .get(&(key.clone(), uid))
                             .copied()
                             .unwrap_or_default();
-                        count.observe(usage, floor, window);
+                        count.observe(usage, floor, window, now_monotonic_ms, leave_ms);
                         if count.admitted {
                             members.push((principal, usage));
                         }
@@ -686,7 +706,7 @@ impl PolicyEngine {
             for ((k, uid), count) in &self.principal_counts {
                 if k == &key && count.admitted && !seen.contains(uid) {
                     let mut count = *count;
-                    count.observe(0, floor, window);
+                    count.observe(0, floor, window, now_monotonic_ms, leave_ms);
                     if count.admitted {
                         principal_counts.insert((key.clone(), *uid), count);
                     }
@@ -835,7 +855,7 @@ impl PolicyEngine {
                 let memory_budget = external
                     .map(|used| {
                         gpu.total_memory_mib
-                            .saturating_sub(config.vram_floor_mib())
+                            .saturating_sub(config.vram_floor_mib(gpu.total_memory_mib))
                             .saturating_sub(used)
                     })
                     .unwrap_or(0);
@@ -942,16 +962,27 @@ impl PolicyEngine {
                     if full_yield { 0 } else { memory_budget }
                 } else {
                     floor_available.insert(key.clone(), memory_budget);
+                    let vram_floor = config.vram_floor(gpu.total_memory_mib);
+                    if vram_floor.raised {
+                        note(
+                            &mut statuses,
+                            key.clone(),
+                            "small_floor_raised",
+                            raised_note(&vram_floor, "GPU memory"),
+                        );
+                    }
                     if gpu.used_memory_mib.is_some_and(|used| {
                         gpu.total_memory_mib.saturating_sub(used)
                             < critical_level(
-                                config.vram_floor_mib(),
+                                config.vram_floor_mib(gpu.total_memory_mib),
                                 crate::config::MIN_VRAM_FLOOR_MIB,
                             )
                     }) {
                         critical_keys.insert(key.clone());
                     }
-                    let capacity = gpu.total_memory_mib.saturating_sub(config.vram_floor_mib());
+                    let capacity = gpu
+                        .total_memory_mib
+                        .saturating_sub(config.vram_floor_mib(gpu.total_memory_mib));
                     let (members, background) = principals(key.clone(), capacity, &|p| {
                         p.gpu_memory_mib.get(&gpu.uuid).copied().unwrap_or(0)
                     });
@@ -1713,7 +1744,7 @@ impl PolicyEngine {
             reasons,
             resources: statuses,
             actions,
-            exceptions: config.caution_options(),
+            exceptions: config.caution_options_on(snapshot),
             allocation_modes,
             max_mode: Some(cap),
         })
@@ -1936,22 +1967,23 @@ fn first_charged_resource(charge: &Resources) -> ResourceKey {
 }
 
 impl PrincipalCount {
-    /// Count one observation; join after `window` at or above the threshold,
-    /// leave after `window` below half of it.
-    fn observe(&mut self, usage: u64, floor: u64, window: u32) {
+    /// Count one observation: join after `window` observations at or above the
+    /// threshold, leave after `leave_ms` below it.
+    fn observe(&mut self, usage: u64, floor: u64, window: u32, now_ms: u64, leave_ms: u64) {
         if usage >= floor {
             self.above = self.above.saturating_add(1);
-            self.below = 0;
-        } else if usage.saturating_mul(2) < floor {
-            self.below = self.below.saturating_add(1);
-            self.above = 0;
+            self.below_since_ms = None;
         } else {
             self.above = 0;
-            self.below = 0;
+            self.below_since_ms.get_or_insert(now_ms);
         }
         if !self.admitted && self.above >= window {
             self.admitted = true;
-        } else if self.admitted && self.below >= window {
+        } else if self.admitted
+            && self
+                .below_since_ms
+                .is_some_and(|since| now_ms.saturating_sub(since) >= leave_ms)
+        {
             *self = Self::default();
         }
     }

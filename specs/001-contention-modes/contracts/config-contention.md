@@ -14,7 +14,8 @@ guaranteed_hint_deadline_s = 5      # 1-30
 critical_floor_percent = 50         # a breach is critical below this share of the floor
 critical_hint_deadline_s = 1        # hint deadline on the critical path
 uid_min = 1000                      # lower user IDs are background demand
-principal_window_intervals = 4      # sustained intervals to join or leave as a principal
+principal_window_intervals = 4      # sustained intervals to join as a principal
+principal_leave_s = 60              # below the threshold this long, a principal leaves
 never_share_occupied_gpus = false   # true: no new own GPU work on devices with external contexts
 
 [contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
@@ -84,7 +85,8 @@ quiet_window_intervals = 20
   `contention.neutral_memory_policy = "b" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent and gpu.reserve_vram_mib`.
 - **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails with
   `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED`.
-- **Floors.** A floor below its minimum (512 MiB of RAM, 256 MiB per GPU) is raised to it with a
+- **Floors.** `gpu.reserve_vram_percent` (default 5) makes each GPU floor at least that share of
+  the device. A floor below its minimum (512 MiB of RAM, 512 MiB per GPU) is raised to it with a
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
   the minimum with a warning.
 - **Performance.** `max_mode = "performance"`, `default_mode = "performance"` or any

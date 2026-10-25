@@ -89,7 +89,7 @@ principal uses at least `principal_min_percent` of them, or when external activi
 unknown amount exists. Principals are the account CedeGrid runs as, whatever its UID,
 and users at or above `contention.uid_min` (1000) that have used at least
 `principal_min_percent` for `contention.principal_window_intervals` (4) observations;
-they leave after the same number of observations below half of it. Until a user
+they leave after `contention.principal_leave_s` (60 s) below it. Until a user
 joins, its usage counts toward one unattributed principal, together with processes
 whose owner cannot be read, so contention is seen at once. A host that mounts `/proc`
 with `hidepid=2` always takes this path for other accounts. Usage by lower UIDs is
@@ -142,8 +142,11 @@ once. An exhausted node spool budget blocks admission and is reported; nothing i
 because of it.
 
 No-harm floors hold in every mode: `ram.reserve_mib`/`ram.reserve_percent` of host
-RAM and `gpu.reserve_vram_mib` per GPU stay free, never less than 512 MiB of RAM and
-256 MiB per GPU. A smaller setting is raised to the minimum with a load-time warning.
+RAM and `gpu.reserve_vram_mib`/`gpu.reserve_vram_percent` per GPU stay free, by default
+max(8 GiB, 5% of RAM) and max(3 GiB, 5% of the device), never less than 512 MiB of RAM and
+512 MiB per GPU (provisional). A smaller setting is raised to the minimum with a load-time
+warning. `doctor` shows every floor as it applies on the host, and a raised floor carries
+the reason code `small_floor_raised`.
 Floors always come before the fair share. A breached floor blocks admission on that
 resource and releases opportunistic work holding it. Floor policy A, the only floor
 policy, then drains Guaranteed work that holds the memory, as the last step: after

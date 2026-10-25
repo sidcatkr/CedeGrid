@@ -620,7 +620,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "kernel_controls_applied": false,
                 "config_warnings": config_warnings,
                 "legacy_gpu": config.legacy_gpu(),
-                "caution_options": config.caution_options()
+                "floors": config.floors(&snapshot),
+                "caution_options": config.caution_options_on(&snapshot)
             }))?;
             ensure!(
                 role_admitted,

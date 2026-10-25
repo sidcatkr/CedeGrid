@@ -85,6 +85,9 @@ fn doctor_separates_selected_profile_from_requested_role_without_creating_state(
     assert_eq!(agent["legacy_gpu"]["execution_mode"], "auto");
     assert!(agent["legacy_gpu"]["interpretation"].is_string());
     assert!(agent["config_warnings"].is_array());
+    // Doctor shows each floor as it applies on this host.
+    assert!(agent["floors"]["ram"]["effective_mib"].as_u64().unwrap() >= 512);
+    assert!(agent["floors"]["ram"]["raised"].is_boolean());
     assert_eq!(agent["selected_profile_admitted"], true);
     assert_eq!(agent["role_admitted"], true);
     let coordinator = run(&path, &["doctor", "--role", "coordinator"]);

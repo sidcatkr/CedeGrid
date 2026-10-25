@@ -476,7 +476,7 @@ node reports with the expected per-resource values at each step.
 - **FR-059**: Principals MUST be the CedeGrid account plus user IDs at or above `uid_min`
   (default 1000) whose usage of a resource has stayed at or above `principal_min_percent` for
   `principal_window_intervals`. A principal MUST leave only after its usage has stayed below
-  half that threshold for the same window. Until then, a user's usage counts toward the single
+  that threshold for `principal_leave_s` (default 60 s). Until then, a user's usage counts toward the single
   unattributed principal, which unreadable owners share; that principal contends once its usage
   reaches `principal_min_percent`. Usage by user IDs below `uid_min` MUST count as background
   external demand: it is subtracted from capacity and never forms a principal.
@@ -567,8 +567,10 @@ node reports with the expected per-resource values at each step.
   - every own process, Guaranteed included, marked as a preferred out-of-memory victim where the
     platform allows an unprivileged process to mark itself.
 
-  Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 256 MiB
-  per GPU device). A smaller configured floor is raised to the minimum with a load-time warning,
+  Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 512 MiB
+  per GPU device, provisional). The GPU floor is also at least `gpu.reserve_vram_percent` (5%) of
+  the device. `doctor` shows every floor as it applies on the host, and a raised floor carries the
+  reason code `small_floor_raised`. A smaller configured floor is raised to the minimum with a load-time warning,
   and to twice the minimum unless the `small_floor` entry confirms it (FR-054). A RAM floor sized
   by `ram.reserve_percent` is judged on the host, after the percentage is applied.
 - **FR-024**: Guaranteed allocations:
@@ -897,7 +899,8 @@ times assume the default 500 ms monitor interval.
 | RAM breach window before draining Guaranteed work | 10 s, 0–60 s | Rides out short RAM spikes, which page cache and allocator churn cause, without losing Guaranteed progress. GPU memory has no reclaimable cache, so its breaches act at once. |
 | Critical floor share | 50% of the floor | Half the floor is still free headroom; below it, other workloads are close to allocation failures. |
 | Critical hint deadline | 1 s | Two monitor intervals: enough for a polling worker to see the target, short enough that the critical path stays within 6.5 s. |
-| Floor minimums | 512 MiB host RAM, 256 MiB per GPU device | Below these, ordinary processes and driver contexts fail to start. |
+| Floor minimums | 512 MiB host RAM, 512 MiB per GPU device | Below these, ordinary processes and driver contexts fail to start. The GPU minimum must be at least what a fresh CUDA context takes on the target GPUs, which T088 measures. |
+| Principal leave | 60 s below `principal_min_percent` | Entry stays fast; a principal that pauses briefly keeps its share instead of rejoining the unattributed principal. |
 | `uid_min` | 1000 | The usual first regular user ID (`UID_MIN` in `login.defs`). |
 | Principal window | 4 monitor intervals (2 s) | Long enough to ignore short commands, short enough that a new user's own share follows quickly; meanwhile its usage counts toward the unattributed principal. |
 | Memory peak window | 300 s | Covers typical allocation cycles of interactive and batch work, so admission does not fill memory another workload just released. |
@@ -911,7 +914,7 @@ times assume the default 500 ms monitor interval.
 | Step hysteresis | Reverse only below 50% of the trigger threshold; at least 3 intervals between step changes | Damps oscillation (SC-009) without delaying a real response by more than one confirmation interval. |
 | Pause bound | 10 s | Longer pauses risk worker and lease timeouts, so contention escalates to the next step instead. |
 | GPU quiet window | 20 monitor intervals (10 s) of healthy observation with no activity | Activity samples are only produced for non-zero use, so quiet must be shown by sustained absence over a complete inventory. |
-| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB) | Reusing the existing settings keeps 0.2 configurations meaningful and their values unchanged. |
+| No-harm floors | Existing reserves: `ram.reserve_mib` / `ram.reserve_percent` (8 GiB / 5%) and `gpu.reserve_vram_mib` (3 GiB), plus the new `gpu.reserve_vram_percent` (5%) | Reusing the existing settings keeps 0.2 configurations meaningful. The defaults are at least max(2 GiB, 5% of RAM) and max(1 GiB, 5% of device memory); the GPU percentage covers devices above 60 GiB, where 3 GiB is less than 5%. |
 
 ## Assumptions
 
