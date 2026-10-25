@@ -648,7 +648,7 @@ context, under Neutral and Performance (quickstart §5).
   - Yield First requires quiet;
   - unknown memory blocks;
   - VRAM headroom keeps each external process's peak, quiet contexts included.
-- [ ] T084 [P] [US5] Add placement tests in `tests/coordinator.rs`:
+- [X] T084 [P] [US5] Add placement tests in `tests/coordinator.rs`:
   - placement honors the per-resource admission from a negotiated `NodeReport.contention`;
   - legacy agents use the 0.2 fields;
   - admission for a resource is blocked while own work on it is above step zero (FR-028);
@@ -661,13 +661,18 @@ context, under Neutral and Performance (quickstart §5).
   the FR-031 interpretation from T136, and block devices with external contexts or unknown
   processes when `never_share_occupied_gpus` is set (FR-064); running own work on a device that
   becomes occupied is not drained for that alone.
-- [ ] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
+- [X] T086 [US5] Place work by per-resource admission in `src/coordinator.rs`.
   `fits_requested`, `schedule` and `grant` must share one admission predicate (audit M10).
-- [ ] T086a [US5] Split the interim combined CPU/RAM admission per resource (plan B7): once
+- [X] T086a [US5] Split the interim combined CPU/RAM admission per resource (plan B7): once
   T086 places by per-resource admission, report CPU and RAM admission separately in
   `NodeReport.contention` from their own cooldowns, and drop the both-cooled rule for
   `cpu_ram_expansion_allowed` in `src/policy.rs`. Test in `tests/policy.rs` and
   `tests/coordinator.rs`: a RAM reclaim backoff blocks only RAM-requesting placement.
+  Every launch reserves CPU and RAM, so RAM backoff blocks all placement while CPU admission
+  and headroom stay open. A hint that answered a breach reverses once calm, whatever the
+  external level, or RAM admission would stay closed. The schedulable CPU budget adds what
+  running opportunistic work is charged above its p95 usage, so placement and the launch
+  check admit CPU as the policy does (FR-034).
 - [X] T087a [US5] Neutral launch recheck admits active GPUs only when US5 floors protect the
   external usage. Batch 2 blocks Active in every mode at the launch recheck in
   `validate_gpu_launch_contract` (`src/policy.rs`). Once T085 admission by mode and the T135 peak
@@ -699,7 +704,7 @@ context, under Neutral and Performance (quickstart §5).
   CPU and RAM are known and safe, but no longer waits for the node-wide cooldown. Amend FR-034,
   `data-model.md`, `contracts/config-contention.md` and `docs/guarantees.md` in the same change.
   Tests first in `tests/policy.rs`.
-- [ ] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
+- [X] T087 [US5] Fix preemption in `src/coordinator.rs`: keep a pass-level projected charge and
   victim set, and preempt only on real exhaustion (audit M9).
 - [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
   authorized Linux host with an NVIDIA device; commands in [native-gates.md](native-gates.md).*

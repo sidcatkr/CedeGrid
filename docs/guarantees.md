@@ -50,14 +50,17 @@ sample periods; reading every 500 ms need not produce independent samples.
 - New external workload identities and external or unattributed VRAM growth beyond the
   noise tolerance block GPU admission on that device. Running work yields only for a real
   floor breach or own usage beyond the budget.
-- External compute activity blocks GPU admission on that device; it never drains own work
-  by itself.
+- External compute activity blocks GPU admission on that device under Yield First;
+  Neutral and Performance admit and share compute. It never drains own work by itself.
 - Unsupported, failed, absent-fresh-sample, or otherwise uncertain activity never
-  becomes evidence of idleness: it blocks admission and holds the current steps, and
-  escalation waits for the bounded unknown window. The explicit occupied mode below
-  accepts a narrower best-effort contract.
+  becomes evidence of idleness: Yield First admits nothing on that device, Neutral and
+  Performance count it as one principal, the current steps hold, and escalation waits
+  for the bounded unknown window. Missing basic observation blocks the device.
 - Stable headroom permits incremental expansion only after the configured cooldown.
-  The coordinator reserves each launch before dispatch and the agent rechecks locally.
+  The coordinator reserves each launch before dispatch, only where every requested
+  resource's admission is open, and the agent rechecks locally. Held or blocked
+  admission never preempts other work; one scheduling pass never lets two waiting tasks
+  claim the same victim.
 
 GPU admission follows each device's GPU compute mode, by one rule the policy and the
 launch recheck share: Yield First admits only on a quiet device; Neutral and Performance
@@ -89,10 +92,12 @@ Physical-core reserves are mapped conservatively using available topology.
 For admission, each running or draining allocation is charged the greater of its request
 and observed usage once, except that running opportunistic CPU is charged at its p95
 usage over `contention.cpu.admission_usage_window_s` (60 s): CPU is compressible, so
-caps and the kernel share it if everyone spikes. A pending allocation consumes its full
-reservation. Yielding judges running work on what it holds: CPU and RAM usage, and GPU
-memory usage for work that takes a hint, else its charge, since its growth cannot be
-bounded.
+caps and the kernel share it if everyone spikes. The reported schedulable CPU budget
+adds what running opportunistic work is charged above that usage, so the coordinator and
+the launch check, which charge requests, admit the same. A pending allocation consumes
+its full reservation. Yielding judges running work on what it holds: CPU and RAM usage,
+and GPU memory usage for work that takes a hint, else its charge, since its growth
+cannot be bounded.
 Subtract attributed managed usage from total system usage before classifying the
 remaining usage as external; do not subtract both the usage and the entire reservation
 again from free capacity. Unknown observations prohibit optimistic admission.

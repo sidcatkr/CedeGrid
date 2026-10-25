@@ -1144,7 +1144,12 @@ impl Coordinator {
                 }
             }
         }
-        if fresh && observed_live && unknown_allocations.is_empty() && report.expansion_allowed {
+        // A negotiated report states admission per resource; placement checks it.
+        if fresh
+            && observed_live
+            && unknown_allocations.is_empty()
+            && (report.expansion_allowed || report.contention.is_some())
+        {
             self.schedule(&report, now)?;
         }
         let mut assignments = Vec::new();
@@ -1286,6 +1291,10 @@ impl Coordinator {
         )?;
         let mut remaining_slots = report.launch_slots.saturating_sub(unstarted);
         let mut charge = self.node_charge(&report.node_id)?;
+        let mut preemption = PreemptionPass {
+            projected: charge.clone(),
+            ..PreemptionPass::default()
+        };
         let mut stmt=tx.prepare("SELECT t.task_id,t.generation,s.request_json,j.pool_id FROM tasks t JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE t.status='queued' AND j.cancelled=0 AND NOT EXISTS(SELECT 1 FROM upgrade_task_holds h WHERE h.task_id=t.task_id) ORDER BY j.priority DESC,s.sequence ASC")?;
         let queued = stmt
             .query_map([], |r| {
@@ -1332,9 +1341,6 @@ impl Coordinator {
                 )?;
                 continue;
             }
-            if !gpu_request_allowed(&request, report) {
-                continue;
-            }
             if !request
                 .required_controls
                 .iter()
@@ -1349,11 +1355,16 @@ impl Coordinator {
             }
             let mut next = charge.clone();
             next.add_checked(&request.resources)?;
+            // Held admission is no exhaustion: the task waits and preempts nothing.
+            let placement = placement(report, &request, &next);
+            if placement == Placement::Closed {
+                continue;
+            }
             if remaining_slots == 0
                 || count >= pool.max_workers
-                || !next.fits(&report.managed_budget, &request.resources)
+                || placement == Placement::Exhausted
             {
-                self.request_preemption(&tx, report, &request, &pool, count, &charge)?;
+                self.request_preemption(&tx, report, &request, &pool, count, &mut preemption)?;
                 continue;
             }
             request.assignment_id = uuid::Uuid::new_v4().to_string();
@@ -1365,6 +1376,7 @@ impl Coordinator {
             tx.execute("UPDATE tasks SET status='assigned',generation=?2,assignment_id=?3 WHERE task_id=?1",params![task,db(nextgen)?,request.assignment_id])?;
             tx.execute("INSERT INTO reservations(assignment_id,node_id,phase,resources_json,lease_deadline_ms,epoch) VALUES (?1,?2,'offered',?3,?4,?5)",params![request.assignment_id,report.node_id,serde_json::to_string(&request.resources)?,db(now.saturating_add(self.config.lease_ms))?,db(self.epoch)?])?;
             charge = next;
+            preemption.projected.add_checked(&request.resources)?;
             remaining_slots -= 1;
         }
         tx.commit()?;
@@ -1377,13 +1389,9 @@ impl Coordinator {
         request: &crate::execution_model::LaunchRequest,
         pool: &PoolSpec,
         count: u32,
-        charge: &Resources,
+        pass: &mut PreemptionPass,
     ) -> Result<()> {
-        if !gpu_request_allowed(request, report)
-            || !request
-                .resources
-                .fits(&report.managed_budget, &request.resources)
-        {
+        if placement(report, request, &request.resources) != Placement::Fits {
             return Ok(());
         }
         let priority: i32 = tx.query_row(
@@ -1403,11 +1411,15 @@ impl Coordinator {
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut projected = charge.clone();
+        let mut projected = pass.projected.clone();
         let mut selected = Vec::new();
-        let mut selected_counts = std::collections::BTreeMap::<String, u32>::new();
+        let mut selected_counts = pass.pool_victims.clone();
         let mut frees_pool_slot = count < pool.max_workers;
         for (id, resources, observed, candidate_pool, pool_json) in candidates {
+            // A victim another waiting task claimed in this pass frees nothing more.
+            if pass.victims.contains(&id) {
+                continue;
+            }
             let protected: PoolSpec = serde_json::from_str(&pool_json)?;
             let active:u32=tx.query_row("SELECT count(*) FROM reservations r JOIN assignments a USING(assignment_id) JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE j.pool_id=?1 AND r.phase!='released'",[&candidate_pool],|r|r.get(0))?;
             let already = selected_counts.get(&candidate_pool).copied().unwrap_or(0);
@@ -1423,8 +1435,8 @@ impl Coordinator {
             selected.push(id);
             let mut future = projected.clone();
             future.add_checked(&request.resources)?;
-            if frees_pool_slot && future.fits(&report.managed_budget, &request.resources) {
-                for id in selected {
+            if frees_pool_slot && placement(report, request, &future) == Placement::Fits {
+                for id in &selected {
                     tx.execute(
                         "INSERT OR IGNORE INTO drain_requests(assignment_id,reason) VALUES (?1,?2)",
                         params![
@@ -1436,6 +1448,9 @@ impl Coordinator {
                         ],
                     )?;
                 }
+                pass.victims.extend(selected);
+                pass.pool_victims = selected_counts;
+                pass.projected = future;
                 break;
             }
         }
@@ -1683,24 +1698,24 @@ impl Coordinator {
             )?;
             let report: NodeReport = serde_json::from_str(&report_json)?;
             ensure!(
-                report.expansion_allowed
-                    && now.saturating_sub(received) <= self.config.telemetry_ttl_ms
+                now.saturating_sub(received) <= self.config.telemetry_ttl_ms
                     && now.saturating_sub(report.observed_at_unix_ms)
                         <= self.config.telemetry_ttl_ms,
                 "initial execution authorization requires fresh capacity evidence"
-            );
-            ensure!(
-                gpu_request_allowed(&request, &report),
-                "initial GPU authorization requires current per-device admission and compatible allocation class"
             );
             // This request is already reserved. Never add it twice and never drop
             // uncertain siblings. A deficit on an unrelated UUID cannot authorize
             // this UUID, nor block independently qualified CPU/other-GPU capacity.
             let charge = self.node_charge(&report.node_id)?;
-            ensure!(
-                charge.fits(&report.managed_budget, &request.resources),
-                "initial execution authorization exceeds current CPU/RAM or requested GPU budget"
-            );
+            match placement(&report, &request, &charge) {
+                Placement::Fits => {}
+                Placement::Closed => bail!(
+                    "initial execution authorization requires current per-resource and per-device admission and a compatible allocation class"
+                ),
+                Placement::Exhausted => bail!(
+                    "initial execution authorization exceeds current CPU/RAM or requested GPU budget"
+                ),
+            }
         }
         if seq > 0 && deadline <= now && request.class == AllocationClass::Opportunistic {
             bail!("allocation lease expired")
@@ -2048,22 +2063,84 @@ fn phase_name(phase: RemotePhase) -> &'static str {
         RemotePhase::Released => "released",
     }
 }
-fn gpu_request_allowed(
-    request: &crate::execution_model::LaunchRequest,
+/// What a node's report allows for one request (FR-028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    Fits,
+    /// Admitted, but beyond the budget: lower-priority work may be preempted.
+    Exhausted,
+    /// Not admitted now: the task waits and preempts nothing.
+    Closed,
+}
+
+/// The one admission predicate that placement, preemption and the first
+/// authorization share (audit M10). `total` is the node's charge including the
+/// request. With `contention/1`, every requested resource (CPU, RAM, and each
+/// requested GPU's memory and compute) must be open with no own work yielding on
+/// it; a resource the report leaves out is not open. Otherwise the 0.2 fields apply.
+fn placement(
     report: &NodeReport,
-) -> bool {
-    request.resources.gpu_memory_mib.is_empty()
-        || (report.gpu_expansion_allowed
-            && (request.class != AllocationClass::Guaranteed || report.gpu_guaranteed_allowed)
-            && request.resources.gpu_memory_mib.keys().all(|uuid| {
-                report
-                    .managed_budget
-                    .gpu_memory_mib
-                    .get(uuid)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0
-            }))
+    request: &crate::execution_model::LaunchRequest,
+    total: &Resources,
+) -> Placement {
+    use crate::contention::{Admission, ResourceKey, YieldStep};
+    let resources = &request.resources;
+    if !resources.gpu_memory_mib.is_empty()
+        && request.class == AllocationClass::Guaranteed
+        && !report.gpu_guaranteed_allowed
+    {
+        return Placement::Closed;
+    }
+    let admitted = match &report.contention {
+        Some(contention) => {
+            let open = |key: ResourceKey| {
+                contention.resources.get(&key).is_some_and(|state| {
+                    state.admission == Admission::Open
+                        && state
+                            .step_summary
+                            .iter()
+                            .all(|(step, count)| *step == YieldStep::None || *count == 0)
+                })
+            };
+            (resources.cpu_millicores == 0 || open(ResourceKey::Cpu))
+                && (resources.ram_mib == 0 || open(ResourceKey::Ram))
+                && resources.gpu_memory_mib.keys().all(|uuid| {
+                    open(ResourceKey::GpuMemory(uuid.clone()))
+                        && open(ResourceKey::GpuCompute(uuid.clone()))
+                })
+        }
+        None => {
+            report.expansion_allowed
+                && (resources.gpu_memory_mib.is_empty()
+                    || report.gpu_expansion_allowed
+                        && resources.gpu_memory_mib.keys().all(|uuid| {
+                            report
+                                .managed_budget
+                                .gpu_memory_mib
+                                .get(uuid)
+                                .copied()
+                                .unwrap_or(0)
+                                > 0
+                        }))
+        }
+    };
+    if !admitted {
+        Placement::Closed
+    } else if total.fits(&report.managed_budget, resources) {
+        Placement::Fits
+    } else {
+        Placement::Exhausted
+    }
+}
+
+/// One scheduling pass's preemption state: the charge projected once the chosen
+/// victims release and their replacements start, and the victims already chosen,
+/// so no two waiting tasks claim the same release (audit M9).
+#[derive(Default)]
+struct PreemptionPass {
+    projected: Resources,
+    victims: std::collections::BTreeSet<String>,
+    pool_victims: std::collections::BTreeMap<String, u32>,
 }
 
 pub fn now_ms() -> u64 {

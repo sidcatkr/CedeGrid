@@ -76,6 +76,7 @@ fn observation() -> (Snapshot, Decision) {
         exceptions: vec![],
         allocation_modes: Default::default(),
         max_mode: None,
+        cpu_admission_credit_millicores: 0,
     };
     (snapshot, decision)
 }

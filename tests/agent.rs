@@ -335,7 +335,7 @@ fn real_extra_cpu_threads_still_trigger_the_agent_envelope() {
     while !drained && Instant::now() < end && child.try_wait().unwrap().is_none() {
         std::thread::sleep(Duration::from_millis(500));
         let (_, allocations) = collector.sample(&store.executions().unwrap()).unwrap();
-        if cedegrid::agent::envelope_exceeded(&allocations, &spec.capacity) {
+        if cedegrid::agent::envelope_exceeded(&allocations, &spec.capacity, 0) {
             writeln!(input, "{}", serde_json::json!({"kind":"drain"})).unwrap();
             input.flush().unwrap();
             drained = true;

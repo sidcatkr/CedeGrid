@@ -2942,7 +2942,10 @@ impl AgentLoop<'_> {
         decision.observe_only = false;
         decision.admission_headroom = minimum(
             &decision.admission_headroom,
-            &remaining_capacity(&decision.managed_budget, &allocation_charge(&allocations)),
+            &remaining_capacity(
+                &schedulable_budget(&decision),
+                &allocation_charge(&allocations),
+            ),
         );
         Ok((snapshot, allocations, decision))
     }
@@ -2973,16 +2976,7 @@ impl AgentLoop<'_> {
         allocations: &[crate::model::Allocation],
     ) -> Result<()> {
         let agent = self.agent;
-        // The policy restores the operator envelope per resource (FR-057); an
-        // exceeded envelope only blocks admission here, never stops everything.
-        if envelope_exceeded(allocations, &agent.capacity) {
-            decision.expansion_allowed = false;
-            decision.cpu_ram_expansion_allowed = false;
-            decision.reasons.push(format!(
-                "operator-approved node envelope exceeded: capacity={}; restoring it per resource",
-                serde_json::to_string(&agent.capacity)?
-            ));
-        }
+        block_admission_beyond_envelope(decision, allocations, &agent.capacity)?;
         let causes: BTreeMap<&str, crate::contention::YieldCause> = decision
             .actions
             .iter()
@@ -3801,8 +3795,45 @@ fn spool_size(path: &Path) -> Result<u64> {
 /// Record the steps a supervisor could not apply; they are skipped from now on.
 /// The agent's operator-envelope check: cumulative charges, max(request,
 /// observed), against the explicit node envelope.
-pub fn envelope_exceeded(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
-    !allocations_fit(allocations, capacity)
+/// The policy restores the operator envelope per resource (FR-057); an exceeded
+/// envelope only blocks admission here, every resource's included, never stops
+/// everything.
+fn block_admission_beyond_envelope(
+    decision: &mut crate::model::Decision,
+    allocations: &[crate::model::Allocation],
+    capacity: &Resources,
+) -> Result<()> {
+    if envelope_exceeded(
+        allocations,
+        capacity,
+        decision.cpu_admission_credit_millicores,
+    ) {
+        decision.expansion_allowed = false;
+        decision.cpu_ram_expansion_allowed = false;
+        for status in decision.resources.values_mut() {
+            status.admission = Some(crate::contention::Admission::Blocked {
+                reason: "the operator envelope is exceeded".into(),
+            });
+        }
+        decision.reasons.push(format!(
+            "operator-approved node envelope exceeded: capacity={}; restoring it per resource",
+            serde_json::to_string(capacity)?
+        ));
+    }
+    Ok(())
+}
+
+/// CPU counts as admission charges it: `cpu_credit` is what running opportunistic
+/// work is charged above its recent usage.
+pub fn envelope_exceeded(
+    allocations: &[crate::model::Allocation],
+    capacity: &Resources,
+    cpu_credit: i64,
+) -> bool {
+    let mut capacity = capacity.clone();
+    capacity.cpu_millicores = (i128::from(capacity.cpu_millicores) + i128::from(cpu_credit))
+        .clamp(0, i128::from(u64::MAX)) as u64;
+    !allocations_fit(allocations, &capacity)
 }
 
 fn allocations_fit(allocations: &[crate::model::Allocation], capacity: &Resources) -> bool {
@@ -4485,7 +4516,104 @@ mod agent_transport_tests {
         ));
         let mut exceeded = allocation;
         exceeded.observed.as_mut().unwrap().cpu_millicores = 1001;
-        assert!(!allocations_fit(&[exceeded], &capacity));
+        assert!(!allocations_fit(std::slice::from_ref(&exceeded), &capacity));
+        // CPU admitted by recent usage is judged that way: a credit of the CPU held
+        // above usage keeps it inside the envelope, a debit does not.
+        assert!(!envelope_exceeded(
+            std::slice::from_ref(&exceeded),
+            &capacity,
+            1
+        ));
+        assert!(envelope_exceeded(&[exceeded], &capacity, 0));
+        let over_usage = Resources {
+            cpu_millicores: 1000,
+            ..Resources::default()
+        };
+        assert!(envelope_exceeded(
+            &[crate::model::Allocation {
+                requested: over_usage.clone(),
+                observed: Some(over_usage),
+                ..allocation_template()
+            }],
+            &capacity,
+            -1
+        ));
+    }
+    #[test]
+    fn an_exceeded_envelope_blocks_every_resource_admission() {
+        use crate::contention::{Admission, ResourceKey};
+        let mut config = Config::default();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.cpu.scale_up_cooldown_ms = Some(0);
+        config.contention.ram.scale_up_cooldown_ms = Some(0);
+        let snapshot = crate::model::Snapshot {
+            schema_version: crate::model::SCHEMA_VERSION,
+            node_id: config.node_id.clone(),
+            observed_at_unix_ms: 1,
+            cpu_capacity_millicores: 8000,
+            physical_cores: Some(4),
+            cpu_busy_millicores: Some(2000),
+            cpu_busy_lower_millicores: None,
+            total_ram_mib: 32_000,
+            available_ram_mib: Some(28_000),
+            gpu_inventory: crate::model::CapabilityStatus::Unsupported,
+            gpus: vec![],
+            capabilities: Default::default(),
+            kernel: None,
+            principals: None,
+            external_processes: None,
+        };
+        let usage = Resources {
+            cpu_millicores: 2000,
+            ram_mib: 2000,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        let allocations = vec![crate::model::Allocation {
+            requested: usage.clone(),
+            observed: Some(usage),
+            ..allocation_template()
+        }];
+        let mut decision = crate::policy::PolicyEngine::new()
+            .evaluate(
+                &config,
+                &snapshot,
+                &crate::model::PolicyInput {
+                    allocations: allocations.clone(),
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        let open = |decision: &crate::model::Decision| {
+            [ResourceKey::Cpu, ResourceKey::Ram]
+                .map(|key| decision.resources[&key].admission == Some(Admission::Open))
+        };
+        let mut within = decision.clone();
+        let roomy = Resources {
+            cpu_millicores: 4000,
+            ram_mib: 4000,
+            gpu_memory_mib: BTreeMap::new(),
+        };
+        block_admission_beyond_envelope(&mut within, &allocations, &roomy).unwrap();
+        assert_eq!(open(&within), [true, true]);
+        let tight = Resources {
+            ram_mib: 1000,
+            ..roomy
+        };
+        block_admission_beyond_envelope(&mut decision, &allocations, &tight).unwrap();
+        assert_eq!(open(&decision), [false, false]);
+        assert!(!decision.expansion_allowed);
+    }
+    fn allocation_template() -> crate::model::Allocation {
+        crate::model::Allocation {
+            id: "t".into(),
+            class: AllocationClass::Opportunistic,
+            phase: crate::model::AllocationPhase::Running,
+            requested: Resources::default(),
+            observed: None,
+            observed_upper: None,
+            modes: Default::default(),
+        }
     }
     #[tokio::test]
     async fn concurrent_transfers_share_one_budget() {

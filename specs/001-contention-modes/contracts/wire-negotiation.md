@@ -34,7 +34,19 @@
 
 With `contention/1`, the coordinator places work using per-resource admission:
 `NodeReport.contention.resources[*].admission` must be `open` for every requested resource
-(FR-028).
+(FR-028):
+- the requested resources are CPU, RAM, and each requested GPU's memory and compute;
+- a resource the report leaves out is not open;
+- a resource whose `step_summary` counts own work above step zero is not open;
+- the legacy `expansion_allowed` and `gpu_expansion_allowed` flags are not consulted.
+
+Placement, preemption and the first authorization share this predicate. Held or blocked
+admission never preempts; only an exhausted budget, worker pool or launch slot with every
+requested resource open does. One scheduling pass keeps the victims it chose and the charge
+it projects once they release, so no two waiting tasks claim the same release.
+
+`managed_budget.cpu_millicores` adds the CPU that running opportunistic work is charged above
+its p95 usage, so request-based charges at the coordinator admit by usage (FR-034).
 
 ## Retry accounting
 

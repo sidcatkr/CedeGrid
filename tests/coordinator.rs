@@ -3558,3 +3558,249 @@ fn a_replay_session_replacement_never_requeues_a_cancelled_task() {
     assert_eq!(reply.drain, vec![a.request.assignment_id.clone()]);
     assert_eq!(task_states(&mut c, 104)["task"], ("cancelled".into(), 1));
 }
+
+/// A negotiated report with CPU, RAM and each listed GPU's memory and compute open.
+fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
+    use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
+    let open = || ResourceContentionReport {
+        mode: ContentionMode::Neutral,
+        admission: Admission::Open,
+        own: None,
+        external: None,
+        target_share: None,
+        step_summary: BTreeMap::new(),
+        held_back: None,
+    };
+    let mut r = report(now);
+    r.features = COORDINATOR_FEATURES.map(String::from).to_vec();
+    let mut resources = BTreeMap::from([(ResourceKey::Cpu, open()), (ResourceKey::Ram, open())]);
+    for uuid in gpus {
+        r.managed_budget
+            .gpu_memory_mib
+            .insert(uuid.to_string(), 1000);
+        resources.insert(ResourceKey::GpuMemory(uuid.to_string()), open());
+        resources.insert(ResourceKey::GpuCompute(uuid.to_string()), open());
+    }
+    r.contention = Some(NodeContentionReport {
+        resources,
+        ..NodeContentionReport::default()
+    });
+    r
+}
+
+fn resource(
+    r: &mut NodeReport,
+    key: cedegrid::contention::ResourceKey,
+) -> &mut ResourceContentionReport {
+    r.contention
+        .as_mut()
+        .unwrap()
+        .resources
+        .get_mut(&key)
+        .unwrap()
+}
+
+fn held() -> cedegrid::contention::Admission {
+    cedegrid::contention::Admission::Held {
+        reason: "the resource is cooling down".into(),
+    }
+}
+
+fn placed(reply: &HeartbeatReply) -> Vec<String> {
+    let mut ids: Vec<_> = reply
+        .assignments
+        .iter()
+        .map(|a| a.request.task_id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// With `contention/1`, every requested resource must be open: CPU, RAM, and
+/// each requested GPU's memory and compute. A resource the report leaves out is
+/// not open (FR-028).
+#[test]
+fn placement_honors_the_per_resource_admission_of_a_negotiated_report() {
+    use cedegrid::contention::ResourceKey;
+    let gpu = || ResourceKey::GpuCompute("GPU-a".into());
+    let run = |change: &dyn Fn(&mut NodeReport)| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(
+            &mut c,
+            "job",
+            0,
+            vec![task("cpu"), gpu_task("gpu", "GPU-a", 500)],
+            100,
+        );
+        let mut r = negotiated(100, &["GPU-a"]);
+        change(&mut r);
+        placed(&report_reply(&mut c, &r, 100))
+    };
+    assert_eq!(run(&|_| {}), ["cpu", "gpu"]);
+    // Every launch reserves RAM, so held RAM places nothing.
+    assert!(run(&|r| resource(r, ResourceKey::Ram).admission = held()).is_empty());
+    assert_eq!(run(&|r| resource(r, gpu()).admission = held()), ["cpu"]);
+    assert_eq!(
+        run(&|r| {
+            r.contention
+                .as_mut()
+                .unwrap()
+                .resources
+                .remove(&ResourceKey::GpuMemory("GPU-a".into()));
+        }),
+        ["cpu"]
+    );
+    // The legacy flags do not override per-resource admission.
+    assert!(
+        run(&|r| {
+            r.expansion_allowed = true;
+            resource(r, ResourceKey::Cpu).admission = held();
+        })
+        .is_empty()
+    );
+}
+
+/// Without `contention/1`, placement keeps the 0.2 fields.
+#[test]
+fn legacy_agents_are_placed_by_the_0_2_fields() {
+    let run = |change: &dyn Fn(&mut NodeReport)| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(
+            &mut c,
+            "job",
+            0,
+            vec![task("cpu"), gpu_task("gpu", "GPU-a", 500)],
+            100,
+        );
+        let mut r = report(100);
+        r.managed_budget.gpu_memory_mib.insert("GPU-a".into(), 1000);
+        change(&mut r);
+        placed(&report_reply(&mut c, &r, 100))
+    };
+    assert_eq!(run(&|_| {}), ["cpu", "gpu"]);
+    assert_eq!(run(&|r| r.gpu_expansion_allowed = false), ["cpu"]);
+    assert!(run(&|r| r.expansion_allowed = false).is_empty());
+}
+
+/// Admission for a resource stays closed while own work on it is above step zero,
+/// whatever the report's admission says (FR-028).
+#[test]
+fn a_resource_with_yielding_own_work_admits_nothing() {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    let run = |key: ResourceKey| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(
+            &mut c,
+            "job",
+            0,
+            vec![task("cpu"), gpu_task("gpu", "GPU-a", 500)],
+            100,
+        );
+        let mut r = negotiated(100, &["GPU-a"]);
+        resource(&mut r, key).step_summary.insert(YieldStep::Cap, 1);
+        placed(&report_reply(&mut c, &r, 100))
+    };
+    assert!(run(ResourceKey::Cpu).is_empty());
+    assert_eq!(run(ResourceKey::GpuCompute("GPU-a".into())), ["cpu"]);
+}
+
+/// Two waiting tasks never claim the same victim: one preemption pass keeps a
+/// projected charge and the victims it already chose.
+#[test]
+fn preemption_keeps_a_pass_level_victim_set() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    submit_tasks(&mut c, "low", 0, vec![task("low-1"), task("low-2")], 100);
+    let mut r = report(100);
+    let low = report_reply(&mut c, &r, 100).assignments;
+    assert_eq!(low.len(), 2);
+    for a in &low {
+        authorize(&mut c, a, 100);
+    }
+    submit_tasks(
+        &mut c,
+        "high",
+        100,
+        vec![task("high-1"), task("high-2")],
+        101,
+    );
+    r.observed_at_unix_ms = 102;
+    r.allocations = low
+        .iter()
+        .map(|a| allocation_report(a, RemotePhase::Running))
+        .collect();
+    let reply = report_reply(&mut c, &r, 102);
+    assert!(
+        reply
+            .assignments
+            .iter()
+            .all(|a| a.request.task_id.starts_with("low"))
+    );
+    let mut drained = reply.drain.clone();
+    drained.sort();
+    let mut expected: Vec<_> = low
+        .iter()
+        .map(|a| a.request.assignment_id.clone())
+        .collect();
+    expected.sort();
+    assert_eq!(drained, expected);
+}
+
+/// Held admission is not exhaustion: nothing is preempted while a requested
+/// resource waits, on CPU/RAM or on the requested GPU.
+#[test]
+fn held_admission_preempts_nothing() {
+    use cedegrid::contention::ResourceKey;
+    let run = |gpu: bool, key: ResourceKey| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        let request = |id: &str| {
+            if gpu {
+                gpu_task(id, "GPU-a", 1000)
+            } else {
+                task(id)
+            }
+        };
+        submit_tasks(&mut c, "low", 0, vec![request("low")], 100);
+        let mut r = negotiated(100, &["GPU-a"]);
+        r.managed_budget.cpu_millicores = 1000;
+        r.managed_budget.gpu_memory_mib.insert("GPU-a".into(), 500);
+        let low = report_reply(&mut c, &r, 100).assignments.remove(0);
+        authorize(&mut c, &low, 100);
+        submit_tasks(&mut c, "high", 100, vec![request("high")], 101);
+        r.observed_at_unix_ms = 102;
+        r.allocations = vec![allocation_report(&low, RemotePhase::Running)];
+        let open = report_reply(&mut c, &r.clone(), 102);
+        assert_eq!(
+            open.drain,
+            vec![low.request.assignment_id.clone()],
+            "{key:?}"
+        );
+        // The same exhaustion with a held resource drains nothing.
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(&mut c, "low", 0, vec![request("low")], 100);
+        r.observed_at_unix_ms = 100;
+        r.allocations.clear();
+        let low = report_reply(&mut c, &r, 100).assignments.remove(0);
+        authorize(&mut c, &low, 100);
+        submit_tasks(&mut c, "high", 100, vec![request("high")], 101);
+        r.observed_at_unix_ms = 102;
+        r.allocations = vec![allocation_report(&low, RemotePhase::Running)];
+        resource(&mut r, key.clone()).admission = held();
+        let reply = report_reply(&mut c, &r, 102);
+        assert!(reply.drain.is_empty(), "{key:?}: {:?}", reply.drain);
+        assert!(reply.assignments.iter().all(|a| a.request.task_id == "low"));
+    };
+    run(false, ResourceKey::Ram);
+    run(true, ResourceKey::GpuCompute("GPU-a".into()));
+}

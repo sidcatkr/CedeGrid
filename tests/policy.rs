@@ -1260,7 +1260,9 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         ]
         .into()
     );
-    assert_eq!(a.admission_headroom, Resources::default());
+    // CPU admits nothing more; RAM stays admissible on its own (T086a).
+    assert_eq!(a.admission_headroom.cpu_millicores, 0);
+    assert!(a.admission_headroom.ram_mib > 0);
 }
 
 #[test]
@@ -1462,8 +1464,32 @@ fn cpu_ram_fallback_fails_closed_for_missing_stale_excess_and_drain_evidence() {
             .evaluate(&config(), &snap, &input, 0)
             .unwrap();
         assert!(!decision.cpu_ram_expansion_allowed, "fault {fault}");
-        assert_eq!(decision.admission_headroom.cpu_millicores, 0);
-        assert_eq!(decision.admission_headroom.ram_mib, 0);
+        // Each fault closes the resources it concerns, and only those (T086a).
+        let (cpu, ram) = match fault {
+            0 | 3 => (true, false),
+            1 => (false, true),
+            _ => (true, true),
+        };
+        let open = |key: cedegrid::contention::ResourceKey| {
+            decision.resources[&key].admission == Some(cedegrid::contention::Admission::Open)
+        };
+        let headroom = &decision.admission_headroom;
+        assert_eq!(
+            headroom.cpu_millicores == 0,
+            cpu,
+            "fault {fault}: {headroom:?}"
+        );
+        assert_eq!(headroom.ram_mib == 0, ram, "fault {fault}: {headroom:?}");
+        assert_eq!(
+            open(cedegrid::contention::ResourceKey::Cpu),
+            !cpu,
+            "fault {fault}"
+        );
+        assert_eq!(
+            open(cedegrid::contention::ResourceKey::Ram),
+            !ram,
+            "fault {fault}"
+        );
     }
     let mut cfg = config();
     cfg.gpu.scale_up_cooldown_ms = Some(137);
@@ -2615,6 +2641,71 @@ fn reclaim_backoff_doubles_and_resets_after_a_quiet_period() {
     assert_eq!(cycle(120_000 + 300_000 + 5000), 1000);
 }
 
+/// A RAM reclaim backoff holds RAM admission only: CPU stays open with its
+/// headroom, each by its own cooldown (T086a).
+#[test]
+fn a_ram_reclaim_backoff_holds_only_ram_admission() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let mut cfg = config();
+    // A node-wide cooldown that has not elapsed must not couple CPU to RAM.
+    cfg.gpu.scale_up_cooldown_ms = Some(60_000);
+    // A backoff that outlasts the RAM step's reversal.
+    cfg.contention.ram.reclaim_backoff_ms = Some(120_000);
+    cfg.contention.ram.reclaim_backoff_max_ms = Some(120_000);
+    let mut engine = PolicyEngine::new();
+    let mut evaluate = |job: u64, now: u64| {
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(1000, 4000, 0),
+                Some(resources(1000, job, 0)),
+            )],
+            facts: BTreeMap::from([(
+                "job".into(),
+                AllocationFacts {
+                    hint_ready: true,
+                    observes_drain: true,
+                    ..AllocationFacts::default()
+                },
+            )]),
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(1000);
+        snap.available_ram_mib = Some(32_000 - 2000 - job);
+        engine.evaluate(&cfg, &snap, &input, now).unwrap()
+    };
+    assert!(!evaluate(29_300, 0).actions.is_empty());
+    // Once the RAM step has reversed, the backoff alone holds RAM.
+    let mut now = 500;
+    let decision = loop {
+        let decision = evaluate(4000, now);
+        if decision.actions.is_empty() {
+            break decision;
+        }
+        now += 500;
+        assert!(
+            now < 100_000,
+            "the RAM step did not reverse: {:?}",
+            decision.actions
+        );
+    };
+    let admission = |key: ResourceKey| decision.resources[&key].admission.clone().unwrap();
+    assert!(
+        matches!(&admission(ResourceKey::Ram), Admission::Held { reason } if reason.contains("backoff")),
+        "{:?}",
+        admission(ResourceKey::Ram)
+    );
+    assert_eq!(decision.admission_headroom.ram_mib, 0);
+    assert_eq!(admission(ResourceKey::Cpu), Admission::Open);
+    assert!(
+        decision.admission_headroom.cpu_millicores > 0,
+        "{:?}",
+        decision.admission_headroom
+    );
+}
+
 /// CPU admission charges running opportunistic work at its p95 usage over the
 /// admission window, not its request; pending and Guaranteed work keep their
 /// requests.
@@ -2671,6 +2762,53 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
     // Once those samples leave the 60 s window, the charge falls with usage.
     now += 60_500;
     assert_eq!(headroom(500, now), 5500 - 500 - 1000 - 500);
+}
+
+/// The schedulable budget adds the CPU that running opportunistic work holds
+/// above its p95 usage, so placement and the launch check, which charge requests,
+/// admit by usage as the policy does (FR-034).
+#[test]
+fn the_schedulable_budget_admits_cpu_by_recent_usage() {
+    let mut guaranteed = allocation(
+        "guaranteed",
+        AllocationPhase::Running,
+        resources(1000, 0, 0),
+        Some(resources(500, 0, 0)),
+    );
+    guaranteed.class = AllocationClass::Guaranteed;
+    let input = PolicyInput {
+        allocations: vec![
+            allocation(
+                "opportunistic",
+                AllocationPhase::Running,
+                resources(4000, 0, 0),
+                Some(resources(1000, 0, 0)),
+            ),
+            guaranteed,
+            allocation(
+                "pending",
+                AllocationPhase::Pending,
+                resources(500, 0, 0),
+                None,
+            ),
+        ],
+        ..PolicyInput::default()
+    };
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(1000 + 500 + 500);
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snap, &input, 0)
+        .unwrap();
+    // A 5500m budget; admission charges 1000 + 1000 + 500, requests 4000 + 1000 + 500.
+    assert_eq!(decision.admission_headroom.cpu_millicores, 3000);
+    let schedulable = cedegrid::policy::schedulable_budget(&decision);
+    assert_eq!(schedulable.cpu_millicores, 5500 + 3000);
+    assert_eq!(
+        schedulable.cpu_millicores - (4000 + 1000 + 500),
+        decision.admission_headroom.cpu_millicores
+    );
+    // RAM and GPU memory keep the budget.
+    assert_eq!(schedulable.ram_mib, decision.managed_budget.ram_mib);
 }
 
 /// Admission headroom for memory uses the external peak over the peak window,

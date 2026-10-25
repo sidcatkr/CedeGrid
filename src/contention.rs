@@ -631,7 +631,12 @@ pub fn plan_step(
             skipped: Vec::new(),
         };
     }
-    if state.trigger_external > 0 && input.external >= threshold {
+    // Only a step that answered external growth waits for that demand to fall;
+    // one that answered a breach reverses once calm, or admission stays closed.
+    if state.cause == YieldCause::ExternalGrowth
+        && state.trigger_external > 0
+        && input.external >= threshold
+    {
         held.calm_since_ms = None;
         return LadderDecision {
             state: Some(held),

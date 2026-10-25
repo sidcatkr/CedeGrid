@@ -353,6 +353,15 @@ pub struct Decision {
     /// The node's cap on the most aggressive mode a job may request (FR-030).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_mode: Option<crate::contention::ContentionMode>,
+    /// CPU that running opportunistic work is charged above its p95 usage, which
+    /// the schedulable budget adds so request-based charges admit by usage
+    /// (FR-034). Negative when recent usage exceeds max(request, observed).
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub cpu_admission_credit_millicores: i64,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 /// A stable machine-readable code plus one sentence for people. Tests and tools

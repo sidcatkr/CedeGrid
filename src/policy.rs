@@ -83,6 +83,9 @@ pub fn validate_gpu_launch_contract(
 /// retains the original managed budget and charges every live/reserved allocation.
 pub fn schedulable_budget(decision: &Decision) -> Resources {
     let mut budget = decision.managed_budget.clone();
+    budget.cpu_millicores = (i128::from(budget.cpu_millicores)
+        + i128::from(decision.cpu_admission_credit_millicores))
+    .clamp(0, i128::from(u64::MAX)) as u64;
     for (uuid, value) in &mut budget.gpu_memory_mib {
         if !decision
             .admission_headroom
@@ -217,6 +220,7 @@ impl PolicyEngine {
         let mut first_observed_gpus = BTreeSet::new();
         let mut last_observed = BTreeMap::new();
         let mut cpu_usage = BTreeMap::new();
+        let mut cpu_credit = 0i128;
         let cpu_window_ms = config
             .contention
             .thresholds(ResourceKind::Cpu)
@@ -243,7 +247,9 @@ impl PolicyEngine {
                         samples
                             .retain(|(at, _)| now_monotonic_ms.saturating_sub(*at) < cpu_window_ms);
                         samples.push_back((now_monotonic_ms, observed.cpu_millicores));
-                        charge.cpu_millicores = p95(samples.iter().map(|(_, usage)| *usage));
+                        let usage = p95(samples.iter().map(|(_, usage)| *usage));
+                        cpu_credit += i128::from(charge.cpu_millicores) - i128::from(usage);
+                        charge.cpu_millicores = usage;
                         cpu_usage.insert(allocation.id.clone(), samples);
                     }
                     if !self.last_observed.contains_key(&allocation.id) {
@@ -1817,8 +1823,7 @@ impl PolicyEngine {
             ResourceKind::Ram,
             backoff_ms(&ResourceKey::Ram),
         );
-        // Until per-resource admission is placed on (US5), CPU/RAM admission opens
-        // only once both have cooled, each from its own stable time.
+        // The 0.2 report has one flag for both; every launch reserves CPU and RAM.
         let cpu_ram_expansion_allowed = cpu_allowed && ram_allowed;
         // Memory admission uses the external peak over its window; yielding uses
         // current usage (FR-060).
@@ -1921,10 +1926,7 @@ impl PolicyEngine {
             headroom.ram_mib = 0;
         }
         if !expansion_allowed {
-            if !cpu_ram_expansion_allowed {
-                headroom.cpu_millicores = 0;
-                headroom.ram_mib = 0;
-            } else {
+            if cpu_ram_expansion_allowed {
                 reasons.push("independently stable CPU/RAM headroom permits CPU-only admission; GPU admission remains blocked".into());
             }
             if !unsafe_now && !cooled_down {
@@ -2196,6 +2198,9 @@ impl PolicyEngine {
             exceptions: config.caution_options_on(snapshot),
             allocation_modes,
             max_mode: Some(cap),
+            cpu_admission_credit_millicores: cpu_credit
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                as i64,
         })
     }
 }

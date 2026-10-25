@@ -542,6 +542,8 @@ node reports with the expected per-resource values at each step.
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
 - **FR-013**: Steps 1–4 MUST be reversible. When external demand recedes past a reversal
   threshold with hysteresis, steps MUST be undone in reverse order at the mode's scale-up rate.
+  A step taken for a floor or envelope breach or an unknown measurement MUST reverse once that
+  cause has stayed clear, whatever the external level.
 - **FR-014**: Pause MUST be bounded in time. A pause that does not resolve contention within the
   bound MUST escalate to the next step. For CPU alone that is the hint, whose target also caps
   CPU, at the 5% minimum duty for a target of zero; a worker that is not hint-ready gets a cap at
@@ -713,11 +715,11 @@ node reports with the expected per-resource values at each step.
   resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
   interval (30, 10 or 2 s). GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
   set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
-  memory add the reclaim backoff (FR-061). Until per-resource admission is placed on (US5),
-  CPU/RAM admission opens once both have cooled. For CPU admission, running opportunistic work
-  is charged at its p95 usage over `contention.cpu.admission_usage_window_s` (default 60 s);
-  pending work is charged in full, Guaranteed work at max(request, observed), and RAM and GPU
-  memory admission stays request-based.
+  memory add the reclaim backoff (FR-061). Each resource's admission opens on its own cooldown.
+  For CPU admission, running opportunistic work is charged at its p95 usage over
+  `contention.cpu.admission_usage_window_s` (default 60 s); pending work is charged in full,
+  Guaranteed work at max(request, observed), and RAM and GPU memory admission stays
+  request-based. Coordinator placement and the agent's launch check MUST admit CPU the same way.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
