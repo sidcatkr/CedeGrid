@@ -272,7 +272,8 @@ reports its `admission`: open, held or blocked, with a reason (FR-028, FR-038).
 per-process samples account for device utilization; else `compute_amount_unknown` with the
 reason. While an external PID is listed, external is max(external PIDs' sum, device
 utilization minus own PIDs' sum); with own PIDs only, external is 0 and own is the device
-utilization. Older recordings have none of them and take the unknown path. `PrincipalUsage`
+utilization. The policy takes the measured path only after `quiet_window_intervals`
+consecutive measured intervals (`PreviousGpu.measured_streak`), and the unknown path at once. Older recordings have none of them and take the unknown path. `PrincipalUsage`
 carries `gpu_compute_milli` per device, the measured compute of that UID's external
 processes; a PID whose UID cannot be read stays in the unattributed remainder.
 

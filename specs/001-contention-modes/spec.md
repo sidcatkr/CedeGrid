@@ -625,7 +625,8 @@ node reports with the expected per-resource values at each step.
   the part nobody accounts for being one unattributed principal; with own processes only, the
   remainder is own work. It MUST stay activity of unknown amount when either query
   is unsupported, samples are not fresh, the process inventory is incomplete, or an MPS control
-  daemon or server is present. A measured amount takes the CPU paths: external processes are
+  daemon or server is present. A device MUST switch to the unknown path at once and return to
+  the measured path only after `quiet_window_intervals` consecutive measured intervals. A measured amount takes the CPU paths: external processes are
   principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
   window as CPU, a PID whose UID cannot be read is unattributed, saturation is at
   `saturation_percent` of device utilization, and probing and satisfied records apply;

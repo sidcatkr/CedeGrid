@@ -724,7 +724,8 @@ context, under Neutral and Performance (quickstart §5).
     evidence;
   - record how closely summed per-process `sm_util` tracks device utilization under 1, 2 and 4
     concurrent processes on each target GPU, and set the default
-    `contention.gpu_compute.attribution_tolerance_percent` (15, provisional) from it.
+    `contention.gpu_compute.attribution_tolerance_percent` (15, provisional) from it, and how
+    often the consistency check fails over a real session.
 - [X] T152 [US5] Measure external GPU compute instead of treating all activity as an unknown
   amount (FR-021): each external PID's average fresh `sm_util`, capped at 100, summed in
   thousandths of the device, trusted when all processes' sum is within

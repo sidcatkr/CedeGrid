@@ -106,6 +106,8 @@ struct PreviousGpu {
     external_memory: Option<u64>,
     sample_id: Option<u64>,
     stable_since: Option<u64>,
+    /// Consecutive intervals with a measured external GPU compute amount.
+    measured_streak: u32,
 }
 
 #[derive(Debug, Default)]
@@ -983,18 +985,38 @@ impl PolicyEngine {
                 // through admission only.
                 let compute_key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 let compute_thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
-                let measured = gpu.external_compute_milli.map(|external| {
-                    (
-                        external.min(GPU_COMPUTE_CAPACITY),
-                        gpu.own_compute_milli
-                            .unwrap_or(GPU_COMPUTE_CAPACITY)
-                            .min(GPU_COMPUTE_CAPACITY),
-                    )
-                });
+                // The unknown path applies at once; the measured path returns only
+                // after the quiet window of consecutive measured intervals.
+                let measured_streak = if gpu.external_compute_milli.is_some() {
+                    previous.measured_streak.saturating_add(1)
+                } else {
+                    0
+                };
+                let measured_window = config.contention.quiet_window_intervals(
+                    config.monitor.interval_ms,
+                    config.gpu.process_sample_max_age_ms,
+                );
+                let settled = measured_streak >= measured_window;
+                let measured = gpu
+                    .external_compute_milli
+                    .filter(|_| settled)
+                    .map(|external| {
+                        (
+                            external.min(GPU_COMPUTE_CAPACITY),
+                            gpu.own_compute_milli
+                                .unwrap_or(GPU_COMPUTE_CAPACITY)
+                                .min(GPU_COMPUTE_CAPACITY),
+                        )
+                    });
                 compute_paths.insert(
                     gpu.uuid.clone(),
                     match measured {
                         Some(_) => ComputePath::Measured,
+                        None if gpu.external_compute_milli.is_some() => ComputePath::Unknown {
+                            reason: format!(
+                                "per-process samples were recently inconsistent or are new: measured {measured_streak} of {measured_window} consecutive intervals"
+                            ),
+                        },
                         None => ComputePath::Unknown {
                             reason: gpu.compute_amount_unknown.clone().unwrap_or_else(|| {
                                 "the collector did not measure the external amount".into()
@@ -1196,6 +1218,7 @@ impl PolicyEngine {
                         } else {
                             None
                         },
+                        measured_streak,
                     },
                 );
             }

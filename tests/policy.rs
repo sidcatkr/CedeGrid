@@ -3339,6 +3339,17 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
     assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
 }
 
+/// Takes the measured GPU compute path from the first measured interval, for tests
+/// of that path; the quiet window's hysteresis has its own test.
+fn measured_at_once(cfg: &mut Config) {
+    // One interval must still span longer than the GPU sample age.
+    cfg.gpu.process_sample_max_age_ms = 400;
+    cfg.contention.gpu_compute.quiet_window_intervals = Some(1);
+    cfg.contention
+        .acknowledge_caution
+        .insert("relaxed_detection".into());
+}
+
 /// One evaluation of a lone running GPU job beside external GPU compute: a
 /// measured `external` amount (own work using the rest of the device at full
 /// utilization), or an unknown amount. Returns the job's GPU compute cap target and
@@ -3352,13 +3363,14 @@ fn gpu_compute_target(
     Option<ComputePath>,
 ) {
     let key = cedegrid::contention::ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
+    let (mut cfg, mut snap) = us5_device(
         mode,
         ComputeActivity::Active,
         Some(vec![987]),
         Some(8000),
         false,
     );
+    measured_at_once(&mut cfg);
     snap.gpus[0].utilization_percent = Some(100);
     snap.gpus[0].external_compute_milli = external;
     snap.gpus[0].own_compute_milli = external.map(|external| 1000 - external);
@@ -3509,13 +3521,14 @@ fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
 fn external_gpu_users_are_principals_by_uid() {
     use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
     let key = ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
+    let (mut cfg, mut snap) = us5_device(
         Neutral,
         ComputeActivity::Active,
         Some(vec![987, 988]),
         Some(8000),
         false,
     );
+    measured_at_once(&mut cfg);
     snap.gpus[0].utilization_percent = Some(100);
     snap.gpus[0].external_compute_milli = Some(666);
     snap.gpus[0].own_compute_milli = Some(334);
@@ -3563,13 +3576,14 @@ fn external_gpu_users_are_principals_by_uid() {
 fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
     use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
+    let (mut cfg, mut snap) = us5_device(
         Neutral,
         ComputeActivity::Active,
         Some(vec![987]),
         Some(8000),
         false,
     );
+    measured_at_once(&mut cfg);
     let input = PolicyInput {
         allocations: vec![allocation(
             "job",
@@ -3602,12 +3616,13 @@ fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
     assert_eq!(cap.unwrap_or(1000), 800);
 }
 
-/// Neutral learns that a measured 5% external user is satisfied once own work
-/// holds the fair share and the device has capacity to spare, and own work then
-/// runs at capacity minus the user minus the 5% margin (FR-021).
+/// A device whose samples alternate between consistent and inconsistent every
+/// interval changes own work's cap at most once: the unknown path applies at once
+/// and the measured path returns only after the quiet window of consecutive
+/// measured intervals, which held_back explains (FR-021).
 #[test]
-fn neutral_learns_a_measured_gpu_user_is_satisfied() {
-    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
+fn alternating_gpu_measurements_cause_at_most_one_step_change() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
     let (cfg, mut snap) = us5_device(
         Neutral,
@@ -3616,6 +3631,92 @@ fn neutral_learns_a_measured_gpu_user_is_satisfied() {
         Some(8000),
         false,
     );
+    let mut engine = PolicyEngine::new();
+    let mut applied = None::<YieldStep>;
+    let mut cap = None::<(YieldStep, Option<u64>)>;
+    let mut path = None;
+    let mut changes = 0;
+    let mut now = 0;
+    while now < 120_000 {
+        // Consistent samples for 60 s, then alternating every interval.
+        let measured = now < 60_000 || (now / 500) % 2 == 0;
+        let own = cap.and_then(|c| c.1).unwrap_or(950).min(950);
+        snap.gpus[0].compute_sample_id = Some(now + 1);
+        snap.gpus[0].utilization_percent = Some(((own + 50) / 10) as u32);
+        snap.gpus[0].external_compute_milli = measured.then_some(50);
+        snap.gpus[0].own_compute_milli = measured.then_some(own);
+        snap.gpus[0].compute_amount_unknown =
+            (!measured).then(|| "summed per-process utilization differs".into());
+        let mut facts = rootless(&["job"]);
+        if let Some(applied) = applied {
+            facts
+                .get_mut("job")
+                .unwrap()
+                .applied
+                .insert(key.clone(), applied);
+        }
+        let decision = engine
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![allocation(
+                        "job",
+                        AllocationPhase::Running,
+                        resources(100, 100, 2000),
+                        Some(resources(100, 100, 2000)),
+                    )],
+                    facts,
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap();
+        let action = decision.actions.iter().find(|a| a.resource == key);
+        let next = action.map(|a| (a.step, a.target));
+        if now == 59_500 {
+            assert_eq!(
+                next,
+                Some((YieldStep::Cap, Some(900))),
+                "learned before alternating"
+            );
+        }
+        if now >= 60_000 && next != cap {
+            changes += 1;
+        }
+        cap = next;
+        applied = action.map(|a| a.step);
+        // A measured interval waiting out the window says why it is not trusted.
+        if measured {
+            path = decision.resources[&key]
+                .held_back
+                .as_ref()
+                .and_then(|held| held.compute_path.clone());
+        }
+        now += 500;
+    }
+    assert!(changes <= 1, "{changes} cap changes");
+    assert!(
+        matches!(&path, Some(ComputePath::Unknown { reason }) if reason.contains("recently inconsistent")),
+        "{path:?}"
+    );
+}
+
+/// Neutral learns that a measured 5% external user is satisfied once own work
+/// holds the fair share and the device has capacity to spare, and own work then
+/// runs at capacity minus the user minus the 5% margin (FR-021).
+#[test]
+fn neutral_learns_a_measured_gpu_user_is_satisfied() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (mut cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    measured_at_once(&mut cfg);
     let input = PolicyInput {
         allocations: vec![allocation(
             "job",

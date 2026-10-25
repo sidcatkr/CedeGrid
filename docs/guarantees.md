@@ -82,14 +82,16 @@ utilization; a measured amount takes the CPU paths, with external processes grou
 principals by UID as on CPU and device time nobody accounts for counted as one more
 external principal while an external process is listed, so own work keeps capacity minus
 that amount minus the mode's margin under Performance, and its fair share or a learned
-satisfied demand under Neutral. Unsupported queries, stale samples, an incomplete
-process list or MPS leave it activity of unknown amount, one principal, under which
-Neutral and Performance hold the fair share: once the supervisor reports a duty cycle
-applied, own work counts as holding at most that duty, so the cap at the share is met
-and does not escalate. Unknown activity from a telemetry failure or a missing
-observation, and a duty cycle not reported applied, first hold the steps and escalate
-after the unknown window. Each device's held-back breakdown says which path it took and
-why. An empty-device pass is not evidence of occupied-device sharing. See
+satisfied demand under Neutral. A device leaves the measured path at once and returns
+only after `quiet_window_intervals` consecutive measured intervals. Unsupported queries,
+stale samples, an incomplete process list or MPS leave it activity of unknown amount,
+one principal, under which Neutral and Performance hold the fair share: once the
+supervisor reports a duty cycle applied, own work counts as holding at most that duty,
+so the cap at the share is met and does not escalate. Unknown activity from a telemetry
+failure or a missing observation, and a duty cycle not reported applied, first hold the
+steps and escalate after the unknown window. Each device's held-back breakdown says
+which path it took and why. An empty-device pass is not evidence of occupied-device
+sharing. See
 [GPU operation](coordinator-work.md#gpu-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
