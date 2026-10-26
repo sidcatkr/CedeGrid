@@ -17,12 +17,93 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-fn directory() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(".agent-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap()
+/// A test's directory, removed on drop after success, failure or panic. The agent
+/// refuses state outside the runtime home, and the macOS default TMPDIR is not in
+/// it, so it lives in the current directory, the repository root under cargo. Only
+/// a killed run leaves it behind.
+struct TestDir(PathBuf);
+impl TestDir {
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        // The test's own processes may still be exiting, so removal is retried.
+        let mut result = fs::remove_dir_all(&self.0);
+        for _ in 0..40 {
+            if result.is_ok() || !self.0.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            result = fs::remove_dir_all(&self.0);
+        }
+        if let Err(error) = result {
+            eprintln!("left {}: {error}", self.0.display());
+        }
+    }
+}
+fn directory() -> TestDir {
+    TestDir(
+        tempfile::Builder::new()
+            .prefix(".agent-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap()
+            .keep(),
+    )
+}
+/// A process the test started, killed and reaped on drop so that a failing test
+/// never leaves it writing into its directory.
+struct Owned(Child);
+impl std::ops::Deref for Owned {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Owned {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl Drop for Owned {
+    fn drop(&mut self) {
+        // Cleanup only: the process may already have exited and been reaped.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+/// A failing test leaves neither its directory nor its processes behind, even
+/// while one of them still writes into the directory.
+#[test]
+fn a_failing_test_leaves_no_directory_or_process_behind() {
+    let seen = std::sync::Mutex::new(None);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let dir = directory();
+        // One process that recreates the directory while it runs, so a survivor
+        // would show.
+        let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let _writer = Owned(
+            Command::new(python)
+                .args([
+                    "-c",
+                    "import os,sys\nwhile True:\n    os.makedirs(sys.argv[1]+'/w',exist_ok=True)\n    open(sys.argv[1]+'/w/log','a').write('x')\n",
+                ])
+                .arg(dir.path())
+                .spawn()
+                .unwrap(),
+        );
+        *seen.lock().unwrap() = Some(dir.path().to_owned());
+        std::thread::sleep(Duration::from_millis(100));
+        panic!("deliberate failure to check cleanup");
+    }));
+    assert!(failed.is_err());
+    let path = seen.into_inner().unwrap().unwrap();
+    assert!(!path.exists(), "{} survived the panic", path.display());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!path.exists(), "a process recreated {}", path.display());
+}
+
 fn clock_ms() -> u64 {
     let mut time: libc::timespec = unsafe { std::mem::zeroed() };
     assert_eq!(
@@ -91,7 +172,7 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
         control_token: None,
     }
 }
-fn start(spec: &SupervisorSpec) -> (Child, ChildStdin, mpsc::Receiver<serde_json::Value>) {
+fn start(spec: &SupervisorSpec) -> (Owned, ChildStdin, mpsc::Receiver<serde_json::Value>) {
     let bootstrap_store =
         StateStore::open_with_profile(&spec.config.state_dir, spec.config.storage_profile).unwrap();
     let namespace = serde_json::to_string(bootstrap_store.namespace_guard().identity()).unwrap();
@@ -118,7 +199,7 @@ fn start(spec: &SupervisorSpec) -> (Child, ChildStdin, mpsc::Receiver<serde_json
             }
         }
     });
-    (child, input, rx)
+    (Owned(child), input, rx)
 }
 fn wait(child: &mut Child) -> std::process::ExitStatus {
     let end = Instant::now() + Duration::from_secs(15);
@@ -570,17 +651,19 @@ async fn real_agent_schedules_command_over_mtls_and_publishes_one_receipt() {
         .unwrap();
     let log = dir.path().join("agent.log");
     let err = dir.path().join("agent.err");
-    let mut process = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
-        .arg("--config")
-        .arg(config_file)
-        .arg("agent")
-        .arg("--deployment")
-        .arg(deployment_file)
-        .env("TMPDIR", dir.path())
-        .stdout(Stdio::from(fs::File::create(&log).unwrap()))
-        .stderr(Stdio::from(fs::File::create(&err).unwrap()))
-        .spawn()
-        .unwrap();
+    let mut process = Owned(
+        Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(config_file)
+            .arg("agent")
+            .arg("--deployment")
+            .arg(deployment_file)
+            .env("TMPDIR", dir.path())
+            .stdout(Stdio::from(fs::File::create(&log).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&err).unwrap()))
+            .spawn()
+            .unwrap(),
+    );
     let mut result = None;
     for _ in 0..80 {
         if let Response::Result { submission } = operator
@@ -1054,12 +1137,19 @@ fn unknown_control_kinds_are_ignored_and_adjust_reports_applied_steps() {
 
 /// A coordinator and a node configuration for an end-to-end agent test.
 struct Service {
-    dir: tempfile::TempDir,
+    dir: TestDir,
     operator: cedegrid::protocol::RpcClient,
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     local: SupervisorSpec,
     config_file: PathBuf,
     deployment_file: PathBuf,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        // Stop the coordinator before its directory is removed.
+        self.server.abort();
+    }
 }
 
 impl Service {
@@ -1207,22 +1297,24 @@ impl Service {
         }
     }
 
-    fn agent(&self, log: &str) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_cedegrid"))
-            .arg("--config")
-            .arg(&self.config_file)
-            .arg("agent")
-            .arg("--deployment")
-            .arg(&self.deployment_file)
-            .env("TMPDIR", self.dir.path())
-            .stdout(Stdio::from(
-                fs::File::create(self.dir.path().join(format!("{log}.log"))).unwrap(),
-            ))
-            .stderr(Stdio::from(
-                fs::File::create(self.dir.path().join(format!("{log}.err"))).unwrap(),
-            ))
-            .spawn()
-            .unwrap()
+    fn agent(&self, log: &str) -> Owned {
+        Owned(
+            Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+                .arg("--config")
+                .arg(&self.config_file)
+                .arg("agent")
+                .arg("--deployment")
+                .arg(&self.deployment_file)
+                .env("TMPDIR", self.dir.path())
+                .stdout(Stdio::from(
+                    fs::File::create(self.dir.path().join(format!("{log}.log"))).unwrap(),
+                ))
+                .stderr(Stdio::from(
+                    fs::File::create(self.dir.path().join(format!("{log}.err"))).unwrap(),
+                ))
+                .spawn()
+                .unwrap(),
+        )
     }
 
     async fn result(&self, attempts: usize) -> Option<cedegrid::protocol::ResultSubmission> {
@@ -1334,15 +1426,17 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
     });
     // Test-owned external load on every logical CPU.
     let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
-    let mut load: Vec<Child> = (0..cpus)
+    let mut load: Vec<Owned> = (0..cpus)
         .map(|_| {
-            Command::new(&python)
-                .args([
-                    "-c",
-                    "import time\nend=time.monotonic()+40\nwhile time.monotonic()<end: pass\n",
-                ])
-                .spawn()
-                .unwrap()
+            Owned(
+                Command::new(&python)
+                    .args([
+                        "-c",
+                        "import time\nend=time.monotonic()+40\nwhile time.monotonic()<end: pass\n",
+                    ])
+                    .spawn()
+                    .unwrap(),
+            )
         })
         .collect();
     let (_, step) = wait_for("a cap or pause", Duration::from_secs(8), &|_, step| {
@@ -1492,7 +1586,7 @@ fn read_pid(path: &Path) -> Option<u32> {
 #[test]
 fn a_reconnected_controller_still_reaches_only_the_verified_family() {
     let dir = directory();
-    let mut foreign = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut foreign = Owned(Command::new("sleep").arg("30").spawn().unwrap());
     let code = r#"
 import os,sys,time,subprocess
 from pathlib import Path
@@ -1624,7 +1718,7 @@ async fn a_restarted_agent_refuses_a_reused_supervisor_pid() {
     agent.kill().unwrap();
     agent.wait().unwrap();
     // The recorded supervisor PID now names another live process.
-    let mut decoy = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut decoy = Owned(Command::new("sleep").arg("30").spawn().unwrap());
     let record = service.record().unwrap();
     let path = service
         .local

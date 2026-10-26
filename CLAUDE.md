@@ -71,8 +71,9 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s tests -p 'test_*.py'
   writes or compares every scripted decision (`CEDEGRID_DECISION_SNAPSHOT`, see
   `tests/support/snapshot.rs`, which test files `include!` rather than `mod`). Never run `--ignored` across the suite, and run hardware
   gates only when explicitly authorized.
-- A failed integration test keeps its `.agent-test-*`, `.distributed-service-*` or
-  `..*.cedegrid-control` directory as evidence. Don't bulk-delete them.
+- A failed integration test keeps its `.distributed-service-*` or `..*.cedegrid-control`
+  directory as evidence. Don't bulk-delete them. `tests/agent.rs` removes its `.agent-test-*`
+  directories after success, failure or panic; only a killed run leaves one.
 - Windows CI checks client paths only: `cargo check --all-targets` and
   `cargo test --lib --test policy --test telemetry --test cli`.
 
