@@ -84,7 +84,7 @@ contender reaches its demand no later than under Performance.
 - [ ] T008 [P] [US1] In `tests/contention.rs`, report 018's case (contract P2): capacity 8000 m,
   own work and one light principal using 200 m that waits with demand 1000 m and grows by 160 m
   per interval; assert Aggressive targets 7640, 7480, 7320, 7160, 7000, 7000 m and that
-  Performance ends at 6840 m.
+  Performance ends at 6840 m. Repeat the case on a GPU compute resource in device units (SC-001).
 - [ ] T009 [P] [US1] In `tests/contention.rs`, the single-observation cases: Performance at or
   below the protected point gives exactly the protected target (P3); a known demand below the
   fair share is kept exactly, an unknown or larger demand keeps the fair share, and wait never
@@ -99,14 +99,18 @@ contender reaches its demand no later than under Performance.
   waiting at once (P4); a protected user stops waiting, then waits again (P5); load switching
   every 4 monitor intervals changes Aggressive's step at most once per switch (P6, 001 SC-009);
   a held compute cap rises straight to capacity − external once calm (P8); memory hints and
-  drains only at a floor breach, as Performance (P7, R4).
+  drains only at a floor breach, as Performance (P7, R4); every action under Aggressive is one of
+  001's step kinds, never a nice decrease or a thread change (FR-017); Guaranteed work is never
+  paused; a node cap lowered below Aggressive moves the run to the new cap's mode from the next
+  interval.
 - [ ] T012 [P] [US1] In `tests/decision_snapshot.rs`, assert in every generated random sequence
   that each decision's Aggressive target is at least its Performance target per resource (P1).
 - [ ] T013 [P] [US1] In `tests/agent.rs`, a `launch_slots` test that an effective mode of
   Aggressive fills every free slot in one heartbeat, as Performance does (SC-003).
 - [ ] T014 [P] [US1] In `tests/observability.rs`, decisions show `held_back.protected_share` and
   reason `aggressive_protected_share` when the protected target is the larger, and 0 while
-  Aggressive equals Performance (data-model "Decision output").
+  Aggressive equals Performance (data-model "Decision output"); `doctor` and `observe` show the
+  red `[Aggressive]` label, plain with `NO_COLOR` (FR-007).
 - [ ] T015 [P] [US1] In `tests/configuration.rs`, replace `no_configuration_can_name_aggressive`:
   `aggressive` as `default_mode`, a resource mode or `max_mode` fails without `aggressive_mode`
   in `contention.acknowledge_caution` and loads with it; with `default_mode = "aggressive"` and
@@ -115,7 +119,8 @@ contender reaches its demand no later than under Performance.
 - [ ] T016 [P] [US1] In `tests/cli.rs`, `cedegrid setup --mode aggressive --acknowledge
   aggressive_mode` and `--max-mode aggressive --acknowledge aggressive_mode` write the same
   configuration as the keyboard interface (001 SC-011), show a red `[Aggressive]` label, and
-  plain text with `NO_COLOR`.
+  plain text with `NO_COLOR`; the caution confirmation says that own work stays the preferred
+  OOM victim, so a sudden external allocation may kill it before it checkpoints (FR-006).
 - [ ] T017 [P] [US1] In `tests/contracts/cedegrid-0.2.json`, flip JC-05 (`"cpu": "aggressive"`)
   to accepted, and run it in `tests/coordinator.rs`, `python/tests/test_transport.py` and
   `npm/tests/sdk.test.ts`; the coordinator accepts Aggressive within the node cap (FR-009).
@@ -141,10 +146,11 @@ contender reaches its demand no later than under Performance.
   574), require it for any `aggressive` mode or `max_mode` (validation near line 814), and stop
   the derived node cap (`max_mode`, line 747) at `performance` unless `max_mode` is set
   explicitly; in `src/setup.rs`, accept `aggressive` (line 255), its margin key and label (lines
-  751, 1441) and the picks (lines 1671–1812), with the red `[Aggressive]` label.
+  751, 1441) and the picks (lines 1671–1812), with the red `[Aggressive]` label and the FR-006
+  confirmation text.
 - [ ] T023 [US1] Add `held_back.protected_share` and the catalog reason `aggressive_protected_share`
-  in `src/contention.rs` and `src/policy/measure.rs`, and show both in `src/explain.rs`
-  (`observe`, `doctor`).
+  in `src/contention.rs` and `src/policy/measure.rs`, and show both, with the `[Aggressive]`
+  label, in `src/explain.rs` (`observe`, `doctor`).
 - [ ] T024 [US1] Accept `aggressive` in job modes in `src/protocol.rs` and `src/coordinator.rs`
   within the node cap, and in `python/cedegrid/` and `npm/src/` (mode value only).
 
@@ -183,7 +189,8 @@ is active.
   `max(max(performance, protected), own)`).
 - [ ] T029 [P] [US2] In `tests/policy.rs`, an unprotected run beside a contender that grows at
   every demand level gets zero compute step-downs, while a RAM floor breach still takes the
-  normal floor path (SC-004, 001 SC-012).
+  normal floor path (SC-004, 001 SC-012); Guaranteed work is never paused; no action raises
+  priority or changes thread counts (FR-017).
 - [ ] T030 [P] [US2] In `tests/state.rs`, the global allowance record: `enabled` is off by
   default, `set_at_unix_ms` is recorded, `set_by` is always `interactive_setup`, and turning it
   off leaves active grants running (data-model "Global allowance").
@@ -191,8 +198,9 @@ is active.
   `interactive_phrase` grant needs the agent's challenge ("valid 120 s, used once"); a
   `flag_and_allowance` grant needs `confirm_unprotected_aggressive` and the allowance; a refused
   request never becomes active; a drained and retried run keeps its grant; a new run needs a new
-  grant; lowering the node cap below Aggressive ends the grant from the next interval
-  (data-model "Unprotected grant").
+  grant; lowering the node cap below Aggressive ends the grant from the next interval; a request
+  is refused when the node cap is below Aggressive, naming the cap (FR-011) (data-model
+  "Unprotected grant").
 - [ ] T032 [P] [US2] In `tests/contracts/cedegrid-0.2.json`, add the cases: an unprotected request
   without confirmation, with the flag but no allowance, and with an expired challenge, each
   rejected; run them in `tests/coordinator.rs`, `python/tests/test_transport.py` and
@@ -201,7 +209,8 @@ is active.
   Aggressive and unprotected options and either SDK's fields differ (FR-019).
 - [ ] T034 [P] [US2] In `tests/configuration.rs`, `unprotected_aggressive` and
   `allow_unprotected_aggressive` in any configuration section fail to load with
-  `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE` naming the key; environment variables cannot enable it
+  `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE` naming the key, also after `src/config_migration.rs`
+  migrates a 0.2 configuration that contains one; environment variables cannot enable it
   (FR-012).
 - [ ] T035 [P] [US2] In `tests/observability.rs`, a run's JSON shows `"unprotected": true` with its
   grant while active, logs carry one warning line at its start, and neither appears after the
@@ -218,7 +227,8 @@ is active.
   requested_unix_ms }` to `src/protocol.rs`, verify it in `src/agent/launch.rs` before the launch
   barrier persists Authorized, and keep the grant's lifetime (ends with the run; retries keep it;
   a lowered node cap ends it) in `src/agent/service.rs`.
-- [ ] T039 [US2] Refuse the unprotected keys in `src/config.rs` with
+- [ ] T039 [US2] Refuse the unprotected keys in `src/config.rs` (and after migration in
+  `src/config_migration.rs`) with
   `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: <key> cannot be stored; unprotected Aggressive is
   turned on per run only`.
 - [ ] T040 [US2] Add `unprotected_aggressive` and `confirm_unprotected_aggressive` (booleans,
@@ -231,7 +241,9 @@ is active.
 
 - [ ] T042 [US2] *(needs 003)* Write failing tests in `tests/run_cli.rs`: the interactive start
   shows the agent's numbers screen (other active principals, their CPU use, an estimated light-user
-  slowdown labeled as an estimate) and `Start this run unprotected? [y/n]` with no default, then
+  slowdown labeled as an estimate, and the FR-006 sentence that own work may be killed by a
+  sudden external allocation before it checkpoints) and `Start this run unprotected? [y/n]` with
+  no default, then
   requires `slow other users for this run`; anything else cancels with `cancelled: the phrase did
   not match; nothing started`; a non-interactive start without `--confirm-unprotected-aggressive`
   or with the allowance off is refused naming each missing condition; `--save` refuses with

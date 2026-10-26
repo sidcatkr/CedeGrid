@@ -132,6 +132,7 @@ src/
 ├── policy/admission.rs    # Aggressive admission pace (fills like Performance)
 ├── config.rs              # "aggressive" mode value, aggressive_mode acknowledgement,
 │                          # max_mode explicit raise, refusal of unprotected keys
+├── config_migration.rs    # the same refusal after a 0.2 configuration is migrated
 ├── setup.rs, setup/interface.rs  # red [Aggressive] label, node-cap step, global allowance
 ├── state.rs               # global allowance record
 ├── protocol.rs            # job/wire mode value and the unprotected grant fields
