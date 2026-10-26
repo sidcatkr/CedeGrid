@@ -486,7 +486,7 @@ pub struct HeldBack {
     /// The mode's idle margin.
     #[serde(skip_serializing_if = "is_zero")]
     pub margin: u64,
-    /// CPU a visible ancestor CPU ceiling keeps from the budget beyond the reserve;
+    /// CPU a visible ancestor CPU ceiling keeps from the budget beyond the reserve and margin;
     /// not contention.
     #[serde(skip_serializing_if = "is_zero")]
     pub ceiling: u64,

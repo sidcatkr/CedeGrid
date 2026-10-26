@@ -283,8 +283,8 @@ Read-only CPU PSI for FR-072, collected with the kernel snapshot:
 
 Per resource, in resource units, zero amounts left out: `floor`, `reserve` (the CPU reserve
 where it exceeds the margin), `margin`, `ceiling` (CPU a visible ancestor CPU ceiling keeps
-from the budget beyond the reserve; `doctor` shows it on its own line, never as contention),
-`contention` (left to contending external demand),
+from the budget beyond the reserve and margin; `doctor` shows it on its own line, never as
+contention), `contention` (left to contending external demand),
 `peak`, `contention_psi` (the contention hold when only external PSI saturates the CPU),
 `noise_tolerance` (external GPU memory growth within this much goes unseen; reported
 for information, not subtracted from the budget), `unknown`, `cooldown`, `backoff`,

@@ -488,7 +488,7 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     (
         "held_back_ceiling",
-        "CPU a visible ancestor CPU ceiling keeps from the budget; it is not contention.",
+        "CPU a visible ancestor CPU ceiling keeps from the budget beyond the reserve and margin; it is not contention.",
     ),
     (
         "held_back_contention",

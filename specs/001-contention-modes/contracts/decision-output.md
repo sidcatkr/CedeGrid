@@ -40,7 +40,7 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from
   admission: `floor`, `reserve`, `margin`, `ceiling` (CPU a visible ancestor ceiling keeps
-  from the budget beyond the reserve; never contention), `contention`, `peak`,
+  from the budget beyond the reserve and margin; never contention), `contention`, `peak`,
   `noise_tolerance`, `unknown`, `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are
   left out (FR-069). `capacity` is
   the resource's capacity and `percent` each cause's share of it, to one decimal. On GPU

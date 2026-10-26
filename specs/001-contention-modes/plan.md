@@ -451,8 +451,8 @@ Spec: Session 2026-10-26, SC-004, FR-034 and the defaults table.
 ## Item 017 fixes (2026-10-26)
 
 - **Held-back ceiling (T171, SC-016)**: CPU `held_back` gains `ceiling`, what a visible ancestor
-  CPU ceiling keeps from the budget beyond the reserve. It is never counted as contention.
-  `doctor` shows it on its own line, and observe and the node report carry it as
+  CPU ceiling keeps from the budget beyond the reserve and margin. It is never counted as
+  contention. `doctor` shows it on its own line, and observe and the node report carry it as
   `held_back.ceiling`. Decisions do not change.
 - **RAM cap through the supervisor (T174, FR-011, FR-024)**: a fake backend in
   `tests/managed_supervision.rs` wraps the rootless one with a `memory.high`-like cap. It covers
