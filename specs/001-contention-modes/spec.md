@@ -139,6 +139,20 @@ thresholds.
   rules (minimum step dwell, hysteresis, reversal tolerance). FR-071's one rise step per
   scale-up interval now means per Performance compute interval.
 
+### Session 2026-10-27
+
+- Q: When every process on a GPU is verified own work, is external GPU compute measured as zero
+  at once, or does it stay Unknown until the quiet window passes? → A: Measured as zero for an
+  interval in which all of these hold: the compute and the graphics process queries both
+  succeeded; every listed PID is an own verified PID, checked through its pidfd, with no PID 0 or
+  unresolvable entry; no MPS control daemon or server is present; and device memory not
+  attributed to own PIDs is no higher than at the last measured or own-only interval plus
+  `contention.gpu_memory.noise_tolerance_mib`. The device then stays on the measured path and its
+  quiet window does not restart. If any one fails, the existing rules apply unchanged.
+- Q: Does the GPU attribution tolerance default change after the first device's measurement? →
+  A: No. `attribution_tolerance_percent` stays 15 until a second device is measured; the first
+  device's largest gap was 5 points.
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -679,10 +693,17 @@ node reports with the expected per-resource values at each step.
   utilization over the same interval. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
   the part nobody accounts for being one unattributed principal; with own processes only, the
-  remainder is own work. It MUST stay activity of unknown amount when either query
-  is unsupported, samples are not fresh, the process inventory is incomplete, or an MPS control
-  daemon or server is present. A device MUST switch to the unknown path at once and return to
-  the measured path only after `quiet_window_intervals` consecutive measured intervals. A measured amount takes the CPU paths: external processes are
+  remainder is own work. External GPU compute MUST be measured as zero, without fresh samples,
+  for an interval in which the compute and the graphics process queries both succeed, at least
+  one PID is listed and every listed PID is an own verified PID (checked through its pidfd, with
+  no PID 0 or unresolvable entry), no MPS control daemon or server is present, and device memory not attributed to own
+  PIDs is no higher than at the last measured or own-only interval plus
+  `contention.gpu_memory.noise_tolerance_mib`; such an interval keeps the device on the measured
+  path and does not restart its quiet window. Otherwise it MUST stay activity of unknown amount
+  when either query is unsupported, samples are not fresh, the process inventory is incomplete,
+  or an MPS control daemon or server is present. A device MUST switch to the unknown path at once
+  and return to the measured path only after `quiet_window_intervals` consecutive measured
+  intervals. A measured amount takes the CPU paths: external processes are
   principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
   window as CPU, a PID whose UID cannot be read is unattributed, saturation is at
   `saturation_percent` of device utilization, and probing and satisfied records apply;
