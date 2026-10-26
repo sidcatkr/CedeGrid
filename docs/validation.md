@@ -49,18 +49,47 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - useful work from two nodes
   - loss and rejoin of a node
   - checkpoint transfer between nodes
-- **GPU.** Not yet verified on hardware:
-  - managed execution on an empty device
-  - sharing and protection on an occupied device
+- **GPU.** Verified on one consumer device only (see
+  [Native gate results](#native-gate-results-feature-001)). Other devices and drivers, and a
+  native Performance ramp on GPU compute, are not verified. In Neutral, a short GPU job runs
+  capped at the fair share after it starts, because its new process reads as Unknown GPU
+  activity.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
-- **Performance ramp.** The 10 s ramp to 90% is verified in simulation only. The gate in
-  `specs/001-contention-modes/native-gates.md` has not run on a Linux host.
+- **Performance ramp.** On CPU, the ramp reaches 90% in under 3 s on one Linux host, but a
+  CPU-bound contender started mid-ramp gets about 0.72 of the core it wants, so SC-004's second
+  bullet is open (see [Native gate results](#native-gate-results-feature-001)).
+- **Idle utilization.** SC-014 is not met on the test host: own CPU work reaches 87.5% of the
+  scope in Neutral and Performance and 75% in Yield First, and the decisions read own CPU
+  about 12% low (see [Native gate results](#native-gate-results-feature-001)).
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
 - **Endurance.** A long-duration soak has not been run. Bounded stress is the release
   requirement.
+
+## Native gate results (feature 001)
+
+Run on 2026-10-26 on one authorized Linux host, the test host, with the commands in
+`specs/001-contention-modes/native-gates.md`. These results hold for this host only. `src/`
+and `Cargo.lock` are the same at every commit listed, so each gate ran the same product code.
+
+| Host role | Kernel | CPUs | RAM | GPU | Driver |
+|---|---|---|---|---|---|
+| test host | Linux 7.0.0 (Ubuntu 26.04), cgroup v2 with PSI, `cpu memory pids` delegated to the user manager | 20 logical (Intel Core i5-13500), 1 NUMA node | 31 GiB, 8 GiB swap | NVIDIA GeForce GTX 1060 6 GB | 580.178.04, CUDA 13.0 |
+
+| Gate | Commit | Values | Result |
+|---|---|---|---|
+| T054, delegated cgroup steps (quickstart §4) | `4d631d0`, `893c1c2` | `cpu.weight`, `cpu.max` and `cgroup.freeze` written, read back and restored; with a foreign test-owned process in the leaf, LowerShare is refused and Cap falls back to the rootless duty cycle ("cgroup write refused"), leaving the leaf unchanged | pass |
+| T138, RAM cap | `4d631d0`, `893c1c2` | `memory.high` written, read back and restored to `max`; swap is on, so the swap-off `memory.stat` check does not apply | pass |
+| T141e, PSI | `4d631d0`, `893c1c2` | (1) status available, 10 external cgroups, external avg10 0; (3) 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples; (2) not run: it needs a load under another account or in a system slice | open |
+| T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `893c1c2`, `1c8a850` | `ramp_seconds` 2.784 idle, 2.728 and 2.762 with a contender (target 10 s); the contender, one busy loop started at 3 s, gets a median of 0.72 core after 10 s pinned and unpinned, and 0.9 core in 7% and 0% of half-second samples; `foreign_actions` 0 | ramp pass, contender fail (SC-004) |
+| T088, GPU on an occupied device | `893c1c2` | owned-context test passes; a fresh external CUDA context takes 74 MiB, so the 512 MiB minimum stays; with an idle external context, 100 of 100 GPU tasks complete in Neutral and in Performance, admission open, no GPU step, unattributed device memory 203 MiB; GPU activity reads Unknown in 88% of those sessions' samples; paused: 0 completions, VRAM unchanged; 50% duty cycle at 500 ms gives 0.50 of baseline, longest gap 258 ms, longest kernel 4.4 ms; T152: summed per-process SM differs from device utilization by at most 2, 2 and 5 points with 1, 2 and 4 processes | pass |
+| T117, CPU reclaim (Yield First, Neutral, Performance) | `1c8a850` | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
+| T117, GPU (Neutral, Performance) | `c0779d3` | GPU compute at the target share 2 intervals after the protected GPU load starts, after up to 6 caps and one pause, no drain; decision p95 0.07 and 0.60 s; post-yield p99 0.77×; matched throughput 0.923 in Performance but 0.723 in Neutral, where each new 20 s job reads as Unknown GPU activity at start, is capped at the fair share and stays capped through the cooldown | Performance pass, Neutral fail |
+| T117, SC-014 (4 CPUs, 500 m tasks, idle) | `374637d`, `c0779d3` | own CPU 87.5% of capacity in Neutral and Performance, 75.0% in Yield First (targets 94%, 97% and 84%); the decisions read own work about 330–430 m low and count that as external; with 500 m tasks own use moves in 500 m steps, so this run cannot reach the targets even with exact measurement | fail |
+| T117, SC-015 (beside a 60 m external user) | `374637d`, `c0779d3` | own CPU as a share of capacity minus the user and the margin: 93.6% in Neutral, 90.7% in Performance, 89.8% in Yield First (target 90%); no step change in 5 minutes | Neutral and Performance pass, Yield First fail |
+| T118, SC-005 audit | `1c8a850` (CPU), `c0779d3` (GPU) | CPU and GPU, at the defaults and with Performance and a 512 MiB floor: 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
 
 ## Rules for validation runs
 

@@ -323,11 +323,13 @@ pause and then reverses, with no drain (quickstart §3, SC-007).
 - [X] T053 [US2] In `src/agent.rs`, advertise only the controls the backend can apply (a
   successful `CgroupBackend::new` plus authorized settings), and exclude PSI observations
   (audit H8).
-- [ ] T054 [US2] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
+- [X] T054 [US2] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
   authorized Linux host; commands in [native-gates.md](native-gates.md).*
   - add `runtime_adjust_requires_verified_membership` to `tests/cgroup.rs`;
   - run quickstart §4 with `CEDEGRID_TEST_CGROUP_ROOT` on Linux;
   - record the evidence in `docs/validation.md`.
+
+  *Passed on the test host on 2026-10-26 (`docs/validation.md`, "Native gate results").*
 - [X] T055 [US2] Add a rootless CPU contention scenario in `tests/agent.rs`: a test-owned
   external CPU load leads to `cap` within the Yield First response time, and the step reverses
   after the load stops (quickstart §3). *SC-002 now requires 2 intervals; T125 covers it.*
@@ -710,7 +712,7 @@ context, under Neutral and Performance (quickstart §5).
   victim set, and preempt only on real exhaustion (audit M9).
   Real exhaustion: every requested resource is open, and the budget, the worker pool or the
   launch slots are used up; zero slots count only at the agent's reported `max_workers`.
-- [ ] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
+- [X] T088 [US5] Native-evidence gate, run only when explicitly authorized. *Deferred: needs an
   authorized Linux host with an NVIDIA device; commands in [native-gates.md](native-gates.md).*
   - run quickstart §5 on Linux + NVIDIA with `CEDEGRID_TEST_GPU_UUID` and an idle external
     context, including 100 consecutive launches on the shared device;
@@ -728,6 +730,11 @@ context, under Neutral and Performance (quickstart §5).
     concurrent processes on each target GPU, and set the default
     `contention.gpu_compute.attribution_tolerance_percent` (15, provisional) from it, and how
     often the consistency check fails over a real session.
+
+  *Passed on the test host on 2026-10-26, one GPU (`docs/validation.md`, "Native gate
+  results"). A fresh external context took 74 MiB, so the 512 MiB minimum stays. The largest
+  attribution gap was 5 points, so the 15-point tolerance stays until a second device is
+  measured (report 021, Decision 5).*
 - [X] T152 [US5] Measure external GPU compute instead of treating all activity as an unknown
   amount (FR-021): each external PID's average fresh `sm_util`, capped at 100, summed in
   thousandths of the device, trusted when all processes' sum is within
@@ -919,7 +926,11 @@ each step.
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
   that evidence.
-- [ ] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
+
+  *Open after the test host's run on 2026-10-26 (`docs/validation.md`): CPU reclaim (SC-002,
+  SC-012) passes; SC-004's contender bullet (T178), SC-014 and Neutral's matched GPU throughput
+  miss; SC-003's convergence is not exercised by the runner. Report 021, Decisions 1–3.*
+- [X] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
   confirmed near-minimum floor:
   - run the `tools/pressure.py` scenario with the actuation audit hook;
   - assert zero actions on external processes;
@@ -927,6 +938,8 @@ each step.
 
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md), which gives
   the audit over `cedegrid history` that stands in for the hook.*
+
+  *Passed on the test host on 2026-10-26, CPU and GPU, four runs (`docs/validation.md`).*
 - [X] T153 Prepare the T117/T118 gate runner in `tools/pressure_comparison.py`, tests first in
   `tests/test_pressure_comparison.py`:
   - `--contention-mode {yield_first,neutral,performance}` and `--ram-floor-mib`;
@@ -984,6 +997,8 @@ each step.
     with `saturated_by_psi`, `psi_system_only`, `psi_unknown` and `held_back.contention_psi` in
     the catalog and `docs/guarantees.md`.
   - [ ] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
+    *Steps 1 and 3 passed on the test host on 2026-10-26; step 2 needs a load under another
+    account or in a system slice (report 021, Decision 4).*
 
 ## Phase 12: Revisions from review items 002–013 (done)
 
@@ -1069,6 +1084,8 @@ no behavior beyond what those commits did.
 ## Phase 15: Convergence (item 017 Part 4)
 
 - [ ] T178 Run the Performance ramp gate (`tools/ramp_gate.py`, "Performance ramp gate" in native-gates.md) on the authorized test host, idle and with a contender started mid-ramp, and record `ramp_seconds`, `contender_served_seconds` and `foreign_actions` in docs/validation.md. *Deferred: runs only with the user's approval in the session.* Per SC-004 and plan: ramp gate (missing)
+  *Open after the test host's run on 2026-10-26: the ramp passes (2.7–2.8 s), but the
+  contender gets about 0.72 core (SC-004, second bullet; report 021, Decisions 1 and 2).*
 - [X] T179 Add the ramp tests (`cargo test --locked --test contention ramp`) and the held-back ceiling test to quickstart §1, and list `tools/ramp_gate.py` in the docs/validation.md matrix and the Performance ramp's hardware evidence under its open gates. Per plan: Faster Performance ramp and Item 017 fixes (partial)
 
 ---
