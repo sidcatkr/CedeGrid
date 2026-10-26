@@ -127,7 +127,9 @@ an own verified process), else the process CPU clock read while a pidfd shows th
 verified process alive, else the `/proc` tick counters. Each source's read error is
 subtracted: its resolution plus one scheduler tick per thread that can be running, or
 two counter ticks for the tick counters. A change of source gives no reading for that
-interval.
+interval. Summed over own work for a decision, pending time counts at most one tick per
+scope CPU at each read, widened by how long the reads take, since only a task running at
+the read has any; the sum stays between the sums of the per-allocation bounds.
 
 Each resource runs in a contention mode, and for every resource and observation the
 targets are ordered: Yield First ≤ Neutral ≤ Performance. Capacity no workload wants
@@ -141,7 +143,10 @@ external activity of unknown amount exists. Principals are the account CedeGrid 
 whatever its UID, and users at or above `contention.uid_min` (1000) that have used at
 least `principal_min_percent` for `contention.principal_window_intervals` (4)
 observations; they leave after `contention.principal_leave_s` (60 s) below it, and
-meanwhile their unused share goes to the others. Until a user joins, its usage counts
+meanwhile their unused share goes to the others. The account CedeGrid runs as is one
+principal: its unmanaged processes share its fair share with own work and are served as
+own work's margin frees capacity, so the 2-interval reclaim bound applies to other
+principals' demand. Until a user joins, its usage counts
 toward one unattributed principal, together with processes whose owner cannot be read,
 so contention is seen at once. A host that mounts `/proc` with `hidepid=2` always takes
 this path for other accounts. Usage by lower UIDs is background demand: it comes off the

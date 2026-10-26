@@ -1177,5 +1177,5 @@ T098 src/setup.rs caution mapping tests    T099 tests/cli.rs flag tests
 
 ## Phase 17: Convergence (item 024)
 
-- [ ] T188 State in `docs/guarantees.md` (Resource accounting, own CPU) that own CPU summed for a decision counts one tick of pending time per scope CPU at each read, widened by the read pass, within the per-allocation sums, per plan "Item 024" and research R9 (partial)
-- [ ] T189 State in `docs/guarantees.md` (principals) that the account CedeGrid runs as is one principal whose unmanaged processes share its fair share with own work and are served as own work's margin frees capacity, while the 2-interval reclaim bound is for other principals' demand, per SC-002 (partial)
+- [X] T188 State in `docs/guarantees.md` (Resource accounting, own CPU) that own CPU summed for a decision counts one tick of pending time per scope CPU at each read, widened by the read pass, within the per-allocation sums, per plan "Item 024" and research R9 (partial)
+- [X] T189 State in `docs/guarantees.md` (principals) that the account CedeGrid runs as is one principal whose unmanaged processes share its fair share with own work and are served as own work's margin frees capacity, while the 2-interval reclaim bound is for other principals' demand, per SC-002 (partial)
