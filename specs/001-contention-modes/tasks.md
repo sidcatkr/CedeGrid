@@ -922,6 +922,9 @@ each step.
   - run the `tools/pressure.py` scenario with the actuation audit hook;
   - assert zero actions on external processes;
   - assert zero external OOM kills and zero external GPU allocation failures.
+
+  *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md), which gives
+  the audit over `cedegrid history` that stands in for the hook.*
 - [X] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
   `include`, `tests/test_source_review.py` passes, and the in-memory
   `validate_files(public=True)` passes.
