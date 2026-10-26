@@ -152,6 +152,12 @@ thresholds.
 - Q: Does the GPU attribution tolerance default change after the first device's measurement? →
   A: No. `attribution_tolerance_percent` stays 15 until a second device is measured; the first
   device's largest gap was 5 points.
+- Q: Does an interval that lists no process count as the memory baseline for own-only GPU
+  intervals? → A: Yes. An external process the driver cannot see is invisible at a measured
+  interval too, so an empty interval is no weaker as a baseline.
+- Q: Does SC-002's 2-interval bound apply to unmanaged programs of the account that runs
+  CedeGrid? → A: No; it is for other principals' demand. The owner's other programs share the
+  owner's fair share with own work and are served as own work's margin frees capacity.
 
 ## Terms
 
@@ -1059,8 +1065,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     below the tolerance (default 256 MiB).
   - In the D5/D6 replay scenarios: zero drains caused by a single interval of measurement skew
     or one missing allocation measurement.
-- **SC-002**: In Yield First and Neutral, CPU demanded by external work is returned within 2
-  monitor intervals of the demand appearing, including on a host that own work saturates: own
+- **SC-002**: In Yield First and Neutral, CPU demanded by another principal's external work is
+  returned within 2 monitor intervals of the demand appearing, including on a host that own work
+  saturates: own
   CPU usage reaches the mode's contended target, which in Yield First is opportunistic work
   paused, then at the minimum duty after `pause_bound_s`, and in Neutral the fair share. Where own
   work saturated the resource before its first cap, Yield First's first step is a cap to the
@@ -1070,7 +1077,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   capacity, so it reaches the fair share within ⌈(own usage − fair share) ÷ margin⌉ intervals
   (24 intervals, 12 s, from 98% with the 2% margin), and never goes below it. With demand that
   fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
-  when CPU is the only contended resource.
+  when CPU is the only contended resource. Unmanaged processes of the account that runs
+  CedeGrid share that account's fair share with own work, so they are served as own work's
+  margin frees capacity rather than within these bounds.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
