@@ -12,8 +12,9 @@ Linux host, and keep the SDK, the coordinator cluster mode and the agent tooling
 
 This feature builds on [001-contention-modes](../001-contention-modes/spec.md): its modes,
 yield ladder, probing (FR-021, FR-072), setup (user story 7) and observability (user story 8).
-It does not redefine them. The constitution (3.0.0) applies, in particular Principle I's
-verified set for descendants and Principle V's Tracked control level.
+It does not redefine them. The constitution (5.0.0) applies, in particular Principle I's
+verified set for descendants and its rule for calls that take only a thread ID, and
+Principle V's Tracked control level.
 
 ## Clarifications
 
@@ -39,6 +40,24 @@ verified set for descendants and Principle V's Tracked control level.
 - Q: How is a run's output kept, and what happens when output comes faster than it can be
   stored? → A: A rotating log file per run keeps output including the tail, with no fixed prefix
   limit. Output never backpressures the job, and `--tty` gives the job a pseudo-terminal.
+- Q: When may a Tracked run change CPU affinity on a thread of one of its verified processes,
+  given that the affinity call accepts only a thread ID? → A: Only when the member's pidfd shows
+  it alive first, the thread's identity is fixed first (a thread pidfd on Linux 6.9 and later,
+  else its `/proc/<pid>/task/<tid>` entry with its start time), and the same check finds the
+  same thread alive afterwards. Otherwise the change is reported as possibly misdirected and the
+  thread is never touched again; the call is skipped when the pre-check fails.
+- Q: On kernels older than 6.9, which have no thread pidfds, does a Tracked run keep the
+  affinity lever? → A: Yes, through the `/proc/<pid>/task/<tid>` entry with its start time.
+- Q: What happens to a thread ID that no longer appears under the member's `/proc/<pid>/task`
+  directory, for example because it now belongs to another thread group? → A: It is never
+  touched.
+- Q: How should the probe treat a contender pinned to cores that own work also uses, which a
+  global step may not help? → A: Its pinning is read read-only (`Cpus_allowed_list`). While its
+  wait rate stays high and its CPUs overlap own work's, it is not recorded as satisfied, and own
+  work's affinity moves off the overlapping cores (own processes only, under the thread-ID
+  rule), never below own work's fair share.
+- Q: Does that per-core rule also apply to 001's PSI-only probe? → A: Yes. The plan says whether
+  that part lands in 003 or needs a 001 follow-up.
 
 ## Terms
 
@@ -258,6 +277,12 @@ without delegation, and check the output and `--json`.
   and is tracked (FR-042). One runs a setuid program: that process leaves the verified set and
   is never acted on (Principle I).
 - A tracked process changes its own CPU affinity: it is reported, not overridden (FR-043).
+- A thread exits between the checks around an affinity change: the change is reported as
+  possibly misdirected and that thread is not touched again. A thread ID the member's
+  `/proc/<pid>/task` no longer lists is never touched (FR-043).
+- A contender is pinned to cores own work also uses and keeps waiting after a global step: it is
+  not recorded as satisfied, and own work moves off those cores, never below its fair share
+  (FR-056).
 - Work started through another daemon (for example a terminal multiplexer server) is outside
   the run's tree and is not tracked (FR-054).
 - Other users' process details are hidden from the user.
@@ -367,7 +392,15 @@ without delegation, and check the output and `--json`.
   whole physical cores (SMT siblings together) and reversible. For a GPU run, the cores nearest
   the GPU's NUMA node MUST be kept. CPU MUST NOT be reduced by raising nice values, which an
   unprivileged user cannot lower again, or by stopping and resuming processes. A tracked process
-  that changes its own CPU affinity MUST be reported, not overridden.
+  that changes its own CPU affinity MUST be reported, not overridden. Each per-thread change MUST
+  follow Principle I's rule for calls that take only a thread ID:
+  - the member's pidfd shows it alive before the call, or the call is skipped;
+  - the thread's identity is fixed before the call: a thread pidfd on Linux 6.9 and later, else
+    its entry under the member's `/proc/<pid>/task/<tid>` with its start time, so hosts on older
+    kernels keep the lever;
+  - after the call, the same check finds the same thread alive; otherwise the change is reported
+    as possibly misdirected and that thread is never touched again;
+  - a thread ID that the member's `/proc/<pid>/task` does not list is never touched.
 - **FR-044**: CedeGrid MUST tell an SDK app when its granted core count changes, so it can
   resize its thread pools. For runs without the SDK, the launch strategy (start wide or narrow)
   MUST be chosen from measurements recorded in the plan.
@@ -405,6 +438,14 @@ without delegation, and check the output and `--json`.
 - **FR-055**: Docs MAY mention that an administrator can enable per-user lingering and
   controller delegation to give the Full level. CedeGrid MUST NOT require it, and no document
   MAY require a system-wide change.
+- **FR-056**: A contender pinned to cores own work also uses may not gain from a global step.
+  CedeGrid MUST read each contender's allowed CPUs read-only (`Cpus_allowed_list` in
+  `/proc/<pid>/status`). While a contender's wait stays at the level that marks it as contending
+  (FR-050) for the probe's response window, and its allowed CPUs overlap own work's or are
+  unknown, the probe (001 FR-021, and FR-072's PSI-only probe) MUST NOT record it as satisfied.
+  At the Tracked level, own work's affinity MUST then move off a known overlap, on own processes
+  only and under FR-043's thread-ID rule, never below own work's fair share. At the Full level,
+  no per-thread call is made; own work yields through its cgroup's CPU limit as in 001.
 
 **Single-core bottlenecks (user story 7)**
 
@@ -443,7 +484,7 @@ without delegation, and check the output and `--json`.
   `--save-env`), file it lives in, optional profile name.
 - **Effective value**: field, value, source.
 - **Contention evidence**: per-user run-queue wait and CPU use, with its availability (per user
-  or host level).
+  or host level), and each contender's allowed CPUs, read read-only.
 
 ## Success Criteria *(mandatory)*
 

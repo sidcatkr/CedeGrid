@@ -143,8 +143,8 @@ Then the implementation:
   - reversible;
   - a process that changed its own mask reported, not overridden.
 
-  **Blocked by Decision 1 of report 016**: CPU affinity takes a thread ID, and Principle I requires acting only through the pidfd (research R4, open item).
-- [ ] T040 [US6] Implement the affinity actuator in src/supervision/tracked.rs (research R4). Blocked as T039.
+  Each call follows Principle I's thread-ID rule (constitution 5.0.0, research R4); its own tests are T074–T077.
+- [ ] T040 [US6] Implement the affinity actuator in src/supervision/tracked.rs (research R4), with every per-thread call made through T078's thread-ID call.
 - [ ] T041 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`:
   - per-thread `run_delay` deltas are summed by UID;
   - exited threads are dropped, so no change is negative;
@@ -238,12 +238,30 @@ Native gates and docs:
 - [ ] T072 [P] Add every new file to the ALLOWLIST in tools/pack_source_review.py, update the CLAUDE.md layout map and docs/validation.md rows, and run the export check.
 - [ ] T073 Full verification: fmt, clippy, the 1.88 check, the serial suite, Python, npm and the Docker Linux check.
 
+## Phase 11: Convergence (item 019: thread-ID calls and per-core contention)
+
+**Purpose**: Principle I's thread-ID rule (constitution 5.0.0) for the affinity lever, and
+per-core contention. Tests first; T039 and T040 build on T074–T078.
+
+- [ ] T074 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`), with an injected thread-identity source: when the member's pidfd shows it dead before the call, the affinity call is skipped and nothing is recorded as applied. Per FR-043 and Constitution I (missing)
+- [ ] T075 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`): a thread that exits between the pre-check and the post-check (its thread pidfd dead, or its task entry gone or with a different start time) is reported as possibly misdirected, added to `misdirected_tids`, and never touched again. Per FR-043 and Constitution I (missing)
+- [ ] T076 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`), with a fake `/proc`: a TID that the member's `/proc/<pid>/task` does not list, such as one that now belongs to another thread group, is never touched. Per FR-043 and Constitution I (missing)
+- [ ] T077 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`): with thread pidfds unavailable (or `CEDEGRID_TEST_FORCE_PROC_THREADS=1`), the `/proc/<pid>/task/<tid>` start-time path skips, reports and refuses exactly as T074–T076 require, and `thread_identity` records `proc_start_time`. Per FR-043 (missing)
+- [ ] T078 [US6] Implement the thread-ID call in src/supervision/tracked.rs (research R4): detect thread pidfd support (`pidfd_open` with `PIDFD_THREAD`) once per agent start; check the member's pidfd before the call; fix the thread's identity (thread pidfd, else task entry and start time); check the same thread after the call; keep `misdirected_tids` per member; honor `CEDEGRID_TEST_FORCE_PROC_THREADS` in tests and gates only. T040 makes every per-thread affinity change through it. Per FR-043, plan: CPU lever (missing)
+- [ ] T079 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`: each contending process's `Cpus_allowed_list` is read read-only into the principal's `allowed_cpus`; unreadable entries leave it unknown, not empty. Per FR-056 and research R15 (missing)
+- [ ] T080 [P] [US6] Test first in tests/contention.rs (`pinned_contender_*`): a principal whose wait stays at the contending level (T043) for the probe's response window and whose `allowed_cpus` overlap own work's granted cores, or are unknown, is not recorded as satisfied, under the saturation probe and under the PSI-only probe; at the Tracked level own work's requested granted cores drop a known overlap but never fall below its fair share in cores, and an unknown overlap moves no core; at the Full level no core request is made; with no overlap the 001 behavior is unchanged. Per FR-056 and 001 FR-021, FR-072 (missing)
+- [ ] T081 [US6] Implement per-core contention: `allowed_cpus` and `pinned_overlap` in src/telemetry/runqueue.rs, the satisfied gate in src/contention.rs's probe (beside T043), and the core request to the affinity actuator (T040, T078). Per FR-056 and plan: per-core contention (missing)
+- [ ] T082 [P] [US6] Test first, then implement: `ps` and `ps --json` show `possibly_misdirected` with the thread IDs, and the run log records each one once. Per FR-043, data-model Run.flags, contracts/cli.md (missing)
+- [ ] T083 [US6] Add the "Pinned contender" and "Thread-ID calls" gates to specs/003-everyday-cli/native-gates.md with exact commands and pass criteria (plan: native gates). Per FR-056, FR-043 (missing)
+- [ ] T084 [US6] Gate, at the Tracked level: a contender pinned with `taskset` to two of own work's cores reaches its demand after own work moves off them and is never recorded as satisfied while it waits; record the evidence in native-gates.md. Per FR-056, SC-006 (missing)
+- [ ] T085 [US6] Gate: on a kernel with thread pidfds and again with `CEDEGRID_TEST_FORCE_PROC_THREADS=1`, a Tracked run's affinity changes reach only verified threads, and no change is reported as possibly misdirected in a normal run; record the evidence in native-gates.md. Per FR-043, SC-006 (missing)
+
 ## Dependencies and execution order
 
 - Setup (T001–T003), then Foundational (T004–T013), then the user stories.
 - US1 needs T004–T009, T012 and T013. US2 needs US1's run path (T017).
-- US6 needs T010 and T011 and the supervisor path. T039 and T040 wait for Decision 1 of
-  report 016.
+- US6 needs T010 and T011 and the supervisor path. T039 and T040 need T074–T078, the thread-ID
+  rule of constitution 5.0.0. T081 (per-core contention) needs T042, T043 and T078.
 - US3 needs T005 and T017. US4 needs T001. US7 needs T017 and T050. US5 needs T011.
 - Polish follows the stories it measures.
 

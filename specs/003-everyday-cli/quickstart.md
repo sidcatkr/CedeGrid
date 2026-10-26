@@ -49,3 +49,13 @@ host; the rest run in CI.
 1. `cedegrid run -- env OMP_NUM_THREADS=1 <benchmark>` on four granted cores.
 2. Expect a bottleneck flag within three intervals of the window, naming `OMP_NUM_THREADS=1`.
    With `--threads auto`, the inherited value is replaced and `--explain` shows it.
+
+## 9. Thread-ID calls and pinned contenders (US6, FR-043, FR-056)
+1. `cargo test --locked --test tracked -- thread_id_call` and
+   `cargo test --locked --test contention -- pinned_contender`.
+2. Expect: a call is skipped when the member's pidfd shows it dead; a thread that exits between
+   the checks is reported as possibly misdirected and not retried; a TID listed under another
+   thread group is never touched; the `/proc` fallback behaves the same; a pinned contender that
+   keeps waiting is not recorded as satisfied, and at the Tracked level own work moves off its
+   cores, never below its fair share.
+3. Native: the "Pinned contender" and "Thread-ID calls" gates in `native-gates.md`.

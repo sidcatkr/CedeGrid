@@ -21,7 +21,8 @@ and `top --json --follow`) and no other text on stdout. Errors go to stderr as
 
 ## `cedegrid ps`
 - Lists own runs: id, state, control level, modes, CPU, RAM, GPU, step and reason, and flags
-  (starved with duration, below fair share with reason, bottleneck with causes).
+  (starved with duration, below fair share with reason, bottleneck with causes, possibly
+  misdirected affinity changes with their thread IDs).
 - `--json`: `{"runs": [Run]}` (see [data-model.md](../data-model.md)).
 
 ## `cedegrid logs <run> [-f]`

@@ -14,7 +14,7 @@
 | `granted_cores` | list of CPU ids | Tracked: the affinity mask; Full: the cgroup's CPU limit. |
 | `state` | `starting` \| `running` \| `draining` \| `stopped` \| `failed` | See transitions. |
 | `step`, `step_reason` | 001 yield step and reason code | Current step on each resource. |
-| `flags` | set | `starved` (with since), `below_fair_share` (with reason), `bottleneck` (with causes). |
+| `flags` | set | `starved` (with since), `below_fair_share` (with reason), `bottleneck` (with causes), `possibly_misdirected` (with the thread IDs, FR-043). |
 | `log` | path | Rotating log directory (R10). |
 
 **Transitions**: `starting → running → draining → stopped`. Also `running → stopped` (normal
@@ -31,6 +31,8 @@ exit), `starting → failed` (refused, for example `--require-containment` at Tr
 | `ids_match` | bool | Real, effective, saved and filesystem user and group IDs equal the run's. |
 | `alive_after_check` | bool | Confirmed through the pidfd after the reads. |
 | `own_affinity_changed` | bool | Reported when the process set a mask CedeGrid did not set. |
+| `misdirected_tids` | set of thread IDs | Threads whose affinity change may have been misdirected: the post-check failed. Never touched again; shown in `ps --json` and the log (FR-043). |
+| `thread_identity` | `thread_pidfd` \| `proc_start_time` | How thread identity is fixed around each call: a thread pidfd on Linux 6.9 and later, else the task entry with its start time. |
 
 A member joins only when all three checks hold. It leaves when it exits, when its IDs change,
 or when its chain cannot be confirmed.
@@ -68,6 +70,8 @@ Floors, the node cap and margins cannot appear in a per-job entry; validation re
 | `cpu_millicores` | integer | From `/proc/<pid>/stat`, for the probe's growth check. |
 | `coverage` | `per_user` \| `host_level` | `host_level` when process details are hidden. |
 | `scan` | threads visited, threads total | Bounded by `evidence.max_threads_per_interval`. |
+| `allowed_cpus` | list of CPU ids | Union of the principal's processes' `Cpus_allowed_list`, read-only (FR-056). |
+| `pinned_overlap` | list of CPU ids, or unknown | `allowed_cpus` ∩ own work's granted cores; unknown when `allowed_cpus` is. While the principal's wait stays at the contending level for the probe's response window and the overlap is non-empty or unknown, the probe does not record it as satisfied. |
 
 ## Control level detection
 | Field | Type | Rules |

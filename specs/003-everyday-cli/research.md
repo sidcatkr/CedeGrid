@@ -66,14 +66,23 @@ verify every mechanism on the target kernels. The host check records what each f
     `cpu.max` and 296% under affinity.
 - **Alternatives**: nice steps (irreversible without privilege); SIGSTOP duty cycling (stalls
   threads); `RLIMIT_CPU` (kills rather than yields).
-- **Open item (Principle I)**: `sched_setaffinity` takes a thread ID, and no pidfd-based
-  affinity call exists. A pidfd does not keep a freed thread ID from reuse.
-  - A thread pidfd (Linux 6.9+) opened before the call, and found alive after it, proves the
-    call reached that thread; if the thread died in between, a reused ID may have been changed
-    before the check could tell.
-  - The leader, and orphans the supervisor reparents, keep their PIDs until the supervisor reaps
-    them, so calls on their main threads are safe. Other threads are not covered.
-  - The options go to the user as Decision 1 in report 016. The affinity tasks wait for it.
+- **Principle I (5.0.0)**: `sched_setaffinity` takes a thread ID, and no pidfd form of the call
+  exists. Constitution 5.0.0 allows such a call on a verified member's thread only under its
+  thread-ID rule, which resolves Decision 1 of report 016:
+  - before the call, the member's pidfd shows it alive, or the call is skipped;
+  - the thread's identity is fixed before the call: a thread pidfd (`pidfd_open` with
+    `PIDFD_THREAD`, Linux 6.9 and later), else the thread's `/proc/<pid>/task/<tid>` entry with
+    its start time from `stat`, so older kernels keep the lever;
+  - after the call, the same check finds the same thread alive; otherwise the change is
+    reported as possibly misdirected and that thread is never touched again;
+  - a TID the member's task directory does not list is never touched.
+
+  The window that remains is a thread exiting during the call, with its ID reused before the
+  kernel's cyclic ID space wraps; even then the kernel refuses the call for other users'
+  processes.
+  - **Alternatives**: no per-thread lever before 6.9 (older hosts lose the lever); signalling
+    instead of affinity (stalls threads, research R6); a cpuset controller (not delegated to
+    unprivileged users).
 
 ## R5. Thread pools
 
@@ -208,3 +217,23 @@ verify every mechanism on the target kernels. The host check records what each f
   of the bare median (SC-003). The same gate compares Tracked with Full (SC-005).
 - **Rationale**: D8; the median of five runs damps noise.
 - **Alternatives**: a single run (noise exceeds 2%).
+
+## R15. Per-core contention
+
+- **Decision**: the run-queue scan also reads `Cpus_allowed_list` from each contending process's
+  `/proc/<pid>/status`, read-only, and keeps each principal's allowed CPUs.
+  - While a principal's wait stays at the level that marks it as contending (T043) for the
+    probe's response window, and its CPUs overlap own work's granted cores or are unknown, the
+    probe does not record it as satisfied. This covers the saturation probe and the PSI-only
+    probe of 001 (FR-021, FR-072), which share one function.
+  - At the Tracked level, the policy then moves own work's granted cores off a known overlap,
+    never below own work's fair share in cores, through the affinity lever under the thread-ID
+    rule (R4). At the Full level no per-thread call is made, since Full verifies no members per
+    thread; own work yields through its cgroup as in 001.
+  - It lands in 003, beside T043's change to the same probe code, so 001 needs no follow-up
+    after the merge.
+- **Rationale**: a contender pinned to cores own work uses gains nothing from a global step, so
+  its CPU use does not grow, and the probe would wrongly record it satisfied while it waits.
+- **Alternatives**: treating pinned contenders like others (records them satisfied while they
+  wait); stepping own work down globally until the pinned contender grows (gives away capacity
+  on cores the contender cannot use).

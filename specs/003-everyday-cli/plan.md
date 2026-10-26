@@ -16,11 +16,13 @@ schema generates the `run` flags and is checked against both SDKs.
 At launch, CedeGrid detects a control level for every launch path:
 - **Full**: a delegating user manager gives each run its own cgroup.
 - **Tracked**: the run's supervisor is the child subreaper of the run's tree. It verifies
-  descendants under Principle I (3.0.0) and gives CPU back through per-thread affinity in whole
-  cores.
+  descendants under Principle I (5.0.0) and gives CPU back through per-thread affinity in whole
+  cores, each call made under Principle I's rule for calls that take only a thread ID.
 
-Contention evidence adds per-user run-queue wait at both levels, fed through 001's probe. The
-setup interface moves to ratatui and crossterm, and `top` shares its style.
+Contention evidence adds per-user run-queue wait at both levels, fed through 001's probe, and
+each contender's allowed CPUs, so a contender pinned to own work's cores is not recorded as
+satisfied while it still waits. The setup interface moves to ratatui and crossterm, and `top`
+shares its style.
 
 ## Technical Context
 
@@ -62,16 +64,16 @@ hosts with up to tens of thousands of threads.
 
 | Principle | How the plan complies |
 |---|---|
-| I. External processes untouchable (3.0.0) | Tracked acts only on descendants verified as Principle I requires:<br>- the pidfd is opened before the parent chain is read;<br>- the chain leads to the launched process;<br>- liveness is confirmed through the pidfd afterwards;<br>- user and group IDs match the run's;<br>- every action goes through the pidfd.<br>`ps`, `stop` and `top` resolve runs through the agent, never by PID. Tests: T030–T035.<br>**Open item (Decision 1 of report 016)**: CPU affinity (`sched_setaffinity`) takes a thread ID, and no pidfd form of that call exists. Bracketing the call with thread pidfds (Linux 6.9+) detects a reused ID afterwards but cannot prevent the call, so per-thread affinity does not yet meet "only through that pidfd". T039 and T040 wait for that decision. |
+| I. External processes untouchable (5.0.0) | Tracked acts only on descendants verified as Principle I requires:<br>- the pidfd is opened before the parent chain is read;<br>- the chain leads to the launched process;<br>- liveness is confirmed through the pidfd afterwards;<br>- user and group IDs match the run's;<br>- every action goes through the pidfd, except thread-ID calls under the next rule.<br>Per-thread affinity follows the rule for calls that take only a thread ID (research R4): the member's pidfd shows it alive first, or the call is skipped; the thread's identity is fixed first (a thread pidfd on Linux 6.9 and later, else its `/proc/<pid>/task/<tid>` entry with its start time); the same check finds the same thread alive afterwards, or the change is reported as possibly misdirected and that thread is never touched again; a TID the member's task directory does not list is never touched. Contenders' allowed CPUs are only read.<br>`ps`, `stop` and `top` resolve runs through the agent, never by PID. Tests: T030–T035, T039, T074–T077. |
 | II. No harm in any mode | Floors and modes come from 001 unchanged.<br>- Own priority is never raised: no negative nice, no real-time class.<br>- SCHED_IDLE and autogroup nice only lower priority.<br>- Tracked RAM has no cap, so SDK hints come earlier and a drain checkpoints (FR-052).<br>- Fair share is a floor for own yielding, not a guarantee; no thread count is raised (FR-049). |
 | III. Unknown is never idle | The control level, the cgroup placement of contenders and per-user evidence are each detected. Hidden process details fall back to the host-level signal with a `doctor` note (FR-050). Detection failure means Tracked, not Full. |
 | IV. Pure policy | The evidence summary enters `Snapshot` as data. Policy decides as in 001 (probe, ladder), and actuation stays in the supervisor (`supervision/tracked.rs`). |
-| V. Rootless (3.0.0) | No privilege, no sysctl, no host change.<br>- Full uses a user-manager-delegated subtree only.<br>- Tracked supports descendants in the subreaper tree. Work outside the tree is not tracked or presented as contained (FR-054).<br>- Tracked is labeled "not containment": no RAM cap, no CPU limit below one core across cgroups (FR-048). |
+| V. Rootless (5.0.0) | No privilege, no sysctl, no host change.<br>- Full uses a user-manager-delegated subtree only.<br>- Tracked supports descendants in the subreaper tree. Work outside the tree is not tracked or presented as contained (FR-054).<br>- Tracked is labeled "not containment": no RAM cap, no CPU limit below one core across cgroups (FR-048). |
 | VI. Tests first | Every policy, telemetry, supervision and protocol task starts with a failing test. Hardware claims rest on native gates for Full and Tracked and for both contender placements. |
 | VII. Compatibility | The task schema and the core-count event are wire and worker-protocol changes. They land in Rust, Python and TypeScript with the contract fixture. `supervise job.json`, the coordinator and `config_version = 1` stay. |
 | VIII. Public docs | Docs describe the two levels generically, with no host descriptions. The optional linger and delegate setup is mentioned as optional (FR-055). |
 
-Result: pass for every part except the Tracked affinity actuator, which waits for Decision 1 (row I). Complexity Tracking lists the two new dependencies.
+Result: pass. Constitution 5.0.0 resolved the open item on the Tracked affinity actuator (report 016 Decision 1, row I). Complexity Tracking lists the two new dependencies.
 
 ## Project Structure
 
@@ -186,6 +188,13 @@ feature (`threads`, `gpu` selection) enter through the schema.
     live sums and `cutime`/`cstime`.
 - **CPU lever (Tracked)**: `sched_setaffinity` on every thread (TID) of every verified process,
   checked every interval.
+  - Each call follows Principle I's thread-ID rule (research R4). Before it, the member's pidfd
+    must show it alive (else skip), and the thread's identity is fixed: a thread pidfd
+    (`pidfd_open` with `PIDFD_THREAD`) where the kernel supports it, else the
+    `/proc/<pid>/task/<tid>` entry and its start time from `stat`. After it, the same check
+    must find the same thread; otherwise the run records the thread as possibly misdirected,
+    shows it in `ps --json` and the log, and never touches that TID again. A TID the member's
+    task directory does not list is never touched. Support is detected once per agent start.
   - Cores shrink and grow by whole physical cores (SMT siblings together).
   - GPU runs keep the cores of the GPU's NUMA node first.
   - A process that changed its own mask is reported, not overridden.
@@ -212,10 +221,34 @@ principal as contending for 001's probe (FR-021, FR-072), and a principal whose 
 not grow after a yield is recorded as satisfied. Where other users' details are hidden, the
 host-level signal goes through the same probe and `doctor` says so.
 
+**Per-core contention (FR-056, research R15)**: the same scan reads `Cpus_allowed_list` from
+each contending process's `/proc/<pid>/status`, read-only, and the summary carries each
+principal's allowed CPUs.
+- In `src/contention.rs`, the probe does not record a principal as satisfied while its wait
+  stays at the level that marks it as contending (T043) for the probe's response window and its
+  allowed CPUs overlap own work's granted cores. Unknown allowed CPUs count as overlapping
+  (Principle III). This applies to the saturation probe (001 FR-021) and the PSI-only probe (001
+  FR-072), which share that code.
+- At the Tracked level, the policy then asks for own work's granted cores without a known
+  overlap, never fewer than own work's fair share in cores, and the supervisor applies it
+  through the affinity lever under the thread-ID rule. Without a known overlap, no core moves.
+  At the Full level no per-thread call is made, because Full verifies no members per thread:
+  own work yields through its cgroup's CPU limit as in 001.
+- Placement: it lands in 003. T043 already changes the probe's satisfied rule in
+  `src/contention.rs` after 001 is merged, and the PSI-only path is the same function, so 001
+  needs no follow-up.
+
 ### Native gates (both levels, both placements)
 - **Levels side by side**: a test-only switch (`CEDEGRID_TEST_FORCE_TRACKED=1`) forces Tracked
   on a host with delegation, so both are measured on the same host.
 - **Cross-cgroup contender**: a contender under a second account, which has its own cgroup.
+- **Pinned contender (FR-056)**: at the Tracked level, a contender started under `taskset` on
+  two of own work's cores. It reaches its demand after own work moves off those cores, and it is
+  never recorded as satisfied while it waits.
+- **Thread-ID calls (FR-043)**: on a kernel with thread pidfds, and through the `/proc`
+  fallback (a test-only switch, `CEDEGRID_TEST_FORCE_PROC_THREADS=1`, forces it on a newer
+  kernel), a Tracked run's affinity changes reach only its verified threads, and no change is
+  reported as possibly misdirected in a normal run.
 - **Same-cgroup contender**: on hosts that give each user a separate cgroup, a contender started
   by the same account from the run's own session, with Tracked forced, shares the run's CPU
   cgroup without any host change. It counts as the owner's unmanaged usage, which 001 already
