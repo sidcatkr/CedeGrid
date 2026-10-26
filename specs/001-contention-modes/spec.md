@@ -132,8 +132,8 @@ thresholds.
 - Q: Do RAM and GPU memory scale up faster in Performance too? → A: No. They keep their current
   Performance scale-up cooldown (2 s) and the reclaim backoff, since memory is slow to reclaim.
 - Q: How does admission keep pace if the 2 s heartbeat limits the ramp? → A: One Performance
-  heartbeat admits as much as fits within the allowance; `lifecycle.heartbeat_interval_ms`
-  keeps its default.
+  heartbeat admits as much as fits within the allowance, at most 32 new assignments (Session
+  2026-10-27); `lifecycle.heartbeat_interval_ms` keeps its default.
 - Q: What stays exactly as it is? → A: Reclaim (SC-002, SC-012, CPU reclaim of at least the margin
   per interval down to the fair share), the margins, the floors, Guaranteed work and the anti-flap
   rules (minimum step dwell, hysteresis, reversal tolerance). FR-071's one rise step per
@@ -158,6 +158,17 @@ thresholds.
 - Q: Does SC-002's 2-interval bound apply to unmanaged programs of the account that runs
   CedeGrid? → A: No; it is for other principals' demand. The owner's other programs share the
   owner's fair share with own work and are served as own work's margin frees capacity.
+- Q: How many new assignments may one heartbeat take, and may launch work delay a node's
+  observations or heartbeat? → A: At most 32 per heartbeat in every mode; Performance fills up to
+  32 per heartbeat, so a 16-task scope still fills in one heartbeat. Launches and per-allocation
+  lease requests never hold the node's observation, heartbeat or telemetry past the monitor
+  interval.
+- Q: How is CPU charged for admission while a running allocation has a held CPU step? → A: At the
+  larger of its request and its p95 usage from before the step, with no credit, until the step
+  is released.
+- Q: How much may held caps and hints on one resource rise in one round, and how is the rise
+  split? → A: Together at most the spare (the mode's allowance minus current usage), split
+  equally among the held steps, the same basis as fair shares, with no per-allocation weights.
 
 ## Terms
 
@@ -616,6 +627,8 @@ node reports with the expected per-resource values at each step.
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
 - **FR-013**: Steps 1–4 MUST be reversible. When external demand recedes past a reversal
   threshold with hysteresis, steps MUST be undone in reverse order at the mode's scale-up rate.
+  The held caps and hints on a resource rise together by at most the spare (the mode's allowance
+  minus current usage) in one round, split equally among the held steps.
   A step taken for an envelope breach or an unknown measurement MUST reverse once that cause has
   stayed clear, whatever the external level. A step taken for a floor breach MUST reverse only
   after free memory has stayed above the floor by at least what the step had to free, or
@@ -834,11 +847,15 @@ node reports with the expected per-resource values at each step.
   For CPU admission, running opportunistic work is charged at its p95 usage over
   `contention.cpu.admission_usage_window_s` (default 60 s) once it has a full window of samples,
   and at max(request, observed) before that, so work in its startup phase is never
-  under-charged; pending work is charged in full, Guaranteed work at max(request, observed), and
+  under-charged. While it has a held CPU step it is charged at the larger of its request and its
+  p95 usage from before the step, with no credit, until the step is released, so usage a cap
+  holds back never becomes admission room. Pending work is charged in full, Guaranteed work at max(request, observed), and
   RAM and GPU memory admission stays request-based. Coordinator placement and the agent's launch
   check MUST admit CPU the same way. RAM admission and the agent's worker limit bound how many
   jobs this CPU credit can admit. In Performance, one heartbeat MUST admit as much as fits within
-  the allowance; in the other modes the agent adds one worker per CPU and RAM cooldown.
+  the allowance, up to 32 new assignments; in the other modes the agent adds one worker per CPU
+  and RAM cooldown. Launches and per-allocation lease requests MUST NOT hold the node's
+  observation, heartbeat or telemetry past the monitor interval.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
@@ -1158,7 +1175,7 @@ times assume the default 500 ms monitor interval.
 | CPU idle reserve | max(`cpu.reserve_physical_cores`, the mode's margin); reserve default 0 | A physical-core reserve and a margin both idle compute; one is enough. |
 | Probe hysteresis | The contention floor (1% of capacity) | A satisfied principal gets that much room to show growth before it contends again. |
 | CPU admission usage window | p95 over 60 s | CPU is compressible: caps and the kernel share it if everyone spikes, so admission follows recent usage rather than requests. |
-| Performance ramp | 90% of available minus margin within 10 s | Compute scales up every interval and one heartbeat admits as much as fits; reclaim, margins, floors and the anti-flap rules are unchanged. |
+| Performance ramp | 90% of available minus margin within 10 s | Compute scales up every interval and one heartbeat admits as much as fits, up to 32 new assignments; reclaim, margins, floors and the anti-flap rules are unchanged. |
 | Reclaim bound: RAM, GPU memory | Hint deadline + drain timeout + termination grace + 1 interval (10.5 s) | The sum of the existing deadlines; nothing else waits. |
 | Hint deadline | 5 s | Long enough for a cooperative worker to reach a safe point; short enough to bound memory reclaim. |
 | Guaranteed hint deadline | 5 s, 1–30 s | The same safe-point argument as the hint deadline. Raising it only delays Guaranteed release above the critical level. |
