@@ -489,6 +489,9 @@ pub struct HeldBack {
     /// Capacity left to contending external demand under contention.
     #[serde(skip_serializing_if = "is_zero")]
     pub contention: u64,
+    /// The contention hold when only external PSI saturates the CPU (FR-072).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub contention_psi: u64,
     /// External memory peak above current external usage (admission).
     #[serde(skip_serializing_if = "is_zero")]
     pub peak: u64,
@@ -526,6 +529,7 @@ impl HeldBack {
             ("reserve", self.reserve),
             ("margin", self.margin),
             ("contention", self.contention),
+            ("contention_psi", self.contention_psi),
             ("unknown", self.unknown),
             ("peak", self.peak),
             ("noise_tolerance", self.noise_tolerance),

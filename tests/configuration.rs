@@ -1044,6 +1044,10 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
             "[contention.gpu_compute]\nattribution_tolerance_percent = 20",
             "relaxed_detection",
         ),
+        (
+            "[contention.cpu]\npsi_some_percent = 30",
+            "relaxed_detection",
+        ),
     ] {
         let error = format!("{:#}", parse_node(setting).unwrap_err());
         assert!(
@@ -1071,6 +1075,7 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
         "[contention.ram]\nmemory_peak_window_s = 600",
         "[contention.gpu_compute]\nquiet_window_intervals = 40",
         "[contention.gpu_compute]\nattribution_tolerance_percent = 10",
+        "[contention.cpu]\npsi_some_percent = 5",
     ] {
         assert!(
             parse_node(setting).unwrap().caution_options().is_empty(),
@@ -1305,6 +1310,10 @@ fn guaranteed_memory_knobs_are_validated() {
         "[contention.cpu]\nadmission_usage_window_s = 0",
         "[contention.cpu]\nadmission_usage_window_s = 3601",
         "[contention.ram]\nadmission_usage_window_s = 60",
+        "[contention.cpu]\npsi_some_percent = 0",
+        "[contention.cpu]\npsi_some_percent = 101",
+        "[contention.gpu_compute]\npsi_some_percent = 10",
+        "[contention.ram]\npsi_some_percent = 10",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

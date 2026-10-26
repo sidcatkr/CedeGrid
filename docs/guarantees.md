@@ -362,6 +362,9 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `step_reversed_envelope_restored` | A step taken for the operator envelope was relaxed because own work is back within it. |
 | `step_reversed_drain_lifted` | A step taken for an operator drain was relaxed because the drain was lifted. |
 | `step_skipped_unavailable` | A step this allocation cannot take was skipped for the next one. |
+| `saturated_by_psi` | External tasks wait for CPU above psi_some_percent (PSI), so the CPU counts as saturated. |
+| `psi_system_only` | Only system-wide CPU pressure is readable; it cannot tell own from external waiting, so it adds no evidence. |
+| `psi_unknown` | CPU pressure is missing, unreadable or malformed, so it adds no evidence. |
 | `ram_cap_growth_stop` | The RAM cap holds above its target, at what the leaf cannot reclaim, so it only stops growth and the hint frees the rest. |
 | `ram_cap_ineffective` | The RAM cap throttled without freeing memory, so it was raised to current usage and the hint frees the rest. |
 | `ram_cap_refused` | A RAM cap write or its readback failed, so the cap is unavailable for this allocation and the hint follows. |
@@ -415,6 +418,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `held_back_reserve` | CPU kept free by the explicit reserve where it exceeds the margin. |
 | `held_back_margin` | Capacity kept free by the mode's idle margin. |
 | `held_back_contention` | Capacity left to contending external demand. |
+| `held_back_contention_psi` | CPU left to external demand while only external pressure (PSI) shows the CPU saturated. |
 | `held_back_peak` | Admission headroom kept for the external memory peak. |
 | `held_back_noise_tolerance` | External GPU memory growth tolerated as noise. |
 | `held_back_unknown` | Capacity withheld while the measurement is unknown or held. |
@@ -468,7 +472,9 @@ own work's user slice, external PSI, is a second CPU saturation signal: its high
 `some` avg10 above `contention.cpu.psi_some_percent` (10%) saturates the CPU, judged per
 observation like `saturation_percent` (FR-072). Saturation still needs an external
 principal to make the CPU contended, and a PSI-only hold shows as `contention_psi` in
-`held_back` (`saturated_by_psi`). Own cgroups' pressure is shown and never counts.
+`held_back` (`saturated_by_psi`). Own cgroups' pressure is shown and never counts. Under
+PSI-only saturation every contending principal is probed, not only small demands: one that
+does not grow into the freed capacity is recorded as satisfied, and contention ends.
 System-wide pressure cannot tell own from external waiting and adds no evidence
 (`psi_system_only`); missing, unreadable or malformed PSI adds none and holds nothing
 back (`psi_unknown`). PSI feeds CPU saturation only, never memory, GPU or floor

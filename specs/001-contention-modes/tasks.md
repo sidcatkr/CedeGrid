@@ -975,7 +975,7 @@ each step.
   - [X] T141b Read external and own CPU pressure read-only in `src/kernel.rs`
     (`KernelSnapshot.cpu_pressure`), tests first in `tests/kernel.rs` with fake `/proc` and
     cgroup trees: external siblings only, own excluded, system-only, unreadable and malformed.
-  - [ ] T141c Add `contention.cpu.psi_some_percent` (`KEY_CLASSES`, `relaxed_detection` above the
+  - [X] T141c Add `contention.cpu.psi_some_percent` (`KEY_CLASSES`, `relaxed_detection` above the
     default) and the saturation rule in `src/policy.rs`, tests first in `tests/contention.rs`:
     external PSI high below `saturation_percent` saturates and, with external demand,
     contends; own PSI high with external low does not; system-only and unknown add nothing
@@ -1030,7 +1030,7 @@ no behavior beyond what those commits did.
 
 ## Phase 13: Convergence
 
-- [ ] T166 Under PSI-only saturation (busy below `saturation_percent`, external PSI above
+- [X] T166 Under PSI-only saturation (busy below `saturation_percent`, external PSI above
   `psi_some_percent`), probe every contending principal in `src/contention.rs` and
   `src/policy.rs`, with T141c, tests first in `tests/contention.rs`:
   - `modes_respond_to_psi_monotonically`;

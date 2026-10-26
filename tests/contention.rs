@@ -569,6 +569,7 @@ mod modes {
             principals: None,
             background: 0,
             saturated: false,
+            psi_only: false,
             unknown_activity: false,
             satisfied: vec![],
             probe: None,
@@ -1943,6 +1944,7 @@ mod scenarios {
                         principals: None,
                         background: 0,
                         saturated: false,
+                        psi_only: false,
                         unknown_activity: false,
                         satisfied: vec![],
                         probe: None,
@@ -2562,6 +2564,399 @@ mod ram_cap {
             "{yield_first:?} {neutral:?} {performance:?}"
         );
         assert!(yield_first.0 < u64::MAX, "Yield First caps here");
+    }
+}
+
+/// T141: external PSI as a second CPU saturation signal (FR-072).
+mod psi_saturation {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+    use cedegrid::kernel::{CpuPressure, CpuPressureStatus, KernelCollector, KernelConfig};
+
+    fn pressure(status: CpuPressureStatus, external: Option<f64>, own: f64) -> CpuPressure {
+        CpuPressure {
+            status,
+            external_some_avg10: external,
+            external_cgroups: if external.is_some() { 3 } else { 0 },
+            own_some_avg10: Some(own),
+            system_some_avg10: Some(own.max(external.unwrap_or(0.0))),
+            detail: String::new(),
+        }
+    }
+
+    fn available(external: f64) -> Option<CpuPressure> {
+        Some(pressure(CpuPressureStatus::Available, Some(external), 20.0))
+    }
+
+    /// An 8000 m host where a job wants 5500 m beside an external user, so busy
+    /// stays below `saturation_percent`.
+    struct Host {
+        config: Config,
+        engine: PolicyEngine,
+        cap: Option<u64>,
+        wants: u64,
+        class: AllocationClass,
+    }
+
+    impl Host {
+        fn new(mode: ContentionMode) -> Self {
+            let mut config = config();
+            config.cpu.reserve_physical_cores = 0;
+            config.contention.default_mode = mode;
+            config
+                .contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            Self {
+                config,
+                engine: PolicyEngine::new(),
+                cap: None,
+                wants: 5500,
+                class: AllocationClass::Opportunistic,
+            }
+        }
+
+        fn wanting(mut self, wants: u64) -> Self {
+            self.wants = wants;
+            self
+        }
+
+        fn guaranteed(mut self) -> Self {
+            self.class = AllocationClass::Guaranteed;
+            self
+        }
+
+        /// What own work runs at under the current step.
+        fn own(&self) -> u64 {
+            self.cap.unwrap_or(self.wants).min(self.wants)
+        }
+
+        fn tick(&mut self, now: u64, external: u64, pressure: Option<CpuPressure>) -> Decision {
+            let own = self.own();
+            let mut snap = snapshot(own + external);
+            snap.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: external,
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let mut kernel = KernelCollector::new(KernelConfig {
+                enabled: false,
+                ..KernelConfig::default()
+            })
+            .sample();
+            kernel.runtime_os = "fixture".into();
+            kernel.cpu_pressure = pressure;
+            snap.kernel = Some(kernel);
+            let input = PolicyInput {
+                allocations: vec![allocation("own", self.class, 1000, Some(own))],
+                facts: BTreeMap::from([(
+                    "own".into(),
+                    AllocationFacts {
+                        unavailable: BTreeMap::from([(
+                            ResourceKey::Cpu,
+                            [YieldStep::LowerShare].into(),
+                        )]),
+                        ..AllocationFacts::default()
+                    },
+                )]),
+                ..PolicyInput::default()
+            };
+            let decision = self
+                .engine
+                .evaluate(&self.config, &snap, &input, now)
+                .unwrap();
+            self.cap = decision
+                .actions
+                .iter()
+                .find(|a| a.allocation_id == "own" && a.resource == ResourceKey::Cpu)
+                .map(|a| match a.step {
+                    YieldStep::Cap => a.target.unwrap_or(self.wants),
+                    YieldStep::Pause => 0,
+                    _ => self.wants,
+                });
+            decision
+        }
+
+        fn run(
+            &mut self,
+            intervals: u64,
+            external: u64,
+            pressure: Option<CpuPressure>,
+        ) -> Vec<Decision> {
+            (0..intervals)
+                .map(|i| self.tick(i * 500, external, pressure.clone()))
+                .collect()
+        }
+    }
+
+    fn codes(decision: &Decision) -> Vec<String> {
+        decision.resources[&ResourceKey::Cpu]
+            .reasons
+            .iter()
+            .map(|r| r.code.clone())
+            .collect()
+    }
+
+    fn capped(decisions: &[Decision]) -> bool {
+        decisions
+            .iter()
+            .any(|d| d.actions.iter().any(|a| a.resource == ResourceKey::Cpu))
+    }
+
+    /// External PSI above the threshold saturates the CPU below `saturation_percent`;
+    /// with external demand it contends, and the hold shows as `contention_psi`.
+    #[test]
+    fn external_psi_saturates_the_cpu_below_saturation_percent() {
+        let decisions = Host::new(ContentionMode::Neutral).run(12, 500, available(40.0));
+        let last = decisions.last().unwrap();
+        assert!(
+            codes(last).contains(&"saturated_by_psi".to_string()),
+            "{:?}",
+            codes(last)
+        );
+        assert!(capped(&decisions));
+        // While the probe runs, the hold shows as `contention_psi`.
+        assert!(
+            decisions.iter().any(|d| {
+                let held = d.resources[&ResourceKey::Cpu].held_back.clone().unwrap();
+                held.contention_psi > 0 && held.contention == 0
+            }),
+            "no PSI-only hold"
+        );
+        // Without PSI the same host is not saturated.
+        let quiet = Host::new(ContentionMode::Neutral).run(12, 500, None);
+        assert!(!capped(&quiet));
+        assert!(!codes(quiet.last().unwrap()).contains(&"saturated_by_psi".to_string()));
+        // Saturated but without external demand: not contended.
+        let alone = Host::new(ContentionMode::Neutral).run(12, 0, available(40.0));
+        assert!(codes(alone.last().unwrap()).contains(&"saturated_by_psi".to_string()));
+        assert!(!capped(&alone));
+    }
+
+    /// Own pressure is never saturation evidence.
+    #[test]
+    fn own_psi_alone_does_not_saturate() {
+        let decisions = Host::new(ContentionMode::Neutral).run(
+            12,
+            500,
+            Some(pressure(CpuPressureStatus::Available, Some(2.0), 95.0)),
+        );
+        assert!(!capped(&decisions));
+        assert!(!codes(decisions.last().unwrap()).contains(&"saturated_by_psi".to_string()));
+    }
+
+    /// System-wide-only and unknown pressure add no evidence and say why.
+    #[test]
+    fn system_only_and_unknown_pressure_add_no_evidence() {
+        for (status, code) in [
+            (CpuPressureStatus::SystemOnly, "psi_system_only"),
+            (CpuPressureStatus::Unknown, "psi_unknown"),
+        ] {
+            let decisions =
+                Host::new(ContentionMode::Neutral).run(12, 500, Some(pressure(status, None, 90.0)));
+            assert!(!capped(&decisions), "{code}");
+            let last = codes(decisions.last().unwrap());
+            assert!(last.contains(&code.to_string()), "{last:?}");
+            assert!(!last.contains(&"saturated_by_psi".to_string()));
+            let held = decisions.last().unwrap().resources[&ResourceKey::Cpu]
+                .held_back
+                .clone()
+                .unwrap();
+            assert_eq!(
+                (held.contention, held.contention_psi, held.unknown),
+                (0, 0, 0),
+                "{code}"
+            );
+        }
+    }
+
+    /// PSI that crosses the threshold back and forth never uncaps and recaps: the
+    /// ladder's calm window and scale-up interval hold the cap.
+    #[test]
+    fn pressure_crossing_the_threshold_does_not_cycle() {
+        let mut host = Host::new(ContentionMode::Neutral);
+        let mut caps = vec![];
+        for i in 0..80u64 {
+            let external = if i % 2 == 0 { 40.0 } else { 5.0 };
+            host.tick(i * 500, 500, available(external));
+            caps.push(host.cap);
+        }
+        let first = caps.iter().position(Option::is_some).expect("a cap");
+        assert!(caps[first..].iter().all(Option::is_some), "{caps:?}");
+        let changes = caps[first..].windows(2).filter(|w| w[0] != w[1]).count();
+        // At most one move per 10 s scale-up interval over the 40 s run.
+        assert!(changes <= 4, "{changes} changes: {caps:?}");
+    }
+
+    fn modes() -> [Host; 3] {
+        [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ]
+        .map(Host::new)
+    }
+
+    /// PSI that stays high while external usage stays flat ends in a satisfied
+    /// record in every mode: each returns to its uncontended target, with Yield
+    /// First ≤ Neutral ≤ Performance at every interval.
+    #[test]
+    fn psi_with_flat_external_usage_returns_every_mode_to_its_target() {
+        let mut hosts = modes().map(|host| host.wanting(7200));
+        let mut last = vec![];
+        for i in 0..400u64 {
+            last = hosts
+                .iter_mut()
+                .map(|host| host.tick(i * 500, 500, available(40.0)))
+                .collect();
+            let own: Vec<u64> = hosts.iter().map(Host::own).collect();
+            assert!(
+                own[0] <= own[1] && own[1] <= own[2],
+                "interval {i}: {own:?}"
+            );
+        }
+        let targets: Vec<Option<u64>> = last
+            .iter()
+            .map(|d| d.resources[&ResourceKey::Cpu].target_share)
+            .collect();
+        // 8000 − 500 external − each mode's margin (15%, 5%, 2%).
+        assert_eq!(targets, [Some(6300), Some(7100), Some(7340)]);
+        assert_eq!(hosts.map(|host| host.own()), [6300, 7100, 7200]);
+    }
+
+    /// Once recorded, a satisfied principal stays satisfied while its usage stays
+    /// within the record, so nothing probes or caps again.
+    #[test]
+    fn a_satisfied_record_holds_while_usage_stays_within_it() {
+        let mut host = Host::new(ContentionMode::Neutral).wanting(7200);
+        host.run(100, 500, available(40.0));
+        let settled = host.own();
+        assert_eq!(settled, 7100);
+        for i in 100..300u64 {
+            let external = if i % 2 == 0 { 500 } else { 560 };
+            let decision = host.tick(i * 500, external, available(40.0));
+            // Not contended: the target is the uncontended one, capacity less
+            // external usage and the 5% margin, and nothing probes again.
+            assert_eq!(
+                decision.resources[&ResourceKey::Cpu].target_share,
+                Some(8000 - external - 400),
+                "interval {i}"
+            );
+            assert!(
+                codes(&decision).iter().all(|c| c != "probing_demand"),
+                "interval {i}: {:?}",
+                codes(&decision)
+            );
+        }
+    }
+
+    /// An external user that grows into the capacity own work frees, as one
+    /// sharing own work's cores would, keeps growing while own work steps down to
+    /// the fair share, including after it moves from the unattributed principal
+    /// to its own.
+    #[test]
+    fn an_external_user_that_grows_into_freed_capacity_keeps_its_share() {
+        let mut host = Host::new(ContentionMode::Neutral);
+        let mut external = 2000;
+        let (mut lowest_own, mut highest_external) = (u64::MAX, 0);
+        for i in 0..120u64 {
+            host.tick(i * 500, external, available(40.0));
+            external = (2000 + (5500 - host.own())).min(4500);
+            lowest_own = lowest_own.min(host.own());
+            highest_external = highest_external.max(external);
+        }
+        assert!(lowest_own <= 4100, "own {lowest_own}");
+        assert!(highest_external >= 3400, "external {highest_external}");
+    }
+
+    /// An external user whose demand grows while PSI stays high is probed again
+    /// and recorded at its new usage; own work keeps the rest.
+    #[test]
+    fn an_external_user_that_grows_while_psi_is_high_gets_its_share() {
+        let mut host = Host::new(ContentionMode::Neutral).wanting(5000);
+        host.run(100, 500, available(40.0));
+        assert_eq!(host.own(), 5000);
+        let grown: Vec<Decision> = (100..300u64)
+            .map(|i| host.tick(i * 500, 2500, available(40.0)))
+            .collect();
+        assert!(
+            grown
+                .iter()
+                .any(|d| codes(d).contains(&"probing_demand".to_string())),
+            "the grown demand is probed"
+        );
+        let last = grown.last().unwrap();
+        // Recorded as satisfied, it no longer contends: own work's target is
+        // capacity less its usage and the 5% margin.
+        assert!(codes(last).contains(&"satisfied_demand".to_string()));
+        assert_eq!(
+            last.resources[&ResourceKey::Cpu].target_share,
+            Some(8000 - 2500 - 400)
+        );
+        assert_eq!(host.own(), 5000);
+    }
+
+    /// PSI never pauses Guaranteed work, never caps its CPU below the request, and
+    /// never changes what memory holds back for the floors.
+    #[test]
+    fn floors_hold_and_guaranteed_is_never_paused_under_psi() {
+        let ram = |pressure: Option<CpuPressure>| {
+            let mut host = Host::new(ContentionMode::Neutral)
+                .wanting(7200)
+                .guaranteed();
+            let decisions = host.run(60, 500, pressure);
+            for d in &decisions {
+                for a in &d.actions {
+                    assert_ne!(a.step, YieldStep::Pause, "{a:?}");
+                    if a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap {
+                        assert!(a.target.unwrap_or(0) >= 1000, "{a:?}");
+                    }
+                }
+            }
+            let last = decisions.last().unwrap();
+            (
+                last.resources[&ResourceKey::Ram].held_back.clone(),
+                last.actions
+                    .iter()
+                    .filter(|a| a.resource == ResourceKey::Ram)
+                    .count(),
+            )
+        };
+        let without = ram(None);
+        for pressure in [
+            available(40.0),
+            Some(pressure(CpuPressureStatus::SystemOnly, None, 90.0)),
+            Some(pressure(CpuPressureStatus::Unknown, None, 90.0)),
+        ] {
+            assert_eq!(ram(pressure), without);
+        }
+    }
+
+    /// The same evidence in every mode, and the existing responses keep modes
+    /// monotonic.
+    #[test]
+    fn modes_respond_to_psi_monotonically() {
+        let own = |mode| {
+            let mut host = Host::new(mode);
+            host.run(200, 500, available(40.0));
+            host.own()
+        };
+        let (yield_first, neutral, performance) = (
+            own(ContentionMode::YieldFirst),
+            own(ContentionMode::Neutral),
+            own(ContentionMode::Performance),
+        );
+        assert!(
+            yield_first <= neutral && neutral <= performance,
+            "{yield_first} {neutral} {performance}"
+        );
     }
 }
 

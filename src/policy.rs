@@ -772,8 +772,51 @@ impl PolicyEngine {
                 .thresholds(ResourceKind::Cpu)
                 .saturation_percent,
         );
-        let cpu_saturated = cpu_busy
+        let utilization_saturated = cpu_busy
             .is_some_and(|busy| busy.saturating_mul(100) >= cpu_total.saturating_mul(saturation));
+        // External PSI is a second CPU saturation signal; own and system-wide
+        // pressure never count, and unknown pressure adds nothing (FR-072).
+        let psi_threshold = config
+            .contention
+            .thresholds(ResourceKind::Cpu)
+            .psi_some_percent;
+        let cpu_pressure = snapshot
+            .kernel
+            .as_ref()
+            .and_then(|kernel| kernel.cpu_pressure.as_ref());
+        let external_psi = cpu_pressure
+            .filter(|pressure| pressure.status == crate::kernel::CpuPressureStatus::Available)
+            .and_then(|pressure| pressure.external_some_avg10);
+        let psi_saturated = external_psi.is_some_and(|avg10| avg10 > f64::from(psi_threshold));
+        let psi_only = psi_saturated && !utilization_saturated;
+        let cpu_saturated = utilization_saturated || psi_saturated;
+        match cpu_pressure.map(|pressure| pressure.status) {
+            _ if psi_only => note(
+                &mut statuses,
+                ResourceKey::Cpu,
+                "saturated_by_psi",
+                format!(
+                    "external PSI some avg10 {:.1}% is above {psi_threshold}%; own and system-wide pressure are not counted",
+                    external_psi.unwrap_or(0.0)
+                ),
+            ),
+            Some(crate::kernel::CpuPressureStatus::SystemOnly) => note(
+                &mut statuses,
+                ResourceKey::Cpu,
+                "psi_system_only",
+                "only system-wide CPU pressure is readable; it cannot tell own from external waiting, so it adds no evidence".into(),
+            ),
+            Some(crate::kernel::CpuPressureStatus::Unknown) => note(
+                &mut statuses,
+                ResourceKey::Cpu,
+                "psi_unknown",
+                format!(
+                    "CPU pressure is missing or unreadable, so it adds no evidence: {}",
+                    cpu_pressure.map_or("", |pressure| pressure.detail.as_str())
+                ),
+            ),
+            _ => {}
+        }
         let mut satisfied = BTreeMap::new();
         let mut probes = BTreeMap::new();
         let mut principal_seen = BTreeMap::new();
@@ -818,6 +861,7 @@ impl PolicyEngine {
                 principals: members,
                 background,
                 saturated: cpu_saturated,
+                psi_only,
                 unknown_activity: false,
                 satisfied: self
                     .satisfied
@@ -875,6 +919,8 @@ impl PolicyEngine {
                 principals: members,
                 background,
                 saturated: false,
+
+                psi_only: false,
                 unknown_activity: false,
                 satisfied: vec![],
                 probe: None,
@@ -1147,6 +1193,7 @@ impl PolicyEngine {
                                 saturated: gpu.utilization_percent.is_some_and(|busy| {
                                     busy >= u32::from(compute_thresholds.saturation_percent)
                                 }),
+                                psi_only: false,
                                 unknown_activity: false,
                                 satisfied: self
                                     .satisfied
@@ -1211,6 +1258,8 @@ impl PolicyEngine {
                                 principals: None,
                                 background: 0,
                                 saturated: false,
+
+                                psi_only: false,
                                 unknown_activity: true,
                                 satisfied: vec![],
                                 probe: None,
@@ -1301,6 +1350,8 @@ impl PolicyEngine {
                         principals: members,
                         background,
                         saturated: false,
+
+                        psi_only: false,
                         unknown_activity: false,
                         satisfied: vec![],
                         probe: None,
@@ -2515,6 +2566,9 @@ impl PolicyEngine {
                 };
                 held.margin = target.saturating_sub(held.reserve).min(margin);
                 held.contention = target.saturating_sub(held.reserve + held.margin);
+                if psi_only {
+                    held.contention_psi = std::mem::take(&mut held.contention);
+                }
                 let pre = budget.cpu_millicores.saturating_sub(charged.cpu_millicores);
                 held.cooldown = if cpu_allowed { 0 } else { pre };
                 held.charge_shortfall = shortfall(&|r| r.cpu_millicores, false);

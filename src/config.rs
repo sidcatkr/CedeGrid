@@ -635,6 +635,8 @@ pub struct ResourceContentionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saturation_percent: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub psi_some_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_backoff_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_backoff_max_ms: Option<u64>,
@@ -724,6 +726,7 @@ impl ContentionConfig {
             saturation_percent: set
                 .saturation_percent
                 .unwrap_or(defaults.saturation_percent),
+            psi_some_percent: set.psi_some_percent.unwrap_or(defaults.psi_some_percent),
             reclaim_backoff_ms: set
                 .reclaim_backoff_ms
                 .unwrap_or(defaults.reclaim_backoff_ms),
@@ -908,6 +911,7 @@ impl ContentionConfig {
                 &[Cpu],
                 set.admission_usage_window_s.is_some(),
             )?;
+            applies("psi_some_percent", &[Cpu], set.psi_some_percent.is_some())?;
             for (field, present) in [
                 ("memory_peak_window_s", set.memory_peak_window_s.is_some()),
                 ("reclaim_backoff_ms", set.reclaim_backoff_ms.is_some()),
@@ -926,6 +930,10 @@ impl ContentionConfig {
             ensure!(
                 (50..=100).contains(&t.saturation_percent),
                 "contention.{name}.saturation_percent must be between 50 and 100"
+            );
+            ensure!(
+                (1..=100).contains(&t.psi_some_percent),
+                "contention.{name}.psi_some_percent must be between 1 and 100"
             );
             // Bounded deadlines and windows keep escalation bounded in time (III).
             ensure!(
@@ -1091,6 +1099,7 @@ impl ContentionConfig {
         result.extend(self.beyond_defaults(|t| {
             [
                 ("saturation_percent", i64::from(t.saturation_percent)),
+                ("psi_some_percent", i64::from(t.psi_some_percent)),
                 ("principal_min_percent", i64::from(t.principal_min_percent)),
                 (
                     "noise_tolerance_mib",
@@ -1250,6 +1259,10 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ),
         (
             "contention.*.saturation_percent",
+            Caution("relaxed_detection"),
+        ),
+        (
+            "contention.*.psi_some_percent",
             Caution("relaxed_detection"),
         ),
         (

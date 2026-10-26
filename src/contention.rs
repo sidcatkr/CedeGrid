@@ -250,6 +250,18 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "A step this allocation cannot take was skipped for the next one.",
     ),
     (
+        "saturated_by_psi",
+        "External tasks wait for CPU above psi_some_percent (PSI), so the CPU counts as saturated.",
+    ),
+    (
+        "psi_system_only",
+        "Only system-wide CPU pressure is readable; it cannot tell own from external waiting, so it adds no evidence.",
+    ),
+    (
+        "psi_unknown",
+        "CPU pressure is missing, unreadable or malformed, so it adds no evidence.",
+    ),
+    (
         "ram_cap_growth_stop",
         "The RAM cap holds above its target, at what the leaf cannot reclaim, so it only stops growth and the hint frees the rest.",
     ),
@@ -461,6 +473,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Capacity left to contending external demand.",
     ),
     (
+        "held_back_contention_psi",
+        "CPU left to external demand while only external pressure (PSI) shows the CPU saturated.",
+    ),
+    (
         "held_back_peak",
         "Admission headroom kept for the external memory peak.",
     ),
@@ -619,6 +635,8 @@ pub struct ResourceThresholds {
     pub memory_peak_window_s: u64,
     /// CPU, GPU compute: busy at or above this share of capacity is saturated.
     pub saturation_percent: u8,
+    /// CPU: external PSI `some` avg10 above this also saturates the CPU (FR-072).
+    pub psi_some_percent: u8,
     /// Memory: the extra cooldown after a repeated reclaim episode, doubling up to
     /// the maximum (FR-061).
     pub reclaim_backoff_ms: u64,
@@ -659,6 +677,7 @@ impl ResourceThresholds {
             guaranteed_breach_window_s: if kind == ResourceKind::Ram { 10 } else { 0 },
             memory_peak_window_s: 300,
             saturation_percent: 98,
+            psi_some_percent: 10,
             reclaim_backoff_ms: 1000,
             reclaim_backoff_max_ms: 30_000,
             admission_usage_window_s: 60,
@@ -1186,6 +1205,9 @@ pub struct ModeInput {
     pub background: u64,
     /// Usage at capacity hides how much more external work wants (CPU).
     pub saturated: bool,
+    /// Saturated by external PSI alone, with utilization below saturation: every
+    /// contending principal is probed, not only small demands (FR-072).
+    pub psi_only: bool,
     /// Activity of unknown amount, such as unsampled GPU compute.
     pub unknown_activity: bool,
     /// Principals whose demand probing found satisfied, by UID (`None`: the
@@ -1457,9 +1479,12 @@ pub fn probe_demand(
     } else {
         BTreeMap::new()
     };
+    // Under PSI-only saturation the host has room to spare, so every demand is
+    // probed: a watch would wait for a saturation that never clears (FR-072).
+    let probe = probe.filter(|probe| !(input.psi_only && probe.watch));
     let larger: BTreeMap<Option<u32>, u64> = unknown
         .iter()
-        .filter(|(_, usage)| **usage >= step)
+        .filter(|(_, usage)| !input.psi_only && **usage >= step)
         .map(|(uid, usage)| (*uid, *usage))
         .collect();
     if let Some(watch) = probe.filter(|probe| probe.watch) {
@@ -1524,8 +1549,37 @@ pub fn probe_demand(
         };
         return (satisfied, Some(started));
     };
+    // Usage that moves from the unattributed principal to a principal joining
+    // during the window, as when a user is admitted, keeps its baseline, so growth
+    // into the freed capacity stays visible.
+    let mut probe = probe.clone();
+    let joiners: Vec<(Option<u32>, u64)> = unknown
+        .iter()
+        .filter(|(uid, _)| !probe.usage_at_step.contains_key(uid))
+        .map(|(uid, usage)| (*uid, *usage))
+        .collect();
+    if !joiners.is_empty() {
+        let unattributed = usage_of(None).unwrap_or(0);
+        let moved = probe
+            .usage_at_step
+            .get(&None)
+            .map_or(0, |before| before.saturating_sub(unattributed));
+        let joined: u64 = joiners.iter().map(|(_, usage)| *usage).sum();
+        for (uid, usage) in joiners {
+            let carried = if moved == 0 || joined == 0 {
+                usage
+            } else {
+                let share = u128::from(moved) * u128::from(usage) / u128::from(joined);
+                u64::try_from(share).unwrap_or(u64::MAX).min(usage)
+            };
+            probe.usage_at_step.insert(uid, carried);
+        }
+        if moved > 0 {
+            probe.usage_at_step.insert(None, unattributed);
+        }
+    }
     if now_ms.saturating_sub(probe.stepped_at_ms) < response_ms {
-        return (satisfied, Some(probe.clone()));
+        return (satisfied, Some(probe));
     }
     // The window is over: who grew into the freed capacity, even after the step
     // ended the saturation?
