@@ -43,6 +43,11 @@ pub struct Collector {
     platform_capabilities: BTreeMap<String, Capability>,
     kernel: crate::kernel::KernelCollector,
     managed_pids: BTreeSet<u32>,
+    /// The verified identities behind `managed_pids`, for pidfd checks.
+    managed_identities: BTreeMap<u32, crate::execution_model::ProcessIdentity>,
+    /// Per device, memory attributed to no listed PID at the last measured,
+    /// own-only or empty interval (research R18).
+    gpu_memory_baseline: BTreeMap<String, u64>,
     managed_gpu_usage: BTreeMap<u32, BTreeMap<String, u64>>,
     gpu_accounting_known: BTreeSet<String>,
     gpu_quiet: BTreeMap<String, QuietState>,
@@ -251,6 +256,8 @@ impl Collector {
             platform_capabilities: platform_capabilities(),
             kernel: crate::kernel::KernelCollector::new(crate::kernel::KernelConfig::default()),
             managed_pids: BTreeSet::new(),
+            managed_identities: BTreeMap::new(),
+            gpu_memory_baseline: BTreeMap::new(),
             managed_gpu_usage: BTreeMap::new(),
             gpu_accounting_known: BTreeSet::new(),
             gpu_quiet: BTreeMap::new(),
@@ -361,6 +368,16 @@ impl Collector {
     /// Callers must verify them again after sampling before trusting attribution.
     pub fn set_managed_pids(&mut self, pids: BTreeSet<u32>) {
         self.managed_pids = pids;
+        self.managed_identities
+            .retain(|pid, _| self.managed_pids.contains(pid));
+    }
+    /// Own verified processes, by PID, with the identities a pidfd check needs.
+    pub fn set_managed_identities(
+        &mut self,
+        identities: BTreeMap<u32, crate::execution_model::ProcessIdentity>,
+    ) {
+        self.managed_pids = identities.keys().copied().collect();
+        self.managed_identities = identities;
     }
     pub fn gpu_usage(
         &self,
@@ -678,7 +695,7 @@ impl Collector {
             }
             let unattributed_memory_mib = memory
                 .filter(|memory| memory.attribution_known)
-                .zip(process_memory)
+                .zip(process_memory.as_ref())
                 .map(|(memory, processes)| {
                     memory
                         .unavailable_mib
@@ -708,14 +725,6 @@ impl Collector {
                 activity_baseline,
                 samples.as_deref().ok(),
             );
-            let quiet = self.gpu_quiet.entry(uuid.clone()).or_default();
-            let quiet_ticks = advance_quiet(
-                quiet,
-                external_process_ids.as_deref(),
-                quiet_tick(external_process_ids.as_deref(), previous, &samples),
-            );
-            let external_compute =
-                quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
             // The MPS control daemon may serve any device; its server and clients
             // appear in the device's process lists.
             let mps = self
@@ -729,15 +738,61 @@ impl Collector {
                     .flatten()
                     .filter_map(|pid| process_name(*pid))
                     .any(|name| is_mps_process(&name));
-            let (compute_amount, compute_by_pid) = measure_compute(
+            // Only own verified processes listed: external compute is zero and the
+            // device's time is own work, without fresh samples (FR-021, R18).
+            let queries_ok = compute_info.is_ok() && graphics_info.is_ok();
+            let listed = merge_process_lists(compute.as_deref().ok(), graphics.as_deref().ok());
+            let own_only = utilization_percent.is_some()
+                && own_only_interval(
+                    &OwnOnlyEvidence {
+                        queries_ok,
+                        listed: listed.as_deref().unwrap_or_default(),
+                        mps,
+                        unattributed_memory_mib,
+                        baseline_mib: self.gpu_memory_baseline.get(&uuid).copied(),
+                        tolerance_mib: self.gpu_memory_tolerance_mib,
+                    },
+                    |pid| {
+                        self.managed_identities
+                            .get(&pid)
+                            .is_some_and(own_process_verified)
+                    },
+                );
+            let quiet = self.gpu_quiet.entry(uuid.clone()).or_default();
+            let quiet_ticks = advance_quiet(
+                quiet,
                 external_process_ids.as_deref(),
-                &self.managed_pids,
-                activity_baseline,
-                &samples,
-                utilization_percent,
-                mps,
-                self.attribution_tolerance_percent,
+                own_only || quiet_tick(external_process_ids.as_deref(), previous, &samples),
             );
+            let external_compute =
+                quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
+            let (compute_amount, compute_by_pid) = match utilization_percent {
+                Some(device) if own_only => (
+                    ComputeAmount::Measured {
+                        external: 0,
+                        own: u64::from(device.min(100)) * 10,
+                    },
+                    BTreeMap::new(),
+                ),
+                _ => measure_compute(
+                    external_process_ids.as_deref(),
+                    &self.managed_pids,
+                    activity_baseline,
+                    &samples,
+                    utilization_percent,
+                    mps,
+                    self.attribution_tolerance_percent,
+                ),
+            };
+            if sets_memory_baseline(
+                own_only,
+                queries_ok,
+                listed.as_deref(),
+                matches!(compute_amount, ComputeAmount::Measured { .. }),
+            ) && let Some(unattributed) = unattributed_memory_mib
+            {
+                self.gpu_memory_baseline.insert(uuid.clone(), unattributed);
+            }
             if matches!(compute_amount, ComputeAmount::Measured { .. }) {
                 self.external_gpu_compute
                     .insert(uuid.clone(), compute_by_pid);
@@ -811,6 +866,7 @@ impl Collector {
                     ComputeAmount::Measured { .. } => None,
                     ComputeAmount::Unknown(reason) => Some(reason),
                 },
+                own_only,
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -818,6 +874,17 @@ impl Collector {
         capabilities.insert("gpu_inventory".into(), capability(inventory.clone(), "Stable UUID observations for NVML devices. Individual failures remain per-device diagnostics and never disable other qualified devices. Other vendor adapters are not implemented."));
         (inventory, gpus)
     }
+}
+
+/// Whether a listed PID is the verified own process it claims to be, by pidfd.
+#[cfg(target_os = "linux")]
+fn own_process_verified(identity: &crate::execution_model::ProcessIdentity) -> bool {
+    managed::verified_pidfd(identity).is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn own_process_verified(_identity: &crate::execution_model::ProcessIdentity) -> bool {
+    false
 }
 
 /// Read-only capability discovery; never applies an available control.
@@ -2076,6 +2143,79 @@ mod tests {
             &"managed-child:in".into(),
             11
         ));
+    }
+
+    fn own_only_evidence(listed: &[u32]) -> OwnOnlyEvidence<'_> {
+        OwnOnlyEvidence {
+            queries_ok: true,
+            listed,
+            mps: false,
+            unattributed_memory_mib: Some(300),
+            baseline_mib: Some(300),
+            tolerance_mib: 32,
+        }
+    }
+
+    #[test]
+    fn an_inventory_of_only_own_verified_pids_is_own_only() {
+        let own = |pid| pid == 42 || pid == 43;
+        // A new own PID is own work like any other.
+        assert!(own_only_interval(&own_only_evidence(&[42, 43]), own));
+        // Memory growth within the tolerance still passes.
+        let within = OwnOnlyEvidence {
+            unattributed_memory_mib: Some(332),
+            ..own_only_evidence(&[42])
+        };
+        assert!(own_only_interval(&within, own));
+    }
+
+    #[test]
+    fn each_failing_own_only_condition_alone_keeps_the_existing_path() {
+        let own = |pid| pid == 42;
+        let cases = [
+            // An external graphics process, a PID 0 entry, an unresolvable PID.
+            own_only_evidence(&[42, 7]),
+            own_only_evidence(&[42, 0]),
+            own_only_evidence(&[42, 43]),
+            OwnOnlyEvidence {
+                mps: true,
+                ..own_only_evidence(&[42])
+            },
+            OwnOnlyEvidence {
+                unattributed_memory_mib: Some(333),
+                ..own_only_evidence(&[42])
+            },
+            OwnOnlyEvidence {
+                queries_ok: false,
+                ..own_only_evidence(&[42])
+            },
+            OwnOnlyEvidence {
+                unattributed_memory_mib: None,
+                ..own_only_evidence(&[42])
+            },
+            // No baseline yet, or nothing listed.
+            OwnOnlyEvidence {
+                baseline_mib: None,
+                ..own_only_evidence(&[42])
+            },
+            own_only_evidence(&[]),
+        ];
+        for case in cases {
+            assert!(!own_only_interval(&case, own), "{:?}", case.listed);
+        }
+    }
+
+    #[test]
+    fn an_empty_interval_sets_the_memory_baseline_but_stays_on_the_existing_path() {
+        assert!(sets_memory_baseline(false, true, Some(&[]), false));
+        assert!(!own_only_interval(&own_only_evidence(&[]), |_| true));
+        assert!(sets_memory_baseline(true, true, Some(&[42]), true));
+        assert!(sets_memory_baseline(false, true, Some(&[7]), true));
+        // An unknown interval with a listed process, a failed query or an
+        // incomplete inventory sets none.
+        assert!(!sets_memory_baseline(false, true, Some(&[7]), false));
+        assert!(!sets_memory_baseline(false, false, Some(&[]), false));
+        assert!(!sets_memory_baseline(false, true, None, false));
     }
 
     /// Native CPU clock checks, run only when asked for on a Linux host.

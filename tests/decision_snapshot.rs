@@ -287,6 +287,7 @@ fn sequence(seed: u64) -> usize {
                 external_compute_milli: measured_compute.then_some(ext_compute.min(1000)),
                 own_compute_milli: measured_compute.then_some(0),
                 compute_amount_unknown: None,
+                own_only: false,
             }],
             capabilities: BTreeMap::new(),
             kernel: None,

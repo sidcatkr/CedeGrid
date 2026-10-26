@@ -357,6 +357,7 @@ fn gpu_snapshot() -> Snapshot {
         external_compute_milli: None,
         own_compute_milli: None,
         compute_amount_unknown: None,
+        own_only: false,
     });
     result
 }
@@ -3746,6 +3747,75 @@ fn alternating_gpu_measurements_cause_at_most_one_step_change() {
     assert!(
         matches!(&path, Some(ComputePath::Unknown { code, reason }) if code == "gpu_compute_recently_inconsistent" && reason.contains("recently inconsistent")),
         "{path:?}"
+    );
+}
+
+/// An interval whose inventory lists only own verified PIDs (research R18) is
+/// measured at once with no external compute: a new own process neither waits
+/// out the quiet window nor is capped for activity of unknown amount, and the
+/// measured streak keeps counting (FR-021).
+#[test]
+fn an_own_only_gpu_interval_is_measured_at_once() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Idle,
+        Some(vec![]),
+        Some(8000),
+        false,
+    );
+    snap.gpus[0].utilization_percent = Some(100);
+    snap.gpus[0].external_compute_milli = Some(0);
+    snap.gpus[0].own_compute_milli = Some(1000);
+    snap.gpus[0].compute_amount_unknown = None;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let path = |snap: &Snapshot, engine: &mut PolicyEngine, now| {
+        let decision = engine.evaluate(&cfg, snap, &input, now).unwrap();
+        let held = decision.resources[&key].held_back.clone();
+        (
+            held.and_then(|held| held.compute_path),
+            decision.actions.iter().any(|a| a.resource == key),
+        )
+    };
+    // Today's path: a fresh device waits out the quiet window.
+    let mut engine = PolicyEngine::new();
+    snap.gpus[0].compute_sample_id = Some(1);
+    assert!(matches!(
+        path(&snap, &mut engine, 0).0,
+        Some(ComputePath::Unknown { code, .. }) if code == "gpu_compute_recently_inconsistent"
+    ));
+    // Own-only: measured from the first interval, and no step on own work.
+    snap.gpus[0].own_only = true;
+    let mut engine = PolicyEngine::new();
+    for now in (0..10_000).step_by(500) {
+        snap.gpus[0].compute_sample_id = Some(now + 1);
+        assert_eq!(
+            path(&snap, &mut engine, now),
+            (Some(ComputePath::Measured), false),
+            "at {now}"
+        );
+    }
+    // A measured interval with an external PID after own-only intervals stays
+    // on the measured path: the streak kept counting.
+    snap.gpus[0].own_only = false;
+    snap.gpus[0].external_process_ids = Some(vec![987]);
+    snap.gpus[0].external_compute = ComputeActivity::Active;
+    snap.gpus[0].external_compute_milli = Some(100);
+    snap.gpus[0].own_compute_milli = Some(900);
+    snap.gpus[0].compute_sample_id = Some(10_001);
+    assert_eq!(
+        path(&snap, &mut engine, 10_000).0,
+        Some(ComputePath::Measured)
     );
 }
 

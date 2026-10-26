@@ -696,11 +696,11 @@ node reports with the expected per-resource values at each step.
   remainder is own work. External GPU compute MUST be measured as zero, without fresh samples,
   for an interval in which the compute and the graphics process queries both succeed, at least
   one PID is listed and every listed PID is an own verified PID (checked through its pidfd, with
-  no PID 0 or unresolvable entry), no MPS control daemon or server is present, and device memory
-  not attributed to own PIDs is no higher than at the last interval that was measured, own-only,
-  or listed no process with both queries successful, plus
-  `contention.gpu_memory.noise_tolerance_mib`; such an interval keeps the device on the measured
-  path and does not restart its quiet window. Otherwise it MUST stay activity of unknown amount
+  no PID 0 or unresolvable entry), no MPS control daemon or server is present, device utilization
+  is available, and device memory attributed to no listed PID (here, the memory not attributed
+  to own PIDs) is no higher than at the last interval that was measured, own-only, or listed no
+  process with both queries successful, plus `contention.gpu_memory.noise_tolerance_mib`; such an
+  interval keeps the device on the measured path and does not restart its quiet window. Otherwise it MUST stay activity of unknown amount
   when either query is unsupported, samples are not fresh, the process inventory is incomplete,
   or an MPS control daemon or server is present. A device MUST switch to the unknown path at once
   and return to the measured path only after `quiet_window_intervals` consecutive measured

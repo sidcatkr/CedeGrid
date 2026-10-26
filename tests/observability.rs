@@ -52,6 +52,7 @@ fn host() -> Snapshot {
             external_compute_milli: Some(0),
             own_compute_milli: Some(0),
             compute_amount_unknown: None,
+            own_only: false,
         }],
         capabilities: BTreeMap::new(),
         kernel: None,

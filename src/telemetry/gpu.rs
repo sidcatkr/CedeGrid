@@ -131,6 +131,55 @@ pub(super) fn device_memory(
     })
 }
 
+/// One device interval's evidence for the own-only rule (FR-021, research R18).
+pub(super) struct OwnOnlyEvidence<'a> {
+    /// The compute and the graphics process queries both succeeded.
+    pub(super) queries_ok: bool,
+    /// Every PID either query listed, own work included.
+    pub(super) listed: &'a [u32],
+    pub(super) mps: bool,
+    /// Device memory attributed to no listed PID, when attribution is known; with
+    /// only own PIDs listed, the memory not attributed to own PIDs.
+    pub(super) unattributed_memory_mib: Option<u64>,
+    /// The same at the last measured, own-only or empty interval. Memory of an
+    /// external PID listed then is not in it, so a context that later drops out of
+    /// the list while keeping its memory still counts as growth.
+    pub(super) baseline_mib: Option<u64>,
+    pub(super) tolerance_mib: u64,
+}
+
+/// Whether every own-only condition holds. With only own verified PIDs listed and
+/// no MPS, no unlisted context computes unless it holds memory nobody accounts
+/// for, so that memory must not have grown. Any failure keeps the existing path.
+pub(super) fn own_only_interval(
+    evidence: &OwnOnlyEvidence<'_>,
+    own_verified: impl Fn(u32) -> bool,
+) -> bool {
+    evidence.queries_ok
+        && !evidence.mps
+        && !evidence.listed.is_empty()
+        && evidence
+            .listed
+            .iter()
+            .all(|pid| *pid != 0 && own_verified(*pid))
+        && evidence
+            .unattributed_memory_mib
+            .zip(evidence.baseline_mib)
+            .is_some_and(|(now, baseline)| now <= baseline.saturating_add(evidence.tolerance_mib))
+}
+
+/// Whether an interval's unattributed memory becomes the own-only baseline: a
+/// measured or own-only interval, or one whose complete inventory lists nothing.
+/// Without the empty case, a device that starts empty could never be own-only.
+pub(super) fn sets_memory_baseline(
+    own_only: bool,
+    queries_ok: bool,
+    listed: Option<&[u32]>,
+    measured: bool,
+) -> bool {
+    own_only || measured || (queries_ok && listed.is_some_and(<[u32]>::is_empty))
+}
+
 /// Consecutive healthy intervals with no external compute, per device.
 #[derive(Debug, Clone, Default)]
 pub(super) struct QuietState {

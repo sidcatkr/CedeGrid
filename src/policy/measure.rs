@@ -1014,7 +1014,8 @@ impl<'a> Interval<'a> {
             config.monitor.interval_ms,
             config.gpu.process_sample_max_age_ms,
         );
-        let settled = measured_streak >= measured_window;
+        // An own-only interval knows external compute is zero without waiting.
+        let settled = measured_streak >= measured_window || gpu.own_only;
         let measured = gpu
             .external_compute_milli
             .filter(|_| settled)

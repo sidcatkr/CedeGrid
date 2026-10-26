@@ -253,7 +253,14 @@ impl ManagedCollector {
             })
             .map(|id| id.pid)
             .collect();
-        self.collector.set_managed_pids(verified.clone());
+        self.collector.set_managed_identities(
+            active
+                .iter()
+                .filter_map(|record| record.identity.clone())
+                .filter(|id| verified.contains(&id.pid))
+                .map(|id| (id.pid, id))
+                .collect(),
+        );
         let owner = |assignment: &String| parents.get(assignment).unwrap_or(assignment).clone();
         let mut families: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
         for record in &active {
@@ -714,6 +721,32 @@ fn pidfd_alive(pidfd: &std::os::fd::OwnedFd) -> Option<bool> {
     }
 }
 
+/// A pidfd that denotes the verified process, not a later one with its PID: it
+/// is opened first, then the PID's boot and start identity is checked, and the
+/// process still runs.
+#[cfg(target_os = "linux")]
+pub(super) fn verified_pidfd(
+    identity: &crate::execution_model::ProcessIdentity,
+) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open only obtains a handle; nothing is signalled.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0u32) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: a successful syscall returns a newly owned descriptor.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let same = crate::supervision::process_identity(
+        identity.pid,
+        &identity.assignment_id,
+        identity.generation,
+    )
+    .ok()
+    .as_ref()
+        == Some(identity);
+    (same && pidfd_alive(&pidfd)?).then_some(pidfd)
+}
+
 /// The whole thread group's CPU time, exited threads included, from the
 /// process CPU clock. The clock is keyed by PID number, so it is read only while
 /// a pidfd opened first, and checked against the verified identity, shows that
@@ -724,27 +757,7 @@ pub(super) fn clock_reading(
     cpus: u64,
     tick_ns: u64,
 ) -> Option<CpuReading> {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    // SAFETY: pidfd_open only obtains a handle; nothing is signalled.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.pid, 0u32) };
-    if fd < 0 {
-        return None;
-    }
-    // SAFETY: a successful syscall returns a newly owned descriptor.
-    let pidfd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    // The handle must denote the verified process, not a later one with its PID.
-    if crate::supervision::process_identity(
-        identity.pid,
-        &identity.assignment_id,
-        identity.generation,
-    )
-    .ok()
-    .as_ref()
-        != Some(identity)
-        || !pidfd_alive(&pidfd)?
-    {
-        return None;
-    }
+    let pidfd = verified_pidfd(identity)?;
     let threads_before = process_threads(identity.pid)?;
     let mut clock: libc::clockid_t = 0;
     // SAFETY: valid output pointer; the call only names the clock.

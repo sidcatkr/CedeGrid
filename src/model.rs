@@ -231,6 +231,10 @@ pub struct GpuSnapshot {
     /// Why the external compute amount is unknown, when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_amount_unknown: Option<String>,
+    /// Every listed process is an own verified process (research R18): external
+    /// compute is measured as zero, and the measured path applies at once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

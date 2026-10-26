@@ -396,8 +396,9 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 
 - **Decision**: an interval is own-only when both process queries succeed, at least one PID is
   listed, every listed PID is an own verified PID checked through a pidfd (no PID 0, no
-  unresolvable entry), no MPS control daemon or server is present, and unattributed device
-  memory is no higher than at the last measured, own-only or empty interval plus
+  unresolvable entry), no MPS control daemon or server is present, device utilization is
+  available (own compute is the device utilization), and device memory attributed to no listed
+  PID is no higher than at the last measured, own-only or empty interval plus
   `contention.gpu_memory.noise_tolerance_mib`. External compute is then 0 and own compute is the
   device utilization, without fresh samples, and the policy takes the measured path at once
   without restarting the measured streak. Any failing condition keeps the existing path.
@@ -406,6 +407,10 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   per-process baseline and the 20-interval quiet window. With every listed PID own and verified,
   no unlisted context can be computing unless it holds unattributed memory, which the memory
   condition catches.
+- **Memory attributed to no listed PID**: in an own-only interval this is the memory not
+  attributed to own PIDs, the item's condition. The baseline uses the same measure, so memory of
+  an external PID listed at a measured interval is not in it, and a context that later drops out
+  of the list while keeping its memory counts as growth.
 - **Empty interval as memory baseline**: an interval that lists no process, with both queries
   successful, also sets the memory baseline; otherwise a device that starts empty could never
   have an own-only interval. Its unattributed memory is at least as clean a baseline as a

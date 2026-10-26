@@ -2574,6 +2574,7 @@ mod ramp {
             external_compute_milli: Some(external),
             own_compute_milli: Some(own),
             compute_amount_unknown: None,
+            own_only: false,
         }];
         snap.principals = Some(vec![
             PrincipalUsage {
