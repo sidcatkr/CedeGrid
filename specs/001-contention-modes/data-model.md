@@ -299,7 +299,10 @@ per-process samples account for device utilization; else `compute_amount_unknown
 reason. While an external PID is listed, external is max(external PIDs' sum, device
 utilization minus own PIDs' sum); with own PIDs only, external is 0 and own is the device
 utilization. The policy takes the measured path only after `quiet_window_intervals`
-consecutive measured intervals (`PreviousGpu.measured_streak`), and the unknown path at once. Older recordings have none of them and take the unknown path. `PrincipalUsage`
+consecutive measured intervals (`PreviousGpu.measured_streak`), and the unknown path at once. Older recordings have none of them and take the unknown path.
+`own_only` (default false, skipped when false) marks an interval whose inventory lists only own
+verified PIDs under research R18's conditions: external is 0, own is the device utilization, and
+the policy takes the measured path at once while the streak keeps counting. `PrincipalUsage`
 carries `gpu_compute_milli` per device, the measured compute of that UID's external
 processes; a PID whose UID cannot be read stays in the unattributed remainder.
 

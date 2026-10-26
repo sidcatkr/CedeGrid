@@ -472,6 +472,56 @@ Spec: Session 2026-10-26, SC-004, FR-034 and the defaults table.
   - VII: `held_back.ceiling` is a new wire field in the node report. The contract fixture
     carries it, and neither SDK models `held_back`, so the SDKs need no change.
 
+## Item 023: own CPU and own-only GPU (2026-10-27)
+
+Measurement only: the policy rules and the decision snapshot do not change.
+
+- **Own CPU sources (research R9)**: `src/telemetry/managed.rs` reads each allocation's CPU from
+  the first source that applies, and records the source in the `managed_cpu_attribution`
+  evidence:
+  1. *Full*: the allocation's leaf `cpu.stat` `usage_usec` (the leaf path is the scope of the
+     record's `cgroup.procs` evidence), only when the leaf's `cgroup.procs`, read before and after
+     `cpu.stat`, is the same set, contains the leader and lies within the allocation's own
+     verified family PIDs. Family members inside the leaf are counted once, by the leaf.
+  2. *Process clock*: `clock_getcpuclockid(pid)` and `clock_gettime`, the whole thread group
+     including exited threads, read only while a pidfd opened before the read, checked against
+     the verified identity, shows the process alive before and after.
+  3. *Fallback*: `/proc/<pid>/stat` ticks with the existing 2-tick bound.
+
+  The lower and upper bound structure, the aligned window and every identity check stay. A
+  change of source between two reads gives no reading for that interval, like a changed
+  baseline.
+- **Bounds**: resolution (1 µs for `cpu.stat`, 1 ns for the clock) plus the read skew. The
+  kernel folds a running thread's pending runtime into these counters only at its next tick, so
+  each read can lag by one scheduler tick per thread that can be running: the smaller of the
+  threads read (summed over leaf members) and the scope's CPUs. The tick is `1/CONFIG_HZ` from
+  `/boot/config-<release>` when readable, else 10 ms (the kernel's minimum HZ is 100). A host
+  with `nohz_full` CPUs keeps the `/proc` source, since a tick-stopped CPU folds pending time in
+  only once a second.
+- **Own-only GPU (FR-021, research R18)**: `src/telemetry.rs` marks a device interval own-only
+  when both process queries succeed, at least one PID is listed, every listed PID is an own
+  verified PID checked through a pidfd (no PID 0, no unresolvable entry), no MPS is present, and
+  unattributed device memory is no higher than at the last measured, own-only or empty interval
+  plus `contention.gpu_memory.noise_tolerance_mib`. It then reports external 0 and own = device
+  utilization, and sets `GpuSnapshot.own_only`. `gpu_compute_path` in `src/policy/measure.rs`
+  takes the measured path at once for such an interval and keeps the measured streak counting.
+  Any failing condition keeps today's path.
+- **Tests first**: the bound math per source; a gated Linux test (`CEDEGRID_TEST_CPU_CLOCK=1`)
+  that a busy child reads within 2% of wall time from the clock and within 2 ticks of
+  `/proc/<pid>/stat`, that short-lived threads are counted in full and that an exited or reused
+  PID gives no reading; the leaf source with fake leaf files; the own-only cases and each failing
+  condition alone; the decision snapshot against `65166b5`.
+- **Constitution**:
+  - I: every read is of own verified processes or their own leaf. The clock is read only while
+    the pidfd shows the verified process alive, so a reused PID gives no reading. A foreign leaf
+    member makes the leaf source unusable. Nothing is signalled.
+  - III: a missing source, a source change or a failed check is no reading (unknown), never
+    zero. The own-only rule needs every condition; any failure keeps Unknown.
+  - IV: the policy reads `own_only` as data; telemetry stays read-only.
+  - VI: each change starts with a failing test.
+  - VII: `GpuSnapshot.own_only` is optional with default false and skipped when false, so
+    recordings and replays keep their meaning.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

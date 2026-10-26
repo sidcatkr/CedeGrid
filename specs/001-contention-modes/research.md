@@ -190,6 +190,24 @@ membership equals the verified PID set.
   (`src/policy.rs:337-343, 360-378`).
 - **Alternatives considered.** A fixed percentage tolerance. Rejected: the error depends on
   allocation count and interval.
+- **Update (item 023, 2026-10-27): own CPU sources.** The `/proc/<pid>/stat` bound (2 ticks +
+  2 ms per process per 500 ms interval) dropped up to about 44 m per busy process, and the
+  policy charged the gap as external use (report 021: about 430 m with 7 workers). Sources now,
+  in order: the leaf's `cpu.stat` `usage_usec` when leaf membership is verified at both reads;
+  the process CPU clock under a pidfd; `/proc/<pid>/stat` as before.
+  - Kernel facts (torvalds/linux master): `pid_for_clock` in `kernel/time/posix-cpu-timers.c`
+    checks only that the PID is a thread-group leader, with no ptrace or UID check, so the agent
+    may read an own process's clock. `thread_group_cputime` (`kernel/sched/cputime.c`) adds
+    `sig->sum_sched_runtime`, so exited threads count, and reads other running threads'
+    `sum_exec_runtime` without folding in their pending time. A per-thread clock of another
+    process is refused. `cpu.stat` `usage_usec` is the same runtime, accounted in `update_se`,
+    in microseconds, and lags the same way. `/proc/<pid>/schedstat` is the leader thread only.
+  - Bound: resolution plus one scheduler tick per thread that can be running (the smaller of
+    the threads read and the scope's CPUs), the tick being `1/CONFIG_HZ` from
+    `/boot/config-<release>`, else 10 ms. `nohz_full` CPUs fold pending time in only once a
+    second, so such hosts keep the `/proc` source.
+  - Not `/proc/<pid>/schedstat` alone (leader thread only), and not a sum over
+    `/proc/<pid>/task/*/schedstat` (misses exited threads, grows with the thread count).
 
 ## R10. Missing observation of one allocation
 
@@ -373,3 +391,26 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - Faster memory scale-up (rejected: memory is slow to reclaim).
   - A larger scale-up step instead of a shorter interval (it would change the margin-sized step
     that FR-071 and the ladder share).
+
+## R18. Own-only GPU intervals (item 023)
+
+- **Decision**: an interval is own-only when both process queries succeed, at least one PID is
+  listed, every listed PID is an own verified PID checked through a pidfd (no PID 0, no
+  unresolvable entry), no MPS control daemon or server is present, and unattributed device
+  memory is no higher than at the last measured, own-only or empty interval plus
+  `contention.gpu_memory.noise_tolerance_mib`. External compute is then 0 and own compute is the
+  device utilization, without fresh samples, and the policy takes the measured path at once
+  without restarting the measured streak. Any failing condition keeps the existing path.
+- **Rationale**: report 021 measured GPU activity Unknown in 88% of a 100-task session and a
+  0.72 matched throughput for 20 s jobs in Neutral, because each new own process restarted the
+  per-process baseline and the 20-interval quiet window. With every listed PID own and verified,
+  no unlisted context can be computing unless it holds unattributed memory, which the memory
+  condition catches.
+- **Empty interval as memory baseline**: an interval that lists no process, with both queries
+  successful, also sets the memory baseline; otherwise a device that starts empty could never
+  have an own-only interval. Its unattributed memory is at least as clean a baseline as a
+  measured interval's. An empty interval itself stays on the existing path.
+- **Alternatives**: let Neutral lift a cap caused only by Unknown (report 021 option B; rejected,
+  a policy change); state that short GPU jobs run at the fair share (option C; rejected,
+  work-conserving test).
+
