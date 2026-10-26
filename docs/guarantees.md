@@ -341,9 +341,11 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
   `contention`, with each resource's admission and `held_back`; a node that did not
   negotiate `contention/1` shows `"not negotiated"`.
 - `held_back` gives each cause in the resource's units and, under `percent`, as a percent
-  of `capacity`: `floor`, `reserve`, `margin` and `contention` are kept from own work,
-  `unknown` while a measurement is unknown or held, and `peak`, `noise_tolerance`,
-  `cooldown`, `backoff` and `charge_shortfall` from admission.
+  of `capacity`: `floor`, `reserve`, `margin`, `ceiling` and `contention` are kept from own
+  work, `unknown` while a measurement is unknown or held, and `peak`, `noise_tolerance`,
+  `cooldown`, `backoff` and `charge_shortfall` from admission. `ceiling` is what a visible
+  ancestor CPU limit keeps from the budget beyond the reserve; `doctor` shows it on its own
+  line, and it never counts as contention.
 
 | Code | Meaning |
 |---|---|
@@ -421,6 +423,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `held_back_floor` | Memory kept free as the no-harm floor. |
 | `held_back_reserve` | CPU kept free by the explicit reserve where it exceeds the margin. |
 | `held_back_margin` | Capacity kept free by the mode's idle margin. |
+| `held_back_ceiling` | CPU a visible ancestor CPU ceiling keeps from the budget; it is not contention. |
 | `held_back_contention` | Capacity left to contending external demand. |
 | `held_back_contention_psi` | CPU left to external demand while only external pressure (PSI) shows the CPU saturated. |
 | `held_back_peak` | Admission headroom kept for the external memory peak. |

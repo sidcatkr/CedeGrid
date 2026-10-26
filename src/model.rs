@@ -486,6 +486,10 @@ pub struct HeldBack {
     /// The mode's idle margin.
     #[serde(skip_serializing_if = "is_zero")]
     pub margin: u64,
+    /// CPU a visible ancestor CPU ceiling keeps from the budget beyond the reserve;
+    /// not contention.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ceiling: u64,
     /// Capacity left to contending external demand under contention.
     #[serde(skip_serializing_if = "is_zero")]
     pub contention: u64,
@@ -528,6 +532,7 @@ impl HeldBack {
             ("floor", self.floor),
             ("reserve", self.reserve),
             ("margin", self.margin),
+            ("ceiling", self.ceiling),
             ("contention", self.contention),
             ("contention_psi", self.contention_psi),
             ("unknown", self.unknown),

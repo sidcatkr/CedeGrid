@@ -39,8 +39,10 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
 - `would_drain` and the prose `reasons` remain for 0.2 readers and recorded replays.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from
-  admission: `floor`, `reserve`, `margin`, `contention`, `peak`, `noise_tolerance`, `unknown`,
-  `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are left out (FR-069). `capacity` is
+  admission: `floor`, `reserve`, `margin`, `ceiling` (CPU a visible ancestor ceiling keeps
+  from the budget beyond the reserve; never contention), `contention`, `peak`,
+  `noise_tolerance`, `unknown`, `cooldown`, `backoff`, `charge_shortfall`. Zero amounts are
+  left out (FR-069). `capacity` is
   the resource's capacity and `percent` each cause's share of it, to one decimal. On GPU
   compute, `compute_path` is `measured` or `unknown` with a `code`
   (`gpu_compute_unknown_activity`, `gpu_compute_amount_unknown` or

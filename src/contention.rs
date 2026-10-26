@@ -487,6 +487,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Capacity kept free by the mode's idle margin.",
     ),
     (
+        "held_back_ceiling",
+        "CPU a visible ancestor CPU ceiling keeps from the budget; it is not contention.",
+    ),
+    (
         "held_back_contention",
         "Capacity left to contending external demand.",
     ),

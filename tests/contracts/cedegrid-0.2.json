@@ -987,6 +987,7 @@
                 },
                 "held_back": {
                   "margin": 100,
+                  "ceiling": 25,
                   "contention": 50
                 }
               }

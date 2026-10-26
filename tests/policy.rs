@@ -138,6 +138,47 @@ fn ancestor_quota_clamps_after_matching_scope_usage_and_reserve() {
     assert_eq!(decision.admission_headroom.cpu_millicores, 1000);
 }
 
+/// An ancestor ceiling below the scoped capacity is held back as its own cause,
+/// never as contention, and doctor shows it on its own line (SC-016).
+#[test]
+fn held_back_shows_an_ancestor_ceiling_apart_from_contention() {
+    use cedegrid::contention::ResourceKey;
+    let mut snap = scoped_snapshot();
+    let cpu = &mut snap.kernel.as_mut().unwrap().cpu;
+    cpu.busy_millicores = Some(0);
+    cpu.visible_cpu_ceiling_millicores = Some(2000);
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snap, &PolicyInput::default(), 0)
+        .unwrap();
+    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
+    let held = decision.resources[&ResourceKey::Cpu]
+        .held_back
+        .clone()
+        .unwrap();
+    assert_eq!(held.contention, 0);
+    // 4000 m scoped - 1000 m core reserve = 3000 m, of which the ceiling takes 1000 m.
+    assert_eq!((held.reserve, held.ceiling), (1000, 1000));
+    assert_eq!(held.capacity, 4000);
+    assert_eq!(held.percent["ceiling"], Percent(25.0));
+    let text = cedegrid::explain::doctor_text(&config(), &snap, &decision, &[]);
+    let cpu_section = text
+        .split("\ncpu")
+        .nth(1)
+        .expect("doctor has a CPU section");
+    assert!(
+        cpu_section.contains("  ceiling: 1000 m (25.0%)"),
+        "{cpu_section}"
+    );
+    let held_line = cpu_section
+        .lines()
+        .find(|line| line.starts_with("  held back:"))
+        .unwrap();
+    assert!(
+        !held_line.contains("ceiling") && !held_line.contains("contention"),
+        "{held_line}"
+    );
+}
+
 #[test]
 fn scoped_observed_usage_and_reservations_are_not_double_charged() {
     let snap = scoped_snapshot();

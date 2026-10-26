@@ -223,16 +223,25 @@ pub fn doctor_text(
             let _ = writeln!(out, "  reason {}: {}", reason.code, reason.text);
         }
         if let Some(held) = &status.held_back {
+            let share = |cause: &str| {
+                held.percent
+                    .get(cause)
+                    .map_or(String::new(), |percent| format!(" ({:.1}%)", percent.0))
+            };
+            // An ancestor ceiling limits the scope itself, so it gets its own line.
+            if held.ceiling > 0 {
+                let _ = writeln!(
+                    out,
+                    "  ceiling: {}{}",
+                    amount(kind, held.ceiling),
+                    share("ceiling")
+                );
+            }
             let causes: Vec<String> = held
                 .causes()
                 .into_iter()
-                .map(|(cause, value)| {
-                    let percent = held
-                        .percent
-                        .get(cause)
-                        .map_or(String::new(), |percent| format!(" ({:.1}%)", percent.0));
-                    format!("{cause} {}{percent}", amount(kind, value))
-                })
+                .filter(|(cause, _)| *cause != "ceiling")
+                .map(|(cause, value)| format!("{cause} {}{}", amount(kind, value), share(cause)))
                 .collect();
             let _ = writeln!(
                 out,

@@ -265,8 +265,9 @@ impl Interval<'_> {
         }
     }
 
-    /// CPU held back: the reserve where it exceeds the margin, the mode's margin,
-    /// contention (by PSI alone when only PSI saturates), and the cooldown.
+    /// CPU held back: the reserve where it exceeds the margin, the mode's margin, what
+    /// an ancestor ceiling takes beyond them, contention (by PSI alone when only PSI
+    /// saturates), and the cooldown.
     fn cpu_held_back(&self) -> HeldBack {
         let config = self.config;
         let available = self
@@ -281,13 +282,20 @@ impl Interval<'_> {
         let percent = thresholds.margin_percent(governing(config, ResourceKind::Cpu));
         let margin = self.cpu_capacity.saturating_mul(u64::from(percent)) / 100;
         let target = available.saturating_sub(self.budget.cpu_millicores);
+        // The budget is capped at the ancestor ceiling after the reserve; only what
+        // the ceiling takes beyond that is the ceiling's.
+        held.ceiling = available
+            .saturating_sub(self.cpu_reserve)
+            .saturating_sub(self.cpu_ceiling)
+            .min(target);
+        let rest = target - held.ceiling;
         held.reserve = if self.cpu_reserve > margin {
-            self.cpu_reserve.min(target)
+            self.cpu_reserve.min(rest)
         } else {
             0
         };
-        held.margin = target.saturating_sub(held.reserve).min(margin);
-        held.contention = target.saturating_sub(held.reserve + held.margin);
+        held.margin = rest.saturating_sub(held.reserve).min(margin);
+        held.contention = rest.saturating_sub(held.reserve + held.margin);
         if self.psi_only {
             held.contention_psi = std::mem::take(&mut held.contention);
         }
