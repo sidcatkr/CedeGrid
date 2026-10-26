@@ -205,7 +205,7 @@ enum Command {
         limit: usize,
     },
     /// Choose roles, modes, the node cap, floors and margins; opens the keyboard
-    /// interface on a terminal (contracts/setup-cli.md).
+    /// interface on a terminal.
     Setup(Box<cedegrid::setup::SetupArgs>),
 }
 
