@@ -1521,6 +1521,21 @@ fn job_contention_cases_parse_and_validate_alike() {
     }
 }
 
+/// No configuration can name Aggressive: the mode is not implemented, and its
+/// unprotected form may never come from configuration (constitution II, 4.0.0).
+/// The job field is pinned by the contract's JC-05 in Rust and both SDKs.
+#[test]
+fn no_configuration_can_name_aggressive() {
+    for body in [
+        "[contention]\ndefault_mode = \"aggressive\"",
+        "[contention]\nmax_mode = \"aggressive\"",
+        "[contention.cpu]\nmode = \"aggressive\"",
+        "[contention.gpu_compute]\nmode = \"aggressive\"",
+    ] {
+        assert!(parse_node(body).is_err(), "{body}");
+    }
+}
+
 /// Memory keeps only the floor under Neutral and Performance, so those margins do
 /// not exist for RAM and GPU memory.
 #[test]

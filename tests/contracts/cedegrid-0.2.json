@@ -1027,6 +1027,13 @@
         "cpu": "turbo"
       },
       "accepted": false
+    },
+    {
+      "id": "JC-05",
+      "modes": {
+        "cpu": "aggressive"
+      },
+      "accepted": false
     }
   ]
 }

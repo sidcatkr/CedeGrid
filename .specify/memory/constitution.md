@@ -37,16 +37,36 @@ never let CedeGrid act on a process it does not own.
 - CedeGrid MUST NOT drive another workload into OOM kills, swap thrash, failed GPU allocations
   or loss of capacity that workload is already using. Every mode keeps explicit floors, such as
   minimum available host RAM and per-device VRAM headroom, each with an enforced minimum.
+- The only exception to the two rules above is unprotected Aggressive, below, and it covers CPU
+  and GPU compute time only.
 - Own processes MUST be the preferred OOM victims. Where the platform allows an unprivileged
   process to mark itself, this happens before user code runs, for every own process.
 - Own priority MUST NOT be raised above the default: no negative nice values and no real-time
   scheduling classes. No exception relaxes this rule.
+- **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive. Aggressive
+  is a *caution* option with a red label, stronger than Performance's yellow. Its default form,
+  protected Aggressive, keeps every rule of this principle: it gives CPU and GPU compute back at
+  once to any other active principal that is below the lesser of its demand and its fair share.
+- **Unprotected Aggressive, the one named exception.** It MAY decline to give back CPU and GPU
+  compute time, as an exception to "Own work MUST be the first to give capacity back" and to
+  "loss of capacity that workload is already using". It covers compute time only:
+  - the floors, Principle I, the OOM-victim rule and the no-priority-raise rule hold in full;
+  - CedeGrid only declines to give compute back. It MUST NOT raise priority, inflate thread
+    counts or do anything else to win share; the split is whatever the kernel and the GPU
+    driver decide;
+  - it is never a default. Configuration files, saved per-job setup, profiles, environment
+    variables, upgrades, migrations and the node cap MUST NOT enable it. Only an explicit
+    per-run flag, or the same explicit per-submission SDK field, turns it on, and only after
+    the two-step confirmation the feature specification defines;
+  - while active it MUST be reported in `ps`, `top`, logs and JSON output.
 - **Who carries the risk.** An option whose risk falls only on own work, such as a shorter hint
-  deadline or draining Guaranteed work sooner, MAY be offered. An option whose risk falls on
-  other workloads, such as external OOM kills, swap thrash or failed external GPU allocations,
-  MUST NOT exist, not even as an opt-in.
+  deadline or draining Guaranteed work sooner, MAY be offered. An option whose risk is OOM kills,
+  swap thrash, failed GPU allocations or any other failure of external workloads MUST NOT exist,
+  not even as an opt-in. The only risk to other workloads that any option may carry is slower
+  compute, and only under unprotected Aggressive.
 - Options that let own work hold more capacity within the floors and the reclaim bounds, such as
-  Performance mode or a floor near its minimum, are marked *caution*. Each such option MUST:
+  Performance mode, protected Aggressive or a floor near its minimum, are marked *caution*. Each
+  such option MUST:
   - be off by default and never enabled implicitly, including by upgrades, migrations or
     non-interactive defaults;
   - be chosen explicitly, with its consequence shown and a separate confirmation;
@@ -60,7 +80,9 @@ never let CedeGrid act on a process it does not own.
 
 Rationale: CedeGrid runs only on spare capacity, so running it must never make another workload
 fail. An operator may trade away their own work's progress, but never another workload's
-safety. Capacity held back without a reclaim reason protects no workload.
+safety. Capacity held back without a reclaim reason protects no workload. Some operators accept
+slowing other workloads' compute to meet a deadline; that choice stays explicit, rare, visible
+and limited to compute time, and it never threatens another workload's safety.
 
 ### III. Unknown Is Never Silently Idle
 
@@ -197,4 +219,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 3.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26
+**Version**: 4.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26

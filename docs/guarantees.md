@@ -281,7 +281,10 @@ marks itself as a preferred out-of-memory victim (`oom_score_adj` 1000) before i
 Other platforms offer no unprivileged equivalent and claim none.
 
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
-failed GPU allocation. The former floor policies `b` and `c` and Neutral memory policy
+failed GPU allocation. The constitution allows one risk to other workloads, slower compute,
+and only under an unprotected Aggressive mode, which is not implemented: the modes are
+Yield First, Neutral and Performance, and no configuration key or job field can name
+Aggressive. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded
 or caution. Four options are marked *caution* because they let own work hold more
