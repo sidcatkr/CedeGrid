@@ -553,6 +553,58 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VII: `managed_cpu_lower_millicores` is optional and skipped when absent, so recordings and
     replays keep their meaning.
 
+## Item 025: launch pacing, admission under held caps and cap duty (2026-10-27)
+
+- **Launches off the observation thread (research R19)**: the agent runs a current-thread
+  runtime, and one launch blocks it 31 ms on the test host, 42–59 ms in the Docker Linux check and
+  233 ms on macOS (synced context and spec writes, the spool walk, the spawn); while the loop
+  awaits any request, the runtime runs the waiting launches. Each launch's preparation now runs
+  on the blocking pool (`spawn_blocking` driving the existing async start through the runtime
+  handle), at most 4 at a time.
+- **32 new assignments per heartbeat** (FR-034): `launch_slots` is capped in every mode, so
+  Performance still fills a 16-task scope in one heartbeat. The agent can't queue offers instead:
+  the coordinator releases an offer that is not authorized within `lease_ms`.
+- **Publication check**: a slot takes an attempt pin only when its checkpoint head is new or its
+  result is released. `pin_attempt` opens a state connection and makes two synced writes, and
+  ran for every slot in every interval (about 100 ms per slot on macOS; the publication stage
+  fell from 5–8 s to 5 ms per interval with 50 slots).
+- **Lease requests**: initial authorizations and renewals share a time budget of half the monitor
+  interval per iteration, longest waiting first; the rest go out in the next iteration. They run
+  one at a time and cost 50–90 ms each in Docker and on macOS (the coordinator's synced writes).
+- **Heartbeat reply**: executions are read once, not once per offered assignment.
+- **Admission under a held CPU step** (FR-034): `charge` (`src/policy/measure.rs`) stops adding
+  usage samples to an allocation's window while it has a held CPU step and charges it at
+  max(request, p95 of the frozen window) with no credit.
+- **Cap rises** (FR-013): the existing rule, a held step's target rising to its usage plus the
+  spare divided by the held steps, already bounds one round by the spare and splits it equally;
+  tests pin it.
+- **Cap duty (research R20)**: the 024 sawtooth came from actuation. `apply` (`src/actuation.rs`)
+  reset the duty to target ÷ request on every cap change, so a raised cap at or above the request
+  ran uncapped for one period and a task that makes up lost CPU ran a full core. The actuator now
+  keeps the family's last measured natural rate and starts a changed cap at target ÷ rate
+  (FR-011: a cap holds from its first period).
+- **Known limits, recorded in `docs/validation.md`**: the coordinator refuses initial
+  authorization while the node's report shows admission closed (new allocations not yet
+  measured), a decision for the reviewer; lease request throughput is bound by the
+  coordinator's synced writes; SC-014's shortfall; Neutral GPU startup beside an idle listed
+  process; how an excess is split across victims (report 024 Decision 2c); report 024 Decision 3's
+  attribution questions.
+- **Constitution**:
+  - I: launches, pins and lease requests concern only own attempts; actuation still acts only on
+    own verified families.
+  - II: admission no longer counts capped usage as room, and a cap holds from its first period, so
+    own work stops overshooting its share; the launch bound keeps telemetry fresh, so other
+    principals' demand keeps being observed on time.
+  - III: an iteration that outlasts its interval made the kernel CPU window and the coordinator's
+    evidence stale; pacing keeps both fresh rather than treating stale data as known.
+  - IV: the admission rule stays in the pure policy; pacing and duty are agent and supervisor
+    effects.
+  - V: no new privilege; rootless duty cycles as before.
+  - VI: tests first for the launch bound, the lease budget order, the frozen charge, the rise
+    bound and the duty rule; the 150-task burst is an opt-in native gate.
+  - VII: no wire, config or recording change; `launch_slots` stays the same field with a smaller
+    maximum.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

@@ -426,3 +426,38 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   a policy change); state that short GPU jobs run at the fair share (option C; rejected,
   work-conserving test).
 
+## R19. Launch pacing and the agent loop's cost (item 025)
+
+- **Decision**: launches run on the blocking pool, at most 4 at a time; a heartbeat takes at most
+  32 new assignments; a slot pins its attempt only when a checkpoint head is new or its result is
+  released; lease requests share half the monitor interval per iteration, longest waiting first.
+- **Rationale**: report 024 saw 134 tasks launched at once stall the agent 4.2 s and every
+  initial authorization refused for stale evidence. A scratch profile (150 one-minute tasks,
+  default cadences, telemetry TTL 3 s) found: a launch blocks the current-thread runtime 31 ms on
+  the test host, 42–59 ms in Docker and 233 ms on macOS, and every await in the loop then runs the
+  waiting launches (one authorization request took 16.3 s with 89 launches waiting); `pin_attempt`
+  for every slot in every interval (a new state connection and two synced writes; 5–8 s per
+  interval with 50 slots on macOS); lease requests one at a time at 50–90 ms each where synced
+  writes are slow. An iteration longer than the interval made both the coordinator's evidence
+  (TTL refusals) and the kernel's CPU accounting window stale (every allocation's usage unknown,
+  admission held).
+- **Alternatives**: queue offers in the agent (rejected: the coordinator releases an offer not
+  authorized within `lease_ms`); a smaller fixed per-heartbeat bound alone (rejected: macOS would
+  need 1–2 per heartbeat, which breaks SC-004's ramp); concurrent lease requests (rejected for
+  now: the requests are paced and the coordinator serializes synced writes, so total time does
+  not shrink).
+
+## R20. Cap duty from the measured rate (item 025)
+
+- **Decision**: the rootless actuator keeps the family's last measured natural rate and starts a
+  changed CPU cap at target ÷ rate; without a measured rate it starts at target ÷ request as
+  before.
+- **Rationale**: in report 024's Yield First runs with a task loop that makes up lost CPU, held
+  caps rose together, each changed cap restarted at duty target ÷ request, so a cap at or above
+  the request ran uncapped for one period, and own work jumped from 2225 m to 3838 m against a
+  3238 m share; the excess then paused or capped most tasks to zero about every 30 s. A scratch
+  policy simulation reproduces the sawtooth only when it models this burst.
+- **Alternatives**: count raised caps at their targets in the spare (rejected: the simulation
+  showed no gain with the burst modelled and no gain without it); bound rises tighter than the
+  spare (rejected: the existing rule already keeps a round within the spare).
+

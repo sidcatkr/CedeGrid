@@ -303,6 +303,9 @@ consecutive measured intervals (`PreviousGpu.measured_streak`), and the unknown 
 `Snapshot.managed_cpu_lower_millicores` (optional, item 024) is own work's CPU lower bound
 summed with one tick of pending time per scope CPU rather than per process; the policy uses it
 between the sums of the per-allocation lower and upper bounds.
+While a running allocation has a held CPU step, `PolicyState`'s CPU usage window for it takes no
+new samples, and admission charges it at max(request, p95 of that window) with no credit
+(item 025); no field is added.
 `own_only` (default false, skipped when false) marks an interval whose inventory lists only own
 verified PIDs under research R18's conditions: external is 0, own is the device utilization, and
 the policy takes the measured path at once while the streak keeps counting. `PrincipalUsage`
