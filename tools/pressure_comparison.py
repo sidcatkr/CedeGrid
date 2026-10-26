@@ -25,6 +25,9 @@ from soak import AllocationLedger,StatusJournal
 from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executable,local_guard
 from runtime_config import atomic_runtime_config, scale_up_cooldowns, read_runtime_config
 
+CONTENTION_MODES=('yield_first','neutral','performance')
+# Mirrors MIN_RAM_FLOOR_MIB in src/config.rs; below twice it a floor is a caution option.
+MIN_RAM_FLOOR_MIB=512
 TARGETS={'matched_idle_throughput_ratio_min':.90,'decision_p95_seconds_max':1.,
     'release_p95_seconds_max':10.,'post_yield_p99_ratio_max':1.20,
     'manager_peak_rss_bytes_max':512*1024**2,'manager_active_cpu_cores_max':.5,
@@ -36,41 +39,133 @@ def protected_samples(event,after=None):
         if after is None or request['arrival_monotonic']>=after]
 
 
+def node_contention(node,mode,ram_floor_mib=None):
+    """The node settings for one gate run: the contention mode and, when set, a RAM
+    floor of exactly that size, with the caution options both need acknowledged."""
+    if mode not in CONTENTION_MODES:raise ValueError('unknown contention mode')
+    node=copy.deepcopy(node);caution=[]
+    contention={'default_mode':mode,**scale_up_cooldowns(3000)}
+    if mode=='performance':caution.append('performance_mode')
+    if ram_floor_mib is not None:
+        if type(ram_floor_mib) is not int or ram_floor_mib<MIN_RAM_FLOOR_MIB:
+            raise ValueError(f'RAM floor must be at least {MIN_RAM_FLOOR_MIB} MiB')
+        node['ram']={**node.get('ram',{}),'reserve_percent':0,'reserve_mib':ram_floor_mib}
+        if ram_floor_mib<2*MIN_RAM_FLOOR_MIB:caution.append('small_floor')
+    if caution:contention['acknowledge_caution']=caution
+    node['contention']=contention
+    return node
+
+
+def step_timing(history,assignments,onset_unix,ended_unix=None):
+    """Per resource, from `cedegrid history` rows: seconds from the demand onset to
+    the first step on own work and to own usage at or below the target share, and
+    from the demand's end to the step's reversal, with how often each step began."""
+    timing={};last={}
+    for row in sorted(history,key=lambda row:row['snapshot']['observed_at_unix_ms']):
+        at=row['snapshot']['observed_at_unix_ms']/1000;decision=row['decision'];steps={}
+        for action in decision.get('actions',[]):
+            if action['allocation_id'] in assignments:steps.setdefault(action['resource'],set()).add(action['step'])
+        for key in set(steps)|set(timing):
+            entry=timing.setdefault(key,{'first_step_seconds':None,'reclaim_seconds':None,'reversal_seconds':None,'steps':{}})
+            current=steps.get(key,set())
+            for step in current-last.get(key,set()):entry['steps'][step]=entry['steps'].get(step,0)+1
+            last[key]=current
+            if current and at>=onset_unix and entry['first_step_seconds'] is None:entry['first_step_seconds']=at-onset_unix
+            if entry['first_step_seconds'] is None:continue
+            status=decision.get('resources',{}).get(key,{});own=status.get('own');target=status.get('target_share')
+            if entry['reclaim_seconds'] is None and own and target is not None and own[0]<=target:
+                entry['reclaim_seconds']=at-onset_unix
+            if ended_unix is not None and at>=ended_unix and not current and entry['reversal_seconds'] is None:
+                entry['reversal_seconds']=at-ended_unix
+    return timing
+
+
+def history_audit(history,own):
+    """SC-005 from `cedegrid history`: every action and drain names own work."""
+    actions=[action['allocation_id'] for row in history for action in row['decision'].get('actions',[])]
+    drains=[allocation for row in history for allocation in row['decision'].get('would_drain',[])]
+    return {'observations':len(history),'own_actions':sum(1 for item in actions if item in own),
+        'actions_outside_own_allocations':sum(1 for item in actions if item not in own),
+        'drains_outside_own_allocations':sum(1 for item in drains if item not in own)}
+
+
+def read_history(binary,config,env):
+    done=subprocess.run([str(binary),'--config',str(config),'history','--limit','10000'],
+        capture_output=True,text=True,timeout=60,check=True,env=env)
+    return json.loads(done.stdout)
+
+
+PROTECTED_LIMITS=('cpu.max','memory.high','memory.max')
+
+
+def protected_snapshot(pid,proc_root=Path('/proc'),cgroup_root=Path('/sys/fs/cgroup')):
+    """A read-only view of a test-owned external process: nice value, start time,
+    cgroup path and that cgroup's limits (an absent file is None)."""
+    stat=(Path(proc_root)/str(pid)/'stat').read_text()
+    fields=stat[stat.rindex(')')+2:].split()
+    path=next((line[3:].strip() for line in (Path(proc_root)/str(pid)/'cgroup').read_text().splitlines()
+        if line.startswith('0::')),None)
+    snapshot={'pid':pid,'nice':int(fields[16]),'start_ticks':int(fields[19]),'cgroup':path}
+    for name in PROTECTED_LIMITS:
+        file=Path(cgroup_root)/path.lstrip('/')/name if path is not None else None
+        snapshot[name]=file.read_text().strip() if file is not None and file.is_file() else None
+    return snapshot
+
+
+def verify_protected_unchanged(before,after):
+    """SC-005: CedeGrid changed nothing about a process it did not launch."""
+    changed=[name for name in before if before[name]!=after.get(name)]
+    if changed:raise RuntimeError('protected process changed: '+', '.join(changed))
+    return changed
+
+
 def evaluate(cases):
-    ratios=[];decisions=[];releases=[];tails=[];missing=[]
+    ratios=[];decisions=[];releases=[];tails=[];missing=[];graduated=0
     for repetition in range(TARGETS['repetitions']):
         group={case['scenario']:case for case in cases if case['repetition']==repetition and case.get('status')=='completed'}
         if len(group)!=5:missing.append(f'repetition{repetition}: incomplete matched cases');continue
         before=group['unmanaged_idle']['probe'];after=group['managed_idle']['probe']
         ratios.append((after['completed_units']/after['elapsed_seconds'])/(before['completed_units']/before['elapsed_seconds']))
         alone=protected_samples(group['protected_alone']['protected'])
-        active=group['managed_contention'];released=active.get('released_monotonic')
+        active=group['managed_contention']
+        # A graduated step yields without a release; its post-yield cutoff is the reclaim.
+        stepped=active.get('yielded') and active.get('drained') is False
+        released=active.get('reclaimed_monotonic' if stepped else 'released_monotonic')
         if active.get('clock_consistency_error_seconds',0)>.25:
             missing.append(f'repetition{repetition}: wall/monotonic clocks diverged');continue
         if released is None or not active.get('yielded'):
             missing.append(f'repetition{repetition}: no verified pressure-triggered yield');continue
+        graduated+=bool(stepped)
         post=protected_samples(active['protected'],released)
         if len(post)<TARGETS['minimum_post_yield_requests'] or not alone:
             missing.append(f'repetition{repetition}: insufficient post-yield requests');continue
         tails.append(quantile(post,.99)/quantile(alone,.99))
         if active.get('decision_delay_seconds') is None:missing.append(f'repetition{repetition}: no policy decision timestamp')
         else:decisions.append(active['decision_delay_seconds'])
-        if active.get('decision_to_release_seconds') is None:missing.append(f'repetition{repetition}: no release timing')
+        if stepped:pass
+        elif active.get('decision_to_release_seconds') is None:missing.append(f'repetition{repetition}: no release timing')
         else:releases.append(active['decision_to_release_seconds'])
     values={'matched_idle_throughput_ratio_min':quantile(ratios,.5),'decision_p95_seconds_max':quantile(decisions,.95),
         'release_p95_seconds_max':quantile(releases,.95),'post_yield_p99_ratio_max':quantile(tails,.5)}
-    return {'missing':missing,'metrics':{name:{'observed':value,'target':TARGETS[name],
-        'status':'inconclusive' if value is None or missing else ('passed' if
-            (value>=TARGETS[name] if name.endswith('_min') else value<=TARGETS[name]) else 'failed')}
+    def status(name,value):
+        if name=='release_p95_seconds_max' and value is None and graduated==TARGETS['repetitions'] and not missing:
+            return 'not_applicable'
+        if value is None or missing:return 'inconclusive'
+        return 'passed' if (value>=TARGETS[name] if name.endswith('_min') else value<=TARGETS[name]) else 'failed'
+    return {'missing':missing,'metrics':{name:{'observed':value,'target':TARGETS[name],'status':status(name,value)}
         for name,value in values.items()}}
 
 
 def policy_decision(state,assignment,after_unix):
+    """The first decision after `after_unix` that yields the assignment: a drain, or
+    a graduated step on any resource."""
     database=state/'state.sqlite3'
     with sqlite3.connect(database.resolve().as_uri()+'?mode=ro',uri=True) as connection:
         for at,payload in connection.execute('SELECT observed_at_unix_ms,decision_json FROM observations WHERE observed_at_unix_ms>=? ORDER BY id',(int(after_unix*1000),)):
             value=json.loads(payload)
-            if assignment in value.get('would_drain',[]):return {'observed_unix':at/1000,'decision':value}
+            if assignment in value.get('would_drain',[]):return {'observed_unix':at/1000,'decision':value,'kind':'drain'}
+            if any(action['allocation_id']==assignment for action in value.get('actions',[])):
+                return {'observed_unix':at/1000,'decision':value,'kind':'step'}
     return None
 
 
@@ -113,6 +208,7 @@ def run(args):
         CUDA_VISIBLE_DEVICES=args.gpu_uuid if args.mode=='gpu' else '',CUDA_CACHE_PATH=str(root/'cache/cuda'))
     env={**os.environ,**worker_env}
     report={'schema_version':1,'run_id':run_id,'mode':args.mode,'targets':TARGETS,'cases':[],
+        'contention_mode':args.contention_mode,'ram_floor_mib':args.ram_floor_mib,
         'started_unix':time.time(),'status':'running','manager_binary_sha256':sha256_file(binary),
         'cpu_ids':cpus,'gpu_uuid':args.gpu_uuid,'wall_time_seconds':1200,'actual_24_hour_soak':False,
         'scope':'one-node native synthetic agent-policy comparison; not two-node application acceptance',
@@ -139,7 +235,8 @@ def run(args):
     try:
         client=deployment(output,binary,cpus,node_id,args.gpu_uuid,1200,env)
         node=read_runtime_config(output/'node.toml');node['cpu']['reserve_physical_cores']=1
-        node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000;node['contention']=scale_up_cooldowns(3000)
+        node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000
+        node=node_contention(node,args.contention_mode,args.ram_floor_mib)
         atomic_runtime_config(output/'node.toml',node, 'node')
         agent=read_runtime_config(output/'agent.toml');agent.update(max_workers=1,
             capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096,'gpu_memory_mib':{args.gpu_uuid:1024} if args.mode=='gpu' else {}})
@@ -194,9 +291,14 @@ def run(args):
                     case['pressure_started_unix']=time.time();case['pressure_started_monotonic']=time.monotonic()
                     children['protected']=OwnedProcess([str(python),str(manager/'tools/pressure.py'),'--config',str(folder/'pressure.json'),'--execute'],manager,folder/'pressure.log',env)
                     case['protected_identity']=children['protected'].identity
+                    case['protected_snapshots']={'before':protected_snapshot(children['protected'].child.pid)}
                 deadline=time.monotonic()+65
                 while True:
                     tick()
+                    # The last view of the protected process while it still runs.
+                    if 'protected' in children and children['protected'].poll() is None:
+                        try:case['protected_snapshots']['after']=protected_snapshot(children['protected'].child.pid)
+                        except (OSError,ValueError,IndexError):pass
                     for name,child in children.items():
                         code=child.poll()
                         if code is not None and code!=0:raise RuntimeError(f'{name} guard failed or process exited abnormally ({code})')
@@ -222,22 +324,39 @@ def run(args):
                     if case['protected']['status']!='completed':raise RuntimeError('protected workload did not complete')
                     case['clock_consistency_error_seconds']=abs((time.time()-case['pressure_started_unix'])-(time.monotonic()-case['pressure_started_monotonic']))
                     case['protected_registry_membership_verified']=verify_external_registry(output/'agent-state',case['protected_identity'])
+                    snapshots=case['protected_snapshots']
+                    if 'after' not in snapshots:raise RuntimeError('no snapshot of the protected process while it ran')
+                    snapshots['changed']=verify_protected_unchanged(snapshots['before'],snapshots['after'])
                 if gpu is not None:
                     case['gpu_release_observations']={name:confirm_gpu_release(gpu,value['pid']) for name,value in case['owned_cleanup'].items()}
                 if managed:
                     outcome=json.loads((output/'agent-state/attempts'/assignment/'execution-outcome.json').read_text())
-                    case['outcome']=outcome;case['yielded']=outcome['yielded']
+                    case['outcome']=outcome;case['drained']=outcome['yielded'];case['yielded']=outcome['yielded']
                     if 'contention' in scenario:
                         onset=case['protected']['demand_started_unix']
+                        ended=case['protected']['started_unix']+case['protected']['elapsed_seconds']
                         decision=policy_decision(output/'agent-state',assignment,onset)
                         case['policy_decision']=decision
+                        case['step_timing']=step_timing(read_history(binary,output/'node.toml',env),{assignment},onset,ended)
                         if decision:
+                            # A graduated step is a yield too, not only a drain.
+                            case['yielded']=True
                             delay=decision['observed_unix']-onset
                             case['decision_delay_seconds']=delay
-                            case['decision_to_release_seconds']=case['released_monotonic']-(case['protected']['demand_started_monotonic']+delay)
+                            if case['drained']:
+                                case['decision_to_release_seconds']=case['released_monotonic']-(case['protected']['demand_started_monotonic']+delay)
+                            reclaimed=[entry['reclaim_seconds'] for entry in case['step_timing'].values() if entry['reclaim_seconds'] is not None]
+                            if reclaimed:case['reclaimed_monotonic']=case['protected']['demand_started_monotonic']+max(reclaimed)
                 case['status']='completed';atomic_json(folder/'case.json',case);atomic_json(output/'report.json',report)
                 deadline=time.monotonic()+4
                 while time.monotonic()<deadline:tick()
+        # SC-005 needs both: every action names own work, and no protected process changed.
+        own={case['assignment_id'] for case in report['cases'] if case.get('assignment_id')}
+        audit=history_audit(read_history(binary,output/'node.toml',env),own)
+        report['sc005']={'history_audit':audit,'protected_snapshots_unchanged':all(
+            case['protected_snapshots']['changed']==[] for case in report['cases'] if 'protected_snapshots' in case)}
+        if audit['actions_outside_own_allocations'] or audit['drains_outside_own_allocations']:
+            raise RuntimeError('history audit found actions outside own allocations')
         report.update(status='completed_pending_metric_review',target_evaluation=evaluate(report['cases']))
     except BaseException as error:report.update(status='failed',error=type(error).__name__+': '+str(error))
     finally:
@@ -278,6 +397,12 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--mode',choices=['cpu','gpu'],required=True);parser.add_argument('--gpu-uuid',required=True)
+    parser.add_argument('--contention-mode',choices=CONTENTION_MODES,default='neutral',
+        help='node default mode for the run; performance is acknowledged as a caution option')
+    parser.add_argument('--ram-floor-mib',type=int,
+        help=f'RAM floor of exactly this many MiB (reserve_percent 0), at least {MIN_RAM_FLOOR_MIB}; below twice that, small_floor is acknowledged')
     parser.add_argument('--execute',action='store_true');args=parser.parse_args()
+    try:node_contention({},args.contention_mode,args.ram_floor_mib)
+    except ValueError as error:parser.error(str(error))
     if not args.execute:print(json.dumps({'mode':'plan_only','configuration':vars(args),'targets':TARGETS}));sys.exit(0)
     result=run(args);print(json.dumps(result,indent=2));sys.exit(0 if result['status']=='completed_pending_metric_review' else 1)

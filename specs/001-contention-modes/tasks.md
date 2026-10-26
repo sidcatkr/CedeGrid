@@ -925,6 +925,15 @@ each step.
 
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md), which gives
   the audit over `cedegrid history` that stands in for the hook.*
+- [X] T153 Prepare the T117/T118 gate runner in `tools/pressure_comparison.py`, tests first in
+  `tests/test_pressure_comparison.py`:
+  - `--contention-mode {yield_first,neutral,performance}` and `--ram-floor-mib`;
+  - a step-timing readout over `cedegrid history`: per resource, time to the first step, to
+    reclaim and to reversal, with a graduated step counted as a yield, not only a drain;
+  - a read-only snapshot of each test-owned external process before and while it runs (nice
+    value, cgroup path, that cgroup's `cpu.max`, `memory.high` and `memory.max`, start time),
+    which must be unchanged beside the `cedegrid history` audit (SC-005);
+  - final commands per mode and floor in [native-gates.md](native-gates.md).
 - [X] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
   `include`, `tests/test_source_review.py` passes, and the in-memory
   `validate_files(public=True)` passes.

@@ -222,6 +222,17 @@ this runner never ignores desktop processes or overrides unknown telemetry.
 Omitting `--execute` only prints the envelope. There is no shared-server approval
 flag: this command does not extend authorization to burst.
 
+`--contention-mode {yield_first,neutral,performance}` sets the node's default mode
+for the run (Neutral by default; Performance is acknowledged as a caution option),
+and `--ram-floor-mib N` sets a RAM floor of exactly N MiB, at least 512, with
+`small_floor` acknowledged below 1024. A graduated step on the probe counts as a
+yield. `report.json` then carries each managed contention case's `step_timing`
+from `cedegrid history` (per resource: time to the first step, to reclaim and to
+reversal) and an `sc005` section. That section holds the history audit and the
+protected process's read-only snapshots (nice value, start time, cgroup path and
+that cgroup's `cpu.max`, `memory.high` and `memory.max`). A changed snapshot, or
+an action outside own allocations, fails the run.
+
 CPU trials use two permitted physical CPU IDs, reserve one core and run one
 bounded half-core producer. Protected CPU requests run on the other selected
 core, with the same100,000-iteration request every20ms in alone and contention

@@ -244,8 +244,8 @@ reports `performance_mode` as `caution`; the terminal tests pass (2). §8: `mixe
 | T138 RAM cap gate | T138's `memory.high` step in `src/cgroup.rs` and its native test in `tests/cgroup.rs` | `CEDEGRID_TEST_CGROUP_ROOT=<delegated-subtree> cargo test --locked --test cgroup -- --ignored --exact <T138 test>`, applying a RAM cap step to a test-owned leaf and recording the `memory.high` readback before the hint |
 | T141 PSI gate | The spec amendment T141 requires, and its reader in `src/kernel.rs` | On Linux with PSI, record `/proc/pressure/cpu` `some avg10` under an external CPU load that saturates the host, and that unknown PSI adds no saturation evidence |
 | T088 GPU gate | US5 (T083–T087) | Quickstart §5 with `CEDEGRID_TEST_GPU_UUID=<GPU-UUID>` and an idle external context, in Neutral and in Performance, including 100 consecutive launches. Also record the GPU memory a fresh external CUDA context takes (`nvidia-smi --query-compute-apps=pid,used_memory --format=csv` while `"$CEDEGRID_TEST_PYTHON" -c 'import torch,time; torch.ones(1,device="cuda"); time.sleep(60)'` runs), and raise the 512 MiB minimum if it is larger. Over a real session, record how often GPU activity is Unknown (the share of samples whose `gpu_compute` measurement or activity is `unknown` in `cedegrid observe` output). Commands: (1) the owned-context test, `CEDEGRID_TEST_GPU_UUID=<GPU-UUID> CEDEGRID_TEST_PYTHON=<python-with-cuda-torch> CEDEGRID_GPU_EVIDENCE="$HOME/.cache/cedegrid-evidence/t088-owned.json" cargo test --locked --test gpu_native -- --ignored --exact owned_cuda_context_is_observed_then_released_after_drain`; (2) the idle external context, `CUDA_VISIBLE_DEVICES=<GPU-UUID> "$CEDEGRID_TEST_PYTHON" -c 'import torch,time; torch.ones(1,device="cuda"); time.sleep(3600)' &`; (3) with that context alive, `cedegrid --config <node.toml> observe --no-state` under `[contention.gpu_compute] mode = "neutral"` and then `"performance"`, recording that the device's `gpu_memory` and `gpu_compute` admission is `open`, then 100 GPU tasks through a coordinator as in `docs/coordinator-work.md`. (4) for T152, with 1, 2 and 4 concurrent test-owned CUDA processes, record summed per-process `sm_util` from `nvidia-smi pmon -c 30 -s u` beside device utilization from `nvidia-smi --query-gpu=utilization.gpu --format=csv -lms 500`, and set `attribution_tolerance_percent` from the largest gap; over a real session, record how often devices report `compute_path` unknown with an inconsistency reason (`cedegrid observe --no-state`). US5 added no hardware test: its admission, duty-cycle and placement rules are covered by `tests/policy.rs`, `tests/contention.rs`, `tests/coordinator.rs` and the actuation unit tests. |
-| T117 thresholds, with SC-014/SC-015 | A mode option and a step-timing readout in `tools/pressure_comparison.py` | See "T117 and T118" below |
-| T118 pressure audit | The same mode option, plus a floor option for the second run | See "T117 and T118" below; the run at defaults works now |
+| T117 thresholds, with SC-014/SC-015 | An authorized Linux host; the runner is ready (T153) | See "T117 and T118" below |
+| T118 pressure audit | An authorized Linux host; the runner is ready (T153) | See "T117 and T118" below |
 
 ### T117 and T118
 
@@ -257,64 +257,71 @@ It also needs one NVIDIA GPU with at least 4 GiB free for the GPU run; the runne
 for CPU runs too. Read access to the kernel log is needed for the OOM check (`journalctl -k`
 works for members of `adm` or `systemd-journal`). Nothing else may run on the pinned CPUs.
 
-**What the runner lacks.** `tools/pressure_comparison.py` replaces `[contention]` with its own
-cooldowns, so every run uses Neutral at default floors. It also counts a yield only when an
-observation lists the probe's assignment in `would_drain`. Graduated CPU yielding caps instead
-of draining (SC-007), so in Yield First and Neutral its CPU decision and release metrics stay
-`inconclusive`. Before T117, the runner needs:
+**The runner (T153).** `tools/pressure_comparison.py` takes `--contention-mode
+{yield_first,neutral,performance}` (Performance is acknowledged as a caution option) and
+`--ram-floor-mib N` (a floor of exactly N MiB, at least 512, with `small_floor` acknowledged
+below 1024). Each run's `report.json` carries:
 
-- a `--contention-mode yield_first|neutral|performance` option, which writes
-  `acknowledge_caution = ["performance_mode"]` for Performance;
-- for T118, a `--ram-floor-mib N` option, with `small_floor` acknowledged when N is under twice
-  the minimum;
-- a readout over `cedegrid history` that gives, per resource, the time from the first observation
-  of external demand to the first step that lowers own usage, and from that observation to the
-  first observation where own usage is at or below its target (SC-002, SC-012). It also reports
-  how many cap, pause, hint and drain steps applied to the probe (SC-007 expects zero drains for
-  CPU).
+- per managed contention case, `step_timing` from `cedegrid history`: per resource, the seconds
+  from the demand onset to the first step on the probe (`first_step_seconds`), to own usage at
+  or below the target share (`reclaim_seconds`), and from the demand's end to the step's
+  reversal (`reversal_seconds`), with how often each step began (`steps`). A graduated step
+  counts as a yield, and its post-yield cutoff is the reclaim, so `release_p95_seconds_max` is
+  `not_applicable` when no repetition drained (SC-007 expects no CPU drain);
+- `sc005`: the `cedegrid history` audit (`actions_outside_own_allocations` and
+  `drains_outside_own_allocations`, both 0) and whether every protected snapshot was unchanged.
+  Each protected process is read before and while it runs: its nice value, start time, cgroup
+  path, and that cgroup's `cpu.max`, `memory.high` and `memory.max`. Any change, or an action
+  outside own allocations, fails the run.
 
-**T117 commands, once those exist.** Run each mode as a CPU run, and run Neutral and Performance
-as GPU runs too. Use a new output directory for every run:
+Every command below uses this setup and a new output directory:
 
 ```sh
 cargo build --locked --release
 cedegrid_validation_root="$HOME/.local/share/cedegrid-validation"
-run="$cedegrid_validation_root/evidence/t117-cpu-yield_first-$(date -u +%Y%m%dT%H%M%SZ)"
-"$cedegrid_validation_root/venv-isolated/bin/python" tools/pressure_comparison.py \
-  --root "$cedegrid_validation_root" --output "$run" --mode cpu \
-  --gpu-uuid "$CEDEGRID_VALIDATION_GPU_UUID" --contention-mode yield_first --execute
-./target/release/cedegrid --config "$run/node.toml" history --limit 10000 > "$run/history.json"
+gate() { # gate <name> <cpu|gpu> [runner options...]
+  name="$1"; mode="$2"; shift 2
+  run="$cedegrid_validation_root/evidence/$name-$(date -u +%Y%m%dT%H%M%SZ)"
+  "$cedegrid_validation_root/venv-isolated/bin/python" tools/pressure_comparison.py \
+    --root "$cedegrid_validation_root" --output "$run" --mode "$mode" \
+    --gpu-uuid "$CEDEGRID_VALIDATION_GPU_UUID" "$@" --execute
+  journalctl -k --since "@$(python3 -c 'import json,sys;print(int(json.load(open(sys.argv[1]))["started_unix"]))' "$run/report.json")" \
+    | grep -c -i -e 'out of memory' -e 'oom-kill'
+}
 ```
 
-For SC-014, run `cedegrid --config "$run/node.toml" observe --no-state --samples 120` while the
-managed probe runs alone, and record own CPU usage against own target for each mode. For SC-015,
-run the probe beside a steady external user of 1–2% of one CPU for 5 minutes. Use five
-consecutive 60 s `protected_cpu` events in one `tools/pressure.py` file, at 0, 60, 120, 180 and
-240 s, with `cpu_iterations` calibrated so that `observe` shows 1–2% external CPU. Record own
-5-minute average usage, and the number of cap and pause steps from `history.json`. Record each
-result in `docs/validation.md`, and change defaults in `src/config.rs` only with that evidence.
-
-**T118 commands.** The run at defaults works with the runner as it is:
+**T117 commands.** One per mode, at the default floor; GPU for Neutral and Performance:
 
 ```sh
-run="$cedegrid_validation_root/evidence/t118-cpu-$(date -u +%Y%m%dT%H%M%SZ)"
-"$cedegrid_validation_root/venv-isolated/bin/python" tools/pressure_comparison.py \
-  --root "$cedegrid_validation_root" --output "$run" --mode cpu \
-  --gpu-uuid "$CEDEGRID_VALIDATION_GPU_UUID" --execute
-./target/release/cedegrid --config "$run/node.toml" history --limit 10000 > "$run/history.json"
-python3 -c 'import json,sys
-r=json.load(open(sys.argv[1]+"/report.json")); h=json.load(open(sys.argv[1]+"/history.json"))
-own={c["assignment_id"] for c in r["cases"] if c.get("assignment_id")}
-acted={a["allocation_id"] for o in h for a in o["decision"].get("actions",[])}
-print("actions outside own allocations:",len(acted-own))
-print("protected runs outside the registry:",sum(1 for c in r["cases"] if "protected" in c and c.get("protected_registry_membership_verified") is not True))
-print("protected statuses:",sorted({c["protected"]["status"] for c in r["cases"] if "protected" in c}))' "$run"
-journalctl -k --since "@$(python3 -c 'import json,sys;print(int(json.load(open(sys.argv[1]))["started_unix"]))' "$run/report.json")" \
-  | grep -c -i -e 'out of memory' -e 'oom-kill'
+gate t117-cpu-yield_first cpu --contention-mode yield_first
+gate t117-cpu-neutral cpu --contention-mode neutral
+gate t117-cpu-performance cpu --contention-mode performance
+gate t117-gpu-neutral gpu --contention-mode neutral
+gate t117-gpu-performance gpu --contention-mode performance
 ```
 
-Expect 0 actions outside own allocations, 0 protected runs outside the registry, only
-`completed` protected statuses (a failed GPU allocation fails the protected event), and an OOM
-count of 0. Repeat with `--mode gpu`. Then repeat both with `--contention-mode performance
---ram-floor-mib <minimum>` once those options exist. The actuation side of the audit is
-`runtime_steps_reach_only_the_verified_family` in the Rust suite.
+Compare each resource's `first_step_seconds`, `reclaim_seconds` and `reversal_seconds` with
+SC-002–SC-004 and SC-012, and check `steps` for no CPU drain (SC-007). For SC-014, run
+`./target/release/cedegrid --config "$run/node.toml" observe --no-state --samples 120` while the
+managed probe runs alone, and record own CPU usage against own target for each mode. For
+SC-015, run the probe beside a steady external user of 1–2% of one CPU for 5 minutes. Use five
+consecutive 60 s `protected_cpu` events in one `tools/pressure.py` file, at 0, 60, 120, 180 and
+240 s, with `cpu_iterations` calibrated so that `observe` shows 1–2% external CPU. Record own
+5-minute average usage, and the number of cap and pause steps from `cedegrid history`. Record
+each result in `docs/validation.md`, and change defaults in `src/config.rs` only with that
+evidence.
+
+**T118 commands.** At the defaults, then with Performance and a confirmed near-minimum floor:
+
+```sh
+gate t118-cpu-defaults cpu
+gate t118-gpu-defaults gpu
+gate t118-cpu-performance-floor cpu --contention-mode performance --ram-floor-mib 512
+gate t118-gpu-performance-floor gpu --contention-mode performance --ram-floor-mib 512
+```
+
+Each run passes SC-005 only with `report.json` `status` `completed_pending_metric_review`,
+`sc005.history_audit` showing 0 actions and 0 drains outside own allocations,
+`sc005.protected_snapshots_unchanged` true, only `completed` protected statuses (a failed GPU
+allocation fails the protected event), and an OOM count of 0 from the `journalctl` line. The
+actuation side of the audit is `runtime_steps_reach_only_the_verified_family` in the Rust suite.
