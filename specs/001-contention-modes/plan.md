@@ -569,7 +569,8 @@ Measurement only: the policy rules and the decision snapshot do not change.
   ran for every slot in every interval (about 100 ms per slot on macOS; the publication stage
   fell from 5–8 s to 5 ms per interval with 50 slots).
 - **Lease requests**: initial authorizations and renewals share a time budget of half the monitor
-  interval per iteration, longest waiting first; the rest go out in the next iteration. They run
+  interval per iteration, longest waiting first; the rest go out in the next iteration, and the
+  longest-waiting request always goes, even once the budget is spent. They run
   one at a time and cost 50–90 ms each in Docker and on macOS (the coordinator's synced writes).
 - **Heartbeat reply**: executions are read once, not once per offered assignment.
 - **Admission under a held CPU step** (FR-034): `charge` (`src/policy/measure.rs`) stops adding
@@ -581,8 +582,8 @@ Measurement only: the policy rules and the decision snapshot do not change.
 - **Cap duty (research R20)**: the 024 sawtooth came from actuation. `apply` (`src/actuation.rs`)
   reset the duty to target ÷ request on every cap change, so a raised cap at or above the request
   ran uncapped for one period and a task that makes up lost CPU ran a full core. The actuator now
-  keeps the family's last measured natural rate and starts a changed cap at target ÷ rate
-  (FR-011: a cap holds from its first period).
+  keeps the family's last measured natural rate and starts a changed cap at target ÷ rate, so a
+  cap step (FR-011) limits usage from its first period.
 - **Known limits, recorded in `docs/validation.md`**: the coordinator refuses initial
   authorization while the node's report shows admission closed (new allocations not yet
   measured), a decision for the reviewer; lease request throughput is bound by the

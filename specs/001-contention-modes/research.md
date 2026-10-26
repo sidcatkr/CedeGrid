@@ -430,7 +430,8 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 
 - **Decision**: launches run on the blocking pool, at most 4 at a time; a heartbeat takes at most
   32 new assignments; a slot pins its attempt only when a checkpoint head is new or its result is
-  released; lease requests share half the monitor interval per iteration, longest waiting first.
+  released; lease requests share half the monitor interval per iteration, longest waiting first,
+  and the longest-waiting one always goes.
 - **Rationale**: report 024 saw 134 tasks launched at once stall the agent 4.2 s and every
   initial authorization refused for stale evidence. A scratch profile (150 one-minute tasks,
   default cadences, telemetry TTL 3 s) found: a launch blocks the current-thread runtime 31 ms on
