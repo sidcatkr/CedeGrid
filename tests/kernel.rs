@@ -1,6 +1,6 @@
 use cedegrid::kernel::{
-    CpuUsageStatus, CpuUsageTracker, KernelCollector, KernelConfig, PressureResource,
-    PressureScope, PressureStatus, PressureTracker, ProbeRoots, inspect_control,
+    CpuPressureStatus, CpuUsageStatus, CpuUsageTracker, KernelCollector, KernelConfig,
+    PressureResource, PressureScope, PressureStatus, PressureTracker, ProbeRoots, inspect_control,
     parse_cgroup_mounts, parse_cpu_list, parse_cpu_max, parse_cpu_stat, parse_psi,
     parse_self_cgroup,
 };
@@ -461,5 +461,151 @@ fn non_linux_reports_unverified_behavior_without_emulation() {
             .limitations
             .iter()
             .any(|detail| detail.contains("unverified"))
+    );
+}
+
+fn pressure(avg10: f64) -> String {
+    format!(
+        "some avg10={avg10:.2} avg60=0.00 avg300=0.00 total=100\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    )
+}
+
+/// Own work runs in user 1000's slice. The root's other children and other users'
+/// slices are external; user 1000's own sessions and the agent's cgroup are not.
+fn psi_host(base: &Path) -> (ProbeRoots, PathBuf) {
+    let proc = base.join("proc");
+    let mount = base.join("cgroups");
+    write(
+        &proc.join("self"),
+        "mountinfo",
+        &format!(
+            "22 11 0:20 / {} rw,nosuid - cgroup2 cgroup rw\n",
+            mount.display()
+        ),
+    );
+    let own = "user.slice/user-1000.slice/user@1000.service/app.slice/agent.scope";
+    write(&proc.join("self"), "cgroup", &format!("0::/{own}\n"));
+    write(&proc.join("pressure"), "cpu", &pressure(70.0));
+    for (path, avg10) in [
+        ("system.slice", 35.0),
+        ("init.scope", 5.0),
+        ("user.slice/user-1001.slice", 12.0),
+        ("user.slice", 90.0),
+        ("user.slice/user-1000.slice", 88.0),
+        ("user.slice/user-1000.slice/session-2.scope", 80.0),
+        ("user.slice/user-1000.slice/user@1000.service", 92.0),
+        (own, 95.0),
+    ] {
+        write(&mount.join(path), "cpu.pressure", &pressure(avg10));
+    }
+    (
+        ProbeRoots {
+            proc,
+            sys: base.join("sys"),
+        },
+        mount,
+    )
+}
+
+/// FR-072: external PSI is the highest `some` avg10 of the cgroups outside own
+/// work's user slice; own and system-wide pressure are shown, never external.
+#[test]
+fn external_cpu_pressure_reads_only_cgroups_outside_own_user_slice() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let (roots, mount) = psi_host(&base);
+    let before = fs::read_to_string(mount.join("system.slice/cpu.pressure")).unwrap();
+    let pressure = cedegrid::kernel::cpu_pressure(&roots, None);
+    assert_eq!(
+        pressure.status,
+        CpuPressureStatus::Available,
+        "{}",
+        pressure.detail
+    );
+    assert_eq!(pressure.external_some_avg10, Some(35.0));
+    assert_eq!(pressure.external_cgroups, 3);
+    assert_eq!(pressure.own_some_avg10, Some(95.0));
+    assert_eq!(pressure.system_some_avg10, Some(70.0));
+    assert_eq!(
+        fs::read_to_string(mount.join("system.slice/cpu.pressure")).unwrap(),
+        before
+    );
+    // The collector carries it in the kernel snapshot.
+    let mut collector = KernelCollector::inspect_at(KernelConfig::default(), roots);
+    let snapshot = collector.sample();
+    assert_eq!(
+        snapshot.cpu_pressure.map(|p| p.external_some_avg10),
+        Some(Some(35.0))
+    );
+}
+
+/// Without per-cgroup PSI, system-wide pressure cannot tell own from external
+/// waiting, so it is no external evidence.
+#[test]
+fn only_system_wide_pressure_is_no_external_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let (roots, mount) = psi_host(&base);
+    for path in ["system.slice", "init.scope", "user.slice/user-1001.slice"] {
+        fs::remove_file(mount.join(path).join("cpu.pressure")).unwrap();
+    }
+    let pressure = cedegrid::kernel::cpu_pressure(&roots, None);
+    assert_eq!(pressure.status, CpuPressureStatus::SystemOnly);
+    assert_eq!(pressure.external_some_avg10, None);
+    assert_eq!(pressure.system_some_avg10, Some(70.0));
+}
+
+/// Unreadable or malformed pressure, and a host without PSI, add no evidence.
+#[test]
+fn unreadable_or_malformed_pressure_is_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let (roots, mount) = psi_host(&base);
+    for path in ["system.slice", "init.scope", "user.slice/user-1001.slice"] {
+        write(&mount.join(path), "cpu.pressure", "some avg10=oops\n");
+    }
+    let pressure = cedegrid::kernel::cpu_pressure(&roots, None);
+    assert_eq!(pressure.status, CpuPressureStatus::Unknown);
+    assert_eq!(pressure.external_some_avg10, None);
+    let bare = base.join("bare");
+    write(&bare.join("proc/self"), "mountinfo", "");
+    write(&bare.join("proc/self"), "cgroup", "0::/\n");
+    let pressure = cedegrid::kernel::cpu_pressure(
+        &ProbeRoots {
+            proc: bare.join("proc"),
+            sys: bare.join("sys"),
+        },
+        None,
+    );
+    assert_eq!(pressure.status, CpuPressureStatus::Unknown);
+    assert_eq!(pressure.external_some_avg10, None);
+    assert_eq!(pressure.system_some_avg10, None);
+}
+
+/// T141 native gate: on an authorized Linux host, external and own CPU pressure
+/// are read without writing anything.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "not tested: requires an authorized Linux host with PSI (CEDEGRID_TEST_PSI=1)"]
+fn native_external_cpu_pressure_is_read() {
+    assert!(
+        std::env::var_os("CEDEGRID_TEST_PSI").is_some(),
+        "explicit CEDEGRID_TEST_PSI=1 is required"
+    );
+    let pressure = cedegrid::kernel::cpu_pressure(&ProbeRoots::default(), None);
+    println!(
+        "status {:?}, external cgroups {}, external {:?}, own {:?}, system {:?}: {}",
+        pressure.status,
+        pressure.external_cgroups,
+        pressure.external_some_avg10,
+        pressure.own_some_avg10,
+        pressure.system_some_avg10,
+        pressure.detail
+    );
+    assert_ne!(
+        pressure.status,
+        CpuPressureStatus::Unknown,
+        "{}",
+        pressure.detail
     );
 }

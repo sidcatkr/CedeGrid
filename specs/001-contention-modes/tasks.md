@@ -970,7 +970,7 @@ each step.
   - [X] T141a Amend Saturated and Contended, add FR-072, `psi_some_percent` in
     `data-model.md` and `contracts/config-contention.md`, `docs/guarantees.md`, plan, research
     R16 and the native gate.
-  - [ ] T141b Read external and own CPU pressure read-only in `src/kernel.rs`
+  - [X] T141b Read external and own CPU pressure read-only in `src/kernel.rs`
     (`KernelSnapshot.cpu_pressure`), tests first in `tests/kernel.rs` with fake `/proc` and
     cgroup trees: external siblings only, own excluded, system-only, unreadable and malformed.
   - [ ] T141c Add `contention.cpu.psi_some_percent` (`KEY_CLASSES`, `relaxed_detection` above the

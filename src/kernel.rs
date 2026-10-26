@@ -73,6 +73,9 @@ pub struct KernelSnapshot {
     pub cpu: CpuTopology,
     pub hierarchy: Option<CgroupHierarchy>,
     pub psi: Vec<PressureReading>,
+    /// CPU pressure outside own work, own and system-wide (FR-072).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_pressure: Option<CpuPressure>,
     pub limitations: Vec<String>,
 }
 
@@ -477,6 +480,160 @@ pub struct PressureReading {
     pub detail: String,
 }
 
+/// What CPU pressure shows about external waiting (FR-072).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuPressureStatus {
+    /// Cgroups outside own work were read.
+    Available,
+    /// Only system-wide pressure, which cannot tell own from external waiting.
+    SystemOnly,
+    /// Missing, unreadable or malformed.
+    Unknown,
+}
+
+/// Read-only CPU pressure. Only `external_some_avg10` is saturation evidence; own
+/// and system-wide pressure are shown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuPressure {
+    pub status: CpuPressureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_some_avg10: Option<f64>,
+    #[serde(default)]
+    pub external_cgroups: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_some_avg10: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_some_avg10: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+fn cpu_some_avg10(path: &Path) -> Result<f64, (io::ErrorKind, String)> {
+    let text =
+        read_text(path).map_err(|error| (error.kind(), format!("{}: {error}", path.display())))?;
+    parse_psi(&text)
+        .map(|counters| counters.some.avg10)
+        .map_err(|error| {
+            (
+                io::ErrorKind::InvalidData,
+                format!("{}: {error}", path.display()),
+            )
+        })
+}
+
+/// The CPU pressure of every sibling of each cgroup on the path from the cgroup v2
+/// root down to own work's user slice (`user-<uid>.slice`), or down to the agent's
+/// own cgroup outside any user slice; the highest `some` avg10 among them is the
+/// external pressure. `own` names where own work runs when it is not the agent's
+/// cgroup, such as a delegated subtree. Reads only.
+pub fn cpu_pressure(roots: &ProbeRoots, own: Option<&Path>) -> CpuPressure {
+    let system = cpu_some_avg10(&roots.proc.join("pressure/cpu"));
+    let mut result = CpuPressure {
+        status: CpuPressureStatus::Unknown,
+        external_some_avg10: None,
+        external_cgroups: 0,
+        own_some_avg10: None,
+        system_some_avg10: system.as_ref().ok().copied(),
+        detail: String::new(),
+    };
+    let without_cgroups = |mut result: CpuPressure, why: String| {
+        match &system {
+            Ok(_) => {
+                result.status = CpuPressureStatus::SystemOnly;
+                result.detail =
+                    format!("{why}; system-wide pressure cannot tell own from external waiting");
+            }
+            Err((_, error)) => result.detail = format!("{why}; {error}"),
+        }
+        result
+    };
+    let located = (|| -> Result<(PathBuf, PathBuf), String> {
+        let mounts = parse_cgroup_mounts(
+            &read_text(&roots.proc.join("self/mountinfo"))
+                .map_err(|error| format!("mountinfo unavailable: {error}"))?,
+        )?;
+        let membership = parse_self_cgroup(
+            &read_text(&roots.proc.join("self/cgroup"))
+                .map_err(|error| format!("cgroup membership unavailable: {error}"))?,
+        )?
+        .ok_or("no cgroup v2 membership")?;
+        mounts
+            .iter()
+            .filter_map(|mount| {
+                membership
+                    .strip_prefix(&mount.root)
+                    .ok()
+                    .map(|relative| (mount, mount.mount_point.join(relative)))
+            })
+            .max_by_key(|(mount, _)| mount.root.components().count())
+            .map(|(mount, path)| (mount.mount_point.clone(), path))
+            .ok_or_else(|| "no cgroup v2 mount holds own membership".to_string())
+    })();
+    let (mount, membership) = match located {
+        Ok(located) => located,
+        Err(why) => return without_cgroups(result, why),
+    };
+    let own = own.unwrap_or(&membership).to_owned();
+    result.own_some_avg10 = cpu_some_avg10(&own.join("cpu.pressure")).ok();
+    let user_slice = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("user-")?.strip_suffix(".slice"))
+            .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let boundary = membership
+        .ancestors()
+        .take_while(|path| path.starts_with(&mount))
+        .find(|path| user_slice(path))
+        .unwrap_or(&membership)
+        .to_owned();
+    let mut readings = Vec::new();
+    let mut errors = Vec::new();
+    let mut on_path = boundary.as_path();
+    while let Some(parent) = on_path.parent().filter(|_| on_path != mount) {
+        let children = match fs::read_dir(parent) {
+            Ok(children) => children,
+            Err(error) => {
+                errors.push(format!("{}: {error}", parent.display()));
+                break;
+            }
+        };
+        for child in children.flatten() {
+            let path = child.path();
+            // Own work's path and anything inside or around own work is not external.
+            if path == on_path
+                || own.starts_with(&path)
+                || path.starts_with(&own)
+                || !child.file_type().is_ok_and(|kind| kind.is_dir())
+            {
+                continue;
+            }
+            match cpu_some_avg10(&path.join("cpu.pressure")) {
+                Ok(avg10) => readings.push(avg10),
+                Err((io::ErrorKind::NotFound, _)) => {}
+                Err((_, error)) => errors.push(error),
+            }
+        }
+        on_path = parent;
+    }
+    if !readings.is_empty() {
+        result.status = CpuPressureStatus::Available;
+        result.external_cgroups = u32::try_from(readings.len()).unwrap_or(u32::MAX);
+        result.external_some_avg10 = readings.into_iter().reduce(f64::max);
+        result.detail = errors.join("; ");
+        return result;
+    }
+    if errors.is_empty() {
+        return without_cgroups(
+            result,
+            "no cgroup outside own work exposes cpu.pressure".into(),
+        );
+    }
+    result.detail = errors.join("; ");
+    result
+}
+
 /// Bounded parser for Linux CPU-list syntax, including sparse SMT identities.
 pub fn parse_cpu_list(input: &str) -> Result<Vec<u32>, String> {
     let input = input.trim();
@@ -855,6 +1012,7 @@ impl KernelCollector {
             cpu: CpuTopology::default(),
             hierarchy: None,
             psi: Vec::new(),
+            cpu_pressure: None,
             limitations: Vec::new(),
         };
         if let Err(error) = self.config.validate() {
@@ -1040,6 +1198,10 @@ impl KernelCollector {
                     result.psi.push(reading);
                 }
             }
+            result.cpu_pressure = Some(cpu_pressure(
+                &self.roots,
+                self.config.delegated_root.as_deref(),
+            ));
         } else {
             result.controls.push(evidence(
                 "psi",

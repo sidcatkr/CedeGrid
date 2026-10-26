@@ -82,6 +82,7 @@ fn scoped_snapshot() -> Snapshot {
         },
         hierarchy: None,
         psi: vec![],
+        cpu_pressure: None,
         limitations: vec![],
     });
     result
