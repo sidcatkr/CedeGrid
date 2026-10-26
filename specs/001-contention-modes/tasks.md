@@ -928,7 +928,7 @@ each step.
 - [X] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
   `include`, `tests/test_source_review.py` passes, and the in-memory
   `validate_files(public=True)` passes.
-- [ ] T120 Run the full verification:
+- [X] T120 Run the full verification:
   - `cargo fmt --check`;
   - `cargo clippy --all-targets -D warnings`;
   - the serial Rust suite;
@@ -937,7 +937,7 @@ each step.
   - `npm test`;
   - `cargo check --target x86_64-pc-windows-msvc` for the client paths, where the target is
     installed.
-- [ ] T121 Run quickstart §1–3 and §6–8, and record the results.
+- [X] T121 Run quickstart §1–3 and §6–8, and record the results.
 - [ ] T138 Add a runtime RAM cap step on delegated cgroups (B14): `memory.high` on the allocation's
   leaf before the hint, verified by readback, in `src/cgroup.rs` and `src/actuation.rs`, with a
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step

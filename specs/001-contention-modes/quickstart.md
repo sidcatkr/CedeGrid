@@ -28,8 +28,10 @@ cargo test --locked --test policy -- d1_ d2_ d3_ d4_ d5_ d6_
   - envelope breach handled per resource
   - idle-host utilization and a steady small external user (SC-014, SC-015):
     `cargo test --locked --test contention -- sc_014 sc_015`
-  - real floor breaches only, and each resource's admission and `held_back`:
-    `cargo test --locked --test policy -- charge_beyond each_resource_reports decisions_show`
+  - real floor breaches only: `cargo test --locked --test contention -- charge_beyond`
+  - each resource's admission and `held_back`, GPU memory cooling down on its own, and
+    admission blocked only while own work is reclaimed:
+    `cargo test --locked --test policy -- each_resource_reports decisions_show gpu_cooldown_alone reclaim_admission`
 
 ## 2. Single authority and error handling (Linux; macOS for the rootless parts)
 
@@ -48,8 +50,16 @@ cargo test --locked --test supervision -- --test-threads=1
 
 ## 3. CPU-only contention, rootless (Linux and macOS)
 
-1. Start a local agent with `[contention.cpu] mode = "yield_first"`, then run one CPU job.
-2. Start a test-owned external CPU load.
+```sh
+cargo test --locked --test agent -- --exact rootless_cpu_contention_caps_the_job_and_reverses_without_drain
+cargo test --locked --test contention -- sc_002 yield_first_pauses_only a_pause_
+```
+
+The agent test starts a coordinator and an agent with `[contention.cpu] mode = "yield_first"`,
+runs one CPU job, then starts a test-owned external load on every logical CPU. It checks that
+the job is capped or paused, that the supervisor journals the step, that the step reverses after
+the load stops, and that the job completes without a drain. The bounds, the margin case and the
+minimum duty come from the policy tests on the second line.
 
 **Expected:**
 - A load that fits in the 15% margin leaves own work running, with any cap at most keeping the
@@ -122,9 +132,13 @@ for batch in batches():
 ## 7. Setup (any OS for flags; a TTY for the interface)
 
 ```sh
-cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance
-cargo run --locked -- --config /tmp/x/node.toml setup --non-interactive --json --default-mode performance --acknowledge-caution performance_mode
+dir="$(mktemp -d)"
+cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --default-mode performance
+cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --default-mode performance --acknowledge-caution performance_mode
+cargo test --locked --test cli -- no_color_writes the_interface_and_flags
 ```
+
+The directory must exist, and a new file needs `--role`.
 
 **Expected:**
 - The first command exits 3 with `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and writes nothing.

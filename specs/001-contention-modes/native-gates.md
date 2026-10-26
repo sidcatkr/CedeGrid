@@ -216,6 +216,25 @@ suite passed 575 tests with 9 ignored, and both Python suites passed (184 and 52
 admission, duty-cycling and placement are covered by unit and integration tests only; the
 native GPU evidence stays with T088.
 
+## Polish checks (T120, T121)
+
+T120 at 9851fd5. On macOS: fmt, clippy and the 1.88 check passed; the serial suite passed 644
+tests with 6 ignored; both Python suites passed (57 and 184), and so did npm (31). Container
+evidence, not host qualification, at the same commit in the same Docker Desktop container
+(aarch64, kernel 7.0.12-linuxkit, Rust 1.98.1, Python 3.11): fmt and clippy passed, the serial
+suite passed 650 tests with 9 ignored, and both Python suites passed. The
+`x86_64-pc-windows-msvc` target is installed, but `cargo check --target x86_64-pc-windows-msvc`
+stops in `ring`'s C build because this macOS host has no Windows C headers; Windows CI covers
+the client paths.
+
+T121 on macOS at 9851fd5: every command in quickstart §1–3 and §6–8 passed. §1: d1–d6 (6), the
+contention tests (67), SC-014/SC-015 (2), `charge_beyond` (1), and admission and `held_back`
+(11). §2: `agent` (17, 2 ignored fixtures) and `supervision` (25). §3: the agent run (1) and
+the policy bounds (5). §6: the worker tests (18) and npm (31). §7: the first setup command exits
+3 with `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and writes nothing; the second writes the file and
+reports `performance_mode` as `caution`; the terminal tests pass (2). §8: `mixed_version` (4).
+§4 and §5 are the native gates T054 and T088.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
