@@ -620,8 +620,9 @@ pub enum Measurement {
 }
 
 /// Effective thresholds for one resource after defaults are applied.
-/// Every value is a configuration setting; the defaults are provisional.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Every value is a configuration setting; the defaults are provisional. Built only
+/// from `defaults` and configuration, never deserialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResourceThresholds {
     pub yield_first_margin_percent: u8,
     /// Compute: what Neutral leaves free while nothing is contended.
@@ -670,8 +671,7 @@ pub struct ResourceThresholds {
     /// device utilization makes the external amount measured (FR-021).
     pub attribution_tolerance_percent: u8,
     /// CPU and GPU compute, which Performance scales up every monitor interval;
-    /// memory keeps its slower scale-up (FR-034).
-    #[serde(default)]
+    /// memory keeps its slower scale-up (FR-034). Set from the resource kind.
     pub compute: bool,
 }
 

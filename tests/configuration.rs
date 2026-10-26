@@ -1470,6 +1470,55 @@ fn the_shipped_and_0_2_node_configs_load_unchanged_in_neutral() {
     }
 }
 
+/// Thresholds are only built from defaults and configuration, never
+/// deserialized, so CPU and GPU compute are always compute and RAM and GPU memory
+/// never are, whatever a file sets, for the shipped, 0.2 and fully set configs.
+/// Performance's per-interval compute scale-up depends on it (FR-034).
+#[test]
+fn thresholds_mark_compute_by_resource_kind_on_every_path() {
+    use cedegrid::contention::{ContentionMode, ResourceKind, ResourceThresholds};
+    let compute = |kind: ResourceKind| matches!(kind, ResourceKind::Cpu | ResourceKind::GpuCompute);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut configs = vec![
+        Config::default(),
+        Config::load(&root.join("examples/node.toml")).unwrap(),
+        Config::load(&root.join("tests/fixtures/0.2/node.toml")).unwrap(),
+    ];
+    let mut body = String::from(
+        "[contention]\ndefault_mode = \"performance\"\nacknowledge_caution = [\"performance_mode\"]\n",
+    );
+    for section in ["cpu", "ram", "gpu_compute", "gpu_memory"] {
+        body.push_str(&format!(
+            "[contention.{section}]\nscale_up_step_interval_s = 5\nperformance_ramp_s = 20\n"
+        ));
+    }
+    configs.push(parse_node(&body).unwrap());
+    for config in &configs {
+        for kind in ResourceKind::ALL {
+            let thresholds = config.contention.thresholds(kind);
+            assert_eq!(thresholds.compute, compute(kind), "{kind:?}");
+            assert_eq!(ResourceThresholds::defaults(kind).compute, compute(kind));
+        }
+    }
+    // With no override, Performance scales compute up every interval and memory every 2 s.
+    let interval = Config::default().monitor.interval_ms;
+    for kind in ResourceKind::ALL {
+        let expected = if compute(kind) { interval } else { 2000 };
+        assert_eq!(
+            configs[0]
+                .contention
+                .thresholds(kind)
+                .scale_up_interval_ms(ContentionMode::Performance, interval),
+            expected,
+            "{kind:?}"
+        );
+    }
+    // No file can set it.
+    for section in ["cpu", "ram", "gpu_compute", "gpu_memory"] {
+        assert!(parse_node(&format!("[contention.{section}]\ncompute = false")).is_err());
+    }
+}
+
 /// A negotiated heartbeat with per-resource admission, held-back amounts,
 /// allocation readiness and the worker limit parses and round-trips; the 0.2
 /// report fixture still parses (FR-032).
