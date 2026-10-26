@@ -15,7 +15,8 @@ yields that capacity when other workloads need it.
   - `supervision.rs`, `child_supervision.rs`, `managed_children.rs`: the per-assignment
     supervisor, launch barrier, drain/terminate lifecycle and SDK-managed children. The Unix
     lifecycle is `supervision/unix.rs`, which includes `child_supervision.rs`.
-  - `policy.rs`: pure, deterministic admission and yield decisions. `contention.rs`: modes,
+  - `policy.rs`: pure, deterministic admission and yield decisions; `evaluate` runs named
+    phases in order on a private `Interval` context. `contention.rs`: modes,
     mode targets, the yield ladder, victim order and the reason-code catalog.
   - `actuation.rs`: supervisor-side steps on owned processes (duty-cycle caps, pauses) and the
     resource-target file.

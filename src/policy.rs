@@ -563,9 +563,9 @@ impl<'a> Interval<'a> {
                         format!(
                             "allocation {} requested {}; the node cap is {}, so it runs in {}",
                             allocation.id,
-                            mode_name(*requested),
-                            mode_name(cap),
-                            mode_name(cap)
+                            requested.name(),
+                            cap.name(),
+                            cap.name()
                         ),
                     );
                 }
@@ -2833,7 +2833,7 @@ impl<'a> Interval<'a> {
             return held;
         }
         let thresholds = config.contention.thresholds(ResourceKind::Cpu);
-        let percent = margin_percent(&thresholds, governing(config, ResourceKind::Cpu));
+        let percent = thresholds.margin_percent(governing(config, ResourceKind::Cpu));
         let margin = self.cpu_capacity.saturating_mul(u64::from(percent)) / 100;
         let target = available.saturating_sub(self.budget.cpu_millicores);
         held.reserve = if self.cpu_reserve > margin {
@@ -3670,15 +3670,6 @@ fn cooled(
     })
 }
 
-/// The mode's idle margin of capacity, in percent.
-fn margin_percent(thresholds: &ResourceThresholds, mode: ContentionMode) -> u8 {
-    match mode {
-        ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
-        ContentionMode::Neutral => thresholds.neutral_margin_percent,
-        ContentionMode::Performance => thresholds.performance_margin_percent,
-    }
-}
-
 /// The most an allowance rises per scale-up interval: the mode's step of
 /// capacity, above the publish threshold.
 fn allowance_step(
@@ -3691,7 +3682,7 @@ fn allowance_step(
     let percent = if kind.is_memory() {
         mode.memory_allowance_step_percent()
     } else {
-        margin_percent(thresholds, mode)
+        thresholds.margin_percent(mode)
     };
     (capacity.saturating_mul(u64::from(percent)) / 100).max(threshold + 1)
 }
@@ -3961,14 +3952,6 @@ fn step_name(step: YieldStep) -> &'static str {
         YieldStep::Hint => "hint",
         YieldStep::Drain => "drain",
         YieldStep::Terminate => "terminate",
-    }
-}
-
-fn mode_name(mode: crate::contention::ContentionMode) -> &'static str {
-    match mode {
-        crate::contention::ContentionMode::YieldFirst => "yield_first",
-        crate::contention::ContentionMode::Neutral => "neutral",
-        crate::contention::ContentionMode::Performance => "performance",
     }
 }
 

@@ -118,14 +118,6 @@ fn psi_line(config: &Config, snapshot: &Snapshot) -> Option<String> {
     })
 }
 
-fn mode_label(mode: ContentionMode) -> &'static str {
-    match mode {
-        ContentionMode::YieldFirst => "Yield First",
-        ContentionMode::Neutral => "Neutral",
-        ContentionMode::Performance => "Performance",
-    }
-}
-
 /// The doctor text: per resource its mode, usage, demand, target share, steps,
 /// reasons and what is held back, then floors, caution options, legacy GPU keys
 /// and the steps the backend offers.
@@ -154,14 +146,16 @@ pub fn doctor_text(
     let _ = writeln!(
         out,
         "modes: default {}, node cap {}",
-        mode_label(config.contention.default_mode),
-        decision.max_mode.map_or("none", mode_label)
+        config.contention.default_mode.label(),
+        decision.max_mode.map_or("none", ContentionMode::label)
     );
     for (key, status) in &decision.resources {
         let kind = key.kind();
         let _ = writeln!(out);
-        let mode = status.mode.map_or("unknown", mode_label);
-        let effective = status.effective_mode.map_or("unknown", mode_label);
+        let mode = status.mode.map_or("unknown", ContentionMode::label);
+        let effective = status
+            .effective_mode
+            .map_or("unknown", ContentionMode::label);
         let _ = writeln!(out, "{key}: {mode} (effective {effective})");
         let mut usage = Vec::new();
         if let Some((own, upper)) = status.own {

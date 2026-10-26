@@ -14,6 +14,24 @@ pub enum ContentionMode {
 }
 
 impl ContentionMode {
+    /// The name in configuration and on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            ContentionMode::YieldFirst => "yield_first",
+            ContentionMode::Neutral => "neutral",
+            ContentionMode::Performance => "performance",
+        }
+    }
+
+    /// The name shown to people.
+    pub fn label(self) -> &'static str {
+        match self {
+            ContentionMode::YieldFirst => "Yield First",
+            ContentionMode::Neutral => "Neutral",
+            ContentionMode::Performance => "Performance",
+        }
+    }
+
     /// How far a memory allowance may rise per scale-up interval, in percent of
     /// capacity. A mechanism constant: memory keeps only the floor under Neutral
     /// and Performance, so no margin sizes it there.
@@ -682,6 +700,15 @@ impl ResourceThresholds {
             reclaim_backoff_max_ms: 30_000,
             admission_usage_window_s: 60,
             attribution_tolerance_percent: 15,
+        }
+    }
+
+    /// The mode's idle margin of capacity, in percent.
+    pub fn margin_percent(&self, mode: ContentionMode) -> u8 {
+        match mode {
+            ContentionMode::YieldFirst => self.yield_first_margin_percent,
+            ContentionMode::Neutral => self.neutral_margin_percent,
+            ContentionMode::Performance => self.performance_margin_percent,
         }
     }
 
@@ -1462,11 +1489,7 @@ pub fn probe_demand(
     if input.kind.is_memory() || input.unknown_activity {
         return (satisfied, None);
     }
-    let percent = match input.mode {
-        ContentionMode::YieldFirst => thresholds.yield_first_margin_percent,
-        ContentionMode::Neutral => thresholds.neutral_margin_percent,
-        ContentionMode::Performance => thresholds.performance_margin_percent,
-    };
+    let percent = thresholds.margin_percent(input.mode);
     let step = (input.capacity.saturating_mul(u64::from(percent)) / 100).max(1);
     let known = |uid: Option<u32>, satisfied: &[(Option<u32>, u64)]| {
         satisfied.iter().any(|(principal, _)| *principal == uid)

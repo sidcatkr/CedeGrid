@@ -240,22 +240,6 @@ impl ConnectionKey {
     }
 }
 
-pub fn mode_name(mode: ContentionMode) -> &'static str {
-    match mode {
-        ContentionMode::YieldFirst => "yield_first",
-        ContentionMode::Neutral => "neutral",
-        ContentionMode::Performance => "performance",
-    }
-}
-
-fn mode_label(mode: ContentionMode) -> &'static str {
-    match mode {
-        ContentionMode::YieldFirst => "Yield First",
-        ContentionMode::Neutral => "Neutral",
-        ContentionMode::Performance => "Performance",
-    }
-}
-
 fn resource_label(kind: ResourceKind) -> &'static str {
     match kind {
         ResourceKind::Cpu => "CPU",
@@ -762,17 +746,12 @@ fn integer(value: u64) -> Result<toml_edit::Value> {
 }
 
 fn margin_of(thresholds: &ResourceThresholds, mode: ContentionMode) -> (&'static str, u8) {
-    match mode {
-        ContentionMode::YieldFirst => (
-            "yield_first_margin_percent",
-            thresholds.yield_first_margin_percent,
-        ),
-        ContentionMode::Neutral => ("neutral_margin_percent", thresholds.neutral_margin_percent),
-        ContentionMode::Performance => (
-            "performance_margin_percent",
-            thresholds.performance_margin_percent,
-        ),
-    }
+    let key = match mode {
+        ContentionMode::YieldFirst => "yield_first_margin_percent",
+        ContentionMode::Neutral => "neutral_margin_percent",
+        ContentionMode::Performance => "performance_margin_percent",
+    };
+    (key, thresholds.margin_percent(mode))
 }
 
 /// A resource setting as the configuration resolves it now.
@@ -803,7 +782,7 @@ fn edit_node(
             document,
             &["contention"],
             "default_mode",
-            mode_name(mode).into(),
+            mode.name().into(),
             changes,
         )?;
     }
@@ -815,7 +794,7 @@ fn edit_node(
                 document,
                 &["contention"],
                 "max_mode",
-                mode_name(mode).into(),
+                mode.name().into(),
                 changes,
             )?,
             None => remove(document, &["contention"], "max_mode", changes)?,
@@ -838,7 +817,7 @@ fn edit_node(
             && *mode != contention.resource(kind).mode
         {
             match mode {
-                Some(mode) => set(document, &section, "mode", mode_name(*mode).into(), changes)?,
+                Some(mode) => set(document, &section, "mode", mode.name().into(), changes)?,
                 None => remove(document, &section, "mode", changes)?,
             }
         }
@@ -1210,7 +1189,7 @@ impl Field {
             Field::RamFloor => "RAM floor".into(),
             Field::GpuFloor => "GPU memory floor".into(),
             Field::Margin(kind, mode) => {
-                format!("{} margin, {}", resource_label(kind), mode_label(mode))
+                format!("{} margin, {}", resource_label(kind), mode.label())
             }
             Field::HintDeadline => "Guaranteed hint deadline".into(),
             Field::NoiseTolerance => "GPU memory noise tolerance".into(),
@@ -1369,11 +1348,11 @@ impl Field {
     pub fn show(self, pick: Pick, config: &Config) -> String {
         match (self, pick) {
             (_, Pick::Role(role)) => role.name().into(),
-            (_, Pick::Mode(mode)) => mode_label(mode).into(),
+            (_, Pick::Mode(mode)) => mode.label().into(),
             (Field::Mode(_), Pick::Inherit) => {
                 format!(
                     "same as default ({})",
-                    mode_label(config.contention.default_mode)
+                    config.contention.default_mode.label()
                 )
             }
             (_, Pick::Inherit) => "no explicit cap".into(),
@@ -1525,25 +1504,24 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
             resource_line(kind, config.contention.default_mode)
         ),
         (Field::MaxMode, Pick::Mode(mode)) => {
-            format!("jobs may request at most {}", mode_label(mode))
+            format!("jobs may request at most {}", mode.label())
         }
         (Field::MaxMode, _) => format!(
             "jobs may request at most the most aggressive configured mode ({})",
-            mode_label(
-                ResourceKind::ALL
-                    .into_iter()
-                    .map(|kind| config.contention.mode(kind))
-                    .max()
-                    .unwrap_or(ContentionMode::Neutral)
-            )
+            ResourceKind::ALL
+                .into_iter()
+                .map(|kind| config.contention.mode(kind))
+                .max()
+                .unwrap_or(ContentionMode::Neutral)
+                .label()
         ),
         (Field::RamFloor, Pick::Number(mib)) => ram_floor(&with(&|c| c.ram.reserve_mib = mib)),
         (Field::GpuFloor, Pick::Number(mib)) => gpu_floor(&with(&|c| c.gpu.reserve_vram_mib = mib)),
         (Field::Margin(kind, mode), Pick::Number(percent)) => match kind {
-            ResourceKind::Cpu => format!("{} in {}", cpu_free(percent), mode_label(mode)),
+            ResourceKind::Cpu => format!("{} in {}", cpu_free(percent), mode.label()),
             ResourceKind::GpuCompute => format!(
                 "keeps {percent}% of each GPU's compute free in {}",
-                mode_label(mode)
+                mode.label()
             ),
             _ => format!(
                 "keeps {percent}% of {} beyond the floor free in Yield First",
@@ -1590,7 +1568,7 @@ pub fn host_lines(config: &Config, host: Option<&Host>) -> Vec<String> {
         lines.push(format!(
             "{:<12} {}: {}",
             resource_label(kind),
-            mode_label(mode),
+            mode.label(),
             consequence(Field::Mode(kind), Pick::Mode(mode), config, host)
         ));
     }
