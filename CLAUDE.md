@@ -12,7 +12,10 @@ yields that capacity when other workloads need it.
     and launches.
   - `supervision.rs`, `child_supervision.rs`, `managed_children.rs`: the per-assignment
     supervisor, launch barrier, drain/terminate lifecycle and SDK-managed children.
-  - `policy.rs`: pure, deterministic admission and yield decisions.
+  - `policy.rs`: pure, deterministic admission and yield decisions. `contention.rs`: modes,
+    mode targets, the yield ladder, victim order and the reason-code catalog.
+  - `actuation.rs`: supervisor-side steps on owned processes (duty-cycle caps, pauses) and the
+    resource-target file.
   - `telemetry.rs` (sysinfo, optional NVML) and `kernel.rs` (pidfd, PSI, cgroup readback):
     read-only observation.
   - `execution_model.rs`: the `LaunchBackend` and `ExecutionJournal` traits, implemented by
@@ -23,6 +26,10 @@ yields that capacity when other workloads need it.
     rustls mTLS, the v1 wire types and bounded cursors.
   - `artifacts.rs`, `publication.rs` (worker RPC socket), `publication_gc.rs`, `config.rs`
     (TOML, `config_version = 1`), `config_migration.rs`, `backup.rs`, `upgrade.rs`, `numeric.rs`.
+  - `setup.rs`: `cedegrid setup`, its flags and keyboard interface. `explain.rs`: the
+    `observe` and `doctor` renderings.
+  - `storage_qualification.rs` (storage diagnostics), `launcher_terminal.rs` (npm launcher
+    terminal handoff); `lib.rs` declares the modules.
 - `tests/`: Rust integration tests (`*.rs`), tool tests (`test_*.py`) and the contract fixture
   `tests/contracts/cedegrid-0.2.json`.
 - `python/cedegrid/`, `npm/src/`: the Python and TypeScript SDKs, which mirror each other.

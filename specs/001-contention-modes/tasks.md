@@ -885,7 +885,7 @@ each step.
 
 ## Phase 11: Polish & Cross-Cutting Concerns
 
-- [ ] T114 Update `docs/guarantees.md` as the single normative source (FR-056); Phase 6a already
+- [X] T114 Update `docs/guarantees.md` as the single normative source (FR-056); Phase 6a already
   documents the items it implemented, and this task reviews the whole document:
   - floors and their minimums;
   - floor policy A, the removed options and the caution options;
@@ -896,7 +896,7 @@ each step.
   - envelope and spool behavior;
   - the deprecation of `gpu.execution_mode`;
   - the reason-code catalog.
-- [ ] T115 [P] Update the layout map in `CLAUDE.md` with `contention.rs`, `actuation.rs` and
+- [X] T115 [P] Update the layout map in `CLAUDE.md` with `contention.rs`, `actuation.rs` and
   `setup.rs`.
 - [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
