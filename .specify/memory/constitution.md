@@ -18,8 +18,23 @@
     running a setuid program, is not in the verified set.
 
   Such a descendant carries the run's boot ID, assignment and generation, and CedeGrid acts on
-  it only through that pidfd, so a reused PID is never acted on. A process that leaves the tree,
-  or whose chain cannot be confirmed, is never acted on.
+  it only through that pidfd, or through a thread-ID call under the next rule, so a reused PID is
+  never acted on. A process that leaves the tree, or whose chain cannot be confirmed, is never
+  acted on.
+- **Calls that take only a thread ID.** A call that accepts only a thread ID, such as CPU
+  affinity, MAY be made on a thread of a verified member only when all of these hold:
+  - the member's pidfd shows it alive before the call;
+  - the thread's identity is fixed before the call: a thread pidfd where the kernel supports one
+    (Linux 6.9 and later), else the thread's entry under the member's `/proc/<pid>/task/<tid>`
+    with its start time;
+  - after the call, the same check shows the same thread still alive: the thread pidfd, or the
+    same entry with the same start time.
+
+  Otherwise the change is reported as possibly misdirected, and that thread is not touched
+  again. One window remains: a thread that exits during the call frees its ID, and that ID can
+  be reused inside the window only after the kernel's cyclic ID space wraps. A misdirected call
+  can only reach a process of the same account, because the kernel refuses such calls on other
+  users' processes.
 - CedeGrid MUST NOT signal, renice, reprioritize, throttle, pause, move into a cgroup, adopt or
   otherwise act on any other process. This includes other users' processes and unmanaged
   processes of the same account, in every mode and for every actuator.
@@ -219,4 +234,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 4.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26
+**Version**: 5.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26

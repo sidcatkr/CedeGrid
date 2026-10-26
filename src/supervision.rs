@@ -515,6 +515,38 @@ mod unix;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Setting affinity acts on the calling thread only: another thread's mask is
+    /// unchanged (constitution I, calls that take only a thread ID).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn current_cpu_affinity_leaves_other_threads_unchanged() {
+        let allowed = read_cpu_affinity(0).unwrap();
+        if allowed.len() < 2 {
+            return;
+        }
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let other = std::thread::spawn(move || {
+            tid_tx
+                .send(unsafe { libc::syscall(libc::SYS_gettid) } as u32)
+                .unwrap();
+            done_rx.recv().unwrap();
+        });
+        let tid = tid_rx.recv().unwrap();
+        let before = read_cpu_affinity(tid).unwrap();
+        let caller = std::thread::spawn(move || {
+            apply_current_cpu_affinity(&allowed[..1]).unwrap();
+            read_cpu_affinity(0).unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(caller.len(), 1);
+        assert_eq!(read_cpu_affinity(tid).unwrap(), before);
+        done_tx.send(()).unwrap();
+        other.join().unwrap();
+    }
+
     fn lifecycle(class: AllocationClass) -> Lifecycle {
         Lifecycle::new(
             class,

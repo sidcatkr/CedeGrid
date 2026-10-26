@@ -466,7 +466,15 @@ opened before its parent chain to the launched process is read, it is confirmed
 alive through that pidfd afterwards, its user and group IDs match the run's, and it
 is acted on only through that pidfd, so a reused PID is never acted on. A descendant
 that leaves the tree, changes its user or group IDs (for example by running a setuid
-program) or cannot be confirmed is never acted on.
+program) or cannot be confirmed is never acted on. A call that accepts only a thread ID,
+such as CPU affinity, is allowed on a verified member's thread only when the member's pidfd
+shows it alive first, the thread's identity is fixed first (a thread pidfd on Linux 6.9 and
+later, else its `/proc/<pid>/task/<tid>` entry with its start time), and the same check finds
+the same thread alive afterwards. Otherwise the change is reported as possibly misdirected
+and that thread is not touched again. A thread that exits during the call frees its ID,
+which can be reused inside that window only after the kernel's ID space wraps, and only for
+a process of the same account. Today CedeGrid sets CPU affinity only on its own calling
+thread, before user code runs, and makes no thread-ID call on any other thread.
 [Linux pidfd lifetime and reaping requirements](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
 
 Preparation reserves capacity, starts only the trusted manager gate, verifies
