@@ -1,0 +1,484 @@
+//! GPU devices through NVML: memory, activity classified over the quiet window,
+//! measured compute, external process identity, and the release check for own work.
+use super::*;
+
+pub(super) fn gpu_memory_mib(total: u64, used: u64) -> Option<(u64, u64)> {
+    let total_mib = total / MIB;
+    (total_mib > 0 && used <= total).then(|| (total_mib, used.div_ceil(MIB).min(total_mib)))
+}
+
+pub(super) fn merge_process_lists(
+    compute: Option<&[u32]>,
+    graphics: Option<&[u32]>,
+) -> Option<Vec<u32>> {
+    let processes: Vec<u32> = compute?
+        .iter()
+        .chain(graphics?)
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    (!processes.contains(&0)).then_some(processes)
+}
+
+/// Native identity for an independently tracked external Linux process. Requiring
+/// all four UID slots to agree prevents a credential transition from retaining a
+/// stale authorization. Other platforms cannot establish this contract yet.
+pub fn external_gpu_process_identity(pid: u32) -> Option<ExternalGpuProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        if pid == 0 {
+            return None;
+        }
+        let native = crate::supervision::process_identity(pid, "external-gpu-identity", 0).ok()?;
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let uids: Vec<u32> = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))?
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()
+            .ok()?;
+        if uids.len() != 4
+            || uids.iter().any(|uid| *uid != uids[0])
+            || native.start_time == 0
+            || native.boot_id.trim().is_empty()
+        {
+            return None;
+        }
+        Some(ExternalGpuProcessIdentity {
+            pid,
+            boot_id: native.boot_id,
+            start_ticks: native.start_time,
+            uid: uids[0],
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+pub(super) fn verify_external_gpu_inventory(
+    external: Option<&[u32]>,
+    authorized: &[ExternalGpuProcessIdentity],
+    before: &[ExternalGpuProcessIdentity],
+    mut read_after: impl FnMut(u32) -> Option<ExternalGpuProcessIdentity>,
+) -> Option<Vec<ExternalGpuProcessIdentity>> {
+    let external = external?;
+    if authorized.is_empty() {
+        return None;
+    }
+    let unique: BTreeSet<_> = external.iter().copied().collect();
+    if unique.len() != external.len() || unique.contains(&0) {
+        return None;
+    }
+    unique
+        .into_iter()
+        .map(|pid| {
+            let identity = read_after(pid)?;
+            (identity.pid == pid
+                && identity.start_ticks > 0
+                && !identity.boot_id.trim().is_empty()
+                && authorized.contains(&identity)
+                && before.contains(&identity))
+            .then_some(identity)
+        })
+        .collect()
+}
+
+/// One NVML memory read in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeviceMemoryRead {
+    pub(super) total: u64,
+    pub(super) free: u64,
+    pub(super) reserved: u64,
+}
+
+/// Device memory from reads before and after process enumeration (research R8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeviceMemory {
+    pub(super) total_mib: u64,
+    /// Total minus free. Unlike NVML v2 `used`, this includes reserved memory.
+    pub(super) unavailable_mib: u64,
+    pub(super) free_mib: u64,
+    pub(super) reserved_mib: u64,
+    /// False when the two reads disagree beyond the tolerance or the second read
+    /// failed: process memory read between them cannot be attributed this tick.
+    pub(super) attribution_known: bool,
+}
+
+pub(super) fn device_memory(
+    before: Option<DeviceMemoryRead>,
+    after: Option<DeviceMemoryRead>,
+    tolerance_mib: u64,
+) -> Option<DeviceMemory> {
+    let valid = |read: DeviceMemoryRead| read.free <= read.total && read.reserved <= read.total;
+    let before = before.filter(|read| valid(*read))?;
+    let after = after.filter(|read| valid(*read) && read.total == before.total);
+    let free = after.map_or(before.free, |after| after.free.min(before.free));
+    let (total_mib, unavailable_mib) = gpu_memory_mib(before.total, before.total - free)?;
+    Some(DeviceMemory {
+        total_mib,
+        unavailable_mib,
+        free_mib: (free / MIB).min(total_mib - unavailable_mib),
+        reserved_mib: after
+            .map_or(before.reserved, |after| after.reserved.max(before.reserved))
+            .div_ceil(MIB),
+        attribution_known: after
+            .is_some_and(|after| after.free.abs_diff(before.free) <= tolerance_mib * MIB),
+    })
+}
+
+/// Consecutive healthy intervals with no external compute, per device.
+#[derive(Debug, Clone, Default)]
+pub(super) struct QuietState {
+    pub(super) pids: BTreeSet<u32>,
+    pub(super) ticks: u32,
+}
+
+/// Whether one query is healthy evidence that no external context computed: a
+/// complete non-empty inventory, a successful or NOT_FOUND query, and no positive
+/// sample for an external PID newer than the submitted cursor.
+pub(super) fn quiet_tick(
+    processes: Option<&[u32]>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+) -> bool {
+    let Some(pids) = processes.filter(|pids| !pids.is_empty()) else {
+        return false;
+    };
+    let samples: &[ProcessUtilizationSample] = match samples {
+        Ok(samples) => samples,
+        Err(NvmlError::NotFound) => &[],
+        Err(_) => return false,
+    };
+    !samples.iter().any(|sample| {
+        pids.contains(&sample.pid) && sample.timestamp > previous.unwrap_or(0) && sample.sm_util > 0
+    })
+}
+
+/// A process leaving keeps the window; a new external process restarts it.
+pub(super) fn advance_quiet(
+    state: &mut QuietState,
+    processes: Option<&[u32]>,
+    healthy: bool,
+) -> u32 {
+    let pids: BTreeSet<u32> = processes.unwrap_or_default().iter().copied().collect();
+    let new_process = !pids.is_subset(&state.pids);
+    state.pids = pids;
+    state.ticks = match (healthy, new_process) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => state.ticks.saturating_add(1),
+    };
+    state.ticks
+}
+
+/// Quiet only replaces Unknown; Idle and Active evidence always wins.
+pub(super) fn quiet_activity(
+    activity: ComputeActivity,
+    ticks: u32,
+    window: u32,
+) -> ComputeActivity {
+    if activity == ComputeActivity::Unknown && window > 0 && ticks >= window {
+        ComputeActivity::Quiet
+    } else {
+        activity
+    }
+}
+
+pub(super) fn fresh_cursor(
+    previous: Option<u64>,
+    age: Option<Duration>,
+    max_age: Duration,
+) -> Option<u64> {
+    previous.filter(|_| age.is_some_and(|age| age <= max_age))
+}
+
+pub(super) fn describe_gpu_observation(
+    basic_known: bool,
+    previous: Option<u64>,
+    baseline_age: Option<Duration>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    fresh_id: Option<u64>,
+    observed_at_unix_ms: u64,
+    max_age: Duration,
+) -> GpuObservation {
+    let newest = samples
+        .as_ref()
+        .ok()
+        .and_then(|s| s.iter().map(|s| s.timestamp).max());
+    let device_error = matches!(
+        samples,
+        Err(NvmlError::GpuLost
+            | NvmlError::ResetRequired
+            | NvmlError::DriverNotLoaded
+            | NvmlError::Uninitialized
+            | NvmlError::LibRmVersionMismatch
+            | NvmlError::OperatingSystem)
+    );
+    // Health and fresh activity evidence are separate: a successful or NOT_FOUND
+    // query is healthy observation even when it carries no new sample (R8).
+    let healthy = matches!(samples, Ok(_) | Err(NvmlError::NotFound));
+    let capability = if !basic_known || device_error {
+        GpuExecutionCapability::InsufficientObservability
+    } else if healthy || fresh_id.is_some() {
+        GpuExecutionCapability::ContentionAware
+    } else {
+        GpuExecutionCapability::ConservativeNonSharing
+    };
+    let freshness_decision = if fresh_id.is_some() {
+        "new_driver_timestamp_after_recent_baseline"
+    } else if baseline_age.is_some_and(|age| age > max_age) {
+        "baseline_expired_before_query_completion_buffered_history_not_activity"
+    } else if previous.is_none() {
+        "no_recent_baseline_buffered_history_not_activity"
+    } else {
+        "no_new_driver_timestamp_not_evidence_of_idleness"
+    };
+    GpuObservation {
+        capability,
+        best_effort_external_processes: None,
+        activity_api: "nvmlDeviceGetProcessUtilization".into(),
+        activity_api_status: match samples {
+            Ok(_) => "NVML_SUCCESS".into(),
+            Err(error) => format!("{error:?}"),
+        },
+        query_cursor_us: previous.unwrap_or(0),
+        newest_sample_timestamp_us: newest,
+        samples_returned: samples.as_ref().map_or(0, Vec::len),
+        observed_at_unix_ms,
+        baseline_age_ms: baseline_age.map(|v| v.as_millis().min(u128::from(u64::MAX)) as u64),
+        sample_max_age_ms: max_age.as_millis().min(u128::from(u64::MAX)) as u64,
+        fresh_after_baseline: fresh_id.is_some(),
+        freshness_decision: freshness_decision.into(),
+    }
+}
+
+pub(super) fn classify_activity(
+    processes: Option<&[u32]>,
+    previous: Option<u64>,
+    samples: Option<&[ProcessUtilizationSample]>,
+) -> (ComputeActivity, Option<u64>, Option<u64>) {
+    let newest = samples.and_then(|samples| samples.iter().map(|s| s.timestamp).max());
+    let next = previous.into_iter().chain(newest).max();
+    // Discard all buffered samples on the first successful read. A repeated
+    // timestamp (including overlapping polling windows) is not new evidence.
+    let fresh_id = previous.and_then(|old| newest.filter(|new| *new > old));
+    let activity = match processes {
+        Some([]) => ComputeActivity::Idle,
+        Some(pids)
+            if fresh_id.is_some()
+                && samples.is_some_and(|samples| {
+                    samples.iter().any(|sample| {
+                        sample.timestamp > previous.unwrap_or(u64::MAX)
+                            && sample.sm_util > 0
+                            && sample.sm_util <= 100
+                            && pids.contains(&sample.pid)
+                    })
+                }) =>
+        {
+            ComputeActivity::Active
+        }
+        _ => ComputeActivity::Unknown,
+    };
+    (activity, fresh_id, next)
+}
+
+/// External and own GPU compute of one interval, in thousandths of device time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ComputeAmount {
+    Measured { external: u64, own: u64 },
+    Unknown(String),
+}
+
+/// MPS runs its clients in one shared context, so per-process samples do not
+/// attribute compute to them.
+pub(super) fn is_mps_process(name: &str) -> bool {
+    name.starts_with("nvidia-cuda-mps")
+}
+
+/// The command name of a process, read-only, where the platform exposes it.
+pub(super) fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|name| name.trim().to_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The interval's GPU compute per side from fresh per-process samples: each PID's
+/// average, capped at 100%, own PIDs being the verified managed ones, all others
+/// external. The amount is trusted only when the sum is within `tolerance` points
+/// of device utilization over the same interval (FR-021). While an external PID is
+/// listed, device time nobody accounts for is external too, the unattributed
+/// part; with own PIDs only it is sampling error on own work.
+pub(super) fn measure_compute(
+    external: Option<&[u32]>,
+    own: &BTreeSet<u32>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    device: Option<u32>,
+    mps: bool,
+    tolerance: u8,
+) -> (ComputeAmount, BTreeMap<u32, u64>) {
+    let unknown = |reason: &str| (ComputeAmount::Unknown(reason.into()), BTreeMap::new());
+    if mps {
+        return unknown(
+            "an MPS daemon or server shares the device, so per-process samples do not attribute compute",
+        );
+    }
+    let Some(device) = device else {
+        return unknown("device utilization is unavailable");
+    };
+    if external.is_none() {
+        return unknown("the device's process inventory is incomplete");
+    }
+    let Some(previous) = previous else {
+        return unknown("no fresh per-process sample baseline");
+    };
+    let samples: &[ProcessUtilizationSample] = match samples {
+        Ok(samples) => samples,
+        Err(NvmlError::NotFound) => &[],
+        Err(error) => {
+            return (
+                ComputeAmount::Unknown(format!(
+                    "per-process utilization is unavailable: {error:?}"
+                )),
+                BTreeMap::new(),
+            );
+        }
+    };
+    let mut per_pid: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
+    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+        let (sum, count) = per_pid.entry(sample.pid).or_default();
+        *sum += u64::from(sample.sm_util.min(100));
+        *count += 1;
+    }
+    let (mut external_percent, mut own_percent) = (0u64, 0u64);
+    let mut by_pid = BTreeMap::new();
+    for (pid, (sum, count)) in per_pid {
+        if own.contains(&pid) {
+            own_percent += sum / count;
+        } else {
+            external_percent += sum / count;
+            by_pid.insert(pid, (sum / count).min(100) * 10);
+        }
+    }
+    let total = external_percent + own_percent;
+    if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
+        return (
+            ComputeAmount::Unknown(format!(
+                "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
+            )),
+            BTreeMap::new(),
+        );
+    }
+    let device = u64::from(device);
+    let (external_percent, own_percent) = if external.is_some_and(|pids| !pids.is_empty()) {
+        (
+            external_percent.max(device.saturating_sub(own_percent)),
+            own_percent,
+        )
+    } else {
+        (0, device)
+    };
+    (
+        ComputeAmount::Measured {
+            external: external_percent.min(100) * 10,
+            own: own_percent.min(100) * 10,
+        },
+        by_pid,
+    )
+}
+
+pub(super) fn error_status(error: &NvmlError) -> CapabilityStatus {
+    match error {
+        NvmlError::NotSupported | NvmlError::FunctionNotFound => CapabilityStatus::Unsupported,
+        NvmlError::NoData | NvmlError::NotFound => CapabilityStatus::Unknown,
+        _ => CapabilityStatus::Unavailable,
+    }
+}
+
+/// GPU admission requires complete device/process APIs before launch. Release is
+/// a fresh successful absence check for the verified managed PID after OS exit;
+/// it is not a promise about unrelated allocations or a hard VRAM partition.
+pub struct GpuReleaseGuard {
+    nvml: Option<Nvml>,
+    uuids: Vec<String>,
+}
+
+impl GpuReleaseGuard {
+    pub fn prepare(resources: &crate::model::Resources) -> Result<Self> {
+        if resources.gpu_memory_mib.is_empty() {
+            return Ok(Self {
+                nvml: None,
+                uuids: Vec::new(),
+            });
+        }
+        ensure!(
+            cfg!(target_os = "linux"),
+            "GPU execution release qualification is Linux-only"
+        );
+        let nvml = Nvml::init()?;
+        for (uuid, amount) in &resources.gpu_memory_mib {
+            ensure!(*amount > 0, "GPU reservation must be positive");
+            let device = nvml.device_by_uuid(uuid.as_str())?;
+            ensure!(
+                device.memory_info()?.total / MIB >= *amount,
+                "GPU reservation exceeds device memory"
+            );
+            let compute = device.running_compute_processes()?;
+            let graphics = device.running_graphics_processes()?;
+            ensure!(
+                compute.iter().chain(&graphics).all(|p| p.pid > 0),
+                "GPU process inventory contains invalid identity"
+            );
+        }
+        Ok(Self {
+            nvml: Some(nvml),
+            uuids: resources.gpu_memory_mib.keys().cloned().collect(),
+        })
+    }
+    /// One fresh observation, never a sleep; family supervisors poll every member
+    /// so a delayed GPU context cannot stall another member's termination clock.
+    pub fn is_released(&self, pid: u32) -> Result<bool> {
+        let Some(nvml) = &self.nvml else {
+            return Ok(true);
+        };
+        for uuid in &self.uuids {
+            let device = nvml.device_by_uuid(uuid.as_str())?;
+            let compute = device.running_compute_processes()?;
+            let graphics = device.running_graphics_processes()?;
+            ensure!(
+                compute.iter().chain(&graphics).all(|p| p.pid > 0),
+                "GPU process inventory contains invalid identity"
+            );
+            if compute.iter().chain(&graphics).any(|p| p.pid == pid) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    pub fn confirm(&self, pid: u32, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if self.is_released(pid)? {
+                return Ok(());
+            }
+            ensure!(
+                start.elapsed() < timeout,
+                "managed GPU context remains visible after verified process exit"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}

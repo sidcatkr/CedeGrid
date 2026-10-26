@@ -137,6 +137,8 @@ ALLOWLIST = (
     'src/supervision.rs',
     'src/supervision/unix.rs',
     'src/telemetry.rs',
+    'src/telemetry/gpu.rs',
+    'src/telemetry/managed.rs',
     'src/upgrade.rs',
     'tests/agent.rs',
     'tests/agent_reconciliation.rs',

@@ -19,8 +19,9 @@ yields that capacity when other workloads need it.
     mode targets, the yield ladder, victim order and the reason-code catalog.
   - `actuation.rs`: supervisor-side steps on owned processes (duty-cycle caps, pauses) and the
     resource-target file.
-  - `telemetry.rs` (sysinfo, optional NVML) and `kernel.rs` (pidfd, PSI, cgroup readback):
-    read-only observation.
+  - `telemetry.rs` (sysinfo; NVML devices in `telemetry/gpu.rs`, own work's usage in
+    `telemetry/managed.rs`) and `kernel.rs` (pidfd, PSI, cgroup readback): read-only
+    observation.
   - `execution_model.rs`: the `LaunchBackend` and `ExecutionJournal` traits, implemented by
     `rootless.rs` and `cgroup.rs` (delegated cgroup v2 subtree only).
   - `state.rs`, `execution_state.rs`, `namespace.rs`: the SQLite ledger, supervisor journal
