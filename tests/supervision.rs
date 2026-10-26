@@ -367,6 +367,38 @@ fn rootless_descendants_and_gpu_work_require_future_verified_support() {
     }
 }
 
+/// A process the run forks without SDK mediation is outside the verified set, so
+/// termination of the run never reaches it (Principle I).
+#[test]
+fn termination_never_reaches_a_forked_descendant() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.class = AllocationClass::Opportunistic;
+    req.argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "sleep 30 </dev/null >/dev/null 2>&1 & echo $! > forked; trap '' TERM; while :; do :; done"
+            .into(),
+    ];
+    let mut opts = options();
+    opts.lease_ms = 500;
+    let outcome = run(&req, &opts, &Journal::new(), &mut Backend::new()).unwrap();
+    assert!(outcome.yielded);
+    assert_eq!(outcome.termination_signal, Some(libc::SIGKILL));
+    let forked: libc::pid_t = fs::read_to_string(temp.path().join("forked"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal zero only probes whether the forked process still exists.
+    let survived = unsafe { libc::kill(forked, 0) } == 0;
+    if survived {
+        // SAFETY: test cleanup of the process this test's run forked moments ago.
+        unsafe { libc::kill(forked, libc::SIGKILL) };
+    }
+    assert!(survived, "the forked descendant was signaled");
+}
+
 #[test]
 fn opportunistic_fixed_lease_terminates_owned_process_only() {
     let temp = TempDir::new().unwrap();

@@ -8,6 +8,18 @@
   bound to boot ID, start time, assignment and generation. Elsewhere it means an exclusively
   owned, unreaped direct child. SDK-mediated managed children each carry their own verified
   handle.
+- A descendant of a verified own process is in the verified set only when all of these hold:
+  - the run's supervisor, as its child subreaper, opened a pidfd for it before reading its
+    parent chain;
+  - the parent chain leads to the launched process;
+  - after reading the chain, the supervisor checked through that pidfd that the process is
+    still alive;
+  - its user and group IDs match the run's. A descendant whose IDs differ, for example after
+    running a setuid program, is not in the verified set.
+
+  Such a descendant carries the run's boot ID, assignment and generation, and CedeGrid acts on
+  it only through that pidfd, so a reused PID is never acted on. A process that leaves the tree,
+  or whose chain cannot be confirmed, is never acted on.
 - CedeGrid MUST NOT signal, renice, reprioritize, throttle, pause, move into a cgroup, adopt or
   otherwise act on any other process. This includes other users' processes and unmanaged
   processes of the same account, in every mode and for every actuator.
@@ -84,9 +96,11 @@ from effects keeps every action auditable.
   modules or sysctl changes.
 - cgroup control MUST stay inside an explicitly delegated cgroup v2 subtree. Every write MUST be
   read back. Nonempty cgroups are kept for reconciliation.
-- Rootless execution supports only `single_process` + `no_escape` commands and SDK-mediated
-  managed children. Arbitrary descendants and daemons are unsupported and MUST NOT be presented
-  as supported.
+- Rootless execution supports single-process commands, SDK-mediated managed children and, at
+  the Tracked control level, descendants that stay in the run's subreaper tree, each verified
+  under Principle I. Work started outside the tree, such as through another daemon, is not
+  tracked and MUST NOT be presented as contained. Tracked is not containment: a run has no RAM
+  cap, and no CPU limit below one core across cgroups.
 - CedeGrid MUST NOT be described as a sandbox for hostile code or as a hard VRAM partition.
 
 Rationale: every guarantee has to hold with ordinary user rights and without host-level
@@ -183,4 +197,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 2.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-25
+**Version**: 3.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26

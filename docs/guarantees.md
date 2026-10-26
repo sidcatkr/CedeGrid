@@ -446,8 +446,17 @@ there is no automatic adoption/signaling path. A leader pidfd does not identify 
 contain descendants. Rootless execution supports single-process commands and opt-in
 SDK-mediated direct children. Each mediated child has its own durable identity,
 verified handle and launch barrier. The shared parent resource envelope covers the
-whole family, with each live usage counted once. Arbitrary forked descendants are
-unsupported; uncertainty in any registered child prevents family release.
+whole family, with each live usage counted once. Uncertainty in any registered child
+prevents family release.
+
+Arbitrary forked descendants are unsupported by the rootless backends, and no
+actuator reaches one: signals go only through the leader's or a mediated child's own
+verified handle. A descendant is acted on only when it is verified: its pidfd is
+opened before its parent chain to the launched process is read, it is confirmed
+alive through that pidfd afterwards, its user and group IDs match the run's, and it
+is acted on only through that pidfd, so a reused PID is never acted on. A descendant
+that leaves the tree, changes its user or group IDs (for example by running a setuid
+program) or cannot be confirmed is never acted on.
 [Linux pidfd lifetime and reaping requirements](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
 
 Preparation reserves capacity, starts only the trusted manager gate, verifies
