@@ -2105,14 +2105,16 @@ enum Placement {
 /// The one admission predicate that placement, preemption and the first
 /// authorization share (audit M10). `total` is the node's charge including the
 /// request. A request with per-job modes needs `contention/1`. With it, every requested resource (CPU, RAM, and each
-/// requested GPU's memory and compute) must be open with no own work yielding on
-/// it; a resource the report leaves out is not open. Otherwise the 0.2 fields apply.
+/// requested GPU's memory and compute) must be open as the node reports it; the
+/// node blocks a resource while own work on it is reclaimed, and a step holding at
+/// its target does not. A resource the report leaves out is not open. Otherwise the
+/// 0.2 fields apply.
 fn placement(
     report: &NodeReport,
     request: &crate::execution_model::LaunchRequest,
     total: &Resources,
 ) -> Placement {
-    use crate::contention::{Admission, ResourceKey, YieldStep};
+    use crate::contention::{Admission, ResourceKey};
     let resources = &request.resources;
     // A per-job mode needs an agent that negotiated `contention/1` (FR-030).
     if request.contention.is_some() && !report.features.iter().any(|f| f == FEATURE_CONTENTION) {
@@ -2127,13 +2129,10 @@ fn placement(
     let admitted = match &report.contention {
         Some(contention) => {
             let open = |key: ResourceKey| {
-                contention.resources.get(&key).is_some_and(|state| {
-                    state.admission == Admission::Open
-                        && state
-                            .step_summary
-                            .iter()
-                            .all(|(step, count)| *step == YieldStep::None || *count == 0)
-                })
+                contention
+                    .resources
+                    .get(&key)
+                    .is_some_and(|state| state.admission == Admission::Open)
             };
             (resources.cpu_millicores == 0 || open(ResourceKey::Cpu))
                 && (resources.ram_mib == 0 || open(ResourceKey::Ram))

@@ -170,7 +170,10 @@ Performance. Each resource's admission opens on its own, and placement needs eve
 requested resource open; every launch reserves CPU and RAM. Own work blocks admission on a
 resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
 holds more than its target, or a step is still moving down. A cap or hint that holds at its
-target does not block. Admission then follows headroom, cooldown and reclaim backoff: own
+target does not block, and coordinator placement follows the node's admission without
+counting steps. A move within the noise tolerance on memory, or within the reversal hysteresis
+of the external growth a compute step answered (`hysteresis_percent` of that demand), is
+jitter: it blocks no admission, and a CPU cap that holds within it resets no cooldown. Admission then follows headroom, cooldown and reclaim backoff: own
 charged usage plus a new request stays within own target, the aggregate from the node mode
 and cap, and a request beyond it waits (`admission_over_own_target`). After a reclaim the
 resource waits for its cooldown again, so admitting, growing and capping cannot cycle. GPU memory waits for

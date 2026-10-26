@@ -2347,7 +2347,7 @@ impl NegotiatedFeatures {
 
 /// Resources whose mode or admission is not yet known are left out, which a
 /// negotiated coordinator treats as not open.
-fn node_contention_report(
+pub fn node_contention_report(
     config: &Config,
     decision: &crate::model::Decision,
     max_workers: usize,

@@ -40,7 +40,11 @@ With `contention/1`, the coordinator places work using per-resource admission:
 (FR-028):
 - the requested resources are CPU, RAM, and each requested GPU's memory and compute;
 - a resource the report leaves out is not open;
-- a resource whose `step_summary` counts own work above step zero is not open;
+- the node blocks a resource's admission while own work on it is being reclaimed (above its
+  target, or a step still moving down); a step holding at its target leaves admission to the
+  node's headroom and cooldown, so `step_summary` is informational and placement does not read
+  it;
+- a request is placed only while the node's charge including it fits `managed_budget`;
 - the legacy `expansion_allowed` and `gpu_expansion_allowed` flags are not consulted.
 
 Placement, preemption and the first authorization share this predicate. Held or blocked

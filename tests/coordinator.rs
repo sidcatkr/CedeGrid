@@ -3736,12 +3736,62 @@ fn legacy_and_negotiated_agents_are_placed_by_their_own_reports() {
     assert_eq!(run(false), (2, 0));
 }
 
-/// Admission for a resource stays closed while own work on it is above step zero,
-/// whatever the report's admission says (FR-028).
+/// Placement follows the reported admission (FR-028), with `step` held on `key`.
+fn placed_beside_a_step(
+    key: cedegrid::contention::ResourceKey,
+    admission: cedegrid::contention::Admission,
+) -> Vec<String> {
+    use cedegrid::contention::YieldStep;
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    submit_tasks(
+        &mut c,
+        "job",
+        0,
+        vec![task("cpu"), gpu_task("gpu", "GPU-a", 500)],
+        100,
+    );
+    let mut r = negotiated(100, &["GPU-a"]);
+    let state = resource(&mut r, key);
+    state.step_summary.insert(YieldStep::Cap, 1);
+    state.admission = admission;
+    placed(&report_reply(&mut c, &r, 100))
+}
+
+/// A step that holds at its target, reported with open admission, does not block
+/// placement (FR-028).
 #[test]
-fn a_resource_with_yielding_own_work_admits_nothing() {
-    use cedegrid::contention::{ResourceKey, YieldStep};
-    let run = |key: ResourceKey| {
+fn a_holding_step_with_open_admission_is_placed() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    assert_eq!(
+        placed_beside_a_step(ResourceKey::Cpu, Admission::Open),
+        ["cpu", "gpu"]
+    );
+    assert_eq!(
+        placed_beside_a_step(ResourceKey::GpuCompute("GPU-a".into()), Admission::Open),
+        ["cpu", "gpu"]
+    );
+}
+
+/// Agents that block admission for any step report it so, and nothing that asks
+/// for that resource is placed.
+#[test]
+fn a_step_reported_with_blocked_admission_places_nothing() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let yielding = || Admission::blocked("admission_own_work_yielding");
+    assert!(placed_beside_a_step(ResourceKey::Cpu, yielding()).is_empty());
+    assert_eq!(
+        placed_beside_a_step(ResourceKey::GpuCompute("GPU-a".into()), yielding()),
+        ["cpu"]
+    );
+}
+
+/// Reports without a contention summary, as 0.2 agents send them, are placed by
+/// `expansion_allowed` and `gpu_expansion_allowed` alone.
+#[test]
+fn reports_without_contention_still_use_the_expansion_flags() {
+    let run = |expansion: bool, gpu_expansion: bool| {
         let d = dir();
         let mut c = Coordinator::open(config(d.path())).unwrap();
         wide_pool(&mut c, 100);
@@ -3752,12 +3802,16 @@ fn a_resource_with_yielding_own_work_admits_nothing() {
             vec![task("cpu"), gpu_task("gpu", "GPU-a", 500)],
             100,
         );
-        let mut r = negotiated(100, &["GPU-a"]);
-        resource(&mut r, key).step_summary.insert(YieldStep::Cap, 1);
+        let mut r = report(100);
+        r.managed_budget.gpu_memory_mib.insert("GPU-a".into(), 1000);
+        r.expansion_allowed = expansion;
+        r.gpu_expansion_allowed = gpu_expansion;
         placed(&report_reply(&mut c, &r, 100))
     };
-    assert!(run(ResourceKey::Cpu).is_empty());
-    assert_eq!(run(ResourceKey::GpuCompute("GPU-a".into())), ["cpu"]);
+    assert_eq!(run(true, true), ["cpu", "gpu"]);
+    assert_eq!(run(true, false), ["cpu"]);
+    assert!(run(false, true).is_empty());
+    assert!(run(false, false).is_empty());
 }
 
 /// Two waiting tasks never claim the same victim: one preemption pass keeps a

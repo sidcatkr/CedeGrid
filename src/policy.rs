@@ -1403,7 +1403,12 @@ impl PolicyEngine {
         }
         let mut ladder = BTreeMap::new();
         // Resources where own work holds more than its target: reclaim is under way.
-        let mut over_target: BTreeSet<ResourceKey> = BTreeSet::new();
+        // The largest amount own work holds above its target, per resource.
+        let mut over_target: BTreeMap<ResourceKey, u64> = BTreeMap::new();
+        let mut note_excess = |key: &ResourceKey, excess: u64| {
+            let largest = over_target.entry(key.clone()).or_default();
+            *largest = (*largest).max(excess);
+        };
         // The deadline each hint carries to its worker, as the ladder enforces it.
         let mut hint_deadlines: BTreeMap<(String, ResourceKey), u64> = BTreeMap::new();
         let mut actions = Vec::new();
@@ -1625,7 +1630,7 @@ impl PolicyEngine {
                     judged_total.saturating_sub(amount_of(&budget))
                 };
                 if usage_excess > 0 {
-                    over_target.insert(key.clone());
+                    note_excess(&key, usage_excess);
                 }
                 let guaranteed =
                     |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
@@ -1752,7 +1757,7 @@ impl PolicyEngine {
                         let own_excess =
                             limit.map_or(0, |limit| (victim.amount + kept).saturating_sub(limit));
                         if own_excess > 0 {
-                            over_target.insert(key.clone());
+                            note_excess(&key, own_excess);
                         }
                         let excess = remaining.max(own_excess);
                         let state = self.ladder.get(&(victim.id.clone(), key.clone()));
@@ -1977,7 +1982,7 @@ impl PolicyEngine {
                 let share = held / running.len() as u64;
                 let excess = held.saturating_sub(budget.share);
                 if excess > 0 {
-                    over_target.insert(key.clone());
+                    note_excess(&key, excess);
                 }
                 // While calm, a held cap rises toward its usage plus its part of
                 // what the mode allows beyond own usage.
@@ -2048,7 +2053,7 @@ impl PolicyEngine {
                     let limit = budget.targets.get(&victim.mode).copied();
                     let own_excess = limit.map_or(0, |limit| share.saturating_sub(limit));
                     if own_excess > 0 {
-                        over_target.insert(key.clone());
+                        note_excess(&key, own_excess);
                     }
                     let excess = remaining.max(own_excess);
                     let contended_victim = excess > 0;
@@ -2251,12 +2256,55 @@ impl PolicyEngine {
                     .min(thresholds.reclaim_backoff_max_ms)
             }
         };
+        // Moves within the noise tolerance (memory), or within the reversal
+        // hysteresis of the external growth a compute step answered, are jitter:
+        // they reset no cooldown and block no admission.
+        let tolerance = |key: &ResourceKey| -> u64 {
+            let thresholds = config.contention.thresholds(key.kind());
+            if key.kind().is_memory() {
+                return thresholds.noise_tolerance_mib;
+            }
+            ladder
+                .iter()
+                .filter(|((_, k), state)| k == key && state.cause == YieldCause::ExternalGrowth)
+                .map(|(_, state)| {
+                    state
+                        .trigger_external
+                        .saturating_mul(u64::from(thresholds.hysteresis_percent))
+                        / 100
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let moving_down: BTreeSet<ResourceKey> = ladder
+            .iter()
+            .filter(|((id, key), next)| {
+                let before = self.ladder.get(&(id.clone(), key.clone()));
+                let step = before.map_or(YieldStep::None, |s| s.step);
+                let fell = match (next.target, before.and_then(|s| s.target)) {
+                    (Some(next), Some(before)) => before.saturating_sub(next) > tolerance(key),
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                next.step > step
+                    || (next.step == step
+                        && matches!(step, YieldStep::Cap | YieldStep::Hint)
+                        && fell)
+            })
+            .map(|((_, key), _)| key.clone())
+            .collect();
         // Each resource waits for its own cooldown, never the GPU one (M1, FR-034).
+        // A CPU cap that holds may sit within the tolerance above a jittering budget.
         let cpu_safe = !input.explicit_drain
             && !cpu_unknown
             && !cpu_held
             && cpu_capacity > 0
-            && charged.cpu_millicores <= budget.cpu_millicores;
+            && (charged.cpu_millicores <= budget.cpu_millicores
+                || (!moving_down.contains(&ResourceKey::Cpu)
+                    && charged.cpu_millicores
+                        <= budget
+                            .cpu_millicores
+                            .saturating_add(tolerance(&ResourceKey::Cpu))));
         let ram_safe = !input.explicit_drain
             && !ram_unknown
             && !ram_held
@@ -2562,21 +2610,15 @@ impl PolicyEngine {
         }
         // Admission per resource: blocked until its cause changes, held while it
         // waits for a measurement or a cooldown (FR-028, FR-038).
-        // Own work is reclaimed while it holds more than its target or a step is
-        // still moving down; a cap or hint that holds at its target is not.
-        let moving_down: BTreeSet<ResourceKey> = ladder
-            .iter()
-            .filter(|((id, key), next)| {
-                let before = self.ladder.get(&(id.clone(), key.clone()));
-                let step = before.map_or(YieldStep::None, |s| s.step);
-                next.step > step
-                    || (next.step == step
-                        && matches!(step, YieldStep::Cap | YieldStep::Hint)
-                        && next.target < before.and_then(|s| s.target))
-            })
-            .map(|((_, key), _)| key.clone())
-            .collect();
-        let stepped = |key: &ResourceKey| over_target.contains(key) || moving_down.contains(key);
+        // Own work is reclaimed while it holds more than its target, or a step is
+        // still moving down, by more than the tolerance; a cap or hint that holds
+        // at its target is not.
+        let stepped = |key: &ResourceKey| {
+            over_target
+                .get(key)
+                .is_some_and(|excess| *excess > tolerance(key))
+                || moving_down.contains(key)
+        };
         let blocked = Admission::blocked;
         let held = Admission::held;
         let admission = |key: &ResourceKey,

@@ -651,7 +651,7 @@ context, under Neutral and Performance (quickstart §5).
 - [X] T084 [P] [US5] Add placement tests in `tests/coordinator.rs`:
   - placement honors the per-resource admission from a negotiated `NodeReport.contention`;
   - legacy agents use the 0.2 fields;
-  - admission for a resource is blocked while own work on it is above step zero (FR-028);
+  - admission for a resource is blocked while own work on it is being reclaimed (FR-028, as amended);
   - preemption keeps a pass-level victim set and runs only on real slot or capacity exhaustion.
 
 ### Implementation for User Story 5

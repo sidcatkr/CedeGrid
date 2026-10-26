@@ -132,7 +132,7 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `external_peak` | RAM, GPU memory: over `memory_peak_window_s`, the sum of each live listed external process's peak plus the peak of the external usage no listed process accounts for, for admission headroom |
 | `measurement` | `known`, `unknown{since}` or `inconsistent_within_tolerance` |
 | `activity` | GPU compute only: `quiet`, `active` or `unknown` |
-| `admission` | `open`, `held{reason}` or `blocked{reason}` |
+| `admission` | `open`, `held{reason}` or `blocked{reason}`; `blocked{admission_own_work_yielding}` only while own work on the resource is being reclaimed: above its target, or a step still moving down, by more than the noise tolerance (memory) or the reversal hysteresis of the external growth a compute step answered (FR-028) |
 
 ## YieldStep (`src/contention.rs`)
 

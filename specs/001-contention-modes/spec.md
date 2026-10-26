@@ -706,7 +706,10 @@ node reports with the expected per-resource values at each step.
 - **FR-027**: Under Yield First, new own GPU work MUST NOT be admitted to a device with active or
   unknown external compute activity.
 - **FR-028**: Node reports MUST state admission per resource. Coordinator placement MUST honor it.
-  Admission for a resource MUST be blocked while own work on that resource is above step zero.
+  Placement is blocked while own work on that resource is being reclaimed, meaning above its
+  target or with a step still moving down. A step holding at its target does not block. A move
+  within the noise tolerance (memory) or within the reversal hysteresis of the external growth a
+  compute step answered is jitter and counts as neither.
 - **FR-029**: Nodes MUST advertise only the control capabilities they can actually apply.
 - **FR-064**: `contention.never_share_occupied_gpus` (default false) MUST, when set, block new own
   GPU work on any device with an external context or unknown external processes, in every mode.

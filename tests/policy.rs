@@ -4874,9 +4874,9 @@ mod reclaim_admission {
         resources(cpu, 100, 0)
     }
 
-    /// The setup: a steady 12.5% user recorded as satisfied and a job capped at
-    /// 26 400 m, then the job's usage falls to 10 000 m for one full p95 window.
-    fn settled(mode: ContentionMode) -> (Sim, Decision) {
+    /// A steady 12.5% user recorded as satisfied and a job that wants the whole
+    /// CPU, capped and holding at the target share.
+    fn capped(mode: ContentionMode) -> Sim {
         let mut sim = Sim::new(mode);
         let capped = sim.run(120, 4000, &[("old", 1000, CPU)]);
         let last = capped.last().unwrap();
@@ -4899,8 +4899,198 @@ mod reclaim_admission {
                 last.resources[&ResourceKey::Cpu].reasons
             );
         }
+        sim
+    }
+
+    /// The setup: `capped`, then the job's usage falls to 10 000 m for one full
+    /// p95 window.
+    fn settled(mode: ContentionMode) -> (Sim, Decision) {
+        let mut sim = capped(mode);
         let fallen = sim.run(130, 4000, &[("old", 1000, 10_000)]);
         (sim, fallen.last().unwrap().clone())
+    }
+
+    /// What a negotiated coordinator places for one `cpu` request, from the report
+    /// the agent builds for `decision`.
+    fn coordinator_places(sim: &Sim, decision: &Decision, cpu: u64) -> Vec<String> {
+        use cedegrid::protocol::*;
+        let dir = tempfile::Builder::new()
+            .prefix(".coordinator-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let mut coordinator = cedegrid::coordinator::Coordinator::open(CoordinatorConfig {
+            storage_profile: Default::default(),
+            state_dir: dir.path().join("state"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tls: TlsIdentity {
+                ca_cert: Default::default(),
+                certificate: Default::default(),
+                private_key: Default::default(),
+            },
+            clients: BTreeMap::new(),
+            lease_ms: 10_000,
+            telemetry_ttl_ms: 3000,
+            max_artifact_bytes: 1024 * 1024,
+            artifact_quota_bytes: 10 * 1024 * 1024,
+            retry_limit: 3,
+            retry_backoff_ms: 1000,
+            retry_backoff_max_ms: 30_000,
+            yield_retry_backoff_ms: 1000,
+            yield_retry_backoff_max_ms: 30_000,
+        })
+        .unwrap();
+        let pool = PoolSpec {
+            pool_id: "pool".into(),
+            class: AllocationClass::Opportunistic,
+            node_ids: vec!["node".into()],
+            min_workers: 0,
+            max_workers: 8,
+        };
+        coordinator
+            .handle_at(&Principal::Operator, Request::PutPool { pool }, 100)
+            .unwrap();
+        let task = cedegrid::execution_model::LaunchRequest {
+            task_id: "new".into(),
+            assignment_id: String::new(),
+            argv: vec!["/bin/true".into()],
+            cwd: std::env::current_dir().unwrap(),
+            env: BTreeMap::new(),
+            resources: request(cpu),
+            replay_safe: true,
+            class: AllocationClass::Opportunistic,
+            no_escape: true,
+            single_process: true,
+            managed_child_limit: 0,
+            max_attempts: None,
+            input_artifacts: vec![],
+            required_controls: vec![],
+            allow_fallback: true,
+            contention: None,
+        };
+        let job = JobSpec {
+            job_id: "job".into(),
+            pool_id: "pool".into(),
+            priority: 0,
+            tasks: vec![task],
+        };
+        coordinator
+            .handle_at(&Principal::Operator, Request::Submit { job }, 100)
+            .unwrap();
+        let report = NodeReport {
+            node_id: "node".into(),
+            boot_id: "boot".into(),
+            observed_at_unix_ms: 100,
+            managed_budget: cedegrid::policy::schedulable_budget(decision),
+            expansion_allowed: true,
+            gpu_expansion_allowed: true,
+            gpu_guaranteed_allowed: true,
+            launch_slots: 2,
+            available_controls: vec![],
+            allocations: vec![],
+            features: COORDINATOR_FEATURES.map(String::from).to_vec(),
+            contention: Some(cedegrid::agent::node_contention_report(
+                &sim.cfg, decision, 8,
+            )),
+        };
+        let Response::Heartbeat { reply } = coordinator
+            .handle_at(
+                &Principal::Node {
+                    node_id: "node".into(),
+                },
+                Request::Heartbeat { report },
+                100,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        reply
+            .assignments
+            .iter()
+            .map(|a| a.request.task_id.clone())
+            .collect()
+    }
+
+    /// FR-028, end to end: while own work is reclaimed on CPU, nothing that asks
+    /// for CPU is placed.
+    #[test]
+    fn a_reclaiming_resource_places_nothing_end_to_end() {
+        let (mut sim, _) = settled(ContentionMode::Neutral);
+        let jobs = [("old", 1000, 10_000), ("new", 8000, 8000)];
+        sim.run(10, 4000, &jobs);
+        let reclaiming = (0..240)
+            .map(|_| sim.step(20_000, &jobs))
+            .find(yielding)
+            .expect("own work is reclaimed");
+        assert!(coordinator_places(&sim, &reclaiming, 1000).is_empty());
+    }
+
+    /// FR-028, end to end: a cap that holds at the target with room below it, so an
+    /// 8000 m job passes `request_admission` and the coordinator places it.
+    #[test]
+    fn a_holding_cap_places_an_8000_m_job_end_to_end() {
+        let (sim, decision) = settled(ContentionMode::Neutral);
+        assert!(
+            decision
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap)
+        );
+        assert_eq!(
+            cedegrid::policy::request_admission(&decision, &request(8000)),
+            Ok(())
+        );
+        assert_eq!(coordinator_places(&sim, &decision, 8000), ["new"]);
+    }
+
+    /// External usage that jitters by 2% of capacity beside a holding cap toggles
+    /// neither admission nor placement: with room below the cap, and with the job
+    /// using all of it, so the cap follows the target share down and up.
+    #[test]
+    fn small_external_jitter_keeps_admission_and_placement_steady() {
+        let cases = [
+            (settled(ContentionMode::Neutral).0, 10_000),
+            (
+                {
+                    let mut sim = capped(ContentionMode::Neutral);
+                    sim.run(140, 4000, &[("old", 1000, CPU)]);
+                    sim
+                },
+                CPU,
+            ),
+        ];
+        for (mut sim, wants) in cases {
+            let jitter = CPU / 50;
+            let mut answers = vec![];
+            for i in 0..20u64 {
+                let external = match i % 4 {
+                    0 => 4000 + jitter,
+                    2 => 4000 - jitter,
+                    _ => 4000,
+                };
+                let decision = sim.step(external, &[("old", 1000, wants)]);
+                assert!(
+                    decision
+                        .actions
+                        .iter()
+                        .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap),
+                    "wants {wants}, interval {i}: the cap holds"
+                );
+                assert_eq!(
+                    cpu_admission(&decision),
+                    Admission::Open,
+                    "wants {wants}, interval {i}, external {external}"
+                );
+                answers.push((
+                    cedegrid::policy::request_admission(&decision, &request(8000)),
+                    coordinator_places(&sim, &decision, 8000),
+                ));
+            }
+            assert!(answers.windows(2).all(|w| w[0] == w[1]), "{answers:?}");
+            if wants == 10_000 {
+                assert_eq!(answers[0], (Ok(()), vec!["new".to_string()]));
+            }
+        }
     }
 
     #[test]
