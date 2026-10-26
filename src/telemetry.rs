@@ -1400,10 +1400,10 @@ mod tests {
 
     #[test]
     fn managed_cpu_upper_bound_adds_quantization_over_the_process_interval() {
-        let lower = cpu_usage_lower_bound(500, Duration::from_secs(1), 22).unwrap();
-        let upper = cpu_usage_upper_bound(500, Duration::from_millis(900), 22).unwrap();
+        let lower = cpu_usage_lower_bound(500 * MS, Duration::from_secs(1), 22 * MS).unwrap();
+        let upper = cpu_usage_upper_bound(500 * MS, Duration::from_millis(900), 22 * MS).unwrap();
         assert_eq!((lower, upper), (478, 580));
-        assert_eq!(cpu_usage_upper_bound(1, Duration::ZERO, 2), None);
+        assert_eq!(cpu_usage_upper_bound(MS, Duration::ZERO, 2 * MS), None);
     }
 
     #[test]
@@ -1441,16 +1441,24 @@ mod tests {
     fn process_cpu_quantization_cannot_prove_false_single_core_excess() {
         // A one-core worker may advance an integral millisecond counter by
         // 501ms during a 500.5ms observed interval. Its budget remains1000m.
-        assert!(cpu_usage_lower_bound(501, Duration::from_micros(500_500), 2).unwrap() <= 1000);
+        assert!(
+            cpu_usage_lower_bound(501 * MS, Duration::from_micros(500_500), 2 * MS).unwrap()
+                <= 1000
+        );
         // Full nanoseconds and enclosing refresh endpoints avoid truncated-wall
         // and variable collector-cost bias. Actual extra-thread demand survives.
         assert_eq!(
-            cpu_usage_lower_bound(1100, Duration::from_secs(1), 2),
+            cpu_usage_lower_bound(1100 * MS, Duration::from_secs(1), 2 * MS),
             Some(1098)
         );
-        assert!(cpu_usage_lower_bound(525, Duration::from_millis(525), 22).unwrap() <= 1000);
-        assert_eq!(cpu_usage_lower_bound(1, Duration::from_secs(1), 2), Some(0));
-        assert_eq!(cpu_usage_lower_bound(1, Duration::ZERO, 2), None);
+        assert!(
+            cpu_usage_lower_bound(525 * MS, Duration::from_millis(525), 22 * MS).unwrap() <= 1000
+        );
+        assert_eq!(
+            cpu_usage_lower_bound(MS, Duration::from_secs(1), 2 * MS),
+            Some(0)
+        );
+        assert_eq!(cpu_usage_lower_bound(MS, Duration::ZERO, 2 * MS), None);
     }
 
     #[test]
@@ -1464,13 +1472,14 @@ mod tests {
         // The native failure compared a partial first worker interval against
         // a full 510ms node interval. An unchanged 500m reservation is charged
         // separately; its partial CPU delta must not be scaled to a full rate.
-        let old_wrong_rate = cpu_usage_lower_bound(170, Duration::from_millis(300), 22).unwrap();
+        let old_wrong_rate =
+            cpu_usage_lower_bound(170 * MS, Duration::from_millis(300), 22 * MS).unwrap();
         let aligned = aligned_cpu_usage_lower_bound(
-            170,
+            170 * MS,
             started + Duration::from_millis(200),
             started + Duration::from_millis(500),
             window,
-            22,
+            22 * MS,
         )
         .unwrap();
         assert!(old_wrong_rate > 322);
@@ -1480,21 +1489,21 @@ mod tests {
         // is converted into a measurement of zero CPU.
         assert_eq!(
             aligned_cpu_usage_lower_bound(
-                170,
+                170 * MS,
                 started - Duration::from_millis(1),
                 window.ended,
                 window,
-                22
+                22 * MS
             ),
             None
         );
         assert_eq!(
             aligned_cpu_usage_lower_bound(
-                170,
+                170 * MS,
                 started,
                 window.ended + Duration::from_millis(1),
                 window,
-                22
+                22 * MS
             ),
             None
         );
@@ -1513,18 +1522,20 @@ mod tests {
         };
         assert_eq!(
             aligned_cpu_usage_lower_bound(
-                300,
+                300 * MS,
                 started + Duration::from_millis(50),
                 started + Duration::from_millis(450),
                 window,
-                22,
+                22 * MS,
             ),
             Some(463)
         );
         // Actual extra-thread excess remains observable; the envelope and
         // rounding allowance were not increased to hide the native failure.
         assert!(
-            aligned_cpu_usage_lower_bound(900, started, window.ended, window, 22).unwrap() > 1000
+            aligned_cpu_usage_lower_bound(900 * MS, started, window.ended, window, 22 * MS)
+                .unwrap()
+                > 1000
         );
     }
 
@@ -1907,5 +1918,302 @@ mod tests {
         assert_eq!(identity.start_ticks, native.start_time);
         assert_eq!(identity.boot_id, native.boot_id);
         assert!(external_gpu_process_identity(0).is_none());
+    }
+
+    const MS: u64 = 1_000_000;
+
+    #[test]
+    fn own_cpu_sources_carry_their_resolution_and_one_tick_per_running_thread() {
+        let tick = MS;
+        assert_eq!(leaf_quantization_ns(1, 4, tick), 1_000 + tick);
+        assert_eq!(leaf_quantization_ns(9, 4, tick), 1_000 + 4 * tick);
+        assert_eq!(clock_quantization_ns(1, 4, tick), 1 + tick);
+        // A process always has at least its leader thread.
+        assert_eq!(clock_quantization_ns(0, 4, tick), 1 + tick);
+        assert_eq!(
+            stat_quantization_ns(),
+            cpu_counter_quantization_ms().map(|ms| ms * MS)
+        );
+        // A busy worker that used 250 ms of a 500 ms window: the clock loses about
+        // 2 m with a 1 ms tick, the tick counters 44 m.
+        let window = Duration::from_millis(500);
+        assert_eq!(
+            cpu_usage_lower_bound(250 * MS, window, clock_quantization_ns(1, 4, tick)),
+            Some(497)
+        );
+        assert_eq!(cpu_usage_lower_bound(250 * MS, window, 22 * MS), Some(456));
+    }
+
+    #[test]
+    fn the_scheduler_tick_comes_from_config_hz_or_the_slowest_kernel_tick() {
+        assert_eq!(
+            scheduler_tick_ns(Some("CONFIG_HZ_1000=y\nCONFIG_HZ=1000\n")),
+            MS
+        );
+        assert_eq!(scheduler_tick_ns(Some("CONFIG_HZ=250\n")), 4 * MS);
+        assert_eq!(scheduler_tick_ns(Some("# CONFIG_HZ is not set\n")), 10 * MS);
+        assert_eq!(scheduler_tick_ns(Some("CONFIG_HZ=0\n")), 10 * MS);
+        assert_eq!(scheduler_tick_ns(None), 10 * MS);
+        assert!(!nohz_full_active(None));
+        assert!(!nohz_full_active(Some("(null)\n")));
+        assert!(!nohz_full_active(Some("\n")));
+        assert!(nohz_full_active(Some("2-7\n")));
+    }
+
+    #[test]
+    fn a_reading_from_another_source_or_running_backwards_gives_no_delta() {
+        let clock = |ns, quantization_ns| CpuReading {
+            source: CpuSource::Clock,
+            ns,
+            quantization_ns,
+        };
+        assert_eq!(cpu_delta(clock(100, 10), clock(400, 30)), Some((300, 30)));
+        assert_eq!(cpu_delta(clock(400, 10), clock(100, 10)), None);
+        let stat = CpuReading {
+            source: CpuSource::Stat,
+            ..clock(100, 10)
+        };
+        assert_eq!(cpu_delta(stat, clock(400, 10)), None);
+        assert_eq!(cpu_delta(clock(100, 10), stat), None);
+    }
+
+    /// A fake leaf: `cgroup.procs` answers in turn, `cpu.stat` is fixed.
+    fn leaf_files(
+        members: Vec<&'static str>,
+        cpu_stat: &'static str,
+    ) -> impl FnMut(&str) -> Option<String> {
+        let mut members = members.into_iter();
+        move |file| match file {
+            "cgroup.procs" => members.next().map(str::to_owned),
+            "cpu.stat" => Some(cpu_stat.to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_leaf_counts_only_a_verified_own_membership() {
+        let stat = "usage_usec 123456\nuser_usec 100000\nsystem_usec 23456\n";
+        let family = BTreeSet::from([10, 11]);
+        let one = |_| Some(1);
+        let (reading, members) = leaf_reading_with(
+            leaf_files(vec!["10\n", "10\n"], stat),
+            10,
+            &family,
+            4,
+            MS,
+            one,
+        )
+        .unwrap();
+        assert_eq!(
+            reading,
+            CpuReading {
+                source: CpuSource::Leaf,
+                ns: 123_456_000,
+                quantization_ns: 1_000 + MS,
+            }
+        );
+        assert_eq!(members, BTreeSet::from([10]));
+        // A child of the family inside the leaf is counted by the leaf.
+        let (_, members) = leaf_reading_with(
+            leaf_files(vec!["10\n11\n", "11\n10\n"], stat),
+            10,
+            &family,
+            4,
+            MS,
+            one,
+        )
+        .unwrap();
+        assert_eq!(members, BTreeSet::from([10, 11]));
+        // A foreign member, a membership change, a missing leader, no usage line or
+        // an unreadable thread count each fall back.
+        for (procs, stat) in [
+            (vec!["10\n99\n", "10\n99\n"], stat),
+            (vec!["10\n", "10\n11\n"], stat),
+            (vec!["11\n", "11\n"], stat),
+            (vec!["10\n", "10\n"], "user_usec 1\n"),
+            (vec!["", ""], stat),
+        ] {
+            assert!(leaf_reading_with(leaf_files(procs, stat), 10, &family, 4, MS, one).is_none());
+        }
+        assert!(
+            leaf_reading_with(
+                leaf_files(vec!["10\n", "10\n"], stat),
+                10,
+                &family,
+                4,
+                MS,
+                |_| None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_family_member_inside_the_leaf_is_counted_once_by_the_leaf() {
+        let parents = BTreeMap::from([
+            ("managed-child:in".to_owned(), "a".to_owned()),
+            ("managed-child:out".to_owned(), "a".to_owned()),
+        ]);
+        let (parent, members) = ("a".to_owned(), BTreeSet::from([10, 11]));
+        let covered = BTreeMap::from([(&parent, &members)]);
+        assert!(counted_by_leaf(
+            &parents,
+            &covered,
+            &"managed-child:in".into(),
+            11
+        ));
+        assert!(!counted_by_leaf(
+            &parents,
+            &covered,
+            &"managed-child:out".into(),
+            12
+        ));
+        // The allocation itself carries the leaf reading.
+        assert!(!counted_by_leaf(&parents, &covered, &parent, 10));
+        assert!(!counted_by_leaf(
+            &parents,
+            &BTreeMap::new(),
+            &"managed-child:in".into(),
+            11
+        ));
+    }
+
+    /// Native CPU clock checks, run only when asked for on a Linux host.
+    #[cfg(target_os = "linux")]
+    fn cpu_clock_tests_enabled() -> bool {
+        std::env::var_os("CEDEGRID_TEST_CPU_CLOCK").is_some_and(|value| value == "1")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stat_cpu_ticks(pid: u32) -> u64 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<u64> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .skip(11)
+            .take(2)
+            .map(|field| field.parse().unwrap())
+            .collect();
+        fields[0] + fields[1]
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "native CPU clock check: set CEDEGRID_TEST_CPU_CLOCK=1 on a Linux host"]
+    fn the_process_clock_reads_a_busy_child_within_two_percent_of_wall_time() {
+        if !cpu_clock_tests_enabled() {
+            return;
+        }
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .unwrap();
+        let identity = crate::supervision::process_identity(child.id(), "cpu-clock", 0).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let tick = scheduler_tick_ns(None);
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+        let (started, ticks_before) = (Instant::now(), stat_cpu_ticks(child.id()));
+        let before = clock_reading(&identity, 1, tick).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let after = clock_reading(&identity, 1, tick).unwrap();
+        let (wall, ticks_after) = (started.elapsed(), stat_cpu_ticks(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (delta, _) = cpu_delta(before, after).unwrap();
+        let wall = wall.as_nanos() as f64;
+        assert!(
+            (delta as f64 - wall).abs() <= wall * 0.02,
+            "clock {delta} ns over {wall} ns of wall time"
+        );
+        let stat_ns = (ticks_after - ticks_before) * 1_000_000_000 / hz;
+        assert!(
+            delta.abs_diff(stat_ns) <= 2 * 1_000_000_000 / hz,
+            "clock {delta} ns against /proc stat {stat_ns} ns"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "native CPU clock check: set CEDEGRID_TEST_CPU_CLOCK=1 on a Linux host"]
+    fn the_process_clock_counts_threads_that_already_exited() {
+        if !cpu_clock_tests_enabled() {
+            return;
+        }
+        let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        // The main thread only joins; 100 short threads each spin for 10 ms.
+        let script = "import threading,time,sys\n\
+            def spin():\n    end=time.process_time()+0.01\n    while time.process_time()<end:pass\n\
+            sys.stdin.readline()\n\
+            for _ in range(100):\n    t=threading.Thread(target=spin);t.start();t.join()\n\
+            sys.stdin.readline()\n";
+        let mut child = std::process::Command::new(python)
+            .args(["-c", script])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let identity = crate::supervision::process_identity(child.id(), "cpu-clock", 0).unwrap();
+        let leader = |pid: u32| -> u64 {
+            std::fs::read_to_string(format!("/proc/{pid}/schedstat"))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let tick = scheduler_tick_ns(None);
+        std::thread::sleep(Duration::from_millis(300));
+        let (before, leader_before) = (
+            clock_reading(&identity, 1, tick).unwrap(),
+            leader(child.id()),
+        );
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+        // The threads together spin for at least 1 s of CPU time.
+        std::thread::sleep(Duration::from_secs(3));
+        let (after, leader_after) = (
+            clock_reading(&identity, 1, tick).unwrap(),
+            leader(child.id()),
+        );
+        child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+        child.wait().unwrap();
+        let (delta, _) = cpu_delta(before, after).unwrap();
+        assert!(
+            delta >= 950 * MS,
+            "clock counted {delta} ns of 1 s of exited threads"
+        );
+        assert!(
+            leader_after - leader_before < delta / 2,
+            "the leader thread alone ran {} ns",
+            leader_after - leader_before
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "native CPU clock check: set CEDEGRID_TEST_CPU_CLOCK=1 on a Linux host"]
+    fn an_exited_or_reused_pid_gives_no_clock_reading() {
+        if !cpu_clock_tests_enabled() {
+            return;
+        }
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let identity = crate::supervision::process_identity(child.id(), "cpu-clock", 0).unwrap();
+        assert!(clock_reading(&identity, 1, MS).is_some());
+        // Another process's start time at this PID is a reused PID.
+        let reused = crate::execution_model::ProcessIdentity {
+            start_time: identity.start_time + 1,
+            ..identity.clone()
+        };
+        assert!(clock_reading(&reused, 1, MS).is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(clock_reading(&identity, 1, MS).is_none());
     }
 }
