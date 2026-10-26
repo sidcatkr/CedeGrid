@@ -1077,9 +1077,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   capacity, so it reaches the fair share within ⌈(own usage − fair share) ÷ margin⌉ intervals
   (24 intervals, 12 s, from 98% with the 2% margin), and never goes below it. With demand that
   fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
-  when CPU is the only contended resource. Unmanaged processes of the account that runs
-  CedeGrid share that account's fair share with own work, so they are served as own work's
-  margin frees capacity rather than within these bounds.
+  when CPU is the only contended resource. These bounds are for other principals' demand:
+  unmanaged processes of the account that runs CedeGrid share that account's fair share with own
+  work, so they are served as own work's margin frees capacity.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
