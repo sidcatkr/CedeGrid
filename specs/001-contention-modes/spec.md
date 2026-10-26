@@ -123,6 +123,21 @@ thresholds.
   in use when PSI stays high while the external user needs no more.
 - Q: Does PSI from a cgroup that holds own work and other users' processes count? → A: Never.
   Such a cgroup counts as own, so its pressure is shown only and utilization still decides.
+- Q: What ramp target and time does Performance use on an idle host? → A: 90% of available
+  capacity minus the margin within 10 s, the new defaults of `performance_ramp_percent` and
+  `performance_ramp_s`; the keys' bounds do not change.
+- Q: How often does Performance scale CPU and GPU compute up? → A: One step per monitor interval
+  (500 ms by default) instead of one per 2 s. Yield First (30 s) and Neutral (10 s) do not
+  change, so the modes stay ordered.
+- Q: Do RAM and GPU memory scale up faster in Performance too? → A: No. They keep their current
+  Performance scale-up cooldown (2 s) and the reclaim backoff, since memory is slow to reclaim.
+- Q: How does admission keep pace if the 2 s heartbeat limits the ramp? → A: One Performance
+  heartbeat admits as much as fits within the allowance; `lifecycle.heartbeat_interval_ms`
+  keeps its default.
+- Q: What stays exactly as it is? → A: Reclaim (SC-002, SC-012, CPU reclaim of at least the margin
+  per interval down to the fair share), the margins, the floors, Guaranteed work and the anti-flap
+  rules (minimum step dwell, hysteresis, reversal tolerance). FR-071's one rise step per
+  scale-up interval now means per Performance compute interval.
 
 ## Terms
 
@@ -784,7 +799,8 @@ node reports with the expected per-resource values at each step.
 - **FR-033**: Recorded snapshots and policy inputs from 0.2 MUST remain replayable.
 - **FR-034**: Scale-up timing MUST be configured per resource and counted from the time that
   resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
-  interval (30, 10 or 2 s). GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
+  interval: 30 s in Yield First, 10 s in Neutral, and in Performance one monitor interval for CPU
+  and GPU compute but 2 s for RAM and GPU memory. GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
   set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Each resource's admission opens on its own cooldown.
   For CPU admission, running opportunistic work is charged at its p95 usage over
@@ -793,7 +809,8 @@ node reports with the expected per-resource values at each step.
   under-charged; pending work is charged in full, Guaranteed work at max(request, observed), and
   RAM and GPU memory admission stays request-based. Coordinator placement and the agent's launch
   check MUST admit CPU the same way. RAM admission and the agent's worker limit bound how many
-  jobs this CPU credit can admit.
+  jobs this CPU credit can admit. In Performance, one heartbeat MUST admit as much as fits within
+  the allowance; in the other modes the agent adds one worker per CPU and RAM cooldown.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
@@ -1036,8 +1053,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.
 - **SC-004**: In Performance:
-  - On an idle host, own work reaches the Performance ramp target within the ramp time. The
-    defaults are 80% of available capacity minus the margin, within 30 s.
+  - On an idle host, own work reaches the Performance ramp target within the ramp time, on CPU
+    and on GPU compute. The defaults are 90% of available capacity minus the margin, within
+    10 s.
   - When an external workload starts, it gets its demanded usage, up to its fair share, within
     the reclaim bounds of SC-012.
 - **SC-005**: In every mode and with every caution option active:
@@ -1102,14 +1120,14 @@ times assume the default 500 ms monitor interval.
 | CPU reclaim | 2 monitor intervals in Yield First and Neutral; in Performance at least the margin per interval down to the fair share | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval, except for Performance, which keeps what external demand does not take, and a probed small demand. |
 | Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
 | Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
-| Performance scale-up | 1 step per 2 s | One heartbeat interval per step, which supports the 30 s ramp target. |
+| Performance scale-up | CPU and GPU compute: 1 step per monitor interval (500 ms); RAM and GPU memory: 1 step per 2 s | Compute is reclaimed within an interval, so it can rise as fast as it is observed; memory keeps its damping because it is slow to reclaim. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
 | Neutral margin | 5% of capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand room to show growth without idling compute that is reclaimed within an interval. |
 | Performance margin | 2% of capacity (CPU, GPU compute), plus the floors (memory) | The smallest room that still shows external growth; under contention Performance keeps what external demand does not take. |
 | CPU idle reserve | max(`cpu.reserve_physical_cores`, the mode's margin); reserve default 0 | A physical-core reserve and a margin both idle compute; one is enough. |
 | Probe hysteresis | The contention floor (1% of capacity) | A satisfied principal gets that much room to show growth before it contends again. |
 | CPU admission usage window | p95 over 60 s | CPU is compressible: caps and the kernel share it if everyone spikes, so admission follows recent usage rather than requests. |
-| Performance ramp | 80% of available minus margin within 30 s | Admission advances on the 2 s heartbeat and scale-up is damped. The originally proposed 90% in 10 s is unproven. |
+| Performance ramp | 90% of available minus margin within 10 s | Compute scales up every interval and one heartbeat admits as much as fits; reclaim, margins, floors and the anti-flap rules are unchanged. |
 | Reclaim bound: RAM, GPU memory | Hint deadline + drain timeout + termination grace + 1 interval (10.5 s) | The sum of the existing deadlines; nothing else waits. |
 | Hint deadline | 5 s | Long enough for a cooperative worker to reach a safe point; short enough to bound memory reclaim. |
 | Guaranteed hint deadline | 5 s, 1–30 s | The same safe-point argument as the hint deadline. Raising it only delays Guaranteed release above the critical level. |

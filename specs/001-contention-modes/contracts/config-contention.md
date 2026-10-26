@@ -27,8 +27,8 @@ neutral_margin_percent = 5          # cpu and gpu_compute only; YF >= neutral >=
 performance_margin_percent = 2      # cpu and gpu_compute only
 neutral_convergence_s = 60
 neutral_tolerance_points = 15
-performance_ramp_s = 30
-performance_ramp_percent = 80
+performance_ramp_s = 10
+performance_ramp_percent = 90
 reclaim_s = 5                       # cpu and gpu_compute only, 1-60: Neutral and Performance escalation time
 hint_deadline_s = 5                 # 1-30
 unknown_window_intervals = 3        # 1-20
@@ -37,7 +37,7 @@ psi_some_percent = 10               # cpu only, 1-100: external PSI some avg10 a
 hysteresis_percent = 50
 min_step_dwell_intervals = 3        # 1-10
 pause_bound_s = 10                  # cpu and gpu_compute only, 1-60
-scale_up_step_interval_s = 10       # ladder reversal rate; unset, 30, 10 or 2 by mode
+scale_up_step_interval_s = 10       # ladder reversal rate; unset: 30 s, 10 s, or in Performance one interval (compute) or 2 s (memory)
 scale_up_cooldown_ms = 10000        # cpu, ram and gpu_memory; admission wait; unset, the mode's scale-up interval
 principal_min_percent = 1           # usage from which a principal contends; above 1 needs "relaxed_detection"
 admission_usage_window_s = 60       # cpu only, 1-3600: running opportunistic CPU is admitted at its p95 usage over it
@@ -66,8 +66,9 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
 - `contention.cpu.scale_up_cooldown_ms` sets how long CPU must stay stable before own work grows
   on it, at startup and after it was unsafe. `contention.ram.scale_up_cooldown_ms` does the same
   for RAM. Each resource waits only for its own cooldown.
-- Unset, each takes its resource's mode scale-up interval: 30000 in Yield First, 10000 in Neutral
-  and 2000 in Performance, or `scale_up_step_interval_s` × 1000 when that is set.
+- Unset, each takes its resource's mode scale-up interval: 30000 in Yield First, 10000 in Neutral,
+  and in Performance the monitor interval on CPU and 2000 on RAM, or `scale_up_step_interval_s` ×
+  1000 when that is set.
 - GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
   `gpu.scale_up_cooldown_ms`, else the mode's scale-up interval; neither affects CPU or RAM
   (FR-034).

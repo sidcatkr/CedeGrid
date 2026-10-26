@@ -59,10 +59,10 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `neutral_margin_percent` | cpu, gpu_compute | 5 | between `performance_margin_percent` and `yield_first_margin_percent`; below 5 needs `reduced_margin` |
 | `performance_margin_percent` | cpu, gpu_compute | 2 | 0–50; below 2 needs `reduced_margin` |
 | `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
-| `scale_up_step_interval_s` | all | 30 (Yield First), 10 (Neutral), 2 (Performance) | ≥ 1 |
+| `scale_up_step_interval_s` | all | unset: 30 s (Yield First), 10 s (Neutral); in Performance one monitor interval on CPU and GPU compute and 2 s on RAM and GPU memory | ≥ 1; when set, applies to every mode |
 | `neutral_convergence_s` | all | 60 | ≥ 1; a success-criteria parameter read by the scenario tests and validation tools, not by the policy |
 | `neutral_tolerance_points` | all | 15 | 1–50; success-criteria parameter |
-| `performance_ramp_s`, `performance_ramp_percent` | all | 30, 80 | percent 1–100; success-criteria parameters |
+| `performance_ramp_s`, `performance_ramp_percent` | all | 10, 90 | percent 1–100; success-criteria parameters |
 | `reclaim_s` | cpu, gpu_compute | 5 | 1–60; how long a Neutral or Performance step has to free the contended amount before the next step; memory moves on at the hint deadline |
 | `hint_deadline_s` | all | 5 | 1–30 |
 | `unknown_window_intervals` | all | 3 | 1–20 |
@@ -71,7 +71,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `noise_tolerance_mib` | gpu_memory | 256 | 0–1024, and at agent start at most half of each device's floor; above 256 needs `relaxed_detection` |
 | `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms`; below 20 needs `relaxed_detection` |
 | `attribution_tolerance_percent` | gpu_compute | 15 | 1–30; summed per-process utilization within this many points of device utilization makes the external amount measured (FR-021); above 15 needs `relaxed_detection`; provisional until T088 |
-| `scale_up_cooldown_ms` | cpu, ram, gpu_memory | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral), 2000 (Performance) | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). On GPU memory a set legacy `gpu.scale_up_cooldown_ms` applies when this key is unset. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
+| `scale_up_cooldown_ms` | cpu, ram, gpu_memory | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral); in Performance the monitor interval (500) on CPU and 2000 on RAM and GPU memory | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). On GPU memory a set legacy `gpu.scale_up_cooldown_ms` applies when this key is unset. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |
 | `memory_peak_window_s` | ram, gpu_memory | 300 | ≥ 1 (FR-060); below 300 needs `relaxed_detection` |
 | `admission_usage_window_s` | cpu | 60 | 1–3600; running opportunistic CPU is charged for admission at its p95 usage over this window, once it has a full window of samples (FR-034) |
@@ -243,7 +243,7 @@ as `m_YF ≥ m_N ≥ m_P` (FR-065).
 Yield First caps to its margin first; activity of unknown amount still takes it to 0. `S`
 counts a satisfied principal at its satisfied demand. Targets never go below 0. Guaranteed CPU
 is never capped below its request. Neutral and Performance differ in idle margin (5% and 2%),
-in their contended target and in scale-up rate (10 s and 2 s per step).
+in their contended target and in scale-up rate (10 s per step, and one monitor interval per step on CPU and GPU compute).
 
 ## DemandProbe (`src/contention.rs`, kept by `PolicyEngine` per compute resource)
 

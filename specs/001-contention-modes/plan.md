@@ -406,6 +406,48 @@ FR-072, from item 013's pinned rules:
   - VII: the config key is additive. `held_back.contention_psi` is an optional field of the
     unreleased `contention/1` report.
 
+## Faster Performance ramp (item 017, 2026-10-26)
+
+Spec: Session 2026-10-26, SC-004, FR-034 and the defaults table.
+- **Target**: on an idle host, Performance reaches 90% of available capacity minus the margin
+  within 10 s. These are the new defaults of `performance_ramp_percent` and `performance_ramp_s`.
+- **Scale-up interval**: in Performance, CPU and GPU compute rise one step per monitor interval
+  (500 ms by default). RAM and GPU memory keep 2 s and the reclaim backoff (FR-034, FR-061).
+  Yield First (30 s) and Neutral (10 s) are unchanged.
+  - `ResourceThresholds` records whether its resource is compute.
+  - `scale_up_interval_ms(mode, interval_ms)` and `cooldown_ms(mode, interval_ms)` replace the
+    seconds-only forms.
+  - A set `scale_up_step_interval_s` still overrides every mode.
+  - The ladder (`LadderTiming::scale_up_ms`), the allowance's rise rate (FR-071) and the CPU and
+    RAM admission cooldowns all read the same interval, so a rise still publishes at most one
+    step per interval.
+  - A held step still reverses no faster than the minimum step dwell, which is unchanged: the
+    ladder waits for the larger of the dwell and the scale-up interval. The idle-host ramp
+    target concerns admission and uncapped growth, where no step is held.
+- **Admission (R4)**:
+  - The limit today is the agent's parallelism. It grows by one worker per the larger of the CPU
+    and RAM cooldowns, and offers arrive on the 2 s heartbeat, so a host that needs eight workers
+    takes about 16 s.
+  - In Performance, the agent reports launch slots up to its worker limit once its growth timer
+    allows. The coordinator's placement then admits every task that fits within the allowance in
+    one heartbeat.
+  - The rule becomes a pure function, `launch_slots`, in `src/agent/service.rs` so the ramp
+    simulation can use it. `lifecycle.heartbeat_interval_ms` keeps its default.
+- **Unchanged**: reclaim (SC-002, SC-012), margins, floors, Guaranteed work, minimum step dwell,
+  hysteresis, reversal tolerance, and the memory cooldowns and backoff.
+- **Tests first** (tests/contention.rs):
+  - the idle ramp reaches the target within 10 s for CPU and for GPU compute;
+  - Yield First and Neutral ramps are unchanged, with the modes ordered at every interval;
+  - an external workload started mid-ramp gets its demand up to its fair share within SC-012;
+  - a process that appears and disappears every interval causes no cap/uncap cycling;
+  - RAM and GPU memory scale-up timing is unchanged.
+- **Gate**: the time to 90% on an idle test host, and a contender started mid-ramp
+  (`native-gates.md`).
+- **Constitution**:
+  - II: more work-conserving; reclaim and floors are unchanged.
+  - III and IV: no change; the policy stays pure.
+  - VII: the defaults change in config docs and the contract; no wire field changes.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

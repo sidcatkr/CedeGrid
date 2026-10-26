@@ -1045,6 +1045,27 @@ no behavior beyond what those commits did.
   shared by own work and other users' processes counts as own and its pressure is never counted,
   per FR-072 (partial).
 
+
+## Phase 14: Convergence (item 017)
+
+- [ ] T168 Write the ramp tests first in tests/contention.rs:
+  - on an idle simulated host, Performance reaches 90% of available capacity minus the margin within 10 s, for CPU and for GPU compute;
+  - Yield First and Neutral ramps are unchanged, with Yield First ≤ Neutral ≤ Performance at every interval;
+  - an external workload started mid-ramp gets its demand, up to its fair share, within SC-012;
+  - an external process that appears and disappears every interval causes no cap/uncap cycling;
+  - RAM and GPU memory scale-up timing is unchanged.
+
+  Per SC-004 (missing).
+- [ ] T169 Scale CPU and GPU compute up one step per monitor interval in Performance, and keep RAM and GPU memory at 2 s, through `ResourceThresholds` in src/contention.rs. The ladder, the allowance's rise (FR-071) and the CPU and RAM admission cooldowns read the same interval. Per FR-034 (missing).
+- [ ] T170 Make the agent's launch-slot rule a pure function in src/agent/service.rs, so one Performance heartbeat admits as much as fits within the allowance, and test it. Per FR-034 and R4 (missing).
+- [ ] T171 Measure CPU `held_back` against the ancestor CPU ceiling the budget uses, and show the gap as its own `ceiling` line in `doctor`, observe and the node report. Test first: 4000 m scoped, 2000 m ceiling, no external user, contention 0. Per SC-016 (partial).
+- [ ] T172 Set the defaults `performance_ramp_s` = 10 and `performance_ramp_percent` = 90 in src/contention.rs, and update docs/guarantees.md (the ramp target, and the scale-up rates at :158). Per the defaults table (partial).
+- [ ] T173 Add the ramp gate to native-gates.md: time to 90% on an idle test host, and a contender started mid-ramp, with exact commands. It is written, not run; it runs only with the user's approval. Per the plan's ramp gate (missing).
+- [ ] T174 Add an end-to-end supervisor test with a fake backend that supports the RAM cap, in tests/managed_supervision.rs, covering the Guaranteed clamp, the recorded target, the unprompted report, keeping the cap under a hint, and reconcile on query. Per FR-011 (missing; the D.10 gap in report 011).
+- [ ] T175 Resolve `source-manifest.json`: remove the stale tracked copy if nothing reads it, and keep generated copies out of the tree; otherwise regenerate it with the pack tool and test that it is current. Per Constitution: source export (contradicts).
+- [ ] T176 Make the helper that creates `.agent-test-*` directories clean up on success, failure and panic with a drop guard, keeping the home-only guard; then delete the leaked directories. Per CLAUDE.md test hygiene (partial).
+- [ ] T177 Release the agent lock explicitly, so a descriptor inherited between fork and exec cannot keep it; the lock test must pass 20 runs in a row with the default thread count. Per the agent lock (partial).
+
 ---
 
 ## Dependencies & Execution Order

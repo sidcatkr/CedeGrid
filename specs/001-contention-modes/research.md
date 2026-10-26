@@ -349,3 +349,23 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
     hysteresis; T117 can revisit it with evidence.
 - **Verify natively** (T141 gate): which slices expose `cpu.pressure` to a non-root user, and how
   external avg10 behaves under a CPU-bound load in another slice.
+
+## R17. Faster Performance ramp (item 017)
+
+- **Decision**:
+  - Performance compute scales up one step per monitor interval, while memory keeps 2 s and the
+    reclaim backoff.
+  - The ramp target becomes 90% of available minus the margin within 10 s.
+  - In Performance, one heartbeat admits as much as fits within the allowance (launch slots up
+    to the worker limit, bounded by placement).
+- **Rationale**:
+  - Compute is reclaimed within one interval, so its rise can follow what each interval
+    observes; SC-012's per-interval reclaim already bounds the cost of a wrong rise.
+  - The measured limit was the agent's admission pace: one worker per 2 s cooldown on the 2 s
+    heartbeat, about 16 s for eight workers.
+  - Memory reclaim waits on hints and deadlines, so its damping stays.
+- **Alternatives**:
+  - A shorter heartbeat (rejected by the decision; it costs coordinator load on every node).
+  - Faster memory scale-up (rejected: memory is slow to reclaim).
+  - A larger scale-up step instead of a shorter interval (it would change the margin-sized step
+    that FR-071 and the ladder share).
