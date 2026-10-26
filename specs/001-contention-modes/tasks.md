@@ -947,11 +947,14 @@ each step.
   - `cargo check --target x86_64-pc-windows-msvc` for the client paths, where the target is
     installed.
 - [X] T121 Run quickstart §1–3 and §6–8, and record the results.
-- [ ] T138 Add a runtime RAM cap step on delegated cgroups (B14): `memory.high` on the allocation's
+- [X] T138 Add a runtime RAM cap step on delegated cgroups (B14): `memory.high` on the allocation's
   leaf before the hint, verified by readback, in `src/cgroup.rs` and `src/actuation.rs`, with a
   native gate in `tests/cgroup.rs` (deferred like T054). Rootless backends keep the cap step
   unavailable for RAM. Amend FR-011, plan H7 and research R4 in the same change, since memory
   then starts at a cap where a delegated cgroup allows it.
+  *Done: the cap is max(target, unevictable + anon without swap + `noise_tolerance_mib`), never
+  below a Guaranteed request or above a launch `memory.high`; an ineffective cap is raised to
+  current usage; the native gate is deferred like T054 (see [native-gates.md](native-gates.md)).*
 - [X] T150 After US5, implement the allowance signal (FR-071), tests first: the supervisor
   publishes an optional `allowance` per resource in the resource-target file whenever it changes,
   also without a target; Python `on_resource_allowance` and TypeScript `onResourceAllowance`

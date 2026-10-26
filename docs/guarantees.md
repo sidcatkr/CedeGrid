@@ -214,6 +214,20 @@ Every opportunistic allocation drains before any Guaranteed one, and a Guarantee
 allocation keeps its CPU request in every tier. An allowance is at most what the job's own
 mode's target leaves it, and the room that bound leaves goes to the others.
 
+On a delegated cgroup with `memory.high` authorized, RAM contention starts with a cap:
+the supervisor writes `memory.high` on the allocation's own leaf, after the same checks as
+every runtime step, and reads it back. The cap is never below what the leaf cannot
+reclaim (its unevictable memory and, when the leaf or host has no swap, its anonymous
+memory, plus `noise_tolerance_mib`), never below a Guaranteed request, and never above a
+launch `memory.high`. A cap held above its target for that reason only stops growth
+(`ram_cap_growth_stop`), and the hint frees the rest. If `memory.events` `high` keeps
+rising for the step dwell while `memory.current` falls by less than the noise tolerance,
+the cap is raised to current usage and the hint follows (`ram_cap_ineffective`). A failed
+write or readback makes the cap unavailable for that allocation (`ram_cap_refused`).
+Reversal follows the memory rule and restores the launch `memory.high`, `max` unless
+configured. `memory.max`, `memory.low` and `memory.min` are never runtime steps; rootless
+backends have no RAM cap.
+
 Memory contention starts with a resource target for workers that read targets
 (see [worker protocol](worker-protocol.md#resource-targets)); usage still above the
 target at the hint deadline, 5 s by default, leads to a drain. Each supervisor reports
@@ -347,6 +361,9 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `step_reversed_envelope_restored` | A step taken for the operator envelope was relaxed because own work is back within it. |
 | `step_reversed_drain_lifted` | A step taken for an operator drain was relaxed because the drain was lifted. |
 | `step_skipped_unavailable` | A step this allocation cannot take was skipped for the next one. |
+| `ram_cap_growth_stop` | The RAM cap holds above its target, at what the leaf cannot reclaim, so it only stops growth and the hint frees the rest. |
+| `ram_cap_ineffective` | The RAM cap throttled without freeing memory, so it was raised to current usage and the hint frees the rest. |
+| `ram_cap_refused` | A RAM cap write or its readback failed, so the cap is unavailable for this allocation and the hint follows. |
 | `allocation_unknown_hold` | An allocation's usage is unknown, so it is charged at the larger of its request and last known usage and its step holds. |
 | `measurement_unknown_hold` | Own usage exceeds what the host reports beyond the known error, so the resource holds. |
 | `inconsistent_within_tolerance` | Own usage exceeds what the host reports within the known error, so external usage is clamped. |

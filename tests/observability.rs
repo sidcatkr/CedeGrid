@@ -433,6 +433,66 @@ fn the_node_cooldown_names_the_legacy_flags_it_covers() {
     );
 }
 
+/// Doctor offers the RAM cap only where a delegated leaf has `memory.high`
+/// authorized, and shows a RAM cap step in MiB with its catalog codes.
+#[test]
+fn doctor_shows_the_ram_cap_where_the_leaf_allows_it() {
+    use cedegrid::explain::{available_steps, doctor_text};
+    let mut cfg = config();
+    assert_eq!(available_steps(&cfg)["ram"], ["hint", "drain"]);
+    cfg.cgroup.enabled = true;
+    cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/example.slice".into());
+    cfg.cgroup.cpu_weight = None;
+    cfg.cgroup.authorized_controls = vec!["cgroup.procs".into(), "memory.high".into()];
+    assert_eq!(available_steps(&cfg)["ram"], ["cap", "hint", "drain"]);
+    assert_eq!(available_steps(&cfg)["gpu_memory"], ["hint", "drain"]);
+    // A floor breach of 3108 MiB on the 256 GiB host, with the RAM cap available.
+    let mut snapshot = host();
+    snapshot.available_ram_mib = Some(10_000);
+    let input = PolicyInput {
+        allocations: vec![Allocation {
+            id: "job".into(),
+            class: AllocationClass::Opportunistic,
+            phase: AllocationPhase::Running,
+            requested: Resources {
+                ram_mib: 1024,
+                ..Resources::default()
+            },
+            observed: Some(Resources {
+                ram_mib: 20_000,
+                ..Resources::default()
+            }),
+            observed_upper: None,
+            modes: BTreeMap::new(),
+        }],
+        facts: BTreeMap::from([(
+            "job".to_string(),
+            AllocationFacts {
+                hint_ready: true,
+                observes_drain: true,
+                ram_cap: true,
+                step_codes: BTreeMap::from([(ResourceKey::Ram, "ram_cap_growth_stop".into())]),
+                ..AllocationFacts::default()
+            },
+        )]),
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snapshot, &input, 0)
+        .unwrap();
+    assert_catalogued(&decision);
+    let text = doctor_text(&cfg, &snapshot, &decision, &[]);
+    assert!(
+        text.contains("step yield_step_cap to 16 892 MiB on job: floor_breach"),
+        "{text}"
+    );
+    assert!(
+        text.contains("reason ram_cap_growth_stop: allocation job:"),
+        "{text}"
+    );
+    assert!(text.contains("  ram: cap, hint, drain"), "{text}");
+}
+
 /// Every code the policy reports, wherever it reports it, is in the catalog
 /// (T113), across floors, envelopes, unknown readings, the node cap, drains and
 /// both GPU compute paths.

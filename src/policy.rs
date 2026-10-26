@@ -1474,6 +1474,7 @@ impl PolicyEngine {
                 // The supervisor reports the steps, the hint among them, that it cannot
                 // apply. Only a worker that acknowledged its target file takes a hint
                 // (FR-062); recordings without facts have no target channel.
+                // A RAM cap needs a backend that reports it can apply one.
                 let facts = |id: &str| {
                     let mut facts = input.facts.get(id).cloned().unwrap_or_default();
                     if !facts.hint_ready {
@@ -1482,6 +1483,13 @@ impl PolicyEngine {
                             .entry(key.clone())
                             .or_default()
                             .insert(YieldStep::Hint);
+                    }
+                    if key == ResourceKey::Ram && !facts.ram_cap {
+                        facts
+                            .unavailable
+                            .entry(key.clone())
+                            .or_default()
+                            .insert(YieldStep::Cap);
                     }
                     facts
                 };
@@ -1847,6 +1855,17 @@ impl PolicyEngine {
                             && !facts(&victim.id).observes_drain
                         {
                             next.step = YieldStep::Terminate;
+                        }
+                        // A Guaranteed RAM cap never goes below the request, as on
+                        // CPU (FR-024).
+                        if let Some(next) = decision.state.as_mut()
+                            && kind == ResourceKind::Ram
+                            && next.step == YieldStep::Cap
+                            && let Some(allocation) = allocation.filter(|a| guaranteed(a))
+                        {
+                            next.target = next
+                                .target
+                                .map(|target| target.max(allocation.requested.ram_mib));
                         }
                         if let Some(next) = &decision.state
                             && next.step == YieldStep::Hint
@@ -2607,6 +2626,22 @@ impl PolicyEngine {
                 ResourceKey::GpuCompute(_) => GPU_COMPUTE_CAPACITY,
             };
             statuses.entry(key).or_default().held_back = Some(held.with_capacity(capacity));
+        }
+        // What the supervisors report about how their steps hold, as catalog codes.
+        for allocation in &input.allocations {
+            let Some(facts) = input.facts.get(&allocation.id) else {
+                continue;
+            };
+            for (key, code) in &facts.step_codes {
+                if let Some(text) = crate::contention::reason_text(code) {
+                    note(
+                        &mut statuses,
+                        key.clone(),
+                        code,
+                        format!("allocation {}: {text}", allocation.id),
+                    );
+                }
+            }
         }
         // Admission per resource: blocked until its cause changes, held while it
         // waits for a measurement or a cooldown (FR-028, FR-038).

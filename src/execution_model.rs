@@ -222,6 +222,23 @@ pub trait Actuator {
     fn take_detail(&mut self) -> Option<String> {
         None
     }
+    /// The target in effect where the mechanism set a different one than asked.
+    fn applied_target(&self, _kind: crate::contention::ResourceKind) -> Option<u64> {
+        None
+    }
+    /// A catalog code for why a step holds above its target or became unavailable.
+    fn step_code(&self, _kind: crate::contention::ResourceKind) -> Option<&'static str> {
+        None
+    }
+    /// Match controls to the recorded steps when an agent reattaches: adopt a
+    /// recorded step, and undo a limit no step records.
+    fn reconcile(
+        &mut self,
+        _family: &mut dyn Family,
+        _applied: &BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Undo every runtime step before drain, termination or exit.
     fn release(&mut self, family: &mut dyn Family) -> Result<()>;
 }
@@ -233,6 +250,10 @@ pub struct ActuatorSettings {
     pub requested: Resources,
     /// Duty-cycle period for a rootless CPU cap: the monitor interval.
     pub period: std::time::Duration,
+    /// RAM cap: the noise tolerance above what a leaf cannot reclaim.
+    pub ram_noise_tolerance_mib: u64,
+    /// RAM cap: how long `memory.high` may throttle without freeing memory.
+    pub ram_calm_window: std::time::Duration,
 }
 
 pub trait LaunchBackend {

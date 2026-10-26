@@ -183,6 +183,8 @@ fn options() -> SupervisorOptions {
         release_confirm_timeout_ms: 2_000,
         duty_period_ms: 100,
         hint_deadline_ms: 5_000,
+        ram_noise_tolerance_mib: 256,
+        ram_calm_window_ms: 1_500,
     }
 }
 fn run(
@@ -1093,6 +1095,8 @@ mod actuation {
             lease_ms: 30_000,
             duty_period_ms: 100,
             hint_deadline_ms: 5_000,
+            ram_noise_tolerance_mib: 256,
+            ram_calm_window_ms: 1_500,
             ..options()
         }
     }

@@ -867,6 +867,8 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         release_confirm_timeout_ms: config.execution.release_confirm_timeout_ms,
         duty_period_ms: config.monitor.interval_ms,
         hint_deadline_ms: config.contention.hint_deadline_ms(),
+        ram_noise_tolerance_mib: config.ram_cap_check().0,
+        ram_calm_window_ms: config.ram_cap_check().1,
     };
     let outcome = match supervision::supervise(
         &request,

@@ -5,7 +5,7 @@
 //! never enables controllers, changes ancestors, moves existing processes, or
 //! treats RAM controls as GPU memory enforcement. Linux runtime behavior must be
 //! verified on an authorized Linux host; fixture tests are not runtime evidence.
-use crate::contention::{ResourceKind, YieldStep};
+use crate::contention::{ResourceKey, ResourceKind, StepRequest, YieldStep};
 use crate::execution_model::{
     Actuator, ActuatorSettings, AllocationClass, ControlEvidence, Family, GateSetup, LaunchBackend,
     LaunchRequest, ProcessIdentity,
@@ -13,8 +13,9 @@ use crate::execution_model::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -27,8 +28,10 @@ const WRITABLE_CONTROLS: &[&str] = &[
     "cgroup.kill",
     "cgroup.freeze",
 ];
-/// Controls that runtime yield steps write, when the operator authorizes them.
-const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cpu.max", "cgroup.freeze"];
+/// Controls that runtime yield steps write, when the operator authorizes them. A
+/// RAM cap is `memory.high` only; `memory.max`, `memory.low` and `memory.min` are
+/// never runtime steps.
+const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cpu.max", "cgroup.freeze", "memory.high"];
 
 /// CPU bandwidth is a quota per period, unlike the relative `cpu.weight`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +270,53 @@ pub trait LeafIo {
     fn same_leaf(&self) -> Result<bool>;
     fn read(&self, control: &str) -> Result<String>;
     fn write(&self, control: &str, value: &str) -> Result<()>;
+    /// The host's swap, in bytes.
+    fn host_swap_bytes(&self) -> Result<u64> {
+        let meminfo = std::fs::read_to_string("/proc/meminfo")?;
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix("SwapTotal:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .context("no SwapTotal in /proc/meminfo")?
+            .parse::<u64>()
+            .map(|kib| kib.saturating_mul(1024))
+            .map_err(Into::into)
+    }
+}
+
+/// The lowest `memory.high` a RAM cap sets: what the leaf cannot reclaim, its
+/// unevictable memory and, without swap, its anonymous memory, plus the noise
+/// tolerance. A lower limit would only stall the job and free nothing.
+pub fn ram_cap_floor_bytes(stat: &str, swap: bool, noise_bytes: u64) -> Result<u64> {
+    let field = |name: &str| -> Result<u64> {
+        stat.lines()
+            .find_map(|line| {
+                let mut parts = line.split_whitespace();
+                (parts.next() == Some(name)).then(|| parts.next()).flatten()
+            })
+            .with_context(|| format!("memory.stat has no {name}"))?
+            .parse::<u64>()
+            .map_err(Into::into)
+    };
+    let anon = if swap { 0 } else { field("anon")? };
+    Ok(field("unevictable")?
+        .saturating_add(anon)
+        .saturating_add(noise_bytes))
+}
+
+/// The `high` count of `memory.events`.
+fn memory_high_events(io: &dyn LeafIo) -> Result<u64> {
+    io.read("memory.events")?
+        .lines()
+        .find_map(|line| line.strip_prefix("high "))
+        .context("memory.events has no high count")?
+        .trim()
+        .parse::<u64>()
+        .map_err(Into::into)
+}
+
+fn memory_current(io: &dyn LeafIo) -> Result<u64> {
+    Ok(io.read("memory.current")?.trim().parse::<u64>()?)
 }
 
 /// Write a runtime-step control only while the leaf is unchanged and holds
@@ -319,6 +369,7 @@ fn write_checked(io: &dyn LeafIo, control: &str, value: &str) -> Result<String> 
 pub struct DirectoryLeaf {
     path: PathBuf,
     identity: (u64, u64),
+    host_swap: u64,
 }
 
 #[cfg(unix)]
@@ -330,7 +381,14 @@ impl DirectoryLeaf {
         Ok(Self {
             path: path.to_owned(),
             identity: (metadata.dev(), metadata.ino()),
+            host_swap: 0,
         })
+    }
+
+    /// The host swap this fixture reports; none unless set.
+    pub fn with_host_swap(mut self, bytes: u64) -> Self {
+        self.host_swap = bytes;
+        self
     }
 
     fn file(&self, control: &str) -> Result<PathBuf> {
@@ -355,6 +413,19 @@ impl LeafIo for DirectoryLeaf {
     fn write(&self, control: &str, value: &str) -> Result<()> {
         Ok(std::fs::write(self.file(control)?, value)?)
     }
+    fn host_swap_bytes(&self) -> Result<u64> {
+        Ok(self.host_swap)
+    }
+}
+
+/// A RAM cap in effect, and what the ineffective-cap check compares against.
+struct RamCap {
+    mib: u64,
+    /// The cap sits above its target, so it only stops growth.
+    growth_stop: bool,
+    high_events: u64,
+    current: u64,
+    throttled_since: Option<Instant>,
 }
 
 /// Runtime steps through authorized delegated controls (research R4), with the
@@ -373,6 +444,14 @@ pub struct CgroupActuator<L: LeafIo> {
     fallback: crate::actuation::RootlessActuator,
     written: std::collections::BTreeMap<ResourceKind, BTreeSet<&'static str>>,
     detail: Option<String>,
+    /// The launch `memory.high`, which a RAM cap never exceeds and reversal restores.
+    memory_high: String,
+    requested_ram_mib: u64,
+    ram_noise_bytes: u64,
+    ram_calm_window: Duration,
+    ram_cap: Option<RamCap>,
+    /// Why the RAM cap step is unavailable for this allocation, as a catalog code.
+    ram_refused: Option<&'static str>,
 }
 
 impl<L: LeafIo> CgroupActuator<L> {
@@ -396,6 +475,14 @@ impl<L: LeafIo> CgroupActuator<L> {
             fallback: crate::actuation::RootlessActuator::new(settings),
             written: Default::default(),
             detail: None,
+            memory_high: config
+                .memory_high_mib
+                .map_or_else(|| "max".into(), |mib| mib.saturating_mul(MIB).to_string()),
+            requested_ram_mib: settings.requested.ram_mib,
+            ram_noise_bytes: settings.ram_noise_tolerance_mib.saturating_mul(MIB),
+            ram_calm_window: settings.ram_calm_window,
+            ram_cap: None,
+            ram_refused: None,
         }
     }
 
@@ -442,6 +529,7 @@ impl<L: LeafIo> CgroupActuator<L> {
             let value = match control {
                 "cpu.weight" => self.weight.clone(),
                 "cpu.max" => self.cpu_max.clone(),
+                "memory.high" => self.memory_high.clone(),
                 _ => "0".into(),
             };
             if let Err(error) = runtime_write(&self.leaf, &verified, control, &value) {
@@ -451,8 +539,98 @@ impl<L: LeafIo> CgroupActuator<L> {
         }
         if !kept.is_empty() {
             self.written.insert(kind, kept);
+        } else if kind == ResourceKind::Ram {
+            self.ram_cap = None;
         }
         result
+    }
+
+    /// Cap RAM through `memory.high`, never below what the leaf can reclaim, below
+    /// a Guaranteed request, or above the launch limit. A refused write or readback
+    /// makes the cap unavailable for this allocation.
+    fn cap_ram(&mut self, family: &dyn Family, target: Option<u64>) -> Result<()> {
+        let target_bytes = target.unwrap_or(0).saturating_mul(MIB);
+        let planned = (|| -> Result<(u64, u64)> {
+            let swap = self
+                .leaf
+                .read("memory.swap.max")
+                .map_or(true, |value| value.trim() != "0")
+                && self.leaf.host_swap_bytes().unwrap_or(0) > 0;
+            let floor =
+                ram_cap_floor_bytes(&self.leaf.read("memory.stat")?, swap, self.ram_noise_bytes)?;
+            let guaranteed = if self.class == AllocationClass::Guaranteed {
+                self.requested_ram_mib.saturating_mul(MIB)
+            } else {
+                0
+            };
+            let mut bytes = target_bytes.max(floor).max(guaranteed);
+            if let Ok(Limit::Value(launch)) = self.memory_high.parse::<Limit>() {
+                bytes = bytes.min(launch);
+            }
+            Ok((bytes.div_ceil(MIB).saturating_mul(MIB), floor))
+        })();
+        let result = planned.and_then(|(bytes, floor)| {
+            self.write(family, ResourceKind::Ram, "memory.high", &bytes.to_string())?;
+            self.ram_cap = Some(RamCap {
+                mib: bytes / MIB,
+                growth_stop: floor > target_bytes && bytes > target_bytes,
+                high_events: memory_high_events(&self.leaf)?,
+                current: memory_current(&self.leaf)?,
+                throttled_since: None,
+            });
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.ram_refused = Some("ram_cap_refused");
+            let _ = self.restore(family, ResourceKind::Ram);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// A cap that keeps throttling for a calm window while usage does not fall by
+    /// the noise tolerance frees nothing: raise it to current usage, so it only
+    /// stops growth, and leave the rest to the hint.
+    fn check_ram_cap(&mut self, family: &dyn Family) -> Result<()> {
+        if self.ram_refused.is_some() {
+            return Ok(());
+        }
+        let Some(cap) = self.ram_cap.as_mut() else {
+            return Ok(());
+        };
+        let high = memory_high_events(&self.leaf)?;
+        let current = memory_current(&self.leaf)?;
+        let throttled = high > cap.high_events;
+        cap.high_events = high;
+        if current.saturating_add(self.ram_noise_bytes) <= cap.current || !throttled {
+            if current.saturating_add(self.ram_noise_bytes) <= cap.current {
+                cap.current = current;
+            }
+            cap.throttled_since = None;
+            return Ok(());
+        }
+        let since = *cap.throttled_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < self.ram_calm_window {
+            return Ok(());
+        }
+        let raised = current.div_ceil(MIB).max(cap.mib);
+        self.write(
+            family,
+            ResourceKind::Ram,
+            "memory.high",
+            &raised.saturating_mul(MIB).to_string(),
+        )?;
+        if let Some(cap) = self.ram_cap.as_mut() {
+            cap.mib = raised;
+            cap.growth_stop = true;
+        }
+        self.ram_refused = Some("ram_cap_ineffective");
+        self.detail = Some(format!(
+            "ram_cap_ineffective: memory.high throttled for {} ms without freeing {} MiB; raised to current usage, {raised} MiB",
+            self.ram_calm_window.as_millis(),
+            self.ram_noise_bytes / MIB
+        ));
+        Ok(())
     }
 
     /// Freeze and confirm through `cgroup.events` within a bound.
@@ -520,7 +698,13 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                     steps.insert(YieldStep::Pause);
                 }
             }
-            ResourceKind::Ram | ResourceKind::GpuMemory => {
+            ResourceKind::Ram => {
+                steps.extend([YieldStep::LowerShare, YieldStep::Pause]);
+                if !self.authorized("memory.high") || self.ram_refused.is_some() {
+                    steps.insert(YieldStep::Cap);
+                }
+            }
+            ResourceKind::GpuMemory => {
                 steps.extend([YieldStep::LowerShare, YieldStep::Cap, YieldStep::Pause]);
             }
         }
@@ -562,6 +746,9 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                     self.fall_back(family, kind, step, target, refusal)?;
                 }
             }
+            (ResourceKind::Ram, YieldStep::Cap) => {
+                self.cap_ram(family, target)?;
+            }
             (_, step) => {
                 self.fallback.apply(family, kind, step, target)?;
             }
@@ -570,11 +757,69 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     }
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
-        self.fallback.tick(family)
+        self.fallback.tick(family)?;
+        self.check_ram_cap(family)
     }
 
     fn take_detail(&mut self) -> Option<String> {
         self.detail.take()
+    }
+
+    fn applied_target(&self, kind: ResourceKind) -> Option<u64> {
+        match kind {
+            ResourceKind::Ram => self.ram_cap.as_ref().map(|cap| cap.mib),
+            _ => None,
+        }
+    }
+
+    fn step_code(&self, kind: ResourceKind) -> Option<&'static str> {
+        match kind {
+            ResourceKind::Ram => self.ram_refused.or_else(|| {
+                self.ram_cap
+                    .as_ref()
+                    .filter(|cap| cap.growth_stop)
+                    .map(|_| "ram_cap_growth_stop")
+            }),
+            _ => None,
+        }
+    }
+
+    fn reconcile(
+        &mut self,
+        family: &mut dyn Family,
+        applied: &BTreeMap<ResourceKey, StepRequest>,
+    ) -> Result<()> {
+        if !self.authorized("memory.high") || self.ram_cap.is_some() {
+            return Ok(());
+        }
+        let current = canonical_control("memory.high", &self.leaf.read("memory.high")?)?;
+        if current == canonical_control("memory.high", &self.memory_high)? {
+            return Ok(());
+        }
+        let verified = family.identities().iter().map(|id| id.pid).collect();
+        verify_runtime_target(&self.leaf, &verified, "memory.high")?;
+        let recorded = applied
+            .get(&ResourceKey::Ram)
+            .is_some_and(|step| step.step == YieldStep::Cap);
+        match current.parse::<Limit>()? {
+            Limit::Value(bytes) if recorded => {
+                self.written
+                    .entry(ResourceKind::Ram)
+                    .or_default()
+                    .insert("memory.high");
+                self.ram_cap = Some(RamCap {
+                    mib: bytes.div_ceil(MIB),
+                    growth_stop: false,
+                    high_events: memory_high_events(&self.leaf)?,
+                    current: memory_current(&self.leaf)?,
+                    throttled_since: None,
+                });
+            }
+            _ => {
+                write_checked(&self.leaf, "memory.high", &self.memory_high)?;
+            }
+        }
+        Ok(())
     }
 
     fn release(&mut self, family: &mut dyn Family) -> Result<()> {

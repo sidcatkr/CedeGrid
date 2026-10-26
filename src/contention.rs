@@ -249,6 +249,18 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "step_skipped_unavailable",
         "A step this allocation cannot take was skipped for the next one.",
     ),
+    (
+        "ram_cap_growth_stop",
+        "The RAM cap holds above its target, at what the leaf cannot reclaim, so it only stops growth and the hint frees the rest.",
+    ),
+    (
+        "ram_cap_ineffective",
+        "The RAM cap throttled without freeing memory, so it was raised to current usage and the hint frees the rest.",
+    ),
+    (
+        "ram_cap_refused",
+        "A RAM cap write or its readback failed, so the cap is unavailable for this allocation and the hint follows.",
+    ),
     // Measurements.
     (
         "allocation_unknown_hold",
@@ -796,15 +808,14 @@ const LADDER: [YieldStep; 5] = [
 ];
 
 impl LadderInput {
-    /// Whether a step can apply here. Memory starts at the hint; Guaranteed work is
-    /// never paused, so it takes no GPU compute cap either, which is a pause duty
-    /// cycle, and is drained only when a floor policy allows it.
+    /// Whether a step can apply here. Memory is never paused or given a lower
+    /// share; RAM may take a `memory.high` cap where a delegated leaf allows it,
+    /// GPU memory starts at the hint. Guaranteed work is never paused, so it takes
+    /// no GPU compute cap either, which is a pause duty cycle, and is drained only
+    /// when a floor policy allows it.
     fn applies(&self, step: YieldStep) -> bool {
-        !(self.kind.is_memory()
-            && matches!(
-                step,
-                YieldStep::LowerShare | YieldStep::Cap | YieldStep::Pause
-            )
+        !(self.kind.is_memory() && matches!(step, YieldStep::LowerShare | YieldStep::Pause)
+            || self.kind == ResourceKind::GpuMemory && step == YieldStep::Cap
             || self.guaranteed && step == YieldStep::Pause
             || self.guaranteed && self.kind == ResourceKind::GpuCompute && step == YieldStep::Cap
             || step == YieldStep::Drain && !self.allow_drain)

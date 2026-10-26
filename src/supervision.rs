@@ -25,6 +25,9 @@ pub struct SupervisorOptions {
     pub duty_period_ms: u64,
     /// How long a worker has to comply with a resource target (FR-037).
     pub hint_deadline_ms: u64,
+    /// RAM cap: the noise tolerance and the ineffective-cap calm window.
+    pub ram_noise_tolerance_mib: u64,
+    pub ram_calm_window_ms: u64,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -37,6 +40,8 @@ impl Default for SupervisorOptions {
             release_confirm_timeout_ms: 10_000,
             duty_period_ms: 500,
             hint_deadline_ms: 5_000,
+            ram_noise_tolerance_mib: 256,
+            ram_calm_window_ms: 1_500,
         }
     }
 }
@@ -292,6 +297,10 @@ pub enum SupervisorReport {
         /// own work at what runs, not at what it asked for.
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         applied_targets: std::collections::BTreeMap<crate::contention::ResourceKey, u64>,
+        /// Catalog codes for steps that hold above their target or became
+        /// unavailable, such as a RAM cap that only stops growth.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        step_codes: std::collections::BTreeMap<crate::contention::ResourceKey, String>,
     },
     State {
         applied: std::collections::BTreeMap<
@@ -1022,6 +1031,36 @@ mod unix {
         }
     }
 
+    /// The cap or hint targets applied per resource.
+    fn applied_targets(
+        contention: &crate::contention::AllocationContention,
+    ) -> std::collections::BTreeMap<crate::contention::ResourceKey, u64> {
+        contention
+            .applied
+            .iter()
+            .filter(|(_, step)| step.step != crate::contention::YieldStep::None)
+            .filter_map(|(key, step)| step.target.map(|target| (key.clone(), target)))
+            .collect()
+    }
+
+    /// The actuator's catalog code for each applied resource and for RAM.
+    fn step_codes(
+        actuator: &dyn Actuator,
+        contention: &crate::contention::AllocationContention,
+    ) -> std::collections::BTreeMap<crate::contention::ResourceKey, String> {
+        contention
+            .applied
+            .keys()
+            .cloned()
+            .chain([crate::contention::ResourceKey::Ram])
+            .filter_map(|key| {
+                actuator
+                    .step_code(key.kind())
+                    .map(|code| (key, code.to_owned()))
+            })
+            .collect()
+    }
+
     /// Apply `adjust` and answer `query` commands. Unavailable or refused steps are
     /// reported, never forced (FR-011); actuation errors mark the step unavailable.
     #[allow(clippy::too_many_arguments)]
@@ -1056,14 +1095,23 @@ mod unix {
                     let mut hints_changed = false;
                     for (key, mut wanted) in resources {
                         let kind = key.kind();
-                        // A Guaranteed CPU cap never goes below the request (FR-024).
-                        if kind == ResourceKind::Cpu
-                            && request.class == AllocationClass::Guaranteed
-                            && matches!(wanted.step, YieldStep::Cap | YieldStep::Hint)
+                        // A Guaranteed CPU cap never goes below the request, nor does
+                        // a Guaranteed RAM cap (FR-024).
+                        let floor = match kind {
+                            ResourceKind::Cpu
+                                if matches!(wanted.step, YieldStep::Cap | YieldStep::Hint) =>
+                            {
+                                Some(request.resources.cpu_millicores)
+                            }
+                            ResourceKind::Ram if wanted.step == YieldStep::Cap => {
+                                Some(request.resources.ram_mib)
+                            }
+                            _ => None,
+                        };
+                        if request.class == AllocationClass::Guaranteed
+                            && let Some(floor) = floor
                         {
-                            wanted.target = wanted
-                                .target
-                                .map(|target| target.max(request.resources.cpu_millicores));
+                            wanted.target = wanted.target.map(|target| target.max(floor));
                         }
                         let current = contention
                             .applied
@@ -1127,7 +1175,7 @@ mod unix {
                                 continue;
                             }
                             // A CPU hint keeps CPU capped at the target while the worker
-                            // adapts; memory has no runtime mechanism below a hint.
+                            // adapts; a RAM cap already held only stops growth and stays.
                             let runtime = if kind == ResourceKind::Cpu
                                 && !actuator.unavailable(kind).contains(&YieldStep::Cap)
                             {
@@ -1135,8 +1183,14 @@ mod unix {
                             } else {
                                 YieldStep::None
                             };
-                            if let Err(error) = actuator.apply(family, kind, runtime, wanted.target)
-                            {
+                            let held = kind == ResourceKind::Ram
+                                && actuator.applied_target(kind).is_some();
+                            let result = if held {
+                                Ok(YieldStep::Cap)
+                            } else {
+                                actuator.apply(family, kind, runtime, wanted.target)
+                            };
+                            if let Err(error) = result {
                                 details.push(format!("{key} Hint: {error:#}"));
                                 unavailable
                                     .entry(key.clone())
@@ -1169,6 +1223,14 @@ mod unix {
                                 if let Some(note) = actuator.take_detail() {
                                     details.push(format!("{key}: {note}"));
                                 }
+                                // A cap held above its target only stops growth: the
+                                // next step frees the rest.
+                                if step == YieldStep::Cap && actuator.step_code(kind).is_some() {
+                                    unavailable
+                                        .entry(key.clone())
+                                        .or_insert_with(Vec::new)
+                                        .push(YieldStep::Cap);
+                                }
                                 applied.insert(key.clone(), step);
                                 if step == YieldStep::None {
                                     contention.applied.remove(&key);
@@ -1177,7 +1239,7 @@ mod unix {
                                         key,
                                         StepRequest {
                                             step,
-                                            target: wanted.target,
+                                            target: actuator.applied_target(kind).or(wanted.target),
                                             cause: wanted.cause,
                                             deadline_ms: None,
                                         },
@@ -1208,14 +1270,8 @@ mod unix {
                         detail: details.join("; "),
                         hint_ready,
                         observes_drain,
-                        applied_targets: contention
-                            .applied
-                            .iter()
-                            .filter(|(_, step)| step.step != YieldStep::None)
-                            .filter_map(|(key, step)| {
-                                step.target.map(|target| (key.clone(), target))
-                            })
-                            .collect(),
+                        applied_targets: applied_targets(contention),
+                        step_codes: step_codes(actuator, contention),
                     });
                 }
                 SupervisorCommand::Allowance { allowance } => {
@@ -1226,6 +1282,10 @@ mod unix {
                     }
                 }
                 SupervisorCommand::Query => {
+                    // A new agent: no limit stays on own work without a recorded step.
+                    if let Err(error) = actuator.reconcile(family, &contention.applied) {
+                        eprintln!("step reconcile failed: {error:#}");
+                    }
                     let _ = control.report(SupervisorReport::State {
                         applied: contention
                             .applied
@@ -1366,6 +1426,8 @@ mod unix {
         let mut readiness_checked_at: Option<Instant> = None;
         let duty_period = Duration::from_millis(options.duty_period_ms.max(1));
         let mut contention = crate::contention::AllocationContention::default();
+        // The RAM cap code last reported to the agent.
+        let mut ram_code: Option<&'static str> = None;
         let mut targets = crate::actuation::TargetChannel::new(options.hint_deadline_ms);
         let result = (|| -> Result<ExecutionOutcome> {
             let deadline = Instant::now()
@@ -1570,6 +1632,8 @@ mod unix {
                 class: request.class,
                 requested: request.resources.clone(),
                 period: Duration::from_millis(options.duty_period_ms),
+                ram_noise_tolerance_mib: options.ram_noise_tolerance_mib,
+                ram_calm_window: Duration::from_millis(options.ram_calm_window_ms),
             }));
             let leader_identity = record.identity.clone().context("verified gate identity")?;
             let mut drain_started_ms = None;
@@ -1757,6 +1821,7 @@ mod unix {
                             control,
                             readiness,
                         );
+                        ram_code = actuator.step_code(crate::contention::ResourceKind::Ram);
                     }
                     if lifecycle.phase == LifecyclePhase::Running
                         && leader_status.is_none()
@@ -1771,6 +1836,51 @@ mod unix {
                         );
                         let _ = actuator.release(&mut family);
                         contention.applied.clear();
+                    }
+                    // A RAM cap the actuator raised to current usage is reported at
+                    // once, so the policy goes on to the hint.
+                    let code = actuator.step_code(crate::contention::ResourceKind::Ram);
+                    if code != ram_code {
+                        ram_code = code;
+                        if let Some(step) = contention
+                            .applied
+                            .get_mut(&crate::contention::ResourceKey::Ram)
+                            && step.step == crate::contention::YieldStep::Cap
+                        {
+                            step.target = actuator
+                                .applied_target(crate::contention::ResourceKind::Ram)
+                                .or(step.target);
+                        }
+                        if let Err(error) =
+                            record_contention_with_retry(journal, &record, &contention)
+                        {
+                            journal_unavailable(&mut lifecycle, elapsed, error);
+                        }
+                        let unavailable = actuator
+                            .unavailable(crate::contention::ResourceKind::Ram)
+                            .contains(&crate::contention::YieldStep::Cap)
+                            .then(|| {
+                                (
+                                    crate::contention::ResourceKey::Ram,
+                                    vec![crate::contention::YieldStep::Cap],
+                                )
+                            })
+                            .into_iter()
+                            .collect();
+                        let _ = control.report(SupervisorReport::Adjusted {
+                            sequence: contention.sequence,
+                            applied: contention
+                                .applied
+                                .iter()
+                                .map(|(key, step)| (key.clone(), step.step))
+                                .collect(),
+                            unavailable,
+                            detail: actuator.take_detail().unwrap_or_default(),
+                            hint_ready: readiness.0,
+                            observes_drain: readiness.1,
+                            applied_targets: applied_targets(&contention),
+                            step_codes: step_codes(actuator.as_ref(), &contention),
+                        });
                     }
                 }
                 let phase = lifecycle.tick(elapsed);

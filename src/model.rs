@@ -348,6 +348,14 @@ pub struct AllocationFacts {
     /// The cap or hint targets the supervisor reported applied, per resource.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
+    /// The backend can cap RAM through `memory.high` on a delegated leaf; without
+    /// it the RAM cap step is unavailable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ram_cap: bool,
+    /// Catalog codes the supervisor reported for steps held above their target or
+    /// found unavailable, per resource.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub step_codes: BTreeMap<crate::contention::ResourceKey, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

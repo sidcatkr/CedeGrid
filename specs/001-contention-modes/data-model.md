@@ -104,6 +104,9 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `unavailable` | Steps the backend or supervisor cannot apply, per resource |
 | `hint_ready` | The worker acknowledged its target file (FR-062) |
 | `observes_drain` | The worker acknowledged its target file or used the supervisor socket, so it polls the drain file (FR-062) |
+| `applied`, `applied_targets` | The steps and the cap or hint targets the supervisor reports applied; a RAM cap reports the `memory.high` in effect |
+| `ram_cap` | The backend can cap RAM: a delegated cgroup leaf with `memory.high` authorized. Without it the RAM cap step is unavailable (T138) |
+| `step_codes` | Catalog codes the supervisor reports for a step held above its target or found unavailable: `ram_cap_growth_stop`, `ram_cap_ineffective`, `ram_cap_refused` |
 
 ## ExternalProcessMemory (`src/model.rs`, `Snapshot.external_processes`)
 

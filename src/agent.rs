@@ -93,6 +93,8 @@ enum Event {
         /// The targets applied; an older supervisor reports none.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        step_codes: BTreeMap<crate::contention::ResourceKey, String>,
     },
     State {
         applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
@@ -462,6 +464,7 @@ impl SupervisorControl for PipeControl {
                 hint_ready,
                 observes_drain,
                 applied_targets,
+                step_codes,
             } => Event::Adjusted {
                 sequence,
                 applied,
@@ -470,6 +473,7 @@ impl SupervisorControl for PipeControl {
                 hint_ready,
                 observes_drain,
                 applied_targets,
+                step_codes,
             },
             supervision::SupervisorReport::State {
                 applied,
@@ -749,6 +753,8 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
         duty_period_ms: spec.config.monitor.interval_ms,
         hint_deadline_ms: spec.config.contention.hint_deadline_ms(),
+        ram_noise_tolerance_mib: spec.config.ram_cap_check().0,
+        ram_calm_window_ms: spec.config.ram_cap_check().1,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,
@@ -899,6 +905,8 @@ struct ChildSlot {
     applied: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
     /// The targets the supervisor reported applied.
     applied_targets: BTreeMap<crate::contention::ResourceKey, u64>,
+    /// Catalog codes for steps the supervisor holds above target or found unavailable.
+    step_codes: BTreeMap<crate::contention::ResourceKey, String>,
     applied_sequence: u64,
     /// Readiness as the supervisor last reported it (FR-062).
     hint_ready: bool,
@@ -936,6 +944,8 @@ impl ChildSlot {
             observes_drain: self.observes_drain,
             applied: self.applied.clone(),
             applied_targets: self.applied_targets.clone(),
+            ram_cap: false,
+            step_codes: self.step_codes.clone(),
         }
     }
 }
@@ -1259,6 +1269,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         applied: BTreeMap::new(),
         applied_sequence: 0,
         applied_targets: BTreeMap::new(),
+        step_codes: BTreeMap::new(),
         hint_ready: false,
         observes_drain: false,
         drain_sent_at: None,
@@ -1833,6 +1844,7 @@ async fn start_assignment(
         applied: BTreeMap::new(),
         applied_sequence: 0,
         applied_targets: BTreeMap::new(),
+        step_codes: BTreeMap::new(),
         hint_ready: false,
         observes_drain: false,
         drain_sent_at: None,
@@ -2345,6 +2357,18 @@ impl NegotiatedFeatures {
     }
 }
 
+/// Whether a RAM cap step can apply to work on `backend`: a delegated cgroup leaf
+/// with `memory.high` authorized. Rootless backends have no RAM cap.
+fn ram_cap_available(config: &Config, backend: Option<&str>) -> bool {
+    backend == Some("cgroup_v2")
+        && config.cgroup.enabled
+        && config
+            .cgroup
+            .authorized_controls
+            .iter()
+            .any(|control| control == "memory.high")
+}
+
 /// Resources whose mode or admission is not yet known are left out, which a
 /// negotiated coordinator treats as not open.
 pub fn node_contention_report(
@@ -2504,6 +2528,7 @@ impl AgentLoop<'_> {
                         hint_ready,
                         observes_drain,
                         applied_targets,
+                        step_codes,
                         ..
                     }) => {
                         for (key, steps) in unavailable {
@@ -2511,6 +2536,7 @@ impl AgentLoop<'_> {
                         }
                         slot.applied = applied;
                         slot.applied_targets = applied_targets;
+                        slot.step_codes = step_codes;
                         slot.applied_sequence = slot.applied_sequence.max(sequence);
                         slot.note_readiness(hint_ready, observes_drain);
                     }
@@ -3129,17 +3155,19 @@ impl AgentLoop<'_> {
                     Some(slot) => facts = slot.facts(),
                     None => facts.uncontrollable = true,
                 }
-                // A rootless backend has no runtime share control (research R4).
-                if records
+                let backend = records
                     .iter()
-                    .any(|r| r.assignment_id == allocation.id && r.backend == "rootless")
-                {
+                    .find(|r| r.assignment_id == allocation.id)
+                    .map(|r| r.backend.as_str());
+                // A rootless backend has no runtime share control (research R4).
+                if backend == Some("rootless") {
                     facts
                         .unavailable
                         .entry(ResourceKey::Cpu)
                         .or_default()
                         .insert(YieldStep::LowerShare);
                 }
+                facts.ram_cap = ram_cap_available(self.config, backend);
                 (allocation.id.clone(), facts)
             })
             .collect()
@@ -4819,6 +4847,22 @@ mod negotiation_tests {
 mod drain_tests {
     use super::*;
 
+    /// The RAM cap step applies only to work in a delegated cgroup leaf with
+    /// `memory.high` authorized; rootless work never takes it.
+    #[test]
+    fn only_a_delegated_leaf_with_memory_high_offers_the_ram_cap() {
+        let mut config = Config::default();
+        assert!(!ram_cap_available(&config, Some("rootless")));
+        assert!(!ram_cap_available(&config, Some("cgroup_v2")));
+        config.cgroup.enabled = true;
+        config.cgroup.authorized_controls = vec!["cgroup.procs".into(), "cpu.weight".into()];
+        assert!(!ram_cap_available(&config, Some("cgroup_v2")));
+        config.cgroup.authorized_controls.push("memory.high".into());
+        assert!(ram_cap_available(&config, Some("cgroup_v2")));
+        assert!(!ram_cap_available(&config, Some("rootless")));
+        assert!(!ram_cap_available(&config, None));
+    }
+
     #[test]
     fn supervisor_readiness_reaches_the_policy_facts() {
         // An older supervisor reports no readiness, which is not ready.
@@ -4895,6 +4939,7 @@ mod drain_tests {
             applied: BTreeMap::new(),
             applied_sequence: 0,
             applied_targets: BTreeMap::new(),
+            step_codes: BTreeMap::new(),
             hint_ready: false,
             observes_drain: false,
             drain_sent_at: None,

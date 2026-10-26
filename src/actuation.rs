@@ -455,6 +455,8 @@ mod tests {
                 ..Resources::default()
             },
             period: Duration::from_millis(100),
+            ram_noise_tolerance_mib: 256,
+            ram_calm_window: Duration::from_millis(1500),
         })
     }
 

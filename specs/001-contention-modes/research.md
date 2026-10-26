@@ -72,7 +72,7 @@ membership equals the verified PID set.
 |---|---|---|
 | Lower share (CPU) | `cpu.weight` written at runtime | Unavailable at runtime: launch-time nice only (see R5) |
 | Cap (CPU) | `cpu.max` written at runtime | SIGSTOP/SIGCONT duty cycle on owned pidfds, period = monitor interval |
-| Cap (RAM) | Not used: memory starts at the hint (FR-011) | Unavailable: go to hint |
+| Cap (RAM) | `memory.high` on the own leaf, read back; never below unevictable memory plus anonymous memory without swap plus the noise tolerance, nor below a Guaranteed request; raised to current usage when `memory.events` `high` rises for a calm window while `memory.current` does not fall; `memory.max`, `memory.low` and `memory.min` are never written (T138) | Unavailable: go to hint |
 | Pause (CPU, GPU compute) | `cgroup.freeze` with `cgroup.events` readback | SIGSTOP on owned pidfds, bounded by the pause limit |
 | Hint (RAM, GPU memory, CPU) | Resource-target file (R6) | Same |
 | Drain / terminate | Existing drain chain | Same |
@@ -286,7 +286,7 @@ The maintainer decisions B1–B14 (plan.md, "Revisions before US5") supersede pa
 research:
 
 - **R4.** GPU compute gets a share through the rootless SIGSTOP/SIGCONT duty cycle (T087d), and
-  a runtime RAM cap through `memory.high` is planned on delegated cgroups (T138).
+  RAM takes a runtime cap through `memory.high` on delegated cgroups (T138).
 - **R11.** Victim order puts pending before class, as FR-016 and `victim_order` do.
 - **R12.** Principals need `uid_min` and the principal window; lower user IDs are background
   demand (FR-059).

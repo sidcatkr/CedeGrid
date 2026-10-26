@@ -535,8 +535,15 @@ node reports with the expected per-resource values at each step.
   hint, cooperative drain, termination.
   - A step that cannot free the contended resource, or is unavailable for the allocation or
     host, MUST be skipped, and the skip MUST be reported.
-  - Memory contention MUST start at the hint step for hint-ready allocations, and at drain for
-    the others. Pause MUST NOT be used to resolve GPU memory contention.
+  - RAM contention MUST start at a `memory.high` cap where the allocation runs in a delegated
+    cgroup leaf with `memory.high` authorized. The cap MUST NOT go below what the leaf cannot
+    reclaim (its unevictable memory and, without swap, its anonymous memory, plus the noise
+    tolerance) or below a Guaranteed request. A cap that holds above its target for that reason,
+    or throttles for a calm window without freeing the noise tolerance, MUST only stop growth
+    and leave the rest to the next step.
+  - Otherwise memory contention MUST start at the hint step for hint-ready allocations, and at
+    drain for the others. GPU memory never takes a cap, and pause MUST NOT be used to resolve
+    memory contention.
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).

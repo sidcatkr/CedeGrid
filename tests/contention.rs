@@ -187,7 +187,7 @@ mod ladder {
     }
 
     #[test]
-    fn steps_escalate_in_order_and_memory_starts_at_hint() {
+    fn steps_escalate_in_order_and_memory_starts_at_a_ram_cap_or_the_hint() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
         let (_, changes) = run(None, &cpu, 0..60, |_| input(ResourceKind::Cpu, 1000, 4000));
         let steps: Vec<_> = changes.iter().map(|(_, step)| *step).collect();
@@ -203,15 +203,31 @@ mod ladder {
         );
         // Each change waits for the response time and the dwell time (3 intervals).
         assert!(changes.windows(2).all(|w| w[1].0 - w[0].0 >= 3 * INTERVAL));
-        for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+        // RAM starts at a cap where a delegated leaf allows it, GPU memory at the
+        // hint; neither is ever paused (FR-011).
+        for (kind, step) in [
+            (ResourceKind::Ram, YieldStep::Cap),
+            (ResourceKind::GpuMemory, YieldStep::Hint),
+        ] {
             let first = plan_step(
                 None,
                 &input(kind, 1, 1),
                 &timing(kind, ContentionMode::Neutral),
                 0,
             );
-            assert_eq!(first.state.unwrap().step, YieldStep::Hint, "{kind:?}");
+            assert_eq!(first.state.unwrap().step, step, "{kind:?}");
+            assert!(first.skipped.is_empty());
         }
+        let mut rootless = input(ResourceKind::Ram, 1, 1);
+        rootless.unavailable = [YieldStep::Cap].into();
+        let first = plan_step(
+            None,
+            &rootless,
+            &timing(ResourceKind::Ram, ContentionMode::Neutral),
+            0,
+        );
+        assert_eq!(first.state.unwrap().step, YieldStep::Hint);
+        assert_eq!(first.skipped, [YieldStep::Cap]);
     }
 
     #[test]
@@ -227,7 +243,7 @@ mod ladder {
         assert_eq!(first.state.as_ref().unwrap().step, YieldStep::Cap);
         assert_eq!(first.skipped, [YieldStep::LowerShare]);
         let mut memory = input(ResourceKind::Ram, 1, 1);
-        memory.unavailable = [YieldStep::Hint].into();
+        memory.unavailable = [YieldStep::Cap, YieldStep::Hint].into();
         let first = plan_step(
             None,
             &memory,
@@ -235,7 +251,7 @@ mod ladder {
             0,
         );
         assert_eq!(first.state.unwrap().step, YieldStep::Drain);
-        assert_eq!(first.skipped, [YieldStep::Hint]);
+        assert_eq!(first.skipped, [YieldStep::Cap, YieldStep::Hint]);
     }
 
     #[test]
@@ -2287,6 +2303,265 @@ mod hints {
     fn a_hint_the_supervisor_cannot_apply_escalates_at_once() {
         let steps = run(false, Some(0));
         assert_eq!(steps[1].1.map(|a| a.0), Some(YieldStep::Drain), "{steps:?}");
+    }
+}
+
+/// T138: a RAM cap step through `memory.high` where a delegated leaf allows it.
+mod ram_cap {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
+
+    type Action = Option<(YieldStep, Option<u64>, YieldCause)>;
+
+    /// The `hints` host: 32000 MiB, a 1000 MiB floor and `external` MiB in
+    /// external use beside an allocation holding `held` MiB.
+    fn evaluate(
+        engine: &mut PolicyEngine,
+        config: &Config,
+        now: u64,
+        (held, external): (u64, u64),
+        class: AllocationClass,
+        facts: AllocationFacts,
+    ) -> Decision {
+        let mut snapshot = snapshot(1000);
+        snapshot.available_ram_mib = Some(32_000 - external - held);
+        let input = PolicyInput {
+            allocations: vec![Allocation {
+                id: "worker".into(),
+                class,
+                phase: AllocationPhase::Running,
+                requested: Resources {
+                    ram_mib: 7900,
+                    ..Resources::default()
+                },
+                observed: Some(Resources {
+                    ram_mib: held,
+                    ..Resources::default()
+                }),
+                observed_upper: None,
+                modes: Default::default(),
+            }],
+            facts: BTreeMap::from([("worker".into(), facts)]),
+            ..PolicyInput::default()
+        };
+        engine.evaluate(config, &snapshot, &input, now).unwrap()
+    }
+
+    fn capable() -> AllocationFacts {
+        AllocationFacts {
+            hint_ready: true,
+            observes_drain: true,
+            ram_cap: true,
+            ..AllocationFacts::default()
+        }
+    }
+
+    fn action(decision: &Decision) -> Action {
+        decision
+            .actions
+            .iter()
+            .find(|a| a.allocation_id == "worker" && a.resource == ResourceKey::Ram)
+            .map(|a| (a.step, a.target, a.cause))
+    }
+
+    fn codes(decision: &Decision) -> Vec<String> {
+        decision.resources[&ResourceKey::Ram]
+            .reasons
+            .iter()
+            .map(|r| r.code.clone())
+            .collect()
+    }
+
+    /// RAM starts at a cap where the backend reports it can apply one (FR-011);
+    /// elsewhere the cap is skipped and reported, and the hint comes first.
+    #[test]
+    fn a_floor_breach_caps_ram_where_the_leaf_allows_it() {
+        let mut engine = PolicyEngine::new();
+        let decision = evaluate(
+            &mut engine,
+            &config(),
+            0,
+            (8000, 23_300),
+            AllocationClass::Opportunistic,
+            capable(),
+        );
+        assert_eq!(
+            action(&decision),
+            Some((YieldStep::Cap, Some(7700), YieldCause::FloorBreach))
+        );
+        let cap = decision
+            .actions
+            .iter()
+            .find(|a| a.resource == ResourceKey::Ram)
+            .unwrap();
+        assert_eq!(cap.code, "yield_step_cap");
+        let mut engine = PolicyEngine::new();
+        let rootless = AllocationFacts {
+            ram_cap: false,
+            ..capable()
+        };
+        let decision = evaluate(
+            &mut engine,
+            &config(),
+            0,
+            (8000, 23_300),
+            AllocationClass::Opportunistic,
+            rootless,
+        );
+        assert_eq!(
+            action(&decision),
+            Some((YieldStep::Hint, Some(7700), YieldCause::FloorBreach))
+        );
+        assert!(codes(&decision).contains(&"step_skipped_unavailable".to_string()));
+    }
+
+    /// A cap the supervisor holds above its target, or found ineffective, only
+    /// stops growth: the ladder goes on to the hint and shows why.
+    #[test]
+    fn a_cap_that_only_stops_growth_goes_on_to_the_hint() {
+        for code in ["ram_cap_growth_stop", "ram_cap_ineffective"] {
+            let mut engine = PolicyEngine::new();
+            let first = evaluate(
+                &mut engine,
+                &config(),
+                0,
+                (8000, 23_300),
+                AllocationClass::Opportunistic,
+                capable(),
+            );
+            assert_eq!(action(&first).map(|a| a.0), Some(YieldStep::Cap));
+            let reported = AllocationFacts {
+                unavailable: BTreeMap::from([(ResourceKey::Ram, [YieldStep::Cap].into())]),
+                applied: BTreeMap::from([(ResourceKey::Ram, YieldStep::Cap)]),
+                applied_targets: BTreeMap::from([(ResourceKey::Ram, 7990)]),
+                step_codes: BTreeMap::from([(ResourceKey::Ram, code.to_string())]),
+                ..capable()
+            };
+            let next = evaluate(
+                &mut engine,
+                &config(),
+                500,
+                (8000, 23_300),
+                AllocationClass::Opportunistic,
+                reported,
+            );
+            assert_eq!(
+                action(&next),
+                Some((YieldStep::Hint, Some(7700), YieldCause::FloorBreach)),
+                "{code}"
+            );
+            assert!(codes(&next).contains(&code.to_string()), "{code}");
+        }
+    }
+
+    /// Guaranteed work is never capped below its request, as on CPU (FR-024).
+    #[test]
+    fn a_guaranteed_ram_cap_never_goes_below_its_request() {
+        let mut engine = PolicyEngine::new();
+        let mut caps = vec![];
+        for now in (0..=20_000).step_by(500) {
+            let decision = evaluate(
+                &mut engine,
+                &config(),
+                now,
+                (8000, 23_300),
+                AllocationClass::Guaranteed,
+                capable(),
+            );
+            if let Some((YieldStep::Cap, target, _)) = action(&decision) {
+                caps.push(target);
+            }
+        }
+        assert!(!caps.is_empty());
+        assert!(
+            caps.iter().all(|target| target.is_some_and(|t| t >= 7900)),
+            "{caps:?}"
+        );
+    }
+
+    /// Reversal follows the memory rule: room above the floor of at least
+    /// max(to_free, noise tolerance) for the calm window, plus the reclaim
+    /// backoff, and the step returns to none.
+    #[test]
+    fn ram_cap_reversal_waits_for_room_the_calm_window_and_backoff() {
+        let config = config();
+        let mut engine = PolicyEngine::new();
+        let mut held = 8000;
+        let mut reversed = None;
+        let mut capped = false;
+        for now in (0..=30_000).step_by(500) {
+            // External use falls by 1000 MiB at 3 s, leaving 1000 MiB of room.
+            let external = if now < 3000 { 23_300 } else { 22_300 };
+            let decision = evaluate(
+                &mut engine,
+                &config,
+                now,
+                (held, external),
+                AllocationClass::Opportunistic,
+                capable(),
+            );
+            match action(&decision) {
+                Some((YieldStep::Cap, Some(target), _)) => {
+                    capped = true;
+                    // The supervisor applies the cap; the job wants 8000 MiB.
+                    held = target.min(8000);
+                }
+                None if capped && reversed.is_none() => reversed = Some(now),
+                _ => {}
+            }
+        }
+        let reversed = reversed.expect("the cap reverses");
+        let thresholds = config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Ram);
+        let dwell = u64::from(thresholds.min_step_dwell_intervals) * config.monitor.interval_ms;
+        let scale_up = thresholds.scale_up_interval_s(ContentionMode::Neutral) * 1000;
+        let backoff = thresholds.reclaim_backoff_ms;
+        assert!(
+            reversed >= (3000 + dwell).max(scale_up) + backoff,
+            "{reversed}"
+        );
+    }
+
+    /// Modes stay monotonic: Yield First caps RAM no later and no higher than
+    /// Neutral, and Neutral no later and no higher than Performance.
+    #[test]
+    fn modes_cap_ram_monotonically() {
+        let first_cap = |mode: ContentionMode| {
+            let mut config = config();
+            config.contention.ram.mode = Some(mode);
+            config
+                .contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            let mut engine = PolicyEngine::new();
+            for now in (0..=10_000).step_by(500) {
+                let decision = evaluate(
+                    &mut engine,
+                    &config,
+                    now,
+                    (8000, 23_000),
+                    AllocationClass::Opportunistic,
+                    capable(),
+                );
+                if let Some((YieldStep::Cap, Some(target), _)) = action(&decision) {
+                    return (now, target);
+                }
+            }
+            (u64::MAX, u64::MAX)
+        };
+        let yield_first = first_cap(ContentionMode::YieldFirst);
+        let neutral = first_cap(ContentionMode::Neutral);
+        let performance = first_cap(ContentionMode::Performance);
+        assert!(
+            yield_first.0 <= neutral.0 && neutral.0 <= performance.0,
+            "{yield_first:?} {neutral:?} {performance:?}"
+        );
+        assert!(
+            yield_first.1 <= neutral.1 && neutral.1 <= performance.1,
+            "{yield_first:?} {neutral:?} {performance:?}"
+        );
+        assert!(yield_first.0 < u64::MAX, "Yield First caps here");
     }
 }
 

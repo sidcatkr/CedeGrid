@@ -184,6 +184,101 @@ fn authorized_native_empty_leaf_preparation_and_cleanup() {
     assert!(!gate.cgroup_path.unwrap().exists());
 }
 
+/// T138 native gate: a RAM cap step writes `memory.high` on the test-owned leaf
+/// this backend created, reads it back, and reversal restores `max`. Requires an
+/// authorized delegated subtree with the memory controller enabled.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "not tested: requires explicit authorized Linux cgroup delegation in CEDEGRID_TEST_CGROUP_ROOT"]
+fn authorized_native_ram_cap_reads_back_memory_high() {
+    use cedegrid::contention::{ResourceKind, YieldStep};
+    use cedegrid::execution_model::{
+        ActuatorSettings, AllocationClass, Family, LaunchBackend, LaunchRequest, ProcessIdentity,
+    };
+    use std::os::unix::process::CommandExt;
+    struct Child(u32);
+    impl Family for Child {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            vec![ProcessIdentity {
+                pid: self.0,
+                boot_id: "native".into(),
+                start_time: 1,
+                assignment_id: "test-ram-cap".into(),
+                generation: 1,
+            }]
+        }
+        fn signal(&mut self, _signal: i32) -> anyhow::Result<()> {
+            anyhow::bail!("the RAM cap never signals")
+        }
+        fn cpu_time(&mut self) -> Option<std::time::Duration> {
+            None
+        }
+    }
+    let root = std::env::var_os("CEDEGRID_TEST_CGROUP_ROOT")
+        .expect("explicit authorized delegated subtree is required");
+    let config = CgroupConfig {
+        delegated_root: Some(root.into()),
+        cpu_weight: None,
+        authorized_controls: vec!["cgroup.procs".into(), "memory.high".into()],
+        ..authorized()
+    };
+    let mut backend = CgroupBackend::new(config).unwrap();
+    let request = LaunchRequest {
+        task_id: "authorized-ram-cap-test".into(),
+        assignment_id: "test-ram-cap".into(),
+        argv: vec!["sleep".into()],
+        cwd: std::env::current_dir().unwrap(),
+        env: Default::default(),
+        resources: Default::default(),
+        replay_safe: true,
+        class: AllocationClass::Opportunistic,
+        no_escape: true,
+        single_process: true,
+        managed_child_limit: 0,
+        max_attempts: None,
+        input_artifacts: vec![],
+        required_controls: vec![],
+        allow_fallback: false,
+        contention: None,
+    };
+    let leaf = backend.prepare(&request).unwrap().cgroup_path.unwrap();
+    let procs = leaf.join("cgroup.procs");
+    // The test-owned child joins the new leaf before it runs anything.
+    // SAFETY: the pre-exec closure only writes one file before exec.
+    let mut child = unsafe {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .pre_exec(move || std::fs::write(&procs, "0"))
+            .spawn()
+            .unwrap()
+    };
+    let mut family = Child(child.id());
+    let mut actuator = backend.actuator(&ActuatorSettings {
+        class: AllocationClass::Opportunistic,
+        requested: Default::default(),
+        period: std::time::Duration::from_millis(500),
+        ram_noise_tolerance_mib: 256,
+        ram_calm_window: std::time::Duration::from_millis(1500),
+    });
+    let read = || std::fs::read_to_string(leaf.join("memory.high")).unwrap();
+    let applied = actuator.apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024));
+    let capped = read();
+    let reversed = actuator.apply(&mut family, ResourceKind::Ram, YieldStep::None, None);
+    let restored = read();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    backend.confirm_release().unwrap();
+    assert_eq!(applied.unwrap(), YieldStep::Cap);
+    let mib = actuator.applied_target(ResourceKind::Ram);
+    assert!(mib.is_none(), "reversal clears the cap");
+    assert!(
+        capped.trim().parse::<u64>().unwrap() >= 1024 * 1024 * 1024,
+        "{capped}"
+    );
+    assert_eq!(reversed.unwrap(), YieldStep::None);
+    assert_eq!(restored.trim(), "max");
+}
+
 #[cfg(unix)]
 mod runtime_steps {
     use cedegrid::cgroup::{
@@ -281,6 +376,8 @@ mod runtime_steps {
                 ..Resources::default()
             },
             period: Duration::from_millis(100),
+            ram_noise_tolerance_mib: 256,
+            ram_calm_window: Duration::from_millis(30),
         }
     }
 
@@ -501,5 +598,373 @@ mod runtime_steps {
         assert_eq!(read(&dir, "cgroup.freeze"), "0");
         assert_eq!(read(&dir, "cpu.max"), "20000 100000");
         assert!(family.signals.is_empty());
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// A leaf with 2048 MiB anonymous, 1024 MiB file and 100 MiB unevictable
+    /// memory, `swap_max` as `memory.swap.max`, and no `memory.high` limit.
+    fn memory_leaf(dir: &Path, members: &str, swap_max: &str) {
+        leaf(dir, members);
+        for (name, value) in [
+            ("memory.high", "max\n".to_string()),
+            ("memory.max", "max\n".to_string()),
+            ("memory.swap.max", format!("{swap_max}\n")),
+            ("memory.current", format!("{}\n", 3172 * MIB)),
+            (
+                "memory.events",
+                "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n".to_string(),
+            ),
+            (
+                "memory.stat",
+                format!(
+                    "anon {}\nfile {}\nkernel 0\nunevictable {}\n",
+                    2048 * MIB,
+                    1024 * MIB,
+                    100 * MIB
+                ),
+            ),
+        ] {
+            fs::write(dir.join(name), value).unwrap();
+        }
+    }
+
+    fn ram_config() -> CgroupConfig {
+        config(&["cgroup.procs", "memory.high"])
+    }
+
+    fn ram_actuator(
+        dir: &Path,
+        class: AllocationClass,
+        swap_bytes: u64,
+    ) -> CgroupActuator<DirectoryLeaf> {
+        let mut settings = settings(class);
+        settings.requested.ram_mib = 4096;
+        CgroupActuator::new(
+            DirectoryLeaf::open(dir).unwrap().with_host_swap(swap_bytes),
+            &ram_config(),
+            &settings,
+        )
+    }
+
+    fn family(pid: u32) -> Recorder {
+        Recorder {
+            pids: vec![pid],
+            signals: vec![],
+        }
+    }
+
+    /// Without swap anonymous memory cannot be reclaimed, so the cap is never set
+    /// below anon + unevictable + the noise tolerance; with swap only unevictable
+    /// memory counts.
+    #[test]
+    fn a_ram_cap_never_goes_below_what_the_leaf_can_reclaim() {
+        let unreclaimable = 2048 + 100 + 256;
+        for (swap_max, host_swap, floor) in [
+            ("0", 8192 * MIB, unreclaimable),
+            ("max", 0, unreclaimable),
+            ("max", 8192 * MIB, 100 + 256),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_owned();
+            memory_leaf(&dir, "71\n", swap_max);
+            let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, host_swap);
+            assert!(
+                !actuator
+                    .unavailable(ResourceKind::Ram)
+                    .contains(&YieldStep::Cap)
+            );
+            let mut family = family(71);
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+                .unwrap();
+            let expected = floor.max(1024);
+            assert_eq!(
+                read(&dir, "memory.high"),
+                (expected * MIB).to_string(),
+                "{swap_max} {host_swap}"
+            );
+            assert_eq!(actuator.applied_target(ResourceKind::Ram), Some(expected));
+            assert_eq!(
+                actuator.step_code(ResourceKind::Ram),
+                (expected > 1024).then_some("ram_cap_growth_stop")
+            );
+            assert!(family.signals.is_empty());
+        }
+        // The floor is computed from memory.stat.
+        let stat = format!("anon {}\nunevictable {}\n", 10 * MIB, MIB);
+        assert_eq!(
+            cedegrid::cgroup::ram_cap_floor_bytes(&stat, false, 256 * MIB).unwrap(),
+            (10 + 1 + 256) * MIB
+        );
+        assert_eq!(
+            cedegrid::cgroup::ram_cap_floor_bytes(&stat, true, 256 * MIB).unwrap(),
+            (1 + 256) * MIB
+        );
+    }
+
+    /// A cap that throttles for a calm window while usage does not fall is raised
+    /// to current usage, so it only stops growth, and the cap step is reported
+    /// unavailable for the hint to follow.
+    #[test]
+    fn an_ineffective_ram_cap_is_raised_to_current_usage() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        memory_leaf(&dir, "72\n", "max");
+        let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, 8192 * MIB);
+        let mut family = family(72);
+        actuator
+            .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+            .unwrap();
+        assert_eq!(read(&dir, "memory.high"), (1024 * MIB).to_string());
+        for high in 1..=4 {
+            fs::write(
+                dir.join("memory.events"),
+                format!("low 0\nhigh {high}\nmax 0\noom 0\noom_kill 0\n"),
+            )
+            .unwrap();
+            actuator.tick(&mut family).unwrap();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(read(&dir, "memory.high"), (3172 * MIB).to_string());
+        assert_eq!(actuator.applied_target(ResourceKind::Ram), Some(3172));
+        assert!(
+            actuator
+                .unavailable(ResourceKind::Ram)
+                .contains(&YieldStep::Cap)
+        );
+        assert_eq!(
+            actuator.step_code(ResourceKind::Ram),
+            Some("ram_cap_ineffective")
+        );
+        assert!(
+            actuator
+                .take_detail()
+                .unwrap()
+                .contains("ram_cap_ineffective")
+        );
+    }
+
+    /// Throttling that frees at least the noise tolerance is a working cap.
+    #[test]
+    fn a_ram_cap_that_frees_memory_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        memory_leaf(&dir, "73\n", "max");
+        let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, 8192 * MIB);
+        let mut family = family(73);
+        actuator
+            .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+            .unwrap();
+        for (high, current) in [(1, 3172), (2, 2800), (3, 2400), (4, 2000)] {
+            fs::write(
+                dir.join("memory.events"),
+                format!("low 0\nhigh {high}\nmax 0\noom 0\noom_kill 0\n"),
+            )
+            .unwrap();
+            fs::write(dir.join("memory.current"), format!("{}\n", current * MIB)).unwrap();
+            actuator.tick(&mut family).unwrap();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(read(&dir, "memory.high"), (1024 * MIB).to_string());
+        assert!(
+            !actuator
+                .unavailable(ResourceKind::Ram)
+                .contains(&YieldStep::Cap)
+        );
+        assert_eq!(actuator.step_code(ResourceKind::Ram), None);
+    }
+
+    /// A readback that differs from the write makes the RAM cap unavailable for
+    /// this allocation, and the step errors so the ladder goes on to the hint.
+    #[test]
+    fn a_ram_cap_readback_mismatch_makes_the_step_unavailable() {
+        struct Stuck(DirectoryLeaf);
+        impl LeafIo for Stuck {
+            fn same_leaf(&self) -> anyhow::Result<bool> {
+                self.0.same_leaf()
+            }
+            fn read(&self, control: &str) -> anyhow::Result<String> {
+                self.0.read(control)
+            }
+            fn write(&self, control: &str, value: &str) -> anyhow::Result<()> {
+                // The kernel keeps memory.high as it was.
+                if control == "memory.high" {
+                    return Ok(());
+                }
+                self.0.write(control, value)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        memory_leaf(&dir, "74\n", "max");
+        let mut settings = settings(AllocationClass::Opportunistic);
+        settings.requested.ram_mib = 4096;
+        let mut actuator = CgroupActuator::new(
+            Stuck(DirectoryLeaf::open(&dir).unwrap()),
+            &ram_config(),
+            &settings,
+        );
+        let mut family = family(74);
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(3500))
+                .is_err()
+        );
+        assert!(
+            actuator
+                .unavailable(ResourceKind::Ram)
+                .contains(&YieldStep::Cap)
+        );
+        assert_eq!(
+            actuator.step_code(ResourceKind::Ram),
+            Some("ram_cap_refused")
+        );
+        assert_eq!(actuator.applied_target(ResourceKind::Ram), None);
+    }
+
+    /// After an agent restart, a recorded RAM cap is adopted as the current step
+    /// and an unrecorded `memory.high` is reset: no cap stays without a step.
+    #[test]
+    fn restart_reconcile_adopts_a_recorded_ram_cap_or_resets_an_unrecorded_one() {
+        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};
+        use std::collections::BTreeMap;
+        for recorded in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_owned();
+            memory_leaf(&dir, "75\n", "max");
+            fs::write(dir.join("memory.high"), format!("{}\n", 2500 * MIB)).unwrap();
+            let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, 8192 * MIB);
+            let mut family = family(75);
+            let applied: BTreeMap<ResourceKey, StepRequest> = if recorded {
+                BTreeMap::from([(
+                    ResourceKey::Ram,
+                    StepRequest {
+                        step: YieldStep::Cap,
+                        target: Some(2500),
+                        cause: YieldCause::FloorBreach,
+                        deadline_ms: None,
+                    },
+                )])
+            } else {
+                BTreeMap::new()
+            };
+            actuator.reconcile(&mut family, &applied).unwrap();
+            if recorded {
+                assert_eq!(read(&dir, "memory.high"), (2500 * MIB).to_string());
+                assert_eq!(actuator.applied_target(ResourceKind::Ram), Some(2500));
+                actuator
+                    .apply(&mut family, ResourceKind::Ram, YieldStep::None, None)
+                    .unwrap();
+            }
+            assert_eq!(read(&dir, "memory.high"), "max", "recorded {recorded}");
+            assert_eq!(actuator.applied_target(ResourceKind::Ram), None);
+        }
+    }
+
+    /// Guaranteed work is never capped below its request, as on CPU.
+    #[test]
+    fn a_guaranteed_ram_cap_never_goes_below_its_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        memory_leaf(&dir, "76\n", "max");
+        let mut actuator = ram_actuator(&dir, AllocationClass::Guaranteed, 8192 * MIB);
+        let mut family = family(76);
+        actuator
+            .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+            .unwrap();
+        assert_eq!(read(&dir, "memory.high"), (4096 * MIB).to_string());
+    }
+
+    /// Reversal sets `memory.high` back to its launch value: `max`, or the
+    /// operator's configured limit.
+    #[test]
+    fn ram_cap_reversal_restores_the_launch_value() {
+        for (configured, launch) in [
+            (None, "max".to_string()),
+            (Some(8192), (8192 * MIB).to_string()),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_owned();
+            memory_leaf(&dir, "77\n", "max");
+            fs::write(dir.join("memory.high"), format!("{launch}\n")).unwrap();
+            let mut config = ram_config();
+            config.memory_high_mib = configured;
+            let mut settings = settings(AllocationClass::Opportunistic);
+            settings.requested.ram_mib = 4096;
+            let mut actuator = CgroupActuator::new(
+                DirectoryLeaf::open(&dir)
+                    .unwrap()
+                    .with_host_swap(8192 * MIB),
+                &config,
+                &settings,
+            );
+            let mut family = family(77);
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+                .unwrap();
+            assert_eq!(read(&dir, "memory.high"), (1024 * MIB).to_string());
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::None, None)
+                .unwrap();
+            assert_eq!(read(&dir, "memory.high"), launch);
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+                .unwrap();
+            actuator.release(&mut family).unwrap();
+            assert_eq!(read(&dir, "memory.high"), launch);
+        }
+    }
+
+    /// The cap step writes `memory.high` only, and only to the allocation's own
+    /// unchanged leaf holding exactly the verified family.
+    #[test]
+    fn a_ram_cap_writes_only_memory_high_on_the_own_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("leaf");
+        fs::create_dir(&dir).unwrap();
+        memory_leaf(&dir, "78\n", "max");
+        let io = DirectoryLeaf::open(&dir).unwrap();
+        for control in ["memory.max", "memory.low", "memory.min"] {
+            assert!(runtime_write(&io, &BTreeSet::from([78]), control, "1048576").is_err());
+        }
+        // A foreign PID in the leaf refuses the cap.
+        fs::write(dir.join("cgroup.procs"), "78\n99\n").unwrap();
+        let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, 8192 * MIB);
+        let mut family = family(78);
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+                .is_err()
+        );
+        assert_eq!(read(&dir, "memory.high"), "max");
+        // So does a leaf CedeGrid did not create: the pinned one was replaced.
+        fs::write(dir.join("cgroup.procs"), "78\n").unwrap();
+        let mut actuator = ram_actuator(&dir, AllocationClass::Opportunistic, 8192 * MIB);
+        fs::rename(&dir, temp.path().join("old")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        memory_leaf(&dir, "78\n", "max");
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(1024))
+                .is_err()
+        );
+        assert_eq!(read(&dir, "memory.high"), "max");
+        // Without memory.high authorized, the cap stays unavailable, as on rootless.
+        let actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        assert!(
+            actuator
+                .unavailable(ResourceKind::Ram)
+                .contains(&YieldStep::Cap)
+        );
+        assert!(
+            actuator
+                .unavailable(ResourceKind::GpuMemory)
+                .contains(&YieldStep::Cap)
+        );
     }
 }

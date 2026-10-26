@@ -44,13 +44,16 @@ pub fn observation(snapshot: &Snapshot, decision: &Decision, id: Option<i64>) ->
 }
 
 /// The steps open to opportunistic work per resource with the configured
-/// backend. Hints need a worker that reads resource targets; memory is the only
-/// resource drained on its own.
+/// backend. Hints need a worker that reads resource targets; a RAM cap needs a
+/// delegated leaf with `memory.high` authorized; memory is the only resource
+/// drained on its own.
 pub fn available_steps(config: &Config) -> BTreeMap<&'static str, Vec<&'static str>> {
     let actuator = crate::actuation::RootlessActuator::new(&ActuatorSettings {
         class: AllocationClass::Opportunistic,
         requested: Resources::default(),
         period: std::time::Duration::from_millis(config.monitor.interval_ms),
+        ram_noise_tolerance_mib: config.ram_cap_check().0,
+        ram_calm_window: std::time::Duration::from_millis(config.ram_cap_check().1),
     });
     let authorized = |control: &str| {
         config.cgroup.enabled
@@ -72,6 +75,9 @@ pub fn available_steps(config: &Config) -> BTreeMap<&'static str, Vec<&'static s
                 if !unavailable.contains(&step) {
                     steps.push(name);
                 }
+            }
+            if kind == ResourceKind::Ram && authorized("memory.high") {
+                steps.push("cap");
             }
             if kind != ResourceKind::GpuCompute {
                 steps.push("hint");

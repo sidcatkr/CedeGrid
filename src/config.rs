@@ -1629,6 +1629,18 @@ impl Config {
         }
     }
 
+    /// The RAM cap's noise tolerance in MiB, and the calm window in milliseconds
+    /// that its ineffective-cap check waits: RAM's step dwell.
+    pub fn ram_cap_check(&self) -> (u64, u64) {
+        let thresholds = self
+            .contention
+            .thresholds(crate::contention::ResourceKind::Ram);
+        (
+            thresholds.noise_tolerance_mib,
+            u64::from(thresholds.min_step_dwell_intervals).saturating_mul(self.monitor.interval_ms),
+        )
+    }
+
     /// The RAM floor on a host with `total_mib` of RAM (FR-023).
     pub fn ram_floor(&self, total_mib: u64) -> FloorStatus {
         let percent = total_mib
