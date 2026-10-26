@@ -56,6 +56,16 @@ class SourceReviewTests(unittest.TestCase):
         self.assertEqual(first['checks']['rust_include_fixtures_checked'], 1)
         self.assertEqual((self.source / 'docs/work-log.md').read_text(), 'retain private work log')
 
+    def test_the_manifest_lives_only_in_the_export_never_in_the_checkout(self):
+        # A copy at the repository root goes stale with every change; the pack step
+        # writes the only manifest, inside its output.
+        repository = Path(__file__).resolve().parents[1]
+        self.assertFalse((repository / 'source-manifest.json').exists())
+        self.assertNotIn('source-manifest.json', review.ALLOWLIST)
+        review.pack(self.source, self.root / 'export')
+        self.assertTrue((self.root / 'export/source/source-manifest.json').is_file())
+        self.assertFalse((self.source / 'source-manifest.json').exists())
+
     def test_existing_output_is_not_overwritten(self):
         output = self.root / 'existing'
         output.mkdir(); (output / 'precious').write_text('retain')

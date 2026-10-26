@@ -21,6 +21,9 @@ dist/
 *.egg-info/
 .pytest_cache/
 
+# Source export output (tools/pack_source_review.py --output source-export).
+/source-export/
+
 # Private development evidence and retained failed test fixtures.
 /docs/work-log.md
 /.distributed-service-*/

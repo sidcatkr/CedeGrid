@@ -107,8 +107,8 @@ the support boundary. In short:
 - Export: modules are `mod x;` in `src/lib.rs`, or in a module's file for its own directory
   (`src/agent/`), never through `#[path]`. A new file that ships goes into `ALLOWLIST`
   in `tools/pack_source_review.py` and into `include` in `Cargo.toml`. Exported text uses
-  placeholder home paths and loopback or RFC 5737 addresses. Don't hand-edit
-  `source-manifest.json`.
+  placeholder home paths and loopback or RFC 5737 addresses. `source-manifest.json` exists
+  only in the pack output; never track or hand-edit it.
 
 ## Spec Kit workflow
 
