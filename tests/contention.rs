@@ -3647,3 +3647,171 @@ fn decision_snapshot() {
     ));
     snapshot::check("contention", scenarios);
 }
+
+/// Report 021's T178 contender, item 023 Part 3: a test, not a policy change. Own
+/// work is 16 tasks of 250 m on 4000 m, measured exactly; a contender that wants
+/// one core starts once own work has ramped. The simulated host splits CPU by
+/// threads, weighted max-min, and honours the caps the policy applies.
+mod t178_contender {
+    use super::*;
+    use crate::snapshot::PolicyEngine;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const CAPACITY: u64 = 4000;
+    const INTERVAL: u64 = 500;
+    const TASKS: usize = 16;
+    const TASK: u64 = 250;
+    const CONTENDER: u64 = 1000;
+
+    /// One thread per claim, weighted max-min over CAPACITY.
+    fn schedule(demands: &[u64]) -> Vec<u64> {
+        let mut shares = vec![0u64; demands.len()];
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        let mut remaining = CAPACITY;
+        while !open.is_empty() && remaining > 0 {
+            let level = remaining / open.len() as u64;
+            let (done, rest): (Vec<usize>, Vec<usize>) = open
+                .iter()
+                .partition(|i| demands[**i] - shares[**i] <= level);
+            if done.is_empty() {
+                for i in &open {
+                    shares[*i] += level;
+                }
+                break;
+            }
+            for i in done {
+                remaining -= demands[i] - shares[i];
+                shares[i] = demands[i];
+            }
+            open = rest;
+        }
+        shares
+    }
+
+    /// The contender's CPU in each interval after it starts, and own work's.
+    pub fn run(mode: ContentionMode, same_account: bool) -> Vec<(u64, u64)> {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        let mut engine = PolicyEngine::new();
+        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
+        let mut served = Vec::new();
+        for tick in 0..120u64 {
+            let now = tick * INTERVAL;
+            let started = now >= 10_000;
+            let mut demands: Vec<u64> = caps
+                .iter()
+                .map(|(step, target)| match step {
+                    YieldStep::Pause => 0,
+                    YieldStep::Cap => target.unwrap_or(TASK).min(TASK),
+                    _ => TASK,
+                })
+                .collect();
+            demands.push(if started { CONTENDER } else { 0 });
+            let usage = schedule(&demands);
+            let contender = usage[TASKS];
+            let own: u64 = usage[..TASKS].iter().sum();
+            let mut snap = snapshot(own + contender);
+            snap.cpu_capacity_millicores = CAPACITY;
+            snap.physical_cores = Some(4);
+            let mut principals = vec![PrincipalUsage {
+                uid: Some(1000),
+                is_owner: true,
+                cpu_millicores: if same_account { contender } else { 0 },
+                ..PrincipalUsage::default()
+            }];
+            if !same_account {
+                principals.push(PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: contender,
+                    ..PrincipalUsage::default()
+                });
+            }
+            snap.principals = Some(principals);
+            let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
+            let input = PolicyInput {
+                allocations: ids
+                    .iter()
+                    .zip(&usage)
+                    .map(|(id, used)| {
+                        allocation(id, AllocationClass::Opportunistic, TASK, Some(*used))
+                    })
+                    .collect(),
+                facts: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            AllocationFacts {
+                                unavailable: BTreeMap::from([(
+                                    ResourceKey::Cpu,
+                                    [YieldStep::LowerShare].into(),
+                                )]),
+                                ..AllocationFacts::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                caps[i] = decision
+                    .actions
+                    .iter()
+                    .find(|a| &a.allocation_id == id && a.resource == ResourceKey::Cpu)
+                    .map_or((YieldStep::None, None), |a| (a.step, a.target));
+            }
+            if started {
+                served.push((contender, own));
+            }
+        }
+        served
+    }
+
+    /// The first interval, counted from the contender's start, in which it gets
+    /// its full core, and whether it keeps it from then on.
+    fn served_from(mode: ContentionMode, same_account: bool) -> usize {
+        let served = run(mode, same_account);
+        let first = served
+            .iter()
+            .position(|(contender, _)| *contender >= CONTENDER)
+            .expect("the contender never got its core");
+        assert!(
+            served[first..]
+                .iter()
+                .all(|(contender, _)| *contender >= CONTENDER),
+            "{mode:?} same_account={same_account}: {served:?}"
+        );
+        first
+    }
+
+    /// With exact own measurement, the contender reaches its demand in every mode,
+    /// as another user and under the account that runs CedeGrid, so report 021's
+    /// 0.72 core is not explained by the account the contender ran under.
+    #[test]
+    fn the_contender_reaches_its_demand_with_exact_own_measurement() {
+        use ContentionMode::*;
+        // Performance (SC-002, SC-012): ⌈(own − fair share) ÷ margin⌉ intervals,
+        // ⌈(3755 − 2000) ÷ 80⌉ = 22 here. The account makes no difference.
+        assert_eq!(
+            served_from(Performance, true),
+            served_from(Performance, false)
+        );
+        assert!(served_from(Performance, false) <= 22);
+        // Another user in Neutral and Yield First: within 2 intervals (SC-002).
+        assert!(served_from(Neutral, false) <= 2);
+        assert!(served_from(YieldFirst, false) <= 2);
+        assert!(served_from(YieldFirst, true) <= 2);
+        // The account's own unmanaged program is part of the owner's principal, so
+        // in Neutral it never contends for a fair share: it is served only as own
+        // work's margin frees capacity, after 5 intervals here (report 023,
+        // Decisions needed).
+        let owner = served_from(Neutral, true);
+        assert!((3..=10).contains(&owner), "{owner}");
+    }
+}
