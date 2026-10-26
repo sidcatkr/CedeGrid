@@ -257,7 +257,12 @@ ramp() { # ramp <name> [gate options...]
 }
 ramp ramp-idle --cpus 4
 ramp ramp-contender --cpus 4 --contender-at 3
+ramp ramp-contender-unpinned --cpus 4 --contender-at 3 --contender-unpinned
 ```
+
+The pinned contender runs on one CPU of the scope, where own threads can still run, so it
+also measures the per-core case that 003 FR-056 addresses. The unpinned contender can run on
+any CPU of the scope and measures 001's SC-004 alone.
 
 Record from each `report.json` in `docs/validation.md`:
 

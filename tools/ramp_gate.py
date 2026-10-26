@@ -113,7 +113,7 @@ def run(args):
     worker_env=dict(TMPDIR=str(root/'tmp'),XDG_CACHE_HOME=str(root/'cache'),PYTHONNOUSERSITE='1')
     env={**os.environ,**worker_env}
     report={'run_id':run_id,'cpus':cpus,'workers':workers,'task_millicores':TASK_MILLICORES,
-        'contender_at_seconds':args.contender_at,'status':'running'}
+        'contender_at_seconds':args.contender_at,'contender_pinned':not args.contender_unpinned,'status':'running'}
     services={};contender=None
     try:
         report['guard']=local_guard(output,{'min_ram_free_bytes':8*1024**3,'min_disk_free_bytes':8*1024**3,'max_output_bytes':1024**3})
@@ -147,7 +147,10 @@ def run(args):
         while time.time()<submitted+args.seconds:
             if args.contender_at is not None and contender is None and time.time()>=submitted+args.contender_at:
                 report['contender_started_unix']=time.time()
-                contender=OwnedProcess(['taskset','-c',str(cpus[-1]),str(python),'-c',DUTY_LOOP,str(args.seconds),'100'],manager,output/'contender.log',env)
+                # Pinned to one CPU of the scope by default (the per-core case); unpinned,
+                # it may run on any CPU of the scope.
+                pin=[] if args.contender_unpinned else ['taskset','-c',str(cpus[-1])]
+                contender=OwnedProcess([*pin,str(python),'-c',DUTY_LOOP,str(args.seconds),'100'],manager,output/'contender.log',env)
                 report['contender_identity']=contender.identity
             if contender is not None and contender.poll() is None:
                 contender_cpu.append((time.time(),cpu_ticks(contender.child.pid)/ticks))
@@ -179,6 +182,7 @@ def main():
     parser.add_argument('--cpus',type=int,default=4);parser.add_argument('--seconds',type=int,default=40)
     parser.add_argument('--settle',type=float,default=10.)
     parser.add_argument('--contender-at',type=float,help='seconds after submission to start an unmanaged contender')
+    parser.add_argument('--contender-unpinned',action='store_true',help='let the contender run on any CPU of the scope instead of the last one')
     parser.add_argument('--execute',action='store_true')
     report=run(parser.parse_args())
     print(json.dumps({key:report.get(key) for key in ['status','target_millicores','ramp_seconds','contender_served_seconds','foreign_actions']}))
