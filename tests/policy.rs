@@ -4596,7 +4596,7 @@ mod per_job_modes {
 }
 
 /// Each GPU's memory admission opens on its own cooldown, whatever CPU and RAM do
-/// (item 010 B1, FR-034).
+/// (FR-034).
 mod gpu_cooldown_alone {
     use super::*;
     use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
@@ -4735,7 +4735,7 @@ mod gpu_cooldown_alone {
 }
 
 /// Admission is blocked for own work only while it is being reclaimed; a cap that
-/// holds at the target leaves admission to headroom and cooldown (item 010 B2).
+/// holds at the target leaves admission to headroom and cooldown.
 mod reclaim_admission {
     use super::*;
     use cedegrid::contention::{Admission, ContentionMode, ResourceKey, YieldStep};

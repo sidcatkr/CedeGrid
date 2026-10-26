@@ -819,7 +819,7 @@ mod setup_non_interactive {
         assert!(!path.exists());
     }
 
-    /// Memory margins exist for Yield First only (item 009 B).
+    /// Memory margins exist for Yield First only.
     #[test]
     fn memory_neutral_and_performance_margins_are_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1306,7 +1306,7 @@ mod setup_terminal {
         let (_, text, _) = pty.finish();
         assert!(!text.contains('\x1b'), "{text:?}");
         assert!(text.contains("[caution]"));
-        // Memory keeps only the floor under Neutral and Performance (item 009 B).
+        // Memory keeps only the floor under Neutral and Performance.
         assert!(text.contains("RAM margin, Yield First"));
         for row in [
             "RAM margin, Neutral",

@@ -521,7 +521,7 @@ fn every_code_the_policy_emits_is_in_the_catalog() {
 }
 
 /// Each code has one sentence, codes are unique `snake_case`, the catalog covers
-/// what item 009 pins, and `docs/guarantees.md` lists every code.
+/// the pinned codes, and `docs/guarantees.md` lists every code.
 #[test]
 fn the_catalog_has_one_sentence_per_stable_code() {
     let mut seen = std::collections::BTreeSet::new();

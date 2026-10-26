@@ -79,7 +79,7 @@ pub fn validate_gpu_launch_contract(
     Ok(())
 }
 
-/// Whether a new request is admitted now (B2): every resource it asks for must be
+/// Whether a new request is admitted now: every resource it asks for must be
 /// admitted, and own charged usage plus the request must stay within own target,
 /// the aggregate from the node mode and cap. Returns the catalog code of the
 /// first refusal. Coordinator placement charges the same headroom.
@@ -2563,7 +2563,7 @@ impl PolicyEngine {
         // Admission per resource: blocked until its cause changes, held while it
         // waits for a measurement or a cooldown (FR-028, FR-038).
         // Own work is reclaimed while it holds more than its target or a step is
-        // still moving down; a cap or hint that holds at its target is not (B2).
+        // still moving down; a cap or hint that holds at its target is not.
         let moving_down: BTreeSet<ResourceKey> = ladder
             .iter()
             .filter(|((id, key), next)| {

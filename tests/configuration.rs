@@ -1513,7 +1513,7 @@ fn job_contention_cases_parse_and_validate_alike() {
 }
 
 /// Memory keeps only the floor under Neutral and Performance, so those margins do
-/// not exist for RAM and GPU memory (item 009 B).
+/// not exist for RAM and GPU memory.
 #[test]
 fn memory_has_no_neutral_or_performance_margin() {
     for resource in ["ram", "gpu_memory"] {

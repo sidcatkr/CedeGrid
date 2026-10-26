@@ -2578,7 +2578,7 @@ mod tests {
         assert_eq!(risk(&plain, Field::HintDeadline, Pick::Number(10)), None);
     }
 
-    /// Consequence lines use this host's numbers (item 008, pin 2).
+    /// Consequence lines use this host's numbers.
     #[test]
     fn consequence_lines_use_host_numbers() {
         let config = Config::default();
@@ -2600,7 +2600,7 @@ mod tests {
             consequence(Field::GpuFloor, Pick::Number(1024), &config, Some(&host)),
             "GPU memory floor 1229 MiB on GPU-a"
         );
-        // Memory keeps only the floor under Neutral and Performance (item 009 B).
+        // Memory keeps only the floor under Neutral and Performance.
         assert_eq!(
             consequence(
                 Field::Mode(ResourceKind::Ram),
@@ -2627,7 +2627,7 @@ mod tests {
     }
 
     /// Every option the interface offers maps to a key the configuration accepts,
-    /// and Neutral is preselected on a new file (item 008, pin 3).
+    /// and Neutral is preselected on a new file.
     #[test]
     fn every_offered_option_loads() {
         let (_dir, plain) = target("config_version = 1\n");
