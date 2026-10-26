@@ -132,6 +132,24 @@ class GateRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'cgroup'):
                 comparison.verify_protected_unchanged(before,comparison.protected_snapshot(4242,proc,cgroup))
 
+    def test_a_case_waits_for_an_unmanaged_probe_to_exit_after_its_result(self):
+        class Child:
+            def __init__(self,code):self.code=code
+            def poll(self):return self.code
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+            probe=Path(temporary)
+            running={'probe':Child(None)}
+            self.assertFalse(comparison.case_finished('unmanaged_idle',probe,running,False,None))
+            (probe/'result.json').write_text('{}')
+            # The result is written, but the probe is still tearing down.
+            self.assertFalse(comparison.case_finished('unmanaged_idle',probe,running,False,None))
+            self.assertTrue(comparison.case_finished('unmanaged_idle',probe,{'probe':Child(0)},False,None))
+            self.assertFalse(comparison.case_finished('unmanaged_contention',probe,
+                {'probe':Child(0),'protected':Child(None)},False,None))
+            self.assertFalse(comparison.case_finished('managed_idle',probe,{},True,None))
+            self.assertTrue(comparison.case_finished('managed_idle',probe,{},True,12.5))
+            self.assertTrue(comparison.case_finished('protected_alone',probe,{'protected':Child(0)},False,None))
+
     def test_usage_names_the_gate_options(self):
         usage=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),'--help'],
             capture_output=True,text=True,check=True).stdout

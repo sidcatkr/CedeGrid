@@ -187,6 +187,15 @@ def confirm_gpu_release(gpu,pid):
         time.sleep(.25)
 
 
+def case_finished(scenario,probe,children,managed,released):
+    """The protected load and the probe are done. An unmanaged probe must also have exited:
+    a GPU probe still tears down its CUDA context after writing its result."""
+    external_done='protected' not in children or children['protected'].poll() is not None
+    probe_done=scenario=='protected_alone' or ((probe/'result.json').exists()
+        and ('probe' not in children or children['probe'].poll() is not None))
+    return external_done and probe_done and (not managed or bool(released))
+
+
 def probe_task(task_id,argv,manager,env,mode,gpu_uuid):
     return command_task(task_id,argv,str(manager),env=env,cpu_millicores=500 if mode=='cpu' else 1000,
         ram_mib=2048,gpu_vram_mib={gpu_uuid:1024} if mode=='gpu' else {},
@@ -310,9 +319,7 @@ def run(args):
                     if gpu is not None and scenario!='protected_alone' and (probe/'ready.json').exists() and not (probe/'result.json').exists():
                         pid=json.loads((probe/'ready.json').read_text())['pid'];reading=gpu.sample(target_pid=pid)
                         if reading['own_memory_bytes'] is None or reading['own_memory_bytes']>1024**3:raise RuntimeError('probe VRAM unavailable or exceeds1GiB')
-                    external_done='protected' not in children or children['protected'].poll() is not None
-                    probe_done=scenario=='protected_alone' or (probe/'result.json').exists()
-                    if external_done and probe_done and (not managed or case.get('released_monotonic')):break
+                    if case_finished(scenario,probe,children,managed,case.get('released_monotonic')):break
                     if time.monotonic()>deadline:raise TimeoutError('finite comparison case exceeded its bound')
                 case['owned_cleanup']={name:child.stop() for name,child in children.items()};children.clear()
                 if any(value['exit_code']!=0 for value in case['owned_cleanup'].values()):raise RuntimeError('owned protected/probe process failed or was signaled')
