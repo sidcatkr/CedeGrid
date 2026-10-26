@@ -1066,6 +1066,11 @@ no behavior beyond what those commits did.
 - [X] T176 Make the helper that creates `.agent-test-*` directories clean up on success, failure and panic with a drop guard, keeping the home-only guard; then delete the leaked directories. Per CLAUDE.md test hygiene (partial).
 - [X] T177 Release the agent lock explicitly, so a descriptor inherited between fork and exec cannot keep it; the lock test must pass 20 runs in a row with the default thread count. Per the agent lock (partial).
 
+## Phase 15: Convergence (item 017 Part 4)
+
+- [ ] T178 Run the Performance ramp gate (`tools/ramp_gate.py`, "Performance ramp gate" in native-gates.md) on the authorized test host, idle and with a contender started mid-ramp, and record `ramp_seconds`, `contender_served_seconds` and `foreign_actions` in docs/validation.md. *Deferred: runs only with the user's approval in the session.* Per SC-004 and plan: ramp gate (missing)
+- [X] T179 Add the ramp tests (`cargo test --locked --test contention ramp`) and the held-back ceiling test to quickstart §1, and list `tools/ramp_gate.py` in the docs/validation.md matrix and the Performance ramp's hardware evidence under its open gates. Per plan: Faster Performance ramp and Item 017 fixes (partial)
+
 ---
 
 ## Dependencies & Execution Order

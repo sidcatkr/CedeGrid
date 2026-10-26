@@ -32,6 +32,11 @@ cargo test --locked --test policy -- d1_ d2_ d3_ d4_ d5_ d6_
   - each resource's admission and `held_back`, GPU memory cooling down on its own, and
     admission blocked only while own work is reclaimed:
     `cargo test --locked --test policy -- each_resource_reports decisions_show gpu_cooldown_alone reclaim_admission`
+  - an ancestor CPU ceiling held back on its own line, never as contention (SC-016):
+    `cargo test --locked --test policy -- held_back_shows_an_ancestor_ceiling`
+  - the Performance ramp: 90% within 10 s for CPU and GPU compute, Yield First and Neutral
+    unchanged, a mid-ramp external workload served and memory timing unchanged (SC-004):
+    `cargo test --locked --test contention -- ramp:: mid_ramp flapping_every_interval`
 
 ## 2. Single authority and error handling (Linux; macOS for the rootless parts)
 

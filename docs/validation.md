@@ -40,6 +40,7 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 | CLI lifecycle commands, storage diagnostic, offline backup and restore | `src/main.rs`, `src/backup.rs` | `tests/cli.rs`, `tests/backup.rs`, `tests/storage_qualification.rs` |
 | Generic command example | `python/examples/counter.py` | `tests/agent.rs` |
 | Matched throughput, protected latency, manager overhead and release timing | `tools/compare.py`, `tools/pressure_comparison.py`, `tools/pressure_probe.py` | `tests/test_compare.py`, `tests/test_pressure_comparison.py` |
+| Performance ramp time and a contender started mid-ramp | `tools/ramp_gate.py` | `tests/test_ramp_gate.py`, `tests/contention.rs` |
 | Bounded stress and optional long-duration soak | `tools/pressure.py`, `tools/soak.py`, `tools/make_soak_config.py`, `tools/pressure_schedule.py` | `tests/test_local_smoke_stress.py`, `tests/test_operations.py`, `tests/test_validation_tools.py` |
 
 ## Open operational gates
@@ -53,6 +54,8 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - sharing and protection on an occupied device
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
+- **Performance ramp.** The 10 s ramp to 90% is verified in simulation only. The gate in
+  `specs/001-contention-modes/native-gates.md` has not run on a Linux host.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
