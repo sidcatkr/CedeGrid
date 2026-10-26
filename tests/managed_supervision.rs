@@ -1494,3 +1494,323 @@ child.wait(timeout=6,poll_interval=.01)
         "800"
     );
 }
+
+/// What the fake RAM cap holds, shared between its actuator and the test.
+#[derive(Default)]
+struct FakeRam {
+    /// Every RAM cap target the supervisor asked the backend to apply.
+    caps: Vec<Option<u64>>,
+    cap: Option<u64>,
+    /// The next tick raises a held cap here, as an ineffective cap does.
+    raise_to: Option<u64>,
+    refused: bool,
+    /// The applied steps each reconcile was given.
+    reconciled: Vec<BTreeMap<cedegrid::contention::ResourceKey, cedegrid::contention::StepRequest>>,
+}
+
+/// The rootless actuator, plus a RAM cap like the cgroup backend's `memory.high`.
+struct FakeRamActuator {
+    inner: Box<dyn Actuator>,
+    state: std::sync::Arc<std::sync::Mutex<FakeRam>>,
+}
+impl Actuator for FakeRamActuator {
+    fn unavailable(
+        &self,
+        kind: cedegrid::contention::ResourceKind,
+    ) -> std::collections::BTreeSet<cedegrid::contention::YieldStep> {
+        use cedegrid::contention::{ResourceKind, YieldStep};
+        let mut steps = self.inner.unavailable(kind);
+        if kind == ResourceKind::Ram && !self.state.lock().unwrap().refused {
+            steps.remove(&YieldStep::Cap);
+        }
+        steps
+    }
+    fn apply(
+        &mut self,
+        family: &mut dyn Family,
+        kind: cedegrid::contention::ResourceKind,
+        step: cedegrid::contention::YieldStep,
+        target: Option<u64>,
+    ) -> anyhow::Result<cedegrid::contention::YieldStep> {
+        use cedegrid::contention::{ResourceKind, YieldStep};
+        if kind != ResourceKind::Ram {
+            return self.inner.apply(family, kind, step, target);
+        }
+        let mut state = self.state.lock().unwrap();
+        match step {
+            YieldStep::Cap => {
+                state.caps.push(target);
+                state.cap = target;
+            }
+            YieldStep::None => state.cap = None,
+            other => anyhow::bail!("the fake RAM backend has no {other:?}"),
+        }
+        Ok(step)
+    }
+    fn tick(&mut self, family: &mut dyn Family) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.cap.is_some()
+            && let Some(raised) = state.raise_to.take()
+        {
+            state.cap = Some(raised);
+            state.refused = true;
+        }
+        drop(state);
+        self.inner.tick(family)
+    }
+    fn applied_target(&self, kind: cedegrid::contention::ResourceKind) -> Option<u64> {
+        (kind == cedegrid::contention::ResourceKind::Ram)
+            .then(|| self.state.lock().unwrap().cap)
+            .flatten()
+    }
+    fn step_code(&self, kind: cedegrid::contention::ResourceKind) -> Option<&'static str> {
+        (kind == cedegrid::contention::ResourceKind::Ram && self.state.lock().unwrap().refused)
+            .then_some("ram_cap_ineffective")
+    }
+    fn reconcile(
+        &mut self,
+        family: &mut dyn Family,
+        applied: &BTreeMap<cedegrid::contention::ResourceKey, cedegrid::contention::StepRequest>,
+    ) -> anyhow::Result<()> {
+        use cedegrid::contention::{ResourceKey, YieldStep};
+        let mut state = self.state.lock().unwrap();
+        state.reconciled.push(applied.clone());
+        // A RAM cap no recorded step accounts for is undone.
+        if !applied
+            .get(&ResourceKey::Ram)
+            .is_some_and(|step| matches!(step.step, YieldStep::Cap | YieldStep::Hint))
+        {
+            state.cap = None;
+        }
+        drop(state);
+        self.inner.reconcile(family, applied)
+    }
+    fn release(&mut self, family: &mut dyn Family) -> anyhow::Result<()> {
+        self.state.lock().unwrap().cap = None;
+        self.inner.release(family)
+    }
+}
+
+/// The rootless backend with the fake RAM cap.
+struct FakeRamBackend {
+    inner: RootlessBackend,
+    state: std::sync::Arc<std::sync::Mutex<FakeRam>>,
+}
+impl LaunchBackend for FakeRamBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn actuator(&self, settings: &ActuatorSettings) -> Box<dyn Actuator> {
+        Box::new(FakeRamActuator {
+            inner: self.inner.actuator(settings),
+            state: self.state.clone(),
+        })
+    }
+    fn prepare(&mut self, request: &LaunchRequest) -> anyhow::Result<GateSetup> {
+        self.inner.prepare(request)
+    }
+    fn preparation_evidence(&self) -> Vec<ControlEvidence> {
+        self.inner.preparation_evidence()
+    }
+    fn verify(&mut self, identity: &ProcessIdentity) -> anyhow::Result<Vec<ControlEvidence>> {
+        self.inner.verify(identity)
+    }
+    fn confirm_release(&mut self) -> anyhow::Result<()> {
+        self.inner.confirm_release()
+    }
+}
+
+/// Caps RAM below the Guaranteed request, lets the cap turn ineffective, hints,
+/// then queries, each once the previous report arrived; it keeps the journal's
+/// contention at each report.
+struct RamCapScript {
+    dir: std::path::PathBuf,
+    state: std::sync::Arc<std::sync::Mutex<FakeRam>>,
+    stage: usize,
+    reports: Vec<supervision::SupervisorReport>,
+    journaled: Vec<Option<cedegrid::contention::AllocationContention>>,
+    /// The backend's RAM cap when each report arrived.
+    held: Vec<Option<u64>>,
+}
+impl supervision::SupervisorControl for RamCapScript {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+        let adjust = |sequence, step, target| supervision::SupervisorCommand::Adjust {
+            sequence,
+            resources: BTreeMap::from([(
+                ResourceKey::Ram,
+                StepRequest {
+                    step,
+                    target,
+                    cause: YieldCause::FloorBreach,
+                    deadline_ms: None,
+                },
+            )]),
+        };
+        let commands = match (self.stage, self.reports.len()) {
+            (0, 0) if self.dir.join("ready").exists() => vec![adjust(1, YieldStep::Cap, Some(10))],
+            (1, 1) => {
+                self.state.lock().unwrap().raise_to = Some(512);
+                vec![]
+            }
+            (2, 2) => vec![adjust(2, YieldStep::Hint, Some(64))],
+            (3, 3) => vec![supervision::SupervisorCommand::Query],
+            (4, 4) => {
+                fs::write(self.dir.join("stop"), "").unwrap();
+                vec![]
+            }
+            _ => return Ok(vec![]),
+        };
+        self.stage += 1;
+        Ok(commands)
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        if !matches!(report, supervision::SupervisorReport::Readiness { .. }) {
+            self.reports.push(report);
+            self.held.push(self.state.lock().unwrap().cap);
+            self.journaled.push(
+                StateStore::open_read_only(&self.dir.join("state"))?
+                    .contention("family-attempt")?,
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The supervisor end to end with a backend that can cap RAM (FR-011, FR-024):
+/// a Guaranteed cap is clamped to the request and journaled, a cap the backend
+/// raised is reported unprompted, a hint keeps the held cap, and a query
+/// reconciles the actuator with the recorded steps.
+#[test]
+fn a_ram_cap_is_clamped_recorded_reported_kept_under_a_hint_and_reconciled() {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    use supervision::SupervisorReport::{Adjusted, State};
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(
+        dir.path(),
+        r#"
+import time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env();hint=None
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    t=signals.resource_targets()
+    if t is not None and t.step=='hint': hint=t.ram_mib
+    time.sleep(0.005)
+(d/'hint').write_text(str(hint))
+"#,
+    );
+    let state = std::sync::Arc::new(std::sync::Mutex::new(FakeRam::default()));
+    let mut script = RamCapScript {
+        dir: dir.path().to_owned(),
+        state: state.clone(),
+        stage: 0,
+        reports: vec![],
+        journaled: vec![],
+        held: vec![],
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut FakeRamBackend {
+            inner: RootlessBackend::new(10),
+            state: state.clone(),
+        },
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut script,
+    )
+    .unwrap();
+    assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+    assert_eq!(outcome.exit_code, Some(0), "{:?}", script.reports);
+    let ram = |map: &BTreeMap<ResourceKey, u64>| map.get(&ResourceKey::Ram).copied();
+    let journaled = |index: usize| {
+        script.journaled[index]
+            .as_ref()
+            .and_then(|c| c.applied.get(&ResourceKey::Ram))
+            .map(|step| (step.step, step.target))
+    };
+    assert_eq!(script.reports.len(), 4, "{:?}", script.reports);
+    // The Guaranteed clamp: a 10 MiB cap is applied at the 128 MiB request, and
+    // the journal records the applied target.
+    match &script.reports[0] {
+        Adjusted {
+            sequence,
+            applied,
+            applied_targets,
+            ..
+        } => {
+            assert_eq!(*sequence, 1);
+            assert_eq!(applied.get(&ResourceKey::Ram), Some(&YieldStep::Cap));
+            assert_eq!(ram(applied_targets), Some(128));
+        }
+        other => panic!("unexpected report {other:?}"),
+    }
+    assert_eq!(journaled(0), Some((YieldStep::Cap, Some(128))));
+    // The unprompted report: the backend raised the cap, so the supervisor reports
+    // the new target, the code and the unavailable cap with no command, and
+    // journals the raised target.
+    match &script.reports[1] {
+        Adjusted {
+            sequence,
+            applied,
+            unavailable,
+            applied_targets,
+            step_codes,
+            ..
+        } => {
+            assert_eq!(*sequence, 1);
+            assert_eq!(applied.get(&ResourceKey::Ram), Some(&YieldStep::Cap));
+            assert_eq!(ram(applied_targets), Some(512));
+            assert_eq!(
+                step_codes.get(&ResourceKey::Ram).map(String::as_str),
+                Some("ram_cap_ineffective")
+            );
+            assert_eq!(
+                unavailable.get(&ResourceKey::Ram),
+                Some(&vec![YieldStep::Cap])
+            );
+        }
+        other => panic!("unexpected report {other:?}"),
+    }
+    assert_eq!(journaled(1), Some((YieldStep::Cap, Some(512))));
+    // Keeping the cap under a hint: the hint is published, and the backend's cap
+    // is neither reapplied nor released.
+    match &script.reports[2] {
+        Adjusted {
+            sequence, applied, ..
+        } => {
+            assert_eq!(*sequence, 2);
+            assert_eq!(applied.get(&ResourceKey::Ram), Some(&YieldStep::Hint));
+        }
+        other => panic!("unexpected report {other:?}"),
+    }
+    assert_eq!(journaled(2), Some((YieldStep::Hint, Some(64))));
+    // Reconcile on query: the actuator sees the recorded hint and keeps its cap.
+    match &script.reports[3] {
+        State {
+            applied, targets, ..
+        } => {
+            assert_eq!(applied.get(&ResourceKey::Ram), Some(&YieldStep::Hint));
+            assert_eq!(ram(targets), Some(64));
+        }
+        other => panic!("unexpected report {other:?}"),
+    }
+    assert_eq!(script.held, [Some(128), Some(512), Some(512), Some(512)]);
+    let state = state.lock().unwrap();
+    assert_eq!(state.caps, [Some(128)]);
+    assert_eq!(state.reconciled.len(), 1);
+    assert_eq!(
+        state.reconciled[0]
+            .get(&ResourceKey::Ram)
+            .map(|step| step.step),
+        Some(YieldStep::Hint)
+    );
+    assert_eq!(fs::read_to_string(dir.path().join("hint")).unwrap(), "64");
+    // Release undid the cap before the run ended.
+    assert_eq!(state.cap, None);
+}
