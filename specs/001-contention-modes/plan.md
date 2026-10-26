@@ -502,8 +502,9 @@ Measurement only: the policy rules and the decision snapshot do not change.
   when both process queries succeed, at least one PID is listed, every listed PID is an own
   verified PID checked through a pidfd (no PID 0, no unresolvable entry), no MPS is present, and
   unattributed device memory is no higher than at the last measured, own-only or empty interval
-  plus `contention.gpu_memory.noise_tolerance_mib`. It then reports external 0 and own = device
-  utilization, and sets `GpuSnapshot.own_only`. `gpu_compute_path` in `src/policy/measure.rs`
+  plus `contention.gpu_memory.noise_tolerance_mib`. The managed collector passes the verified
+  identities, not only their PIDs, so each listed PID's pidfd is checked against its identity.
+  It then reports external 0 and own = device utilization, and sets `GpuSnapshot.own_only`. `gpu_compute_path` in `src/policy/measure.rs`
   takes the measured path at once for such an interval and keeps the measured streak counting.
   Any failing condition keeps today's path.
 - **Tests first**: the bound math per source; a gated Linux test (`CEDEGRID_TEST_CPU_CLOCK=1`)
