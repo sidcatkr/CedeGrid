@@ -282,7 +282,26 @@ impl<'a> Interval<'a> {
         };
         // Own usage is a lower bound and host busy an upper bound (schema 3 adds
         // the host lower bound). Overlapping bounds are consistent (R9).
-        let own_lower = self.managed_observed.cpu_millicores;
+        let own_upper = input
+            .allocations
+            .iter()
+            .filter_map(|a| a.observed.as_ref().map(|o| (a, o)))
+            .map(|(a, o)| {
+                a.observed_upper
+                    .as_ref()
+                    .map_or(o.cpu_millicores, |u| u.cpu_millicores.max(o.cpu_millicores))
+            })
+            .fold(0u64, u64::saturating_add);
+        // The summed bound counts one tick of pending time per scope CPU rather
+        // than per process; it stays within the per-allocation sums.
+        let own_lower = snapshot.managed_cpu_lower_millicores.map_or(
+            self.managed_observed.cpu_millicores,
+            |summed| {
+                summed
+                    .min(own_upper)
+                    .max(self.managed_observed.cpu_millicores)
+            },
+        );
         let host_lower = match self.scoped_kernel() {
             Some(kernel) => kernel.cpu.busy_lower_millicores,
             None => snapshot.cpu_busy_lower_millicores,
@@ -329,19 +348,7 @@ impl<'a> Interval<'a> {
             .min(self.cpu_ceiling);
         let status = self.statuses.entry(ResourceKey::Cpu).or_default();
         status.external = Some(external);
-        status.own = Some((
-            own_lower,
-            input
-                .allocations
-                .iter()
-                .filter_map(|a| a.observed.as_ref().map(|o| (a, o)))
-                .map(|(a, o)| {
-                    a.observed_upper
-                        .as_ref()
-                        .map_or(o.cpu_millicores, |u| u.cpu_millicores.max(o.cpu_millicores))
-                })
-                .fold(0u64, u64::saturating_add),
-        ));
+        status.own = Some((own_lower, own_upper));
     }
 
     /// RAM: the floor and its critical level, floor breaches and room, and the

@@ -34,6 +34,7 @@ fn host() -> Snapshot {
         physical_cores: Some(16),
         cpu_busy_millicores: Some(0),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib: 262_144,
         available_ram_mib: Some(250_000),
         gpu_inventory: CapabilityStatus::Available,

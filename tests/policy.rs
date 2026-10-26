@@ -41,6 +41,7 @@ fn snapshot() -> Snapshot {
         physical_cores: Some(4),
         cpu_busy_millicores: Some(2000),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,
@@ -2066,6 +2067,46 @@ fn d5_sampling_skew_between_own_and_host_cpu_keeps_the_budget() {
     assert_eq!(consistent.managed_budget.cpu_millicores, 5900);
     assert_eq!(consistent.admission_headroom.cpu_millicores, 1900);
     assert!(codes(&consistent, "cpu").contains(&"inconsistent_within_tolerance".into()));
+}
+
+/// The collector's summed own CPU bound (one tick of pending time per scope CPU,
+/// not per process) replaces the sum of per-allocation lower bounds, within that
+/// sum and the sum of upper bounds (item 024 Part 0).
+#[test]
+fn the_summed_own_cpu_bound_applies_within_the_per_allocation_sums() {
+    use cedegrid::contention::ResourceKey;
+    let input = PolicyInput {
+        allocations: (0..2)
+            .map(|i| {
+                let mut a = allocation(
+                    &format!("a{i}"),
+                    AllocationPhase::Running,
+                    resources(2000, 100, 0),
+                    Some(resources(1843, 100, 0)),
+                );
+                a.observed_upper = Some(resources(1957, 100, 0));
+                a
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let own = |summed| {
+        let mut snap = snapshot();
+        snap.schema_version = SCHEMA_VERSION;
+        snap.cpu_busy_millicores = Some(4000);
+        snap.cpu_busy_lower_millicores = Some(3990);
+        snap.managed_cpu_lower_millicores = summed;
+        let decision = PolicyEngine::new()
+            .evaluate(&config(), &snap, &input, 0)
+            .unwrap();
+        let status = &decision.resources[&ResourceKey::Cpu];
+        (status.own, status.external)
+    };
+    assert_eq!(own(None), (Some((3686, 3914)), Some(314)));
+    assert_eq!(own(Some(3791)), (Some((3791, 3914)), Some(209)));
+    // Never above the upper sum, never below the lower sum.
+    assert_eq!(own(Some(9999)).0, Some((3914, 3914)));
+    assert_eq!(own(Some(10)).0, Some((3686, 3914)));
 }
 
 #[test]

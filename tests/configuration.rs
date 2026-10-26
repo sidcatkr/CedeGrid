@@ -752,6 +752,7 @@ fn host(total_ram_mib: u64, gpus: &[u64]) -> cedegrid::model::Snapshot {
         physical_cores: Some(4),
         cpu_busy_millicores: Some(0),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib,
         available_ram_mib: Some(total_ram_mib),
         gpu_inventory: if gpus.is_empty() {
@@ -1240,6 +1241,7 @@ fn a_percentage_floor_near_its_minimum_is_judged_on_the_host() {
         physical_cores: Some(4),
         cpu_busy_millicores: Some(0),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib,
         available_ram_mib: Some(total_ram_mib),
         gpu_inventory: CapabilityStatus::Unsupported,

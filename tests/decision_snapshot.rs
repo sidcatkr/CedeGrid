@@ -256,6 +256,7 @@ fn sequence(seed: u64) -> usize {
             physical_cores: Some(4),
             cpu_busy_millicores: (!rng.chance(5)).then_some(busy),
             cpu_busy_lower_millicores: None,
+            managed_cpu_lower_millicores: None,
             total_ram_mib: RAM,
             available_ram_mib: (!rng.chance(5))
                 .then(|| RAM.saturating_sub(own_ram + ext_ram + 2000)),

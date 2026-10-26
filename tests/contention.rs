@@ -32,6 +32,7 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
         physical_cores: Some(4),
         cpu_busy_millicores: Some(cpu_busy_millicores),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,

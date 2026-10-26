@@ -249,6 +249,11 @@ pub struct Snapshot {
     /// Lower bound of host busy time (schema 3); `cpu_busy_millicores` is the upper bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_busy_lower_millicores: Option<u64>,
+    /// Own work's CPU lower bound summed with one tick of pending time per scope
+    /// CPU rather than per process; the policy uses it within the per-allocation
+    /// sums.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_cpu_lower_millicores: Option<u64>,
     pub total_ram_mib: u64,
     pub available_ram_mib: Option<u64>,
     pub gpu_inventory: CapabilityStatus,

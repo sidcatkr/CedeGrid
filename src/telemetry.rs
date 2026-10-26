@@ -479,6 +479,7 @@ impl Collector {
             physical_cores: self.physical_cores,
             cpu_busy_millicores: cpu_busy,
             cpu_busy_lower_millicores: cpu_busy_lower,
+            managed_cpu_lower_millicores: None,
             total_ram_mib: total_ram,
             available_ram_mib: available_ram,
             gpu_inventory,
@@ -2033,6 +2034,7 @@ mod tests {
             source: CpuSource::Clock,
             ns,
             quantization_ns,
+            threads: 1,
         };
         assert_eq!(cpu_delta(clock(100, 10), clock(400, 30)), Some((300, 30)));
         assert_eq!(cpu_delta(clock(400, 10), clock(100, 10)), None);
@@ -2077,6 +2079,7 @@ mod tests {
                 source: CpuSource::Leaf,
                 ns: 123_456_000,
                 quantization_ns: 1_000 + MS,
+                threads: 1,
             }
         );
         assert_eq!(members, BTreeSet::from([10]));
@@ -2216,6 +2219,70 @@ mod tests {
         assert!(!sets_memory_baseline(false, true, Some(&[7]), false));
         assert!(!sets_memory_baseline(false, false, Some(&[]), false));
         assert!(!sets_memory_baseline(false, true, None, false));
+    }
+
+    fn precise(delta_ns: u64, threads: u64, tick: u64) -> CpuPart {
+        CpuPart {
+            delta_ns,
+            quantization_ns: clock_quantization_ns(threads, 4, tick),
+            precise: Some((1, threads)),
+        }
+    }
+
+    #[test]
+    fn the_summed_bound_takes_one_tick_per_scope_cpu_for_many_single_thread_processes() {
+        // 38 tasks of 100 m on 4 CPUs over 500 ms at a 1 ms tick: 3800 m used.
+        let window = Duration::from_millis(500);
+        let parts: Vec<CpuPart> = (0..38).map(|_| precise(50 * MS, 1, MS)).collect();
+        let per_process: u64 = parts
+            .iter()
+            .map(|part| cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns).unwrap())
+            .sum();
+        assert_eq!(per_process, 3686);
+        assert_eq!(summed_lower_bound(&parts, 4, MS, 0, window), Some(3791));
+        // The read pass's own length widens each CPU's share of pending time.
+        assert_eq!(summed_lower_bound(&parts, 4, MS, MS, window), Some(3783));
+    }
+
+    #[test]
+    fn the_summed_bound_matches_one_multi_thread_process() {
+        let window = Duration::from_millis(500);
+        let parts = [precise(2000 * MS, 8, MS)];
+        assert_eq!(
+            summed_lower_bound(&parts, 4, MS, 0, window),
+            cpu_usage_lower_bound(2000 * MS, window, clock_quantization_ns(8, 4, MS))
+        );
+    }
+
+    #[test]
+    fn the_summed_bound_never_exceeds_the_raw_delta_nor_falls_below_the_per_process_sum() {
+        let window = Duration::from_millis(500);
+        let stat = CpuPart {
+            delta_ns: 50 * MS,
+            quantization_ns: 22 * MS,
+            precise: None,
+        };
+        for parts in [
+            vec![precise(50 * MS, 1, MS)],
+            vec![precise(MS / 2, 1, MS), precise(0, 1, MS)],
+            vec![stat, precise(250 * MS, 2, MS)],
+            (0..9).map(|_| precise(100 * MS, 1, 4 * MS)).collect(),
+        ] {
+            let raw = parts.iter().map(|part| part.delta_ns).sum::<u64>() * 1000 / 500_000_000;
+            let per_process: u64 = parts
+                .iter()
+                .map(|part| {
+                    cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns).unwrap()
+                })
+                .sum();
+            for span in [0, MS, 100 * MS] {
+                let summed = summed_lower_bound(&parts, 4, MS, span, window).unwrap();
+                assert!(summed <= raw, "{summed} > {raw}");
+                assert!(summed >= per_process, "{summed} < {per_process}");
+            }
+        }
+        // The tick counters keep their own rounding in full.
+        assert_eq!(summed_lower_bound(&[stat], 4, MS, 0, window), Some(56));
     }
 
     /// Native CPU clock checks, run only when asked for on a Linux host.

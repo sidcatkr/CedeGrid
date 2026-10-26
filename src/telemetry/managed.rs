@@ -17,6 +17,8 @@ pub struct ManagedCollector {
     /// Whether the leaf and clock sources apply; a host with `nohz_full` CPUs
     /// keeps the `/proc` counters.
     precise_cpu: bool,
+    /// How long the last pass of baseline reads took, for the summed bound.
+    baseline_span: Option<Duration>,
 }
 
 /// The running kernel's build configuration, where the distribution installs it.
@@ -50,6 +52,7 @@ impl ManagedCollector {
             scoped_cpu: config.kernel.enabled,
             previous: BTreeMap::new(),
             tick_ns: scheduler_tick_ns(kernel_config().as_deref()),
+            baseline_span: None,
             precise_cpu: cfg!(target_os = "linux")
                 && !nohz_full_active(
                     std::fs::read_to_string("/sys/devices/system/cpu/nohz_full")
@@ -95,6 +98,7 @@ impl ManagedCollector {
                 source: CpuSource::Stat,
                 ns: ms.checked_mul(1_000_000)?,
                 quantization_ns: stat_quantization_ns()?,
+                threads: 0,
             })
         });
         (reading, None)
@@ -338,6 +342,8 @@ impl ManagedCollector {
             .refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
         let mut allocations = Vec::new();
         let mut cpu_diagnostics = Vec::new();
+        let mut parts = Vec::new();
+        let (mut first_baseline, mut last_baseline) = (None, None);
         // A member the allocation's leaf already counts adds no CPU of its own.
         let covered: BTreeMap<&String, &BTreeSet<u32>> = end_reads
             .iter()
@@ -359,7 +365,11 @@ impl ManagedCollector {
                         .processes
                         .process(sysinfo::Pid::from_u32(id.pid))
                         .map(|process| process.accumulated_cpu_time());
-                    self.read_cpu(record, family, stat_ms, cpus).0
+                    let started = Instant::now();
+                    let reading = self.read_cpu(record, family, stat_ms, cpus).0;
+                    first_baseline.get_or_insert(started);
+                    last_baseline = Some(Instant::now());
+                    reading
                 });
             let bounds = (|| -> Option<(Resources, Resources)> {
                 let id = record.identity.as_ref()?;
@@ -411,6 +421,14 @@ impl ManagedCollector {
                 let (cpu_millicores, upper_cpu) = if leaf_counted {
                     (0, 0)
                 } else {
+                    let end = end?;
+                    parts.push(CpuPart {
+                        delta_ns: delta,
+                        quantization_ns: quantization,
+                        precise: end
+                            .resolution_ns()
+                            .map(|resolution| (resolution, old.1.threads.max(end.threads))),
+                    });
                     (cpu_millicores, upper_cpu)
                 };
                 let upper = Resources {
@@ -469,6 +487,21 @@ impl ManagedCollector {
                 modes: record.modes.clone(),
             });
         }
+        // The baseline pass this interval's deltas started from ran last interval.
+        if let (Some(span), Some(window), false) =
+            (self.baseline_span, cpu_window, parts.is_empty())
+        {
+            snapshot.managed_cpu_lower_millicores = summed_lower_bound(
+                &parts,
+                cpus,
+                self.tick_ns,
+                u64::try_from(span.as_nanos()).unwrap_or(u64::MAX),
+                window.duration(),
+            );
+        }
+        self.baseline_span = first_baseline
+            .zip(last_baseline)
+            .map(|(first, last)| last - first);
         if !cpu_diagnostics.is_empty()
             && let Some(evidence) = snapshot.capabilities.get_mut("managed_cpu_attribution")
         {
@@ -555,6 +588,19 @@ pub(super) struct CpuReading {
     pub(super) source: CpuSource,
     pub(super) ns: u64,
     pub(super) quantization_ns: u64,
+    /// Threads read with a precise source, for the sum over own work.
+    pub(super) threads: u64,
+}
+
+impl CpuReading {
+    /// The source's resolution, when it is a precise one.
+    fn resolution_ns(self) -> Option<u64> {
+        match self.source {
+            CpuSource::Leaf => Some(1_000),
+            CpuSource::Clock => Some(1),
+            CpuSource::Stat => None,
+        }
+    }
 }
 
 /// CPU time between two reads of the same source, with the larger of their
@@ -568,6 +614,54 @@ pub(super) fn cpu_delta(old: CpuReading, new: CpuReading) -> Option<(u64, u64)> 
         new.ns.checked_sub(old.ns)?,
         old.quantization_ns.max(new.quantization_ns),
     ))
+}
+
+/// One allocation's CPU delta this interval, for the sum over own work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CpuPart {
+    pub(super) delta_ns: u64,
+    /// The allocation's own bound, as in its evidence.
+    pub(super) quantization_ns: u64,
+    /// For the leaf and the clock: the resolution and the threads read.
+    pub(super) precise: Option<(u64, u64)>,
+}
+
+/// Own work's CPU lower bound in millicores, summed over allocations. Pending
+/// runtime exists only on a task running at the read, so across all own
+/// processes it is at most one tick per scope CPU, widened by the read pass's
+/// length: on one CPU the pending stretches of processes read one after another
+/// are disjoint and lie between its last tick and the last read. The tick
+/// counters keep their rounding in full. The result is never below the sum of
+/// the per-allocation bounds, nor above the raw delta.
+pub(super) fn summed_lower_bound(
+    parts: &[CpuPart],
+    cpus: u64,
+    tick_ns: u64,
+    span_ns: u64,
+    window: Duration,
+) -> Option<u64> {
+    let per_part = parts
+        .iter()
+        .map(|part| cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns))
+        .sum::<Option<u64>>()?;
+    let mut delta = 0u64;
+    let mut subtract = 0u64;
+    let mut threads = 0u64;
+    for part in parts {
+        delta = delta.checked_add(part.delta_ns)?;
+        match part.precise {
+            Some((resolution, part_threads)) => {
+                subtract = subtract.checked_add(resolution)?;
+                threads = threads.checked_add(part_threads.max(1))?;
+            }
+            None => subtract = subtract.checked_add(part.quantization_ns)?,
+        }
+    }
+    let pending = threads
+        .min(cpus)
+        .checked_mul(tick_ns.checked_add(span_ns)?)?;
+    let summed = cpu_usage_lower_bound(delta, window, subtract.checked_add(pending)?)?;
+    Some(summed.max(per_part))
 }
 
 /// The kernel folds a running thread's pending runtime into the group clock and
@@ -654,6 +748,7 @@ pub(super) fn leaf_reading_with(
             source: CpuSource::Leaf,
             ns: usage_usec.checked_mul(1_000)?,
             quantization_ns: leaf_quantization_ns(threads, cpus, tick_ns),
+            threads,
         },
         before,
     ))
@@ -781,10 +876,12 @@ pub(super) fn clock_reading(
         .ok()?
         .checked_mul(1_000_000_000)?
         .checked_add(u64::try_from(time.tv_nsec).ok()?)?;
+    let threads = threads_before.max(threads_after);
     Some(CpuReading {
         source: CpuSource::Clock,
         ns,
-        quantization_ns: clock_quantization_ns(threads_before.max(threads_after), cpus, tick_ns),
+        quantization_ns: clock_quantization_ns(threads, cpus, tick_ns),
+        threads,
     })
 }
 

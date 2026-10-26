@@ -52,6 +52,7 @@ fn observation() -> (Snapshot, Decision) {
         physical_cores: Some(2),
         cpu_busy_millicores: Some(500),
         cpu_busy_lower_millicores: None,
+        managed_cpu_lower_millicores: None,
         total_ram_mib: 8192,
         available_ram_mib: Some(4096),
         gpu_inventory: CapabilityStatus::Available,
