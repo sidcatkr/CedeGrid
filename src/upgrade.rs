@@ -183,7 +183,7 @@ pub fn upgrade(
         };
         write_new_json(&backup.join("upgrade-bundle-manifest.json"), &report)?;
         File::open(backup)?.sync_all()?;
-        File::open(backup.parent().unwrap())?.sync_all()?;
+        File::open(backup.parent().context("upgrade backup has no parent")?)?.sync_all()?;
         write_new_json(&operation_path, &report)?;
         report
     };
@@ -227,7 +227,7 @@ pub(crate) fn require_replay_upgrade(namespace: &Namespace, guard: &NamespaceGua
         Ok::<_, anyhow::Error>(bytes)
     })?;
     let schema = (header.len() >= 100 && &header[..16] == b"SQLite format 3\0")
-        .then(|| u32::from_be_bytes(header[60..64].try_into().unwrap()));
+        .then(|| u32::from_be_bytes(header[60..64].try_into().expect("four-byte schema field")));
     ensure!(
         schema.is_none_or(|v| v <= SCHEMA_VERSION as u32),
         "replay state has unsupported future schema"
@@ -625,6 +625,6 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<()> {
     serde_json::to_writer(&mut f, value)?;
     f.write_all(b"\n")?;
     f.sync_all()?;
-    File::open(path.parent().unwrap())?.sync_all()?;
+    File::open(path.parent().context("path has no parent directory")?)?.sync_all()?;
     Ok(())
 }

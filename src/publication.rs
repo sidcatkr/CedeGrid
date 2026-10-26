@@ -353,13 +353,17 @@ impl NativePublisher {
             Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
         tx.execute(
             "UPDATE local_uploads SET path=?2,sha256=?3,sealed=1 WHERE upload_id=?1",
-            params![upload, destination.to_str().unwrap(), hash],
+            params![
+                upload,
+                destination.to_str().context("non-UTF8 spool path")?,
+                hash
+            ],
         )?;
         tx.execute(
             "DELETE FROM local_spool_entries WHERE path=?1",
-            [path.to_str().unwrap()],
+            [path.to_str().context("non-UTF8 spool path")?],
         )?;
-        tx.execute("INSERT INTO local_spool_entries(path,bytes,assignment_id) VALUES (?1,?2,?3) ON CONFLICT(path) DO UPDATE SET bytes=MAX(bytes,excluded.bytes)",params![destination.to_str().unwrap(),db(size)?,self.settings.assignment_id])?;
+        tx.execute("INSERT INTO local_spool_entries(path,bytes,assignment_id) VALUES (?1,?2,?3) ON CONFLICT(path) DO UPDATE SET bytes=MAX(bytes,excluded.bytes)",params![destination.to_str().context("non-UTF8 spool path")?,db(size)?,self.settings.assignment_id])?;
         tx.commit()?;
         Ok(json!({"ok":true,"artifact_id":upload,"name":name,"sha256":hash,"size":size}))
     }
@@ -402,7 +406,7 @@ impl NativePublisher {
                 [artifact_id],
                 |r| r.get(0),
             )?;
-            artifacts.push(json!({"name":name,"artifact_id":artifact_id,"path":path.strip_prefix(&self.settings.output_dir)?.to_str().unwrap(),"size":size,"sha256":sha}));
+            artifacts.push(json!({"name":name,"artifact_id":artifact_id,"path":path.strip_prefix(&self.settings.output_dir)?.to_str().context("non-UTF8 artifact path")?,"size":size,"sha256":sha}));
         }
         let tx =
             Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
@@ -446,7 +450,7 @@ impl NativePublisher {
             self.settings.max_spool_bytes,
             &self.settings.assignment_id,
         )?;
-        tx.execute("INSERT INTO local_publications(assignment_id,publication_id,kind,sequence,payload_hash,path,sha256,state) VALUES (?1,?2,?3,?4,?5,?6,?7,'pending')", params![self.settings.assignment_id,publication,kind,sequence,payload_hash,path.to_str().unwrap(),sha])?;
+        tx.execute("INSERT INTO local_publications(assignment_id,publication_id,kind,sequence,payload_hash,path,sha256,state) VALUES (?1,?2,?3,?4,?5,?6,?7,'pending')", params![self.settings.assignment_id,publication,kind,sequence,payload_hash,path.to_str().context("non-UTF8 spool path")?,sha])?;
         tx.commit()?;
         let durable = (|| -> Result<()> {
             let mut file = create_new(&path)?;
@@ -512,14 +516,18 @@ impl NativePublisher {
                 tx.execute("UPDATE local_publications SET state='rejected' WHERE assignment_id=?1 AND publication_id=?2",params![self.settings.assignment_id,publication])?;
                 tx.execute(
                     "DELETE FROM local_spool_entries WHERE path=?1",
-                    [path.to_str().unwrap()],
+                    [path.to_str().context("non-UTF8 spool path")?],
                 )?;
                 tx.commit()?;
                 return self.status(publication);
             }
             Err(_) => return Ok(state),
         };
-        if hex::encode(Sha256::digest(&bytes)) != state["sha256"].as_str().unwrap() {
+        if hex::encode(Sha256::digest(&bytes))
+            != state["sha256"]
+                .as_str()
+                .context("publication state has no sha256")?
+        {
             return Ok(state);
         }
         let descriptor: Value = crate::numeric::from_slice(&bytes)?;
@@ -536,8 +544,12 @@ impl NativePublisher {
         }
         let tx =
             Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
-        let kind = state["kind"].as_str().unwrap();
-        let sequence = state["sequence"].as_i64().unwrap();
+        let kind = state["kind"]
+            .as_str()
+            .context("publication state has no kind")?;
+        let sequence = state["sequence"]
+            .as_i64()
+            .context("publication state has no sequence")?;
         let head:Option<(i64,String)>=tx.query_row("SELECT sequence,publication_id FROM local_publication_heads WHERE assignment_id=?1 AND kind=?2",params![self.settings.assignment_id,kind],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         if head
             .as_ref()

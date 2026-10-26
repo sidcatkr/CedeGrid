@@ -312,7 +312,7 @@ pub(super) async fn start_assignment(
                 .gpu_memory_mib
                 .keys()
                 .next()
-                .unwrap()
+                .expect("one GPU UUID was checked above")
                 .clone(),
         );
     } else {

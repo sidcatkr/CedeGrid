@@ -353,7 +353,11 @@ impl AgentLoop<'_> {
                                     .request(&Request::Fail {
                                         assignment_id: id.clone(),
                                         generation: slot.assignment.generation,
-                                        detail: record.as_ref().unwrap().detail.clone(),
+                                        detail: record
+                                            .as_ref()
+                                            .expect("record was checked released above")
+                                            .detail
+                                            .clone(),
                                         failure_kind: if outcome.as_ref().is_some_and(|o| o.yielded)
                                         {
                                             FailureKind::Yielded

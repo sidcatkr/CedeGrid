@@ -32,7 +32,10 @@ fn validate(raw: &RawValue, depth: usize) -> Result<()> {
                     value.is_finite(),
                     "ERR_CEDEGRID_ARGUMENT: nonfinite JSON number"
                 );
-                let significand = token.split(['e', 'E']).next().unwrap();
+                let significand = token
+                    .split(['e', 'E'])
+                    .next()
+                    .expect("split yields at least one part");
                 let nonzero = significand.bytes().any(|b| matches!(b, b'1'..=b'9'));
                 ensure!(
                     value != 0.0 || !nonzero,

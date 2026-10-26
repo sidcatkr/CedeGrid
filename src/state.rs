@@ -1547,7 +1547,11 @@ fn prepare_private_state(requested: &Path, directory: &Path) -> Result<()> {
         if metadata.mode() & 0o7777 == 0o600 {
             continue;
         }
-        let name = std::ffi::CString::new(path.file_name().unwrap().as_encoded_bytes())?;
+        let name = std::ffi::CString::new(
+            path.file_name()
+                .context("SQLite file has no name")?
+                .as_encoded_bytes(),
+        )?;
         // SAFETY: leaf is an open directory, name is NUL terminated, and the
         // nofollow flag prevents chmod from following a substituted symlink.
         let changed = unsafe {

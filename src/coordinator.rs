@@ -94,7 +94,7 @@ impl Coordinator {
         let lock_path = store
             .database_path()
             .parent()
-            .unwrap()
+            .context("state database has no parent")?
             .join("coordinator.lock");
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).create(true).truncate(false);
@@ -2001,7 +2001,10 @@ impl Coordinator {
                 "SELECT task_id FROM task_specs WHERE job_id=?1 ORDER BY sequence LIMIT 1001",
             )?;
             let ids = stmt
-                .query_map([job["job_id"].as_str().unwrap()], |r| r.get::<_, String>(0))?
+                .query_map(
+                    [job["job_id"].as_str().context("job row has no job_id")?],
+                    |r| r.get::<_, String>(0),
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             ensure!(
                 ids.len() <= 1000,
@@ -2014,12 +2017,19 @@ impl Coordinator {
             let nodes = load(
                 Collection::PoolNodes,
                 None,
-                Some(pool["pool_id"].as_str().unwrap().into()),
+                Some(
+                    pool["pool_id"]
+                        .as_str()
+                        .context("pool row has no pool_id")?
+                        .into(),
+                ),
                 true,
             )?;
             pool["node_ids"] =
                 serde_json::json!(nodes.iter().map(|n| &n["node_id"]).collect::<Vec<_>>());
-            pool.as_object_mut().unwrap().remove("node_count");
+            pool.as_object_mut()
+                .context("pool row is not an object")?
+                .remove("node_count");
         }
         let pools = pool_values
             .into_iter()
@@ -2027,7 +2037,10 @@ impl Coordinator {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut nodes = load(Collection::Nodes, None, None, true)?;
         for node in &mut nodes {
-            let id = node["node_id"].as_str().unwrap().to_owned();
+            let id = node["node_id"]
+                .as_str()
+                .context("node row has no node_id")?
+                .to_owned();
             node["report"]["allocations"] = serde_json::json!(load(
                 Collection::ReportedAllocations,
                 Some(id.clone()),

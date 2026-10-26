@@ -133,20 +133,27 @@ fn prepare(options: &MigrationOptions) -> Result<Prepared> {
                 let settings: crate::protocol::ClientConfig = serde_json::from_value(legacy)
                     .context("invalid legacy Rust client settings")?;
                 legacy = serde_json::to_value(settings)?;
-                let object = legacy.as_object_mut().unwrap();
+                let object = legacy
+                    .as_object_mut()
+                    .expect("client settings serialize to an object");
                 // The audited Rust transport used a ten-second request timeout
                 // and no transfer pacer. Do not silently adopt the new defaults.
                 object.insert("timeout_seconds".into(), Value::from(10.0));
                 object.insert("max_transfer_bytes_per_second".into(), Value::from(0));
                 input_base
             }
-            LegacyClientSemantics::Python => options.legacy_cwd.as_deref().unwrap(),
+            LegacyClientSemantics::Python => options
+                .legacy_cwd
+                .as_deref()
+                .expect("prepare requires --legacy-cwd for Python semantics"),
         }
     } else {
         input_base
     };
     if options.kind == RuntimeConfigKind::Node {
-        let object = legacy.as_object_mut().unwrap();
+        let object = legacy
+            .as_object_mut()
+            .expect("legacy configuration is an object");
         let schema = object.get("schema_version").map(|version| version.as_u64());
         ensure!(
             matches!(schema, None | Some(Some(1 | 2))),

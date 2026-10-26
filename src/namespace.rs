@@ -86,7 +86,12 @@ impl Namespace {
             let _ = lock_file(&control.join(name))?;
         }
         bind_lock_identities(&control, &root)?;
-        File::open(control.parent().unwrap())?.sync_all()?;
+        File::open(
+            control
+                .parent()
+                .context("namespace control has no parent")?,
+        )?
+        .sync_all()?;
         Ok(Self { root, control })
     }
     pub fn root(&self) -> &Path {

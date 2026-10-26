@@ -281,7 +281,11 @@ pub fn create(source: &Path, destination: &Path, limits: Limits) -> Result<Manif
     write_json(&destination.join(MANIFEST_FILENAME), &manifest)?;
     fs::remove_file(destination.join(INCOMPLETE_FILENAME))?;
     sync_dir(&destination)?;
-    sync_dir(destination.parent().unwrap())?;
+    sync_dir(
+        destination
+            .parent()
+            .context("backup destination has no parent")?,
+    )?;
     Ok(manifest)
 }
 
@@ -446,7 +450,11 @@ pub fn restore(
     write_json(&destination.join("restore-receipt.json"), &report)?;
     fs::remove_file(destination.join(INCOMPLETE_FILENAME))?;
     sync_dir(&destination)?;
-    sync_dir(destination.parent().unwrap())?;
+    sync_dir(
+        destination
+            .parent()
+            .context("backup destination has no parent")?,
+    )?;
     Ok(report)
 }
 fn require_coordinator_only(store: &StateStore, root: &Path) -> Result<()> {
@@ -740,7 +748,11 @@ fn copy_or_hash(
     ensure!(bytes == size, "snapshot source shrank during copy");
     if let Some(out) = out {
         out.sync_all()?;
-        sync_dir(destination.unwrap().parent().unwrap())?;
+        sync_dir(
+            destination
+                .and_then(Path::parent)
+                .context("snapshot destination has no parent")?,
+        )?;
     } else {
         f.sync_all()?;
     }
@@ -778,7 +790,11 @@ fn copy_verified(
     }
     ensure!(bytes == entry.size, "snapshot shrank during restore");
     out.sync_all()?;
-    sync_dir(destination.parent().unwrap())?;
+    sync_dir(
+        destination
+            .parent()
+            .context("backup destination has no parent")?,
+    )?;
     Ok(hex::encode(digest.finalize()))
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -791,7 +807,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     f.write_all(&data)?;
     f.write_all(b"\n")?;
     f.sync_all()?;
-    sync_dir(path.parent().unwrap())
+    sync_dir(path.parent().context("path has no parent directory")?)
 }
 fn sync_dir(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
