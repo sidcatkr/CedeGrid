@@ -524,6 +524,35 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VII: `GpuSnapshot.own_only` is optional with default false and skipped when false, so
     recordings and replays keep their meaning.
 
+## Item 024: summed own CPU bound and reruns (2026-10-27)
+
+- **Summed own CPU bound (research R9)**: pending runtime exists only on a task running at the
+  read, so across all own processes it is at most one tick per scope CPU at each read side. The
+  collector's reads are sequential, and on one CPU the pending stretches of processes read in
+  turn are disjoint and lie between its last tick and the last read, so the bound per read side
+  is min(Σ threads, scope CPUs) × (tick + read pass length). `summed_lower_bound`
+  (`src/telemetry/managed.rs`) subtracts that, the precise sources' resolutions and the tick
+  counters' rounding in full; it is never below the sum of per-allocation bounds nor above the
+  raw delta. The collector passes it as `Snapshot.managed_cpu_lower_millicores`, and the
+  policy's CPU measurement (`src/policy/measure.rs`) uses it clamped between the sums of the
+  per-allocation lower and upper bounds. Each allocation keeps its own bound in its evidence.
+  38 tasks of 100 m on 4 CPUs at a 1 ms tick read 3686 m per process and 3791 m summed (3800 m
+  used).
+- **Ramp gate**: `--contender-uid` and `--contender-marker` measure a contender that a second
+  unprivileged account starts, timed by `--submit-at`, by reading only its `/proc` entries;
+  `--device gpu` times own GPU compute (SC-004's first bullet).
+- **SC-002**: its 2-interval bound is for other principals' demand; the owner's unmanaged
+  programs share the owner's fair share (Session 2026-10-27).
+- **Constitution**:
+  - I: the gate never acts on the second account's processes; the agent reads only own
+    processes and own leaves, as before.
+  - III: the summed bound needs every part's delta; an allocation without one is left out of
+    both sums, as before.
+  - IV: the policy reads the summed bound as data.
+  - VI: tests first for the bound, the clamp and the gate's read-only contender.
+  - VII: `managed_cpu_lower_millicores` is optional and skipped when absent, so recordings and
+    replays keep their meaning.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
