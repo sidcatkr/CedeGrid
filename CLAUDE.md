@@ -13,7 +13,8 @@ yields that capacity when other workloads need it.
     `reconcile` (restart), `report` (contention report) and `client` hold its stages;
     `supervisor` is the per-assignment supervisor process.
   - `supervision.rs`, `child_supervision.rs`, `managed_children.rs`: the per-assignment
-    supervisor, launch barrier, drain/terminate lifecycle and SDK-managed children.
+    supervisor, launch barrier, drain/terminate lifecycle and SDK-managed children. The Unix
+    lifecycle is `supervision/unix.rs`, which includes `child_supervision.rs`.
   - `policy.rs`: pure, deterministic admission and yield decisions. `contention.rs`: modes,
     mode targets, the yield ladder, victim order and the reason-code catalog.
   - `actuation.rs`: supervisor-side steps on owned processes (duty-cycle caps, pauses) and the

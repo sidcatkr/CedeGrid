@@ -134,6 +134,7 @@ ALLOWLIST = (
     'src/state.rs',
     'src/storage_qualification.rs',
     'src/supervision.rs',
+    'src/supervision/unix.rs',
     'src/telemetry.rs',
     'src/upgrade.rs',
     'tests/agent.rs',
