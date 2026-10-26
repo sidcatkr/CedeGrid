@@ -116,8 +116,7 @@ Performance mode, a floor below twice its minimum, a margin below its default, a
 setting beyond its default. In the interface it needs a separate confirmation, and with flags
 `--acknowledge-caution` naming the option. The choice is recorded in
 `contention.acknowledge_caution`. See [guarantees](docs/guarantees.md) for what each mode,
-floor and caution option does. The full contract is
-[setup-cli.md](specs/001-contention-modes/contracts/setup-cli.md).
+floor and caution option does, and `cedegrid setup --help` for every flag.
 
 ## Select which work is managed
 

@@ -922,7 +922,7 @@ each step.
   - run the `tools/pressure.py` scenario with the actuation audit hook;
   - assert zero actions on external processes;
   - assert zero external OOM kills and zero external GPU allocation failures.
-- [ ] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
+- [X] T119 Check export parity: every new tracked file is in `ALLOWLIST` and the Cargo
   `include`, `tests/test_source_review.py` passes, and the in-memory
   `validate_files(public=True)` passes.
 - [ ] T120 Run the full verification:
