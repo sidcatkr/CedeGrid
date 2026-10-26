@@ -52,8 +52,9 @@ A parity test fails when the CLI and either SDK differ (FR-019).
 
 ## Wire (protocol v1, job and assignment)
 
-- Job modes accept `aggressive` (contract case JC-05 becomes accepted with the acknowledgement;
-  a new case rejects it without).
+- Job modes accept `aggressive`: contract case JC-05 becomes accepted. A job carries no
+  acknowledgement; the node cap decides the effective mode, with `mode_capped` below Aggressive
+  (FR-008, FR-009).
 - Job field `unprotected_aggressive: { "confirmed": "interactive_phrase" | "flag_and_allowance",
   "challenge": <string, interactive only>, "requested_unix_ms": <u64> }`; absent means protected.
   The launching agent verifies it before Authorized; an older agent rejects the job.

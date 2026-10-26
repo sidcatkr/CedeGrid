@@ -72,7 +72,7 @@ the unprotected grant and the global allowance, label and marker in every output
 | IV. Pure policy | `protected_allowance` is a pure function of `ModeInput`; the wait evidence and the grant enter as data. Confirmation and the allowance are checked in the agent, effects stay in the supervisor. |
 | V. Rootless | No privilege. The allowance lives in the agent's own state database. |
 | VI. Tests first | Every task group starts with a failing test: ordering, report 018's case, the protection cases, refusal paths, label and marker, CLI and SDK parity. SC-008 rests on native gates. |
-| VII. Compatibility | `aggressive` in job and wire modes and the unprotected fields land in Rust, Python and TypeScript with the contract fixture (JC-05 flips to accepted with the acknowledgement; new cases for the unprotected fields). Older agents refuse an `aggressive` job, as JC-05 does today. `config_version = 1` stays. |
+| VII. Compatibility | `aggressive` in job and wire modes and the unprotected fields land in Rust, Python and TypeScript with the contract fixture (JC-05 flips to accepted, with the node cap deciding the effective mode; new cases for the unprotected fields). Older agents refuse an `aggressive` job, as JC-05 does today. `config_version = 1` stays. |
 | VIII. Public docs | `docs/guarantees.md` replaces "Aggressive is not implemented" with the mode, its protection and the unprotected exception, generically. |
 
 Result: pass. No violations, so Complexity Tracking is empty.
