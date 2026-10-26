@@ -393,9 +393,14 @@ fn native_runtime_adjust(root: PathBuf) {
     let frozen = (read("cgroup.freeze"), read("cgroup.events"));
     let reversed = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::None, None);
     let restored = (read("cpu.weight"), read("cpu.max"), read("cgroup.freeze"));
-    // A process outside the verified set in the leaf refuses the next step.
+    // A process outside the verified set in the leaf refuses every cgroup write. A
+    // lower share has no rootless fallback, so it fails; a cap may fall back to the
+    // rootless duty cycle on the verified family, but the leaf is never written.
     let mut foreign = join(&leaf);
-    let refused = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500));
+    let refused_share = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None);
+    let share_untouched = read("cpu.weight");
+    let refused_cap = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500));
+    let cap_detail = actuator.take_detail().unwrap_or_default();
     let untouched = read("cpu.max");
     for child in [&mut member, &mut foreign] {
         child.kill().unwrap();
@@ -425,10 +430,18 @@ fn native_runtime_adjust(root: PathBuf) {
     assert_eq!(reversed.unwrap(), YieldStep::None);
     assert_eq!(restored, (weight, cpu_max.clone(), "0".to_owned()));
     assert!(
-        refused.is_err(),
-        "a step went through with a foreign member in the leaf"
+        refused_share.is_err(),
+        "a lower share went through with a foreign member in the leaf"
     );
-    assert_eq!(untouched, cpu_max, "a refused step changed the leaf");
+    assert_eq!(
+        share_untouched, restored.0,
+        "a refused share changed the leaf"
+    );
+    assert!(
+        refused_cap.is_err() || cap_detail.contains("cgroup write refused"),
+        "a cap reached the leaf with a foreign member in it: {cap_detail}"
+    );
+    assert_eq!(untouched, cpu_max, "a refused cap changed the leaf");
 }
 
 #[cfg(unix)]
