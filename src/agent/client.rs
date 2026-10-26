@@ -1,0 +1,199 @@
+//! The coordinator client: authenticated requests, paced control traffic and the
+//! shared transfer budget.
+use super::*;
+
+/// Two bounded lanes reserve control traffic so artifact queues cannot starve
+/// authoritative renewals. Their rates sum to the configured per-agent budget.
+pub(super) struct NodeClient {
+    pub(super) rpc: RpcClient,
+    pub(super) replay_session: Option<String>,
+    pub(super) control: RateLimiter,
+    pub(super) artifacts: RateLimiter,
+    pub(super) cache_dir: PathBuf,
+    pub(super) cache_lock: tokio::sync::Mutex<()>,
+    pub(super) spool_root: PathBuf,
+    pub(super) max_spool_bytes: u64,
+    pub(super) namespace_guard: NamespaceGuard,
+    pub(super) storage_profile: crate::state::StorageProfile,
+}
+
+impl NodeClient {
+    pub(super) fn new(
+        config: &AgentConfig,
+        state_dir: &Path,
+        storage_profile: crate::state::StorageProfile,
+        namespace_guard: NamespaceGuard,
+    ) -> Result<Self> {
+        ensure!(
+            config.max_transfer_bytes_per_second >= 10,
+            "transfer budget must be at least ten bytes/second"
+        );
+        let control = config.max_transfer_bytes_per_second / 10;
+        let cache_dir = state_dir.join("attempts").join(".input-cache");
+        private_dir(&cache_dir)?;
+        Ok(Self {
+            rpc: RpcClient::with_settings(&config.coordinator_url, &config.tls, 15.0, 0)?,
+            replay_session: None,
+            control: RateLimiter::new(control),
+            artifacts: RateLimiter::new(config.max_transfer_bytes_per_second - control),
+            cache_dir,
+            cache_lock: tokio::sync::Mutex::new(()),
+            spool_root: state_dir.join("attempts"),
+            max_spool_bytes: config.max_spool_bytes,
+            namespace_guard,
+            storage_profile,
+        })
+    }
+    pub(super) fn download_charge(&self, path: &Path) -> Result<crate::publication::CaptureCharge> {
+        crate::publication::CaptureCharge::for_download(
+            self.spool_root.parent().context("spool parent missing")?,
+            self.storage_profile,
+            self.namespace_guard.clone(),
+            path,
+            self.max_spool_bytes,
+        )
+    }
+    pub(super) fn write_json_new(&self, path: &Path, value: &impl Serialize) -> Result<()> {
+        let charge = self.download_charge(path)?;
+        // Receipt/control bytes share the node ledger with artifacts and logs.
+        // After reservation, any write/sync uncertainty retains the full charge.
+        write_json_new_reserved(path, value, Some(&charge))
+    }
+    pub(super) async fn request(&self, request: &Request) -> Result<Response> {
+        tokio::time::timeout(Duration::from_secs(15), self.request_paced(request))
+            .await
+            .context("node RPC exceeded its end-to-end queue/pacing/transport deadline")?
+    }
+    pub(super) async fn request_control(
+        &self,
+        request: &Request,
+        due: Instant,
+        interval: Duration,
+    ) -> Result<Response> {
+        let started = Instant::now();
+        let lateness = started.saturating_duration_since(due);
+        let evidence =
+            std::env::var_os("CEDEGRID_RPC_EVIDENCE").as_deref() == Some(std::ffi::OsStr::new("1"));
+        // The qualification mode supplies an explicit scheduled 10-second
+        // control deadline while preserving the normal transport and queues.
+        let result = if evidence {
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(due + Duration::from_secs(10)),
+                self.request(request),
+            )
+            .await
+            .context("scheduled control RPC deadline exceeded")
+            .and_then(|r| r)
+        } else {
+            self.request(request).await
+        };
+        if evidence {
+            let operation = match request {
+                Request::Heartbeat { .. } => "heartbeat",
+                Request::Renew { .. } => "renew",
+                _ => "other",
+            };
+            let assignment = match request {
+                Request::Renew { assignment_id, .. } => Some(assignment_id),
+                _ => None,
+            };
+            let finished = Instant::now();
+            let success = result
+                .as_ref()
+                .is_ok_and(|r| !matches!(r, Response::Error { .. }));
+            emit(
+                &serde_json::json!({"event":"control_rpc","operation":operation,"assignment_id":assignment,"scheduled_due_monotonic_ms":local_clock_ms()?.saturating_sub(finished.saturating_duration_since(due).as_millis() as u64),"enqueued_late_ms":lateness.as_secs_f64()*1000.0,"elapsed_ms":finished.saturating_duration_since(due).as_secs_f64()*1000.0,"request_elapsed_ms":finished.duration_since(started).as_secs_f64()*1000.0,"missed_schedule_slots":lateness.as_millis()/interval.as_millis().max(1),"success":success,"deadline_ms":10000}),
+            )?;
+        }
+        result
+    }
+    pub(super) async fn request_paced(&self, request: &Request) -> Result<Response> {
+        let artifact = matches!(
+            request,
+            Request::BeginUpload { .. }
+                | Request::UploadChunk { .. }
+                | Request::CommitUpload { .. }
+                | Request::ReadArtifact { .. }
+                | Request::PublishCheckpoint { .. }
+                | Request::Complete { .. }
+        );
+        let limiter = if artifact {
+            &self.artifacts
+        } else {
+            &self.control
+        };
+        let wrapped;
+        let wire_request = if let Some(session_id) = &self.replay_session {
+            wrapped = Request::NodeSession {
+                session_id: session_id.clone(),
+                request: Box::new(request.clone()),
+            };
+            &wrapped
+        } else {
+            request
+        };
+        let upload = serde_json::to_vec(wire_request)?.len() as u64;
+        let estimated_reply = if let Request::ReadArtifact { max_bytes, .. } = request {
+            u64::from(*max_bytes) * 2
+        } else {
+            0
+        };
+        limiter
+            .acquire(wire_charge(upload.saturating_add(estimated_reply)))
+            .await;
+        let response = self.rpc.request(wire_request).await?;
+        if estimated_reply == 0 {
+            limiter
+                .acquire(wire_charge(serde_json::to_vec(&response)?.len() as u64))
+                .await;
+        }
+        Ok(response)
+    }
+}
+
+pub(super) fn next_control_due(last: &mut Instant, interval: Duration) -> Instant {
+    next_control_due_at(last, interval, Instant::now())
+}
+
+pub(super) fn next_control_due_at(last: &mut Instant, interval: Duration, now: Instant) -> Instant {
+    let due = *last + interval;
+    let missed = now.saturating_duration_since(due).as_millis() / interval.as_millis().max(1);
+    *last = due + interval.saturating_mul(missed.min(u32::MAX as u128) as u32);
+    due
+}
+
+pub(super) fn next_periodic_wake(due: Instant, interval: Duration, now: Instant) -> Instant {
+    if now < due {
+        return due;
+    }
+    let elapsed = now.saturating_duration_since(due).as_nanos();
+    let intervals = elapsed / interval.as_nanos().max(1) + 1;
+    due + interval.saturating_mul(intervals.min(u32::MAX as u128) as u32)
+}
+
+pub(super) fn wire_charge(json_bytes: u64) -> u64 {
+    json_bytes
+        .saturating_add(json_bytes / 20)
+        .saturating_add(4096)
+}
+
+pub(super) struct RateLimiter {
+    pub(super) rate: u64,
+    pub(super) next: tokio::sync::Mutex<tokio::time::Instant>,
+}
+
+impl RateLimiter {
+    pub(super) fn new(rate: u64) -> Self {
+        Self {
+            rate,
+            next: tokio::sync::Mutex::new(tokio::time::Instant::now()),
+        }
+    }
+    pub(super) async fn acquire(&self, bytes: u64) {
+        let mut next = self.next.lock().await;
+        let start = (*next).max(tokio::time::Instant::now());
+        *next = start + Duration::from_secs_f64(bytes as f64 / self.rate as f64);
+        drop(next);
+        tokio::time::sleep_until(start).await;
+    }
+}

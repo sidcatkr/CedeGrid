@@ -8,8 +8,10 @@ yields that capacity when other workloads need it.
 - `src/`: one Rust crate, `cedegrid` (lib + bin, edition 2024, MSRV 1.88).
   - `main.rs`: the CLI. The hidden `__worker-gate` / `__assignment-supervisor` dispatch runs
     before clap, Tokio, any thread and the launcher terminal handoff. Keep it first.
-  - `agent.rs`: the rootless node agent. Each loop samples, evaluates policy, drains, reports
-    and launches.
+  - `agent.rs` and `agent/`: the rootless node agent. `agent/service.rs` runs each loop:
+    sample, evaluate policy, drain, report and launch. `launch`, `publishing`, `replay`,
+    `reconcile` (restart), `report` (contention report) and `client` hold its stages;
+    `supervisor` is the per-assignment supervisor process.
   - `supervision.rs`, `child_supervision.rs`, `managed_children.rs`: the per-assignment
     supervisor, launch barrier, drain/terminate lifecycle and SDK-managed children.
   - `policy.rs`: pure, deterministic admission and yield decisions. `contention.rs`: modes,
@@ -97,7 +99,8 @@ the support boundary. In short:
   `tools/` uses only the standard library plus the in-repo SDK, on Python 3.10.
 - Comments: short and factual. Explain why, not what. Keep each decision reason and error
   message to one sentence.
-- Export: modules are top-level `mod x;` in `src/`. A new file that ships goes into `ALLOWLIST`
+- Export: modules are `mod x;` in `src/lib.rs`, or in a module's file for its own directory
+  (`src/agent/`), never through `#[path]`. A new file that ships goes into `ALLOWLIST`
   in `tools/pack_source_review.py` and into `include` in `Cargo.toml`. Exported text uses
   placeholder home paths and loopback or RFC 5737 addresses. Don't hand-edit
   `source-manifest.json`.
