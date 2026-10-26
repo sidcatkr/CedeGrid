@@ -50,20 +50,22 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - loss and rejoin of a node
   - checkpoint transfer between nodes
 - **GPU.** Verified on one consumer device only (see
-  [Native gate results](#native-gate-results-feature-001)). Other devices and drivers, and a
-  native Performance ramp on GPU compute, are not verified. A short GPU job in Neutral ran
-  capped at the fair share after it started, because its new process read as Unknown GPU
-  activity: fixed (an interval that lists only own verified processes is measured), rerun
-  pending. The GPU attribution tolerance stays 15 points until a second device is measured;
-  the first device's largest gap was 5.
+  [Native gate results](#native-gate-results-feature-001)). Other devices and drivers are not
+  verified. An interval that lists only own verified processes is measured, but on the test
+  host the display manager always lists a GPU process, so a short GPU job in Neutral still runs
+  capped at half the device for about 10 s after it starts. The GPU attribution tolerance stays
+  15 points until a second device is measured; the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
-- **Performance ramp.** On CPU, the ramp reaches 90% in under 3 s on one Linux host, but a
-  CPU-bound contender started mid-ramp gets about 0.72 of the core it wants, so SC-004's second
-  bullet is open (see [Native gate results](#native-gate-results-feature-001)).
-- **Idle utilization.** SC-014 is not met on the test host: own CPU work reaches 87.5% of the
-  scope in Neutral and Performance and 75% in Yield First, and the decisions read own CPU
-  about 12% low (see [Native gate results](#native-gate-results-feature-001)).
+- **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
+  compute. A CPU-bound contender started mid-ramp under the account that runs CedeGrid gets
+  about 0.7 of the core it wants; the same run under a second account is pending, so SC-004's
+  second bullet is open (see [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
+- **Idle utilization.** SC-014 is not met on the test host: on 14 CPUs own CPU work reaches
+  91.4% of the scope in Performance, 87.0% in Neutral and 73.0% in Yield First. CedeGrid's own
+  processes and the bound on own measurement count as external, and with many tasks the agent's
+  loop runs slower than its interval (see
+  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
@@ -92,6 +94,43 @@ and `Cargo.lock` are the same at every commit listed, so each gate ran the same 
 | T117, SC-014 (4 CPUs, 500 m tasks, idle) | `374637d`, `c0779d3` | own CPU 87.5% of capacity in Neutral and Performance, 75.0% in Yield First (targets 94%, 97% and 84%); the decisions read own work about 330–430 m low and count that as external; with 500 m tasks own use moves in 500 m steps, so this run cannot reach the targets even with exact measurement | fail |
 | T117, SC-015 (beside a 60 m external user) | `374637d`, `c0779d3` | own CPU as a share of capacity minus the user and the margin: 93.6% in Neutral, 90.7% in Performance, 89.8% in Yield First (target 90%); no step change in 5 minutes | Neutral and Performance pass, Yield First fail |
 | T118, SC-005 audit | `1c8a850` (CPU), `c0779d3` (GPU) | CPU and GPU, at the defaults and with Performance and a 512 MiB floor: 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
+
+### Reruns with exact own measurement
+
+Run on 2026-10-26 on the same test host at `770651f`, which reads own CPU from the process
+clock or the leaf `cpu.stat` with a summed bound and measures an interval that lists only own
+verified GPU processes. The kernel has `CONFIG_HZ=1000` and an empty `nohz_full` list, so the
+precise own-CPU sources apply. The 14-CPU scope is the host's 14 physical cores, one logical
+CPU each. SC runs name their task loop: the catch-up loop (as in the first runs) makes up CPU
+lost to a cap or pause, so a task runs a full core when its cap rises; the steady loop does not.
+
+| Gate | Values | Result |
+|---|---|---|
+| Own-CPU clock tests | 44 telemetry tests pass natively, including the 3 gated process-clock tests | pass |
+| T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.755 idle, 2.754 and 2.756 with a contender; `foreign_actions` 0; a contender under the account that runs CedeGrid, started at 3 s, gets a median of 0.70 core after 10 s pinned and 0.62 unpinned, and 0.9 core in 2% and 0% of half-second samples (that account's other programs share its fair share, per SC-002); the contender under a second account was not run, because that account's SSH key is not accepted | ramp pass, contender open |
+| SC-004, ramp on GPU compute (1 task) | own GPU compute reaches 90% 2.6 s after submission once the deployment's 30 s GPU cooldown has passed; submitted earlier, it waits for that cooldown (22.6 s) and then reaches 1000 within 0.5 s | pass |
+| T117, GPU (Neutral, Performance) | Performance: matched throughput 0.923, decision p95 0.41 s, post-yield p99 0.76×. Neutral: matched throughput 0.722; GPU measurement stays known, but the device always lists the display manager's greeter (another account, a 2 MiB graphics context), so the own-only path does not apply; each new job's first interval has no fresh per-process sample baseline, Neutral counts that activity as one more principal and caps the job at half the device until the next scale-up move about 10 s later | Performance pass, Neutral fail |
+| T088 (Neutral, beside an idle external CUDA context and without it) | 100 of 100 and 50 of 50 GPU tasks complete, admission open, no GPU step; GPU compute reads as an unknown amount in 94% and 91% of the retained intervals with own work, mostly for lack of a fresh per-process sample baseline; the greeter is listed in both | pass |
+| SC-014, 4 CPUs, 250 m tasks (comparison) | Neutral 87.5% (no step change); Performance 91.8% with 163 step changes (catch-up loop), 89.0% with 1 (steady); Yield First 49.4% with 21 step changes and 61 paused samples (catch-up), 69.7% with none (steady); targets 94%, 97% and 84% | fail |
+| SC-014, 14 CPUs, steady loop | Performance, 250 m tasks: 91.4% of capacity, 93.7% with CedeGrid's own processes, 130 step changes and 9 paused samples; Neutral, 100 m tasks: 87.0% and 90.5%, no step change; Yield First, 100 m tasks: 73.0% and 76.4%, no step change; targets 97%, 94% and 84%. With 100 m tasks Performance admitted 134 at once and every task failed (below) | fail |
+| SC-015, 4 CPUs beside a 60 m external user | own tasks 3500 m in Neutral and in Performance (targets 3366 and 3474 m, catch-up loop, no step change); Yield First 1978 m with 100 step changes (catch-up), 3051 m of 3006 m with none (steady) | pass with the steady loop |
+
+What holds own CPU work below the SC-014 targets on this host:
+
+- CedeGrid's agent and supervisors (56–65 m on 4 CPUs, 325–489 m with 53–113 tasks) and the
+  gap between own work's measured lower bound and its use (95–144 m on 4 CPUs, 513–907 m on 14)
+  count as external, so they come out of the share. With 113 tasks the summed own-CPU bound
+  equals the per-allocation sum, as the read pass over that many processes is long, and the
+  tasks' CPU read from `/proc` was 173 m above the decisions' upper bound; that gap is not yet
+  explained.
+- With the catch-up loop, held caps that rise together let every task burst at once; Yield
+  First then pauses or caps most tasks to zero about every 30 s. Admission also counted capped
+  usage as room: a fourteenth task started with all thirteen capped. With the steady loop,
+  neither mode cycles on 4 CPUs.
+- The agent's loop slows as tasks are added: about 1.4 s per 500 ms interval with 113 tasks.
+  Launching 134 tasks at once stalled it 4.2 s, past the coordinator's 3 s telemetry limit, so
+  every initial authorization was refused and all 140 tasks failed. The launch barrier held
+  and every release was verified.
 
 ## Rules for validation runs
 
