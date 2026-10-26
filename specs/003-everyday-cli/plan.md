@@ -1,0 +1,230 @@
+# Implementation Plan: Everyday CLI for a Single User and Host
+
+**Branch**: specified on `001-contention-modes`; implemented on its own branch after 001 is
+merged into `dev` | **Date**: 2026-10-26 | **Spec**: [spec.md](spec.md)
+
+**Input**: Feature specification from `specs/003-everyday-cli/spec.md`
+
+## Summary
+
+`cedegrid run` starts work through the user's own local agent, over a Unix socket with no
+coordinator and no TLS, along the same supervisor and launch-barrier path that SDK tasks and
+cluster assignments use. `ps`, `logs`, `stop` and `top` view and control own runs. Per-job
+entries in `cedegrid.toml` and `--explain` make repeated runs flag-free and traceable. One task
+schema generates the `run` flags and is checked against both SDKs.
+
+At launch, CedeGrid detects a control level for every launch path:
+- **Full**: a delegating user manager gives each run its own cgroup.
+- **Tracked**: the run's supervisor is the child subreaper of the run's tree. It verifies
+  descendants under Principle I (3.0.0) and gives CPU back through per-thread affinity in whole
+  cores.
+
+Contention evidence adds per-user run-queue wait at both levels, fed through 001's probe. The
+setup interface moves to ratatui and crossterm, and `top` shares its style.
+
+## Technical Context
+
+**Language/Version**: Rust 1.88 (MSRV, edition 2024); Python SDK 3.10+; TypeScript SDK.
+
+**Primary Dependencies**: existing crates (clap 4 derive, tokio, serde, toml_edit, libc,
+sysinfo, nvml-wrapper). New: `ratatui` 0.30 (rust-version 1.88.0) and `crossterm` 0.29
+(rust-version 1.63), for US4 and `top` only (research R11).
+
+**Storage**: the existing SQLite ledger and journals; per-run rotating log files under the
+agent's state directory; `cedegrid.toml` per-job entries (TOML, comment-preserving writes).
+
+**Testing**: `cargo test` (serial), the Python and npm suites, the schema contract test across
+Rust, Python and TypeScript, and native gates on a Linux test host (`native-gates.md`, written
+with the tasks).
+
+**Target Platform**: Linux for control levels and contention evidence. macOS keeps today's
+rootless limits for `run`. Windows client paths keep compiling.
+
+**Project Type**: CLI with a per-user agent and supervisor processes; SDK libraries.
+
+**Performance Goals**:
+- SC-001: first run visible in `ps` within 5 s, including the agent's start.
+- SC-003: throughput within 2% of a bare run with no contention.
+- SC-009: the evidence scan stays under 5% of one core with 10,000 threads.
+
+**Constraints**:
+- no privilege and no host change (Principle V);
+- act only on verified processes (Principle I);
+- no own priority raised (Principle II);
+- environment values never stored (FR-009).
+
+**Scale/Scope**: one user and one host per local agent. Run trees up to hundreds of processes;
+hosts with up to tens of thousands of threads.
+
+## Constitution Check
+
+*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+
+| Principle | How the plan complies |
+|---|---|
+| I. External processes untouchable (3.0.0) | Tracked acts only on descendants verified as Principle I requires:<br>- the pidfd is opened before the parent chain is read;<br>- the chain leads to the launched process;<br>- liveness is confirmed through the pidfd afterwards;<br>- user and group IDs match the run's;<br>- every action goes through the pidfd.<br>`ps`, `stop` and `top` resolve runs through the agent, never by PID. Tests: T030–T035.<br>**Open item (Decision 1 of report 016)**: CPU affinity (`sched_setaffinity`) takes a thread ID, and no pidfd form of that call exists. Bracketing the call with thread pidfds (Linux 6.9+) detects a reused ID afterwards but cannot prevent the call, so per-thread affinity does not yet meet "only through that pidfd". T039 and T040 wait for that decision. |
+| II. No harm in any mode | Floors and modes come from 001 unchanged.<br>- Own priority is never raised: no negative nice, no real-time class.<br>- SCHED_IDLE and autogroup nice only lower priority.<br>- Tracked RAM has no cap, so SDK hints come earlier and a drain checkpoints (FR-052).<br>- Fair share is a floor for own yielding, not a guarantee; no thread count is raised (FR-049). |
+| III. Unknown is never idle | The control level, the cgroup placement of contenders and per-user evidence are each detected. Hidden process details fall back to the host-level signal with a `doctor` note (FR-050). Detection failure means Tracked, not Full. |
+| IV. Pure policy | The evidence summary enters `Snapshot` as data. Policy decides as in 001 (probe, ladder), and actuation stays in the supervisor (`supervision/tracked.rs`). |
+| V. Rootless (3.0.0) | No privilege, no sysctl, no host change.<br>- Full uses a user-manager-delegated subtree only.<br>- Tracked supports descendants in the subreaper tree. Work outside the tree is not tracked or presented as contained (FR-054).<br>- Tracked is labeled "not containment": no RAM cap, no CPU limit below one core across cgroups (FR-048). |
+| VI. Tests first | Every policy, telemetry, supervision and protocol task starts with a failing test. Hardware claims rest on native gates for Full and Tracked and for both contender placements. |
+| VII. Compatibility | The task schema and the core-count event are wire and worker-protocol changes. They land in Rust, Python and TypeScript with the contract fixture. `supervise job.json`, the coordinator and `config_version = 1` stay. |
+| VIII. Public docs | Docs describe the two levels generically, with no host descriptions. The optional linger and delegate setup is mentioned as optional (FR-055). |
+
+Result: pass for every part except the Tracked affinity actuator, which waits for Decision 1 (row I). Complexity Tracking lists the two new dependencies.
+
+## Project Structure
+
+### Documentation (this feature)
+
+```text
+specs/003-everyday-cli/
+├── plan.md
+├── research.md
+├── data-model.md
+├── quickstart.md
+├── contracts/
+│   ├── cli.md             # commands, flags, exit codes, --json shapes
+│   ├── task-schema.md     # the single task schema and its generated surfaces
+│   ├── local-agent.md     # socket location, lifecycle and requests
+│   └── worker-events.md   # granted-core events for SDK workers
+├── checklists/requirements.md
+└── tasks.md
+```
+
+### Source Code (repository root)
+
+```text
+src/
+├── main.rs              # adds run, ps, logs, stop, top subcommands (dispatch stays first)
+├── task_schema.rs       # NEW: the one task schema; clap args and JSON export derive from it
+├── run.rs               # NEW: `cedegrid run` front end
+├── run/
+│   ├── client.rs        # local socket client; starts the agent when absent
+│   ├── scope.rs         # per-job entry lookup, profiles, precedence, --explain
+│   ├── env.rs           # environment capture (names stored, values never)
+│   └── view.rs          # foreground viewer: log tail, Ctrl-C drain/force, -d
+├── control_level.rs     # NEW: Full/Tracked detection and its evidence
+├── agent/
+│   ├── local.rs         # NEW: Unix socket server, idle exit, single-agent lock
+│   └── logs.rs          # NEW: rotating per-run logs, no backpressure
+├── supervision/
+│   ├── tracked.rs       # NEW: subreaper tree, descendant verification, affinity actuator
+│   └── full.rs          # NEW: per-run cgroup through the delegating user manager
+├── telemetry/
+│   └── runqueue.rs      # NEW: per-thread schedstat by UID, bounded scan
+├── top.rs               # NEW: live view (ratatui), shared style with setup
+├── setup/interface.rs   # redesigned with ratatui; per-job scope
+└── explain.rs           # doctor ✓/✗ checks, control level, evidence availability
+
+python/cedegrid/          # task schema check, granted-core event, threads field
+npm/src/                  # same
+tests/
+├── run_cli.rs            # NEW: run, ps, logs, stop, explain, precedence, --json
+├── task_schema.rs        # NEW: schema contract across CLI and both SDKs
+├── tracked.rs            # NEW: descendant verification and actuator ownership
+├── control_level.rs      # NEW: Full/Tracked detection with fake cgroup and manager roots
+├── runqueue.rs           # NEW: evidence summing, deltas, scan bound
+└── contracts/task-schema.json  # NEW: exported schema fixture for Python and TypeScript
+```
+
+**Structure Decision**: one crate, as today. New files are child modules of their area (as
+`agent/`, `policy/` and `telemetry/` already are), listed in `ALLOWLIST`, with no `#[path]`.
+The run path is a client (`run.rs` and `run/`) and an agent side (`agent/local.rs`,
+`agent/logs.rs`) that hands work to the existing supervisor. `supervision/tracked.rs` and
+`supervision/full.rs` are the two control levels behind the existing `LaunchBackend`.
+
+## Design highlights
+
+### Run path
+1. `cedegrid run` parses flags generated from `task_schema.rs`, then resolves the effective
+   values: flags, then the per-job entry, then the global setup, then defaults.
+2. It captures the environment (FR-009) and connects to the local socket, starting the agent if
+   absent.
+3. It submits the task. The agent reserves, launches through the supervisor and the launch
+   barrier, and streams output to the per-run log.
+4. The terminal tails the log as a viewer (FR-015).
+
+`--json` prints the run record instead of the tail.
+
+### Local agent lifecycle
+- **Location**: the socket is `$XDG_RUNTIME_DIR/cedegrid/agent.sock`, or
+  `$HOME/.local/state/cedegrid/agent.sock` without a runtime directory. Its directory has mode
+  0700 and is owned by the user; the agent refuses to listen in any other directory.
+- **One per user per host**: the existing namespace lifetime lock (`namespace.rs`) is held for
+  the agent's life. A second start finds the lock and connects instead.
+- **Cluster mode**: a cluster-mode agent also serves the local socket, so `run` reuses it (D1).
+  Local runs then appear in its reports as own work.
+- **Idle exit**: with no runs for `local.idle_exit_s` (default 600), the agent exits. A cluster
+  agent never idles out.
+- **Start**: `run` starts `cedegrid agent --local` detached (new session, standard streams to a
+  log). It waits up to 3 s for the socket and fails with the agent's log tail otherwise.
+
+### One task schema
+`task_schema.rs` lists every task field with:
+- its type, default and help text;
+- its JSON name;
+- its CLI flag;
+- its SDK names.
+
+clap arguments are generated from it, and so is `tests/contracts/task-schema.json`. Python and
+TypeScript tests load the fixture and compare it with `command_task` and `commandTask`
+parameters and fields. A difference in either direction fails CI (FR-004). New fields from this
+feature (`threads`, `gpu` selection) enter through the schema.
+
+### Control levels
+- **Full detection**: a running user manager (`systemctl --user` reachable over its private
+  socket) whose `user@<uid>.service` delegates the cpu and memory controllers. The run gets a
+  transient scope through the user manager (`systemd-run --user --scope -p Delegate=yes`,
+  research R2), and the existing cgroup backend drives it.
+- **Tracked**: otherwise, including detection errors. The supervisor sets
+  `PR_SET_CHILD_SUBREAPER` before EXEC.
+  - Every monitor interval it walks `/proc/<pid>/task/*/children` from the leader.
+  - For each new PID it opens a pidfd first, then confirms the parent chain and the user and
+    group IDs, then checks liveness through the pidfd (Principle I).
+  - It reaps orphans with `waitid` on their pidfds and adds their rusage to accounting, with
+    live sums and `cutime`/`cstime`.
+- **CPU lever (Tracked)**: `sched_setaffinity` on every thread (TID) of every verified process,
+  checked every interval.
+  - Cores shrink and grow by whole physical cores (SMT siblings together).
+  - GPU runs keep the cores of the GPU's NUMA node first.
+  - A process that changed its own mask is reported, not overridden.
+- **Thread pools**: the SDK worker gets a `granted_cores` event (contract `worker-events.md`).
+  For runs without the SDK, the native gate measures start-wide and start-narrow, and the
+  default follows the result (research R5).
+- **SCHED_IDLE** (Yield First, same-cgroup contenders only, never for GPU runs by default):
+  set at launch for the run's tree. With RLIMIT_NICE 0 it cannot be undone, so mode changes up
+  need a restart. Starvation shows in `ps` and `top`.
+- **Autogroup nice**: only when the run's tasks sit in the root CPU cgroup (detected); off by
+  default.
+- **Limits stated in docs**:
+  - across cgroups, Tracked has no lever below one core (FR-048);
+  - the fair share is a floor for own yielding, not a guarantee (FR-049).
+
+### Contention evidence
+`telemetry/runqueue.rs` reads `/proc/<pid>/task/<tid>/schedstat` (run_delay) for other users'
+threads:
+- it takes per-thread deltas, drops threads that exit, and sums by UID;
+- the scan is bounded per interval, by a thread budget and rotation (research R7).
+
+The summary joins the snapshot as per-principal wait. Wait never yields by itself: it marks a
+principal as contending for 001's probe (FR-021, FR-072), and a principal whose CPU use does
+not grow after a yield is recorded as satisfied. Where other users' details are hidden, the
+host-level signal goes through the same probe and `doctor` says so.
+
+### Native gates (both levels, both placements)
+- **Levels side by side**: a test-only switch (`CEDEGRID_TEST_FORCE_TRACKED=1`) forces Tracked
+  on a host with delegation, so both are measured on the same host.
+- **Cross-cgroup contender**: a contender under a second account, which has its own cgroup.
+- **Same-cgroup contender**: on hosts that give each user a separate cgroup, a contender started
+  by the same account from the run's own session, with Tracked forced, shares the run's CPU
+  cgroup without any host change. It counts as the owner's unmanaged usage, which 001 already
+  treats as a contending principal. Per-user evidence for a second account uses the
+  cross-cgroup contender. If no second account exists, creating one is a host change and needs
+  the user's approval first.
+
+## Complexity Tracking
+
+| Addition | Why needed | Simpler alternative rejected because |
+|---|---|---|
+| `ratatui` 0.30 + `crossterm` 0.29 | US4's grouped layout, side pane and in-place editing, and `top`'s live view, on terminals including Windows client paths | The current raw-termios interface would need its own layout, widgets and Windows backend; the crates fit MSRV 1.88 and are MIT |
