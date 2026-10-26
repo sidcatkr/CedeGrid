@@ -279,6 +279,158 @@ fn authorized_native_ram_cap_reads_back_memory_high() {
     assert_eq!(restored.trim(), "max");
 }
 
+/// T054 native gate (quickstart section 4): on a test-owned leaf in an authorized
+/// delegated subtree, runtime `cpu.weight`, `cpu.max` and `cgroup.freeze` steps read
+/// back and reverse, and a step is refused while the leaf holds a process outside
+/// the verified set. It skips without `CEDEGRID_TEST_CGROUP_ROOT` and off Linux.
+#[test]
+#[ignore = "not tested: requires explicit authorized Linux cgroup delegation in CEDEGRID_TEST_CGROUP_ROOT"]
+fn runtime_adjust_requires_verified_membership() {
+    let Some(root) = std::env::var_os("CEDEGRID_TEST_CGROUP_ROOT") else {
+        eprintln!("skipped: CEDEGRID_TEST_CGROUP_ROOT names no authorized delegated subtree");
+        return;
+    };
+    #[cfg(target_os = "linux")]
+    native_runtime_adjust(root.into());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        eprintln!("skipped: cgroup v2 actuation needs Linux");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn native_runtime_adjust(root: PathBuf) {
+    use cedegrid::contention::{ResourceKind, YieldStep};
+    use cedegrid::execution_model::{
+        ActuatorSettings, AllocationClass, Family, LaunchBackend, LaunchRequest, ProcessIdentity,
+    };
+    use std::os::unix::process::CommandExt;
+    struct Verified(u32);
+    impl Family for Verified {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            vec![ProcessIdentity {
+                pid: self.0,
+                boot_id: "native".into(),
+                start_time: 1,
+                assignment_id: "test-runtime-adjust".into(),
+                generation: 1,
+            }]
+        }
+        fn signal(&mut self, _signal: i32) -> anyhow::Result<()> {
+            anyhow::bail!("cgroup steps never signal")
+        }
+        fn cpu_time(&mut self) -> Option<std::time::Duration> {
+            None
+        }
+    }
+    let config = CgroupConfig {
+        delegated_root: Some(root),
+        authorized_controls: vec![
+            "cgroup.procs".into(),
+            "cpu.weight".into(),
+            "cpu.max".into(),
+            "cgroup.freeze".into(),
+        ],
+        ..authorized()
+    };
+    let mut backend = CgroupBackend::new(config).unwrap();
+    let request = LaunchRequest {
+        task_id: "authorized-runtime-adjust-test".into(),
+        assignment_id: "test-runtime-adjust".into(),
+        argv: vec!["sleep".into()],
+        cwd: std::env::current_dir().unwrap(),
+        env: Default::default(),
+        resources: Default::default(),
+        replay_safe: true,
+        class: AllocationClass::Opportunistic,
+        no_escape: true,
+        single_process: true,
+        managed_child_limit: 0,
+        max_attempts: None,
+        input_artifacts: vec![],
+        required_controls: vec![],
+        allow_fallback: false,
+        contention: None,
+    };
+    let leaf = backend.prepare(&request).unwrap().cgroup_path.unwrap();
+    // Each test-owned child joins the leaf before it runs anything.
+    let join = |leaf: &std::path::Path| {
+        let procs = leaf.join("cgroup.procs");
+        // SAFETY: the pre-exec closure only writes one file before exec.
+        unsafe {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .pre_exec(move || std::fs::write(&procs, "0"))
+                .spawn()
+                .unwrap()
+        }
+    };
+    let read = |control: &str| {
+        std::fs::read_to_string(leaf.join(control))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let mut member = join(&leaf);
+    let mut family = Verified(member.id());
+    let mut actuator = backend.actuator(&ActuatorSettings {
+        class: AllocationClass::Opportunistic,
+        requested: cedegrid::model::Resources {
+            cpu_millicores: 1000,
+            ..Default::default()
+        },
+        period: std::time::Duration::from_millis(500),
+        ram_noise_tolerance_mib: 256,
+        ram_calm_window: std::time::Duration::from_millis(1500),
+    });
+    let (weight, cpu_max) = (read("cpu.weight"), read("cpu.max"));
+    let shared = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None);
+    let lowered = read("cpu.weight");
+    let capped_step = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500));
+    let capped = read("cpu.max");
+    let paused_step = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None);
+    let frozen = (read("cgroup.freeze"), read("cgroup.events"));
+    let reversed = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::None, None);
+    let restored = (read("cpu.weight"), read("cpu.max"), read("cgroup.freeze"));
+    // A process outside the verified set in the leaf refuses the next step.
+    let mut foreign = join(&leaf);
+    let refused = actuator.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500));
+    let untouched = read("cpu.max");
+    for child in [&mut member, &mut foreign] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    backend.confirm_release().unwrap();
+    assert_eq!(shared.unwrap(), YieldStep::LowerShare);
+    assert_eq!(lowered, "1");
+    assert_eq!(capped_step.unwrap(), YieldStep::Cap);
+    assert_ne!(capped, cpu_max, "the cap reads back");
+    assert!(
+        capped
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .is_ok(),
+        "{capped}"
+    );
+    assert_eq!(paused_step.unwrap(), YieldStep::Pause);
+    assert_eq!(frozen.0, "1");
+    assert!(
+        frozen.1.lines().any(|line| line == "frozen 1"),
+        "{}",
+        frozen.1
+    );
+    assert_eq!(reversed.unwrap(), YieldStep::None);
+    assert_eq!(restored, (weight, cpu_max.clone(), "0".to_owned()));
+    assert!(
+        refused.is_err(),
+        "a step went through with a foreign member in the leaf"
+    );
+    assert_eq!(untouched, cpu_max, "a refused step changed the leaf");
+}
+
 #[cfg(unix)]
 mod runtime_steps {
     use cedegrid::cgroup::{
