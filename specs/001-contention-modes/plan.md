@@ -382,13 +382,25 @@ FR-072, from item 013's pinned rules:
   `saturation_percent`, or external avg10 above `contention.cpu.psi_some_percent`. Each
   observation is judged on its own, like utilization. The ladder's calm window and hysteresis
   stop cycling, and `contended()` is unchanged.
+- **Probing (item 015, report 013 Decision 1 = A).** Under PSI-only saturation, utilization below
+  `saturation_percent`, `contention::probe_demand` probes every contending principal, not only
+  those below one margin step: own work steps down by the mode's margin step per response
+  window, a principal that does not grow into the freed capacity is recorded as satisfied at its
+  usage plus the contention floor, and one that grows gets its share. PSI that stays high while
+  the external user needs no more then ends in satisfied records. Every mode returns to its
+  uncontended target, so modes stay monotonic and capacity stays in use. The record bound (64)
+  and rejoin-on-growth rules are unchanged.
+- **Shared cgroups.** A cgroup holding own work together with other users' processes counts as
+  own, so its pressure is never counted; utilization still decides there.
 - **Visible.** The codes are `saturated_by_psi`, `psi_system_only` and `psi_unknown`, and
   `held_back.contention_psi` holds the contention amount when only PSI saturated the CPU.
   `doctor` prints a PSI line under CPU.
 - **Constitution.**
   - I and V: reads only, nothing written outside own cgroups.
   - II: evidence of external waiting only, never of own oversubscription. A host where others
-    wait yields sooner; own stalls cost nothing.
+    wait yields sooner; own stalls cost nothing. Probing every principal under PSI-only
+    saturation keeps the rule work-conserving and modes monotonic when PSI stays high for reasons
+    own work cannot change, such as an external load held back by its own limits.
   - III: unknown or system-only PSI adds no evidence, so utilization still decides, as before.
   - IV: the policy stays pure and reads the snapshot.
   - VII: the config key is additive. `held_back.contention_psi` is an optional field of the

@@ -252,9 +252,10 @@ in their contended target and in scale-up rate (10 s and 2 s per step).
 - `stepped_at_ms`, `usage_at_step`: when it last stepped and the probed principals' usage then.
 - `watch`, `baselined`: a watch of a larger demand, and whether it has taken its baseline.
 - A probe starts only under saturation, for contending principals whose unknown demand is below
-  one margin step. At the end of a window, a principal whose usage did not grow beyond
+  one margin step, and under PSI-only saturation for every contending principal (FR-072). At the end of a window, a principal whose usage did not grow beyond
   `usage_at_step + floor` is satisfied at its usage plus the floor.
-- A demand of a margin step or more gets the fair share at once and starts a watch, which sets
+- Outside PSI-only saturation, a demand of a margin step or more gets the fair share at once
+  and starts a watch, which sets
   no target. Its baseline is the external principals at or above the floor one interval later,
   taken again whenever that set changes. At the end of one response window, if the host is not
   saturated, each whose usage stayed within `usage_at_step + floor` is satisfied at its usage

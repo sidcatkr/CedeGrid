@@ -1028,6 +1028,23 @@ no behavior beyond what those commits did.
   returns to the measured path only after `quiet_window_intervals` measured intervals
   (`src/telemetry.rs`, `src/policy.rs`, `src/model.rs`; `cb277fc`, `60c8887`, `9b08de1`).
 
+## Phase 13: Convergence
+
+- [ ] T166 Under PSI-only saturation (busy below `saturation_percent`, external PSI above
+  `psi_some_percent`), probe every contending principal in `src/contention.rs` and
+  `src/policy.rs`, with T141c, tests first in `tests/contention.rs`:
+  - `modes_respond_to_psi_monotonically`;
+  - with PSI high and flat external usage, every mode regains its uncontended target, with
+    Yield First ≤ Neutral ≤ Performance at every interval;
+  - a satisfied record holds while usage stays within the noise tolerance, and re-probing
+    follows only the record rules;
+  - an external user that grows while PSI is high gets its share;
+  - floors hold and Guaranteed work is never paused in every PSI case.
+  Per FR-072 and FR-021, Session 2026-10-26 (missing).
+- [ ] T167 With T141d, state in the `doctor` PSI line and `docs/guarantees.md` that a cgroup
+  shared by own work and other users' processes counts as own and its pressure is never counted,
+  per FR-072 (partial).
+
 ---
 
 ## Dependencies & Execution Order

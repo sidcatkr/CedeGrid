@@ -115,6 +115,14 @@ thresholds.
 - Q: What threshold, which resources, which modes? → A: `contention.cpu.psi_some_percent`,
   provisional default 10 (1–100), a detection setting whose values above the default need
   `relaxed_detection`; T117 validates it. CPU only, with the same evidence in every mode.
+- Q: Under PSI-only saturation, which contending principals are probed? → A: Every contending
+  principal, not only those below one margin step. Own work steps down by the mode's margin
+  step per response window. A principal that does not grow into the freed capacity within the
+  probe window is recorded as satisfied at its usage plus the contention floor, and contention
+  ends. A principal that grows gets its share, as today. This keeps modes monotonic and capacity
+  in use when PSI stays high while the external user needs no more.
+- Q: Does PSI from a cgroup that holds own work and other users' processes count? → A: Never.
+  Such a cgroup counts as own, so its pressure is shown only and utilization still decides.
 
 ## Terms
 
@@ -630,10 +638,11 @@ node reports with the expected per-resource values at each step.
   - converge own work to its fair share under contention, and not step it below fair share
     except to keep a no-harm floor;
   - under saturation, probe a contending principal whose unknown demand is below one margin
-    step: step own work down by the margin per response window, and record a principal whose
+    step, and under PSI-only saturation every contending principal (FR-072): step own work down
+    by the margin per response window, and record a principal whose
     usage does not grow into the freed capacity as satisfied, after which it no longer contends
-    until its usage exceeds that demand; a larger demand gets the fair share at once, and is
-    then watched for one response window from the interval after: if the host has capacity to
+    until its usage exceeds that demand; outside PSI-only saturation, a larger demand gets the
+    fair share at once, and is then watched for one response window from the interval after: if the host has capacity to
     spare at its end and the principal's usage stayed within its baseline plus the contention
     floor, it is recorded as satisfied the same way, else it keeps its share. A satisfied
     principal that leaves keeps its record and rejoins at once when it returns. Records do not
@@ -963,6 +972,12 @@ node reports with the expected per-resource values at each step.
     on the path from the root down to it. It MUST use the highest `some` avg10 among them.
   - Own cgroups' pressure MUST be shown in `observe` and `doctor` and MUST NOT be saturation
     evidence.
+  - A cgroup that holds own work together with other users' processes counts as own: its pressure
+    MUST NOT be counted.
+  - Under PSI-only saturation (busy below `saturation_percent`), every contending principal MUST
+    be probed, not only those below one margin step (FR-021). A principal that does not grow
+    into the freed capacity within the probe window is recorded as satisfied at its usage plus
+    the contention floor, and contention ends; a principal that grows gets its share.
   - When only system-wide PSI exists, or PSI is missing, unreadable or malformed, it MUST add no
     evidence and hold nothing back, reported as `psi_system_only` or `psi_unknown`.
   - PSI MUST feed CPU saturation only, never RAM, GPU or floor breaches, give the same evidence

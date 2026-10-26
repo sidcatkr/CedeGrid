@@ -330,7 +330,19 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - Per-cgroup `cpu.pressure` outside the own subtree shows external tasks waiting.
   - `some` avg10 is already a 10-second kernel average, so no second window is needed, and the
     ladder's calm window stops cycling.
+- **Decision (item 015).** Under PSI-only saturation, probe every contending principal. Own work
+  steps down by the mode's margin step per response window, and a principal that does not grow
+  into the freed capacity is satisfied at its usage plus the contention floor. A cgroup shared
+  by own work and other users' processes counts as own and is never PSI evidence.
+- **Rationale (item 015).** PSI can stay high after own work yields, for example when the
+  external cgroup is held back by its own `cpu.max`. Without probing, Neutral keeps a larger
+  external demand (above its 5% step) at the fair share for as long as PSI stays high. Yield
+  First, probing up to its 15% step, learns the demand is satisfied and keeps more than
+  Neutral: not monotonic, and wasteful. Probing every principal ends that in every mode.
 - **Alternatives considered.**
+  - Stop counting PSI once own work has held the fair share for N response windows with flat
+    external usage: rejected, because it adds per-episode state that probing already provides.
+  - Accept the non-monotonic state: rejected (constitution, monotonic modes).
   - System-wide PSI as a fallback: rejected, because it cannot separate own from external stalls.
   - Own PSI as a signal: rejected for the same reason.
   - A consecutive-interval window or a separate clear threshold: not needed beyond the ladder's
