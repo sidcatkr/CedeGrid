@@ -1263,14 +1263,15 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     for name in ["attempts", "tmp", "cache", "refusals", "failure-receipts"] {
         private_dir(&config.state_dir.join(name))?;
     }
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(config.state_dir.join("agent.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .context("another agent already owns this node state")?;
+    let lock = super::AgentLock::acquire(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(config.state_dir.join("agent.lock"))?,
+        "another agent already owns this node state",
+    )?;
     #[cfg(unix)]
     let attached = if replay.is_none() {
         reattach_supervisors(config, &store)?

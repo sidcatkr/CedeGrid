@@ -22,8 +22,8 @@ pub fn reconcile(config: &Config) -> Result<Vec<ExecutionRecord>> {
         .create(true)
         .truncate(false)
         .open(config.state_dir.join("agent.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .context("cannot reconcile while a live agent owns node state")?;
+    let _lock =
+        super::AgentLock::acquire(lock, "cannot reconcile while a live agent owns node state")?;
     reconcile_unlocked(config, &BTreeSet::new())
 }
 

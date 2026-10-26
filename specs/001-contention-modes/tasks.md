@@ -1064,7 +1064,7 @@ no behavior beyond what those commits did.
 - [X] T174 Add an end-to-end supervisor test with a fake backend that supports the RAM cap, in tests/managed_supervision.rs, covering the Guaranteed clamp, the recorded target, the unprompted report, keeping the cap under a hint, and reconcile on query. Per FR-011 (missing; the D.10 gap in report 011).
 - [X] T175 Resolve `source-manifest.json`: remove the stale tracked copy if nothing reads it, and keep generated copies out of the tree; otherwise regenerate it with the pack tool and test that it is current. Per Constitution: source export (contradicts).
 - [X] T176 Make the helper that creates `.agent-test-*` directories clean up on success, failure and panic with a drop guard, keeping the home-only guard; then delete the leaked directories. Per CLAUDE.md test hygiene (partial).
-- [ ] T177 Release the agent lock explicitly, so a descriptor inherited between fork and exec cannot keep it; the lock test must pass 20 runs in a row with the default thread count. Per the agent lock (partial).
+- [X] T177 Release the agent lock explicitly, so a descriptor inherited between fork and exec cannot keep it; the lock test must pass 20 runs in a row with the default thread count. Per the agent lock (partial).
 
 ---
 

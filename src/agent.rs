@@ -609,7 +609,26 @@ fn phase(phase: &ExecutionPhase) -> RemotePhase {
     }
 }
 
-fn owned_agent_lock(path: &Path) -> Result<File> {
+/// The exclusive `agent.lock`. Its descriptor is close-on-exec, but a child that
+/// another thread forks shares the open file until it executes, and the lock
+/// belongs to the open file, so dropping the guard releases the lock itself.
+struct AgentLock(File);
+
+impl AgentLock {
+    fn acquire(file: File, held: &'static str) -> Result<Self> {
+        fs2::FileExt::try_lock_exclusive(&file).context(held)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for AgentLock {
+    fn drop(&mut self) {
+        // A failed unlock only keeps the lock until the last copy closes.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn owned_agent_lock(path: &Path) -> Result<AgentLock> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -638,8 +657,7 @@ fn owned_agent_lock(path: &Path) -> Result<File> {
             "agent lock identity changed"
         );
     }
-    fs2::FileExt::try_lock_exclusive(&lock).context("another agent owns this node state")?;
-    Ok(lock)
+    AgentLock::acquire(lock, "another agent owns this node state")
 }
 
 fn local_clock_ms() -> Result<u64> {
@@ -1035,6 +1053,37 @@ mod agent_transport_tests {
         assert!(owned_agent_lock(&alias).is_err());
         drop(lock);
         assert!(owned_agent_lock(&target).is_ok());
+    }
+    /// A child another thread forks holds a copy of every descriptor until it
+    /// executes, close-on-exec ones included; a dropped lock is free all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_agent_lock_is_free_while_another_thread_spawns() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("lock");
+        let lock = owned_agent_lock(&target).unwrap();
+        let spawner = std::thread::spawn(|| {
+            let mut command = std::process::Command::new("true");
+            // SAFETY: nanosleep is async-signal-safe; the closure allocates nothing.
+            unsafe {
+                command.pre_exec(|| {
+                    let pause = libc::timespec {
+                        tv_sec: 1,
+                        tv_nsec: 0,
+                    };
+                    libc::nanosleep(&pause, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+            command.status().unwrap()
+        });
+        // The child has forked and is paused before its exec.
+        std::thread::sleep(Duration::from_millis(300));
+        drop(lock);
+        let reacquired = owned_agent_lock(&target);
+        assert!(spawner.join().unwrap().success());
+        assert!(reacquired.is_ok(), "{:?}", reacquired.err());
     }
     #[cfg(target_os = "linux")]
     #[test]
