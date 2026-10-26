@@ -33,6 +33,7 @@ reclaim_s = 5                       # cpu and gpu_compute only, 1-60: Neutral an
 hint_deadline_s = 5                 # 1-30
 unknown_window_intervals = 3        # 1-20
 saturation_percent = 98             # cpu and gpu_compute only; above the default needs "relaxed_detection"
+psi_some_percent = 10               # cpu only, 1-100: external PSI some avg10 above it saturates the CPU; above 10 needs "relaxed_detection"
 hysteresis_percent = 50
 min_step_dwell_intervals = 3        # 1-10
 pause_bound_s = 10                  # cpu and gpu_compute only, 1-60

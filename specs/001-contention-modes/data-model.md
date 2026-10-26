@@ -78,6 +78,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `guaranteed_breach_window_s` | ram | 10 | 0–60 (FR-024) |
 | `principal_min_percent` | all | 1 | 1–50; usage, in percent of capacity, from which a principal contends for a fair share under saturation; above 1 needs `relaxed_detection` |
 | `saturation_percent` | cpu, gpu_compute | 98 | 50–100; busy at or above this share of capacity is saturated; above 98 needs `relaxed_detection` |
+| `psi_some_percent` | cpu | 10 | 1–100; external PSI `some` avg10 above it saturates the CPU (FR-072); above 10 needs `relaxed_detection` |
 
 Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 `gpu.reserve_vram_mib`, plus the new `gpu.reserve_vram_percent`.
@@ -129,7 +130,7 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 | `floor` | No-harm floor |
 | `margin` | From the effective mode |
 | `fair_share` | Max-min share for the owner principal (Neutral) |
-| `contended` | CPU, GPU compute: saturated with an active external principal whose demand is not known to be satisfied, or unknown activity |
+| `contended` | CPU, GPU compute: saturated (for CPU, by utilization or external PSI) with an active external principal whose demand is not known to be satisfied, or unknown activity |
 | `satisfied` | CPU, GPU compute: demands probing found satisfied, by principal: usage that did not grow into freed capacity plus the contention floor |
 | `probe` | CPU, GPU compute: while a small external demand is probed, the allowance stepping down by the mode's margin per response window (`DemandProbe`) |
 | `external_peak` | RAM, GPU memory: over `memory_peak_window_s`, the sum of each live listed external process's peak plus the peak of the external usage no listed process accounts for, for admission headroom |
@@ -262,11 +263,25 @@ in their contended target and in scale-up rate (10 s and 2 s per step).
   records are kept per resource key; past that, those whose principals were seen longest ago
   are dropped first (`PolicyEngine` keeps when each recorded principal was last seen).
 
+## CpuPressure (`src/kernel.rs`, `KernelSnapshot.cpu_pressure`)
+
+Read-only CPU PSI for FR-072, collected with the kernel snapshot:
+
+| Field | Meaning |
+|---|---|
+| `status` | `available` (external cgroups read), `system_only` (only `/proc/pressure/cpu`), or `unknown` (missing, unreadable or malformed) |
+| `external_some_avg10` | The highest `some` avg10 among the cgroups outside own work's user slice |
+| `external_cgroups` | How many external cgroups were read |
+| `own_some_avg10` | `some` avg10 of own work's cgroup, shown only |
+| `system_some_avg10` | `some` avg10 of `/proc/pressure/cpu`, shown only |
+| `detail` | Why the status is not `available` |
+
 ## HeldBack (`src/model.rs`, `ResourceStatus.held_back`, node report)
 
 Per resource, in resource units, zero amounts left out: `floor`, `reserve` (the CPU reserve
 where it exceeds the margin), `margin`, `contention` (left to contending external demand),
-`peak`, `noise_tolerance` (external GPU memory growth within this much goes unseen; reported
+`peak`, `contention_psi` (the contention hold when only external PSI saturates the CPU),
+`noise_tolerance` (external GPU memory growth within this much goes unseen; reported
 for information, not subtracted from the budget), `unknown`, `cooldown`, `backoff`,
 `charge_shortfall` (admission capacity held by charges above usage) (FR-069). GPU compute also
 reports `compute_path`: `measured`, or `unknown` with its reason (FR-021). Each resource also

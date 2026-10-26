@@ -123,7 +123,8 @@ targets are ordered: Yield First ≤ Neutral ≤ Performance. Capacity no worklo
 does not sit idle: a reserve is held back only for how slowly its resource is reclaimed,
 so CPU and GPU compute keep small margins and memory keeps the floors. CPU and GPU
 compute are *contended* when they are saturated (busy at or above `saturation_percent`,
-98% by default, of capacity) and an external principal uses at least
+98% by default, of capacity, or for CPU external PSI above `psi_some_percent`) and an
+external principal uses at least
 `principal_min_percent` of them without its demand being known to be satisfied, or when
 external activity of unknown amount exists. Principals are the account CedeGrid runs as,
 whatever its UID, and users at or above `contention.uid_min` (1000) that have used at
@@ -462,8 +463,16 @@ nonempty cleanup and cgroup.kill are unavailable pending stronger ownership proo
 
 PSI reports system or cgroup scope, timestamps, sample interval, availability and
 freshness. System pressure cannot identify the workload causing it. Unknown, stale,
-inaccessible or unsupported readings remain unknown. PSI is observation-only in
-this increment, not an unexplained drain threshold.
+inaccessible or unsupported readings remain unknown. CPU pressure of the cgroups outside
+own work's user slice, external PSI, is a second CPU saturation signal: its highest
+`some` avg10 above `contention.cpu.psi_some_percent` (10%) saturates the CPU, judged per
+observation like `saturation_percent` (FR-072). Saturation still needs an external
+principal to make the CPU contended, and a PSI-only hold shows as `contention_psi` in
+`held_back` (`saturated_by_psi`). Own cgroups' pressure is shown and never counts.
+System-wide pressure cannot tell own from external waiting and adds no evidence
+(`psi_system_only`); missing, unreadable or malformed PSI adds none and holds nothing
+back (`psi_unknown`). PSI feeds CPU saturation only, never memory, GPU or floor
+breaches, gives every mode the same evidence, and is read without writing anything.
 [Linux PSI definitions](https://docs.kernel.org/accounting/psi.html)
 
 ## Deadlines and leases

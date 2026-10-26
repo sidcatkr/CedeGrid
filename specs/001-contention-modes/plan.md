@@ -344,6 +344,31 @@ Constitution 2.1.0 adds the work-conserving rule to Principle II. Each item land
 - **U7, U11, U13.** The allowance signal is specified now and implemented after US5 (T150); the
   constitution amendment is above; T088 also measures how often GPU activity is Unknown.
 
+## PSI as a second CPU saturation signal (T141, 2026-10-26)
+
+FR-072, from item 013's pinned rules:
+
+- **Read.** `KernelCollector` reads `cpu.pressure` read-only from every sibling of each cgroup on
+  the path from the cgroup v2 root down to own work's user slice (`user-<uid>.slice`, else the
+  agent's own cgroup). It reports the highest `some` avg10 as `KernelSnapshot.cpu_pressure`,
+  with own and system-wide avg10 for display. No external cgroup readable means `system_only`
+  when `/proc/pressure/cpu` exists, else `unknown`.
+- **Rule.** `policy.rs` computes `cpu_saturated` as utilization at or above
+  `saturation_percent`, or external avg10 above `contention.cpu.psi_some_percent`. Each
+  observation is judged on its own, like utilization. The ladder's calm window and hysteresis
+  stop cycling, and `contended()` is unchanged.
+- **Visible.** The codes are `saturated_by_psi`, `psi_system_only` and `psi_unknown`, and
+  `held_back.contention_psi` holds the contention amount when only PSI saturated the CPU.
+  `doctor` prints a PSI line under CPU.
+- **Constitution.**
+  - I and V: reads only, nothing written outside own cgroups.
+  - II: evidence of external waiting only, never of own oversubscription. A host where others
+    wait yields sooner; own stalls cost nothing.
+  - III: unknown or system-only PSI adds no evidence, so utilization still decides, as before.
+  - IV: the policy stays pure and reads the snapshot.
+  - VII: the config key is additive. `held_back.contention_psi` is an optional field of the
+    unreleased `contention/1` report.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

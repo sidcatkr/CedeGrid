@@ -305,3 +305,23 @@ Constitution 2.1.0 and plan.md, "Utilization revisions before US5", supersede fu
   reserve defaults to 0 and never stacks on the margin; CPU admission charges running
   opportunistic work at its p95 usage over 60 s. Real hosts still have to confirm SC-014 and
   SC-015 (T117).
+
+## R16. PSI as CPU saturation evidence (T141)
+
+- **Decision.** External PSI counts: the highest `some` avg10 of the cgroups outside own
+  work's user slice, above `contention.cpu.psi_some_percent` (10, provisional), judged per
+  observation. Own and system-wide PSI never count; missing PSI adds nothing.
+- **Rationale.**
+  - System-wide `/proc/pressure/cpu` also counts stalls between own threads. A job with more
+    threads than its share beside a small external user would raise it with nobody external
+    waiting, and cut own work for nothing.
+  - Per-cgroup `cpu.pressure` outside the own subtree shows external tasks waiting.
+  - `some` avg10 is already a 10-second kernel average, so no second window is needed, and the
+    ladder's calm window stops cycling.
+- **Alternatives considered.**
+  - System-wide PSI as a fallback: rejected, because it cannot separate own from external stalls.
+  - Own PSI as a signal: rejected for the same reason.
+  - A consecutive-interval window or a separate clear threshold: not needed beyond the ladder's
+    hysteresis; T117 can revisit it with evidence.
+- **Verify natively** (T141 gate): which slices expose `cpu.pressure` to a non-root user, and how
+  external avg10 behaves under a CPU-bound load in another slice.

@@ -967,6 +967,21 @@ each step.
   [native-gates.md](native-gates.md). Then read it in `src/kernel.rs` (read-only), treat the CPU
   as saturated when either signal says so, keep unknown PSI as no extra evidence, and test it in
   `tests/contention.rs` and `tests/kernel.rs`.
+  - [X] T141a Amend Saturated and Contended, add FR-072, `psi_some_percent` in
+    `data-model.md` and `contracts/config-contention.md`, `docs/guarantees.md`, plan, research
+    R16 and the native gate.
+  - [ ] T141b Read external and own CPU pressure read-only in `src/kernel.rs`
+    (`KernelSnapshot.cpu_pressure`), tests first in `tests/kernel.rs` with fake `/proc` and
+    cgroup trees: external siblings only, own excluded, system-only, unreadable and malformed.
+  - [ ] T141c Add `contention.cpu.psi_some_percent` (`KEY_CLASSES`, `relaxed_detection` above the
+    default) and the saturation rule in `src/policy.rs`, tests first in `tests/contention.rs`:
+    external PSI high below `saturation_percent` saturates and, with external demand,
+    contends; own PSI high with external low does not; system-only and unknown add nothing
+    with their codes; crossing back and forth does not cycle; modes stay monotonic.
+  - [ ] T141d Show external PSI, own PSI and the saturating signal in `observe` and `doctor`,
+    with `saturated_by_psi`, `psi_system_only`, `psi_unknown` and `held_back.contention_psi` in
+    the catalog and `docs/guarantees.md`.
+  - [ ] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
 
 ---
 

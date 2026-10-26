@@ -97,6 +97,25 @@ thresholds.
   60 s; pending work at its request and Guaranteed work at max(request, observed). RAM and GPU
   memory stay request-based.
 
+### Session 2026-10-26
+
+- Q: Which CPU pressure counts as saturation evidence? → A: Only external PSI: `cpu.pressure`
+  of the cgroups outside own work's user slice, the highest `some` avg10 among them. Own
+  cgroups' pressure is shown but never counts, since a job with more threads than its share
+  stalls on itself.
+- Q: What if only system-wide PSI is available? → A: It adds no evidence, since it cannot tell
+  own from external waiting; `psi_system_only` says so.
+- Q: Over what window does PSI saturate the CPU, and how does that clear? → A: As with
+  `saturation_percent`, which judges each observation on its own: external `some` avg10, a
+  10-second kernel average, above `contention.cpu.psi_some_percent`. When it falls back, the
+  ladder's calm window and hysteresis end the steps it caused, so a signal that crosses back
+  and forth does not cycle caps.
+- Q: What do missing, unreadable or malformed PSI mean? → A: No extra evidence and nothing held
+  back; `psi_unknown` says so.
+- Q: What threshold, which resources, which modes? → A: `contention.cpu.psi_some_percent`,
+  provisional default 10 (1–100), a detection setting whose values above the default need
+  `relaxed_detection`; T117 validates it. CPU only, with the same evidence in every mode.
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -112,10 +131,15 @@ thresholds.
 - **Margin**: capacity own work leaves unused for external demand to grow into, justified only
   by how slowly the resource is reclaimed. Margins are set per mode and per resource: small on
   CPU and GPU compute, and on memory the floors plus Yield First's 20%.
-- **Saturated**: busy at or above `saturation_percent` of capacity (default 98%).
+- **Saturated**: busy at or above `saturation_percent` of capacity (default 98%). CPU is also
+  saturated when external PSI `some` avg10 is above `contention.cpu.psi_some_percent` (default
+  10%). External PSI is the CPU pressure of the cgroups outside own work's user slice; own and
+  system-wide pressure are never evidence, and missing, unreadable or system-only PSI adds none.
+  Each observation is judged on its own (FR-072).
 - **Contended**: a CPU or GPU compute resource is contended when it is saturated and an external
   principal, or the unattributed principal, uses at least `principal_min_percent` of it without
   its demand being known to be satisfied, or when it has external activity of unknown amount.
+  Saturation by PSI alone still needs such a principal.
 - **Satisfied demand**: a principal's demand found by probing: the usage that did not grow into
   capacity own work freed, plus hysteresis equal to the contention floor. It holds while the
   principal's usage stays within it.
@@ -933,6 +957,19 @@ node reports with the expected per-resource values at each step.
   a rise at most one scale-up step per scale-up interval. Both
   SDKs MUST offer `on_resource_allowance`, which an allowance-only change calls instead of the
   target callback. Workers that ignore it keep working.
+- **FR-072**: CPU saturation MUST also count external CPU pressure (PSI).
+  - The agent MUST read `cpu.pressure` read-only from the cgroups outside own work's user slice,
+    or outside the agent's own cgroup when it runs in no user slice: the siblings of each cgroup
+    on the path from the root down to it. It MUST use the highest `some` avg10 among them.
+  - Own cgroups' pressure MUST be shown in `observe` and `doctor` and MUST NOT be saturation
+    evidence.
+  - When only system-wide PSI exists, or PSI is missing, unreadable or malformed, it MUST add no
+    evidence and hold nothing back, reported as `psi_system_only` or `psi_unknown`.
+  - PSI MUST feed CPU saturation only, never RAM, GPU or floor breaches, give the same evidence
+    in every mode, and write nothing anywhere.
+  - `observe` and `doctor` MUST show external and own PSI and which signal made the CPU
+    saturated (`saturated_by_psi`), and `held_back` MUST show capacity held for PSI-only
+    contention as `contention_psi`.
 
 ### Key Entities
 
