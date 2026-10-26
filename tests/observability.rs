@@ -410,6 +410,29 @@ fn a_scripted_gpu_compute_run_is_shown_at_every_step() {
     );
 }
 
+/// The node-wide cooldown says it covers only the 0.2 expansion flags, while GPU
+/// memory admission is already open on its own cooldown.
+#[test]
+fn the_node_cooldown_names_the_legacy_flags_it_covers() {
+    let steps = run(&config(), &[(20, 0, 0), (120, 4000, 0)]);
+    let last = &steps.last().unwrap().decision;
+    let reason = last
+        .reason_codes
+        .iter()
+        .find(|r| r.code == "cooldown_pending")
+        .expect("the node cooldown is pending");
+    assert_eq!(
+        Some(reason.text.as_str()),
+        cedegrid::contention::reason_text("cooldown_pending")
+    );
+    assert!(
+        last.resources[&ResourceKey::GpuMemory(GPU.into())]
+            .admission
+            .as_ref()
+            .is_some_and(|a| a.code().is_none())
+    );
+}
+
 /// Every code the policy reports, wherever it reports it, is in the catalog
 /// (T113), across floors, envelopes, unknown readings, the node cap, drains and
 /// both GPU compute paths.

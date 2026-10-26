@@ -2389,9 +2389,11 @@ impl PolicyEngine {
                 reasons.push(ReasonCode::new("cpu_only_admission", "independently stable CPU/RAM headroom permits CPU-only admission; GPU admission remains blocked"));
             }
             if !unsafe_now && !cooled_down {
+                // The catalog sentence says this covers only the 0.2 expansion flags.
                 reasons.push(ReasonCode::new(
                     "cooldown_pending",
-                    "stable-capacity cooldown has not elapsed",
+                    crate::contention::reason_text("cooldown_pending")
+                        .unwrap_or("cooldown_pending"),
                 ));
             }
         }
