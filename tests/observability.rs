@@ -6,9 +6,12 @@ use cedegrid::{
     contention::{ContentionMode, REASON_CODES, ResourceKey, YieldStep},
     execution_model::AllocationClass,
     model::*,
-    policy::PolicyEngine,
 };
+use snapshot::PolicyEngine;
 use std::collections::BTreeMap;
+
+#[path = "support/snapshot.rs"]
+mod snapshot;
 
 const CPU: u64 = 32_000;
 const GPU: &str = "GPU-a";
@@ -656,5 +659,39 @@ fn the_catalog_has_one_sentence_per_stable_code() {
     assert_eq!(
         table, expected,
         "docs/guarantees.md and REASON_CODES differ"
+    );
+}
+
+/// The scripted runs above as a decision snapshot (tests/support/snapshot.rs).
+#[test]
+#[ignore = "decision snapshot: needs CEDEGRID_DECISION_SNAPSHOT"]
+fn decision_snapshot() {
+    snapshot::check(
+        "observability",
+        snapshot::scripted(
+            "observability",
+            &[
+                (
+                    "a_scripted_cpu_contention_run_is_shown_at_every_step",
+                    a_scripted_cpu_contention_run_is_shown_at_every_step,
+                ),
+                (
+                    "a_scripted_gpu_compute_run_is_shown_at_every_step",
+                    a_scripted_gpu_compute_run_is_shown_at_every_step,
+                ),
+                (
+                    "the_node_cooldown_names_the_legacy_flags_it_covers",
+                    the_node_cooldown_names_the_legacy_flags_it_covers,
+                ),
+                (
+                    "doctor_shows_the_ram_cap_where_the_leaf_allows_it",
+                    doctor_shows_the_ram_cap_where_the_leaf_allows_it,
+                ),
+                (
+                    "every_code_the_policy_emits_is_in_the_catalog",
+                    every_code_the_policy_emits_is_in_the_catalog,
+                ),
+            ],
+        ),
     );
 }

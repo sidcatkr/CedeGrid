@@ -1,4 +1,6 @@
 //! Contention-mode and yield-ladder properties. Builders mirror tests/policy.rs.
+#[path = "support/snapshot.rs"]
+mod snapshot;
 use cedegrid::{config::Config, execution_model::AllocationClass, model::*, policy::PolicyEngine};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -1598,6 +1600,7 @@ mod guaranteed_policy {
 /// steps the policy applies; the real policy engine runs every 500 ms.
 mod scenarios {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
 
     const CAPACITY: u64 = 8000;
@@ -2205,12 +2208,69 @@ mod scenarios {
         }
         assert!(!world.drained);
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "sc_002_yield_first_restores_its_margin_within_three_intervals_without_draining",
+            sc_002_yield_first_restores_its_margin_within_three_intervals_without_draining,
+        ),
+        (
+            "sc_002_contended_cpu_returns_within_two_intervals_in_every_mode",
+            sc_002_contended_cpu_returns_within_two_intervals_in_every_mode,
+        ),
+        (
+            "yield_first_pauses_only_when_external_demand_exceeds_its_margin",
+            yield_first_pauses_only_when_external_demand_exceeds_its_margin,
+        ),
+        (
+            "yield_first_does_not_pause_own_saturation_for_a_small_external_user",
+            yield_first_does_not_pause_own_saturation_for_a_small_external_user,
+        ),
+        (
+            "sc_015_a_steady_small_external_user_leaves_own_work_its_share",
+            sc_015_a_steady_small_external_user_leaves_own_work_its_share,
+        ),
+        (
+            "sc_014_own_work_uses_an_idle_host",
+            sc_014_own_work_uses_an_idle_host,
+        ),
+        (
+            "a_satisfied_small_demand_stops_the_probe_and_rising_usage_restarts_it",
+            a_satisfied_small_demand_stops_the_probe_and_rising_usage_restarts_it,
+        ),
+        (
+            "a_held_cap_rises_again_when_external_demand_shrinks",
+            a_held_cap_rises_again_when_external_demand_shrinks,
+        ),
+        (
+            "sc_003_neutral_converges_to_half_with_one_contending_principal",
+            sc_003_neutral_converges_to_half_with_one_contending_principal,
+        ),
+        (
+            "sc_004_performance_ramps_on_an_idle_host_and_yields_within_the_reclaim_time",
+            sc_004_performance_ramps_on_an_idle_host_and_yields_within_the_reclaim_time,
+        ),
+        (
+            "a_steady_large_external_user_is_capped_once_then_learned_satisfied",
+            a_steady_large_external_user_is_capped_once_then_learned_satisfied,
+        ),
+        (
+            "a_returning_satisfied_user_does_not_cut_own_work_again",
+            a_returning_satisfied_user_does_not_cut_own_work_again,
+        ),
+        (
+            "a_satisfied_user_that_grows_gets_its_fair_share_within_two_intervals",
+            a_satisfied_user_that_grows_gets_its_fair_share_within_two_intervals,
+        ),
+    ];
 }
 
 /// Hints through the policy engine: compliance is judged by observed usage
 /// and the hint deadline bounds the wait (FR-037).
 mod hints {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{ResourceKey, YieldCause, YieldStep};
 
     /// The worker's RAM action at each interval: step, target and cause.
@@ -2306,11 +2366,32 @@ mod hints {
         let steps = run(false, Some(0));
         assert_eq!(steps[1].1.map(|a| a.0), Some(YieldStep::Drain), "{steps:?}");
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "memory_contention_starts_with_a_hint_and_its_target",
+            memory_contention_starts_with_a_hint_and_its_target,
+        ),
+        (
+            "a_compliant_worker_is_not_drained",
+            a_compliant_worker_is_not_drained,
+        ),
+        (
+            "a_non_compliant_worker_is_drained_at_the_hint_deadline",
+            a_non_compliant_worker_is_drained_at_the_hint_deadline,
+        ),
+        (
+            "a_hint_the_supervisor_cannot_apply_escalates_at_once",
+            a_hint_the_supervisor_cannot_apply_escalates_at_once,
+        ),
+    ];
 }
 
 /// T138: a RAM cap step through `memory.high` where a delegated leaf allows it.
 mod ram_cap {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
 
     type Action = Option<(YieldStep, Option<u64>, YieldCause)>;
@@ -2565,11 +2646,33 @@ mod ram_cap {
         );
         assert!(yield_first.0 < u64::MAX, "Yield First caps here");
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "a_floor_breach_caps_ram_where_the_leaf_allows_it",
+            a_floor_breach_caps_ram_where_the_leaf_allows_it,
+        ),
+        (
+            "a_cap_that_only_stops_growth_goes_on_to_the_hint",
+            a_cap_that_only_stops_growth_goes_on_to_the_hint,
+        ),
+        (
+            "a_guaranteed_ram_cap_never_goes_below_its_request",
+            a_guaranteed_ram_cap_never_goes_below_its_request,
+        ),
+        (
+            "ram_cap_reversal_waits_for_room_the_calm_window_and_backoff",
+            ram_cap_reversal_waits_for_room_the_calm_window_and_backoff,
+        ),
+        ("modes_cap_ram_monotonically", modes_cap_ram_monotonically),
+    ];
 }
 
 /// T141: external PSI as a second CPU saturation signal (FR-072).
 mod psi_saturation {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
     use cedegrid::kernel::{CpuPressure, CpuPressureStatus, KernelCollector, KernelConfig};
 
@@ -3008,6 +3111,54 @@ mod psi_saturation {
             "unknown"
         );
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "external_psi_saturates_the_cpu_below_saturation_percent",
+            external_psi_saturates_the_cpu_below_saturation_percent,
+        ),
+        (
+            "own_psi_alone_does_not_saturate",
+            own_psi_alone_does_not_saturate,
+        ),
+        (
+            "system_only_and_unknown_pressure_add_no_evidence",
+            system_only_and_unknown_pressure_add_no_evidence,
+        ),
+        (
+            "pressure_crossing_the_threshold_does_not_cycle",
+            pressure_crossing_the_threshold_does_not_cycle,
+        ),
+        (
+            "psi_with_flat_external_usage_returns_every_mode_to_its_target",
+            psi_with_flat_external_usage_returns_every_mode_to_its_target,
+        ),
+        (
+            "a_satisfied_record_holds_while_usage_stays_within_it",
+            a_satisfied_record_holds_while_usage_stays_within_it,
+        ),
+        (
+            "an_external_user_that_grows_into_freed_capacity_keeps_its_share",
+            an_external_user_that_grows_into_freed_capacity_keeps_its_share,
+        ),
+        (
+            "an_external_user_that_grows_while_psi_is_high_gets_its_share",
+            an_external_user_that_grows_while_psi_is_high_gets_its_share,
+        ),
+        (
+            "floors_hold_and_guaranteed_is_never_paused_under_psi",
+            floors_hold_and_guaranteed_is_never_paused_under_psi,
+        ),
+        (
+            "modes_respond_to_psi_monotonically",
+            modes_respond_to_psi_monotonically,
+        ),
+        (
+            "doctor_shows_the_pressure_line",
+            doctor_shows_the_pressure_line,
+        ),
+    ];
 }
 
 /// Satisfied records are kept without expiry, at most 64 per resource key: past
@@ -3030,4 +3181,19 @@ fn satisfied_records_keep_the_64_most_recently_seen_principals() {
     let mut few = vec![(Some(1), 10), (None, 20)];
     bound_satisfied(&mut few, &BTreeMap::new());
     assert_eq!(few.len(), 2);
+}
+
+/// The scripted runs above as a decision snapshot (tests/support/snapshot.rs).
+#[test]
+#[ignore = "decision snapshot: needs CEDEGRID_DECISION_SNAPSHOT"]
+fn decision_snapshot() {
+    let mut scenarios = Vec::new();
+    scenarios.extend(snapshot::scripted("scenarios", scenarios::SNAPSHOT));
+    scenarios.extend(snapshot::scripted("hints", hints::SNAPSHOT));
+    scenarios.extend(snapshot::scripted("ram_cap", ram_cap::SNAPSHOT));
+    scenarios.extend(snapshot::scripted(
+        "psi_saturation",
+        psi_saturation::SNAPSHOT,
+    ));
+    snapshot::check("contention", scenarios);
 }

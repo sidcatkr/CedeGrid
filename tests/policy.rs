@@ -1,3 +1,5 @@
+#[path = "support/snapshot.rs"]
+mod snapshot;
 use cedegrid::{
     config::*,
     execution_model::AllocationClass,
@@ -4600,6 +4602,7 @@ mod per_job_modes {
 /// (FR-034).
 mod gpu_cooldown_alone {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
 
     fn cfg(mode: ContentionMode) -> Config {
@@ -4733,12 +4736,29 @@ mod gpu_cooldown_alone {
             Some("admission_measurement_unknown")
         );
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu",
+            gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu,
+        ),
+        (
+            "an_external_gpu_workload_resets_only_its_device",
+            an_external_gpu_workload_resets_only_its_device,
+        ),
+        (
+            "an_unknown_cpu_reading_leaves_gpu_memory_counting",
+            an_unknown_cpu_reading_leaves_gpu_memory_counting,
+        ),
+    ];
 }
 
 /// Admission is blocked for own work only while it is being reclaimed; a cap that
 /// holds at the target leaves admission to headroom and cooldown.
 mod reclaim_admission {
     use super::*;
+    use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{Admission, ContentionMode, ResourceKey, YieldStep};
 
     const CPU: u64 = 32_000;
@@ -5263,4 +5283,57 @@ mod reclaim_admission {
             decision.resources[&key]
         );
     }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "a_reclaiming_resource_places_nothing_end_to_end",
+            a_reclaiming_resource_places_nothing_end_to_end,
+        ),
+        (
+            "a_holding_cap_places_an_8000_m_job_end_to_end",
+            a_holding_cap_places_an_8000_m_job_end_to_end,
+        ),
+        (
+            "small_external_jitter_keeps_admission_and_placement_steady",
+            small_external_jitter_keeps_admission_and_placement_steady,
+        ),
+        (
+            "a_holding_cap_leaves_room_below_the_target_open",
+            a_holding_cap_leaves_room_below_the_target_open,
+        ),
+        (
+            "a_request_over_own_target_is_held",
+            a_request_over_own_target_is_held,
+        ),
+        (
+            "growth_past_the_fair_share_blocks_admission_until_reclaim_completes",
+            growth_past_the_fair_share_blocks_admission_until_reclaim_completes,
+        ),
+        (
+            "the_cooldown_stops_an_admit_grow_cap_cycle",
+            the_cooldown_stops_an_admit_grow_cap_cycle,
+        ),
+        ("modes_admit_monotonically", modes_admit_monotonically),
+        (
+            "a_holding_gpu_compute_cap_does_not_block_admission",
+            a_holding_gpu_compute_cap_does_not_block_admission,
+        ),
+    ];
+}
+
+/// The scripted runs above as a decision snapshot (tests/support/snapshot.rs).
+#[test]
+#[ignore = "decision snapshot: needs CEDEGRID_DECISION_SNAPSHOT"]
+fn decision_snapshot() {
+    let mut scenarios = Vec::new();
+    scenarios.extend(snapshot::scripted(
+        "gpu_cooldown_alone",
+        gpu_cooldown_alone::SNAPSHOT,
+    ));
+    scenarios.extend(snapshot::scripted(
+        "reclaim_admission",
+        reclaim_admission::SNAPSHOT,
+    ));
+    snapshot::check("policy", scenarios);
 }

@@ -21,6 +21,7 @@ include = [
     "/NOTICE",
     "/src/**/*.rs",
     "/tests/*.rs",
+    "/tests/support/*.rs",
     "/tests/test_*.py",
     "/examples/*.toml",
     "/examples/*.c",

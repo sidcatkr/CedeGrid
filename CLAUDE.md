@@ -30,8 +30,8 @@ yields that capacity when other workloads need it.
     `observe` and `doctor` renderings.
   - `storage_qualification.rs` (storage diagnostics), `launcher_terminal.rs` (npm launcher
     terminal handoff); `lib.rs` declares the modules.
-- `tests/`: Rust integration tests (`*.rs`), tool tests (`test_*.py`) and the contract fixture
-  `tests/contracts/cedegrid-0.2.json`.
+- `tests/`: Rust integration tests (`*.rs`), tool tests (`test_*.py`), shared test modules
+  (`tests/support/`) and the contract fixture `tests/contracts/cedegrid-0.2.json`.
 - `python/cedegrid/`, `npm/src/`: the Python and TypeScript SDKs, which mirror each other.
 - `tools/`: operator, validation and release scripts.
 - `docs/`: user and operator docs. `docs/guarantees.md` defines the support boundary.
@@ -59,9 +59,11 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 - Run the Rust suite serially. In parallel, the multi-process service tests can time out.
-- `#[ignore]` tests are either subprocess fixtures that other tests re-launch, or opt-in
-  hardware gates (`CEDEGRID_TEST_CGROUP_ROOT`, `CEDEGRID_TEST_GPU_UUID`). Never run
-  `--ignored` across the suite, and run hardware gates only when explicitly authorized.
+- `#[ignore]` tests are subprocess fixtures that other tests re-launch, opt-in hardware gates
+  (`CEDEGRID_TEST_CGROUP_ROOT`, `CEDEGRID_TEST_GPU_UUID`), or `decision_snapshot`, which
+  writes or compares every scripted decision (`CEDEGRID_DECISION_SNAPSHOT`, see
+  `tests/support/snapshot.rs`). Never run `--ignored` across the suite, and run hardware
+  gates only when explicitly authorized.
 - A failed integration test keeps its `.agent-test-*`, `.distributed-service-*` or
   `..*.cedegrid-control` directory as evidence. Don't bulk-delete them.
 - Windows CI checks client paths only: `cargo check --all-targets` and
