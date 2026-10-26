@@ -167,7 +167,13 @@ CPU and RAM each wait for their own cooldown, counted from the time each became 
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
 each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2 s in
 Performance. Each resource's admission opens on its own, and placement needs every
-requested resource open; every launch reserves CPU and RAM. GPU memory waits for
+requested resource open; every launch reserves CPU and RAM. Own work blocks admission on a
+resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
+holds more than its target, or a step is still moving down. A cap or hint that holds at its
+target does not block. Admission then follows headroom, cooldown and reclaim backoff: own
+charged usage plus a new request stays within own target, the aggregate from the node mode
+and cap, and a request beyond it waits (`admission_over_own_target`). After a reclaim the
+resource waits for its cooldown again, so admitting, growing and capping cannot cycle. GPU memory waits for
 `contention.gpu_memory.scale_up_cooldown_ms`, else a set legacy
 `gpu.scale_up_cooldown_ms`, else its mode's interval, counted per device from the time that
 device became stable: its own external growth, its own measurement and its own charges reset
@@ -358,6 +364,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `admission_own_work_yielding` | Own work on this resource is yielding, so nothing more is admitted. |
 | `admission_cooling_down` | The resource is cooling down after its last change. |
 | `admission_reclaim_backoff` | The reclaim backoff after recent floor breaches applies. |
+| `admission_over_own_target` | Own charged usage plus the request would exceed own target, so the request waits. |
 | `admission_envelope_exceeded` | Own work exceeds the operator envelope, so nothing is admitted. |
 | `gpu_memory_unknown` | GPU memory or its attribution is unknown, so the device admits nothing. |
 | `gpu_external_workload_appeared` | A new external GPU workload or external memory growth appeared. |
@@ -380,7 +387,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `cpu_charges_exceed_budget` | Managed CPU charges exceed the scheduling budget. |
 | `ram_charges_exceed_budget` | Managed RAM charges exceed the scheduling budget. |
 | `cpu_only_admission` | Stable CPU and RAM headroom allows CPU-only admission while GPU admission stays blocked. |
-| `cooldown_pending` | The stable-capacity cooldown has not elapsed. |
+| `cooldown_pending` | The node-wide cooldown behind the 0.2 expansion flags has not elapsed; each resource's admission keeps its own cooldown. |
 | `held_back_floor` | Memory kept free as the no-harm floor. |
 | `held_back_reserve` | CPU kept free by the explicit reserve where it exceeds the margin. |
 | `held_back_margin` | Capacity kept free by the mode's idle margin. |

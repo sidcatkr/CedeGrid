@@ -79,6 +79,52 @@ pub fn validate_gpu_launch_contract(
     Ok(())
 }
 
+/// Whether a new request is admitted now (B2): every resource it asks for must be
+/// admitted, and own charged usage plus the request must stay within own target,
+/// the aggregate from the node mode and cap. Returns the catalog code of the
+/// first refusal. Coordinator placement charges the same headroom.
+pub fn request_admission(decision: &Decision, request: &Resources) -> Result<(), &'static str> {
+    let catalogued = |code: &str| {
+        crate::contention::REASON_CODES
+            .iter()
+            .find(|(known, _)| *known == code)
+            .map_or("admission_over_own_target", |(known, _)| *known)
+    };
+    let admitted = |key: &ResourceKey| -> Result<(), &'static str> {
+        match decision
+            .resources
+            .get(key)
+            .and_then(|status| status.admission.as_ref())
+        {
+            Some(admission) => admission
+                .code()
+                .map_or(Ok(()), |code| Err(catalogued(code))),
+            None => Err("admission_measurement_unknown"),
+        }
+    };
+    let headroom = &decision.admission_headroom;
+    if request.cpu_millicores > 0 {
+        admitted(&ResourceKey::Cpu)?;
+        if request.cpu_millicores > headroom.cpu_millicores {
+            return Err("admission_over_own_target");
+        }
+    }
+    if request.ram_mib > 0 {
+        admitted(&ResourceKey::Ram)?;
+        if request.ram_mib > headroom.ram_mib {
+            return Err("admission_over_own_target");
+        }
+    }
+    for (uuid, mib) in &request.gpu_memory_mib {
+        admitted(&ResourceKey::GpuMemory(uuid.clone()))?;
+        admitted(&ResourceKey::GpuCompute(uuid.clone()))?;
+        if *mib > headroom.gpu_memory_mib.get(uuid).copied().unwrap_or(0) {
+            return Err("admission_over_own_target");
+        }
+    }
+    Ok(())
+}
+
 /// Coordinator placement uses this admission budget, while policy accounting
 /// retains the original managed budget and charges every live/reserved allocation.
 pub fn schedulable_budget(decision: &Decision) -> Resources {
@@ -1356,6 +1402,8 @@ impl PolicyEngine {
             allocation_unknown_since.insert(id.clone(), start);
         }
         let mut ladder = BTreeMap::new();
+        // Resources where own work holds more than its target: reclaim is under way.
+        let mut over_target: BTreeSet<ResourceKey> = BTreeSet::new();
         // The deadline each hint carries to its worker, as the ladder enforces it.
         let mut hint_deadlines: BTreeMap<(String, ResourceKey), u64> = BTreeMap::new();
         let mut actions = Vec::new();
@@ -1576,6 +1624,9 @@ impl PolicyEngine {
                 } else {
                     judged_total.saturating_sub(amount_of(&budget))
                 };
+                if usage_excess > 0 {
+                    over_target.insert(key.clone());
+                }
                 let guaranteed =
                     |a: &Allocation| a.class == crate::execution_model::AllocationClass::Guaranteed;
                 // Opportunistic work nobody can act on cannot be released first.
@@ -1700,6 +1751,9 @@ impl PolicyEngine {
                         let limit = allocation.and_then(ceiling).filter(|_| !pending_pass);
                         let own_excess =
                             limit.map_or(0, |limit| (victim.amount + kept).saturating_sub(limit));
+                        if own_excess > 0 {
+                            over_target.insert(key.clone());
+                        }
                         let excess = remaining.max(own_excess);
                         let state = self.ladder.get(&(victim.id.clone(), key.clone()));
                         // A Guaranteed hint waits the Guaranteed hint deadline (FR-024).
@@ -1922,6 +1976,9 @@ impl PolicyEngine {
                 }
                 let share = held / running.len() as u64;
                 let excess = held.saturating_sub(budget.share);
+                if excess > 0 {
+                    over_target.insert(key.clone());
+                }
                 // While calm, a held cap rises toward its usage plus its part of
                 // what the mode allows beyond own usage.
                 let spare_share = budget.share.saturating_sub(held) / running.len() as u64;
@@ -1989,8 +2046,11 @@ impl PolicyEngine {
                     // A job above its own mode's share yields the difference even
                     // while the aggregate has room.
                     let limit = budget.targets.get(&victim.mode).copied();
-                    let excess =
-                        remaining.max(limit.map_or(0, |limit| share.saturating_sub(limit)));
+                    let own_excess = limit.map_or(0, |limit| share.saturating_sub(limit));
+                    if own_excess > 0 {
+                        over_target.insert(key.clone());
+                    }
+                    let excess = remaining.max(own_excess);
                     let contended_victim = excess > 0;
                     let decision = plan_step(
                         state,
@@ -2500,11 +2560,21 @@ impl PolicyEngine {
         }
         // Admission per resource: blocked until its cause changes, held while it
         // waits for a measurement or a cooldown (FR-028, FR-038).
-        let stepped = |key: &ResourceKey| {
-            ladder
-                .iter()
-                .any(|((_, k), state)| k == key && state.step > YieldStep::None)
-        };
+        // Own work is reclaimed while it holds more than its target or a step is
+        // still moving down; a cap or hint that holds at its target is not (B2).
+        let moving_down: BTreeSet<ResourceKey> = ladder
+            .iter()
+            .filter(|((id, key), next)| {
+                let before = self.ladder.get(&(id.clone(), key.clone()));
+                let step = before.map_or(YieldStep::None, |s| s.step);
+                next.step > step
+                    || (next.step == step
+                        && matches!(step, YieldStep::Cap | YieldStep::Hint)
+                        && next.target < before.and_then(|s| s.target))
+            })
+            .map(|((_, key), _)| key.clone())
+            .collect();
+        let stepped = |key: &ResourceKey| over_target.contains(key) || moving_down.contains(key);
         let blocked = Admission::blocked;
         let held = Admission::held;
         let admission = |key: &ResourceKey,
@@ -2578,6 +2648,24 @@ impl PolicyEngine {
         }
         for (key, state) in admissions {
             statuses.entry(key).or_default().admission = Some(state);
+        }
+        // Admission is open but own charges fill own target: requests wait.
+        if headroom.cpu_millicores == 0
+            && budget.cpu_millicores > 0
+            && statuses
+                .get(&ResourceKey::Cpu)
+                .and_then(|s| s.admission.as_ref())
+                == Some(&Admission::Open)
+        {
+            note(
+                &mut statuses,
+                ResourceKey::Cpu,
+                "admission_over_own_target",
+                format!(
+                    "own charges fill the CPU target of {}m, so a request waits",
+                    budget.cpu_millicores
+                ),
+            );
         }
         // The allowance (FR-071): what each running allocation may grow to now
         // without causing a step. Its usage plus an equal part of the room under

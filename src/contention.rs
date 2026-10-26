@@ -341,6 +341,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "The reclaim backoff after recent floor breaches applies.",
     ),
     (
+        "admission_over_own_target",
+        "Own charged usage plus the request would exceed own target, so the request waits.",
+    ),
+    (
         "admission_envelope_exceeded",
         "Own work exceeds the operator envelope, so nothing is admitted.",
     ),

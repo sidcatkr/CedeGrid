@@ -558,11 +558,20 @@ fn the_catalog_has_one_sentence_per_stable_code() {
     ] {
         assert!(seen.contains(code), "{code} missing from the catalog");
     }
+    // docs/guarantees.md carries the catalog row for row, so the two cannot drift.
     let guarantees = include_str!("../docs/guarantees.md");
-    for (code, _) in REASON_CODES {
-        assert!(
-            guarantees.contains(&format!("`{code}`")),
-            "{code} not in docs/guarantees.md"
-        );
-    }
+    let table: Vec<&str> = guarantees
+        .lines()
+        .skip_while(|line| *line != "| Code | Meaning |")
+        .skip(2)
+        .take_while(|line| line.starts_with('|'))
+        .collect();
+    let expected: Vec<String> = REASON_CODES
+        .iter()
+        .map(|(code, text)| format!("| `{code}` | {text} |"))
+        .collect();
+    assert_eq!(
+        table, expected,
+        "docs/guarantees.md and REASON_CODES differ"
+    );
 }

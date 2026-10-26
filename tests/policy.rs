@@ -4733,3 +4733,343 @@ mod gpu_cooldown_alone {
         );
     }
 }
+
+/// Admission is blocked for own work only while it is being reclaimed; a cap that
+/// holds at the target leaves admission to headroom and cooldown (item 010 B2).
+mod reclaim_admission {
+    use super::*;
+    use cedegrid::contention::{Admission, ContentionMode, ResourceKey, YieldStep};
+
+    const CPU: u64 = 32_000;
+
+    fn cfg(mode: ContentionMode) -> Config {
+        let mut cfg = Config::default();
+        cfg.contention.default_mode = mode;
+        cfg.contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        cfg
+    }
+
+    fn host(busy: u64, external: u64) -> Snapshot {
+        let mut snap = snapshot();
+        snap.cpu_capacity_millicores = CPU;
+        snap.physical_cores = Some(16);
+        snap.total_ram_mib = 262_144;
+        snap.available_ram_mib = Some(250_000);
+        snap.cpu_busy_millicores = Some(busy.min(CPU));
+        snap.principals = Some(vec![
+            cpu_principal(1000, true, 0),
+            cpu_principal(2001, false, external),
+        ]);
+        snap
+    }
+
+    fn share(demands: &[u64]) -> Vec<u64> {
+        let mut given = vec![0u64; demands.len()];
+        let mut left = CPU;
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        while left > 0 && !open.is_empty() {
+            let each = (left / open.len() as u64).max(1);
+            let mut next = vec![];
+            for i in open {
+                let take = (demands[i] - given[i]).min(each).min(left);
+                given[i] += take;
+                left -= take;
+                if given[i] < demands[i] {
+                    next.push(i);
+                }
+            }
+            open = next;
+        }
+        given
+    }
+
+    /// Jobs by ID with what each wants, beside one external user; every cap and
+    /// pause applies at once.
+    struct Sim {
+        engine: PolicyEngine,
+        cfg: Config,
+        actions: Vec<YieldAction>,
+        now: u64,
+    }
+
+    impl Sim {
+        fn new(mode: ContentionMode) -> Self {
+            Self {
+                engine: PolicyEngine::new(),
+                cfg: cfg(mode),
+                actions: vec![],
+                now: 0,
+            }
+        }
+
+        fn step(&mut self, external: u64, jobs: &[(&str, u64, u64)]) -> Decision {
+            let limit = |id: &str| {
+                self.actions
+                    .iter()
+                    .find(|a| a.allocation_id == id && a.resource == ResourceKey::Cpu)
+                    .map_or(CPU, |a| match a.step {
+                        YieldStep::Cap => a.target.unwrap_or(CPU),
+                        YieldStep::Pause => 0,
+                        _ => CPU,
+                    })
+            };
+            let mut demands = vec![external];
+            demands.extend(jobs.iter().map(|(id, _, wants)| (*wants).min(limit(id))));
+            let given = share(&demands);
+            let allocations: Vec<Allocation> = jobs
+                .iter()
+                .zip(&given[1..])
+                .map(|((id, request, _), used)| {
+                    allocation(
+                        id,
+                        AllocationPhase::Running,
+                        resources(*request, 100, 0),
+                        Some(resources(*used, 100, 0)),
+                    )
+                })
+                .collect();
+            let ids: Vec<&str> = jobs.iter().map(|(id, _, _)| *id).collect();
+            let decision = self
+                .engine
+                .evaluate(
+                    &self.cfg,
+                    &host(given.iter().sum(), given[0]),
+                    &PolicyInput {
+                        facts: rootless(&ids),
+                        allocations,
+                        ..PolicyInput::default()
+                    },
+                    self.now,
+                )
+                .unwrap();
+            self.actions = decision.actions.clone();
+            self.now += 500;
+            decision
+        }
+
+        fn run(
+            &mut self,
+            intervals: u64,
+            external: u64,
+            jobs: &[(&str, u64, u64)],
+        ) -> Vec<Decision> {
+            (0..intervals).map(|_| self.step(external, jobs)).collect()
+        }
+    }
+
+    fn cpu_admission(decision: &Decision) -> Admission {
+        decision.resources[&ResourceKey::Cpu]
+            .admission
+            .clone()
+            .unwrap()
+    }
+
+    fn yielding(decision: &Decision) -> bool {
+        cpu_admission(decision).code() == Some("admission_own_work_yielding")
+    }
+
+    fn request(cpu: u64) -> Resources {
+        resources(cpu, 100, 0)
+    }
+
+    /// The setup: a steady 12.5% user recorded as satisfied and a job capped at
+    /// 26 400 m, then the job's usage falls to 10 000 m for one full p95 window.
+    fn settled(mode: ContentionMode) -> (Sim, Decision) {
+        let mut sim = Sim::new(mode);
+        let capped = sim.run(120, 4000, &[("old", 1000, CPU)]);
+        let last = capped.last().unwrap();
+        let target = last.resources[&ResourceKey::Cpu].target_share;
+        assert!(
+            last.actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.target == target),
+            "{:?}",
+            last.actions
+        );
+        // The item's setup is Neutral, where the steady user is recorded as satisfied.
+        if mode == ContentionMode::Neutral {
+            assert!(
+                last.resources[&ResourceKey::Cpu]
+                    .reasons
+                    .iter()
+                    .any(|r| r.code == "satisfied_demand"),
+                "{:?}",
+                last.resources[&ResourceKey::Cpu].reasons
+            );
+        }
+        let fallen = sim.run(130, 4000, &[("old", 1000, 10_000)]);
+        (sim, fallen.last().unwrap().clone())
+    }
+
+    #[test]
+    fn a_holding_cap_leaves_room_below_the_target_open() {
+        let (_, decision) = settled(ContentionMode::Neutral);
+        assert_eq!(
+            decision.resources[&ResourceKey::Cpu].target_share,
+            Some(26_400)
+        );
+        assert!(!yielding(&decision), "{:?}", cpu_admission(&decision));
+        assert_eq!(cpu_admission(&decision), Admission::Open);
+        assert_eq!(
+            cedegrid::policy::request_admission(&decision, &request(8000)),
+            Ok(())
+        );
+        let own: u64 = decision.resources[&ResourceKey::Cpu].own.unwrap().0;
+        assert!(own + 8000 <= 26_400, "{own}");
+    }
+
+    #[test]
+    fn a_request_over_own_target_is_held() {
+        let (mut sim, _) = settled(ContentionMode::Neutral);
+        // The admitted 8000 m job runs beside the old one.
+        let decision = sim.step(4000, &[("old", 1000, 10_000), ("new", 8000, 8000)]);
+        assert_eq!(
+            cedegrid::policy::request_admission(&decision, &request(2000)),
+            Ok(())
+        );
+        assert_eq!(
+            cedegrid::policy::request_admission(&decision, &request(9000)),
+            Err("admission_over_own_target")
+        );
+    }
+
+    #[test]
+    fn growth_past_the_fair_share_blocks_admission_until_reclaim_completes() {
+        let (mut sim, _) = settled(ContentionMode::Neutral);
+        let jobs = [("old", 1000, 10_000), ("new", 8000, 8000)];
+        sim.run(10, 4000, &jobs);
+        let grown = sim.run(240, 20_000, &jobs);
+        let first = grown
+            .iter()
+            .position(|d| !d.actions.is_empty() && yielding(d))
+            .expect("a step and a block");
+        // Blocked while own work is reclaimed; once it holds, admission reopens
+        // only after the CPU cooldown, never in the same interval.
+        let released = grown[first..]
+            .iter()
+            .position(|d| !yielding(d))
+            .expect("reclaim completes")
+            + first;
+        let open = grown[released..]
+            .iter()
+            .position(|d| cpu_admission(d) == Admission::Open)
+            .map(|i| i + released);
+        if let Some(open) = open {
+            assert!(
+                (open - released) as u64 * 500 >= 10_000,
+                "{released} {open}"
+            );
+        }
+    }
+
+    /// Admit, grow, cap, admit: the cooldown after each reclaim stops a cycle.
+    #[test]
+    fn the_cooldown_stops_an_admit_grow_cap_cycle() {
+        let (mut sim, _) = settled(ContentionMode::Neutral);
+        let mut jobs: Vec<(String, u64, u64)> = vec![("old".into(), 1000, 10_000)];
+        let mut opens = vec![];
+        let mut previous_open = false;
+        for _ in 0..600 {
+            let view: Vec<(&str, u64, u64)> = jobs
+                .iter()
+                .map(|(id, r, w)| (id.as_str(), *r, *w))
+                .collect();
+            let decision = sim.step(4000, &view);
+            let open = cedegrid::policy::request_admission(&decision, &request(4000)).is_ok();
+            if open && !previous_open {
+                opens.push(sim.now);
+                // Each admitted job wants more than it asked for.
+                jobs.push((format!("job-{}", jobs.len()), 4000, 12_000));
+            }
+            previous_open = open;
+        }
+        for pair in opens.windows(2) {
+            assert!(pair[1] - pair[0] >= 10_000, "{opens:?}");
+        }
+    }
+
+    /// Modes stay monotonic: Yield First admits no more than Neutral, Neutral no
+    /// more than Performance, in the same state.
+    #[test]
+    fn modes_admit_monotonically() {
+        let headroom = |mode| settled(mode).1.admission_headroom.cpu_millicores;
+        let (yield_first, neutral, performance) = (
+            headroom(ContentionMode::YieldFirst),
+            headroom(ContentionMode::Neutral),
+            headroom(ContentionMode::Performance),
+        );
+        assert!(
+            yield_first <= neutral && neutral <= performance,
+            "{yield_first} {neutral} {performance}"
+        );
+    }
+
+    /// The same for GPU compute: a cap that holds at the share does not block.
+    #[test]
+    fn a_holding_gpu_compute_cap_does_not_block_admission() {
+        let key = ResourceKey::GpuCompute("GPU-test".into());
+        let mut cfg = cfg(ContentionMode::Neutral);
+        cfg.gpu.process_sample_max_age_ms = 400;
+        cfg.contention.gpu_compute.quiet_window_intervals = Some(1);
+        cfg.contention
+            .acknowledge_caution
+            .insert("relaxed_detection".into());
+        let mut engine = PolicyEngine::new();
+        let mut actions: Vec<YieldAction> = vec![];
+        let mut last = None;
+        for i in 0..400u64 {
+            let wants = if i < 200 { 1000 } else { 300 };
+            let limit = actions
+                .iter()
+                .find(|a| a.resource == key)
+                .map_or(1000, |a| match a.step {
+                    YieldStep::Cap => a.target.unwrap_or(1000),
+                    YieldStep::Pause => 0,
+                    _ => 1000,
+                });
+            let gpu = share(&[125, wants.min(limit)]);
+            let mut snap = gpu_snapshot();
+            snap.gpus[0].external_compute = ComputeActivity::Active;
+            snap.gpus[0].external_process_ids = Some(vec![987]);
+            snap.gpus[0].external_compute_milli = Some(gpu[0].min(125));
+            snap.gpus[0].own_compute_milli = Some(gpu[1].min(1000 - gpu[0].min(125)));
+            snap.gpus[0].utilization_percent =
+                Some(((gpu[0].min(125) + gpu[1]) / 10).min(100) as u32);
+            snap.gpus[0].compute_sample_id = Some(i + 1);
+            let mut user = cpu_principal(2001, false, 0);
+            user.gpu_compute_milli = BTreeMap::from([("GPU-test".to_string(), gpu[0].min(125))]);
+            snap.principals = Some(vec![cpu_principal(1000, true, 0), user]);
+            let decision = engine
+                .evaluate(
+                    &cfg,
+                    &snap,
+                    &PolicyInput {
+                        allocations: vec![allocation(
+                            "job",
+                            AllocationPhase::Running,
+                            resources(100, 100, 2000),
+                            Some(resources(100, 100, 2000)),
+                        )],
+                        facts: rootless(&["job"]),
+                        ..PolicyInput::default()
+                    },
+                    i * 500,
+                )
+                .unwrap();
+            actions = decision.actions.clone();
+            last = Some(decision);
+        }
+        let decision = last.unwrap();
+        assert_ne!(
+            decision.resources[&key]
+                .admission
+                .as_ref()
+                .and_then(|a| a.code()),
+            Some("admission_own_work_yielding"),
+            "{:?}",
+            decision.resources[&key]
+        );
+    }
+}
