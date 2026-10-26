@@ -264,6 +264,21 @@ The pinned contender runs on one CPU of the scope, where own threads can still r
 also measures the per-core case that 003 FR-056 addresses. The unpinned contender can run on
 any CPU of the scope and measures 001's SC-004 alone.
 
+A contender under a second unprivileged account measures SC-004 for another principal. That
+account starts it, timed to a fixed submission, with a marker among its arguments; the gate
+finds it by UID and marker and only reads its `/proc` entries, never acting on it:
+
+```sh
+at=$(( $(date +%s) + 60 ))
+ramp ramp-contender-other --cpus 4 --submit-at "$at" --contender-at 3 \
+  --contender-uid <uid> --contender-marker cedegrid-contender
+# As the second account, on the same host:
+sleep $(( at + 3 - $(date +%s) )); exec taskset -c <cpu> python3 -c "<one-core loop>" 40 cedegrid-contender
+```
+
+`--device gpu --gpu-uuid <uuid>` times own GPU compute instead (SC-004, first bullet), with
+CUDA busy tasks requesting `GPU_TASK_MIB` of device memory each.
+
 Record from each `report.json` in `docs/validation.md`:
 
 - `ramp_seconds` (idle run): seconds from submission until own CPU reaches 90% of that
