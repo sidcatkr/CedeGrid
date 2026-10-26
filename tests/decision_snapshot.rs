@@ -1,8 +1,10 @@
 //! Seeded decision sequences for the decision snapshot (tests/support/snapshot.rs):
 //! CPU, RAM and GPU in all three modes, with unknown readings, external users
 //! that arrive and leave, and own work that follows the steps it is given.
-#[path = "support/snapshot.rs"]
-mod snapshot;
+#[allow(dead_code)]
+mod snapshot {
+    include!("support/snapshot.rs");
+}
 
 use cedegrid::{
     config::Config,

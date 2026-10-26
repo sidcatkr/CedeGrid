@@ -1,5 +1,7 @@
-#[path = "support/snapshot.rs"]
-mod snapshot;
+#[allow(dead_code)]
+mod snapshot {
+    include!("support/snapshot.rs");
+}
 use cedegrid::{
     config::*,
     execution_model::AllocationClass,

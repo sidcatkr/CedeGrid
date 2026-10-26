@@ -1,6 +1,8 @@
 //! Contention-mode and yield-ladder properties. Builders mirror tests/policy.rs.
-#[path = "support/snapshot.rs"]
-mod snapshot;
+#[allow(dead_code)]
+mod snapshot {
+    include!("support/snapshot.rs");
+}
 use cedegrid::{config::Config, execution_model::AllocationClass, model::*, policy::PolicyEngine};
 use proptest::prelude::*;
 use std::collections::BTreeMap;

@@ -62,7 +62,7 @@ PYTHONPATH="$PWD/python" python3 -m unittest discover -s tests -p 'test_*.py'
 - `#[ignore]` tests are subprocess fixtures that other tests re-launch, opt-in hardware gates
   (`CEDEGRID_TEST_CGROUP_ROOT`, `CEDEGRID_TEST_GPU_UUID`), or `decision_snapshot`, which
   writes or compares every scripted decision (`CEDEGRID_DECISION_SNAPSHOT`, see
-  `tests/support/snapshot.rs`). Never run `--ignored` across the suite, and run hardware
+  `tests/support/snapshot.rs`, which test files `include!` rather than `mod`). Never run `--ignored` across the suite, and run hardware
   gates only when explicitly authorized.
 - A failed integration test keeps its `.agent-test-*`, `.distributed-service-*` or
   `..*.cedegrid-control` directory as evidence. Don't bulk-delete them.

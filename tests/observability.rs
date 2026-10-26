@@ -10,8 +10,10 @@ use cedegrid::{
 use snapshot::PolicyEngine;
 use std::collections::BTreeMap;
 
-#[path = "support/snapshot.rs"]
-mod snapshot;
+#[allow(dead_code)]
+mod snapshot {
+    include!("support/snapshot.rs");
+}
 
 const CPU: u64 = 32_000;
 const GPU: &str = "GPU-a";

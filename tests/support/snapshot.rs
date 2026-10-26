@@ -1,10 +1,9 @@
-//! Decision snapshots: every decision and node report the scripted scenarios
-//! produce, as JSON lines, so a refactor can show it changes no output. Each test
-//! binary that includes this module runs its scenarios under `check`, which is
-//! ignored by default. `CEDEGRID_DECISION_SNAPSHOT=<dir>` enables it, and
-//! `CEDEGRID_DECISION_SNAPSHOT_WRITE=1` writes `<dir>/<name>.jsonl` instead of
-//! comparing with it byte for byte.
-#![allow(dead_code)]
+// Decision snapshots: every decision and node report the scripted scenarios
+// produce, as JSON lines, so a refactor can show it changes no output. A test
+// binary includes this file in a `snapshot` module and runs its scenarios under
+// `check`, which is ignored by default. `CEDEGRID_DECISION_SNAPSHOT=<dir>`
+// enables it, and `CEDEGRID_DECISION_SNAPSHOT_WRITE=1` writes `<dir>/<name>.jsonl`
+// instead of comparing with it byte for byte.
 
 use cedegrid::{config::Config, model::*};
 use std::cell::RefCell;
