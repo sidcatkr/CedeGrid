@@ -1174,3 +1174,8 @@ T098 src/setup.rs caution mapping tests    T099 tests/cli.rs flag tests
 - [X] T185 Implement `GpuSnapshot.own_only` (`src/model.rs`, default false, skipped when false), the own-only classification with pidfd identity checks against the verified identities the managed collector passes, and the per-device memory baseline (`src/telemetry.rs`, `src/telemetry/gpu.rs`, `src/telemetry/managed.rs`), and the measured path for own-only intervals in `gpu_compute_path` (`src/policy/measure.rs`), until T184 passes, per FR-021 and data-model "GpuSnapshot compute amount" (missing)
 - [X] T186 Update `docs/guarantees.md` (the GPU attribution paragraph: own-only intervals) and `docs/validation.md` (the Neutral short-GPU-job note becomes "fixed, rerun pending"; the 15-point attribution tolerance is kept until a second device is measured), per FR-021 and report 021 Decision 5 (partial)
 - [X] T187 Compare the decision snapshot with the one at `65166b5` and explain any change; a measurement-source change must leave the simulated decisions unchanged, per plan "Item 023" (missing)
+
+## Phase 17: Convergence (item 024)
+
+- [ ] T188 State in `docs/guarantees.md` (Resource accounting, own CPU) that own CPU summed for a decision counts one tick of pending time per scope CPU at each read, widened by the read pass, within the per-allocation sums, per plan "Item 024" and research R9 (partial)
+- [ ] T189 State in `docs/guarantees.md` (principals) that the account CedeGrid runs as is one principal whose unmanaged processes share its fair share with own work and are served as own work's margin frees capacity, while the 2-interval reclaim bound is for other principals' demand, per SC-002 (partial)
