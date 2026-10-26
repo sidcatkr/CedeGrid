@@ -29,7 +29,8 @@ yields that capacity when other workloads need it.
     rustls mTLS, the v1 wire types and bounded cursors.
   - `artifacts.rs`, `publication.rs` (worker RPC socket), `publication_gc.rs`, `config.rs`
     (TOML, `config_version = 1`), `config_migration.rs`, `backup.rs`, `upgrade.rs`, `numeric.rs`.
-  - `setup.rs`: `cedegrid setup`, its flags and keyboard interface. `explain.rs`: the
+  - `setup.rs`: `cedegrid setup` and its flags, with the keyboard interface and line prompts
+    in `setup/interface.rs`. `explain.rs`: the
     `observe` and `doctor` renderings.
   - `storage_qualification.rs` (storage diagnostics), `launcher_terminal.rs` (npm launcher
     terminal handoff); `lib.rs` declares the modules.

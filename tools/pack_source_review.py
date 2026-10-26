@@ -131,6 +131,7 @@ ALLOWLIST = (
     'src/publication_gc.rs',
     'src/rootless.rs',
     'src/setup.rs',
+    'src/setup/interface.rs',
     'src/state.rs',
     'src/storage_qualification.rs',
     'src/supervision.rs',
