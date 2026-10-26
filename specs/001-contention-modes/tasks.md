@@ -217,12 +217,13 @@ job launched with unattributed device memory is not drained.
 supervisors to owned processes, reachable after agent restart, with least-cost victims.
 
 **Independent Test**: in a CPU-only contention run, the job moves through lower share, cap and
-pause and then reverses, with no drain (quickstart §3).
+pause and then reverses, with no drain (quickstart §3, SC-007).
 
 ### Tests for User Story 2 ⚠️
 
 - [X] T033 [P] [US2] Add property tests in `tests/contention.rs` for the ladder:
-  - steps escalate in order, and memory resources skip steps 1–3;
+  - steps escalate in order, and memory resources skip steps 1–3 (*since T138, RAM takes a cap
+    where the facts report `ram_cap`; `steps_escalate_in_order_and_memory_starts_at_a_ram_cap_or_the_hint`*);
   - `min_step_dwell_intervals` is respected;
   - steps reverse one level at a time below `hysteresis_percent`;
   - drain and terminate never reverse;
@@ -284,7 +285,8 @@ pause and then reverses, with no drain (quickstart §3).
   - a `Limit::{Max, Value}` type;
   - runtime writes of `cpu.weight`, `cpu.max` and `cgroup.freeze`, with `cgroup.events`
     readback. No runtime `memory.high`: FR-011 starts memory at the hint, so a RAM cap is never
-    requested;
+    requested (*superseded by T138: RAM takes a `memory.high` cap where a delegated leaf
+    allows it*);
   - a refused write falls back to the rootless mechanism for cap and pause;
   - every write first re-verifies the leaf identity and that membership equals the verified
     PIDs;
@@ -621,8 +623,8 @@ wants does not sit idle, and no other workload is harmed.
   `admission_usage_window_s`; reclaim episodes span real breaches and the backoff resets after a
   quiet window; a held hint rises while calm; a leaving principal's unused share is
   redistributed (`src/policy.rs`, `tests/policy.rs`, `tests/contention.rs`; FR-034, FR-061).
-- [X] T149 `held_back` per resource in decisions and node reports; scenario tests for SC-014
-  and SC-015; the four test binaries that left namespace control directories remove them;
+- [X] T149 `held_back` per resource in decisions and node reports (SC-016); scenario tests for
+  SC-014 and SC-015; the four test binaries that left namespace control directories remove them;
   constitution 2.1.0 (`src/model.rs`, `src/policy.rs`, `src/protocol.rs`, `src/namespace.rs`;
   FR-069).
 - [X] T151 Report each resource's admission (open, held or blocked, with its reason) so node
@@ -982,6 +984,49 @@ each step.
     with `saturated_by_psi`, `psi_system_only`, `psi_unknown` and `held_back.contention_psi` in
     the catalog and `docs/guarantees.md`.
   - [ ] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
+
+## Phase 12: Revisions from review items 002–013 (done)
+
+**Purpose**: requirement changes made directly during review, each with its commits. They change
+no behavior beyond what those commits did.
+
+- [X] T154 FR-013: a floor-breach step reverses only after free memory has stayed above the floor
+  by `StepState.to_free`, or `noise_tolerance_mib` if larger, for the calm window plus the
+  episode's reclaim backoff (`src/contention.rs`, `src/policy.rs`; `affb281`).
+- [X] T155 FR-021: a larger external demand gets the fair share at once and is watched for one
+  response window; it is recorded as satisfied when the host has capacity to spare and its usage
+  stayed within its baseline plus the contention floor (`src/contention.rs`; `391ef63`).
+- [X] T156 FR-021: satisfied records do not expire; at most 64 are kept per resource, those
+  whose principals were seen longest ago go first, and a recorded principal rejoins at once
+  (`src/contention.rs`, `src/policy.rs`; `ac1e8dc`).
+- [X] T157 FR-034: running opportunistic CPU is charged at its p95 only once it has a full
+  `admission_usage_window_s` of samples, and at max(request, observed) before that
+  (`src/policy.rs`; `a25704b`).
+- [X] T158 FR-021: under GPU compute of unknown amount, a duty cycle the supervisor reports
+  applied counts as what own work holds, at the larger of the applied and current targets
+  (`src/policy.rs`, `src/agent.rs`, `src/model.rs`, `src/supervision.rs`; `b8429b3`, `9852623`).
+- [X] T159 FR-045, FR-068: `attribution_tolerance_percent` above its default is
+  `relaxed_detection` in `KEY_CLASSES`, which also marks it in setup (`src/config.rs`;
+  `3f61b8c`).
+- [X] T160 FR-071: the allowance holds back one publish threshold in total, shared over the
+  running allocations, not one each (`src/policy.rs`; `1ffd605`).
+- [X] T161 FR-020–FR-022, FR-065: memory keeps only the floor under Neutral and Performance;
+  their memory margins are refused at load and not offered by setup, and the memory allowance
+  step is a per-mode constant (`src/config.rs`, `src/setup.rs`, `src/contention.rs`,
+  `src/policy.rs`; `5eeb374`).
+- [X] T162 FR-034: each GPU's memory admission cools down on its own; CPU and RAM state never
+  reset it, and the node-wide cooldown stays only behind the 0.2 expansion flags
+  (`src/policy.rs`, `src/contention.rs`; `9f2b5b5`, `0f3131b`).
+- [X] T163 FR-028: the agent blocks admission for own work only while it is being reclaimed;
+  `policy::request_admission` holds a request past own target with `admission_over_own_target`
+  (`src/policy.rs`, `src/contention.rs`; `97185cd`).
+- [X] T164 FR-028 as amended: coordinator placement follows the node's admission without counting
+  steps, and moves within the noise tolerance or the reversal hysteresis are jitter
+  (`src/coordinator.rs`, `src/policy.rs`; `17bc695`).
+- [X] T165 FR-021: measured GPU compute groups external processes into principals by UID,
+  counts device time nobody accounts for as external while an external process is listed, and
+  returns to the measured path only after `quiet_window_intervals` measured intervals
+  (`src/telemetry.rs`, `src/policy.rs`, `src/model.rs`; `cb277fc`, `60c8887`, `9b08de1`).
 
 ---
 

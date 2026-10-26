@@ -341,8 +341,33 @@ Constitution 2.1.0 adds the work-conserving rule to Principle II. Each item land
 - **Group 1.** `config::KEY_CLASSES` with an enumeration test over the derived `Deserialize`
   impls; `Config::caution_details`; `Config::validate_host` at the agent's first sample; upper
   bounds for settings that lengthen reclaim.
-- **U7, U11, U13.** The allowance signal is specified now and implemented after US5 (T150); the
+- **U7, U11, U13.** The allowance signal is specified now and implemented in T150; the
   constitution amendment is above; T088 also measures how often GPU activity is Unknown.
+
+## Revisions from review items 002–013 (2026-10-25 to 2026-10-26)
+
+Direct amendments made during review, checked through Spec Kit in item 014. Each lists its
+requirement, the code it changed and its task.
+
+- **Reversal and probing (T154–T156).** A floor-breach step reverses with room of at least
+  `to_free` or the noise tolerance for the calm window plus the reclaim backoff (FR-013). A
+  larger external demand gets the fair share and is watched for one response window before it
+  is recorded as satisfied. Records do not expire, and at most 64 are kept per resource (FR-021).
+- **Admission (T157, T162, T163).** CPU is charged at its p95 only after a full window. Each
+  GPU's memory admission cools down on its own, and the node cooldown stays behind the 0.2
+  flags (FR-034). Admission blocks for own work only while it is being reclaimed, and a request
+  past own target is held (FR-028).
+- **Placement (T164).** The coordinator follows the node's admission. Jitter within the noise
+  tolerance or the reversal hysteresis toggles nothing (FR-028 as amended).
+- **GPU compute (T152, T158, T165).** The external amount is measured when per-process samples
+  account for the device, and principals are grouped by UID. An applied duty counts own work
+  under an unknown amount (FR-021). A looser attribution tolerance is `relaxed_detection`
+  (T159, FR-045).
+- **Allowance and memory margins (T150, T160, T161).** FR-071 is implemented with one publish
+  threshold held back in total. Memory keeps only the floor under Neutral and Performance.
+- **RAM cap (T138)** and **PSI (T141)**: see H7, B14 and the next section. **Gate runner
+  (T153)**: `tools/pressure_comparison.py` gains the mode, floor, step-timing and snapshot
+  options that the T117 and T118 entries in `native-gates.md` use.
 
 ## PSI as a second CPU saturation signal (T141, 2026-10-26)
 

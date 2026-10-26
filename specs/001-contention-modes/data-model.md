@@ -156,9 +156,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
     not freed within the mode's response time and `min_step_dwell_intervals` has passed; on the
     critical floor path the dwell is at most the critical hint deadline.
   - A cap whose target is zero for external demand is a pause instead, at once.
-  - Memory resources skip steps 1–3 (FR-011). `hint` is available only when the allocation is
-    hint-ready.
-  - Guaranteed allocations never enter `pause`, and their CPU cap never goes below their
+  - Memory resources skip `lower_share` and `pause` (FR-011). RAM takes `cap` only where the
+    allocation's facts report `ram_cap` (a delegated leaf with `memory.high` authorized), and GPU
+    memory never does. `hint` is available only when the allocation is hint-ready.
+  - Guaranteed allocations never enter `pause`, and their CPU or RAM cap never goes below their
     request. They enter `drain` only as the last step of floor policy A (FR-024, FR-057).
   - On the critical floor path, the hint deadline is `critical_hint_deadline_s`, and an
     allocation that does not observe the drain file goes to `terminate` instead of `drain`

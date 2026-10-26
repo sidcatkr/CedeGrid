@@ -306,6 +306,18 @@ Constitution 2.1.0 and plan.md, "Utilization revisions before US5", supersede fu
   opportunistic work at its p95 usage over 60 s. Real hosts still have to confirm SC-014 and
   SC-015 (T117).
 
+## Review revisions (items 002–013, 2026-10-25 to 2026-10-26)
+
+plan.md, "Revisions from review items 002–013", supersedes further parts:
+
+- **R8.** External GPU compute is measured from per-process samples when their sum is within
+  `attribution_tolerance_percent` of device utilization, and is grouped into principals by UID.
+  Unknown activity remains the fallback (T152, T165).
+- **R12.** A larger external demand is watched for one response window and can be recorded as
+  satisfied. Records are bounded at 64 per resource and never expire (T155, T156).
+- **R15.** CPU admission uses the p95 credit only after a full window (T157).
+- **R4.** RAM takes a `memory.high` cap on delegated leaves (T138); see the table above.
+
 ## R16. PSI as CPU saturation evidence (T141)
 
 - **Decision.** External PSI counts: the highest `some` avg10 of the cgroups outside own
