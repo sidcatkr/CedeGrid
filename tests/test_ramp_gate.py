@@ -102,6 +102,16 @@ class RampGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ramp_gate.check_options(args)
 
+    def test_performance_runs_at_its_defaults_without_the_deployments_gpu_cooldown(self):
+        node={'node_mode':'protected','cpu':{'reserve_physical_cores':1},
+              'gpu':{'reserve_vram_mib':4096,'scale_up_cooldown_ms':30000},
+              'contention':{'default_mode':'neutral','cpu':{'scale_up_cooldown_ms':3000}}}
+        ramp_gate.performance_defaults(node)
+        self.assertEqual(node['node_mode'],'opportunistic')
+        self.assertEqual(node['cpu']['reserve_physical_cores'],0)
+        self.assertEqual(node['gpu'],{'reserve_vram_mib':4096})
+        self.assertEqual(node['contention'],{'default_mode':'performance','acknowledge_caution':['performance_mode']})
+
     def test_gpu_tasks_request_device_memory_and_spin_on_the_device(self):
         task=ramp_gate.gpu_task('t',Path('/usr/bin/python3'),40,Path.home(),{},'GPU-x')
         self.assertEqual(task['resources']['gpu_memory_mib'],{'GPU-x':ramp_gate.GPU_TASK_MIB})

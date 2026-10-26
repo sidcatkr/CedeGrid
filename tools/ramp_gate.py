@@ -145,6 +145,16 @@ def busy_task(task_id,python,seconds,manager,env):
         single_process=True,no_escape=True,replay_safe=True,max_attempts=1)
 
 
+def performance_defaults(node):
+    """Performance at its defaults: no cooldown override, no CPU reserve. The deployment's
+    legacy GPU cooldown would otherwise hold GPU admission for 30 s after the agent starts."""
+    node['node_mode']='opportunistic'
+    node['cpu']['reserve_physical_cores']=0
+    node.get('gpu',{}).pop('scale_up_cooldown_ms',None)
+    node['contention']={'default_mode':'performance','acknowledge_caution':['performance_mode']}
+    return node
+
+
 def gpu_task(task_id,python,seconds,manager,env,gpu_uuid):
     return command_task(task_id,[str(python),'-c',CUDA_LOOP,str(seconds)],str(manager),
         env=env,cpu_millicores=TASK_MILLICORES,ram_mib=2048,gpu_vram_mib={gpu_uuid:GPU_TASK_MIB},
@@ -173,10 +183,7 @@ def run(args):
         report['guard']=local_guard(output,{'min_ram_free_bytes':8*1024**3,'min_disk_free_bytes':8*1024**3,'max_output_bytes':1024**3})
         client=(deployment(output,binary,cpus,node_id,args.gpu_uuid,args.seconds+120,env) if gpu
             else deployment(output,binary,cpus,node_id,'',args.seconds+120,env,device='cpu'))
-        # Performance at its defaults: no cooldown override, no CPU reserve.
-        node=read_runtime_config(output/'node.toml');node['node_mode']='opportunistic'
-        node['cpu']['reserve_physical_cores']=0
-        node['contention']={'default_mode':'performance','acknowledge_caution':['performance_mode']}
+        node=performance_defaults(read_runtime_config(output/'node.toml'))
         atomic_runtime_config(output/'node.toml',node,'node')
         agent=read_runtime_config(output/'agent.toml')
         agent.update(max_workers=workers,capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096 if not gpu else 8192,
