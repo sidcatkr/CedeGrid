@@ -60,8 +60,10 @@ never let CedeGrid act on a process it does not own.
   scheduling classes. No exception relaxes this rule.
 - **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive. Aggressive
   is a *caution* option with a red label, stronger than Performance's yellow. Its default form,
-  protected Aggressive, keeps every rule of this principle: it gives CPU and GPU compute back at
-  once to any other active principal that is below the lesser of its demand and its fair share.
+  protected Aggressive, keeps every rule of this principle. Any other active principal that is
+  below the lesser of its demand and its fair share gets that CPU and GPU compute back no slower
+  than Performance would give it back, and protected Aggressive never holds less than
+  Performance would in the same observation.
 - **Unprotected Aggressive, the one named exception.** It MAY decline to give back CPU and GPU
   compute time, as an exception to "Own work MUST be the first to give capacity back" and to
   "loss of capacity that workload is already using". It covers compute time only:
@@ -234,4 +236,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 5.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26
+**Version**: 6.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26
