@@ -243,7 +243,8 @@ as `m_YF ≥ m_N ≥ m_P` (FR-065).
 Yield First caps to its margin first; activity of unknown amount still takes it to 0. `S`
 counts a satisfied principal at its satisfied demand. Targets never go below 0. Guaranteed CPU
 is never capped below its request. Neutral and Performance differ in idle margin (5% and 2%),
-in their contended target and in scale-up rate (10 s per step, and one monitor interval per step on CPU and GPU compute).
+in their contended target and in scale-up rate: 10 s per step in Neutral; in Performance one
+monitor interval per step on CPU and GPU compute and 2 s on memory.
 
 ## DemandProbe (`src/contention.rs`, kept by `PolicyEngine` per compute resource)
 

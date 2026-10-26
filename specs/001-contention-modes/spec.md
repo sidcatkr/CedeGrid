@@ -1104,8 +1104,8 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-015**: Beside a steady external user of 1–2%, own work's 5-minute average is at least 90%
   of capacity minus that user and the margin, with no cap or pause cycling.
 - **SC-016**: `doctor` and `status` show, per resource, how much is held back and why: floor,
-  reserve, margin, contention, peak, noise tolerance, unknown, cooldown, backoff and charge
-  shortfall.
+  reserve, margin, an ancestor CPU ceiling (never as contention), contention, contention by PSI
+  alone, peak, noise tolerance, unknown, cooldown, backoff and charge shortfall.
 
 ### Provisional thresholds
 
@@ -1120,7 +1120,7 @@ times assume the default 500 ms monitor interval.
 | CPU reclaim | 2 monitor intervals in Yield First and Neutral; in Performance at least the margin per interval down to the fair share | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval, except for Performance, which keeps what external demand does not take, and a probed small demand. |
 | Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
 | Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
-| Performance scale-up | CPU and GPU compute: 1 step per monitor interval (500 ms); RAM and GPU memory: 1 step per 2 s | Compute is reclaimed within an interval, so it can rise as fast as it is observed; memory keeps its damping because it is slow to reclaim. |
+| Performance scale-up | CPU and GPU compute: 1 step per monitor interval (500 ms); RAM and GPU memory: 1 step per 2 s; a held step still waits the step dwell (3 intervals) | Compute is reclaimed within an interval, so it can rise as fast as it is observed; memory keeps its damping because it is slow to reclaim. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
 | Neutral margin | 5% of capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand room to show growth without idling compute that is reclaimed within an interval. |
 | Performance margin | 2% of capacity (CPU, GPU compute), plus the floors (memory) | The smallest room that still shows external growth; under contention Performance keeps what external demand does not take. |

@@ -364,6 +364,10 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - The measured limit was the agent's admission pace: one worker per 2 s cooldown on the 2 s
     heartbeat, about 16 s for eight workers.
   - Memory reclaim waits on hints and deadlines, so its damping stays.
+- **Result** (simulation in `tests/contention.rs`, 8000 m, 500 m jobs, 2 s heartbeat): Performance
+  reached its 7056 m target at 30.5 s before the change and at 2.5 s after it; Yield First
+  (390.5 s) and Neutral (140.5 s) did not change. A held compute cap still rises no faster than
+  the step dwell, so a cap set 1.5 s earlier rises after 1.5 s instead of 2 s.
 - **Alternatives**:
   - A shorter heartbeat (rejected by the decision; it costs coordinator load on every node).
   - Faster memory scale-up (rejected: memory is slow to reclaim).

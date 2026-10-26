@@ -441,12 +441,36 @@ Spec: Session 2026-10-26, SC-004, FR-034 and the defaults table.
   - an external workload started mid-ramp gets its demand up to its fair share within SC-012;
   - a process that appears and disappears every interval causes no cap/uncap cycling;
   - RAM and GPU memory scale-up timing is unchanged.
-- **Gate**: the time to 90% on an idle test host, and a contender started mid-ramp
-  (`native-gates.md`).
+- **Gate**: the time to 90% on an idle test host, and a contender started mid-ramp, through
+  `tools/ramp_gate.py` (`native-gates.md`). It is written, not run.
 - **Constitution**:
   - II: more work-conserving; reclaim and floors are unchanged.
   - III and IV: no change; the policy stays pure.
   - VII: the defaults change in config docs and the contract; no wire field changes.
+
+## Item 017 fixes (2026-10-26)
+
+- **Held-back ceiling (T171, SC-016)**: CPU `held_back` gains `ceiling`, what a visible ancestor
+  CPU ceiling keeps from the budget beyond the reserve. It is never counted as contention.
+  `doctor` shows it on its own line, and observe and the node report carry it as
+  `held_back.ceiling`. Decisions do not change.
+- **RAM cap through the supervisor (T174, FR-011, FR-024)**: a fake backend in
+  `tests/managed_supervision.rs` wraps the rootless one with a `memory.high`-like cap. It covers
+  the Guaranteed clamp, the journaled target, the unprompted report, the cap kept under a hint
+  and reconcile on query.
+- **Source manifest (T175)**: nothing reads a root copy, so it is untracked. The pack step writes
+  the only manifest inside its output, and `/source-export/` is ignored.
+- **Test directories (T176)**: `tests/agent.rs` kills and reaps the processes it starts, stops
+  the coordinator, and removes its `.agent-test-*` directory with retries after success, failure
+  or panic. The home-only state guard keeps the directory under the repository root.
+- **Agent lock (T177)**: an `AgentLock` guard unlocks on drop, because a child another thread
+  forks shares the lock's open file until it executes, even though the descriptor is
+  close-on-exec.
+- **Constitution**:
+  - I: product code acts on no new process. The test guards kill only processes the test
+    itself started, and `AgentLock` touches only the agent's own lock file.
+  - VII: `held_back.ceiling` is a new wire field in the node report. The contract fixture
+    carries it, and neither SDK models `held_back`, so the SDKs need no change.
 
 ## Complexity Tracking
 
