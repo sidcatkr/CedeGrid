@@ -17,7 +17,7 @@ cap and per-job modes (FR-030), Performance (FR-022), probing (FR-021, FR-072), 
 caution options (FR-043, FR-051) and the mode ordering (FR-065). It uses
 [003-everyday-cli](../003-everyday-cli/spec.md) for `run`, per-job entries and profiles
 (FR-020–FR-026), `ps` and `top` (FR-010, FR-013), the setup interface (FR-030–FR-033) and
-per-user run-queue wait (FR-050). The constitution (4.0.0) applies, in particular Principle II's
+per-user run-queue wait (FR-050). The constitution (6.0.0) applies, in particular Principle II's
 Aggressive mode and its one named exception, unprotected Aggressive.
 
 ## Clarifications
@@ -38,6 +38,24 @@ Aggressive mode and its one named exception, unprotected Aggressive.
   OOM-victim rule are unchanged; GPU compute follows the CPU rules.
 - Q: Does the global "allow unprotected Aggressive" setting affect interactive starts? → A: No.
   It is off by default and only gates non-interactive starts.
+- Q: How does protected Aggressive give CPU and GPU compute back to a waiting principal below its
+  protected share, compared with Performance? → A: It never holds less than Performance in the
+  same observation (report 018 Decision 1, answer B). For each compute resource and observation,
+  its target is the larger of Performance's target for that observation and its own target (0%
+  margin, scale-up at once) limited so that every other active principal keeps its protected
+  share. While Performance holds more than the protection leaves, Aggressive equals Performance
+  and gives back exactly as Performance does; once Performance has stepped down to the protected
+  point or below, Aggressive holds no more than the protection leaves. The mode ordering stays
+  strict per observation, with no exception.
+- Q: How quickly must a light contender below its fair share reach its demand in protected
+  Aggressive? → A: No later than under Performance in the same scenario: 001's SC-012 reclaim
+  bounds apply unchanged.
+- Q: How much does own work give back when several light principals wait at once? → A: Each keeps
+  its protected share; own work goes no lower than the protection needs and never below
+  Performance in the same observation.
+- Q: What happens when a protected principal stops waiting and later waits again? → A: The same
+  rule applies in every observation: own work gives back again as Performance would, never below
+  Performance, and Performance's step dwell and hysteresis prevent cap and uncap cycling.
 
 ## Terms
 
@@ -61,7 +79,8 @@ Aggressive mode and its one named exception, unprotected Aggressive.
 
 An operator with a deadline chooses Aggressive. Own work uses all idle CPU and GPU compute at
 once, with no margin and no ramp. Another user who needs only a little compute, or no more than
-their fair share, still gets it as soon as they wait for it.
+their fair share, still gets it when they wait for it, no slower than Performance would give it
+back.
 
 **Why this priority**: it gives the most throughput the constitution allows without slowing
 anyone below what they need or their fair share.
@@ -76,8 +95,10 @@ demand; the heavy one gets its fair share, not more.
    **Then** it uses all available CPU and GPU compute, with no idle margin, from the first
    admitting heartbeat.
 2. **Given** own work in Aggressive and another principal below its protected share and waiting,
-   **When** the policy observes it, **Then** own work gives back at once until that principal
-   reaches its protected share.
+   **When** the policy observes it, **Then** own work gives back as Performance would, never
+   holding less than Performance in the same observation, until that principal reaches its
+   protected share; once Performance has stepped down to that point or below, own work holds no
+   more than the protection leaves.
 3. **Given** another principal at or above its protected share, **When** it wants more, **Then**
    own work does not give back, and own work never goes below its own fair share.
 4. **Given** a shared-cgroup host, **When** a contender's usage understates its demand, **Then**
@@ -132,10 +153,12 @@ permitted paths start an unprotected run.
 
 ### Edge Cases
 
-- A protected principal stops waiting, then waits again: own work gives back again at once; the
-  step dwell and hysteresis still prevent cap and uncap cycling.
-- Several light principals wait at once: each keeps its protected share; own work goes no lower
-  than its fair share.
+- A protected principal stops waiting, then waits again: own work gives back again as Performance
+  would, never below Performance in the same observation; Performance's step dwell and
+  hysteresis still prevent cap and uncap cycling.
+- Several light principals wait at once: each keeps its protected share. Own work goes no lower
+  than the protection needs, never below its own fair share, and never below Performance in the
+  same observation.
 - A contender's demand is unknown on a shared-cgroup host where run-queue wait is unavailable:
   the probe applies as in 001, and wait alone never drives own work below its fair share.
 - Unknown external activity during an unprotected run: own work does not grow into it and does
@@ -158,7 +181,8 @@ permitted paths start an unprotected run.
 
 - **FR-001**: Aggressive MUST be a fourth contention mode for every resource. For every resource
   and observation, own work's target MUST satisfy Yield First ≤ Neutral ≤ Performance ≤
-  Aggressive.
+  Aggressive, with no exception (001 FR-065), including while another principal waits below its
+  protected share (FR-003).
 - **FR-002**: Aggressive MUST be Performance with three overrides, and otherwise Performance's
   rules (reclaim bounds, floors, unknown handling, anti-flap rules, Guaranteed rules):
   - an idle margin of 0% on CPU and GPU compute;
@@ -166,10 +190,18 @@ permitted paths start an unprotected run.
     heartbeat, and a held compute cap rises straight to what the mode allows once calm. The
     minimum step dwell, hysteresis and reversal tolerance stay Performance's;
   - memory: no hints or drains while above the floors.
-- **FR-003**: Protected Aggressive MUST give CPU and GPU compute back at once to any other active
-  principal that is below its protected share and waiting, until it reaches that share. It MUST
-  NOT give back to a principal at or above its protected share, and own work MUST NOT go below
-  its own fair share.
+- **FR-003**: For each compute resource and observation, protected Aggressive's target MUST be the
+  larger of:
+  - Performance's target for the same observation;
+  - Aggressive's own target (FR-002's 0% margin and scale-up at once), limited so that every
+    other active principal that is below its protected share and waiting keeps that share.
+
+  So a waiting principal gets that capacity back no slower than Performance would give it back:
+  while Performance holds more than the protection leaves, Aggressive equals Performance and gives
+  back exactly as Performance does; once Performance has stepped down to the protected point or
+  below, Aggressive holds no more than the protection leaves. Protected Aggressive MUST NOT give
+  back to a principal at or above its protected share, and own work MUST NOT go below its own fair
+  share.
 - **FR-004**: On a shared-cgroup host, a principal's demand MUST come from its run-queue wait
   (003 FR-050) plus the growth probe (001 FR-021). On a per-user-cgroup host, it MUST come from
   its usage plus the probe. Wait alone MUST NOT drive own work below its fair share.
@@ -244,7 +276,9 @@ permitted paths start an unprotected run.
 ### Measurable Outcomes
 
 - **SC-001**: In protected Aggressive, a light contender below its fair share reaches its demand
-  within 2 monitor intervals of waiting, on CPU and on GPU compute.
+  no later than it would under Performance in the same scenario, within 001's SC-012 reclaim
+  bounds, on CPU and on GPU compute; from then on, own work holds no more than the protection
+  leaves.
 - **SC-002**: In protected Aggressive, own work never goes below its fair share for a contender
   above its protected share.
 - **SC-003**: On an idle host, Aggressive uses at least as much CPU and GPU compute as
@@ -258,8 +292,9 @@ permitted paths start an unprotected run.
   unprotected through it.
 - **SC-006**: The `[Aggressive]` label and the `UNPROTECTED` marker appear in every listed output
   for every active run, and nowhere when the run is not in that mode.
-- **SC-007**: Mode ordering holds for every resource and observation in the simulated policy
-  suite, with Aggressive included.
+- **SC-007**: Yield First ≤ Neutral ≤ Performance ≤ Aggressive holds for every resource and
+  observation in the policy, contention and random scenarios, with no exception, including the
+  observations in which another principal waits below its protected share.
 - **SC-008**: Test-host gates record Aggressive against Performance (ramp time and idle capacity
   used) and the contender slowdown with and without the protection, for a same-cgroup and a
   cross-cgroup contender.
@@ -271,7 +306,8 @@ permitted paths start an unprotected run.
   003; without them, only the configuration, SDK and coordinator parts apply.
 - Aggressive on RAM and GPU memory behaves as Performance does there: floors only.
 - The fixed confirmation phrase, the flag names and the acknowledgement name are set in the plan.
-- "At once" uses the existing reclaim timing: the first step applies in the interval that
-  observes the waiting principal.
+- Protected Aggressive gives compute back on Performance's timing: while Performance holds more
+  than the protection leaves, the two targets are equal, so 001's SC-012 reclaim bounds apply to
+  Aggressive unchanged.
 - The light-user slowdown on the numbers screen is an estimate from current usage and the fair
   share, stated as an estimate.
