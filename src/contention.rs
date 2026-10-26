@@ -251,7 +251,7 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     (
         "saturated_by_psi",
-        "External tasks wait for CPU above psi_some_percent (PSI), so the CPU counts as saturated.",
+        "External tasks wait for CPU above psi_some_percent (PSI), so the CPU counts as saturated; a cgroup shared with own work never counts.",
     ),
     (
         "psi_system_only",

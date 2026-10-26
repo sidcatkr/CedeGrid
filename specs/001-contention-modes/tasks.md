@@ -980,7 +980,7 @@ each step.
     external PSI high below `saturation_percent` saturates and, with external demand,
     contends; own PSI high with external low does not; system-only and unknown add nothing
     with their codes; crossing back and forth does not cycle; modes stay monotonic.
-  - [ ] T141d Show external PSI, own PSI and the saturating signal in `observe` and `doctor`,
+  - [X] T141d Show external PSI, own PSI and the saturating signal in `observe` and `doctor`,
     with `saturated_by_psi`, `psi_system_only`, `psi_unknown` and `held_back.contention_psi` in
     the catalog and `docs/guarantees.md`.
   - [ ] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
@@ -1041,7 +1041,7 @@ no behavior beyond what those commits did.
   - an external user that grows while PSI is high gets its share;
   - floors hold and Guaranteed work is never paused in every PSI case.
   Per FR-072 and FR-021, Session 2026-10-26 (missing).
-- [ ] T167 With T141d, state in the `doctor` PSI line and `docs/guarantees.md` that a cgroup
+- [X] T167 With T141d, state in the `doctor` PSI line and `docs/guarantees.md` that a cgroup
   shared by own work and other users' processes counts as own and its pressure is never counted,
   per FR-072 (partial).
 

@@ -2958,6 +2958,56 @@ mod psi_saturation {
             "{yield_first} {neutral} {performance}"
         );
     }
+
+    /// Doctor shows external, own and system pressure under cpu, and says that a
+    /// cgroup shared with own work never counts (T141d).
+    #[test]
+    fn doctor_shows_the_pressure_line() {
+        let config = Host::new(ContentionMode::Neutral).config;
+        let mut snap = snapshot(1000);
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &snap, &PolicyInput::default(), 0)
+            .unwrap();
+        let cpu_block = |snap: &Snapshot| {
+            let text = cedegrid::explain::doctor_text(&config, snap, &decision, &[]);
+            text.split("\n\n")
+                .find(|block| block.starts_with("cpu:"))
+                .unwrap_or_else(|| panic!("no cpu block in:\n{text}"))
+                .to_string()
+        };
+        assert!(!cpu_block(&snap).contains("psi:"));
+        let mut kernel = KernelCollector::new(KernelConfig {
+            enabled: false,
+            ..KernelConfig::default()
+        })
+        .sample();
+        for (reading, line) in [
+            (
+                available(35.0),
+                "psi: external 35.0% over 3 cgroups (saturates above 10%), own 20.0%, \
+                 system 35.0%; a cgroup shared with own work never counts",
+            ),
+            (
+                Some(pressure(CpuPressureStatus::SystemOnly, None, 15.0)),
+                "psi: system-wide only, no external evidence; own 15.0%, system 15.0%",
+            ),
+            (
+                Some(pressure(CpuPressureStatus::Unknown, None, 0.0)),
+                "psi: unknown, no evidence; own 0.0%, system 0.0%",
+            ),
+        ] {
+            kernel.cpu_pressure = reading;
+            snap.kernel = Some(kernel.clone());
+            let block = cpu_block(&snap);
+            assert!(block.contains(line), "{block}");
+        }
+        // observe carries the same reading in the snapshot.
+        let observed = cedegrid::explain::observation(&snap, &decision, None);
+        assert_eq!(
+            observed["snapshot"]["kernel"]["cpu_pressure"]["status"],
+            "unknown"
+        );
+    }
 }
 
 /// Satisfied records are kept without expiry, at most 64 per resource key: past

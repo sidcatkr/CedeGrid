@@ -90,6 +90,34 @@ pub fn available_steps(config: &Config) -> BTreeMap<&'static str, Vec<&'static s
         .collect()
 }
 
+/// The CPU pressure line (FR-072): external pressure, the only saturation
+/// evidence, beside own and system-wide pressure, which are shown only.
+fn psi_line(config: &Config, snapshot: &Snapshot) -> Option<String> {
+    use crate::kernel::CpuPressureStatus;
+    let pressure = snapshot.kernel.as_ref()?.cpu_pressure.as_ref()?;
+    let percent = |value: Option<f64>| value.map_or("n/a".to_string(), |v| format!("{v:.1}%"));
+    let shown = format!(
+        "own {}, system {}",
+        percent(pressure.own_some_avg10),
+        percent(pressure.system_some_avg10)
+    );
+    Some(match pressure.status {
+        CpuPressureStatus::Available => format!(
+            "psi: external {} over {} cgroups (saturates above {}%), {shown}; a cgroup shared with own work never counts",
+            percent(pressure.external_some_avg10),
+            pressure.external_cgroups,
+            config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .psi_some_percent
+        ),
+        CpuPressureStatus::SystemOnly => {
+            format!("psi: system-wide only, no external evidence; {shown}")
+        }
+        CpuPressureStatus::Unknown => format!("psi: unknown, no evidence; {shown}"),
+    })
+}
+
 fn mode_label(mode: ContentionMode) -> &'static str {
     match mode {
         ContentionMode::YieldFirst => "Yield First",
@@ -154,6 +182,11 @@ pub fn doctor_text(
         }
         if !usage.is_empty() {
             let _ = writeln!(out, "  {}", usage.join(", "));
+        }
+        if *key == crate::contention::ResourceKey::Cpu
+            && let Some(line) = psi_line(config, snapshot)
+        {
+            let _ = writeln!(out, "  {line}");
         }
         if let Some(admission) = &status.admission {
             match admission.code() {
