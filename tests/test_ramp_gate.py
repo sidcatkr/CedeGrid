@@ -31,10 +31,21 @@ class RampGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ramp_gate.ramp_target(ramp_gate.cpu_series([row(1000,0)]),5.)
 
-    def test_contender_service_waits_for_its_core(self):
-        series=ramp_gate.cpu_series([row(14000,3750,0),row(15000,3500,400),row(16500,2900,950)])
-        served=ramp_gate.seconds_to(series,15.,lambda own,external:external>=900)
-        self.assertEqual(served,1.5)
+    def test_ramp_time_follows_each_samples_target_share(self):
+        # The share falls as the services and supervisors add external use.
+        rows=[row(10000,0,share=3780),row(12000,2400,share=3078),row(13000,2800,share=3078)]
+        series=ramp_gate.cpu_series(rows)
+        self.assertEqual(ramp_gate.ramp_seconds(series,10.),3.0)
+        self.assertIsNone(ramp_gate.ramp_seconds(series[:2],10.))
+
+    def test_contender_service_counts_only_its_own_cpu(self):
+        # CPU seconds of the contender itself, sampled every half second.
+        samples=[(10.0,0.0),(10.5,0.2),(11.0,0.65),(11.5,1.12)]
+        self.assertEqual(ramp_gate.served_seconds(samples,10.),1.0)
+        self.assertIsNone(ramp_gate.served_seconds(samples[:2],10.))
+
+    def test_the_duty_loop_holds_cpu_time_at_its_share(self):
+        self.assertIn('process_time',ramp_gate.DUTY_LOOP)
 
     def test_an_action_on_any_allocation_the_gate_did_not_submit_is_reported(self):
         own={'allocation_id':'mine','step':'cap'};other={'allocation_id':'other','step':'cap'}

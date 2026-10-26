@@ -261,13 +261,16 @@ ramp ramp-contender --cpus 4 --contender-at 3
 
 Record from each `report.json` in `docs/validation.md`:
 
-- `ramp_seconds` (idle run): seconds from submission until own CPU reaches
-  `target_millicores`, 90% of the first target share after submission. SC-004 expects at most
-  10. `null` means the target was never reached within `--seconds`.
-- `contender_served_seconds` (contender run): seconds from the contender's start until external
-  CPU reaches 900 m. Its one core is within its fair share, so SC-004 expects it within SC-002's
-  Performance bound, ⌈(own − (capacity − 1000 m − margin)) ÷ margin⌉ intervals: about 11
-  intervals (5.5 s) on 4 CPUs.
+- `ramp_seconds` (idle run): seconds from submission until own CPU reaches 90% of that
+  sample's target share. The share is capacity minus the margin and external use, which the
+  coordinator, agent and supervisors on the same CPUs add to. SC-004 expects at most 10. `null`
+  means the target was never reached within `--seconds`. `target_millicores` reports 90% of the
+  share when work starts.
+- `contender_served_seconds` (contender run): seconds from the contender's start until its own
+  CPU time, read from `/proc/<pid>/stat`, reaches 0.9 of a core over one sample interval. Its
+  one core is within its fair share, so SC-004 expects it within SC-002's Performance bound,
+  ⌈(own − (capacity − 1000 m − margin)) ÷ margin⌉ intervals: about 11 intervals (5.5 s) on 4
+  CPUs.
 - `foreign_actions`: must be empty, so no step reached a process the gate did not submit,
   including the contender (SC-005).
 - `owned_cleanup`: every exit code, and `guard`.
