@@ -208,6 +208,13 @@ membership equals the verified PID set.
     second, so such hosts keep the `/proc` source.
   - Not `/proc/<pid>/schedstat` alone (leader thread only), and not a sum over
     `/proc/<pid>/task/*/schedstat` (misses exited threads, grows with the thread count).
+- **Update (item 024, 2026-10-27): the summed bound.** Subtracting a tick per running thread for
+  every process counts pending time once per process, but only a task running at the read has
+  any, so across own work it is at most one tick per scope CPU at each read side, plus the read
+  pass's length because the reads are sequential. Own CPU summed for a decision uses that bound
+  (`Snapshot.managed_cpu_lower_millicores`), clamped between the per-allocation sums; each
+  allocation keeps its own. 38 tasks of 100 m on 4 CPUs at a 1 ms tick: 114 m low per process
+  (each bound also truncates to a whole millicore), 9 m low summed.
 
 ## R10. Missing observation of one allocation
 

@@ -300,6 +300,9 @@ reason. While an external PID is listed, external is max(external PIDs' sum, dev
 utilization minus own PIDs' sum); with own PIDs only, external is 0 and own is the device
 utilization. The policy takes the measured path only after `quiet_window_intervals`
 consecutive measured intervals (`PreviousGpu.measured_streak`), and the unknown path at once. Older recordings have none of them and take the unknown path.
+`Snapshot.managed_cpu_lower_millicores` (optional, item 024) is own work's CPU lower bound
+summed with one tick of pending time per scope CPU rather than per process; the policy uses it
+between the sums of the per-allocation lower and upper bounds.
 `own_only` (default false, skipped when false) marks an interval whose inventory lists only own
 verified PIDs under research R18's conditions: external is 0, own is the device utilization, and
 the policy takes the measured path at once while the streak keeps counting. `PrincipalUsage`
