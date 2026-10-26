@@ -188,7 +188,7 @@ ALLOWLIST = (
     'tools/docker-validation/linux-check/run.sh',
     'tools/gpu_qualification.py',
     'tools/local_smoke.py',
-    'tools/make_kaggriculture_validation.py',
+    'tools/make_application_validation.py',
     'tools/make_soak_config.py',
     'tools/make_test_pki.py',
     'tools/native_validation.py',
@@ -284,7 +284,8 @@ def inspect_text(name, data):
     # These checks find common accidental disclosures, not every possible secret.
     if re.search(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----', text):
         raise ValueError('private key material in ' + name)
-    if re.search(r'https://login[.]tailscale[.]com/a/[a-zA-Z0-9]+', text):
+    # A private network's login enrollment link, whatever its host.
+    if re.search(r'https://login[.][a-z0-9.-]+/a/[a-zA-Z0-9]+', text):
         raise ValueError('enrollment URL in ' + name)
     for user in re.findall(r'/(?:Users|home)/([^/\s"\x27`]+)', text):
         if user not in ('USER', 'user', 'test', 'cedegrid', 'example', '<USER>', '<user>') and not user.startswith(('$', '{')):

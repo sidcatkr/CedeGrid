@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'tools'))
 import anchor_validation as anchor
-from make_kaggriculture_validation import generate
+from make_application_validation import generate
 
 
 class CpuComparisonTests(unittest.TestCase):

@@ -20,7 +20,7 @@ class ComparisonContinuationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.old_id = 'comparison-original'
         self.path = self.root / 'evidence' / self.old_id / 'report.json'
-        self.application = self.root / 'source/Kaggriculture'
+        self.application = self.root / 'source/application'
         self.sources = {}
         for name in ('training/self_play.py', 'training/train.py',
                      'integration/cedegrid/workflow.py', 'integration/cedegrid/worker.py'):

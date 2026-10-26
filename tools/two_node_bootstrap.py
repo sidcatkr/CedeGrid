@@ -127,7 +127,7 @@ def burst_settings(args):
         result = {'kind': 'docker', 'home': '/home/cedegrid', 'root': root, 'cpus': [0, 1], 'reserve_ram_mib': 1024,
                   'python': remote_path(root, 'venv-isolated/bin/python'),
                   'binary': remote_path(root, 'source/ResourceManager/target/release/cedegrid'),
-                  'source_root': remote_path(root, 'source/Kaggriculture'),
+                  'source_root': remote_path(root, 'source/application'),
                   'sdk_root': remote_path(root, 'source/ResourceManager/python')}
     result['storage_profile'] = storage_profile(getattr(args, 'burst_storage_profile', 'wal_full'))
     return result
@@ -161,7 +161,7 @@ def prepare(args):
         raise ValueError('distinct node identities required')
     cpus = cpu_list(args.anchor_cpus)
     python = home_executable(args.python); binary = home_executable(args.binary)
-    source = inside_home(getattr(args, 'source_root', None) or root / 'source/Kaggriculture')
+    source = inside_home(getattr(args, 'source_root', None) or root / 'source/application')
     sdk = inside_home(getattr(args, 'sdk_root', None) or root / 'source/ResourceManager/python')
     manager = sdk.parent
     placement = burst_settings(args)
@@ -467,7 +467,7 @@ def argument_parser():
     for name in ('root', 'run-id', 'python', 'binary', 'candidate', 'bootstrap', 'dataset', 'anchor-cpus', 'anchor-node-id', 'burst-node-id'):
         prep.add_argument('--' + name, required=True)
     prep.add_argument('--docker-root', default=DEFAULT_DOCKER_ROOT)
-    prep.add_argument('--source-root', help='existing anchor application source; default ROOT/source/Kaggriculture')
+    prep.add_argument('--source-root', help='existing anchor application source; default ROOT/source/application')
     prep.add_argument('--sdk-root', help='existing anchor Python SDK; default ROOT/source/ResourceManager/python')
     prep.add_argument('--burst-home', help='explicit physical burst runtime home; requires all burst paths, CPUs and endpoint')
     for name in ('root', 'python', 'binary', 'source-root', 'sdk-root', 'cpus'):

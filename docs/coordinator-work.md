@@ -604,7 +604,7 @@ an unchanged `submit` after a lost ACK is safe. Do not manually modify SQLite ro
 `BeginUpload` → bounded hexadecimal `UploadChunk` requests → `CommitUpload` →
 `PublishCheckpoint` or `Complete` connect to the Python SDK and agent spool.
 `GetResult` returns the accepted real descriptor and artifact references for the
-Kaggriculture collector. Node artifact reads are restricted to assigned work or its
+application collector. Node artifact reads are restricted to assigned work or its
 previous checkpoints; operators can retrieve all accepted experiment outputs.
 
 ## Evidence and remaining validation scope
@@ -790,7 +790,7 @@ Linux kernel-control evidence, or the 24-hour soak.
 
 ## Bounded attempt starts and separate yield backoff
 
-The later real Kaggriculture trial exposed repeated cooperative yields, which do
+The later real application trial exposed repeated cooperative yields, which do
 not consume the execution-failure budget. This invalidated deriving a hard start
 ceiling from `retry_limit` alone. `LaunchRequest.max_attempts` is now an optional
 positive immutable cap on top-level task attempt reservations, counting yields and
@@ -801,7 +801,7 @@ cannot increase or bypass the declared cap. A new explicitly authorized task is
 needed for additional attempts. Existing serialized requests default to no explicit
 cap, preserving compatibility. This does not bound the number of SDK-mediated
 child processes inside one opted-in allocation; those retain their separate family
-contract. The bounded Kaggriculture game tasks use the single-process contract.
+contract. The bounded tasks of the example workload use the single-process contract.
 
 Cooperative yielding now has durable exponential delay, configured separately with
 `yield_retry_backoff_ms` (default 1000) and `yield_retry_backoff_max_ms` (30000).
@@ -845,7 +845,7 @@ with no failures**; two deliberately ignored subprocess fixture entrypoints are
 invoked by their owning integration tests. Strict all-target Clippy also passed.
 Raw output and exact source-file SHA256 values are retained privately.
 This supersedes the earlier local test totals for the recorded source snapshot.
-Real Linux runtime, real Kaggriculture two-server contribution, shared-server
+Real Linux runtime, real two-server application contribution, shared-server
 pressure experiments, optional delegated controls, and elapsed 24-hour soak each
 still require their own native evidence and authorization gates.
 

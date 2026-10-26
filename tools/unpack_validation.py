@@ -49,7 +49,7 @@ def unpack(archive, sha256, destination, activate_in=None, expected_previous=Non
             if set(expected) != names - {'source-manifest.json'}:
                 raise ValueError('manifest does not account for every archive file')
             for item in members:
-                if item.name != 'source-manifest.json' and not item.name.startswith(('source/ResourceManager/', 'source/Kaggriculture/', 'bootstrap-dataset/')):
+                if item.name != 'source-manifest.json' and not item.name.startswith(('source/ResourceManager/', 'source/application/', 'bootstrap-dataset/')):
                     raise ValueError('unexpected source component')
                 stream = source.extractfile(item)
                 data = stream.read(item.size + 1)

@@ -41,6 +41,10 @@
 
 ### Changed
 
+- **Validation layout.** The application validation manifest generator is
+  `tools/make_application_validation.py`, and validation bundles hold the application checkout
+  under `source/application`. Repack an existing validation root, or rename its application
+  directory to match.
 - **Neutral is the default.** A configuration without mode settings runs every resource in
   Neutral, and `config_version = 1` files load unchanged.
 - **Legacy GPU keys are interpreted.** `gpu.execution_mode` applies to GPU resources without an

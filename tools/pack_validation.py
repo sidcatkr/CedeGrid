@@ -20,12 +20,12 @@ def pack(manager, application, dataset, output):
                 if p.suffix not in ['.py','.rs','.json','.toml','.md','.yaml','.yml','.sh']:continue
                 files.append((p,'source/ResourceManager/'+str(p.relative_to(manager))))
     for name in ['main.py','requirements-train.txt']:
-        files.append((application/name,'source/Kaggriculture/'+name))
+        files.append((application/name,'source/application/'+name))
     for directory in ['training','integration','ln_v4','tests','scripts','config','opponents','bases','weights']:
         for p in sorted((application/directory).rglob('*')):
             if p.is_file() and not any(x in p.parts for x in ['__pycache__','.pytest_cache']):
                 if p.suffix not in ['.py','.json','.npz','.md','.sh']:continue
-                files.append((p,'source/Kaggriculture/'+str(p.relative_to(application))))
+                files.append((p,'source/application/'+str(p.relative_to(application))))
     for p in sorted(dataset.rglob('*')):
         if p.is_file():files.append((p,'bootstrap-dataset/'+str(p.relative_to(dataset))))
     manifest={'schema_version':1,'classification':'private_validation_source_and_derived_dataset','files':{}}

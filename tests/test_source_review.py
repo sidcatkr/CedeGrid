@@ -84,7 +84,7 @@ class SourceReviewTests(unittest.TestCase):
     def test_common_disclosures_are_rejected(self):
         examples = ['-----BEGIN ' + 'PRIVATE KEY-----', '100.' + '64.0.1',
                     '/Users/' + 'a-private-account/source',
-                    'https://login.tailscale.com/' + 'a/private-enrollment']
+                    'https://login.example.net/' + 'a/private-enrollment']
         for value in examples:
             with self.subTest(kind=value.split('/')[0]):
                 with self.assertRaises(ValueError):

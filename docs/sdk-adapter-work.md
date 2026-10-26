@@ -1,4 +1,4 @@
-# Python SDK and Kaggriculture integration work log
+# Python SDK and application integration work log
 
 The dated evidence below describes earlier development snapshots. CedeGrid 0.2.0
 qualification is tracked separately in the [current release record](release-0.2-gates.json);
@@ -37,18 +37,18 @@ descriptor is never rewritten. Spooling defaults to 2 GiB, single artifacts to
 256 MiB; source/descriptor integrity checks reject corruption and path escapes.
 
 `python/examples/counter.py --steps 20 --delay 0.1` demonstrates ordinary
-cooperative work, drain, checkpoint cursor, and completion without Kaggriculture.
+cooperative work, drain, checkpoint cursor, and completion without the application.
 
 ## Separate application integration
 
-The application code is in Kaggriculture's `integration/cedegrid`, not the generic
+The application code is in the application checkout's `integration/cedegrid`, not the generic
 manager. Its example `examples/deployment.json` contains explicit per-node paths,
 stable configured node IDs, class, worker ceiling, GPU UUID, immutable snapshot
 hash, model hash, and opponent hash. Replace placeholders using verified private
 deployment data. Run the experiment controller on the anchor: dataset and learner
 paths are deliberately local to that host, not assumed shared across machines.
 
-With `PYTHONPATH=<RM>/python:<Kaggriculture>`:
+With `PYTHONPATH=<RM>/python:<application>`:
 
 ```sh
 python -m integration.cedegrid prepare-dataset --source /home/USER/source-dataset --output /home/USER/validation/bootstrap-dataset
@@ -110,7 +110,7 @@ continuation. Legacy checkpoints keep their older epoch resume behavior.
 ## Validation evidence
 
 - Existing self-play worker and sampler regressions: 14 passed on macOS.
-- Full SDK plus existing/new Kaggriculture regression suite: 74 passed on macOS
+- Full SDK plus existing/new application regression suite: 74 passed on macOS
   (53 existing application tests and 21 new SDK/integration tests), including immutable publication,
   interrupted sync, attempt isolation, actual optimizer tensor equality for
   uninterrupted versus interrupted/resumed execution, pre-first-step drain, and
@@ -129,7 +129,7 @@ continuation. Legacy checkpoints keep their older epoch resume behavior.
 Tests must set `TMPDIR` and pytest `--basetemp` inside the user's home. Example:
 
 ```sh
-TMPDIR="$PWD/.runtime/tmp" PYTHONPATH="$PWD/python:/home/USER/Kaggriculture" python -m pytest python/tests /home/USER/Kaggriculture/tests/cedegrid --basetemp "$PWD/.runtime/tmp/sdk-tests"
+TMPDIR="$PWD/.runtime/tmp" PYTHONPATH="$PWD/python:/home/USER/application" python -m pytest python/tests /home/USER/application/tests/cedegrid --basetemp "$PWD/.runtime/tmp/sdk-tests"
 ```
 
 ## Remaining operational gates
@@ -170,7 +170,7 @@ TCP bytes. Workloads retain no operator credentials.
 
 Generic `LaunchRequest.input_artifacts` references are exposed through
 `WorkerContext.inputs` after the agent verifies the private input downloads. The
-Kaggriculture adapter alone packs policy snapshots, accepts only bounded regular
+application adapter alone packs policy snapshots, accepts only bounded regular
 archive members, rejects links/traversal/duplicates, and verifies every file
 against the pinned snapshot/model. Extracted models are private to an attempt and
 removed on completion/drain; original snapshots remain untouched. Canonical replay

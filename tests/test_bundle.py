@@ -23,7 +23,7 @@ class BundleTests(unittest.TestCase):
 
     def bundle(self, corrupt=False, escape=False):
         files = {'source/ResourceManager/src/main.rs': b'fn main() {}',
-                 'source/Kaggriculture/main.py': b'pass',
+                 'source/application/main.py': b'pass',
                  'bootstrap-dataset/manifest.json': b'{}'}
         manifest = {'classification': 'private_validation_source_and_derived_dataset',
                     'files': {name: {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()} for name, data in files.items()}}

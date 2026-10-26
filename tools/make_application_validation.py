@@ -28,7 +28,7 @@ def generate(root, run_id, python, candidate, gpu_uuid, client_config, node_id='
     if device == 'cpu' and gpu_uuid:
         raise ValueError('CPU validation must not request a GPU UUID')
     root = inside_home(root)
-    application = inside_home(root / 'source/Kaggriculture')
+    application = inside_home(root / 'source/application')
     manager = inside_home(root / 'source/ResourceManager')
     python=home_executable(python)
     candidate, client_config = map(inside_home, (candidate, client_config))

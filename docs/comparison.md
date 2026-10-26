@@ -189,8 +189,8 @@ Targets are registered before execution: median idle managed/unmanaged throughpu
 ratio >=0.90; protected p99 during managed contention divided by its matched
 protected-alone reference <=1.20; sampled
 manager mean CPU <=0.5 cores; sampled peak RSS <=512MiB. Missing metrics remain
-pending. These synthetic targets do not establish application speedup; real
-Kaggriculture matched trials remain a separate required comparison.
+pending. These synthetic targets do not establish application speedup; matched
+trials of the real application remain a separate required comparison.
 
 The standalone CLI comparison measures the whole contention interval. It has no
 post-yield segmentation, so the required operational post-yield p99 goal remains
@@ -203,8 +203,8 @@ case is never the protected reference; a regression test rejects that false pass
 gap. It creates a fresh private mTLS coordinator and agent through the existing
 deployment helper, then runs three matched repetitions of protected-alone,
 unmanaged idle, managed idle, unmanaged contention and managed contention. Its
-synthetic producer is `tools/pressure_probe.py`; real Kaggriculture comparisons
-remain a separate required measurement. These commands are for the already
+synthetic producer is `tools/pressure_probe.py`; comparisons with the real
+application remain a separate required measurement. These commands are for the already
 authorized Linux anchor after native installation/testing, using its actual UUID:
 
 ```sh
@@ -321,10 +321,10 @@ Each segment's overhead coverage is reported independently. Old missing samples
 remain inconclusive, and installed packages at the same interpreter path are
 assumed unchanged rather than cryptographically attested.
 
-The actual `kaggriculture-pairs010` run completed three cases before its limit,
+The actual `application-pairs010` run completed three cases before its limit,
 then released both managed allocations and reaped every directly owned process.
 A later run used the 1800-second total envelope. The completed
-`kaggriculture-pairs011` continuation ran only the three missing cases, retaining
+`application-pairs011` continuation ran only the three missing cases, retaining
 the original source, model, seeds and ordering. Do not execute these used run IDs
 again or repeat the completed measurements.
 

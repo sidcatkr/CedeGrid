@@ -19,7 +19,7 @@ class BootstrapTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='.cedegrid-bootstrap-test-', dir=Path.home())
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.source = self.root / 'source/Kaggriculture'
+        self.source = self.root / 'source/application'
         manager = self.root / 'source/ResourceManager'
         for path, contents in {
             manager / 'python/cedegrid/__init__.py': '',
@@ -71,7 +71,7 @@ def verify_snapshot(candidate, expected, model):
         self.args.burst_root = home + '/validation/frozen-source-identifier'
         self.args.burst_python = home + '/environments/isolated/bin/python'
         self.args.burst_binary = home + '/binaries/frozen/cedegrid'
-        self.args.burst_source_root = home + '/bundles/source/Kaggriculture'
+        self.args.burst_source_root = home + '/bundles/source/application'
         self.args.burst_sdk_root = home + '/bundles/source/ResourceManager/python'
         self.args.burst_cpus = '22,54'
         self.args.burst_storage_profile = 'delete_extra'

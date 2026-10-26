@@ -977,7 +977,7 @@
       "sha256": "6a8d35e9898bad442f0b5b27de9fb2e7ef84aedced5bde58cec7b5ab7b83adbc",
       "source_sha256": "6a8d35e9898bad442f0b5b27de9fb2e7ef84aedced5bde58cec7b5ab7b83adbc"
     },
-    "tools/make_kaggriculture_validation.py": {
+    "tools/make_application_validation.py": {
       "bytes": 7139,
       "curated": false,
       "sha256": "8beee883014af74e6946cf0128caba9631862f7386b2d003dd88ff2a2e2e4ad8",

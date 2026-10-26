@@ -21,7 +21,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 from cedegrid import Client, sha256_file
 from make_test_pki import generate as generate_pki
-from make_kaggriculture_validation import generate as generate_application, IMPLEMENTATION_FILES
+from make_application_validation import generate as generate_application, IMPLEMENTATION_FILES
 from native_validation import physical_cpus
 from local_smoke import family_memory
 from soak import AllocationLedger
@@ -287,7 +287,7 @@ def resume_cases(path, root, expected):
         raise ValueError('prior durable allocation releases are not verified')
     released = {row['assignment_id'] for row in final['allocations']}
     tasks = {task['task_id']: task for task in final.get('tasks', [])}
-    application = inside_home(root / 'source/Kaggriculture')
+    application = inside_home(root / 'source/application')
     cases = []; seen = set()
     for case in prior.get('cases', []):
         key = case['repetition'], case['mode']
@@ -383,7 +383,7 @@ def run(args):
     device = getattr(args, 'device', 'cuda:0')
     envelope = comparison_envelope(args.stage, device, args.gpu_uuid, getattr(args, 'wall_seconds', None))
     root = inside_home(args.root)
-    application, manager = root / 'source/Kaggriculture', root / 'source/ResourceManager'
+    application, manager = root / 'source/application', root / 'source/ResourceManager'
     python = home_executable(root / 'venv-isolated/bin/python')
     binary = inside_home(args.binary) if getattr(args, 'binary', None) else manager / 'target/release/cedegrid'
     bootstrap = inside_home(args.bootstrap) if args.bootstrap else None

@@ -75,12 +75,12 @@ def main():
     p.add_argument('--gpu-uuid')
     a=p.parse_args()
     if sys.platform!='linux':raise SystemExit('native validation requires Linux')
-    root=inside_home(a.root);rm=root/'source/ResourceManager';kg=root/'source/Kaggriculture'
+    root=inside_home(a.root);rm=root/'source/ResourceManager';app=root/'source/application'
     cpus=physical_cpus();os.sched_setaffinity(0,cpus)
     env=dict(os.environ,TMPDIR=str(root/'tmp'),XDG_CACHE_HOME=str(root/'cache'),
         CARGO_HOME=str(root/'tools/cargo'),RUSTUP_HOME=str(root/'tools/rustup'),CARGO_BUILD_JOBS='2',
         CEDEGRID_TEST_PYTHON=str(root/'venv-isolated/bin/python'),
-        PYTHONPATH=str(rm/'python')+os.pathsep+str(kg),PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(rm/'python')+os.pathsep+str(app),PYTHONDONTWRITEBYTECODE='1',
         OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
         CUDA_VISIBLE_DEVICES='')
     env['PATH']=str(root/'tools/cargo/bin')+os.pathsep+env['PATH']
@@ -90,10 +90,10 @@ def main():
     elif a.stage=='tests':
         result=execute([str(root/'tools/cargo/bin/cargo'),'test','--locked','--all-targets','--no-fail-fast','--','--test-threads=2'],rm,out,env,1800,ram_mib=4096,gpu_mib=0)
     elif a.stage=='sdk-tests':
-        result=execute([str(root/'venv-isolated/bin/python'),'-m','pytest',str(rm/'python/tests'),str(rm/'tests'),str(kg/'tests'),'--basetemp',str(root/'tmp'/a.run_id),'--junitxml',str(root/'evidence'/(a.run_id+'.xml'))],rm,out,env,1800,ram_mib=4096,gpu_mib=0)
+        result=execute([str(root/'venv-isolated/bin/python'),'-m','pytest',str(rm/'python/tests'),str(rm/'tests'),str(app/'tests'),'--basetemp',str(root/'tmp'/a.run_id),'--junitxml',str(root/'evidence'/(a.run_id+'.xml'))],rm,out,env,1800,ram_mib=4096,gpu_mib=0)
     elif a.stage=='cpu-integration':
         result=execute([str(root/'venv-isolated/bin/python'),str(rm/'tools/local_smoke.py'),
-            '--application',str(kg),'--dataset',str(root/'bootstrap-dataset'),
+            '--application',str(app),'--dataset',str(root/'bootstrap-dataset'),
             '--binary',str(rm/'target/release/cedegrid'),'--python',str(root/'venv-isolated/bin/python'),
             '--output',str(root/'runs'/a.run_id),'--execute'],rm,out,env,650,ram_mib=4096,gpu_mib=0)
     elif a.stage=='gpu-release':
@@ -105,7 +105,7 @@ def main():
         if not a.gpu_uuid or not a.gpu_uuid.startswith('GPU-'):raise SystemExit('explicit approved GPU UUID required')
         env['CUDA_VISIBLE_DEVICES']=a.gpu_uuid
         model=root/'runs'/a.run_id/'bootstrap'
-        result=execute([str(root/'venv-isolated/bin/python'),'training/train.py','--dataset',str(root/'bootstrap-dataset'),'--output',str(model),'--workers','0','--device','cuda:0','--batch-size','32','--epochs','2','--max-steps','100','--experiment-id',a.run_id],kg,out,env,1800)
+        result=execute([str(root/'venv-isolated/bin/python'),'training/train.py','--dataset',str(root/'bootstrap-dataset'),'--output',str(model),'--workers','0','--device','cuda:0','--batch-size','32','--epochs','2','--max-steps','100','--experiment-id',a.run_id],app,out,env,1800)
     print(json.dumps(result,indent=2));return 0 if result['status']=='passed' else 1
 
 if __name__=='__main__':sys.exit(main())
