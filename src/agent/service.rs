@@ -2,12 +2,12 @@
 //! reports and launches.
 use super::*;
 
-pub(super) type Publication = tokio::task::JoinHandle<(String, bool, String, Result<()>)>;
+type Publication = tokio::task::JoinHandle<(String, bool, String, Result<()>)>;
 
-pub(super) type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool);
+type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool);
 
 /// State of one agent service loop. Each stage of an interval is a method.
-pub(super) struct AgentLoop<'a> {
+struct AgentLoop<'a> {
     config: &'a Config,
     agent: &'a AgentConfig,
     executable: &'a Path,
@@ -1345,7 +1345,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     Ok(())
 }
 
-pub(super) async fn shutdown_signal() {
+async fn shutdown_signal() {
     #[cfg(unix)]
     {
         if let Ok(mut term) =
@@ -1360,7 +1360,7 @@ pub(super) async fn shutdown_signal() {
     }
 }
 
-pub(super) fn upgrade_attempt_held(store: &StateStore, assignment: &str) -> Result<bool> {
+fn upgrade_attempt_held(store: &StateStore, assignment: &str) -> Result<bool> {
     let exists: bool = store.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='upgrade_attempt_holds')", [], |r| r.get(0))?;
     if !exists {
         return Ok(false);
@@ -1372,7 +1372,7 @@ pub(super) fn upgrade_attempt_held(store: &StateStore, assignment: &str) -> Resu
     )?)
 }
 
-pub(super) fn collect_released_spool(
+fn collect_released_spool(
     config: &Config,
     store: &StateStore,
     records: &[ExecutionRecord],

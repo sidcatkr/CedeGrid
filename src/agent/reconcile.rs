@@ -116,10 +116,7 @@ pub(crate) fn recovery_allows_release(record: &ExecutionRecord) -> bool {
 }
 
 /// Whether the attempt's supervisor is verifiably the same live process.
-pub(super) fn live_supervisor(
-    config: &Config,
-    record: &ExecutionRecord,
-) -> Option<ProcessIdentity> {
+fn live_supervisor(config: &Config, record: &ExecutionRecord) -> Option<ProcessIdentity> {
     let output = config
         .state_dir
         .join("attempts")
@@ -170,7 +167,7 @@ pub(super) fn reattach_supervisors(config: &Config, store: &StateStore) -> Resul
 }
 
 #[cfg(unix)]
-pub(super) fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<ChildSlot> {
+fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<ChildSlot> {
     let output = config
         .state_dir
         .join("attempts")
@@ -284,10 +281,7 @@ pub(super) fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> 
     }
 }
 
-pub(super) fn reconcile_unlocked(
-    config: &Config,
-    exclude: &BTreeSet<String>,
-) -> Result<Vec<ExecutionRecord>> {
+fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec<ExecutionRecord>> {
     let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
     reconcile_guarded(config, exclude, guard)
 }

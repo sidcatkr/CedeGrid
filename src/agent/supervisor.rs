@@ -2,7 +2,7 @@
 //! run of one assignment.
 use super::*;
 
-pub(super) struct PipeControl {
+struct PipeControl {
     rx: mpsc::Receiver<Incoming>,
     /// Writes events to an authenticated control-socket controller as well.
     #[cfg(unix)]
@@ -162,7 +162,7 @@ pub(super) fn new_control_token() -> Result<Option<String>> {
 }
 
 /// A control line this supervisor does not understand, such as one from a newer agent.
-pub(super) fn unknown_control(detail: &str) {
+fn unknown_control(detail: &str) {
     write_diagnostic(
         std::io::stderr(),
         format_args!(
@@ -294,7 +294,7 @@ impl PipeControl {
     }
 }
 
-pub(super) fn validate_lease(lease: &Lease, assignment: &Assignment) -> Result<()> {
+fn validate_lease(lease: &Lease, assignment: &Assignment) -> Result<()> {
     ensure!(
         lease.assignment_id == assignment.request.assignment_id
             && lease.generation == assignment.generation
@@ -436,7 +436,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     result
 }
 
-pub(super) fn write_supervisor_usage(
+fn write_supervisor_usage(
     output: &Path,
     identity: &ProcessIdentity,
     started: Instant,

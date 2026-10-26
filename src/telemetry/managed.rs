@@ -363,7 +363,7 @@ pub(super) fn cpu_usage_upper_bound(
     u64::try_from(u128::from(delta_ms.saturating_add(quantization_ms)) * 1_000_000_000 / nanos).ok()
 }
 
-pub(super) fn cpu_counter_quantization_ms() -> Option<u64> {
+fn cpu_counter_quantization_ms() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         // /proc/<pid>/stat utime/stime use _SC_CLK_TCK; account for both
@@ -415,7 +415,7 @@ pub(super) fn cpu_counter_quantization_ms() -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn anonymous_memory_mib(pid: u32) -> Option<u64> {
+fn anonymous_memory_mib(pid: u32) -> Option<u64> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
     let anon = text
         .lines()
@@ -428,14 +428,14 @@ pub(super) fn anonymous_memory_mib(pid: u32) -> Option<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn anonymous_memory_mib(_pid: u32) -> Option<u64> {
+fn anonymous_memory_mib(_pid: u32) -> Option<u64> {
     // No matching anonymous attribution on this backend. Zero is a known safe
     // lower bound for subtraction, not a claim that the process uses no RAM.
     Some(0)
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn process_scope_matches(pid: u32, snapshot: &Snapshot, scoped: bool) -> bool {
+fn process_scope_matches(pid: u32, snapshot: &Snapshot, scoped: bool) -> bool {
     if !scoped {
         return snapshot.cpu_capacity_millicores > 0;
     }
@@ -460,6 +460,6 @@ pub(super) fn process_scope_matches(pid: u32, snapshot: &Snapshot, scoped: bool)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn process_scope_matches(_pid: u32, _snapshot: &Snapshot, _scoped: bool) -> bool {
+fn process_scope_matches(_pid: u32, _snapshot: &Snapshot, _scoped: bool) -> bool {
     true
 }

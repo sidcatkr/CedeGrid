@@ -2,7 +2,7 @@
 //! its supervisor launched.
 use super::*;
 
-pub(super) async fn download_checkpoint(
+async fn download_checkpoint(
     client: &NodeClient,
     assignment: &Assignment,
     output: &Path,
@@ -37,11 +37,7 @@ pub(super) async fn download_checkpoint(
     )
 }
 
-pub(super) async fn download_verified(
-    client: &NodeClient,
-    artifact: &ArtifactRef,
-    path: &Path,
-) -> Result<()> {
+async fn download_verified(client: &NodeClient, artifact: &ArtifactRef, path: &Path) -> Result<()> {
     let charge = client.download_charge(path)?;
     // Reserve the entire download before creating or extending its file. The
     // same transaction ledger is used by concurrent native worker publishers.
@@ -81,7 +77,7 @@ pub(super) async fn download_verified(
     Ok(())
 }
 
-pub(super) async fn materialize_cached(
+async fn materialize_cached(
     client: &NodeClient,
     artifact: &ArtifactRef,
     path: &Path,
@@ -152,7 +148,7 @@ pub(super) async fn materialize_cached(
     Ok(())
 }
 
-pub(super) async fn download_inputs(
+async fn download_inputs(
     client: &NodeClient,
     assignment: &Assignment,
     output: &Path,

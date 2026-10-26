@@ -11,7 +11,7 @@ pub(super) fn sha256_file(path: &Path) -> Result<(String, u64)> {
     hash_open_file(&mut file, expected)
 }
 
-pub(super) fn hash_open_file(file: &mut File, expected: u64) -> Result<(String, u64)> {
+fn hash_open_file(file: &mut File, expected: u64) -> Result<(String, u64)> {
     use sha2::{Digest, Sha256};
     use std::io::{Seek, SeekFrom};
     file.seek(SeekFrom::Start(0))?;

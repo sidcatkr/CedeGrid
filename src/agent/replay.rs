@@ -17,7 +17,7 @@ pub(super) fn validate_replay_launch(config: &Config, request: &LaunchRequest) -
     Ok(())
 }
 
-pub(super) fn replay_parent(config: &Config, home: &Path) -> Result<PathBuf> {
+fn replay_parent(config: &Config, home: &Path) -> Result<PathBuf> {
     ensure!(
         config.node_mode == NodeMode::Opportunistic,
         "replayable storage requires an opportunistic node"
