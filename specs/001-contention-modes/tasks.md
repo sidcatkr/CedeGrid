@@ -898,7 +898,7 @@ each step.
   - the reason-code catalog.
 - [X] T115 [P] Update the layout map in `CLAUDE.md` with `contention.rs`, `actuation.rs` and
   `setup.rs`.
-- [ ] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
+- [X] T116 [P] Remove code made obsolete by this feature in `src/policy.rs` and `src/agent.rs`:
   the protection-cap fields and the supervisor-side policy plumbing.
 - [X] T116a Count external principals for Neutral's CPU fair share (done with T063 and T064:
   principals come from `src/telemetry.rs`, and unattributed external usage counts as one

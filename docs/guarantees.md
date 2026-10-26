@@ -291,6 +291,8 @@ GPU memory to Neutral unless their mode is set, `conservative_non_sharing` sets
 `contention.never_share_occupied_gpus = true`, and `auto` changes nothing. A non-empty
 `gpu.best_effort_external_processes` is reported as unused. `doctor` shows the
 interpretation and every load-time warning. `gpu.execution_mode` has no other effect.
+`gpu.protective_shrink_percent` and `gpu.active_shrink_percent` are still read and validated
+so 0.2 files load, and have no effect: graduated steps replaced the protection caps.
 
 A drain decision does not release a reservation. The durable execution ledger keeps it
 charged until process exit and resource-release observations confirm the release.

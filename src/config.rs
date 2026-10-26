@@ -1473,6 +1473,8 @@ pub struct GpuConfig {
     /// wins, and unset, the mode's interval applies (FR-034).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale_up_cooldown_ms: Option<u64>,
+    /// 0.2 protection-cap settings: read and validated so 0.2 files keep loading,
+    /// with no effect; graduated steps replaced the caps.
     pub protective_shrink_percent: u8,
     pub active_shrink_percent: u8,
 }
