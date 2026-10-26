@@ -83,7 +83,12 @@ principals by UID as on CPU and device time nobody accounts for counted as one m
 external principal while an external process is listed, so own work keeps capacity minus
 that amount minus the mode's margin under Performance, and its fair share or a learned
 satisfied demand under Neutral. A device leaves the measured path at once and returns
-only after `quiet_window_intervals` consecutive measured intervals. Unsupported queries,
+only after `quiet_window_intervals` consecutive measured intervals. An interval in which
+both process queries succeed, every listed process is an own verified process checked
+through its pidfd, no MPS is present, device utilization is known and memory attributed
+to no listed process has not grown beyond the last measured, own-only or empty interval
+plus the noise tolerance is measured at once with no external compute, so a new own
+process neither restarts the window nor turns the device Unknown. Unsupported queries,
 stale samples, an incomplete process list or MPS leave it activity of unknown amount,
 one principal, under which Neutral and Performance hold the fair share: once the
 supervisor reports a duty cycle applied, own work counts as holding at most that duty,
@@ -117,6 +122,12 @@ bounded.
 Subtract attributed managed usage from total system usage before classifying the
 remaining usage as external; do not subtract both the usage and the entire reservation
 again from free capacity. Unknown observations prohibit optimistic admission.
+Own CPU comes from the allocation's cgroup leaf (`cpu.stat`, only while every member is
+an own verified process), else the process CPU clock read while a pidfd shows the
+verified process alive, else the `/proc` tick counters. Each source's read error is
+subtracted: its resolution plus one scheduler tick per thread that can be running, or
+two counter ticks for the tick counters. A change of source gives no reading for that
+interval.
 
 Each resource runs in a contention mode, and for every resource and observation the
 targets are ordered: Yield First ≤ Neutral ≤ Performance. Capacity no workload wants

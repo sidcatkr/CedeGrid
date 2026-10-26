@@ -51,9 +51,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - checkpoint transfer between nodes
 - **GPU.** Verified on one consumer device only (see
   [Native gate results](#native-gate-results-feature-001)). Other devices and drivers, and a
-  native Performance ramp on GPU compute, are not verified. In Neutral, a short GPU job runs
-  capped at the fair share after it starts, because its new process reads as Unknown GPU
-  activity.
+  native Performance ramp on GPU compute, are not verified. A short GPU job in Neutral ran
+  capped at the fair share after it started, because its new process read as Unknown GPU
+  activity: fixed (an interval that lists only own verified processes is measured), rerun
+  pending. The GPU attribution tolerance stays 15 points until a second device is measured;
+  the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
 - **Performance ramp.** On CPU, the ramp reaches 90% in under 3 s on one Linux host, but a
