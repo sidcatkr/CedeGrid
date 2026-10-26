@@ -665,6 +665,10 @@ pub struct ResourceThresholds {
     /// GPU compute: summed per-process utilization within this many points of
     /// device utilization makes the external amount measured (FR-021).
     pub attribution_tolerance_percent: u8,
+    /// CPU and GPU compute, which Performance scales up every monitor interval;
+    /// memory keeps its slower scale-up (FR-034).
+    #[serde(default)]
+    pub compute: bool,
 }
 
 impl ResourceThresholds {
@@ -680,8 +684,8 @@ impl ResourceThresholds {
             scale_up_step_interval_s: None,
             neutral_convergence_s: 60,
             neutral_tolerance_points: 15,
-            performance_ramp_s: 30,
-            performance_ramp_percent: 80,
+            performance_ramp_s: 10,
+            performance_ramp_percent: 90,
             reclaim_s: 5,
             hint_deadline_s: 5,
             unknown_window_intervals: 3,
@@ -700,6 +704,7 @@ impl ResourceThresholds {
             reclaim_backoff_max_ms: 30_000,
             admission_usage_window_s: 60,
             attribution_tolerance_percent: 15,
+            compute: !kind.is_memory(),
         }
     }
 
@@ -712,20 +717,27 @@ impl ResourceThresholds {
         }
     }
 
-    /// The scale-up interval for a mode when none is configured.
-    pub fn scale_up_interval_s(&self, mode: ContentionMode) -> u64 {
-        self.scale_up_step_interval_s.unwrap_or(match mode {
-            ContentionMode::YieldFirst => 30,
-            ContentionMode::Neutral => 10,
-            ContentionMode::Performance => 2,
-        })
+    /// The least time between two scale-up moves: 30 s in Yield First, 10 s in
+    /// Neutral, and in Performance one monitor interval on compute but 2 s on
+    /// memory, which is slow to reclaim. A set `scale_up_step_interval_s` applies
+    /// to every mode.
+    pub fn scale_up_interval_ms(&self, mode: ContentionMode, interval_ms: u64) -> u64 {
+        if let Some(seconds) = self.scale_up_step_interval_s {
+            return seconds.saturating_mul(1000);
+        }
+        match mode {
+            ContentionMode::YieldFirst => 30_000,
+            ContentionMode::Neutral => 10_000,
+            ContentionMode::Performance if self.compute => interval_ms,
+            ContentionMode::Performance => 2000,
+        }
     }
 
     /// A resource's scale-up cooldown for a mode (FR-034), independent of GPU
     /// settings: 30 s in Yield First, as 0.2's cooldown, and faster otherwise.
-    pub fn cooldown_ms(&self, mode: ContentionMode) -> u64 {
+    pub fn cooldown_ms(&self, mode: ContentionMode, interval_ms: u64) -> u64 {
         self.scale_up_cooldown_ms
-            .unwrap_or_else(|| self.scale_up_interval_s(mode).saturating_mul(1000))
+            .unwrap_or_else(|| self.scale_up_interval_ms(mode, interval_ms))
     }
 }
 
@@ -827,7 +839,7 @@ impl LadderTiming {
         Self {
             response_ms,
             dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
-            scale_up_ms: thresholds.scale_up_interval_s(mode).saturating_mul(1000),
+            scale_up_ms: thresholds.scale_up_interval_ms(mode, interval_ms),
             pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
             hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,

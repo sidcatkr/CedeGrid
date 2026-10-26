@@ -639,7 +639,7 @@ impl Interval<'_> {
             .fold(0u64, u64::saturating_add);
         for (allocation_id, value, mode) in current {
             let step = allowance_step(&thresholds, kind, capacity, threshold, mode);
-            let scale_up_ms = thresholds.scale_up_interval_s(mode).saturating_mul(1000);
+            let scale_up_ms = thresholds.scale_up_interval_ms(mode, config.monitor.interval_ms);
             let id = (allocation_id.clone(), key.clone());
             let published = match prev.allowance_published.get(&id).copied() {
                 None => (value, now),
@@ -807,7 +807,7 @@ fn cooled(
             >= config
                 .contention
                 .thresholds(kind)
-                .cooldown_ms(governing(config, kind))
+                .cooldown_ms(governing(config, kind), config.monitor.interval_ms)
                 .saturating_add(extra_ms)
     })
 }

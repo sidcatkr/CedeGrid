@@ -235,6 +235,43 @@ the policy bounds (5). §6: the worker tests (18) and npm (31). §7: the first s
 reports `performance_mode` as `caution`; the terminal tests pass (2). §8: `mixed_version` (4).
 §4 and §5 are the native gates T054 and T088.
 
+## Performance ramp gate (T173)
+
+Written, not run. It runs only on the authorized Linux test host, with the user's approval for
+that run. It needs the host preparation `docs/comparison.md` describes (the release binary and
+`venv-isolated` under `$cedegrid_validation_root`), at least 4 physical CPUs that nothing else
+uses during the run, 8 GiB of available RAM and 8 GiB of free disk. `tools/ramp_gate.py` starts
+a fresh private coordinator and agent in Performance at its defaults (no cooldown override, no
+CPU reserve), submits 250 m duty-cycled tasks, 4 per CPU, and reads the agent's decisions back.
+With `--contender-at`, it also starts an unmanaged one-core busy loop it owns, pinned to the
+last CPU of the scope. Each run writes `report.json` under a new output directory.
+
+```sh
+cargo build --locked --release
+cedegrid_validation_root="$HOME/.local/share/cedegrid-validation"
+ramp() { # ramp <name> [gate options...]
+  name="$1"; shift
+  "$cedegrid_validation_root/venv-isolated/bin/python" tools/ramp_gate.py \
+    --root "$cedegrid_validation_root" \
+    --output "$cedegrid_validation_root/evidence/$name-$(date -u +%Y%m%dT%H%M%SZ)" "$@" --execute
+}
+ramp ramp-idle --cpus 4
+ramp ramp-contender --cpus 4 --contender-at 3
+```
+
+Record from each `report.json` in `docs/validation.md`:
+
+- `ramp_seconds` (idle run): seconds from submission until own CPU reaches
+  `target_millicores`, 90% of the first target share after submission. SC-004 expects at most
+  10. `null` means the target was never reached within `--seconds`.
+- `contender_served_seconds` (contender run): seconds from the contender's start until external
+  CPU reaches 900 m. Its one core is within its fair share, so SC-004 expects it within SC-002's
+  Performance bound, ⌈(own − (capacity − 1000 m − margin)) ÷ margin⌉ intervals: about 11
+  intervals (5.5 s) on 4 CPUs.
+- `foreign_actions`: must be empty, so no step reached a process the gate did not submit,
+  including the contender (SC-005).
+- `owned_cleanup`: every exit code, and `guard`.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

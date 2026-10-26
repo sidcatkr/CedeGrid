@@ -2,6 +2,32 @@
 //! reports and launches.
 use super::*;
 
+/// What the agent's launch slots depend on in one heartbeat.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchPacing {
+    pub max_workers: usize,
+    pub active: usize,
+    /// Workers admitted so far; parallelism grows from here.
+    pub admitted: usize,
+    /// The CPU and RAM cooldown since the last growth has passed.
+    pub may_grow: bool,
+    /// CPU runs in Performance.
+    pub fill: bool,
+}
+
+/// How many new assignments one heartbeat may take. Parallelism grows by one
+/// worker per CPU and RAM cooldown, except in Performance, where one heartbeat may
+/// fill every free worker slot so the coordinator admits all that fits within the
+/// allowance (FR-034).
+pub fn launch_slots(pacing: LaunchPacing) -> usize {
+    let free = pacing.max_workers.saturating_sub(pacing.active);
+    if pacing.fill && pacing.may_grow {
+        free
+    } else {
+        free.min(pacing.admitted.saturating_sub(pacing.active) + usize::from(pacing.may_grow))
+    }
+}
+
 type Publication = tokio::task::JoinHandle<(String, bool, String, Result<()>)>;
 
 type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool);
@@ -886,16 +912,28 @@ impl AgentLoop<'_> {
                 .get(&key)
                 .and_then(|s| s.effective_mode)
                 .unwrap_or_else(|| config.contention.mode(kind));
-            config.contention.thresholds(kind).cooldown_ms(mode)
+            config
+                .contention
+                .thresholds(kind)
+                .cooldown_ms(mode, config.monitor.interval_ms)
         })
         .max()
         .unwrap_or(0);
         let may_grow = self.last_growth.elapsed() >= Duration::from_millis(grow_after_ms);
         let admission_safe = decision.expansion_allowed || decision.cpu_ram_expansion_allowed;
+        let fill = decision
+            .resources
+            .get(&crate::contention::ResourceKey::Cpu)
+            .and_then(|s| s.effective_mode)
+            == Some(crate::contention::ContentionMode::Performance);
         let launch_slots = if admission_safe && self.stopping.is_none() && !self.spool_full {
-            agent.max_workers.saturating_sub(active_workers).min(
-                self.admitted_parallelism.saturating_sub(active_workers) + usize::from(may_grow),
-            ) as u32
+            launch_slots(LaunchPacing {
+                max_workers: agent.max_workers,
+                active: active_workers,
+                admitted: self.admitted_parallelism,
+                may_grow,
+                fill,
+            }) as u32
         } else {
             0
         };

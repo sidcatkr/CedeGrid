@@ -739,6 +739,7 @@ impl ContentionConfig {
             attribution_tolerance_percent: set
                 .attribution_tolerance_percent
                 .unwrap_or(defaults.attribution_tolerance_percent),
+            compute: defaults.compute,
         }
     }
 
@@ -1889,7 +1890,7 @@ impl Config {
             .gpu_memory
             .scale_up_cooldown_ms
             .or(self.gpu.scale_up_cooldown_ms)
-            .unwrap_or_else(|| thresholds.cooldown_ms(mode))
+            .unwrap_or_else(|| thresholds.cooldown_ms(mode, self.monitor.interval_ms))
     }
 
     /// The launch-time nice value. Own priority is never raised above the default.

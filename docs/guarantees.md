@@ -155,7 +155,11 @@ margin: it gives back what external demand takes and never goes below the fair s
 activity of unknown amount holds it to the fair share. Otherwise Yield First keeps 15%
 of capacity free, Neutral 5% and Performance 2%; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
-scale up (10 s and 2 s per step). On memory, Yield First keeps 20% free beyond the floor
+scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU and GPU
+compute and 2 s on memory. A held step still moves no faster than the minimum step dwell.
+On an idle host, Performance reaches `performance_ramp_percent` (default 90%) of available
+capacity minus its margin within `performance_ramp_s` (default 10 s): once the agent's
+growth cooldown allows, one heartbeat admits as much as fits within the allowance. On memory, Yield First keeps 20% free beyond the floor
 and the other modes only the floor. The CPU idle reserve is the larger of
 `cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
 margins are configurable per resource. In every mode, contended CPU returns within 2
@@ -166,8 +170,8 @@ CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
-each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral and 2 s in
-Performance. Each resource's admission opens on its own, and placement needs every
+each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral, and in
+Performance one monitor interval for CPU and 2 s for RAM. Each resource's admission opens on its own, and placement needs every
 requested resource open; every launch reserves CPU and RAM. Own work blocks admission on a
 resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
 holds more than its target, or a step is still moving down. A cap or hint that holds at its

@@ -49,6 +49,7 @@ use report::*;
 pub use service::envelope_exceeded;
 pub use service::restrict_gpu_scope;
 pub use service::run;
+pub use service::{LaunchPacing, launch_slots};
 pub use supervisor::assignment_supervisor;
 use supervisor::*;
 

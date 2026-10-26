@@ -948,7 +948,13 @@ mod performance_and_guaranteed {
             )),
             6000
         );
+        // Compute scales up every interval in Performance; memory keeps 2 s (FR-034).
         let thresholds = ResourceThresholds::defaults(ResourceKind::Cpu);
+        assert_eq!(
+            LadderTiming::new(&thresholds, ContentionMode::Performance, 500).scale_up_ms,
+            500
+        );
+        let thresholds = ResourceThresholds::defaults(ResourceKind::Ram);
         assert_eq!(
             LadderTiming::new(&thresholds, ContentionMode::Performance, 500).scale_up_ms,
             2000
@@ -2092,7 +2098,7 @@ mod scenarios {
             let cooldown = config
                 .contention
                 .thresholds(cedegrid::contention::ResourceKind::Cpu)
-                .cooldown_ms(ContentionMode::Performance);
+                .cooldown_ms(ContentionMode::Performance, config.monitor.interval_ms);
             if decision.cpu_ram_expansion_allowed
                 && decision.admission_headroom.cpu_millicores >= 1000
                 && now - last_growth >= cooldown
@@ -2211,8 +2217,74 @@ mod scenarios {
         assert!(!world.drained);
     }
 
+    /// An external workload that starts while Performance is still growing gets its
+    /// demand, up to its fair share, within the reclaim bound SC-004 uses (SC-012).
+    #[test]
+    fn an_external_workload_started_mid_ramp_gets_its_demand() {
+        let mut world = World::new(ContentionMode::Performance, (8, 0));
+        let mut now = 0;
+        let mut served_at = None;
+        while now < 20_000 {
+            // Own work grows by 1000m per interval, as a ramp does.
+            world.own.1 = (now / INTERVAL + 1).saturating_mul(1000).min(CAPACITY);
+            if now == 1500 {
+                world.external = (4, 3000);
+            }
+            let (_, external) = world.tick(now);
+            if now >= 1500 && served_at.is_none() && external >= 3000 {
+                served_at = Some(now);
+            }
+            now += INTERVAL;
+        }
+        let served_at = served_at.expect("external work never got its demand");
+        assert!(served_at - 1500 <= 5000, "after {} ms", served_at - 1500);
+        assert!(!world.drained);
+    }
+
+    /// An external process that appears and disappears every interval causes no
+    /// cap and uncap cycling: steps change no faster than the minimum dwell.
+    #[test]
+    fn a_process_flapping_every_interval_does_not_cycle_caps() {
+        let mut world = World::new(ContentionMode::Performance, (8, 8000));
+        let dwell = u64::from(
+            world
+                .config
+                .contention
+                .thresholds(cedegrid::contention::ResourceKind::Cpu)
+                .min_step_dwell_intervals,
+        ) * INTERVAL;
+        let mut now = 0;
+        let mut changes = vec![];
+        let mut previous = world.step;
+        while now < 60_000 {
+            world.external = if (now / INTERVAL).is_multiple_of(2) {
+                (4, 3000)
+            } else {
+                (0, 0)
+            };
+            world.tick(now);
+            if world.step != previous {
+                changes.push(now);
+                previous = world.step;
+            }
+            now += INTERVAL;
+        }
+        for pair in changes.windows(2) {
+            assert!(pair[1] - pair[0] >= dwell, "steps changed at {changes:?}");
+        }
+        assert!(!world.drained);
+    }
+
     /// This module's runs in the decision snapshot.
     pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "an_external_workload_started_mid_ramp_gets_its_demand",
+            an_external_workload_started_mid_ramp_gets_its_demand,
+        ),
+        (
+            "a_process_flapping_every_interval_does_not_cycle_caps",
+            a_process_flapping_every_interval_does_not_cycle_caps,
+        ),
         (
             "sc_002_yield_first_restores_its_margin_within_three_intervals_without_draining",
             sc_002_yield_first_restores_its_margin_within_three_intervals_without_draining,
@@ -2270,6 +2342,379 @@ mod scenarios {
 
 /// Hints through the policy engine: compliance is judged by observed usage
 /// and the hint deadline bounds the wait (FR-037).
+/// The Performance ramp (SC-004, FR-034, Session 2026-10-26).
+mod ramp {
+    use super::*;
+    use crate::snapshot::PolicyEngine;
+    use cedegrid::agent::{LaunchPacing, launch_slots};
+    use cedegrid::contention::{
+        ContentionMode, LadderTiming, ResourceKey, ResourceKind, YieldStep,
+    };
+
+    const CAPACITY: u64 = 8000;
+    const INTERVAL: u64 = 500;
+    const HEARTBEAT: u64 = 2000;
+    const JOB: u64 = 500;
+    const GPU: &str = "GPU-ramp";
+
+    fn mode_config(mode: ContentionMode) -> Config {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        config
+    }
+
+    /// 90% of available capacity minus the mode's margin.
+    fn target(config: &Config, mode: ContentionMode, capacity: u64) -> u64 {
+        let thresholds = config.contention.thresholds(ResourceKind::Cpu);
+        let margin = capacity * u64::from(thresholds.margin_percent(mode)) / 100;
+        (capacity - margin) * u64::from(thresholds.performance_ramp_percent) / 100
+    }
+
+    /// Own CPU per interval on an idle host that admits 500m jobs on each 2 s
+    /// heartbeat, as the agent's launch slots and the coordinator's placement do.
+    fn admission_ramp(mode: ContentionMode, until_ms: u64) -> Vec<u64> {
+        let config = mode_config(mode);
+        let mut engine = PolicyEngine::new();
+        let mut jobs: Vec<Allocation> = vec![];
+        let (mut admitted, mut last_growth) = (0usize, 0u64);
+        let mut own_per_interval = vec![];
+        for now in (0..=until_ms).step_by(INTERVAL as usize) {
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
+            let own: u64 = jobs
+                .iter()
+                .filter_map(|j| j.observed.as_ref())
+                .map(|o| o.cpu_millicores)
+                .sum();
+            own_per_interval.push(own);
+            let input = PolicyInput {
+                allocations: jobs.clone(),
+                ..PolicyInput::default()
+            };
+            let decision = engine
+                .evaluate(&config, &snapshot(own), &input, now)
+                .unwrap();
+            if now % HEARTBEAT != 0 {
+                continue;
+            }
+            let grow_after = [ResourceKind::Cpu, ResourceKind::Ram]
+                .into_iter()
+                .map(|kind| {
+                    config
+                        .contention
+                        .thresholds(kind)
+                        .cooldown_ms(mode, config.monitor.interval_ms)
+                })
+                .max()
+                .unwrap();
+            let fill = decision.resources[&ResourceKey::Cpu].effective_mode
+                == Some(ContentionMode::Performance);
+            let slots = if decision.expansion_allowed || decision.cpu_ram_expansion_allowed {
+                launch_slots(LaunchPacing {
+                    max_workers: 64,
+                    active: jobs.len(),
+                    admitted,
+                    may_grow: now - last_growth >= grow_after,
+                    fill,
+                })
+            } else {
+                0
+            };
+            let mut headroom = decision.admission_headroom.cpu_millicores;
+            for k in 0..slots {
+                if headroom < JOB {
+                    break;
+                }
+                headroom -= JOB;
+                let mut job = allocation(
+                    &format!("job-{now}-{k}"),
+                    AllocationClass::Opportunistic,
+                    JOB,
+                    None,
+                );
+                job.phase = AllocationPhase::Pending;
+                jobs.push(job);
+                if jobs.len() > admitted {
+                    admitted = jobs.len();
+                    last_growth = now;
+                }
+            }
+        }
+        own_per_interval
+    }
+
+    fn reached_at(own: &[u64], target: u64) -> Option<u64> {
+        own.iter()
+            .position(|own| *own >= target)
+            .map(|i| i as u64 * INTERVAL)
+    }
+
+    /// On an idle host, Performance reaches 90% of available CPU minus the margin
+    /// within 10 s, the new defaults (SC-004).
+    #[test]
+    fn performance_reaches_ninety_percent_of_cpu_within_ten_seconds() {
+        let config = mode_config(ContentionMode::Performance);
+        let thresholds = config.contention.thresholds(ResourceKind::Cpu);
+        assert_eq!(
+            (
+                thresholds.performance_ramp_percent,
+                thresholds.performance_ramp_s
+            ),
+            (90, 10)
+        );
+        let own = admission_ramp(ContentionMode::Performance, 20_000);
+        let reached = reached_at(&own, target(&config, ContentionMode::Performance, CAPACITY))
+            .expect("Performance never reached its ramp target");
+        assert!(reached <= 10_000, "ramp target reached at {reached} ms");
+    }
+
+    /// Yield First and Neutral still add one worker per 30 s and 10 s, and the modes
+    /// stay ordered at every interval.
+    #[test]
+    fn yield_first_and_neutral_ramps_are_unchanged_and_modes_stay_ordered() {
+        let until = 60_000;
+        let yield_first = admission_ramp(ContentionMode::YieldFirst, until);
+        let neutral = admission_ramp(ContentionMode::Neutral, until);
+        let performance = admission_ramp(ContentionMode::Performance, until);
+        for i in 0..yield_first.len() {
+            assert!(
+                yield_first[i] <= neutral[i] && neutral[i] <= performance[i],
+                "interval {i}: {} {} {}",
+                yield_first[i],
+                neutral[i],
+                performance[i]
+            );
+        }
+        let rises = |own: &[u64]| -> Vec<usize> {
+            own.windows(2)
+                .enumerate()
+                .filter(|(_, pair)| pair[1] > pair[0])
+                .map(|(i, _)| i + 1)
+                .collect()
+        };
+        for (own, gap_ms) in [(&yield_first, 30_000), (&neutral, 10_000)] {
+            let rises = rises(own);
+            for pair in rises.windows(2) {
+                assert!(
+                    (pair[1] - pair[0]) as u64 * INTERVAL >= gap_ms,
+                    "rises at intervals {rises:?}"
+                );
+            }
+            for i in &rises {
+                assert_eq!(own[*i] - own[*i - 1], JOB, "one worker per rise");
+            }
+        }
+    }
+
+    /// Performance scales CPU and GPU compute up every monitor interval; RAM and GPU
+    /// memory keep 2 s; Yield First and Neutral keep 30 s and 10 s (FR-034).
+    #[test]
+    fn performance_scales_compute_up_every_interval_and_memory_every_two_seconds() {
+        let mut config = mode_config(ContentionMode::Performance);
+        // The shared fixture zeroes the legacy GPU memory cooldown.
+        config.gpu.scale_up_cooldown_ms = None;
+        let interval = config.monitor.interval_ms;
+        for kind in ResourceKind::ALL {
+            let thresholds = config.contention.thresholds(kind);
+            let performance = if kind.is_memory() { 2000 } else { interval };
+            for (mode, expected) in [
+                (ContentionMode::YieldFirst, 30_000),
+                (ContentionMode::Neutral, 10_000),
+                (ContentionMode::Performance, performance),
+            ] {
+                assert_eq!(
+                    thresholds.scale_up_interval_ms(mode, interval),
+                    expected,
+                    "{kind:?} {mode:?}"
+                );
+                assert_eq!(
+                    thresholds.cooldown_ms(mode, interval),
+                    expected,
+                    "{kind:?} {mode:?}"
+                );
+                assert_eq!(
+                    LadderTiming::new(&thresholds, mode, interval).scale_up_ms,
+                    expected,
+                    "{kind:?} {mode:?}"
+                );
+            }
+        }
+        assert_eq!(
+            config.gpu_memory_cooldown_ms(ContentionMode::Performance),
+            2000
+        );
+    }
+
+    fn gpu_snapshot(own: u64, external: u64, sample: u64) -> Snapshot {
+        let mut snap = snapshot(0);
+        snap.gpu_inventory = CapabilityStatus::Available;
+        snap.gpus = vec![GpuSnapshot {
+            uuid: GPU.into(),
+            total_memory_mib: 16_000,
+            used_memory_mib: Some(2000),
+            utilization_percent: Some(((own + external) / 10).min(100) as u32),
+            external_process_ids: Some(if external > 0 { vec![987] } else { vec![] }),
+            external_compute: if external > 0 {
+                ComputeActivity::Active
+            } else {
+                ComputeActivity::Idle
+            },
+            compute_sample_id: Some(sample),
+            observation: None,
+            reserved_memory_mib: None,
+            free_memory_mib: None,
+            unattributed_memory_mib: None,
+            external_compute_milli: Some(external),
+            own_compute_milli: Some(own),
+            compute_amount_unknown: None,
+        }];
+        snap.principals = Some(vec![
+            PrincipalUsage {
+                uid: Some(1000),
+                is_owner: true,
+                ..PrincipalUsage::default()
+            },
+            PrincipalUsage {
+                uid: Some(2001),
+                gpu_compute_milli: BTreeMap::from([(GPU.to_string(), external)]),
+                ..PrincipalUsage::default()
+            },
+        ]);
+        snap
+    }
+
+    /// Own GPU compute reaches 90% of the device minus the margin within 10 s on an
+    /// idle device, and again within 10 s after an external user leaves (SC-004).
+    #[test]
+    fn performance_reaches_ninety_percent_of_gpu_compute_within_ten_seconds() {
+        let mut config = mode_config(ContentionMode::Performance);
+        config.gpu.process_sample_max_age_ms = 400;
+        config.contention.gpu_compute.quiet_window_intervals = Some(1);
+        config
+            .contention
+            .acknowledge_caution
+            .insert("relaxed_detection".into());
+        let key = ResourceKey::GpuCompute(GPU.into());
+        let target = target(&config, ContentionMode::Performance, 1000);
+        let mut engine = PolicyEngine::new();
+        let mut cap = 1000u64;
+        let mut own_per_interval = vec![];
+        for i in 0..80u64 {
+            // External compute below the fair share on a saturated device for
+            // intervals 20 to 39, and a short burst at 60 and 61.
+            let external_demand = if (20..40).contains(&i) || (60..62).contains(&i) {
+                300
+            } else {
+                0
+            };
+            let external = external_demand.min(1000);
+            let own = cap.min(1000 - external);
+            own_per_interval.push(own);
+            let job = Allocation {
+                id: "job".into(),
+                class: AllocationClass::Opportunistic,
+                phase: AllocationPhase::Running,
+                requested: Resources {
+                    cpu_millicores: 100,
+                    ram_mib: 100,
+                    gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 1000)]),
+                },
+                observed: Some(Resources {
+                    cpu_millicores: 100,
+                    ram_mib: 100,
+                    gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 1000)]),
+                }),
+                observed_upper: None,
+                modes: BTreeMap::new(),
+            };
+            let input = PolicyInput {
+                allocations: vec![job],
+                ..PolicyInput::default()
+            };
+            let decision = engine
+                .evaluate(
+                    &config,
+                    &gpu_snapshot(own, external, i + 1),
+                    &input,
+                    i * INTERVAL,
+                )
+                .unwrap();
+            cap = decision
+                .actions
+                .iter()
+                .find(|a| a.resource == key)
+                .map_or(1000, |a| match a.step {
+                    YieldStep::Cap => a.target.unwrap_or(1000),
+                    YieldStep::Pause => 0,
+                    _ => 1000,
+                });
+        }
+        let idle = reached_at(&own_per_interval[..20], target).expect("idle device never reached");
+        assert!(idle <= 10_000, "idle ramp at {idle} ms");
+        assert!(
+            own_per_interval[21..40].iter().all(|own| *own < 700),
+            "the external user never held own work back"
+        );
+        let after = reached_at(&own_per_interval[40..60], target).expect("never regained");
+        assert!(
+            after <= 10_000,
+            "regained at {after} ms after the external user left"
+        );
+        // After a fresh cap, the raise waits the minimum step dwell, now longer than
+        // the compute scale-up interval, and no more.
+        let timing = LadderTiming::new(
+            &config.contention.thresholds(ResourceKind::GpuCompute),
+            ContentionMode::Performance,
+            INTERVAL,
+        );
+        assert!(timing.scale_up_ms < timing.dwell_ms);
+        let burst = reached_at(&own_per_interval[61..], target).expect("burst never regained");
+        assert!(
+            burst <= timing.dwell_ms,
+            "regained {burst} ms after the burst's cap"
+        );
+    }
+
+    /// RAM keeps its Performance scale-up cooldown: a new floor breach still opens
+    /// admission only after 2 s plus the reclaim backoff (FR-034, FR-061).
+    #[test]
+    fn memory_scale_up_timing_is_unchanged() {
+        let config = mode_config(ContentionMode::Performance);
+        let thresholds = config.contention.thresholds(ResourceKind::Ram);
+        assert_eq!(
+            thresholds.cooldown_ms(ContentionMode::Performance, 500),
+            2000
+        );
+        assert_eq!(thresholds.reclaim_backoff_ms, 1000);
+        assert_eq!(thresholds.reclaim_backoff_max_ms, 30_000);
+        let gpu = config.contention.thresholds(ResourceKind::GpuMemory);
+        assert_eq!(gpu.cooldown_ms(ContentionMode::Performance, 500), 2000);
+    }
+
+    /// This module's runs in the decision snapshot.
+    pub(super) const SNAPSHOT: &[(&str, fn())] = &[
+        (
+            "performance_reaches_ninety_percent_of_cpu_within_ten_seconds",
+            performance_reaches_ninety_percent_of_cpu_within_ten_seconds,
+        ),
+        (
+            "yield_first_and_neutral_ramps_are_unchanged_and_modes_stay_ordered",
+            yield_first_and_neutral_ramps_are_unchanged_and_modes_stay_ordered,
+        ),
+        (
+            "performance_reaches_ninety_percent_of_gpu_compute_within_ten_seconds",
+            performance_reaches_ninety_percent_of_gpu_compute_within_ten_seconds,
+        ),
+    ];
+}
+
 mod hints {
     use super::*;
     use crate::snapshot::PolicyEngine;
@@ -2600,7 +3045,8 @@ mod ram_cap {
             .contention
             .thresholds(cedegrid::contention::ResourceKind::Ram);
         let dwell = u64::from(thresholds.min_step_dwell_intervals) * config.monitor.interval_ms;
-        let scale_up = thresholds.scale_up_interval_s(ContentionMode::Neutral) * 1000;
+        let scale_up =
+            thresholds.scale_up_interval_ms(ContentionMode::Neutral, config.monitor.interval_ms);
         let backoff = thresholds.reclaim_backoff_ms;
         assert!(
             reversed >= (3000 + dwell).max(scale_up) + backoff,
@@ -3191,6 +3637,7 @@ fn satisfied_records_keep_the_64_most_recently_seen_principals() {
 fn decision_snapshot() {
     let mut scenarios = Vec::new();
     scenarios.extend(snapshot::scripted("scenarios", scenarios::SNAPSHOT));
+    scenarios.extend(snapshot::scripted("ramp", ramp::SNAPSHOT));
     scenarios.extend(snapshot::scripted("hints", hints::SNAPSHOT));
     scenarios.extend(snapshot::scripted("ram_cap", ram_cap::SNAPSHOT));
     scenarios.extend(snapshot::scripted(
