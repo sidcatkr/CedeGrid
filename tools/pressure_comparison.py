@@ -274,8 +274,9 @@ def run(args):
                 case={'repetition':repetition,'scenario':scenario,'status':'running','started_monotonic':time.monotonic()}
                 report['cases'].append(case);folder=output/f'r{repetition}-{scenario}';folder.mkdir()
                 managed=scenario.startswith('managed');assignment=None;task_id=run_id+'.'+uuid.uuid4().hex
+                probe=folder/'probe'
                 if scenario!='protected_alone':
-                    probe=folder/'probe';argv=[str(python),str(manager/'tools/pressure_probe.py'),'--mode',args.mode,
+                    argv=[str(python),str(manager/'tools/pressure_probe.py'),'--mode',args.mode,
                         '--seconds','40' if 'contention' in scenario else '20','--cpu',str(cpus[0]),'--output',str(probe)]
                     if managed:
                         task=probe_task(task_id,argv,manager,worker_env,args.mode,args.gpu_uuid)
