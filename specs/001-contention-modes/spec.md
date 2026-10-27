@@ -638,8 +638,9 @@ node reports with the expected per-resource values at each step.
 - **FR-073**: Own CPU for the external estimate MUST be measured as follows.
   - In Full, when every own allocation is under one delegated parent, it is that parent's
     `cpu.stat` `usage_usec`, read once per interval next to the host's CPU counters. Its error is
-    1 µs plus one scheduler tick per own thread that can run, at most one per scope CPU.
-    CedeGrid's own processes under that parent are measured apart.
+    1 µs plus one scheduler tick per own thread that can run, at most one per scope CPU. The
+    parent is used only while its children are exactly the own leaves, so CedeGrid's own
+    processes are never inside it; they are measured apart by their process clocks.
   - In Tracked, each process's rate is taken over its own read-to-read interval, except in its
     first interval, which keeps the aggregate interval. The summed bound subtracts each source's
     read error and the tick lag, not the length of the read pass. A baseline outside the aggregate
@@ -685,12 +686,13 @@ node reports with the expected per-resource values at each step.
   - Otherwise memory contention MUST start at the hint step for hint-ready allocations, and at
     drain for the others. GPU memory never takes a cap, and pause MUST NOT be used to resolve
     memory contention.
-  - When own CPU usage is over its target and the budget did not fall because external usage
-    rose, the actuator first holds each capped allocation at its cap from its last measured rate,
-    which is not a new step. Own work steps down only when usage stays over the target for
+  - When own CPU usage is over its target and the budget did not fall (external usage did not
+    rise and no contention lowered the target), the actuator first holds each capped allocation
+    at its cap from its last measured rate, which is not a new step. Own work steps down only when usage stays over the target for
     `min_step_dwell_intervals` with caps applied. The cause is `own_over_target`, and the
-    scale-up interval does not restart for it once enforcement holds. A budget that fell because
-    external usage rose keeps the steps and bounds above (SC-002).
+    scale-up interval does not restart for it once enforcement holds. A budget that fell, because
+    external usage rose or contention lowered the target, keeps the steps and bounds above
+    (SC-002).
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).

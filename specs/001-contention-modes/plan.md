@@ -689,8 +689,10 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - `StepState.pending` marks a step planned on the pending pass. The running pass re-plans a
     pending-pass CPU drain of opportunistic work instead of holding it.
 - **Own usage over its target** (FR-011, FR-018, research R25):
-  - The ladder's cause is `own_over_target` when own usage is over the budget and external usage
-    did not rise beyond its per-interval bound since the last target (`PolicyState.cpu_target`).
+  - The ladder's cause is `own_over_target` when own usage is over the budget and the budget did
+    not fall beyond its per-interval bound since the last target (`PolicyState.cpu_target`):
+    external usage did not rise and no contention lowered the target. Any fall keeps
+    `external_growth` and today's path.
   - Over the target without external growth, held caps keep their targets, which the actuator
     enforces from the measured rate, and no step is entered until usage has stayed over the
     target for `min_step_dwell_intervals` with every held cap reported applied; then steps take
@@ -698,6 +700,8 @@ Measurement only: the policy rules and the decision snapshot do not change.
     holds. An `own_over_target` hold restarts neither the scale-up interval nor CPU stability.
   - `YieldCause::OwnOverTarget` joins the catalog and the guarantees table, with reversal code
     `step_reversed_own_usage_fell`, the drain-permission matches and the reconcile reseed.
+    `ResourceContentionReport.cause_summary` (optional, skipped when empty) counts steps by cause,
+    so `status` shows `own_over_target` apart.
 - **CedeGrid's own cost** (FR-059, FR-069, SC-014):
   - The agent measures its own CPU (process clock) and its supervisors' (verified children) as
     `Snapshot.cedegrid_cpu_lower_millicores`, per interval and over the window. The policy
