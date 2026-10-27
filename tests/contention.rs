@@ -2457,6 +2457,40 @@ mod ramp {
             .map(|i| i as u64 * INTERVAL)
     }
 
+    /// One heartbeat takes at most 32 new assignments in every mode, and a
+    /// 16-task scope still fills in one Performance heartbeat (FR-034).
+    #[test]
+    fn a_heartbeat_takes_at_most_32_new_assignments() {
+        assert_eq!(cedegrid::agent::LAUNCHES_PER_HEARTBEAT, 32);
+        for fill in [false, true] {
+            for max_workers in [1, 16, 32, 33, 150] {
+                for active in 0..=max_workers {
+                    for admitted in [0, active, max_workers] {
+                        for may_grow in [false, true] {
+                            let slots = launch_slots(LaunchPacing {
+                                max_workers,
+                                active,
+                                admitted,
+                                may_grow,
+                                fill,
+                            });
+                            assert!(slots <= 32 && slots <= max_workers - active);
+                        }
+                    }
+                }
+            }
+        }
+        let idle = |max_workers| LaunchPacing {
+            max_workers,
+            active: 0,
+            admitted: 0,
+            may_grow: true,
+            fill: true,
+        };
+        assert_eq!(launch_slots(idle(16)), 16);
+        assert_eq!(launch_slots(idle(150)), 32);
+    }
+
     /// On an idle host, Performance reaches 90% of available CPU minus the margin
     /// within 10 s, the new defaults (SC-004).
     #[test]

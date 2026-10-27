@@ -27,6 +27,7 @@ dist/
 # Private development evidence and retained failed test fixtures.
 /docs/work-log.md
 /.distributed-service-*/
+/.launch-burst-*/
 
 # SDK build dependencies and package archives.
 /npm/node_modules/

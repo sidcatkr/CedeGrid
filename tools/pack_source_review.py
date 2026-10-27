@@ -163,6 +163,7 @@ ALLOWLIST = (
     'tests/gpu_native.rs',
     'tests/history_overhead.rs',
     'tests/kernel.rs',
+    'tests/launch_burst.rs',
     'tests/managed_children.rs',
     'tests/managed_supervision.rs',
     'tests/namespace.rs',

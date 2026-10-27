@@ -49,7 +49,7 @@ use report::*;
 pub use service::envelope_exceeded;
 pub use service::restrict_gpu_scope;
 pub use service::run;
-pub use service::{LaunchPacing, launch_slots};
+pub use service::{LAUNCHES_PER_HEARTBEAT, LaunchPacing, launch_slots};
 pub use supervisor::assignment_supervisor;
 use supervisor::*;
 
@@ -1623,5 +1623,55 @@ mod drain_tests {
             new_drains(more.iter().map(|(k, v)| (k, *v)), &mut counted),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::service::{lease_order, lease_turn, needs_pin};
+    use std::time::{Duration, Instant};
+
+    /// Lease requests go out longest waiting first, whatever kind they are.
+    #[test]
+    fn lease_requests_go_out_longest_waiting_first() {
+        let now = Instant::now();
+        let mut waiting = vec![
+            (now, "renewal due now".to_string()),
+            (
+                now - Duration::from_millis(900),
+                "authorization".to_string(),
+            ),
+            (
+                now - Duration::from_millis(300),
+                "older renewal".to_string(),
+            ),
+        ];
+        lease_order(&mut waiting);
+        let order: Vec<&str> = waiting.iter().map(|(_, id)| id.as_str()).collect();
+        assert_eq!(order, ["authorization", "older renewal", "renewal due now"]);
+    }
+
+    /// Requests share half the monitor interval, and the longest-waiting one
+    /// always goes, so an iteration stays bounded and requests still progress.
+    #[test]
+    fn lease_requests_stop_at_the_budget_but_the_first_always_goes() {
+        let budget = Duration::from_millis(250);
+        assert!(lease_turn(0, Duration::from_secs(5), budget));
+        assert!(lease_turn(3, Duration::from_millis(100), budget));
+        assert!(!lease_turn(1, Duration::from_millis(250), budget));
+        assert!(!lease_turn(4, Duration::from_millis(400), budget));
+    }
+
+    /// A running slot with nothing new to publish takes no attempt pin; a released
+    /// result, a new checkpoint head or an unreadable head does.
+    #[test]
+    fn only_a_possible_publication_takes_an_attempt_pin() {
+        assert!(!needs_pin(false, false, Some(None), None));
+        assert!(needs_pin(false, true, Some(None), None));
+        assert!(!needs_pin(true, false, Some(None), None));
+        assert!(!needs_pin(true, false, Some(Some("a")), Some("a")));
+        assert!(needs_pin(true, false, Some(Some("b")), Some("a")));
+        assert!(needs_pin(true, false, Some(Some("a")), None));
+        assert!(needs_pin(true, false, None, Some("a")));
     }
 }

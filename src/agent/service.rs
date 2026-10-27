@@ -15,16 +15,57 @@ pub struct LaunchPacing {
     pub fill: bool,
 }
 
+/// New assignments one heartbeat may take in any mode. Each needs a launch and an initial
+/// authorization; 32 still fills a 16-task scope in one Performance heartbeat (research R19).
+pub const LAUNCHES_PER_HEARTBEAT: usize = 32;
+
+/// Launch preparations that run at once on the blocking pool; each makes synced writes.
+const LAUNCH_CONCURRENCY: usize = 4;
+
 /// How many new assignments one heartbeat may take. Parallelism grows by one
 /// worker per CPU and RAM cooldown, except in Performance, where one heartbeat may
-/// fill every free worker slot so the coordinator admits all that fits within the
-/// allowance (FR-034).
+/// fill free worker slots so the coordinator admits what fits within the
+/// allowance (FR-034), up to [`LAUNCHES_PER_HEARTBEAT`].
 pub fn launch_slots(pacing: LaunchPacing) -> usize {
-    let free = pacing.max_workers.saturating_sub(pacing.active);
+    let free = pacing
+        .max_workers
+        .saturating_sub(pacing.active)
+        .min(LAUNCHES_PER_HEARTBEAT);
     if pacing.fill && pacing.may_grow {
         free
     } else {
         free.min(pacing.admitted.saturating_sub(pacing.active) + usize::from(pacing.may_grow))
+    }
+}
+
+/// Waiting lease requests, longest waiting first.
+pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
+    waiting.sort();
+}
+
+/// Whether one more lease request goes out this iteration: the longest-waiting one always
+/// does, the rest while the budget lasts.
+pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bool {
+    sent == 0 || elapsed < budget
+}
+
+/// Whether a slot's publication check takes an attempt pin, which costs a state connection
+/// and two synced writes: for a released result, or for a checkpoint head that is unreadable
+/// (the pinned path reports it) or not yet published. `head` is the head's hash, `None` when
+/// it could not be read.
+pub(super) fn needs_pin(
+    checkpoint: bool,
+    released: bool,
+    head: Option<Option<&str>>,
+    published: Option<&str>,
+) -> bool {
+    if !checkpoint {
+        return released;
+    }
+    match head {
+        None => true,
+        Some(None) => false,
+        Some(Some(hash)) => published != Some(hash),
     }
 }
 
@@ -61,6 +102,8 @@ struct AgentLoop<'a> {
     floor_warnings: BTreeSet<String>,
     /// Whether the first sample passed the host-dependent configuration checks.
     host_checked: bool,
+    /// Bounds the launch preparations that run at once.
+    launch_gate: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl AgentLoop<'_> {
@@ -134,7 +177,12 @@ impl AgentLoop<'_> {
     /// publication and reaping, one pass over every owned slot.
     async fn service_slots(&mut self) -> Result<()> {
         let config = self.config;
-        for slot in self.slots.values_mut() {
+        let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
+        let mut records = BTreeMap::new();
+        // Lease requests wait in one queue, longest waiting first: an authorization since
+        // its launch, a renewal since it fell due.
+        let mut waiting = Vec::new();
+        for (id, slot) in self.slots.iter_mut() {
             let supervisor_exited = slot.child.exited()?.is_some();
             slot.exited = supervisor_exited;
             while let Ok(event) = slot.events.try_recv() {
@@ -185,11 +233,62 @@ impl AgentLoop<'_> {
                     }
                 }
             }
-            if let Some(record) = slot
-                .prepared
-                .as_ref()
-                .filter(|_| slot.sequence == 0 && !supervisor_exited)
-            {
+            let record = self
+                .store
+                .execution_record(&slot.assignment.request.assignment_id)?;
+            ensure!(
+                !config.storage_profile.is_replayable()
+                    || record.is_some()
+                    || (!supervisor_exited && slot.prepared.is_none() && slot.sequence == 0),
+                "replayable execution journal lost an owned attempt; reservation remains uncertain until authenticated recovery"
+            );
+            if supervisor_exited && record.is_none() {
+                // The only route to EXEC first persists an execution row. An
+                // exited owned supervisor with no row could not authorize code.
+                let id = slot.assignment.request.assignment_id.clone();
+                let pair = (
+                    slot.assignment.clone(),
+                    "owned supervisor exited before reservation/authorization".to_string(),
+                );
+                let proof = config.state_dir.join("refusals").join(format!("{id}.json"));
+                if !proof.exists() {
+                    write_json_new(&proof, &pair)?;
+                }
+                self.refusals.insert(id, pair);
+                slot.reported = true;
+                continue;
+            }
+            let running = record.as_ref().is_some_and(|r| {
+                matches!(
+                    r.phase,
+                    ExecutionPhase::Authorized | ExecutionPhase::Running
+                )
+            });
+            if slot.prepared.is_some() && slot.sequence == 0 && !supervisor_exited {
+                waiting.push((slot.started_at, id.clone()));
+            } else if running && slot.sequence > 0 && slot.last_renew.elapsed() >= interval {
+                waiting.push((slot.last_renew + interval, id.clone()));
+            }
+            records.insert(id.clone(), record);
+        }
+        // Requests run one at a time and each costs a synced coordinator write, so they share
+        // half the monitor interval; the rest wait for the next iteration (research R19).
+        lease_order(&mut waiting);
+        let started = Instant::now();
+        let budget = Duration::from_millis(config.monitor.interval_ms / 2);
+        let mut sent = 0;
+        for (_, id) in waiting {
+            if !lease_turn(sent, started.elapsed(), budget) {
+                break;
+            }
+            sent += 1;
+            let Some(slot) = self.slots.get_mut(&id) else {
+                continue;
+            };
+            if slot.sequence == 0 {
+                let Some(record) = slot.prepared.clone() else {
+                    continue;
+                };
                 let requested = Instant::now();
                 match self
                     .client
@@ -225,45 +324,8 @@ impl AgentLoop<'_> {
                         )?;
                     }
                 }
-            }
-            let record = self
-                .store
-                .execution_record(&slot.assignment.request.assignment_id)?;
-            ensure!(
-                !config.storage_profile.is_replayable()
-                    || record.is_some()
-                    || (!supervisor_exited && slot.prepared.is_none() && slot.sequence == 0),
-                "replayable execution journal lost an owned attempt; reservation remains uncertain until authenticated recovery"
-            );
-            if supervisor_exited && record.is_none() {
-                // The only route to EXEC first persists an execution row. An
-                // exited owned supervisor with no row could not authorize code.
-                let id = slot.assignment.request.assignment_id.clone();
-                let pair = (
-                    slot.assignment.clone(),
-                    "owned supervisor exited before reservation/authorization".to_string(),
-                );
-                let proof = config.state_dir.join("refusals").join(format!("{id}.json"));
-                if !proof.exists() {
-                    write_json_new(&proof, &pair)?;
-                }
-                self.refusals.insert(id, pair);
-                slot.reported = true;
-                continue;
-            }
-            let running = record.as_ref().is_some_and(|r| {
-                matches!(
-                    r.phase,
-                    ExecutionPhase::Authorized | ExecutionPhase::Running
-                )
-            });
-            if running
-                && slot.sequence > 0
-                && slot.last_renew.elapsed()
-                    >= Duration::from_millis(config.lifecycle.heartbeat_interval_ms)
-            {
+            } else {
                 let requested = Instant::now();
-                let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
                 let due = next_control_due(&mut slot.last_renew, interval);
                 match self
                     .client
@@ -303,12 +365,43 @@ impl AgentLoop<'_> {
                     }
                 }
             }
+        }
+        for (id, slot) in self.slots.iter_mut() {
+            // A slot refused above has no record entry and needs nothing more this interval.
+            let Some(record) = records.remove(id) else {
+                continue;
+            };
+            let supervisor_exited = slot.exited;
             for checkpoint in [true, false] {
                 let id = slot.assignment.request.assignment_id.clone();
                 if self.publishing.contains(&(id.clone(), checkpoint))
                     || slot.reported
                     || (checkpoint && self.publishing.contains(&(id.clone(), false)))
                 {
+                    continue;
+                }
+                let released = record
+                    .as_ref()
+                    .is_some_and(|r| r.phase == ExecutionPhase::Released);
+                // The checkpoint head's hash, `None` when it cannot be read.
+                let head = if checkpoint {
+                    crate::publication::read_head(&self.store, &slot.output_dir, "checkpoint")
+                        .ok()
+                        .map(|bytes| {
+                            bytes.map(|bytes| {
+                                use sha2::{Digest, Sha256};
+                                hex::encode(Sha256::digest(bytes))
+                            })
+                        })
+                } else {
+                    Some(None)
+                };
+                if !needs_pin(
+                    checkpoint,
+                    released,
+                    head.as_ref().map(|hash| hash.as_deref()),
+                    slot.checkpoint_hash.as_deref(),
+                ) {
                     continue;
                 }
                 let publication_pin =
@@ -374,6 +467,12 @@ impl AgentLoop<'_> {
                         }
                         if has_descriptor { /* Native immutable result committed before a racing drain. */
                         } else {
+                            // A failure report is a synced coordinator write too; it waits
+                            // for the next iteration once the budget is spent.
+                            if !lease_turn(sent, started.elapsed(), budget) {
+                                continue;
+                            }
+                            sent += 1;
                             if matches!(
                                 self.client
                                     .request(&Request::Fail {
@@ -980,7 +1079,14 @@ impl AgentLoop<'_> {
                     }
                 }
                 let mut acknowledged = vec![];
-                for (id, (assignment, detail)) in &self.refusals {
+                // Refusal reports share half the monitor interval, like lease requests; the
+                // rest are reported at the next heartbeat (research R19).
+                let reports_started = Instant::now();
+                let budget = Duration::from_millis(config.monitor.interval_ms / 2);
+                for (reported, (id, (assignment, detail))) in self.refusals.iter().enumerate() {
+                    if !lease_turn(reported, reports_started.elapsed(), budget) {
+                        break;
+                    }
                     let yielded = fs::read(
                         config
                             .state_dir
@@ -1024,16 +1130,13 @@ impl AgentLoop<'_> {
                 for id in acknowledged {
                     self.refusals.remove(&id);
                 }
+                let journaled = self.store.executions()?;
                 for assignment in reply.assignments {
                     let id = assignment.request.assignment_id.clone();
                     if remote_drains.contains(&id)
                         && !self.slots.contains_key(&id)
                         && !self.preparations.contains_key(&id)
-                        && !self
-                            .store
-                            .executions()?
-                            .iter()
-                            .any(|r| r.assignment_id == id)
+                        && !journaled.iter().any(|r| r.assignment_id == id)
                     {
                         ensure!(
                             !config.storage_profile.is_replayable(),
@@ -1066,22 +1169,30 @@ impl AgentLoop<'_> {
                     let task_snapshot = snapshot.clone();
                     let task_executable = executable.to_path_buf();
                     let task_client = self.client.clone();
-                    let handle = tokio::spawn(async move {
-                        validate_gpu_launch_contract(
-                            &task_config,
-                            &task_snapshot,
-                            &task_assignment.request.resources,
-                            task_assignment.request.class,
-                        )?;
-                        start_assignment(
-                            &task_config,
-                            &task_agent,
-                            task_assignment,
-                            &task_capacity,
-                            &task_executable,
-                            &task_client,
-                        )
-                        .await
+                    // A launch blocks on synced writes and the spawn; on the blocking pool it
+                    // cannot hold up this current-thread loop, and the gate bounds how many
+                    // write at once (research R19).
+                    let runtime = tokio::runtime::Handle::current();
+                    let gate = self.launch_gate.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        runtime.block_on(async move {
+                            let _permit = gate.acquire().await?;
+                            validate_gpu_launch_contract(
+                                &task_config,
+                                &task_snapshot,
+                                &task_assignment.request.resources,
+                                task_assignment.request.class,
+                            )?;
+                            start_assignment(
+                                &task_config,
+                                &task_agent,
+                                task_assignment,
+                                &task_capacity,
+                                &task_executable,
+                                &task_client,
+                            )
+                            .await
+                        })
                     });
                     self.preparations.insert(id, (assignment, handle, false));
                     if active >= self.admitted_parallelism {
@@ -1345,6 +1456,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         counted_drains: BTreeSet::new(),
         floor_warnings: BTreeSet::new(),
         host_checked: false,
+        launch_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(LAUNCH_CONCURRENCY)),
     };
     for slot in attached {
         state
