@@ -437,5 +437,6 @@ pub(super) async fn start_assignment(
         sent_steps: BTreeMap::new(),
         sent_allowance: None,
         seed: None,
+        journal_seen: None,
     })
 }

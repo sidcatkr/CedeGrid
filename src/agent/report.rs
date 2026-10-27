@@ -29,16 +29,26 @@ pub fn advertised_controls(config: &Config, cpu_affinity: bool) -> Vec<String> {
 #[derive(Debug, Default)]
 pub(super) struct NegotiatedFeatures {
     pub(super) contention: bool,
+    /// Lease requests go as one batch per iteration (FR-074).
+    pub(super) lease_batch: bool,
 }
 
 impl NegotiatedFeatures {
     pub(super) fn learn(&mut self, reply: &HeartbeatReply) {
         self.contention = reply.features.iter().any(|f| f == FEATURE_CONTENTION);
+        self.lease_batch = reply.features.iter().any(|f| f == FEATURE_LEASE_BATCH);
     }
 
     /// A rejected or failed heartbeat may come from a restarted older coordinator.
     pub(super) fn forget(&mut self) {
         self.contention = false;
+        self.lease_batch = false;
+    }
+
+    /// A refused batch may come from a restarted older coordinator: single requests until the
+    /// next reply advertises batches again.
+    pub(super) fn forget_lease_batch(&mut self) {
+        self.lease_batch = false;
     }
 
     pub(super) fn apply(

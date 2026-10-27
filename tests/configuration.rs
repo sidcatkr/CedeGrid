@@ -1528,6 +1528,30 @@ fn thresholds_mark_compute_by_resource_kind_on_every_path() {
     }
 }
 
+/// A lease batch and its reply parse and round-trip exactly (FR-074).
+#[test]
+fn lease_batch_cases_round_trip() {
+    use cedegrid::protocol::{Request, Response};
+    for case in contract()["lease_batch_cases"].as_array().unwrap() {
+        let request: Request = serde_json::from_value(case["request"].clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            case["request"],
+            "{}",
+            case["id"]
+        );
+        let response: Response = serde_json::from_value(case["response"].clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            case["response"],
+            "{}",
+            case["id"]
+        );
+    }
+}
+
 /// A negotiated heartbeat with per-resource admission, held-back amounts,
 /// allocation readiness and the worker limit parses and round-trips; the 0.2
 /// report fixture still parses (FR-032).

@@ -43,6 +43,106 @@ pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
     waiting.sort();
 }
 
+/// One iteration's lease batches: renewals first, earliest deadline first, then initial
+/// authorizations, longest waiting first, each batch at most `MAX_LEASE_BATCH_ITEMS` items and
+/// `MAX_LEASE_BATCH_BYTES` (FR-074). A renewal's instant is its last renewal, so its deadline.
+pub(super) fn lease_batches(
+    mut renewals: Vec<(Instant, LeaseItem)>,
+    mut initial: Vec<(Instant, LeaseItem)>,
+) -> Vec<Vec<LeaseItem>> {
+    renewals.sort_by_key(|(at, _)| *at);
+    initial.sort_by_key(|(at, _)| *at);
+    let mut batches: Vec<Vec<LeaseItem>> = Vec::new();
+    let mut bytes = 0usize;
+    for (_, item) in renewals.into_iter().chain(initial) {
+        let size = serde_json::to_vec(&item).map_or(MAX_LEASE_BATCH_BYTES, |json| json.len());
+        let full = batches.last().is_none_or(|batch| {
+            batch.len() >= MAX_LEASE_BATCH_ITEMS || bytes + size > MAX_LEASE_BATCH_BYTES
+        });
+        if full {
+            batches.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += size;
+        if let Some(batch) = batches.last_mut() {
+            batch.push(item);
+        }
+    }
+    batches
+}
+
+/// A batch item's result as the single request's, so its events keep their bytes.
+pub(super) fn item_result(result: LeaseResult) -> Result<Response> {
+    match result {
+        LeaseResult::Lease { lease } => Ok(Response::Lease { lease }),
+        LeaseResult::Error { message } => {
+            Err(anyhow::anyhow!("coordinator rejected request: {message}"))
+        }
+    }
+}
+
+/// An initial authorization's reply: the lease goes to the supervisor, anything else is
+/// reported.
+fn authorization_reply(
+    slot: &mut ChildSlot,
+    requested: Instant,
+    result: Result<Response>,
+) -> Result<()> {
+    match result {
+        Ok(Response::Lease { lease }) => {
+            let remaining_ms = lease
+                .valid_for_ms
+                .saturating_sub(requested.elapsed().as_millis() as u64);
+            if remaining_ms > 0 {
+                let seq = lease.sequence;
+                let _ = send(
+                    slot,
+                    &Control::Authorize {
+                        lease,
+                        expires_monotonic_ms: local_clock_ms()?.saturating_add(remaining_ms),
+                    },
+                );
+                slot.sequence = seq;
+                slot.last_renew = Instant::now();
+            }
+        }
+        result => {
+            emit(
+                &serde_json::json!({"event":"authorization_unavailable","assignment_id":slot.assignment.request.assignment_id,"detail":format!("{result:?}")}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// A renewal's reply: the lease goes to the supervisor, anything else is reported.
+fn renewal_reply(slot: &mut ChildSlot, requested: Instant, result: Result<Response>) -> Result<()> {
+    match result {
+        Ok(Response::Lease { lease }) => {
+            let remaining_ms = lease
+                .valid_for_ms
+                .saturating_sub(requested.elapsed().as_millis() as u64);
+            if remaining_ms > 0 {
+                let seq = lease.sequence;
+                let _ = send(
+                    slot,
+                    &Control::Renewal {
+                        lease,
+                        expires_monotonic_ms: local_clock_ms()?.saturating_add(remaining_ms),
+                    },
+                );
+                slot.sequence = seq;
+            }
+        }
+        result => {
+            emit(
+                &serde_json::json!({"event":"lease_unavailable","assignment_id":slot.assignment.request.assignment_id,"detail":format!("{result:?}")}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether one more lease request goes out this iteration: the longest-waiting one always
 /// does, the rest while the budget lasts.
 pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bool {
@@ -182,10 +282,14 @@ impl AgentLoop<'_> {
         // Lease requests wait in one queue, longest waiting first: an authorization since
         // its launch, a renewal since it fell due.
         let mut waiting = Vec::new();
+        let key = self.store.change_key()?;
         for (id, slot) in self.slots.iter_mut() {
             let supervisor_exited = slot.child.exited()?.is_some();
+            // A slot with no new event and an unchanged journal needs no new read.
+            let mut fresh = slot.exited != supervisor_exited;
             slot.exited = supervisor_exited;
             while let Ok(event) = slot.events.try_recv() {
+                fresh = true;
                 match event {
                     Ok(Event::Prepared { record }) => {
                         self.collector.prime(std::slice::from_ref(&record));
@@ -233,9 +337,24 @@ impl AgentLoop<'_> {
                     }
                 }
             }
-            let record = self
-                .store
-                .execution_record(&slot.assignment.request.assignment_id)?;
+            let record = match slot
+                .journal_seen
+                .as_ref()
+                .filter(|seen| !fresh && seen.key == key)
+            {
+                Some(seen) => seen.record.clone(),
+                None => {
+                    let record = self
+                        .store
+                        .execution_record(&slot.assignment.request.assignment_id)?;
+                    slot.journal_seen = Some(JournalSeen {
+                        key,
+                        record: record.clone(),
+                        head: None,
+                    });
+                    record
+                }
+            };
             ensure!(
                 !config.storage_profile.is_replayable()
                     || record.is_some()
@@ -277,92 +396,138 @@ impl AgentLoop<'_> {
         let started = Instant::now();
         let budget = Duration::from_millis(config.monitor.interval_ms / 2);
         let mut sent = 0;
-        for (_, id) in waiting {
-            if !lease_turn(sent, started.elapsed(), budget) {
-                break;
-            }
-            sent += 1;
-            let Some(slot) = self.slots.get_mut(&id) else {
-                continue;
-            };
-            if slot.sequence == 0 {
-                let Some(record) = slot.prepared.clone() else {
+        if self.negotiated.lease_batch {
+            // One request per batch, served in one coordinator transaction (FR-074).
+            let mut renewals = Vec::new();
+            let mut initial = Vec::new();
+            for (_, id) in &waiting {
+                let Some(slot) = self.slots.get(id) else {
                     continue;
                 };
-                let requested = Instant::now();
-                match self
-                    .client
-                    .request(&Request::Prepared {
-                        assignment_id: record.assignment_id.clone(),
-                        generation: record.generation,
-                        coordinator_epoch: slot.assignment.coordinator_epoch,
-                        record: record.clone(),
-                    })
-                    .await
-                {
-                    Ok(Response::Lease { lease }) => {
-                        let remaining_ms = lease
-                            .valid_for_ms
-                            .saturating_sub(requested.elapsed().as_millis() as u64);
-                        if remaining_ms > 0 {
-                            let seq = lease.sequence;
-                            let _ = send(
-                                slot,
-                                &Control::Authorize {
-                                    lease,
-                                    expires_monotonic_ms: local_clock_ms()?
-                                        .saturating_add(remaining_ms),
-                                },
-                            );
-                            slot.sequence = seq;
-                            slot.last_renew = Instant::now();
-                        }
-                    }
-                    result => {
-                        emit(
-                            &serde_json::json!({"event":"authorization_unavailable","assignment_id":slot.assignment.request.assignment_id,"detail":format!("{result:?}")}),
-                        )?;
-                    }
-                }
-            } else {
-                let requested = Instant::now();
-                let due = next_control_due(&mut slot.last_renew, interval);
-                match self
-                    .client
-                    .request_control(
-                        &Request::Renew {
+                if slot.sequence == 0 {
+                    let Some(record) = slot.prepared.clone() else {
+                        continue;
+                    };
+                    initial.push((
+                        slot.started_at,
+                        LeaseItem::Prepared {
+                            assignment_id: record.assignment_id.clone(),
+                            generation: record.generation,
+                            coordinator_epoch: slot.assignment.coordinator_epoch,
+                            record: Box::new(record),
+                        },
+                    ));
+                } else {
+                    renewals.push((
+                        slot.last_renew,
+                        LeaseItem::Renew {
                             assignment_id: slot.assignment.request.assignment_id.clone(),
                             generation: slot.assignment.generation,
                             coordinator_epoch: slot.assignment.coordinator_epoch,
                             previous_sequence: slot.sequence,
                         },
-                        due,
-                        interval,
-                    )
-                    .await
-                {
-                    Ok(Response::Lease { lease }) => {
-                        let remaining_ms = lease
-                            .valid_for_ms
-                            .saturating_sub(requested.elapsed().as_millis() as u64);
-                        if remaining_ms > 0 {
-                            let seq = lease.sequence;
-                            let _ = send(
-                                slot,
-                                &Control::Renewal {
-                                    lease,
-                                    expires_monotonic_ms: local_clock_ms()?
-                                        .saturating_add(remaining_ms),
-                                },
-                            );
-                            slot.sequence = seq;
+                    ));
+                }
+            }
+            for batch in lease_batches(renewals, initial) {
+                if !lease_turn(sent, started.elapsed(), budget) {
+                    break;
+                }
+                sent += 1;
+                let mut dues = BTreeMap::new();
+                for item in &batch {
+                    if let LeaseItem::Renew { assignment_id, .. } = item
+                        && let Some(slot) = self.slots.get_mut(assignment_id)
+                    {
+                        dues.insert(
+                            assignment_id.clone(),
+                            next_control_due(&mut slot.last_renew, interval),
+                        );
+                    }
+                }
+                let requested = Instant::now();
+                match self.client.request_leases(&batch, &dues, interval).await {
+                    Ok(Response::Leases { results }) if results.len() == batch.len() => {
+                        for (item, result) in batch.iter().zip(results) {
+                            let Some(slot) = self.slots.get_mut(item.assignment_id()) else {
+                                continue;
+                            };
+                            match item {
+                                LeaseItem::Prepared { .. } => {
+                                    authorization_reply(slot, requested, item_result(result))?
+                                }
+                                LeaseItem::Renew { .. } => {
+                                    renewal_reply(slot, requested, item_result(result))?
+                                }
+                            }
                         }
                     }
-                    result => {
-                        emit(
-                            &serde_json::json!({"event":"lease_unavailable","assignment_id":slot.assignment.request.assignment_id,"detail":format!("{result:?}")}),
-                        )?;
+                    other => {
+                        // A refused batch may come from an older coordinator: single requests
+                        // from the next iteration. Each item reads as a request that met it.
+                        let refused = match &other {
+                            Ok(_) => true,
+                            Err(error) => {
+                                format!("{error:#}").contains("coordinator rejected request")
+                            }
+                        };
+                        if refused {
+                            self.negotiated.forget_lease_batch();
+                        }
+                        let detail = format!("{other:?}");
+                        for item in &batch {
+                            let event = match item {
+                                LeaseItem::Prepared { .. } => "authorization_unavailable",
+                                LeaseItem::Renew { .. } => "lease_unavailable",
+                            };
+                            emit(
+                                &serde_json::json!({"event":event,"assignment_id":item.assignment_id(),"detail":detail}),
+                            )?;
+                        }
                     }
+                }
+            }
+        } else {
+            for (_, id) in waiting {
+                if !lease_turn(sent, started.elapsed(), budget) {
+                    break;
+                }
+                sent += 1;
+                let Some(slot) = self.slots.get_mut(&id) else {
+                    continue;
+                };
+                if slot.sequence == 0 {
+                    let Some(record) = slot.prepared.clone() else {
+                        continue;
+                    };
+                    let requested = Instant::now();
+                    let result = self
+                        .client
+                        .request(&Request::Prepared {
+                            assignment_id: record.assignment_id.clone(),
+                            generation: record.generation,
+                            coordinator_epoch: slot.assignment.coordinator_epoch,
+                            record: record.clone(),
+                        })
+                        .await;
+                    authorization_reply(slot, requested, result)?;
+                } else {
+                    let requested = Instant::now();
+                    let due = next_control_due(&mut slot.last_renew, interval);
+                    let result = self
+                        .client
+                        .request_control(
+                            &Request::Renew {
+                                assignment_id: slot.assignment.request.assignment_id.clone(),
+                                generation: slot.assignment.generation,
+                                coordinator_epoch: slot.assignment.coordinator_epoch,
+                                previous_sequence: slot.sequence,
+                            },
+                            due,
+                            interval,
+                        )
+                        .await;
+                    renewal_reply(slot, requested, result)?;
                 }
             }
         }
@@ -385,14 +550,32 @@ impl AgentLoop<'_> {
                     .is_some_and(|r| r.phase == ExecutionPhase::Released);
                 // The checkpoint head's hash, `None` when it cannot be read.
                 let head = if checkpoint {
-                    crate::publication::read_head(&self.store, &slot.output_dir, "checkpoint")
-                        .ok()
-                        .map(|bytes| {
-                            bytes.map(|bytes| {
-                                use sha2::{Digest, Sha256};
-                                hex::encode(Sha256::digest(bytes))
-                            })
-                        })
+                    let seen = slot
+                        .journal_seen
+                        .as_ref()
+                        .filter(|seen| seen.key == key)
+                        .and_then(|seen| seen.head.clone());
+                    match seen {
+                        Some(head) => head,
+                        None => {
+                            let head = crate::publication::read_head(
+                                &self.store,
+                                &slot.output_dir,
+                                "checkpoint",
+                            )
+                            .ok()
+                            .map(|bytes| {
+                                bytes.map(|bytes| {
+                                    use sha2::{Digest, Sha256};
+                                    hex::encode(Sha256::digest(bytes))
+                                })
+                            });
+                            if let Some(seen) = slot.journal_seen.as_mut() {
+                                seen.head = Some(head.clone());
+                            }
+                            head
+                        }
+                    }
                 } else {
                     Some(None)
                 };

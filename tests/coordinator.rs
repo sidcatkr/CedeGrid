@@ -3243,7 +3243,10 @@ fn heartbeat_reply_advertises_contention_features() {
     let d = dir();
     let mut c = Coordinator::open(config(d.path())).unwrap();
     setup(&mut c, &["task"], 100);
-    assert_eq!(offers(&mut c, 100).features, ["api/1", "contention/1"]);
+    assert_eq!(
+        offers(&mut c, 100).features,
+        ["api/1", "contention/1", "lease_batch/1"]
+    );
 }
 
 #[test]
@@ -4270,4 +4273,142 @@ fn status_shows_each_nodes_contention_summary() {
     let summary = &node("other")["contention"];
     assert_eq!(summary["resources"]["cpu"]["admission"]["state"], "open");
     assert_eq!(summary["resources"]["cpu"]["held_back"]["margin"], 100);
+}
+
+/// One batch of renewals and initial authorizations per agent iteration, served in one
+/// transaction with a result per item (FR-074).
+mod lease_batches {
+    use super::*;
+
+    fn prepared_item(a: &Assignment, record: ExecutionRecord) -> LeaseItem {
+        LeaseItem::Prepared {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            coordinator_epoch: a.coordinator_epoch,
+            record: Box::new(record),
+        }
+    }
+
+    fn renew_item(a: &Assignment, previous_sequence: u64) -> LeaseItem {
+        LeaseItem::Renew {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            coordinator_epoch: a.coordinator_epoch,
+            previous_sequence,
+        }
+    }
+
+    fn batch(c: &mut Coordinator, items: Vec<LeaseItem>, now: u64) -> Vec<LeaseResult> {
+        let Response::Leases { results } = c
+            .handle_at(&node(), Request::Leases { items }, now)
+            .unwrap()
+        else {
+            panic!("not a lease batch reply")
+        };
+        results
+    }
+
+    fn sequence(result: &LeaseResult) -> u64 {
+        match result {
+            LeaseResult::Lease { lease } => lease.sequence,
+            LeaseResult::Error { message } => panic!("refused: {message}"),
+        }
+    }
+
+    #[test]
+    fn a_batch_gets_one_result_per_item_and_a_refusal_affects_only_its_item() {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        setup(&mut c, &["t0", "t1"], 100);
+        let offered = offers(&mut c, 100).assignments;
+        let (a0, a1) = (&offered[0], &offered[1]);
+        assert_eq!(authorize(&mut c, a0, 100).sequence, 1);
+        // An initial authorization and a renewal, results in the items' positions.
+        let results = batch(
+            &mut c,
+            vec![prepared_item(a1, prepared(a1)), renew_item(a0, 1)],
+            1000,
+        );
+        assert_eq!(results.len(), 2);
+        assert_eq!(sequence(&results[0]), 1);
+        assert_eq!(sequence(&results[1]), 2);
+        // A refused item beside a renewal: the renewal is served, the refusal reported.
+        let mut changed = prepared(a1);
+        changed.resources.cpu_millicores += 1;
+        let results = batch(
+            &mut c,
+            vec![prepared_item(a1, changed), renew_item(a0, 2)],
+            1500,
+        );
+        match &results[0] {
+            LeaseResult::Error { message } => {
+                assert!(
+                    message.contains("prepared resources/task changed"),
+                    "{message}"
+                )
+            }
+            other => panic!("changed record authorized: {other:?}"),
+        }
+        assert_eq!(sequence(&results[1]), 3);
+    }
+
+    #[test]
+    fn a_failed_grant_inside_a_batch_keeps_its_preparation_record() {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        setup(&mut c, &["task"], 100);
+        let a = offers(&mut c, 100).assignments.remove(0);
+        // No report for longer than the telemetry limit: the grant is refused for stale
+        // evidence after the preparation record was accepted.
+        let results = batch(&mut c, vec![prepared_item(&a, prepared(&a))], 5000);
+        match &results[0] {
+            LeaseResult::Error { message } => {
+                assert!(message.contains("fresh capacity evidence"), "{message}")
+            }
+            other => panic!("stale evidence authorized: {other:?}"),
+        }
+        // A later record with another identity is refused against the kept one.
+        offers(&mut c, 5001);
+        let mut record = prepared(&a);
+        record.identity.as_mut().unwrap().start_time += 1;
+        let results = batch(&mut c, vec![prepared_item(&a, record)], 5002);
+        match &results[0] {
+            LeaseResult::Error { message } => {
+                assert!(message.contains("identity/backend changed"), "{message}")
+            }
+            other => panic!("changed identity authorized: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_retried_batch_is_idempotent_per_item() {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        setup(&mut c, &["t0", "t1"], 100);
+        let offered = offers(&mut c, 100).assignments;
+        assert_eq!(authorize(&mut c, &offered[0], 100).sequence, 1);
+        let items = vec![
+            renew_item(&offered[0], 1),
+            prepared_item(&offered[1], prepared(&offered[1])),
+        ];
+        let first = batch(&mut c, items.clone(), 1000);
+        let again = batch(&mut c, items, 1100);
+        assert_eq!(
+            first.iter().map(sequence).collect::<Vec<_>>(),
+            again.iter().map(sequence).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_batch_above_its_item_limit_is_refused_whole() {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        setup(&mut c, &["task"], 100);
+        let a = offers(&mut c, 100).assignments.remove(0);
+        let items = vec![renew_item(&a, 0); MAX_LEASE_BATCH_ITEMS + 1];
+        assert!(
+            c.handle_at(&node(), Request::Leases { items }, 200)
+                .is_err()
+        );
+    }
 }

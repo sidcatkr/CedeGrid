@@ -8,6 +8,19 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 impl StateStore {
+    /// A key that moves whenever the journal may have changed: another connection's commit,
+    /// as a supervisor's, moves `data_version`, and this connection's writes move
+    /// `total_changes()`.
+    pub fn change_key(&self) -> Result<(i64, i64)> {
+        let version: i64 = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?;
+        let changes: i64 = self
+            .connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))?;
+        Ok((version, changes))
+    }
+
     /// Read one durable allocation after observing the owned supervisor lifecycle.
     pub fn execution_record(&self, assignment_id: &str) -> Result<Option<ExecutionRecord>> {
         let json: Option<String> = self

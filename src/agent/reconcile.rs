@@ -236,6 +236,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         sent_steps: BTreeMap::new(),
         sent_allowance: None,
         seed: None,
+        journal_seen: None,
     };
     send(&mut slot, &Control::Query)?;
     let deadline = Instant::now() + Duration::from_secs(2);

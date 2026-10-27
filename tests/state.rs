@@ -1773,3 +1773,22 @@ fn task_statuses_match_both_sdks() {
         assert_eq!(listed, names, "{file}");
     }
 }
+
+/// The journal's change key moves when another connection commits, as a supervisor does, and
+/// when this connection writes, so a slot pass may skip reads only while neither happened.
+#[test]
+fn the_journal_change_key_moves_on_any_commit() {
+    let dir = storage_dir();
+    let store = StateStore::open(dir.path()).unwrap();
+    let first = store.change_key().unwrap();
+    assert_eq!(store.change_key().unwrap(), first);
+    let other = Connection::open(dir.path().join(DATABASE_FILENAME)).unwrap();
+    other
+        .execute_batch("CREATE TABLE IF NOT EXISTS change_probe(x INTEGER)")
+        .unwrap();
+    let after_other = store.change_key().unwrap();
+    assert_ne!(after_other, first);
+    let (snapshot, decision) = observation();
+    store.append_observation(&snapshot, &decision).unwrap();
+    assert_ne!(store.change_key().unwrap(), after_other);
+}

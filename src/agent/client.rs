@@ -71,7 +71,6 @@ impl NodeClient {
         interval: Duration,
     ) -> Result<Response> {
         let started = Instant::now();
-        let lateness = started.saturating_duration_since(due);
         let evidence =
             std::env::var_os("CEDEGRID_RPC_EVIDENCE").as_deref() == Some(std::ffi::OsStr::new("1"));
         // The qualification mode supplies an explicit scheduled 10-second
@@ -94,16 +93,61 @@ impl NodeClient {
                 _ => "other",
             };
             let assignment = match request {
-                Request::Renew { assignment_id, .. } => Some(assignment_id),
+                Request::Renew { assignment_id, .. } => Some(assignment_id.as_str()),
                 _ => None,
             };
-            let finished = Instant::now();
             let success = result
                 .as_ref()
                 .is_ok_and(|r| !matches!(r, Response::Error { .. }));
-            emit(
-                &serde_json::json!({"event":"control_rpc","operation":operation,"assignment_id":assignment,"scheduled_due_monotonic_ms":local_clock_ms()?.saturating_sub(finished.saturating_duration_since(due).as_millis() as u64),"enqueued_late_ms":lateness.as_secs_f64()*1000.0,"elapsed_ms":finished.saturating_duration_since(due).as_secs_f64()*1000.0,"request_elapsed_ms":finished.duration_since(started).as_secs_f64()*1000.0,"missed_schedule_slots":lateness.as_millis()/interval.as_millis().max(1),"success":success,"deadline_ms":10000}),
-            )?;
+            control_evidence(operation, assignment, due, started, interval, success)?;
+        }
+        result
+    }
+    /// One lease batch on the control lane (FR-074). Under `CEDEGRID_RPC_EVIDENCE=1` each
+    /// renewal reports its `control_rpc` evidence as a single renewal would, so the counts do
+    /// not change.
+    pub(super) async fn request_leases(
+        &self,
+        items: &[LeaseItem],
+        dues: &BTreeMap<String, Instant>,
+        interval: Duration,
+    ) -> Result<Response> {
+        let started = Instant::now();
+        let evidence =
+            std::env::var_os("CEDEGRID_RPC_EVIDENCE").as_deref() == Some(std::ffi::OsStr::new("1"));
+        let request = Request::Leases {
+            items: items.to_vec(),
+        };
+        let result = match dues.values().min().filter(|_| evidence) {
+            Some(due) => tokio::time::timeout_at(
+                tokio::time::Instant::from_std(*due + Duration::from_secs(10)),
+                self.request(&request),
+            )
+            .await
+            .context("scheduled control RPC deadline exceeded")
+            .and_then(|r| r),
+            None => self.request(&request).await,
+        };
+        if evidence {
+            for (index, item) in items.iter().enumerate() {
+                if let LeaseItem::Renew { assignment_id, .. } = item
+                    && let Some(due) = dues.get(assignment_id)
+                {
+                    let success = matches!(
+                        &result,
+                        Ok(Response::Leases { results })
+                            if matches!(results.get(index), Some(LeaseResult::Lease { .. }))
+                    );
+                    control_evidence(
+                        "renew",
+                        Some(assignment_id),
+                        *due,
+                        started,
+                        interval,
+                        success,
+                    )?;
+                }
+            }
         }
         result
     }
@@ -149,6 +193,22 @@ impl NodeClient {
         }
         Ok(response)
     }
+}
+
+/// One control request's schedule evidence for the release gates.
+fn control_evidence(
+    operation: &str,
+    assignment: Option<&str>,
+    due: Instant,
+    started: Instant,
+    interval: Duration,
+    success: bool,
+) -> Result<()> {
+    let lateness = started.saturating_duration_since(due);
+    let finished = Instant::now();
+    emit(
+        &serde_json::json!({"event":"control_rpc","operation":operation,"assignment_id":assignment,"scheduled_due_monotonic_ms":local_clock_ms()?.saturating_sub(finished.saturating_duration_since(due).as_millis() as u64),"enqueued_late_ms":lateness.as_secs_f64()*1000.0,"elapsed_ms":finished.saturating_duration_since(due).as_secs_f64()*1000.0,"request_elapsed_ms":finished.duration_since(started).as_secs_f64()*1000.0,"missed_schedule_slots":lateness.as_millis()/interval.as_millis().max(1),"success":success,"deadline_ms":10000}),
+    )
 }
 
 pub(super) fn next_control_due(last: &mut Instant, interval: Duration) -> Instant {

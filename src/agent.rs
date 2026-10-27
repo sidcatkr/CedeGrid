@@ -483,6 +483,18 @@ struct ChildSlot {
     sent_allowance: Option<crate::model::ResourceAmounts>,
     /// Steps learned from a reattached supervisor, to seed the policy authority.
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
+    /// What the slot pass last read from the journal for this slot.
+    journal_seen: Option<JournalSeen>,
+}
+
+/// What the slot pass last read from the journal for a slot, at which change key; while the
+/// key holds and the slot delivered nothing new, the reads are not repeated.
+#[derive(Clone)]
+struct JournalSeen {
+    key: (i64, i64),
+    record: Option<ExecutionRecord>,
+    /// The checkpoint head's hash, once read: `None` inside when it could not be read.
+    head: Option<Option<Option<String>>>,
 }
 
 impl ChildSlot {
@@ -1425,6 +1437,23 @@ mod negotiation_tests {
                 .all(|field| value["allocations"][0].get(field).is_none())
     }
 
+    /// Lease batches go only to a coordinator that advertises them, and a refused batch turns
+    /// them off until the next reply advertises them again (FR-074).
+    #[test]
+    fn lease_batches_follow_the_coordinators_features() {
+        let mut negotiated = NegotiatedFeatures::default();
+        assert!(!negotiated.lease_batch);
+        negotiated.learn(&reply(&[FEATURE_API, FEATURE_CONTENTION]));
+        assert!(!negotiated.lease_batch);
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        assert!(negotiated.lease_batch && negotiated.contention);
+        negotiated.forget_lease_batch();
+        assert!(!negotiated.lease_batch && negotiated.contention);
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        negotiated.forget();
+        assert!(!negotiated.lease_batch && !negotiated.contention);
+    }
+
     #[test]
     fn new_fields_are_sent_only_after_the_coordinator_advertises_them() {
         let mut negotiated = NegotiatedFeatures::default();
@@ -1576,6 +1605,7 @@ mod drain_tests {
             sent_steps: BTreeMap::new(),
             sent_allowance: None,
             seed: None,
+            journal_seen: None,
         }
     }
 
@@ -1673,7 +1703,102 @@ mod pacing_tests {
         assert!(!lease_turn(4, Duration::from_millis(400), budget));
     }
 
-    /// A running slot with nothing new to publish takes no attempt pin; a released
+    fn renew(id: &str) -> crate::protocol::LeaseItem {
+        crate::protocol::LeaseItem::Renew {
+            assignment_id: id.into(),
+            generation: 1,
+            coordinator_epoch: 1,
+            previous_sequence: 1,
+        }
+    }
+
+    /// Renewals go first, earliest lease deadline first, then initial authorizations, longest
+    /// waiting first; a batch holds at most 128 items (FR-074).
+    #[test]
+    fn lease_batches_put_renewals_first_and_split_at_their_limit() {
+        use super::service::lease_batches;
+        let now = Instant::now();
+        let at = |ms: u64| now - Duration::from_millis(ms);
+        let renewals = vec![(at(100), renew("late")), (at(900), renew("early"))];
+        let initial = vec![(at(50), renew("new")), (at(500), renew("older"))];
+        let batches = lease_batches(renewals, initial);
+        let ids: Vec<&str> = batches[0].iter().map(|item| item.assignment_id()).collect();
+        assert_eq!(ids, ["early", "late", "older", "new"]);
+        let many: Vec<_> = (0..300).map(|i| (at(i), renew(&format!("r{i}")))).collect();
+        let sizes: Vec<usize> = lease_batches(many, vec![]).iter().map(Vec::len).collect();
+        assert_eq!(sizes, [128, 128, 44]);
+    }
+
+    /// A batch item's refusal reads exactly as a single request's, so per-item events keep
+    /// their bytes.
+    #[test]
+    fn a_batch_item_result_reads_as_a_single_request() {
+        use super::service::item_result;
+        let single: anyhow::Result<crate::protocol::Response> = Err(anyhow::anyhow!(
+            "coordinator rejected request: lease expired"
+        ));
+        let item = item_result(crate::protocol::LeaseResult::Error {
+            message: "lease expired".into(),
+        });
+        assert_eq!(format!("{item:?}"), format!("{single:?}"));
+    }
+
+    /// Simulated: 300 slots renewing every 2 s against a coordinator whose commit takes 9 ms,
+    /// batched, keep every 10 s lease with under 100 ms of lease work per iteration; one request
+    /// per lease would not (FR-074).
+    #[test]
+    fn batches_keep_300_leases_renewed_against_a_9_ms_commit() {
+        use super::service::{lease_batches, lease_turn};
+        let run = |batched: bool| {
+            let mut last = vec![0u64; 300];
+            let (mut worst_gap, mut worst_work) = (0u64, 0u64);
+            let mut now = 0u64;
+            while now <= 60_000 {
+                let due: Vec<usize> = (0..300).filter(|i| now - last[*i] >= 2_000).collect();
+                let origin = Instant::now();
+                let items: Vec<_> = due
+                    .iter()
+                    .map(|i| {
+                        (
+                            origin + Duration::from_millis(last[*i]),
+                            renew(&i.to_string()),
+                        )
+                    })
+                    .collect();
+                // Each request costs one 9 ms commit plus 0.1 ms per item served.
+                let groups = if batched {
+                    lease_batches(items, vec![])
+                } else {
+                    items.into_iter().map(|item| vec![item.1]).collect()
+                };
+                let mut work = 0u64;
+                for (sent, group) in groups.iter().enumerate() {
+                    if !lease_turn(
+                        sent,
+                        Duration::from_micros(work),
+                        Duration::from_millis(250),
+                    ) {
+                        break;
+                    }
+                    work += 9_000 + 100 * group.len() as u64;
+                    for item in group {
+                        last[item.assignment_id().parse::<usize>().unwrap()] = now;
+                    }
+                }
+                worst_work = worst_work.max(work);
+                worst_gap = worst_gap.max((0..300).map(|i| now - last[i]).max().unwrap());
+                now += 500;
+            }
+            (worst_gap, worst_work)
+        };
+        let (gap, work) = run(true);
+        assert!(gap < 10_000, "a lease went {gap} ms unrenewed");
+        assert!(work < 100_000, "lease work {work} µs per iteration");
+        let (gap, _) = run(false);
+        assert!(gap >= 10_000, "single requests kept up: {gap} ms");
+    }
+
+    /// A slot with nothing new to publish takes no attempt pin; a released
     /// result, a new checkpoint head or an unreadable head does.
     #[test]
     fn only_a_possible_publication_takes_an_attempt_pin() {

@@ -307,6 +307,195 @@ impl Coordinator {
             self.artifacts.verify(artifact)
         }
     }
+    /// Check a preparation record against its assignment and keep it, once per attempt: a
+    /// later record must carry the same process identity and backend.
+    fn record_preparation(
+        &mut self,
+        principal: &Principal,
+        assignment_id: &str,
+        generation: u64,
+        coordinator_epoch: u64,
+        record: &crate::execution_model::ExecutionRecord,
+    ) -> Result<()> {
+        self.authorize_assignment(principal, assignment_id, generation)?;
+        ensure!(coordinator_epoch == self.epoch, "stale coordinator epoch");
+        ensure!(
+            record.assignment_id == assignment_id
+                && record.generation == generation
+                && record.phase == crate::execution_model::ExecutionPhase::Prepared,
+            "preparation record identity/phase mismatch"
+        );
+        let identity = record
+            .identity
+            .as_ref()
+            .context("prepared process identity absent")?;
+        ensure!(
+            identity.assignment_id == assignment_id
+                && identity.generation == generation
+                && identity.pid > 0
+                && identity.start_time > 0
+                && !identity.boot_id.is_empty(),
+            "invalid prepared identity"
+        );
+        let owner_boot:String=self.store.connection.query_row("SELECT json_extract(n.report_json,'$.boot_id') FROM nodes n JOIN reservations r ON r.node_id=n.node_id WHERE r.assignment_id=?1",[assignment_id],|r|r.get(0))?;
+        ensure!(
+            identity.boot_id == owner_boot,
+            "prepared identity boot differs from node report"
+        );
+        let req = self.assignment_request(assignment_id)?;
+        ensure!(
+            req.task_id == record.task_id
+                && req.resources == record.resources
+                && req.class == record.class
+                && !record.backend.is_empty(),
+            "prepared resources/task changed"
+        );
+        for control in &req.required_controls {
+            ensure!(
+                record.evidence.iter().any(|e| &e.control == control
+                    && e.applied
+                    && !e.fallback
+                    && e.available == Some(true)
+                    && e.permitted == Some(true)),
+                "required control was not applied: {control}"
+            );
+        }
+        self.current_attempt(assignment_id, generation)?;
+        let prior: Option<String> = self
+            .store
+            .connection
+            .query_row(
+                "SELECT record_json FROM preparations WHERE assignment_id=?1",
+                [assignment_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            let prior: crate::execution_model::ExecutionRecord = serde_json::from_str(&prior)?;
+            ensure!(
+                prior.identity == record.identity && prior.backend == record.backend,
+                "prepared process identity/backend changed within an attempt"
+            );
+        } else {
+            self.store.connection.execute(
+                "INSERT INTO preparations(assignment_id,record_json) VALUES (?1,?2)",
+                params![assignment_id, serde_json::to_string(record)?],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// One agent iteration's lease requests (FR-074): renewals first, by lease deadline, then
+    /// initial authorizations, all at one clock value, in one transaction with one commit. Each
+    /// item runs in its own savepoint, so a refusal affects only that item, and a preparation
+    /// record is kept before its grant, as for a single request.
+    fn leases(
+        &mut self,
+        principal: &Principal,
+        items: Vec<LeaseItem>,
+        now: u64,
+    ) -> Result<Response> {
+        ensure!(
+            items.len() <= MAX_LEASE_BATCH_ITEMS,
+            "lease batch exceeds {MAX_LEASE_BATCH_ITEMS} items"
+        );
+        let mut order = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let deadline = match item {
+                LeaseItem::Renew { assignment_id, .. } => Some(
+                    self.store
+                        .connection
+                        .query_row(
+                            "SELECT lease_deadline_ms FROM reservations WHERE assignment_id=?1",
+                            [assignment_id],
+                            |r| r.get::<_, Option<i64>>(0),
+                        )
+                        .optional()?
+                        .flatten()
+                        .unwrap_or(i64::MAX),
+                ),
+                LeaseItem::Prepared { .. } => None,
+            };
+            order.push((deadline.is_none(), deadline.unwrap_or(0), index));
+        }
+        order.sort();
+        self.store.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let served = (|| -> Result<Vec<Option<LeaseResult>>> {
+            let mut results = vec![None; items.len()];
+            for (_, _, index) in order {
+                let result = match &items[index] {
+                    LeaseItem::Renew {
+                        assignment_id,
+                        generation,
+                        coordinator_epoch,
+                        previous_sequence,
+                    } => self.savepoint(|this| {
+                        this.authorize_assignment(principal, assignment_id, *generation)?;
+                        ensure!(*coordinator_epoch == this.epoch, "stale coordinator epoch");
+                        this.grant(assignment_id, *generation, Some(*previous_sequence), now)
+                    })?,
+                    LeaseItem::Prepared {
+                        assignment_id,
+                        generation,
+                        coordinator_epoch,
+                        record,
+                    } => match self.savepoint(|this| {
+                        this.record_preparation(
+                            principal,
+                            assignment_id,
+                            *generation,
+                            *coordinator_epoch,
+                            record,
+                        )
+                    })? {
+                        Ok(()) => self
+                            .savepoint(|this| this.grant(assignment_id, *generation, None, now))?,
+                        Err(error) => Err(error),
+                    },
+                };
+                results[index] = Some(match result {
+                    Ok(Response::Lease { lease }) => LeaseResult::Lease { lease },
+                    Ok(other) => LeaseResult::Error {
+                        message: format!("unexpected lease reply {other:?}"),
+                    },
+                    Err(error) => LeaseResult::Error {
+                        message: format!("{error:#}"),
+                    },
+                });
+            }
+            Ok(results)
+        })();
+        match served {
+            Ok(results) => {
+                self.store.connection.execute_batch("COMMIT")?;
+                Ok(Response::Leases {
+                    results: results.into_iter().flatten().collect(),
+                })
+            }
+            Err(error) => {
+                self.store.connection.execute_batch("ROLLBACK")?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Run one lease item in a savepoint: its writes stay only if it succeeds. The outer
+    /// result fails only when the savepoint itself does.
+    fn savepoint<T>(&mut self, item: impl FnOnce(&mut Self) -> Result<T>) -> Result<Result<T>> {
+        self.store
+            .connection
+            .execute_batch("SAVEPOINT lease_item")?;
+        let result = item(self);
+        if result.is_ok() {
+            self.store.connection.execute_batch("RELEASE lease_item")?;
+        } else {
+            self.store
+                .connection
+                .execute_batch("ROLLBACK TO lease_item; RELEASE lease_item")?;
+        }
+        Ok(result)
+    }
+
     fn advance_clock(&mut self, now: u64) -> Result<()> {
         ensure!(
             now >= self.last_clock_ms,
@@ -492,72 +681,13 @@ impl Coordinator {
                 coordinator_epoch,
                 record,
             } => {
-                self.authorize_assignment(principal, &assignment_id, generation)?;
-                ensure!(coordinator_epoch == self.epoch, "stale coordinator epoch");
-                ensure!(
-                    record.assignment_id == assignment_id
-                        && record.generation == generation
-                        && record.phase == crate::execution_model::ExecutionPhase::Prepared,
-                    "preparation record identity/phase mismatch"
-                );
-                let identity = record
-                    .identity
-                    .as_ref()
-                    .context("prepared process identity absent")?;
-                ensure!(
-                    identity.assignment_id == assignment_id
-                        && identity.generation == generation
-                        && identity.pid > 0
-                        && identity.start_time > 0
-                        && !identity.boot_id.is_empty(),
-                    "invalid prepared identity"
-                );
-                let owner_boot:String=self.store.connection.query_row("SELECT json_extract(n.report_json,'$.boot_id') FROM nodes n JOIN reservations r ON r.node_id=n.node_id WHERE r.assignment_id=?1",[&assignment_id],|r|r.get(0))?;
-                ensure!(
-                    identity.boot_id == owner_boot,
-                    "prepared identity boot differs from node report"
-                );
-                let req = self.assignment_request(&assignment_id)?;
-                ensure!(
-                    req.task_id == record.task_id
-                        && req.resources == record.resources
-                        && req.class == record.class
-                        && !record.backend.is_empty(),
-                    "prepared resources/task changed"
-                );
-                for control in &req.required_controls {
-                    ensure!(
-                        record.evidence.iter().any(|e| &e.control == control
-                            && e.applied
-                            && !e.fallback
-                            && e.available == Some(true)
-                            && e.permitted == Some(true)),
-                        "required control was not applied: {control}"
-                    );
-                }
-                self.current_attempt(&assignment_id, generation)?;
-                let prior: Option<String> = self
-                    .store
-                    .connection
-                    .query_row(
-                        "SELECT record_json FROM preparations WHERE assignment_id=?1",
-                        [&assignment_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(prior) = prior {
-                    let prior: crate::execution_model::ExecutionRecord =
-                        serde_json::from_str(&prior)?;
-                    ensure!(
-                        prior.identity == record.identity && prior.backend == record.backend,
-                        "prepared process identity/backend changed within an attempt"
-                    );
-                } else {
-                    self.store.connection.execute(
-                        "INSERT INTO preparations(assignment_id,record_json) VALUES (?1,?2)",
-                        params![assignment_id, serde_json::to_string(&record)?],
-                    )?;
-                }
+                self.record_preparation(
+                    principal,
+                    &assignment_id,
+                    generation,
+                    coordinator_epoch,
+                    &record,
+                )?;
                 self.grant(&assignment_id, generation, None, now)
             }
             Request::Renew {
@@ -570,6 +700,7 @@ impl Coordinator {
                 ensure!(coordinator_epoch == self.epoch, "stale coordinator epoch");
                 self.grant(&assignment_id, generation, Some(previous_sequence), now)
             }
+            Request::Leases { items } => self.leases(principal, items, now),
             Request::Complete { submission } => self.accept(principal, submission, false),
             Request::PublishCheckpoint { submission } => self.accept(principal, submission, true),
             Request::Fail {

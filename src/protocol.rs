@@ -10,8 +10,13 @@ use std::{collections::BTreeMap, path::PathBuf};
 pub const API_VERSION: u32 = 1;
 pub const FEATURE_API: &str = "api/1";
 pub const FEATURE_CONTENTION: &str = "contention/1";
+/// `Request::Leases` and `Response::Leases` (FR-074).
+pub const FEATURE_LEASE_BATCH: &str = "lease_batch/1";
 /// Features this coordinator advertises in every heartbeat reply.
-pub const COORDINATOR_FEATURES: [&str; 2] = [FEATURE_API, FEATURE_CONTENTION];
+pub const COORDINATOR_FEATURES: [&str; 3] = [FEATURE_API, FEATURE_CONTENTION, FEATURE_LEASE_BATCH];
+/// The most items, and serialized bytes of items, one lease batch carries (FR-074).
+pub const MAX_LEASE_BATCH_ITEMS: usize = 128;
+pub const MAX_LEASE_BATCH_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsIdentity {
@@ -227,6 +232,43 @@ pub struct Lease {
     pub valid_for_ms: u64,
     pub drain: bool,
 }
+/// One item of a lease batch, with the fields of the single request (FR-074).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LeaseItem {
+    Prepared {
+        assignment_id: String,
+        generation: u64,
+        coordinator_epoch: u64,
+        record: Box<crate::execution_model::ExecutionRecord>,
+    },
+    Renew {
+        assignment_id: String,
+        generation: u64,
+        coordinator_epoch: u64,
+        previous_sequence: u64,
+    },
+}
+
+impl LeaseItem {
+    pub fn assignment_id(&self) -> &str {
+        match self {
+            LeaseItem::Prepared { assignment_id, .. } | LeaseItem::Renew { assignment_id, .. } => {
+                assignment_id
+            }
+        }
+    }
+}
+
+/// One lease batch item's result, in the item's position: a lease, or the single request's
+/// refusal message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LeaseResult {
+    Lease { lease: Lease },
+    Error { message: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatReply {
     pub coordinator_epoch: u64,
@@ -325,6 +367,10 @@ pub enum Request {
         coordinator_epoch: u64,
         previous_sequence: u64,
     },
+    /// Renewals and initial authorizations of one agent iteration, behind `lease_batch/1`.
+    Leases {
+        items: Vec<LeaseItem>,
+    },
     Complete {
         submission: ResultSubmission,
     },
@@ -379,6 +425,9 @@ pub enum Response {
     },
     Lease {
         lease: Lease,
+    },
+    Leases {
+        results: Vec<LeaseResult>,
     },
     Receipt {
         receipt: Receipt,

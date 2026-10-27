@@ -1097,5 +1097,71 @@
       },
       "accepted": false
     }
+  ],
+  "lease_batch_cases": [
+    {
+      "id": "LB-01",
+      "description": "One iteration's renewals and initial authorizations as one batch, behind lease_batch/1; results in the items' positions, a refusal with the single request's message (FR-074).",
+      "request": {
+        "op": "leases",
+        "items": [
+          {
+            "op": "renew",
+            "assignment_id": "b",
+            "generation": 1,
+            "coordinator_epoch": 1,
+            "previous_sequence": 3
+          },
+          {
+            "op": "prepared",
+            "assignment_id": "a",
+            "generation": 1,
+            "coordinator_epoch": 1,
+            "record": {
+              "task_id": "task",
+              "assignment_id": "a",
+              "generation": 1,
+              "class": "opportunistic",
+              "phase": "prepared",
+              "resources": {
+                "cpu_millicores": 250,
+                "ram_mib": 64,
+                "gpu_memory_mib": {}
+              },
+              "identity": {
+                "pid": 123,
+                "boot_id": "boot",
+                "start_time": 456,
+                "assignment_id": "a",
+                "generation": 1
+              },
+              "backend": "rootless",
+              "evidence": [],
+              "detail": "verified"
+            }
+          }
+        ]
+      },
+      "response": {
+        "kind": "leases",
+        "results": [
+          {
+            "kind": "lease",
+            "lease": {
+              "assignment_id": "b",
+              "generation": 1,
+              "coordinator_epoch": 1,
+              "sequence": 4,
+              "valid_for_ms": 10000,
+              "drain": false
+            }
+          },
+          {
+            "kind": "error",
+            "message": "authorization requires fresh capacity evidence"
+          }
+        ]
+      }
+    }
   ]
 }
