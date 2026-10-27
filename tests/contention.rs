@@ -4266,7 +4266,15 @@ mod contention_ended {
             (ContentionMode::YieldFirst, 30_000),
             (ContentionMode::Neutral, 10_000),
         ] {
-            let run = run(mode, 240, |now| if now < 10_000 { 0 } else if now < 40_000 { 1000 } else { 500 });
+            let run = run(mode, 240, |now| {
+                if now < 10_000 {
+                    0
+                } else if now < 40_000 {
+                    1000
+                } else {
+                    500
+                }
+            });
             for task in 0..TASKS {
                 let rises: Vec<u64> = run
                     .windows(2)

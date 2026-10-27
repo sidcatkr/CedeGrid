@@ -1365,16 +1365,15 @@ fn expected_external(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
         return input.external;
     }
     let floor = principal_floor(input, thresholds);
-    contending_principals(input, thresholds)
-        .into_iter()
-        .fold(input.external, |external, (uid, usage)| {
-            match satisfied_demand(input, uid, usage) {
-                Some(demand) if usage.saturating_add(floor) < demand => {
-                    external.saturating_add(demand - usage)
-                }
-                _ => external,
+    contending_principals(input, thresholds).into_iter().fold(
+        input.external,
+        |external, (uid, usage)| match satisfied_demand(input, uid, usage) {
+            Some(demand) if usage.saturating_add(floor) < demand => {
+                external.saturating_add(demand - usage)
             }
-        })
+            _ => external,
+        },
+    )
 }
 
 /// The contention floor: usage, in resource units, from which a principal

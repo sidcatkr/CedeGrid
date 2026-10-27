@@ -787,7 +787,9 @@ impl<'a> Interval<'a> {
                         principal.cpu_millicores
                     };
                     match principal.uid {
-                        Some(uid) if !principal.is_owner && uid >= self.config.contention.uid_min => {
+                        Some(uid)
+                            if !principal.is_owner && uid >= self.config.contention.uid_min =>
+                        {
                             each_below &= usage < floor;
                         }
                         None if !principal.is_owner => continue,
