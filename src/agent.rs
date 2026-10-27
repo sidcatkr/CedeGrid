@@ -508,7 +508,8 @@ impl ChildSlot {
     fn facts(&self) -> crate::model::AllocationFacts {
         let since = self.last_checkpoint_at.unwrap_or(self.started_at);
         crate::model::AllocationFacts {
-            uncontrollable: self.exited || self.sequence == 0,
+            // A prepared reservation not yet authorized may still be cancelled (FR-012).
+            uncontrollable: self.exited || (self.sequence == 0 && self.prepared.is_none()),
             progress_lost_ms: since.elapsed().as_millis() as u64,
             unavailable: self.unavailable.clone(),
             hint_ready: self.hint_ready,
@@ -1607,6 +1608,65 @@ mod drain_tests {
             seed: None,
             journal_seen: None,
         }
+    }
+
+    /// A prepared reservation the supervisor has not been authorized for may be cancelled:
+    /// the pending pass may pick it, and once its drain is sent no initial authorization is
+    /// requested for it. An authorized one whose journal still reads Prepared is no longer the
+    /// pending pass's to cancel (FR-012).
+    #[test]
+    fn a_cancelled_prepared_slot_is_released_without_authorization() {
+        use super::service::{wants_authorization, withhold_authorized_pending};
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut slot = slot_with(child, input);
+        assert!(slot.facts().uncontrollable, "nothing prepared yet");
+        assert!(!wants_authorization(&slot));
+        slot.prepared = Some(ExecutionRecord {
+            task_id: "t".into(),
+            assignment_id: "a".into(),
+            generation: 1,
+            class: AllocationClass::Opportunistic,
+            phase: ExecutionPhase::Prepared,
+            resources: Resources::default(),
+            identity: None,
+            backend: "rootless".into(),
+            evidence: vec![],
+            detail: String::new(),
+            modes: BTreeMap::new(),
+        });
+        assert!(
+            !slot.facts().uncontrollable,
+            "a prepared reservation may be cancelled"
+        );
+        assert!(wants_authorization(&slot));
+        drain(
+            &mut slot,
+            Some(crate::contention::YieldCause::ExternalGrowth),
+        );
+        assert!(
+            !wants_authorization(&slot),
+            "a cancelled slot is not authorized"
+        );
+        // Authorized, but its journal still reads Prepared: the pending pass leaves it alone.
+        let mut facts = BTreeMap::from([("a".to_string(), slot.facts())]);
+        let pending = crate::model::Allocation {
+            id: "a".into(),
+            class: AllocationClass::Opportunistic,
+            phase: crate::model::AllocationPhase::Pending,
+            requested: Resources::default(),
+            observed: None,
+            observed_upper: None,
+            observed_window_cpu: None,
+            modes: BTreeMap::new(),
+        };
+        withhold_authorized_pending(&mut facts, std::slice::from_ref(&pending), |_| true);
+        assert!(facts["a"].uncontrollable);
     }
 
     #[test]

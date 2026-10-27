@@ -5909,3 +5909,76 @@ mod measurement_window {
         assert_eq!(credit(Some(200)), 50);
     }
 }
+
+/// A CPU drain planned while an allocation was pending cancels the reservation; once the
+/// allocation runs anyway, it is re-planned as running work, which CPU contention alone never
+/// drains (FR-012, SC-007).
+#[test]
+fn a_pending_pass_cpu_drain_is_replanned_once_the_allocation_runs() {
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    let config = config();
+    let mut engine = PolicyEngine::new();
+    let running = allocation(
+        "r",
+        AllocationPhase::Running,
+        resources(3000, 0, 0),
+        Some(resources(3000, 0, 0)),
+    );
+    // External work uses 2000m: the 4000m budget fits the running task but not a 2000m
+    // reservation beside it, so the pending pass cancels the reservation.
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(5000);
+    let pending = allocation("p", AllocationPhase::Pending, resources(2000, 0, 0), None);
+    let first = engine
+        .evaluate(
+            &config,
+            &snap,
+            &PolicyInput {
+                allocations: vec![running.clone(), pending],
+                facts: rootless(&["r", "p"]),
+                ..PolicyInput::default()
+            },
+            0,
+        )
+        .unwrap();
+    assert!(
+        first
+            .actions
+            .iter()
+            .any(|a| a.allocation_id == "p" && a.step == YieldStep::Drain),
+        "{:?}",
+        first.actions
+    );
+    // It was authorized before the cancellation landed and now runs at 1000m, within the
+    // budget: nothing drains it.
+    let started = allocation(
+        "p",
+        AllocationPhase::Running,
+        resources(2000, 0, 0),
+        Some(resources(1000, 0, 0)),
+    );
+    snap.cpu_busy_millicores = Some(6000);
+    for now in [500, 1000, 1500] {
+        let decision = engine
+            .evaluate(
+                &config,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![running.clone(), started.clone()],
+                    facts: rootless(&["r", "p"]),
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap();
+        assert!(
+            !decision
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.step >= YieldStep::Drain),
+            "at {now} ms: {:?}",
+            decision.actions
+        );
+        assert!(decision.would_drain.is_empty(), "at {now} ms");
+    }
+}

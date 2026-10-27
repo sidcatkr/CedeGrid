@@ -391,7 +391,13 @@ impl<'a> Interval<'a> {
             note_excess(&mut self.over_target, key, own_excess);
         }
         let excess = (*remaining).max(own_excess);
-        let state = prev.ladder.get(&(victim.id.clone(), key.clone()));
+        let mut state = prev.ladder.get(&(victim.id.clone(), key.clone()));
+        // A CPU drain planned while the allocation was pending cancelled its reservation; if
+        // it runs anyway, it is re-planned as running work, which CPU contention alone never
+        // drains (FR-012).
+        if replanned_pending_drain(state, kind, pending_pass, victim.guaranteed) {
+            state = None;
+        }
         // A Guaranteed hint waits the Guaranteed hint deadline (FR-024).
         let mut victim_timing = frame.timing_for(config, victim.mode);
         if victim.guaranteed && kind.is_memory() && !frame.critical {
@@ -494,6 +500,9 @@ impl<'a> Interval<'a> {
                 victim_timing.hint_deadline_ms,
             );
         }
+        if pending_pass && let Some(next) = decision.state.as_mut() {
+            next.pending = true;
+        }
         if let Some(next) = &decision.state {
             // A newly applied step is expected to release its share;
             // the next observation shows whether it did.
@@ -523,6 +532,14 @@ impl<'a> Interval<'a> {
             let Some(allocation) = input.allocations.iter().find(|a| &a.id == id) else {
                 continue;
             };
+            if replanned_pending_drain(
+                Some(state),
+                kind,
+                allocation.phase == AllocationPhase::Pending,
+                is_guaranteed(allocation),
+            ) {
+                continue;
+            }
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
@@ -1042,6 +1059,20 @@ fn compute_unavailable(input: &PolicyInput, key: &ResourceKey, id: &str) -> BTre
         .unwrap_or_default();
     steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
     steps
+}
+
+/// Whether a held step is a CPU drain the pending pass planned for opportunistic work that now
+/// runs: it no longer applies, and the allocation is planned as running work (FR-012).
+fn replanned_pending_drain(
+    state: Option<&StepState>,
+    kind: ResourceKind,
+    still_pending: bool,
+    guaranteed: bool,
+) -> bool {
+    !still_pending
+        && !guaranteed
+        && kind == ResourceKind::Cpu
+        && state.is_some_and(|state| state.pending && state.step >= YieldStep::Drain)
 }
 
 fn cpu_usage_of(allocation: &Allocation) -> u64 {

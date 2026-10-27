@@ -786,6 +786,10 @@ pub struct StepState {
     /// while the floor has that much room (FR-013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_free: Option<u64>,
+    /// Planned on the pending pass, for a reservation that had not started; a CPU drain from it
+    /// is re-planned once the allocation runs (FR-012).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -952,6 +956,7 @@ pub fn plan_step(
             contended_since_ms: Some(now_ms),
             after_pause: false,
             to_free: (input.excess > 0).then_some(input.excess),
+            pending: false,
         }),
         skipped,
     };

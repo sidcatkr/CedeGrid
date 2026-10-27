@@ -310,6 +310,7 @@ mod ladder {
             calm_since_ms: None,
             contended_since_ms: Some(0),
             after_pause: false,
+            pending: false,
         };
         let before = plan_step(
             Some(&paused),
@@ -342,6 +343,7 @@ mod ladder {
             calm_since_ms: None,
             contended_since_ms: Some(0),
             after_pause: false,
+            pending: false,
         };
         let plain = |excess| LadderInput {
             room: None,
@@ -383,6 +385,7 @@ mod ladder {
             calm_since_ms: None,
             contended_since_ms: None,
             after_pause: false,
+            pending: false,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
         let (held, changes) = run(Some(capped.clone()), &cpu, 1..40, |_| {
@@ -414,6 +417,7 @@ mod ladder {
                 calm_since_ms: None,
                 contended_since_ms: None,
                 after_pause: false,
+                pending: false,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
                 input(ResourceKind::Cpu, 0, 0)

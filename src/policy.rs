@@ -252,6 +252,7 @@ impl PolicyEngine {
                 contended_since_ms: None,
                 after_pause: false,
                 to_free: None,
+                pending: false,
             },
         );
     }

@@ -143,6 +143,29 @@ fn renewal_reply(slot: &mut ChildSlot, requested: Instant, result: Result<Respon
     Ok(())
 }
 
+/// Whether a slot's initial authorization is requested: prepared, not yet authorized, its
+/// supervisor alive, and not cancelled by a drain (FR-012).
+pub(super) fn wants_authorization(slot: &ChildSlot) -> bool {
+    slot.prepared.is_some() && slot.sequence == 0 && !slot.exited && slot.drain_sent_at.is_none()
+}
+
+/// An allocation whose journal still reads Prepared after its authorization went out is no
+/// longer the pending pass's to cancel.
+pub(super) fn withhold_authorized_pending(
+    facts: &mut BTreeMap<String, crate::model::AllocationFacts>,
+    allocations: &[crate::model::Allocation],
+    authorized: impl Fn(&str) -> bool,
+) {
+    for allocation in allocations {
+        if allocation.phase == crate::model::AllocationPhase::Pending
+            && authorized(&allocation.id)
+            && let Some(facts) = facts.get_mut(&allocation.id)
+        {
+            facts.uncontrollable = true;
+        }
+    }
+}
+
 /// Whether one more lease request goes out this iteration: the longest-waiting one always
 /// does, the rest while the budget lasts.
 pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bool {
@@ -383,7 +406,7 @@ impl AgentLoop<'_> {
                     ExecutionPhase::Authorized | ExecutionPhase::Running
                 )
             });
-            if slot.prepared.is_some() && slot.sequence == 0 && !supervisor_exited {
+            if wants_authorization(slot) {
                 waiting.push((slot.started_at, id.clone()));
             } else if running && slot.sequence > 0 && slot.last_renew.elapsed() >= interval {
                 waiting.push((slot.last_renew + interval, id.clone()));
@@ -1056,7 +1079,7 @@ impl AgentLoop<'_> {
         allocations: &[crate::model::Allocation],
     ) -> BTreeMap<String, crate::model::AllocationFacts> {
         use crate::contention::{ResourceKey, YieldStep};
-        allocations
+        let mut facts = allocations
             .iter()
             .map(|allocation| {
                 let mut facts = crate::model::AllocationFacts::default();
@@ -1079,7 +1102,11 @@ impl AgentLoop<'_> {
                 facts.ram_cap = ram_cap_available(self.config, backend);
                 (allocation.id.clone(), facts)
             })
-            .collect()
+            .collect();
+        withhold_authorized_pending(&mut facts, allocations, |id| {
+            self.slots.get(id).is_some_and(|slot| slot.sequence > 0)
+        });
+        facts
     }
 
     /// Heartbeat and admission: report, apply coordinator drains, acknowledge
