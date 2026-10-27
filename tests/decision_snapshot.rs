@@ -257,6 +257,9 @@ fn sequence(seed: u64) -> usize {
             cpu_busy_millicores: (!rng.chance(5)).then_some(busy),
             cpu_busy_lower_millicores: None,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: RAM,
             available_ram_mib: (!rng.chance(5))
                 .then(|| RAM.saturating_sub(own_ram + ext_ram + 2000)),
@@ -351,6 +354,7 @@ fn sequence(seed: u64) -> usize {
                     requested: job.requested.clone(),
                     observed: (!rng.chance(3)).then(|| resources(used.0, used.1, used.2)),
                     observed_upper: None,
+                    observed_window_cpu: None,
                     modes: job.modes.clone(),
                 })
                 .collect(),

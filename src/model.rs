@@ -127,6 +127,9 @@ pub struct Allocation {
     /// Upper bound of attributed usage (schema 3). Missing means no bound is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_upper: Option<Resources>,
+    /// CPU lower bound over the busy-time window, for the admission p95 (FR-073).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_window_cpu: Option<u64>,
     /// Modes the job requested per resource; the node cap still applies (FR-030).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
@@ -254,6 +257,16 @@ pub struct Snapshot {
     /// sums.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_cpu_lower_millicores: Option<u64>,
+    /// Own work's CPU lower bound over the busy-time window, with one bound for the window
+    /// (FR-073).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_cpu_window_lower_millicores: Option<u64>,
+    /// CPU lower bound of CedeGrid's own processes (the agent and supervisors), per interval
+    /// and over the window, attributed to the owner (FR-059, FR-069).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cedegrid_cpu_lower_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cedegrid_cpu_window_lower_millicores: Option<u64>,
     pub total_ram_mib: u64,
     pub available_ram_mib: Option<u64>,
     pub gpu_inventory: CapabilityStatus,

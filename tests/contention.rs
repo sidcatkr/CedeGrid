@@ -33,6 +33,9 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
         cpu_busy_millicores: Some(cpu_busy_millicores),
         cpu_busy_lower_millicores: None,
         managed_cpu_lower_millicores: None,
+        managed_cpu_window_lower_millicores: None,
+        cedegrid_cpu_lower_millicores: None,
+        cedegrid_cpu_window_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,
@@ -61,6 +64,7 @@ pub fn allocation(
         requested: resources(cpu),
         observed: observed_cpu.map(resources),
         observed_upper: None,
+        observed_window_cpu: None,
         modes: Default::default(),
     }
 }
@@ -1036,6 +1040,7 @@ mod guaranteed_policy {
             requested: resources.clone(),
             observed: (phase != AllocationPhase::Pending).then_some(resources),
             observed_upper: None,
+            observed_window_cpu: None,
             modes: Default::default(),
         }
     }
@@ -2668,6 +2673,7 @@ mod ramp {
                     gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 1000)]),
                 }),
                 observed_upper: None,
+                observed_window_cpu: None,
                 modes: BTreeMap::new(),
             };
             let input = PolicyInput {
@@ -2794,6 +2800,7 @@ mod hints {
                     },
                     observed: Some(resources),
                     observed_upper: None,
+                    observed_window_cpu: None,
                     modes: Default::default(),
                 }],
                 facts: BTreeMap::from([("worker".into(), facts)]),
@@ -2905,6 +2912,7 @@ mod ram_cap {
                     ..Resources::default()
                 }),
                 observed_upper: None,
+                observed_window_cpu: None,
                 modes: Default::default(),
             }],
             facts: BTreeMap::from([("worker".into(), facts)]),

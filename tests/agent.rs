@@ -1873,6 +1873,9 @@ mod operator_limits {
             cpu_busy_millicores: Some(3500),
             cpu_busy_lower_millicores: None,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: 32_000,
             available_ram_mib: Some(26_000),
             gpu_inventory: CapabilityStatus::Unsupported,
@@ -1902,6 +1905,7 @@ mod operator_limits {
             requested: resources(requested),
             observed: Some(resources(observed)),
             observed_upper: None,
+            observed_window_cpu: None,
             modes: Default::default(),
         }
     }

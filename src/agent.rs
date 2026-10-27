@@ -1153,6 +1153,9 @@ mod agent_transport_tests {
             cpu_busy_millicores: Some(1000),
             cpu_busy_lower_millicores: None,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: 16000,
             available_ram_mib: Some(12000),
             gpu_inventory: CapabilityStatus::Unknown,
@@ -1199,6 +1202,7 @@ mod agent_transport_tests {
                 gpu_memory_mib: BTreeMap::new(),
             }),
             observed_upper: None,
+            observed_window_cpu: None,
             modes: Default::default(),
         };
         let used = allocation_charge(std::slice::from_ref(&allocation));
@@ -1250,6 +1254,9 @@ mod agent_transport_tests {
             cpu_busy_millicores: Some(2000),
             cpu_busy_lower_millicores: None,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: 32_000,
             available_ram_mib: Some(28_000),
             gpu_inventory: crate::model::CapabilityStatus::Unsupported,
@@ -1308,6 +1315,7 @@ mod agent_transport_tests {
             requested: Resources::default(),
             observed: None,
             observed_upper: None,
+            observed_window_cpu: None,
             modes: Default::default(),
         }
     }
@@ -1356,6 +1364,9 @@ mod negotiation_tests {
             cpu_busy_millicores: Some(1000),
             cpu_busy_lower_millicores: None,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: 32_000,
             available_ram_mib: Some(30_000),
             gpu_inventory: crate::model::CapabilityStatus::Unsupported,

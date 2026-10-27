@@ -95,6 +95,14 @@ pub struct CpuTopology {
     pub busy_lower_millicores: Option<u64>,
     pub busy_status: CpuUsageStatus,
     pub busy_interval_ms: Option<u64>,
+    /// Busy time over the last 8 intervals with one tick of rounding for the whole window:
+    /// upper and lower bounds and the window's length (FR-073).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_window_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_window_lower_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_window_ms: Option<u64>,
     /// A visible ceiling, NOT free capacity or guaranteed CPU time. Hidden
     /// ancestors may restrict it further; scoped usage must be budgeted separately.
     pub visible_cpu_ceiling_millicores: Option<u64>,
@@ -187,14 +195,40 @@ pub struct CpuUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_lower_millicores: Option<u64>,
     pub interval_ms: Option<u64>,
+    /// Busy time over the last `window_intervals` intervals, with one tick of rounding for the
+    /// whole window (FR-073).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_window_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_window_lower_millicores: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_intervals: Option<u64>,
     pub detail: String,
 }
+
+/// A cgroup's cumulative CPU time in nanoseconds, from `usage_usec` in its `cpu.stat`.
+pub(crate) fn parse_usage_usec(stat: &str) -> Option<u64> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000)
+}
+
+/// Intervals in the busy-time window the steady-state budget uses (FR-073).
+pub const CPU_WINDOW_INTERVALS: usize = 8;
 
 #[derive(Default)]
 pub struct CpuUsageTracker {
     previous: Option<(u64, BTreeMap<u32, CpuTicks>)>,
     max_interval_ticks: Option<u64>,
     clock_tick_hz: Option<u64>,
+    /// Consecutive valid samples, oldest first, at most one more than the window's intervals.
+    history: std::collections::VecDeque<(u64, BTreeMap<u32, CpuTicks>)>,
+    window_max_ticks: Option<u64>,
 }
 
 /// Read boundaries and a conservative divisor for managed CPU attribution.
@@ -214,7 +248,64 @@ impl CpuAccountingWindow {
     }
 }
 
+/// Busy upper and lower bounds and the largest selected tick total between two samples of the
+/// same CPUs over `interval_ms`, or the status that makes them unknown.
+fn busy_bounds(
+    previous: &BTreeMap<u32, CpuTicks>,
+    current: &BTreeMap<u32, CpuTicks>,
+    interval_ms: u64,
+    clock_tick_hz: Option<u64>,
+) -> Result<(u64, u64, u64), CpuUsageStatus> {
+    let mut busy = 0u64;
+    let mut busy_lower = 0u64;
+    let mut max_interval_ticks = 0u64;
+    for (id, current) in current {
+        let old = &previous[id];
+        let (total, idle) = current
+            .total
+            .checked_sub(old.total)
+            .zip(current.idle.checked_sub(old.idle))
+            .filter(|(total, idle)| total >= idle)
+            .ok_or(CpuUsageStatus::CounterReset)?;
+        if total == 0 {
+            return Err(CpuUsageStatus::NoInterval);
+        }
+        let tick_busy = ((u128::from(total - idle) * 1000).div_ceil(u128::from(total))) as u64;
+        let mut conservative_busy = tick_busy;
+        // Lower bound: busy ticks without iowait, less one tick of
+        // endpoint rounding, over the longer of ticks and elapsed time.
+        let mut lower_denominator = u128::from(total) * 1000;
+        if let Some(hz) = clock_tick_hz {
+            let idle_only = current
+                .idle_only
+                .checked_sub(old.idle_only)
+                .ok_or(CpuUsageStatus::CounterReset)?;
+            // One counter tick bounds endpoint rounding. Treat
+            // iowait as occupied in this upper estimate; it is
+            // not reliable evidence of schedulable spare CPU.
+            let idle_lower = u128::from(idle_only.saturating_sub(1)) * 1000;
+            let elapsed_ticks = u128::from(interval_ms) * u128::from(hz);
+            if idle_lower > elapsed_ticks {
+                return Err(CpuUsageStatus::Unknown);
+            }
+            let non_idle = ((elapsed_ticks - idle_lower) * 1000).div_ceil(elapsed_ticks) as u64;
+            conservative_busy = conservative_busy.max(non_idle);
+            lower_denominator = lower_denominator.max(elapsed_ticks);
+        }
+        let lower =
+            (u128::from((total - idle).saturating_sub(1)) * 1_000_000 / lower_denominator) as u64;
+        busy += conservative_busy;
+        busy_lower += lower.min(conservative_busy);
+        max_interval_ticks = max_interval_ticks.max(total);
+    }
+    Ok((busy, busy_lower, max_interval_ticks))
+}
+
 impl CpuUsageTracker {
+    /// How many consecutive samples the window currently holds.
+    fn history_len(&self) -> usize {
+        self.history.len()
+    }
     /// Supply the actual USER_HZ timebase, not kernel CONFIG_HZ. The monotonic
     /// idle complement conservatively covers busy ticks omitted by tick sampling.
     pub fn with_clock_tick_hz(hz: std::num::NonZeroU64) -> Self {
@@ -232,11 +323,16 @@ impl CpuUsageTracker {
         freshness_ms: u64,
     ) -> CpuUsage {
         self.max_interval_ticks = None;
+        self.window_max_ticks = None;
         let mut result = CpuUsage {
             status: CpuUsageStatus::Unknown,
             busy_millicores: None,
             busy_lower_millicores: None,
             interval_ms: None,
+            busy_window_millicores: None,
+            busy_window_lower_millicores: None,
+            window_ms: None,
+            window_intervals: None,
             detail: "CPU usage unavailable; no free-capacity inference.".into(),
         };
         let selected = input
@@ -259,6 +355,7 @@ impl CpuUsageTracker {
             Ok(selected) => selected,
             Err(error) => {
                 self.previous = None;
+                self.history.clear();
                 result.detail = error;
                 return result;
             }
@@ -279,81 +376,49 @@ impl CpuUsageTracker {
                     result.detail = "CPU interval exceeded freshness limit; baseline reset.".into();
                 }
                 Some(interval) => {
-                    let mut busy = 0u64;
-                    let mut busy_lower = 0u64;
-                    let mut max_interval_ticks = 0u64;
-                    let mut valid = true;
-                    for (id, current) in &selected {
-                        let old = &previous[id];
-                        let Some((total, idle)) = current
-                            .total
-                            .checked_sub(old.total)
-                            .zip(current.idle.checked_sub(old.idle))
-                            .filter(|(total, idle)| total >= idle)
-                        else {
-                            result.status = CpuUsageStatus::CounterReset;
-                            valid = false;
-                            break;
-                        };
-                        if total == 0 {
-                            result.status = CpuUsageStatus::NoInterval;
-                            valid = false;
-                            break;
+                    match busy_bounds(previous, &selected, interval, self.clock_tick_hz) {
+                        Ok((busy, busy_lower, max_interval_ticks)) => {
+                            result.status = CpuUsageStatus::Available;
+                            result.busy_millicores = Some(busy);
+                            result.busy_lower_millicores = Some(busy_lower);
+                            self.max_interval_ticks = Some(max_interval_ticks);
+                            result.detail = if self.clock_tick_hz.is_some() {
+                                "Per-effective-CPU conservative busy estimate: maximum of busy-tick ratio and monotonic non-idle fraction with one USER_HZ tick of idle rounding allowance. Missing busy ticks never manufacture spare capacity; iowait is occupied in the non-idle bound. Guest is not double counted. This is advisory observation, not a hard CPU limit."
+                            } else {
+                                "Per-effective-CPU tick ratio only; monotonic idle timebase unavailable. Guest is not double counted. Usage and hardware capacity share one CPU set; bandwidth quota is separate."
+                            }.into();
                         }
-                        let tick_busy =
-                            ((u128::from(total - idle) * 1000).div_ceil(u128::from(total))) as u64;
-                        let mut conservative_busy = tick_busy;
-                        // Lower bound: busy ticks without iowait, less one tick of
-                        // endpoint rounding, over the longer of ticks and elapsed time.
-                        let mut lower_denominator = u128::from(total) * 1000;
-                        if let Some(hz) = self.clock_tick_hz {
-                            let Some(idle_only) = current.idle_only.checked_sub(old.idle_only)
-                            else {
-                                result.status = CpuUsageStatus::CounterReset;
-                                valid = false;
-                                break;
-                            };
-                            // One counter tick bounds endpoint rounding. Treat
-                            // iowait as occupied in this upper estimate; it is
-                            // not reliable evidence of schedulable spare CPU.
-                            let idle_lower = u128::from(idle_only.saturating_sub(1)) * 1000;
-                            let elapsed_ticks = u128::from(interval) * u128::from(hz);
-                            if idle_lower > elapsed_ticks {
-                                result.status = CpuUsageStatus::Unknown;
-                                valid = false;
-                                break;
-                            }
-                            let non_idle = ((elapsed_ticks - idle_lower) * 1000)
-                                .div_ceil(elapsed_ticks)
-                                as u64;
-                            conservative_busy = conservative_busy.max(non_idle);
-                            lower_denominator = lower_denominator.max(elapsed_ticks);
+                        Err(status) => {
+                            result.status = status;
+                            result.detail =
+                                "Counter reset, missing ticks or idle time inconsistent with elapsed time; busy usage is unknown.".into();
                         }
-                        let lower = (u128::from((total - idle).saturating_sub(1)) * 1_000_000
-                            / lower_denominator) as u64;
-                        busy += conservative_busy;
-                        busy_lower += lower.min(conservative_busy);
-                        max_interval_ticks = max_interval_ticks.max(total);
-                    }
-                    if valid {
-                        result.status = CpuUsageStatus::Available;
-                        result.busy_millicores = Some(busy);
-                        result.busy_lower_millicores = Some(busy_lower);
-                        self.max_interval_ticks = Some(max_interval_ticks);
-                        result.detail = if self.clock_tick_hz.is_some() {
-                            "Per-effective-CPU conservative busy estimate: maximum of busy-tick ratio and monotonic non-idle fraction with one USER_HZ tick of idle rounding allowance. Missing busy ticks never manufacture spare capacity; iowait is occupied in the non-idle bound. Guest is not double counted. This is advisory observation, not a hard CPU limit."
-                        } else {
-                            "Per-effective-CPU tick ratio only; monotonic idle timebase unavailable. Guest is not double counted. Usage and hardware capacity share one CPU set; bandwidth quota is separate."
-                        }.into();
-                    } else {
-                        result.detail =
-                            "Counter reset, missing ticks or idle time inconsistent with elapsed time; busy usage is unknown.".into();
                     }
                 }
             }
         } else {
             result.status = CpuUsageStatus::Baseline;
             result.detail = "Initial or changed CPU set requires a baseline.".into();
+        }
+        // The window holds only consecutive valid intervals; anything else starts it again.
+        if result.status != CpuUsageStatus::Available {
+            self.history.clear();
+        }
+        self.history.push_back((monotonic_ms, selected.clone()));
+        while self.history.len() > CPU_WINDOW_INTERVALS + 1 {
+            self.history.pop_front();
+        }
+        if self.history.len() == CPU_WINDOW_INTERVALS + 1
+            && let Some((first_time, first)) = self.history.front()
+            && let Some(window) = monotonic_ms.checked_sub(*first_time)
+            && let Ok((busy, busy_lower, max_ticks)) =
+                busy_bounds(first, &selected, window, self.clock_tick_hz)
+        {
+            self.window_max_ticks = Some(max_ticks);
+            result.busy_window_millicores = Some(busy);
+            result.busy_window_lower_millicores = Some(busy_lower);
+            result.window_ms = Some(window);
+            result.window_intervals = Some(CPU_WINDOW_INTERVALS as u64);
         }
         self.previous = Some((monotonic_ms, selected));
         result
@@ -955,12 +1020,42 @@ pub struct KernelCollector {
     cpu_usage: CpuUsageTracker,
     cpu_read_started: Option<Instant>,
     cpu_window: Option<CpuAccountingWindow>,
+    /// Read starts of the samples the tracker's window holds, oldest first.
+    cpu_read_history: std::collections::VecDeque<Instant>,
+    /// The delegated root's CPU time read beside each of those samples (FR-073).
+    delegated_history: std::collections::VecDeque<Option<u64>>,
+    cpu_window_span: Option<(CpuAccountingWindow, u64)>,
     fixture: bool,
 }
 
 impl KernelCollector {
     pub(crate) fn cpu_accounting_window(&self) -> Option<CpuAccountingWindow> {
         self.cpu_window
+    }
+
+    /// Read boundaries of the busy-time window and how many intervals it spans (FR-073).
+    pub(crate) fn cpu_window_accounting(&self) -> Option<(CpuAccountingWindow, u64)> {
+        self.cpu_window_span
+    }
+
+    /// The delegated root's CPU time, in nanoseconds, over the last interval and over the
+    /// busy-time window, each read beside the host's CPU counters (FR-073).
+    pub(crate) fn delegated_cpu_usage(&self) -> (Option<u64>, Option<u64>) {
+        let latest = self.delegated_history.back().copied().flatten();
+        let previous = self
+            .delegated_history
+            .len()
+            .checked_sub(2)
+            .and_then(|index| self.delegated_history[index]);
+        let first = self.delegated_history.front().copied().flatten();
+        (
+            latest
+                .zip(previous)
+                .and_then(|(now, then)| now.checked_sub(then)),
+            self.cpu_window_span
+                .and(latest.zip(first))
+                .and_then(|(now, then)| now.checked_sub(then)),
+        )
     }
 
     pub fn new(config: KernelConfig) -> Self {
@@ -973,6 +1068,9 @@ impl KernelCollector {
             cpu_usage: runtime_cpu_tracker(),
             cpu_read_started: None,
             cpu_window: None,
+            cpu_read_history: std::collections::VecDeque::new(),
+            delegated_history: std::collections::VecDeque::new(),
+            cpu_window_span: None,
             fixture: false,
         }
     }
@@ -989,6 +1087,7 @@ impl KernelCollector {
 
     pub fn sample(&mut self) -> KernelSnapshot {
         self.cpu_window = None;
+        self.cpu_window_span = None;
         let now = millis(self.started.elapsed().as_millis());
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1104,6 +1203,14 @@ impl KernelCollector {
         let cpu_read_started = Instant::now();
         let cpu_stat = read_text(&self.roots.proc.join("stat"));
         let cpu_read_ended = Instant::now();
+        // Next to the host counters, the delegated root's CPU time, for own CPU in Full.
+        let delegated = self
+            .config
+            .delegated_root
+            .as_ref()
+            .and_then(|root| read_text(&root.join("cpu.stat")).ok())
+            .as_deref()
+            .and_then(parse_usage_usec);
         let usage = self.cpu_usage.observe(
             cpu_stat
                 .as_deref()
@@ -1116,6 +1223,30 @@ impl KernelCollector {
         result.cpu.busy_lower_millicores = usage.busy_lower_millicores;
         result.cpu.busy_status = usage.status;
         result.cpu.busy_interval_ms = usage.interval_ms;
+        result.cpu.busy_window_millicores = usage.busy_window_millicores;
+        result.cpu.busy_window_lower_millicores = usage.busy_window_lower_millicores;
+        result.cpu.busy_window_ms = usage.window_ms;
+        self.cpu_read_history.push_back(cpu_read_started);
+        self.delegated_history.push_back(delegated);
+        while self.cpu_read_history.len() > self.cpu_usage.history_len() {
+            self.cpu_read_history.pop_front();
+            self.delegated_history.pop_front();
+        }
+        if let (Some(intervals), Some(started), Some(ticks)) = (
+            usage.window_intervals,
+            self.cpu_read_history.front(),
+            self.cpu_usage.window_max_ticks,
+        ) && let Some(counter_interval) = cpu_tick_duration(ticks)
+        {
+            self.cpu_window_span = Some((
+                CpuAccountingWindow {
+                    started: *started,
+                    ended: cpu_read_ended,
+                    counter_interval,
+                },
+                intervals,
+            ));
+        }
         if let Some(started) = self.cpu_read_started
             && let Some(ticks) = self.cpu_usage.max_interval_ticks
             && let Some(counter_interval) = cpu_tick_duration(ticks)
@@ -1545,13 +1676,50 @@ fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTo
                 .collect()
         })
         .unwrap_or_default();
-    CpuTopology { allowed_cpu_ids, effective_cgroup_cpu_ids, effective_cpu_ids, cores, effective_cpu_capacity_millicores, busy_millicores: None, busy_lower_millicores: None, busy_status: CpuUsageStatus::Unknown, busy_interval_ms: None, visible_cpu_ceiling_millicores: ceiling,
+    CpuTopology { allowed_cpu_ids, effective_cgroup_cpu_ids, effective_cpu_ids, cores, effective_cpu_capacity_millicores, busy_millicores: None, busy_lower_millicores: None, busy_status: CpuUsageStatus::Unknown, busy_interval_ms: None, busy_window_millicores: None, busy_window_lower_millicores: None, busy_window_ms: None, visible_cpu_ceiling_millicores: ceiling,
         detail: "Observer task affinity intersected with the observed cgroup effective set; minimum visible ancestor cpu.max. This is a ceiling only: no guaranteed share or headroom. Namespace-hidden ancestors and future workload affinity may differ. Never subtract whole-host CPU usage from this restricted budget.".into() }
 }
 
 #[cfg(test)]
 mod cpu_alignment_tests {
     use super::*;
+
+    /// Two CPUs at 100 ticks a second, CPU 0 busy half of every 500 ms interval and CPU 1 idle,
+    /// sampled 9 times: one interval carries a tick of rounding per CPU, the 8-interval window
+    /// one tick per CPU over the whole window (FR-073).
+    #[test]
+    fn host_busy_over_eight_intervals_carries_one_tick_of_rounding() {
+        let mut tracker =
+            CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
+        let stat = |k: u64| {
+            format!(
+                "cpu0 {} 0 0 {} 0 0 0 0\ncpu1 0 0 0 {} 0 0 0 0\n",
+                1000 + 25 * k,
+                1000 + 25 * k,
+                2000 + 50 * k
+            )
+        };
+        let mut last = None;
+        for k in 0..=8 {
+            let usage = tracker.observe(Ok(&stat(k)), Some(&[0, 1]), k * 500, 1500);
+            if k < 8 {
+                assert_eq!(usage.busy_window_millicores, None, "sample {k}");
+            }
+            last = Some(usage);
+        }
+        let usage = last.unwrap();
+        // One interval: 25 of 50 ticks busy, one tick of rounding either way on each CPU.
+        assert_eq!(usage.busy_millicores, Some(520 + 20));
+        assert_eq!(usage.busy_lower_millicores, Some(480));
+        // The window: 200 of 400 ticks busy on CPU 0, one tick of rounding per CPU.
+        assert_eq!(usage.busy_window_millicores, Some(503 + 3));
+        assert_eq!(usage.busy_window_lower_millicores, Some(497));
+        assert_eq!(usage.window_ms, Some(4000));
+        assert_eq!(usage.window_intervals, Some(8));
+        // A counter reset starts the window again.
+        let reset = tracker.observe(Ok(&stat(0)), Some(&[0, 1]), 4500, 1500);
+        assert_eq!(reset.busy_window_millicores, None);
+    }
 
     #[test]
     fn aligned_cpu_divisor_matches_selected_counter_intervals_and_resets() {

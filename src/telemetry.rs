@@ -480,6 +480,9 @@ impl Collector {
             cpu_busy_millicores: cpu_busy,
             cpu_busy_lower_millicores: cpu_busy_lower,
             managed_cpu_lower_millicores: None,
+            managed_cpu_window_lower_millicores: None,
+            cedegrid_cpu_lower_millicores: None,
+            cedegrid_cpu_window_lower_millicores: None,
             total_ram_mib: total_ram,
             available_ram_mib: available_ram,
             gpu_inventory,
@@ -2226,6 +2229,7 @@ mod tests {
             delta_ns,
             quantization_ns: clock_quantization_ns(threads, 4, tick),
             precise: Some((1, threads)),
+            interval: Duration::from_millis(500),
         }
     }
 
@@ -2239,9 +2243,7 @@ mod tests {
             .map(|part| cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns).unwrap())
             .sum();
         assert_eq!(per_process, 3686);
-        assert_eq!(summed_lower_bound(&parts, 4, MS, 0, window), Some(3791));
-        // The read pass's own length widens each CPU's share of pending time.
-        assert_eq!(summed_lower_bound(&parts, 4, MS, MS, window), Some(3783));
+        assert_eq!(summed_lower_bound(&parts, 4, MS), Some(3791));
     }
 
     #[test]
@@ -2249,7 +2251,7 @@ mod tests {
         let window = Duration::from_millis(500);
         let parts = [precise(2000 * MS, 8, MS)];
         assert_eq!(
-            summed_lower_bound(&parts, 4, MS, 0, window),
+            summed_lower_bound(&parts, 4, MS),
             cpu_usage_lower_bound(2000 * MS, window, clock_quantization_ns(8, 4, MS))
         );
     }
@@ -2261,6 +2263,7 @@ mod tests {
             delta_ns: 50 * MS,
             quantization_ns: 22 * MS,
             precise: None,
+            interval: window,
         };
         for parts in [
             vec![precise(50 * MS, 1, MS)],
@@ -2275,14 +2278,283 @@ mod tests {
                     cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns).unwrap()
                 })
                 .sum();
-            for span in [0, MS, 100 * MS] {
-                let summed = summed_lower_bound(&parts, 4, MS, span, window).unwrap();
-                assert!(summed <= raw, "{summed} > {raw}");
-                assert!(summed >= per_process, "{summed} < {per_process}");
-            }
+            let summed = summed_lower_bound(&parts, 4, MS).unwrap();
+            assert!(summed <= raw, "{summed} > {raw}");
+            assert!(summed >= per_process, "{summed} < {per_process}");
         }
         // The tick counters keep their own rounding in full.
-        assert_eq!(summed_lower_bound(&[stat], 4, MS, 0, window), Some(56));
+        assert_eq!(summed_lower_bound(&[stat], 4, MS), Some(56));
+    }
+
+    /// Each part is divided by its own interval, and the summed bound subtracts one tick per
+    /// scope CPU but nothing for the length of the read pass (FR-073).
+    #[test]
+    fn the_summed_bound_divides_each_part_by_its_own_interval_without_a_read_pass_term() {
+        // 117 tasks of 100 m on 14 CPUs, each read over 454 ms of a 500 ms interval.
+        let parts: Vec<CpuPart> = (0..117)
+            .map(|_| CpuPart {
+                delta_ns: 45_400_000,
+                quantization_ns: clock_quantization_ns(1, 14, MS),
+                precise: Some((1, 1)),
+                interval: Duration::from_millis(454),
+            })
+            .collect();
+        let summed = summed_lower_bound(&parts, 14, MS).unwrap();
+        // 11,700 m used; one tick per CPU over 454 ms is 30 m.
+        assert_eq!(summed, 11_669);
+        // Mixed sources keep their own errors: a tick-counter part subtracts its whole rounding,
+        // a leaf part its 1 µs, a clock part 1 ns, and the tick lag is shared.
+        let mixed = [
+            CpuPart {
+                delta_ns: 50 * MS,
+                quantization_ns: 22 * MS,
+                precise: None,
+                interval: Duration::from_millis(500),
+            },
+            CpuPart {
+                delta_ns: 100 * MS,
+                quantization_ns: leaf_quantization_ns(2, 14, MS),
+                precise: Some((1_000, 2)),
+                interval: Duration::from_millis(500),
+            },
+            CpuPart {
+                delta_ns: 100 * MS,
+                quantization_ns: clock_quantization_ns(1, 14, MS),
+                precise: Some((1, 1)),
+                interval: Duration::from_millis(500),
+            },
+        ];
+        // (50 - 22) + (100 - 0.001) + (100 - 0.000001) ms, less 3 ticks, over 500 ms.
+        assert_eq!(summed_lower_bound(&mixed, 14, MS), Some(449));
+    }
+
+    /// An established process's delta is divided by its own read interval; one whose baseline
+    /// was taken at its launch keeps the aggregate interval, so a partial first delta is never
+    /// scaled to a full rate; a baseline before the aggregate interval stays unknown (FR-073).
+    #[test]
+    fn an_established_process_is_divided_by_its_own_read_interval_and_a_new_one_by_the_aggregate() {
+        let started = Instant::now();
+        let window = crate::kernel::CpuAccountingWindow {
+            started,
+            ended: started + Duration::from_millis(500),
+            counter_interval: Duration::from_millis(500),
+        };
+        let q = clock_quantization_ns(1, 14, MS);
+        let at = |ms: u64| started + Duration::from_millis(ms);
+        assert_eq!(
+            own_cpu_lower_bound(45_400_000, at(20), at(474), window, q, false),
+            Some((97, Duration::from_millis(454)))
+        );
+        // The same delta at the aggregate divisor reads 10% low.
+        assert_eq!(
+            cpu_usage_lower_bound(45_400_000, window.duration(), q),
+            Some(88)
+        );
+        assert_eq!(
+            own_cpu_lower_bound(27_400_000, at(200), at(474), window, q, true),
+            Some((52, Duration::from_millis(500)))
+        );
+        assert_eq!(
+            own_cpu_lower_bound(
+                45_400_000,
+                started - Duration::from_millis(1),
+                at(474),
+                window,
+                q,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            own_cpu_lower_bound(45_400_000, at(20), at(501), window, q, false),
+            None
+        );
+    }
+
+    /// In Full, own CPU comes from the delegated root's `cpu.stat`, read next to the host's CPU
+    /// counters, only while the root holds no process and its children are exactly the own
+    /// leaves; its error is 1 µs plus one tick per own thread that can run, at most one per scope
+    /// CPU, with no read-pass term (FR-073).
+    #[test]
+    fn the_delegated_root_counts_own_cpu_only_when_its_children_are_the_own_leaves() {
+        use std::ffi::OsString;
+        let leaves: BTreeSet<OsString> = ["cedegrid-aa", "cedegrid-bb"].map(OsString::from).into();
+        assert!(full_parent_applies(&leaves, "", &leaves));
+        assert!(!full_parent_applies(&leaves, "1234\n", &leaves));
+        let mut more = leaves.clone();
+        more.insert(OsString::from("other"));
+        assert!(!full_parent_applies(&more, "", &leaves));
+        assert!(!full_parent_applies(&leaves, "", &more));
+        assert!(!full_parent_applies(&BTreeSet::new(), "", &BTreeSet::new()));
+        // 117 threads on 14 CPUs over 500 ms: 11,700 m used, 14 ticks and 1 µs subtracted.
+        assert_eq!(
+            parent_lower_bound(5_850_000_000, 117, 14, MS, Duration::from_millis(500)),
+            Some(11_671)
+        );
+        assert_eq!(
+            parse_usage_usec("usage_usec 42\nuser_usec 40\n"),
+            Some(42_000)
+        );
+        assert_eq!(parse_usage_usec("user_usec 40\n"), None);
+    }
+
+    /// Host counters at 100 ticks a second for `cpus` CPUs each busy for `busy(t)` nanoseconds up
+    /// to `t`, as `/proc/stat` text.
+    fn proc_stat(cpus: u32, t_ns: u64, busy: impl Fn(u64) -> u64) -> String {
+        let tick = 10_000_000;
+        (0..cpus)
+            .map(|id| {
+                let busy_ns = busy(t_ns);
+                format!(
+                    "cpu{id} {} 0 0 {} 0 0 0 0\n",
+                    busy_ns / tick,
+                    (t_ns - busy_ns) / tick
+                )
+            })
+            .collect()
+    }
+
+    /// A process clock that lags its true runtime by up to one tick at each read.
+    fn lagged(runtime_ns: u64, seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        runtime_ns.saturating_sub((*seed >> 33) % MS)
+    }
+
+    /// 117 tasks of 100 m on 14 CPUs with no external work, read one after another over 46 ms
+    /// before and after each aggregate sample: over the 8-interval window, host busy less own
+    /// CPU stays at or below 1% of capacity (FR-073).
+    #[test]
+    fn a_window_keeps_the_external_estimate_within_one_percent_of_capacity_at_117_tasks() {
+        const TASKS: u64 = 117;
+        const CPUS: u32 = 14;
+        let rate = 100; // millicores per task
+        let per_cpu = |t: u64| t * TASKS * rate / 1000 / u64::from(CPUS);
+        let runtime = |t: u64| t * rate / 1000;
+        let mut tracker = crate::kernel::CpuUsageTracker::with_clock_tick_hz(
+            std::num::NonZeroU64::new(100).unwrap(),
+        );
+        let ids: Vec<u32> = (0..CPUS).collect();
+        let mut seed = 11;
+        // Baseline read times and clocks per interval: after sample k, then end reads before k+1.
+        let base_at = |k: u64, i: u64| k * 500 * MS + MS + 46 * MS * i / TASKS;
+        let end_at = |k: u64, i: u64| k * 500 * MS - 47 * MS + 46 * MS * i / TASKS;
+        let mut baselines: Vec<Vec<(u64, u64)>> = Vec::new();
+        let mut checked = 0;
+        for k in 0..20u64 {
+            let usage = tracker.observe(
+                Ok(&proc_stat(CPUS, k * 500 * MS, per_cpu)),
+                Some(&ids),
+                k * 500,
+                1500,
+            );
+            if k >= 9 {
+                let window = usage.busy_window_millicores.unwrap();
+                let parts: Vec<CpuPart> = (0..TASKS)
+                    .map(|i| {
+                        let (start_ns, start_clock) = baselines[(k - 8) as usize][i as usize];
+                        let end_ns = end_at(k, i);
+                        CpuPart {
+                            delta_ns: lagged(runtime(end_ns), &mut seed) - start_clock,
+                            quantization_ns: clock_quantization_ns(1, u64::from(CPUS), MS),
+                            precise: Some((1, 1)),
+                            interval: Duration::from_nanos(end_ns - start_ns),
+                        }
+                    })
+                    .collect();
+                let own = summed_lower_bound(&parts, u64::from(CPUS), MS).unwrap();
+                let external = window.saturating_sub(own);
+                assert!(
+                    external <= 140,
+                    "interval {k}: window {window} m, own {own} m"
+                );
+                checked += 1;
+            }
+            baselines.push(
+                (0..TASKS)
+                    .map(|i| {
+                        let at = base_at(k, i);
+                        (at, lagged(runtime(at), &mut seed))
+                    })
+                    .collect(),
+            );
+        }
+        assert_eq!(checked, 11);
+    }
+
+    /// Own work bursting from 2000 m to 3600 m on 4 CPUs, measured over each process's own read
+    /// interval: the per-interval external estimate does not rise beyond its own bound, so the
+    /// burst does not read as external growth (FR-073).
+    #[test]
+    fn own_work_bursting_on_four_cpus_does_not_read_as_external_growth() {
+        const TASKS: u64 = 16;
+        let burst_at = 2_250 * MS;
+        let runtime = |t: u64| {
+            if t <= burst_at {
+                t * 125 / 1000
+            } else {
+                burst_at * 125 / 1000 + (t - burst_at) * 225 / 1000
+            }
+        };
+        let per_cpu = |t: u64| runtime(t) * TASKS / 4;
+        let mut tracker = crate::kernel::CpuUsageTracker::with_clock_tick_hz(
+            std::num::NonZeroU64::new(100).unwrap(),
+        );
+        let ids = [0, 1, 2, 3];
+        let mut seed = 5;
+        let base_at = |k: u64, i: u64| k * 500 * MS + MS + 20 * MS * i / TASKS;
+        let end_at = |k: u64, i: u64| k * 500 * MS - 21 * MS + 20 * MS * i / TASKS;
+        let mut previous: Option<Vec<(u64, u64)>> = None;
+        let mut estimates = Vec::new();
+        for k in 0..10u64 {
+            let usage = tracker.observe(
+                Ok(&proc_stat(4, k * 500 * MS, per_cpu)),
+                Some(&ids),
+                k * 500,
+                1500,
+            );
+            if let (Some(old), Some(busy), Some(lower)) = (
+                &previous,
+                usage.busy_millicores,
+                usage.busy_lower_millicores,
+            ) {
+                let q = clock_quantization_ns(1, 4, MS);
+                let parts: Vec<CpuPart> = (0..TASKS)
+                    .map(|i| {
+                        let (start_ns, start_clock) = old[i as usize];
+                        let end_ns = end_at(k, i);
+                        CpuPart {
+                            delta_ns: lagged(runtime(end_ns), &mut seed) - start_clock,
+                            quantization_ns: q,
+                            precise: Some((1, 1)),
+                            interval: Duration::from_nanos(end_ns - start_ns),
+                        }
+                    })
+                    .collect();
+                let own = summed_lower_bound(&parts, 4, MS).unwrap();
+                let own_upper: u64 = parts
+                    .iter()
+                    .map(|part| cpu_usage_upper_bound(part.delta_ns, part.interval, q).unwrap())
+                    .sum();
+                estimates.push((busy.saturating_sub(own), (busy - lower) + (own_upper - own)));
+            }
+            previous = Some(
+                (0..TASKS)
+                    .map(|i| {
+                        let at = base_at(k, i);
+                        (at, lagged(runtime(at), &mut seed))
+                    })
+                    .collect(),
+            );
+        }
+        for pair in estimates.windows(2) {
+            let ((before, _), (after, bound)) = (pair[0], pair[1]);
+            assert!(
+                after <= before + bound,
+                "external {before} -> {after} m beyond {bound} m"
+            );
+        }
     }
 
     /// Native CPU clock checks, run only when asked for on a Linux host.

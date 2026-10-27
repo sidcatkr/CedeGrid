@@ -35,6 +35,9 @@ fn host() -> Snapshot {
         cpu_busy_millicores: Some(0),
         cpu_busy_lower_millicores: None,
         managed_cpu_lower_millicores: None,
+        managed_cpu_window_lower_millicores: None,
+        cedegrid_cpu_lower_millicores: None,
+        cedegrid_cpu_window_lower_millicores: None,
         total_ram_mib: 262_144,
         available_ram_mib: Some(250_000),
         gpu_inventory: CapabilityStatus::Available,
@@ -187,6 +190,7 @@ fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
                     gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 2048)]),
                 }),
                 observed_upper: None,
+                observed_window_cpu: None,
                 modes: BTreeMap::new(),
             };
             let input = PolicyInput {
@@ -472,6 +476,7 @@ fn doctor_shows_the_ram_cap_where_the_leaf_allows_it() {
                 ..Resources::default()
             }),
             observed_upper: None,
+            observed_window_cpu: None,
             modes: BTreeMap::new(),
         }],
         facts: BTreeMap::from([(
@@ -528,6 +533,7 @@ fn every_code_the_policy_emits_is_in_the_catalog() {
             gpu_memory_mib: BTreeMap::new(),
         }),
         observed_upper: None,
+        observed_window_cpu: None,
         modes: BTreeMap::from([(
             cedegrid::contention::ResourceKind::Cpu,
             ContentionMode::Performance,

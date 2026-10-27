@@ -60,7 +60,14 @@ impl<'a> Interval<'a> {
                             charge.cpu_millicores = held;
                         } else {
                             samples.retain(|(at, _)| now.saturating_sub(*at) < cpu_window_ms);
-                            samples.push_back((now, observed.cpu_millicores));
+                            // The window's value, with one bound for it, when the collector has
+                            // one (FR-073).
+                            samples.push_back((
+                                now,
+                                allocation
+                                    .observed_window_cpu
+                                    .unwrap_or(observed.cpu_millicores),
+                            ));
                             if now.saturating_sub(since) >= cpu_window_ms {
                                 let usage = p95(samples.iter().map(|(_, usage)| *usage));
                                 self.cpu_credit +=
@@ -372,7 +379,24 @@ impl<'a> Interval<'a> {
                     ),
                 );
             }
-            busy.saturating_sub(own_lower.saturating_add(self.unknown_charge.cpu_millicores))
+            let interval =
+                busy.saturating_sub(own_lower.saturating_add(self.unknown_charge.cpu_millicores));
+            // Over the window, host busy and own CPU carry one bound for the whole window. Its
+            // estimate sets the steady state while this interval's stays within its own bound
+            // of it; beyond that bound, growth or fall, this interval's applies at once (FR-073).
+            let window = self
+                .scoped_kernel()
+                .and_then(|kernel| kernel.cpu.busy_window_millicores)
+                .zip(snapshot.managed_cpu_window_lower_millicores)
+                .filter(|(busy, own)| own <= busy)
+                .map(|(busy, own)| {
+                    busy.saturating_sub(own.saturating_add(self.unknown_charge.cpu_millicores))
+                });
+            let bound = (busy - host_lower).saturating_add(own_upper.saturating_sub(own_lower));
+            match window {
+                Some(window) if window.abs_diff(interval) <= bound => window,
+                _ => interval,
+            }
         };
         self.budget.cpu_millicores = self
             .cpu_capacity

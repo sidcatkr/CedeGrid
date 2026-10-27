@@ -42,6 +42,9 @@ fn snapshot() -> Snapshot {
         cpu_busy_millicores: Some(2000),
         cpu_busy_lower_millicores: None,
         managed_cpu_lower_millicores: None,
+        managed_cpu_window_lower_millicores: None,
+        cedegrid_cpu_lower_millicores: None,
+        cedegrid_cpu_window_lower_millicores: None,
         total_ram_mib: 32_000,
         available_ram_mib: Some(26_000),
         gpu_inventory: CapabilityStatus::Unsupported,
@@ -82,6 +85,9 @@ fn scoped_snapshot() -> Snapshot {
             busy_lower_millicores: None,
             busy_status: CpuUsageStatus::Available,
             busy_interval_ms: Some(500),
+            busy_window_millicores: None,
+            busy_window_lower_millicores: None,
+            busy_window_ms: None,
             visible_cpu_ceiling_millicores: Some(4000),
             detail: "synthetic scoped telemetry".into(),
         },
@@ -420,6 +426,7 @@ fn allocation(
         requested,
         observed,
         observed_upper: None,
+        observed_window_cpu: None,
         modes: Default::default(),
     }
 }
@@ -5780,4 +5787,125 @@ fn decision_snapshot() {
         reclaim_admission::SNAPSHOT,
     ));
     snapshot::check("policy", scenarios);
+}
+
+/// Own CPU and host busy over the 8-interval window set the steady-state budget, while the
+/// per-interval estimate decides growth (FR-073).
+mod measurement_window {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+
+    /// A scoped 4-CPU reading: host busy upper and lower, own lower, and optionally the
+    /// window's host busy upper and lower and own lower.
+    fn reading(busy: (u64, u64), own: u64, window: Option<((u64, u64), u64)>) -> Snapshot {
+        let mut snap = scoped_snapshot();
+        let cpu = &mut snap.kernel.as_mut().unwrap().cpu;
+        cpu.busy_millicores = Some(busy.0);
+        cpu.busy_lower_millicores = Some(busy.1);
+        if let Some(((upper, lower), own_window)) = window {
+            cpu.busy_window_millicores = Some(upper);
+            cpu.busy_window_lower_millicores = Some(lower);
+            cpu.busy_window_ms = Some(4000);
+            snap.managed_cpu_window_lower_millicores = Some(own_window);
+        }
+        snap.managed_cpu_lower_millicores = Some(own);
+        snap
+    }
+
+    fn input(own: u64, upper: u64) -> PolicyInput {
+        let mut task = allocation(
+            "a",
+            AllocationPhase::Running,
+            resources(250, 0, 0),
+            Some(resources(own, 0, 0)),
+        );
+        task.observed_upper = Some(resources(upper, 0, 0));
+        PolicyInput {
+            allocations: vec![task],
+            facts: rootless(&["a"]),
+            ..Default::default()
+        }
+    }
+
+    fn external(decision: &Decision) -> Option<u64> {
+        decision.resources[&ResourceKey::Cpu].external
+    }
+
+    #[test]
+    fn the_window_sets_the_steady_state_external_estimate_within_the_per_interval_bound() {
+        let config = config();
+        // Per interval: 3080 m busy (2990 m lower), own 2950 m (3000 m upper), so 130 m
+        // external within a 140 m bound; the window reads 10 m.
+        let windowed = reading((3080, 2990), 2950, Some(((2965, 2955), 2955)));
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &windowed, &input(2950, 3000), 0)
+            .unwrap();
+        assert_eq!(external(&decision), Some(10));
+        // Without a window the per-interval estimate stays as before.
+        let plain = reading((3080, 2990), 2950, None);
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &plain, &input(2950, 3000), 0)
+            .unwrap();
+        assert_eq!(external(&decision), Some(130));
+    }
+
+    /// A one-core external start reads beyond the per-interval bound at once, so it is used at
+    /// once and own work is contended within 2 intervals in Yield First and Neutral (SC-002).
+    #[test]
+    fn a_real_external_start_is_contended_within_two_intervals_with_the_window_in_place() {
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let mut config = config();
+            config.contention.default_mode = mode;
+            let mut engine = PolicyEngine::new();
+            let steady = reading((2980, 2960), 2950, Some(((2965, 2955), 2955)));
+            let decision = engine
+                .evaluate(&config, &steady, &input(2950, 2960), 0)
+                .unwrap();
+            assert!(
+                decision.actions.is_empty(),
+                "{mode:?}: {:?}",
+                decision.actions
+            );
+            // A one-core contender: per interval 1050 m external, the window only an eighth of it.
+            let started = reading((4000, 3990), 2950, Some(((3090, 3080), 2955)));
+            let first = engine
+                .evaluate(&config, &started, &input(2950, 2960), 500)
+                .unwrap();
+            assert_eq!(external(&first), Some(1050), "{mode:?}");
+            let second = engine
+                .evaluate(&config, &started, &input(2950, 2960), 1000)
+                .unwrap();
+            assert!(
+                first
+                    .actions
+                    .iter()
+                    .chain(&second.actions)
+                    .any(|a| a.resource == ResourceKey::Cpu && a.allocation_id == "a"),
+                "{mode:?}: no CPU step within 2 intervals"
+            );
+        }
+    }
+
+    /// The admission p95 takes each allocation's window value when it has one.
+    #[test]
+    fn the_admission_p95_takes_the_window_value() {
+        let config = config();
+        let credit = |window: Option<u64>| {
+            let mut engine = PolicyEngine::new();
+            let mut last = None;
+            let mut now = 0;
+            while now <= 61_000 {
+                let mut input = input(250, 260);
+                input.allocations[0].observed_window_cpu = window;
+                let mut snap = reading((1300, 1280), 250, Some(((1290, 1280), 250)));
+                // Fresh scoped telemetry each interval.
+                snap.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + now;
+                last = Some(engine.evaluate(&config, &snap, &input, now).unwrap());
+                now += 500;
+            }
+            last.unwrap().cpu_admission_credit_millicores
+        };
+        assert_eq!(credit(None), 0);
+        assert_eq!(credit(Some(200)), 50);
+    }
 }

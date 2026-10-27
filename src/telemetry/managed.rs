@@ -10,15 +10,28 @@ pub struct ManagedCollector {
     pub collector: Collector,
     pub(super) processes: System,
     pub(super) scoped_cpu: bool,
-    pub(super) previous:
-        BTreeMap<String, (crate::execution_model::ProcessIdentity, CpuReading, Instant)>,
+    /// Each allocation's baseline: its identity, the reading, when it was read, and whether it
+    /// was taken at launch, so the next delta covers only part of an aggregate interval.
+    pub(super) previous: BTreeMap<String, Baseline>,
+    /// Each allocation's baselines for the window, oldest first: one per aggregate sample.
+    window_baselines: BTreeMap<String, std::collections::VecDeque<Baseline>>,
     /// One scheduler tick, the precise sources' read lag per running thread.
     tick_ns: u64,
     /// Whether the leaf and clock sources apply; a host with `nohz_full` CPUs
     /// keeps the `/proc` counters.
     precise_cpu: bool,
-    /// How long the last pass of baseline reads took, for the summed bound.
-    baseline_span: Option<Duration>,
+    /// The cgroup backend's delegated root, whose `cpu.stat` gives own CPU in Full.
+    delegated_root: Option<std::path::PathBuf>,
+}
+
+/// A CPU reading taken as the start of an allocation's next delta.
+#[derive(Clone)]
+pub(super) struct Baseline {
+    pub(super) identity: crate::execution_model::ProcessIdentity,
+    pub(super) reading: CpuReading,
+    pub(super) at: Instant,
+    /// Taken at launch rather than right after an aggregate sample.
+    pub(super) first: bool,
 }
 
 /// The running kernel's build configuration, where the distribution installs it.
@@ -51,8 +64,13 @@ impl ManagedCollector {
             processes: System::new(),
             scoped_cpu: config.kernel.enabled,
             previous: BTreeMap::new(),
+            window_baselines: BTreeMap::new(),
+            delegated_root: config
+                .cgroup
+                .enabled
+                .then(|| config.cgroup.delegated_root.clone())
+                .flatten(),
             tick_ns: scheduler_tick_ns(kernel_config().as_deref()),
-            baseline_span: None,
             precise_cpu: cfg!(target_os = "linux")
                 && !nohz_full_active(
                     std::fs::read_to_string("/sys/devices/system/cpu/nohz_full")
@@ -135,10 +153,15 @@ impl ManagedCollector {
                     cpus,
                 )
             {
-                self.previous.insert(
-                    record.assignment_id.clone(),
-                    (identity.clone(), reading, refresh_started),
-                );
+                let baseline = Baseline {
+                    identity: identity.clone(),
+                    reading,
+                    at: refresh_started,
+                    first: true,
+                };
+                self.window_baselines
+                    .insert(record.assignment_id.clone(), [baseline.clone()].into());
+                self.previous.insert(record.assignment_id.clone(), baseline);
             }
         }
     }
@@ -246,6 +269,11 @@ impl ManagedCollector {
                 .iter()
                 .any(|record| record.assignment_id == *assignment)
         });
+        self.window_baselines.retain(|assignment, _| {
+            active
+                .iter()
+                .any(|record| record.assignment_id == *assignment)
+        });
         let verified: BTreeSet<_> = active
             .iter()
             .filter_map(|r| r.identity.as_ref())
@@ -309,7 +337,8 @@ impl ManagedCollector {
             .map(|(pid, process)| (*pid, process.accumulated_cpu_time()))
             .collect();
         let cpus = scope_cpus();
-        let end_reads: BTreeMap<String, (Option<CpuReading>, Option<BTreeSet<u32>>)> = active
+        type EndRead = (Option<CpuReading>, Option<BTreeSet<u32>>, Instant);
+        let end_reads: BTreeMap<String, EndRead> = active
             .iter()
             .filter_map(|record| {
                 let id = record
@@ -318,40 +347,44 @@ impl ManagedCollector {
                     .filter(|id| verified.contains(&id.pid))?;
                 let family = families.get(&owner(&record.assignment_id))?;
                 let stat_ms = before.get(&sysinfo::Pid::from_u32(id.pid)).copied();
-                Some((
-                    record.assignment_id.clone(),
-                    self.read_cpu(record, family, stat_ms, cpus),
-                ))
+                let at = Instant::now();
+                let (reading, members) = self.read_cpu(record, family, stat_ms, cpus);
+                Some((record.assignment_id.clone(), (reading, members, at)))
             })
             .collect();
-        let before_ended = Instant::now();
         let mut snapshot = self.collector.sample()?;
         let cpu_window = if self.scoped_cpu && cfg!(target_os = "linux") {
             self.collector.kernel.cpu_accounting_window()
         } else {
             self.collector.cpu_window
         };
+        // The busy-time window, when the scoped collector holds one (FR-073).
+        let busy_window = (self.scoped_cpu && cfg!(target_os = "linux"))
+            .then(|| self.collector.kernel.cpu_window_accounting())
+            .flatten()
+            .map(|(window, _)| window);
         snapshot.capabilities.insert("managed_memory_attribution".into(),capability(
             if cfg!(target_os="linux"){CapabilityStatus::Available}else{CapabilityStatus::Unsupported},
             "Managed RAM subtraction uses anonymous proportional physical memory on Linux, excluding reclaimable file mappings. Other platforms subtract a conservative zero lower bound and retain declared reservations; this is not a measurement of zero workload RAM and not hard memory enforcement."));
         snapshot.capabilities.insert("managed_cpu_attribution".into(),capability(
             if cpu_counter_quantization_ms().is_some(){CapabilityStatus::Available}else{CapabilityStatus::Unsupported},
-            "Managed CPU is a conservative lower bound over the aggregate CPU sample window, from the allocation's verified cgroup leaf (cpu.stat usage_usec, only while its members are own verified processes), else the process CPU clock read under a pidfd, else /proc tick counters. Process deltas lie inside aggregate read boundaries; Linux uses at least the largest selected-core tick interval as divisor. New workers use the whole aggregate interval; each source's resolution plus one scheduler tick per thread that can be running (the tick counters: two ticks) is subtracted, and reservations remain charged in full. A source change or missing attribution is unknown; this is not hard CPU enforcement."));
-        let refresh_started = Instant::now();
+            "Managed CPU is a conservative lower bound from the allocation's verified cgroup leaf (cpu.stat usage_usec, only while its members are own verified processes), else the process CPU clock read under a pidfd, else /proc tick counters. Process deltas lie inside aggregate read boundaries; a process that ran the whole interval is divided by its own read interval, and a new worker by the whole aggregate interval. Each source's resolution plus one scheduler tick per thread that can be running (the tick counters: two ticks) is subtracted per allocation, and one tick per scope CPU from the sum; reservations remain charged in full. A source change or missing attribution is unknown; this is not hard CPU enforcement."));
         self.processes
             .refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
         let mut allocations = Vec::new();
         let mut cpu_diagnostics = Vec::new();
         let mut parts = Vec::new();
-        let (mut first_baseline, mut last_baseline) = (None, None);
+        let mut window_parts = Vec::new();
+        let mut window_complete = busy_window.is_some();
         // A member the allocation's leaf already counts adds no CPU of its own.
         let covered: BTreeMap<&String, &BTreeSet<u32>> = end_reads
             .iter()
-            .filter_map(|(assignment, (_, members))| Some((assignment, members.as_ref()?)))
+            .filter_map(|(assignment, (_, members, _))| Some((assignment, members.as_ref()?)))
             .collect();
         for record in active {
             let old_cpu = self.previous.get(&record.assignment_id).cloned();
             let end = end_reads.get(&record.assignment_id).and_then(|end| end.0);
+            let end_at = end_reads.get(&record.assignment_id).map(|end| end.2);
             let leaf_counted = record.identity.as_ref().is_some_and(|id| {
                 counted_by_leaf(parents, &covered, &record.assignment_id, id.pid)
             });
@@ -365,12 +398,16 @@ impl ManagedCollector {
                         .processes
                         .process(sysinfo::Pid::from_u32(id.pid))
                         .map(|process| process.accumulated_cpu_time());
-                    let started = Instant::now();
-                    let reading = self.read_cpu(record, family, stat_ms, cpus).0;
-                    first_baseline.get_or_insert(started);
-                    last_baseline = Some(Instant::now());
-                    reading
+                    let at = Instant::now();
+                    let reading = self.read_cpu(record, family, stat_ms, cpus).0?;
+                    Some(Baseline {
+                        identity: id.clone(),
+                        reading,
+                        at,
+                        first: false,
+                    })
                 });
+            let mut window_cpu = None;
             let bounds = (|| -> Option<(Resources, Resources)> {
                 let id = record.identity.as_ref()?;
                 if !verified.contains(&id.pid)
@@ -389,24 +426,28 @@ impl ManagedCollector {
                     return None;
                 }
                 let process = self.processes.process(sysinfo::Pid::from_u32(id.pid))?;
-                let Some(baseline) = baseline else {
+                let Some(baseline) = baseline.clone() else {
                     self.previous.remove(&record.assignment_id);
+                    self.window_baselines.remove(&record.assignment_id);
                     return None;
                 };
-                let old = self.previous.insert(
-                    record.assignment_id.clone(),
-                    (id.clone(), baseline, refresh_started),
-                )?;
-                if old.0 != *id {
+                let old = self
+                    .previous
+                    .insert(record.assignment_id.clone(), baseline)?;
+                if old.identity != *id {
+                    self.window_baselines.remove(&record.assignment_id);
                     return None;
                 }
-                let (delta, quantization) = cpu_delta(old.1, end?)?;
-                let cpu_millicores = aligned_cpu_usage_lower_bound(
+                let end = end?;
+                let end_at = end_at?;
+                let (delta, quantization) = cpu_delta(old.reading, end)?;
+                let (cpu_millicores, divisor) = own_cpu_lower_bound(
                     delta,
-                    old.2,
-                    before_ended,
+                    old.at,
+                    end_at,
                     cpu_window?,
                     quantization,
+                    old.first,
                 )?;
                 let ram_mib = anonymous_memory_mib(id.pid)?;
                 let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources)?;
@@ -414,20 +455,50 @@ impl ManagedCollector {
                 // quantization, and resident memory including shared pages.
                 let upper_cpu = cpu_usage_upper_bound(
                     delta,
-                    before_ended.checked_duration_since(old.2)?,
+                    end_at.checked_duration_since(old.at)?,
                     quantization,
                 )?
                 .max(cpu_millicores);
+                let precise = end
+                    .resolution_ns()
+                    .map(|resolution| (resolution, old.reading.threads.max(end.threads)));
+                // Over the window: from the first baseline taken after the window began, divided
+                // by the process's own read interval when an older baseline shows it ran the whole
+                // window, else by the whole window (FR-073).
+                if let Some(window) = busy_window
+                    && let Some(history) = self.window_baselines.get(&record.assignment_id)
+                    && let Some(start) = history.iter().position(|b| b.at >= window.started)
+                    && history[start].identity == *id
+                    && let Some((window_delta, window_quantization)) =
+                        cpu_delta(history[start].reading, end)
+                {
+                    let interval = if start > 0 && !history[start].first {
+                        end_at.checked_duration_since(history[start].at)
+                    } else {
+                        Some(window.duration())
+                    };
+                    if let Some(interval) = interval {
+                        window_cpu =
+                            cpu_usage_lower_bound(window_delta, interval, window_quantization);
+                        if !leaf_counted {
+                            window_parts.push(CpuPart {
+                                delta_ns: window_delta,
+                                quantization_ns: window_quantization,
+                                precise,
+                                interval,
+                            });
+                        }
+                    }
+                }
                 let (cpu_millicores, upper_cpu) = if leaf_counted {
+                    window_cpu = window_cpu.map(|_| 0);
                     (0, 0)
                 } else {
-                    let end = end?;
                     parts.push(CpuPart {
                         delta_ns: delta,
                         quantization_ns: quantization,
-                        precise: end
-                            .resolution_ns()
-                            .map(|resolution| (resolution, old.1.threads.max(end.threads))),
+                        precise,
+                        interval: divisor,
                     });
                     (cpu_millicores, upper_cpu)
                 };
@@ -446,6 +517,19 @@ impl ManagedCollector {
                 ))
             })();
             let (observed, observed_upper) = bounds.unzip();
+            if let Some(baseline) = baseline {
+                let history = self
+                    .window_baselines
+                    .entry(record.assignment_id.clone())
+                    .or_default();
+                history.push_back(baseline);
+                while history.len() > crate::kernel::CPU_WINDOW_INTERVALS + 2 {
+                    history.pop_front();
+                }
+            }
+            if observed.is_some() && window_cpu.is_none() {
+                window_complete = false;
+            }
             // Bounded read-only evidence makes a rejected subtraction
             // diagnosable even if the workload drains before the next heartbeat.
             if cpu_diagnostics.len() < 64
@@ -456,12 +540,12 @@ impl ManagedCollector {
                     "assignment_id":record.assignment_id,"pid":id.pid,
                     "cpu_source":end.map(|end|end.source.name()),
                     "leaf_counted":leaf_counted,
-                    "previous_cpu_ns":old_cpu.as_ref().map(|old|old.1.ns),
+                    "previous_cpu_ns":old_cpu.as_ref().map(|old|old.reading.ns),
                     "end_cpu_ns":end.map(|end|end.ns),
-                    "next_baseline_cpu_ns":self.previous.get(&record.assignment_id).map(|next|next.1.ns),
+                    "next_baseline_cpu_ns":self.previous.get(&record.assignment_id).map(|next|next.reading.ns),
                     "stat_cpu_ms":before.get(&pid),
-                    "process_baseline_after_aggregate_start_ns":old_cpu.as_ref().and_then(|old|cpu_window.and_then(|window|old.2.checked_duration_since(window.started))).map(|duration|duration.as_nanos()),
-                    "process_read_before_aggregate_end_ns":cpu_window.and_then(|window|window.ended.checked_duration_since(before_ended)).map(|duration|duration.as_nanos()),
+                    "process_baseline_after_aggregate_start_ns":old_cpu.as_ref().and_then(|old|cpu_window.and_then(|window|old.at.checked_duration_since(window.started))).map(|duration|duration.as_nanos()),
+                    "process_read_before_aggregate_end_ns":cpu_window.zip(end_at).and_then(|(window,at)|window.ended.checked_duration_since(at)).map(|duration|duration.as_nanos()),
                     "aggregate_wall_ns":cpu_window.map(|window|window.ended.duration_since(window.started).as_nanos()),
                     "aggregate_counter_ns":cpu_window.map(|window|window.counter_interval.as_nanos()),
                     "divisor_ns":cpu_window.map(|window|window.duration().as_nanos()),
@@ -484,24 +568,78 @@ impl ManagedCollector {
                 requested: record.resources.clone(),
                 observed: if pending { None } else { observed },
                 observed_upper: if pending { None } else { observed_upper },
+                observed_window_cpu: if pending { None } else { window_cpu },
                 modes: record.modes.clone(),
             });
         }
-        // The baseline pass this interval's deltas started from ran last interval.
-        if let (Some(span), Some(window), false) =
-            (self.baseline_span, cpu_window, parts.is_empty())
-        {
-            snapshot.managed_cpu_lower_millicores = summed_lower_bound(
-                &parts,
-                cpus,
-                self.tick_ns,
-                u64::try_from(span.as_nanos()).unwrap_or(u64::MAX),
-                window.duration(),
-            );
+        if cpu_window.is_some() && !parts.is_empty() {
+            snapshot.managed_cpu_lower_millicores = summed_lower_bound(&parts, cpus, self.tick_ns);
         }
-        self.baseline_span = first_baseline
-            .zip(last_baseline)
-            .map(|(first, last)| last - first);
+        // Full: every own allocation is a leaf directly under the delegated root, read through
+        // its verified leaf; then the root's one read, beside the host counters, is own CPU.
+        let mut full = false;
+        if let (Some(root), Some(window), true) =
+            (&self.delegated_root, cpu_window, self.scoped_cpu)
+        {
+            let mut leaves = BTreeSet::new();
+            let mut threads = 0u64;
+            let mut every_leaf = true;
+            for record in records
+                .iter()
+                .filter(|r| r.phase != ExecutionPhase::Released)
+            {
+                match leaf_path(record).filter(|leaf| leaf.parent() == Some(root.as_path())) {
+                    Some(leaf) => {
+                        leaves.insert(leaf.file_name().unwrap_or_default().to_owned());
+                        match end_reads.get(&record.assignment_id) {
+                            Some((Some(reading), Some(_), _)) => threads += reading.threads,
+                            _ if matches!(
+                                record.phase,
+                                ExecutionPhase::Reserved | ExecutionPhase::Prepared
+                            ) => {}
+                            _ => every_leaf = false,
+                        }
+                    }
+                    None => every_leaf = false,
+                }
+            }
+            let children: BTreeSet<_> = std::fs::read_dir(root)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                        .map(|entry| entry.file_name())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let procs = std::fs::read_to_string(root.join("cgroup.procs")).ok();
+            if every_leaf
+                && let Some(procs) = procs
+                && full_parent_applies(&children, &procs, &leaves)
+            {
+                let (interval, over_window) = self.collector.kernel.delegated_cpu_usage();
+                if let Some(delta) = interval {
+                    snapshot.managed_cpu_lower_millicores =
+                        parent_lower_bound(delta, threads, cpus, self.tick_ns, window.duration());
+                }
+                if let (Some(delta), Some(span)) = (over_window, busy_window) {
+                    snapshot.managed_cpu_window_lower_millicores =
+                        parent_lower_bound(delta, threads, cpus, self.tick_ns, span.duration());
+                }
+                full = true;
+                if let Some(evidence) = snapshot.capabilities.get_mut("managed_cpu_attribution") {
+                    evidence.detail.push_str(" Own CPU in total: the delegated root's cpu.stat, read beside the host counters, while its children are exactly the own leaves.");
+                }
+            }
+        }
+        // Own CPU over the window, only when every measured allocation has its window value.
+        if !full && window_complete && window_parts.len() == parts.len() {
+            snapshot.managed_cpu_window_lower_millicores = if window_parts.is_empty() {
+                Some(0)
+            } else {
+                summed_lower_bound(&window_parts, cpus, self.tick_ns)
+            };
+        }
         if !cpu_diagnostics.is_empty()
             && let Some(evidence) = snapshot.capabilities.get_mut("managed_cpu_attribution")
         {
@@ -533,6 +671,38 @@ pub(super) fn aligned_cpu_usage_lower_bound(
         return None;
     }
     cpu_usage_lower_bound(delta_ns, aggregate.duration(), quantization_ns)
+}
+
+/// One allocation's CPU lower bound and the interval it is divided by. A process whose
+/// baseline was read right after the previous aggregate sample ran that whole interval, so its
+/// delta is divided by its own read interval; one whose baseline was taken at launch keeps the
+/// aggregate interval, so a partial first delta is never scaled to a full rate. A baseline
+/// before the aggregate interval, or an end read after it, stays unknown (FR-073).
+pub(super) fn own_cpu_lower_bound(
+    delta_ns: u64,
+    baseline_at: Instant,
+    end_at: Instant,
+    aggregate: crate::kernel::CpuAccountingWindow,
+    quantization_ns: u64,
+    first: bool,
+) -> Option<(u64, Duration)> {
+    if first {
+        let divisor = aggregate.duration();
+        return aligned_cpu_usage_lower_bound(
+            delta_ns,
+            baseline_at,
+            end_at,
+            aggregate,
+            quantization_ns,
+        )
+        .map(|millicores| (millicores, divisor));
+    }
+    if baseline_at < aggregate.started || end_at > aggregate.ended || end_at <= baseline_at {
+        return None;
+    }
+    let divisor = end_at - baseline_at;
+    cpu_usage_lower_bound(delta_ns, divisor, quantization_ns)
+        .map(|millicores| (millicores, divisor))
 }
 
 /// CPU time over an enclosing interval in millicores, the read error subtracted.
@@ -616,7 +786,7 @@ pub(super) fn cpu_delta(old: CpuReading, new: CpuReading) -> Option<(u64, u64)> 
     ))
 }
 
-/// One allocation's CPU delta this interval, for the sum over own work.
+/// One allocation's CPU delta, for the sum over own work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CpuPart {
     pub(super) delta_ns: u64,
@@ -624,43 +794,43 @@ pub(super) struct CpuPart {
     pub(super) quantization_ns: u64,
     /// For the leaf and the clock: the resolution and the threads read.
     pub(super) precise: Option<(u64, u64)>,
+    /// What the delta is divided by: the process's own read interval, or the aggregate
+    /// interval for a delta that covers only part of it.
+    pub(super) interval: Duration,
 }
 
-/// Own work's CPU lower bound in millicores, summed over allocations. Pending
-/// runtime exists only on a task running at the read, so across all own
-/// processes it is at most one tick per scope CPU, widened by the read pass's
-/// length: on one CPU the pending stretches of processes read one after another
-/// are disjoint and lie between its last tick and the last read. The tick
-/// counters keep their rounding in full. The result is never below the sum of
-/// the per-allocation bounds, nor above the raw delta.
-pub(super) fn summed_lower_bound(
-    parts: &[CpuPart],
-    cpus: u64,
-    tick_ns: u64,
-    span_ns: u64,
-    window: Duration,
-) -> Option<u64> {
+/// Own work's CPU lower bound in millicores, summed over allocations, each divided by its own
+/// interval. Pending runtime exists only on a task running at the read, so across all own
+/// processes it is taken as one tick per scope CPU, over the shortest interval; runtime pending
+/// at one read is folded and counted at a later one (research R23). The tick counters keep their
+/// rounding in full. The result is never below the sum of the per-allocation bounds, nor above
+/// the raw delta.
+pub(super) fn summed_lower_bound(parts: &[CpuPart], cpus: u64, tick_ns: u64) -> Option<u64> {
+    // Nano-millicores keep the sum of many per-part rates exact to a millicore.
+    const SCALE: u128 = 1_000_000_000;
     let per_part = parts
         .iter()
-        .map(|part| cpu_usage_lower_bound(part.delta_ns, window, part.quantization_ns))
+        .map(|part| cpu_usage_lower_bound(part.delta_ns, part.interval, part.quantization_ns))
         .sum::<Option<u64>>()?;
-    let mut delta = 0u64;
-    let mut subtract = 0u64;
+    let shortest = parts.iter().map(|part| part.interval.as_nanos()).min()?;
+    if shortest == 0 {
+        return None;
+    }
+    let mut rate = 0u128;
     let mut threads = 0u64;
     for part in parts {
-        delta = delta.checked_add(part.delta_ns)?;
-        match part.precise {
+        let subtract = match part.precise {
             Some((resolution, part_threads)) => {
-                subtract = subtract.checked_add(resolution)?;
                 threads = threads.checked_add(part_threads.max(1))?;
+                resolution
             }
-            None => subtract = subtract.checked_add(part.quantization_ns)?,
-        }
+            None => part.quantization_ns,
+        };
+        rate += u128::from(part.delta_ns.saturating_sub(subtract)) * 1000 * SCALE
+            / part.interval.as_nanos().max(1);
     }
-    let pending = threads
-        .min(cpus)
-        .checked_mul(tick_ns.checked_add(span_ns)?)?;
-    let summed = cpu_usage_lower_bound(delta, window, subtract.checked_add(pending)?)?;
+    let pending = u128::from(threads.min(cpus).checked_mul(tick_ns)?) * 1000 * SCALE / shortest;
+    let summed = u64::try_from(rate.saturating_sub(pending) / SCALE).ok()?;
     Some(summed.max(per_part))
 }
 
@@ -733,12 +903,7 @@ pub(super) fn leaf_reading_with(
     if before != after || !before.contains(&leader) || !before.is_subset(family) {
         return None;
     }
-    let usage_usec: u64 = stat
-        .lines()
-        .find_map(|line| line.strip_prefix("usage_usec "))?
-        .trim()
-        .parse()
-        .ok()?;
+    let ns = parse_usage_usec(&stat)?;
     let threads = before
         .iter()
         .map(|pid| threads(*pid))
@@ -746,12 +911,41 @@ pub(super) fn leaf_reading_with(
     Some((
         CpuReading {
             source: CpuSource::Leaf,
-            ns: usage_usec.checked_mul(1_000)?,
+            ns,
             quantization_ns: leaf_quantization_ns(threads, cpus, tick_ns),
             threads,
         },
         before,
     ))
+}
+
+pub(super) use crate::kernel::parse_usage_usec;
+
+/// Whether the delegated root's CPU time is own work's alone: it holds no process and its
+/// children are exactly the own leaves, so no other process and none of CedeGrid's own are in it
+/// (FR-073).
+pub(super) fn full_parent_applies(
+    children: &BTreeSet<std::ffi::OsString>,
+    procs: &str,
+    leaves: &BTreeSet<std::ffi::OsString>,
+) -> bool {
+    !leaves.is_empty() && procs.trim().is_empty() && children == leaves
+}
+
+/// Own CPU from the delegated root over `interval`: its 1 µs resolution and one tick per own
+/// thread that can run, at most one per scope CPU, subtracted; one read, so no read-pass term.
+pub(super) fn parent_lower_bound(
+    delta_ns: u64,
+    threads: u64,
+    cpus: u64,
+    tick_ns: u64,
+    interval: Duration,
+) -> Option<u64> {
+    cpu_usage_lower_bound(
+        delta_ns,
+        interval,
+        1_000 + running_threads(threads, cpus) * tick_ns,
+    )
 }
 
 /// Whether a managed child's CPU is already in its allocation's leaf reading.
