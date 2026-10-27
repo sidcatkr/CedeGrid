@@ -200,7 +200,11 @@ requested resource open; every launch reserves CPU and RAM. Own work blocks admi
 resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
 holds more than its target, or a step is still moving down. A cap or hint that holds at its
 target does not block, and coordinator placement follows the node's admission without
-counting steps. A move within the noise tolerance on memory, or within the reversal hysteresis
+counting steps. When CPU or RAM admission is closed only by the node's own new allocations
+that have no first measurement yet, or by the cooldown only they restarted, the report says
+so for that resource, and the coordinator still authorizes reservations it placed earlier
+while they fit the budget; it places nothing new there, and any other cause, a GPU resource or
+a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
 of the external growth a compute step answered (`hysteresis_percent` of that demand), is
 jitter: it blocks no admission, and a CPU cap that holds within it resets no cooldown. Admission then follows headroom, cooldown and reclaim backoff: own
 charged usage plus a new request stays within own target, the aggregate from the node mode

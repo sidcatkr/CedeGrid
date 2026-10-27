@@ -998,6 +998,68 @@
           }
         }
       }
+    },
+    {
+      "id": "NEG-02",
+      "description": "A burst's own new allocations hold CPU admission: the report says so per resource, so the coordinator can authorize reservations it already placed (FR-028).",
+      "request": {
+        "op": "heartbeat",
+        "report": {
+          "node_id": "node",
+          "boot_id": "boot",
+          "observed_at_unix_ms": 1,
+          "managed_budget": {
+            "cpu_millicores": 2000,
+            "ram_mib": 1000,
+            "gpu_memory_mib": {}
+          },
+          "expansion_allowed": true,
+          "gpu_expansion_allowed": false,
+          "gpu_guaranteed_allowed": true,
+          "launch_slots": 2,
+          "available_controls": [],
+          "allocations": [
+            {
+              "assignment_id": "a",
+              "generation": 1,
+              "phase": "running",
+              "observed": {
+                "cpu_millicores": 100,
+                "ram_mib": 100,
+                "gpu_memory_mib": {}
+              },
+              "detail": "",
+              "hint_ready": true,
+              "observes_drain": true
+            }
+          ],
+          "features": [
+            "api/1",
+            "contention/1"
+          ],
+          "contention": {
+            "resources": {
+              "cpu": {
+                "mode": "neutral",
+                "admission": {
+                  "state": "held",
+                  "code": "admission_measurement_unknown",
+                  "reason": "The measurement is unknown, so admission waits for it."
+                },
+                "held_back": {
+                  "margin": 100,
+                  "ceiling": 25,
+                  "contention": 50
+                },
+                "admission_own_new": true
+              }
+            },
+            "exceptions": [],
+            "max_mode": "neutral",
+            "max_workers": 4
+          }
+        }
+      }
     }
   ],
   "job_contention_cases": [
