@@ -170,6 +170,12 @@ thresholds.
 - Q: How much may held caps and hints on one resource rise in one round, and how is the rise
   split? → A: Together at most the spare (the mode's allowance minus current usage), split
   equally among the held steps, the same basis as fair shares, with no per-allocation weights.
+- Q: May a reservation be authorized for the first time while its node's admission is closed? →
+  A: Only when every cause closing that resource is the node's own new allocations that have no
+  first measurement yet, or the stability cooldown that only they restarted, and only for CPU and
+  RAM. The node report states that cause per resource as a structured field; a report without it
+  stays fail-closed. Any other cause still refuses, and the request must still fit the budget.
+  Placement of new reservations and preemption are unchanged.
 
 ## Terms
 
@@ -807,6 +813,15 @@ node reports with the expected per-resource values at each step.
   target or with a step still moving down. A step holding at its target does not block. A move
   within the noise tolerance (memory) or within the reversal hysteresis of the external growth a
   compute step answered is jitter and counts as neither.
+  - Reports MUST also state, per resource, when its admission is closed only by the node's own
+    new allocations that have no first measurement yet, or by the stability cooldown only they
+    restarted. At the first authorization of an existing reservation, and only there, the
+    coordinator MUST count such a CPU or RAM resource as open, so a burst's own launches do not
+    refuse the rest of the burst. Any other cause keeps it closed: contention or external growth,
+    an own step that holds work back or the cooldown it restarted, a floor breach, unknown host
+    measurement, a full spool, an unknown or closed GPU device, or a report without the field.
+    The request MUST still fit the budget, and placement of new reservations and preemption keep
+    the unchanged rule.
 - **FR-029**: Nodes MUST advertise only the control capabilities they can actually apply.
 - **FR-064**: `contention.never_share_occupied_gpus` (default false) MUST, when set, block new own
   GPU work on any device with an external context or unknown external processes, in every mode.
