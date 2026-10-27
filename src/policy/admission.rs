@@ -61,23 +61,98 @@ impl Interval<'_> {
             .map(|((_, key), _)| key.clone())
             .collect();
         // A CPU cap that holds may sit within the tolerance above a jittering budget.
+        let cpu_fits = self.charged.cpu_millicores <= self.budget.cpu_millicores
+            || (!moving_down.contains(&ResourceKey::Cpu)
+                && self.charged.cpu_millicores
+                    <= self.budget.cpu_millicores.saturating_add(jitter_tolerance(
+                        config,
+                        ladder,
+                        &ResourceKey::Cpu,
+                    )));
         let cpu_safe = !input.explicit_drain
             && !self.cpu_unknown
             && !self.cpu_held
             && self.cpu_capacity > 0
-            && (self.charged.cpu_millicores <= self.budget.cpu_millicores
-                || (!moving_down.contains(&ResourceKey::Cpu)
-                    && self.charged.cpu_millicores
-                        <= self.budget.cpu_millicores.saturating_add(jitter_tolerance(
-                            config,
-                            ladder,
-                            &ResourceKey::Cpu,
-                        ))));
+            && cpu_fits;
         let ram_safe = !input.explicit_drain
             && !self.ram_unknown
             && !self.ram_held
             && snapshot.total_ram_mib > 0
             && self.charged.ram_mib <= self.budget.ram_mib;
+        // Holding back only for own allocations that have no first measurement yet:
+        // nothing else about the resource is unsafe, reclaimed or stepped (FR-028).
+        let steps_held = |key: &ResourceKey| {
+            ladder
+                .iter()
+                .any(|((_, k), state)| k == key && state.step != YieldStep::None)
+        };
+        // Own work, counting the new allocations at their charge, within the mode's
+        // target share, and external usage no higher than beside that target: steps
+        // are held while a measurement is unknown, so contention and external growth
+        // show here rather than in the ladder. A held interval computes no target, so
+        // the last one carries through with the external usage it was computed beside.
+        let target_of = |key: &ResourceKey, before: Option<(u64, u64)>| {
+            self.statuses
+                .get(key)
+                .and_then(|status| status.target_share)
+                .map(|target| (target, self.external_of(key)))
+                .or(before)
+        };
+        let (cpu_target, ram_target) = (
+            target_of(&ResourceKey::Cpu, prev.cpu_target),
+            target_of(&ResourceKey::Ram, prev.ram_target),
+        );
+        self.next.cpu_target = cpu_target;
+        self.next.ram_target = ram_target;
+        let within = |key: &ResourceKey, target: Option<(u64, u64)>, charged: u64| {
+            let tolerance = jitter_tolerance(config, ladder, key);
+            target.is_some_and(|(target, external)| {
+                charged <= target.saturating_add(tolerance)
+                    && self.external_of(key) <= external.saturating_add(tolerance)
+            })
+        };
+        let cpu_within = within(&ResourceKey::Cpu, cpu_target, self.charged.cpu_millicores);
+        let ram_within = within(&ResourceKey::Ram, ram_target, self.charged.ram_mib);
+        let cpu_new_now = !input.explicit_drain
+            && !self.cpu_unknown
+            && !self.cpu_held_inconsistent
+            && self.cpu_capacity > 0
+            && cpu_fits
+            && self.unknown_charge.cpu_millicores > 0
+            && self.unknown_charge.cpu_millicores == self.unknown_new.cpu_millicores
+            && cpu_within
+            && !steps_held(&ResourceKey::Cpu);
+        let ram_new_now = !input.explicit_drain
+            && !self.ram_unknown
+            && snapshot.total_ram_mib > 0
+            && self.charged.ram_mib <= self.budget.ram_mib
+            && self.unknown_charge.ram_mib > 0
+            && self.unknown_charge.ram_mib == self.unknown_new.ram_mib
+            && ram_within
+            && !self.breached.contains(&ResourceKey::Ram)
+            && !steps_held(&ResourceKey::Ram);
+        self.next.cpu_reset_by_new = if cpu_safe {
+            prev.cpu_reset_by_new
+        } else {
+            cpu_new_now
+        };
+        self.next.ram_reset_by_new = if ram_safe {
+            prev.ram_reset_by_new
+        } else {
+            ram_new_now
+        };
+        self.cpu_new_only = if cpu_safe {
+            self.next.cpu_reset_by_new && !steps_held(&ResourceKey::Cpu)
+        } else {
+            cpu_new_now
+        };
+        self.ram_new_only = if ram_safe {
+            self.next.ram_reset_by_new
+                && !steps_held(&ResourceKey::Ram)
+                && !self.breached.contains(&ResourceKey::Ram)
+        } else {
+            ram_new_now
+        };
         self.next.cpu_stable_since = cpu_safe.then_some(prev.cpu_stable_since.unwrap_or(now));
         self.next.ram_stable_since = ram_safe.then_some(prev.ram_stable_since.unwrap_or(now));
         self.cpu_allowed = cooled(
@@ -562,7 +637,19 @@ impl Interval<'_> {
             }
         }
         for (key, state) in admissions {
-            self.statuses.entry(key).or_default().admission = Some(state);
+            // Only a hold for a first measurement or the cooldown can be the burst's
+            // own; reclaim, floors, drains and backoff never are (FR-028).
+            let own_new = match key {
+                ResourceKey::Cpu => self.cpu_new_only && !self.stepped(&key),
+                ResourceKey::Ram => self.ram_new_only && !self.stepped(&key),
+                _ => false,
+            } && matches!(
+                state.code(),
+                Some("admission_measurement_unknown" | "admission_cooling_down")
+            );
+            let status = self.statuses.entry(key).or_default();
+            status.admission = Some(state);
+            status.admission_own_new = own_new;
         }
         // Admission is open but own charges fill own target: requests wait.
         if self.headroom.cpu_millicores == 0

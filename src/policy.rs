@@ -167,6 +167,14 @@ pub struct PolicyEngine {
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
     ram_stable_since: Option<u64>,
+    /// Whether the last reset of CPU's and RAM's stability had no cause but own
+    /// allocations without a first measurement (FR-028).
+    cpu_reset_by_new: bool,
+    ram_reset_by_new: bool,
+    /// The last CPU and RAM target shares computed, carried through held intervals,
+    /// with the external usage they were computed beside, to tell external growth.
+    cpu_target: Option<(u64, u64)>,
+    ram_target: Option<(u64, u64)>,
     last_now: Option<u64>,
     node_id: Option<String>,
     /// Collector-relative sample marker and the policy time it first arrived.
@@ -315,6 +323,8 @@ struct Interval<'a> {
     /// Charges of running allocations whose usage is unknown this interval. Host
     /// usage includes them, so they are own work, never external demand (R10).
     unknown_charge: Resources,
+    /// The part of `unknown_charge` from allocations never measured yet.
+    unknown_new: Resources,
     unknown_allocations: BTreeSet<String>,
     first_observed_gpus: BTreeSet<String>,
     cpu_credit: i128,
@@ -329,6 +339,11 @@ struct Interval<'a> {
     ram_unknown: bool,
     cpu_held: bool,
     ram_held: bool,
+    /// CPU is held because own usage read above host busy.
+    cpu_held_inconsistent: bool,
+    /// CPU and RAM admission, when closed, is closed only by own new allocations.
+    cpu_new_only: bool,
+    ram_new_only: bool,
     cpu_capacity: u64,
     cpu_busy: Option<u64>,
     cpu_ceiling: u64,
@@ -404,6 +419,7 @@ impl<'a> Interval<'a> {
             managed_observed: Resources::default(),
             charges: BTreeMap::new(),
             unknown_charge: Resources::default(),
+            unknown_new: Resources::default(),
             unknown_allocations: BTreeSet::new(),
             first_observed_gpus: BTreeSet::new(),
             cpu_credit: 0,
@@ -414,6 +430,9 @@ impl<'a> Interval<'a> {
             cpu_unknown: false,
             ram_unknown: false,
             cpu_held: false,
+            cpu_held_inconsistent: false,
+            cpu_new_only: false,
+            ram_new_only: false,
             ram_held: false,
             cpu_capacity: 0,
             cpu_busy: None,

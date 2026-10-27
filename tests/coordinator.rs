@@ -3567,6 +3567,7 @@ fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
     let open = || ResourceContentionReport {
         mode: ContentionMode::Neutral,
         admission: Admission::Open,
+        admission_own_new: false,
         own: None,
         external: None,
         target_share: None,
@@ -3660,6 +3661,152 @@ fn placement_honors_the_per_resource_admission_of_a_negotiated_report() {
         })
         .is_empty()
     );
+}
+
+/// 150 reservations offered while admission was open, then a report changed by
+/// `change`: how many first authorizations succeed, how many are refused, and
+/// the tasks the reply to that report lists (outstanding offers and new ones).
+fn burst_authorizations(change: &dyn Fn(&mut NodeReport)) -> (usize, usize, Vec<String>) {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let mut p = pool();
+    p.max_workers = 160;
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: p }, 100)
+        .unwrap();
+    let small = |id: String| {
+        let mut request = task(&id);
+        request.resources.cpu_millicores = 10;
+        request.resources.ram_mib = 4;
+        request
+    };
+    submit_tasks(
+        &mut c,
+        "burst",
+        0,
+        (0..150).map(|i| small(format!("t{i}"))).collect(),
+        100,
+    );
+    let mut open = negotiated(100, &[]);
+    open.launch_slots = 150;
+    let offered = report_reply(&mut c, &open, 100).assignments;
+    assert_eq!(offered.len(), 150);
+    submit_tasks(&mut c, "late", 0, vec![small("late".into())], 150);
+    let mut closed = negotiated(200, &[]);
+    closed.launch_slots = 150;
+    change(&mut closed);
+    let late = placed(&report_reply(&mut c, &closed, 200));
+    let (mut authorized, mut refused) = (0, 0);
+    for a in &offered {
+        let result = c.handle_at(
+            &node(),
+            Request::Prepared {
+                assignment_id: a.request.assignment_id.clone(),
+                generation: a.generation,
+                coordinator_epoch: a.coordinator_epoch,
+                record: prepared(a),
+            },
+            300,
+        );
+        match result {
+            Ok(Response::Lease { .. }) => authorized += 1,
+            _ => refused += 1,
+        }
+    }
+    (authorized, refused, late)
+}
+
+/// FR-028, item 026: at a reservation's first authorization, CPU or RAM closed
+/// only by the node's own new allocations counts as open, so a burst's own
+/// launches do not refuse the rest of the burst; new placement still sees it
+/// closed, and the reservations must still fit the budget.
+#[test]
+fn a_bursts_own_reservations_are_authorized_while_they_fit() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let own_new = |r: &mut NodeReport, key: ResourceKey, code: &str| {
+        let state = resource(r, key);
+        state.admission = Admission::held(code);
+        state.admission_own_new = true;
+    };
+    let (authorized, refused, late) = burst_authorizations(&|r| {
+        own_new(r, ResourceKey::Cpu, "admission_measurement_unknown");
+        own_new(r, ResourceKey::Ram, "admission_cooling_down");
+    });
+    assert_eq!((authorized, refused), (150, 0));
+    // The reply repeats the outstanding offers; the new task is not among them.
+    assert!(
+        !late.iter().any(|id| id == "late"),
+        "a new reservation is still placed by the unchanged rule"
+    );
+    // Beyond the budget, none is authorized.
+    let (authorized, _, _) = burst_authorizations(&|r| {
+        own_new(r, ResourceKey::Cpu, "admission_measurement_unknown");
+        r.managed_budget.cpu_millicores = 1000;
+    });
+    assert_eq!(authorized, 0);
+}
+
+/// Any other cause keeps a closed resource closed at the first authorization:
+/// the flag absent (an older report, or a held step, contention, a floor breach,
+/// unknown host measurement or a full spool, which never set it), or a closed
+/// GPU device even with the flag (FR-028).
+#[test]
+fn other_causes_still_refuse_the_first_authorization() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    for code in [
+        "admission_own_work_yielding",
+        "admission_floor_breached",
+        "admission_measurement_unknown",
+        "admission_spool_exhausted",
+        "admission_cooling_down",
+    ] {
+        let (authorized, refused, _) = burst_authorizations(&|r| {
+            resource(r, ResourceKey::Cpu).admission = if code == "admission_own_work_yielding"
+                || code == "admission_floor_breached"
+                || code == "admission_spool_exhausted"
+            {
+                Admission::blocked(code)
+            } else {
+                Admission::held(code)
+            };
+        });
+        assert_eq!((authorized, refused), (0, 150), "{code}");
+    }
+    // A report from an agent without the field parses with it unset.
+    let mut old = serde_json::to_value(negotiated(100, &[])).unwrap();
+    old["contention"]["resources"]["cpu"]["admission"] =
+        serde_json::to_value(Admission::held("admission_measurement_unknown")).unwrap();
+    let old: NodeReport = serde_json::from_value(old).unwrap();
+    assert!(!old.contention.unwrap().resources[&ResourceKey::Cpu].admission_own_new);
+}
+
+/// The GPU is never exempt: a GPU reservation stays refused while its device is
+/// closed, whatever the flag says (FR-028).
+#[test]
+fn a_closed_gpu_device_still_refuses_the_first_authorization() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    submit_tasks(&mut c, "job", 0, vec![gpu_task("gpu", "GPU-a", 500)], 100);
+    let offered = report_reply(&mut c, &negotiated(100, &["GPU-a"]), 100).assignments;
+    assert_eq!(offered.len(), 1);
+    let mut closed = negotiated(200, &["GPU-a"]);
+    let state = resource(&mut closed, ResourceKey::GpuMemory("GPU-a".into()));
+    state.admission = Admission::held("admission_cooling_down");
+    state.admission_own_new = true;
+    report_reply(&mut c, &closed, 200);
+    let a = &offered[0];
+    let result = c.handle_at(
+        &node(),
+        Request::Prepared {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            coordinator_epoch: a.coordinator_epoch,
+            record: prepared(a),
+        },
+        300,
+    );
+    assert!(result.is_err() || !matches!(result, Ok(Response::Lease { .. })));
 }
 
 /// Without `contention/1`, placement keeps the 0.2 fields.

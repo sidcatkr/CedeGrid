@@ -1736,7 +1736,7 @@ impl Coordinator {
             // uncertain siblings. A deficit on an unrelated UUID cannot authorize
             // this UUID, nor block independently qualified CPU/other-GPU capacity.
             let charge = self.node_charge(&report.node_id)?;
-            match placement(&report, &request, &charge) {
+            match authorization_placement(&report, &request, &charge) {
                 Placement::Fits => {}
                 Placement::Closed => bail!(
                     "initial execution authorization requires current per-resource and per-device admission and a compatible allocation class"
@@ -2115,8 +2115,9 @@ enum Placement {
     Closed,
 }
 
-/// The one admission predicate that placement, preemption and the first
-/// authorization share (audit M10). `total` is the node's charge including the
+/// The one admission predicate that placement and preemption share (audit M10), and
+/// that the first authorization of an existing reservation applies through
+/// [`authorization_placement`]. `total` is the node's charge including the
 /// request. A request with per-job modes needs `contention/1`. With it, every requested resource (CPU, RAM, and each
 /// requested GPU's memory and compute) must be open as the node reports it; the
 /// node blocks a resource while own work on it is reclaimed, and a step holding at
@@ -2176,6 +2177,30 @@ fn placement(
     } else {
         Placement::Exhausted
     }
+}
+
+/// [`placement`] for the first authorization of a reservation already placed: a CPU
+/// or RAM resource closed only by the node's own allocations without a first
+/// measurement, or the cooldown only they restarted, counts as open, so a burst's
+/// own launches do not refuse the rest of it (FR-028). Every other cause, a GPU
+/// resource, a report without the cause, and the budget still apply.
+fn authorization_placement(
+    report: &NodeReport,
+    request: &crate::execution_model::LaunchRequest,
+    total: &Resources,
+) -> Placement {
+    use crate::contention::{Admission, ResourceKey};
+    let mut report = report.clone();
+    if let Some(contention) = report.contention.as_mut() {
+        for key in [ResourceKey::Cpu, ResourceKey::Ram] {
+            if let Some(state) = contention.resources.get_mut(&key)
+                && state.admission_own_new
+            {
+                state.admission = Admission::Open;
+            }
+        }
+    }
+    placement(&report, request, total)
 }
 
 /// One scheduling pass's preemption state: the charge projected once the chosen

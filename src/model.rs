@@ -475,6 +475,10 @@ pub struct ResourceStatus {
     pub activity: Option<ComputeActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission: Option<crate::contention::Admission>,
+    /// CPU or RAM admission is closed only by own allocations that have no first
+    /// measurement yet, or by the cooldown only they restarted (FR-028).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admission_own_new: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_back: Option<HeldBack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

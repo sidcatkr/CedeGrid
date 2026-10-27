@@ -618,7 +618,10 @@ Measurement only: the policy rules and the decision snapshot do not change.
   total beside `unknown_charge`), or the stability cooldown that only they restarted
   (`PolicyState` keeps, per resource, whether the last reset of its stability had only that
   cause). The CPU hold from an inconsistent measurement (own above host busy) is tracked apart,
-  so it never counts. The node contention report carries the flag as
+  so it never counts. Steps are held while a measurement is unknown, so contention is read
+  directly: own charges, the new allocations at theirs, must fit the last target share computed,
+  and external usage must be no higher than beside it, within the jitter tolerance; no step may
+  be held on the resource, and RAM must not be in a floor breach. The node contention report carries the flag as
   `ResourceContentionReport.admission_own_new`, default false and skipped when false.
 - **Coordinator**: the first authorization of an existing reservation (`grant`, sequence 0)
   calls `authorization_placement`, which counts a CPU or RAM resource closed with that flag as

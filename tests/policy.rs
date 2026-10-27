@@ -3025,6 +3025,214 @@ fn usage_held_back_by_a_cpu_step_is_not_admission_room() {
     assert!(calm.admission_headroom.cpu_millicores > 0);
 }
 
+/// Item 026 (FR-028): CPU and RAM report `admission_own_new` while their admission
+/// is closed only by the node's own allocations that have no first measurement
+/// yet, or by the cooldown only they restarted; never for another cause.
+mod admission_own_new {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+
+    /// Running allocations by ID with their usage, `None` when unknown this interval.
+    fn decide(
+        engine: &mut PolicyEngine,
+        config: &Config,
+        jobs: &[(&str, Option<(u64, u64)>)],
+        external: u64,
+        now: u64,
+    ) -> Decision {
+        let input = PolicyInput {
+            allocations: jobs
+                .iter()
+                .map(|(id, used)| {
+                    allocation(
+                        id,
+                        AllocationPhase::Running,
+                        resources(500, 200, 0),
+                        used.map(|(cpu, ram)| resources(cpu, ram, 0)),
+                    )
+                })
+                .collect(),
+            ..PolicyInput::default()
+        };
+        let own: u64 = jobs.iter().filter_map(|(_, u)| u.map(|(cpu, _)| cpu)).sum();
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(own + external);
+        engine.evaluate(config, &snap, &input, now).unwrap()
+    }
+
+    fn flags(decision: &Decision) -> (bool, bool) {
+        let flag = |key| {
+            decision
+                .resources
+                .get(&key)
+                .is_some_and(|status| status.admission_own_new)
+        };
+        (flag(ResourceKey::Cpu), flag(ResourceKey::Ram))
+    }
+
+    /// An idle node with one measured job, cooled down.
+    fn settled(config: &Config) -> (PolicyEngine, u64) {
+        let mut engine = PolicyEngine::new();
+        let mut now = 0;
+        while now <= 30_000 {
+            decide(&mut engine, config, &[("old", Some((500, 200)))], 0, now);
+            now += 500;
+        }
+        (engine, now)
+    }
+
+    #[test]
+    fn new_unmeasured_allocations_and_the_cooldown_they_restart_are_marked() {
+        let mut config = config();
+        scale_up_cooldowns(&mut config, 5000);
+        let (mut engine, mut now) = settled(&config);
+        let burst = [("old", Some((500, 200))), ("n1", None), ("n2", None)];
+        let first = decide(&mut engine, &config, &burst, 0, now);
+        assert!(
+            first.resources[&ResourceKey::Cpu].admission
+                != Some(cedegrid::contention::Admission::Open)
+        );
+        assert_eq!(flags(&first), (true, true));
+        now += 500;
+        let measured = [
+            ("old", Some((500, 200))),
+            ("n1", Some((500, 200))),
+            ("n2", Some((500, 200))),
+        ];
+        let cooling = decide(&mut engine, &config, &measured, 0, now);
+        assert_eq!(
+            cooling.resources[&ResourceKey::Cpu]
+                .admission
+                .as_ref()
+                .and_then(|a| a.code()),
+            Some("admission_cooling_down")
+        );
+        assert_eq!(flags(&cooling), (true, true));
+        // Once the cooldown passes, admission is open and nothing is marked.
+        let mut open = cooling;
+        for _ in 0..60 {
+            now += 500;
+            open = decide(&mut engine, &config, &measured, 0, now);
+        }
+        assert_eq!(
+            open.resources[&ResourceKey::Cpu].admission,
+            Some(cedegrid::contention::Admission::Open)
+        );
+        assert_eq!(flags(&open), (false, false));
+        assert!(open.resources.keys().all(|key| !matches!(
+            key,
+            ResourceKey::GpuMemory(_) | ResourceKey::GpuCompute(_)
+        ) || !open.resources[key].admission_own_new));
+    }
+
+    #[test]
+    fn an_allocation_measured_before_is_not_new() {
+        let config = config();
+        let (mut engine, now) = settled(&config);
+        let decision = decide(&mut engine, &config, &[("old", None)], 0, now);
+        assert_eq!(flags(&decision), (false, false));
+    }
+
+    #[test]
+    fn own_usage_above_host_busy_is_not_new() {
+        let config = config();
+        let (mut engine, now) = settled(&config);
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "old",
+                    AllocationPhase::Running,
+                    resources(500, 200, 0),
+                    Some(resources(3000, 200, 0)),
+                ),
+                allocation("n1", AllocationPhase::Running, resources(500, 200, 0), None),
+            ],
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(1000);
+        let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+        assert!(!flags(&decision).0);
+    }
+
+    /// External growth that makes own work step down, and the steps it holds, are
+    /// not the burst's own cause, even with new allocations among them.
+    #[test]
+    fn contention_and_held_steps_are_not_new() {
+        let mut config = config();
+        config.contention.default_mode = ContentionMode::YieldFirst;
+        let (mut engine, mut now) = settled(&config);
+        let wants = |id| (id, Some((2000, 200)));
+        for _ in 0..4 {
+            decide(&mut engine, &config, &[wants("old")], 0, now);
+            now += 500;
+        }
+        // External demand arrives with a new allocation: contention, not the burst.
+        for _ in 0..4 {
+            let contended = decide(
+                &mut engine,
+                &config,
+                &[wants("old"), ("n1", None)],
+                4000,
+                now,
+            );
+            assert!(
+                !flags(&contended).0,
+                "{:?}",
+                contended.resources[&ResourceKey::Cpu].admission
+            );
+            now += 500;
+        }
+        // Once measured, own work steps down; a newer allocation under held steps is
+        // not the burst either.
+        let measured = [wants("old"), ("n1", Some((500, 200)))];
+        let mut stepped = decide(&mut engine, &config, &measured, 4000, now);
+        for _ in 0..6 {
+            now += 500;
+            stepped = decide(&mut engine, &config, &measured, 4000, now);
+        }
+        assert!(
+            stepped
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu)
+        );
+        now += 500;
+        let later = decide(
+            &mut engine,
+            &config,
+            &[wants("old"), ("n1", Some((500, 200))), ("n2", None)],
+            4000,
+            now,
+        );
+        assert!(!flags(&later).0);
+    }
+
+    /// A RAM floor breach is not the burst's cause either.
+    #[test]
+    fn a_floor_breach_is_not_new() {
+        let config = config();
+        let (mut engine, now) = settled(&config);
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "old",
+                    AllocationPhase::Running,
+                    resources(500, 200, 0),
+                    Some(resources(500, 200, 0)),
+                ),
+                allocation("n1", AllocationPhase::Running, resources(500, 200, 0), None),
+            ],
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(500);
+        snap.available_ram_mib = Some(100);
+        let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+        assert!(!flags(&decision).1);
+    }
+}
+
 /// The schedulable budget adds the CPU that running opportunistic work holds
 /// above its p95 usage, so placement and the launch check, which charge requests,
 /// admit by usage as the policy does (FR-034).

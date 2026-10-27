@@ -93,6 +93,7 @@ pub fn node_contention_report(
                 ResourceContentionReport {
                     mode: status.effective_mode.or(status.mode)?,
                     admission: status.admission.clone()?,
+                    admission_own_new: status.admission_own_new,
                     own: status.own,
                     external: status.external,
                     target_share: status.target_share,

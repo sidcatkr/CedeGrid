@@ -88,6 +88,9 @@ impl<'a> Interval<'a> {
                             .insert(allocation.id.clone(), last.clone());
                     }
                     self.unknown_charge.add_checked(&charge)?;
+                    if last.is_none() {
+                        self.unknown_new.add_checked(&charge)?;
+                    }
                     self.unknown_allocations.insert(allocation.id.clone());
                     self.reasons.push(ReasonCode::new("allocation_unknown_hold", format!(
                         "allocation {} has unknown managed usage; charged at max(request, last known), its step holds and affected admission is blocked",
@@ -339,6 +342,7 @@ impl<'a> Interval<'a> {
         .min(busy);
         let external = if own_lower > busy {
             self.cpu_held = true;
+            self.cpu_held_inconsistent = true;
             self.statuses
                 .entry(ResourceKey::Cpu)
                 .or_default()
