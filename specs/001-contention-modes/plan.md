@@ -574,8 +574,12 @@ Measurement only: the policy rules and the decision snapshot do not change.
   one at a time and cost 50–90 ms each in Docker and on macOS (the coordinator's synced writes).
 - **Heartbeat reply**: executions are read once, not once per offered assignment.
 - **Admission under a held CPU step** (FR-034): `charge` (`src/policy/measure.rs`) stops adding
-  usage samples to an allocation's window while it has a held CPU step and charges it at
-  max(request, p95 of the frozen window) with no credit.
+  usage samples to an allocation's window while a CPU step holds it back (a pause, or a cap or
+  hint whose target its usage reaches, the ladder's binding test) and charges it at
+  max(request, p95 of the frozen window) with no credit. A cap above its usage holds nothing
+  back, so FR-028's room below a holding cap stays. The extra charge closes admission but is
+  left out of the "charges exceed budget" safety check, so one job held at its mode's target on
+  an idle host does not keep the node unsafe.
 - **Cap rises** (FR-013): the existing rule, a held step's target rising to its usage plus the
   spare divided by the held steps, already bounds one round by the spare and splits it equally;
   tests pin it.

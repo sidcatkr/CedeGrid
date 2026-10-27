@@ -164,8 +164,9 @@ thresholds.
   lease requests never hold the node's observation, heartbeat or telemetry past the monitor
   interval.
 - Q: How is CPU charged for admission while a running allocation has a held CPU step? → A: At the
-  larger of its request and its p95 usage from before the step, with no credit, until the step
-  is released.
+  larger of its request and its p95 usage from before the step, with no credit, while the step
+  holds it back (a pause, or a cap or hint whose target its usage reaches); a cap above its usage
+  holds nothing back, so demand that fell on its own still frees room (FR-028).
 - Q: How much may held caps and hints on one resource rise in one round, and how is the rise
   split? → A: Together at most the spare (the mode's allowance minus current usage), split
   equally among the held steps, the same basis as fair shares, with no per-allocation weights.
@@ -847,9 +848,10 @@ node reports with the expected per-resource values at each step.
   For CPU admission, running opportunistic work is charged at its p95 usage over
   `contention.cpu.admission_usage_window_s` (default 60 s) once it has a full window of samples,
   and at max(request, observed) before that, so work in its startup phase is never
-  under-charged. While it has a held CPU step it is charged at the larger of its request and its
-  p95 usage from before the step, with no credit, until the step is released, so usage a cap
-  holds back never becomes admission room. Pending work is charged in full, Guaranteed work at max(request, observed), and
+  under-charged. While a CPU step holds it back (a pause, or a cap or hint whose target its usage
+  reaches) it is charged at the larger of its request and its p95 usage from before the step,
+  with no credit, so usage a cap holds back never becomes admission room; that charge closes
+  admission but does not count as own usage beyond the budget. Pending work is charged in full, Guaranteed work at max(request, observed), and
   RAM and GPU memory admission stays request-based. Coordinator placement and the agent's launch
   check MUST admit CPU the same way. RAM admission and the agent's worker limit bound how many
   jobs this CPU credit can admit. In Performance, one heartbeat MUST admit as much as fits within

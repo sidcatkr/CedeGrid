@@ -421,7 +421,9 @@ fn a_scripted_gpu_compute_run_is_shown_at_every_step() {
 /// memory admission is already open on its own cooldown.
 #[test]
 fn the_node_cooldown_names_the_legacy_flags_it_covers() {
-    let steps = run(&config(), &[(20, 0, 0), (120, 4000, 0)]);
+    // The external user's arrival briefly takes own work over the budget, so the
+    // node cooldown restarts; ten intervals later it is still pending.
+    let steps = run(&config(), &[(20, 0, 0), (10, 4000, 0)]);
     let last = &steps.last().unwrap().decision;
     let reason = last
         .reason_codes

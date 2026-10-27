@@ -31,13 +31,42 @@ impl<'a> Interval<'a> {
                             .get(&allocation.id)
                             .cloned()
                             .unwrap_or((now, Default::default()));
-                        samples.retain(|(at, _)| now.saturating_sub(*at) < cpu_window_ms);
-                        samples.push_back((now, observed.cpu_millicores));
-                        if now.saturating_sub(since) >= cpu_window_ms {
-                            let usage = p95(samples.iter().map(|(_, usage)| *usage));
-                            self.cpu_credit +=
-                                i128::from(charge.cpu_millicores) - i128::from(usage);
-                            charge.cpu_millicores = usage;
+                        // Usage a CPU step holds back is not demand: while a pause, or a cap
+                        // or hint its usage reaches, holds the allocation, the window keeps
+                        // its samples from before the step and earns no credit (FR-034). A
+                        // cap above its usage holds nothing back, so demand that fell on its
+                        // own still frees room (FR-028).
+                        let held_back = prev
+                            .ladder
+                            .get(&(allocation.id.clone(), ResourceKey::Cpu))
+                            .is_some_and(|state| match state.step {
+                                YieldStep::Pause => true,
+                                YieldStep::Cap | YieldStep::Hint => {
+                                    state.target.is_some_and(|target| {
+                                        observed.cpu_millicores.saturating_mul(100)
+                                            >= target.saturating_mul(95)
+                                    })
+                                }
+                                _ => false,
+                            });
+                        if held_back {
+                            let held = allocation
+                                .requested
+                                .cpu_millicores
+                                .max(p95(samples.iter().map(|(_, usage)| *usage)));
+                            self.held_back_cpu = self
+                                .held_back_cpu
+                                .saturating_add(held.saturating_sub(charge.cpu_millicores));
+                            charge.cpu_millicores = held;
+                        } else {
+                            samples.retain(|(at, _)| now.saturating_sub(*at) < cpu_window_ms);
+                            samples.push_back((now, observed.cpu_millicores));
+                            if now.saturating_sub(since) >= cpu_window_ms {
+                                let usage = p95(samples.iter().map(|(_, usage)| *usage));
+                                self.cpu_credit +=
+                                    i128::from(charge.cpu_millicores) - i128::from(usage);
+                                charge.cpu_millicores = usage;
+                            }
                         }
                         self.next
                             .cpu_usage
@@ -1235,7 +1264,11 @@ impl<'a> Interval<'a> {
     /// budget.
     pub(super) fn safety(&mut self) {
         let (config, now) = (self.config, self.now);
-        if self.charged.cpu_millicores > self.budget.cpu_millicores
+        if self
+            .charged
+            .cpu_millicores
+            .saturating_sub(self.held_back_cpu)
+            > self.budget.cpu_millicores
             || self.charged.ram_mib > self.budget.ram_mib
         {
             self.unsafe_now = true;

@@ -865,7 +865,12 @@ impl<'a> Interval<'a> {
         );
         let mut seen = BTreeSet::new();
         self.would_drain.retain(|id| seen.insert(id.clone()));
-        if self.charged.cpu_millicores > self.budget.cpu_millicores {
+        if self
+            .charged
+            .cpu_millicores
+            .saturating_sub(self.held_back_cpu)
+            > self.budget.cpu_millicores
+        {
             self.reasons.push(ReasonCode::new(
                 "cpu_charges_exceed_budget",
                 "managed CPU charges exceed scheduling budget",

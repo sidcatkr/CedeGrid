@@ -2943,6 +2943,88 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
     assert_eq!(headroom(500, now), 5500 - 500 - 1000 - 500);
 }
 
+/// While a running allocation has a held CPU step, CPU admission charges it at
+/// the larger of its request and its p95 usage from before the step, with no
+/// credit, so usage a cap holds back never becomes room for more work: report
+/// 024 saw a 14th task admitted with all 13 capped (FR-034).
+#[test]
+fn usage_held_back_by_a_cpu_step_is_not_admission_room() {
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+    let mut config = config();
+    config.contention.default_mode = ContentionMode::YieldFirst;
+    let ids: Vec<String> = (0..13).map(|i| format!("t{i}")).collect();
+    let mut engine = PolicyEngine::new();
+    // Each task runs at its 250m request, or at what a cap allows, or not at all
+    // while paused, as the tasks in report 024 did.
+    let mut limits: BTreeMap<String, u64> = BTreeMap::new();
+    let mut evaluate = |external: u64, now: u64| {
+        let usage = |id: &String| limits.get(id).copied().unwrap_or(250).min(250);
+        let input = PolicyInput {
+            allocations: ids
+                .iter()
+                .map(|id| {
+                    allocation(
+                        id,
+                        AllocationPhase::Running,
+                        resources(250, 0, 0),
+                        Some(resources(usage(id), 0, 0)),
+                    )
+                })
+                .collect(),
+            facts: rootless(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(ids.iter().map(usage).sum::<u64>() + external);
+        let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+        limits = decision
+            .actions
+            .iter()
+            .filter(|a| a.resource == ResourceKey::Cpu)
+            .filter_map(|a| match a.step {
+                YieldStep::Cap => Some((a.allocation_id.clone(), a.target.unwrap_or(250))),
+                YieldStep::Pause => Some((a.allocation_id.clone(), 0)),
+                _ => None,
+            })
+            .collect();
+        decision
+    };
+    // A full window at the request: its p95 is the request.
+    let mut now = 0;
+    while now <= 60_000 {
+        evaluate(0, now);
+        now += 500;
+    }
+    // External demand grows, own work steps down, and the held tasks run at
+    // their caps for longer than the window.
+    let mut busy = evaluate(3500, now);
+    for _ in 0..240 {
+        now += 500;
+        busy = evaluate(3500, now);
+    }
+    let capped = busy
+        .actions
+        .iter()
+        .filter(|a| a.resource == ResourceKey::Cpu)
+        .count();
+    assert!(capped > 0, "own work holds CPU steps");
+    // Tasks held back earn no credit, and the others run at their request.
+    assert_eq!(busy.cpu_admission_credit_millicores, 0);
+    assert!(
+        busy.admission_headroom.cpu_millicores < 250,
+        "no room for a 14th task while 13 are held back: {}",
+        busy.admission_headroom.cpu_millicores
+    );
+    // Once demand recedes and the steps are released, the charge follows usage.
+    let mut calm = evaluate(0, now);
+    for _ in 0..400 {
+        now += 500;
+        calm = evaluate(0, now);
+    }
+    assert!(!calm.actions.iter().any(|a| a.resource == ResourceKey::Cpu));
+    assert!(calm.admission_headroom.cpu_millicores > 0);
+}
+
 /// The schedulable budget adds the CPU that running opportunistic work holds
 /// above its p95 usage, so placement and the launch check, which charge requests,
 /// admit by usage as the policy does (FR-034).

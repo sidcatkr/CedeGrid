@@ -318,6 +318,9 @@ struct Interval<'a> {
     unknown_allocations: BTreeSet<String>,
     first_observed_gpus: BTreeSet<String>,
     cpu_credit: i128,
+    /// What held-back allocations are charged above what they hold now: it closes
+    /// admission but is not own usage beyond the budget.
+    held_back_cpu: u64,
     allocation_modes: BTreeMap<String, BTreeMap<ResourceKind, ContentionMode>>,
     // Measurement and budgets.
     budget: Resources,
@@ -404,6 +407,7 @@ impl<'a> Interval<'a> {
             unknown_allocations: BTreeSet::new(),
             first_observed_gpus: BTreeSet::new(),
             cpu_credit: 0,
+            held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
             unsafe_now: false,
