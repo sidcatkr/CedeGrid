@@ -462,3 +462,25 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   showed no gain with the burst modelled and no gain without it); bound rises tighter than the
   spare (rejected: the existing rule already keeps a round within the spare).
 
+
+## R21. A contender's share of a CPU own work also runs on (item 025, analysis)
+
+- **Finding**: on the test host (rootless backend: CPU caps are SIGSTOP/SIGCONT duty cycles, no
+  `cpu.max`), a one-core contender under the account that runs CedeGrid got 689 m pinned and
+  637 m unpinned while own work held its share (2961 m of 2999 m, 2996 m of 3046 m) and own plus
+  external stayed at capacity minus the margin. Performance's target, capacity minus external
+  minus margin, holds at any split where own plus external fills that much, so the split is the
+  kernel's: own work's duty-cycled tasks keep running on the contender's CPU during their run
+  phases. Report 023's simulation pools capacity, so freed CPU reaches the contender in full and
+  it reaches its core in 5 intervals; on the host only part of what own work frees lands on the
+  contender's CPU. With q cores of own work spread over 4 CPUs and an even split while both run,
+  the contender gets about 1 − q/8 of its CPU: 0.63 at q = 2.96, as measured.
+- **What would let it reach its demand**: for the owner's own programs, a lower weight for own
+  work within the owner's slice (the leaf's `cpu.weight`, or nice in a rootless lower-share
+  step), which SC-002 as amended does not require. For another account's contender, its slice
+  and own work's split a contended CPU evenly, and its waiting shows as external CPU pressure
+  (FR-072), so Performance keeps reclaiming toward the fair share; at q = 2 that gives about
+  0.75 of its CPU, and the rest needs own work to leave that CPU.
+- **Prediction for item 026**: under a second account, the pinned contender gets about 0.6–0.75
+  core, external `cpu.pressure` some avg10 stays above `psi_some_percent` while it waits, and own
+  work is reclaimed toward its fair share; SC-004's second bullet would still miss pinned.
