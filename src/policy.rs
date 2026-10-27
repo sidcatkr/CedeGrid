@@ -178,6 +178,9 @@ pub struct PolicyEngine {
     /// Since when own CPU usage has been over its target while the budget did not fall,
     /// counted once every held cap is applied (FR-011).
     cpu_over_since: Option<u64>,
+    /// Consecutive intervals in which every external CPU principal, the unattributed
+    /// remainder included and background left out, stayed below `principal_min_percent`.
+    cpu_quiet_intervals: u32,
     last_now: Option<u64>,
     node_id: Option<String>,
     /// Collector-relative sample marker and the policy time it first arrived.
@@ -353,6 +356,9 @@ struct Interval<'a> {
     cpu_own_hold: bool,
     /// CedeGrid's own CPU this interval: own work's side, out of external usage (FR-069).
     cedegrid_cpu: u64,
+    /// CPU contention has fully ended: Yield First and Neutral return CPU in one move,
+    /// without the mode's scale-up interval (FR-034).
+    cpu_contention_ended: bool,
     /// CPU and RAM admission, when closed, is closed only by own new allocations.
     cpu_new_only: bool,
     ram_new_only: bool,
@@ -446,6 +452,7 @@ impl<'a> Interval<'a> {
             cpu_bound: 0,
             cpu_own_hold: false,
             cedegrid_cpu: 0,
+            cpu_contention_ended: false,
             cpu_new_only: false,
             ram_new_only: false,
             ram_held: false,

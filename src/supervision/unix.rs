@@ -794,8 +794,9 @@ fn apply_runtime_commands(
 const JOURNAL_ATTEMPTS: u32 = 4;
 /// The running loop's pass while a source it watches has no event to wait on.
 const PASS: Duration = Duration::from_millis(5);
-/// The longest wait for an event before the running loop passes anyway.
-const IDLE_PASS: Duration = Duration::from_millis(100);
+/// The longest wait for an event before the running loop passes anyway; every source it
+/// watches has an event or a deadline, so this only bounds an unforeseen one.
+const IDLE_PASS: Duration = Duration::from_secs(1);
 
 /// Waits until a descriptor turns readable or `until` passes, whichever comes first. An
 /// interrupted or failed wait only ends this pass early.

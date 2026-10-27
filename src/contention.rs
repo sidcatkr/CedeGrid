@@ -1315,7 +1315,9 @@ pub fn max_min_shares(capacity: u64, demands: &[Option<u64>]) -> Vec<u64> {
 /// beyond them except Yield First's.
 pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     let margin = |percent: u8| input.capacity.saturating_mul(u64::from(percent)) / 100;
-    let available = input.capacity.saturating_sub(input.external);
+    let available = input
+        .capacity
+        .saturating_sub(expected_external(input, thresholds));
     let contended = contended(input, thresholds);
     let yield_first_margin = margin(thresholds.yield_first_margin_percent);
     let probe = input.probe.filter(|_| !input.unknown_activity);
@@ -1353,6 +1355,26 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
             available.saturating_sub(margin(thresholds.performance_margin_percent))
         }
     }
+}
+
+/// External usage with room for a principal whose demand is on record as satisfied but who
+/// uses clearly less of a saturated resource: it may be starved, as when it comes back, so its
+/// recorded demand counts and it is served within SC-002's bound.
+fn expected_external(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+    if !input.saturated || input.kind.is_memory() {
+        return input.external;
+    }
+    let floor = principal_floor(input, thresholds);
+    contending_principals(input, thresholds)
+        .into_iter()
+        .fold(input.external, |external, (uid, usage)| {
+            match satisfied_demand(input, uid, usage) {
+                Some(demand) if usage.saturating_add(floor) < demand => {
+                    external.saturating_add(demand - usage)
+                }
+                _ => external,
+            }
+        })
 }
 
 /// The contention floor: usage, in resource units, from which a principal

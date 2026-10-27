@@ -4101,3 +4101,230 @@ mod cap_rises {
         );
     }
 }
+
+/// CPU returns at once once contention has fully ended (FR-034, item 027 Part 5b): own work
+/// of 16 tasks of 250 m on 4000 m beside a contender of another user. The simulated host
+/// splits CPU by threads, weighted max-min, and honours the caps the policy applies.
+mod contention_ended {
+    use super::*;
+    use crate::snapshot::PolicyEngine;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const CAPACITY: u64 = 4000;
+    const INTERVAL: u64 = 500;
+    const TASKS: usize = 16;
+    const TASK: u64 = 250;
+
+    /// One thread per claim, weighted max-min over CAPACITY.
+    fn schedule(demands: &[u64]) -> Vec<u64> {
+        let mut shares = vec![0u64; demands.len()];
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        let mut remaining = CAPACITY;
+        while !open.is_empty() && remaining > 0 {
+            let level = remaining / open.len() as u64;
+            let (done, rest): (Vec<usize>, Vec<usize>) = open
+                .iter()
+                .partition(|i| demands[**i] - shares[**i] <= level);
+            if done.is_empty() {
+                for i in &open {
+                    shares[*i] += level;
+                }
+                break;
+            }
+            for i in done {
+                remaining -= demands[i] - shares[i];
+                shares[i] = demands[i];
+            }
+            open = rest;
+        }
+        shares
+    }
+
+    struct Tick {
+        now: u64,
+        own: u64,
+        contender: u64,
+        steps: Vec<(YieldStep, Option<u64>)>,
+        share: u64,
+    }
+
+    /// Each interval's usage and steps while the contender wants `demand(now)`.
+    fn run(mode: ContentionMode, ticks: u64, demand: impl Fn(u64) -> u64) -> Vec<Tick> {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        let mut engine = PolicyEngine::new();
+        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
+        let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
+        let mut out = Vec::new();
+        for tick in 0..ticks {
+            let now = tick * INTERVAL;
+            let mut demands: Vec<u64> = caps
+                .iter()
+                .map(|(step, target)| match step {
+                    YieldStep::Pause => 0,
+                    YieldStep::Cap => target.unwrap_or(TASK).min(TASK),
+                    _ => TASK,
+                })
+                .collect();
+            demands.push(demand(now));
+            let usage = schedule(&demands);
+            let contender = usage[TASKS];
+            let own: u64 = usage[..TASKS].iter().sum();
+            let mut snap = snapshot(own + contender);
+            snap.cpu_capacity_millicores = CAPACITY;
+            snap.physical_cores = Some(4);
+            snap.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: contender,
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let input = PolicyInput {
+                allocations: ids
+                    .iter()
+                    .zip(&usage)
+                    .map(|(id, used)| {
+                        allocation(id, AllocationClass::Opportunistic, TASK, Some(*used))
+                    })
+                    .collect(),
+                facts: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            AllocationFacts {
+                                unavailable: BTreeMap::from([(
+                                    ResourceKey::Cpu,
+                                    [YieldStep::LowerShare].into(),
+                                )]),
+                                ..AllocationFacts::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                caps[i] = decision
+                    .actions
+                    .iter()
+                    .find(|a| &a.allocation_id == id && a.resource == ResourceKey::Cpu)
+                    .map_or((YieldStep::None, None), |a| (a.step, a.target));
+            }
+            out.push(Tick {
+                now,
+                own,
+                contender,
+                steps: caps.clone(),
+                share: decision.resources[&ResourceKey::Cpu]
+                    .target_share
+                    .unwrap_or(0),
+            });
+        }
+        out
+    }
+
+    /// The first interval at or after `from` in which own work is within 2% of `target`.
+    fn reached(run: &[Tick], from: u64, target: u64) -> Option<u64> {
+        run.iter()
+            .find(|tick| tick.now >= from && tick.own * 50 >= target * 49)
+            .map(|tick| tick.now - from)
+    }
+
+    /// A one-core contender drops to half a core, then leaves 5 s later: own work is at the
+    /// uncontended target within 2 s plus one interval, though a rise came less than the
+    /// mode's interval before.
+    #[test]
+    fn a_contender_that_leaves_returns_the_cpu_within_two_seconds_and_an_interval() {
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let run = run(mode, 240, |now| match now {
+                10_000..40_000 => 1000,
+                40_000..45_000 => 500,
+                _ => 0,
+            });
+            let target = run.last().unwrap().share;
+            let after = reached(&run, 45_000, target);
+            assert!(
+                after.is_some_and(|ms| ms <= 2000 + INTERVAL),
+                "{mode:?}: {after:?} to reach {target}m"
+            );
+        }
+    }
+
+    /// Contention that only falls keeps the mode's interval between rises of a held cap.
+    #[test]
+    fn contention_that_only_falls_keeps_the_modes_interval() {
+        for (mode, interval) in [
+            (ContentionMode::YieldFirst, 30_000),
+            (ContentionMode::Neutral, 10_000),
+        ] {
+            let run = run(mode, 240, |now| if now < 10_000 { 0 } else if now < 40_000 { 1000 } else { 500 });
+            for task in 0..TASKS {
+                let rises: Vec<u64> = run
+                    .windows(2)
+                    .filter(|pair| {
+                        let (before, after) = (pair[0].steps[task], pair[1].steps[task]);
+                        before.0 == YieldStep::Cap
+                            && after.0 == YieldStep::Cap
+                            && after.1 > before.1
+                    })
+                    .map(|pair| pair[1].now)
+                    .collect();
+                assert!(
+                    rises.windows(2).all(|pair| pair[1] - pair[0] >= interval),
+                    "{mode:?} t{task}: {rises:?}"
+                );
+            }
+        }
+    }
+
+    /// An on/off contender, every 4 intervals as SC-009 states and every 30 s, changes each
+    /// task's step at most once per switch, and when it comes back it has its core within 2
+    /// intervals (SC-002).
+    #[test]
+    fn an_on_off_contender_changes_each_step_once_per_switch_and_is_served_on_return() {
+        for (mode, half) in [
+            (ContentionMode::YieldFirst, 2000),
+            (ContentionMode::Neutral, 2000),
+            (ContentionMode::YieldFirst, 30_000),
+            (ContentionMode::Neutral, 30_000),
+        ] {
+            let on = |now: u64| now >= half && (now / half) % 2 == 1;
+            let run = run(mode, 1200, |now| if on(now) { 1000 } else { 0 });
+            for switch in 1..(run.last().unwrap().now / half) {
+                let window: Vec<&Tick> = run
+                    .iter()
+                    .filter(|tick| tick.now / half == switch)
+                    .collect();
+                for task in 0..TASKS {
+                    let changes = window
+                        .windows(2)
+                        .filter(|pair| pair[0].steps[task].0 != pair[1].steps[task].0)
+                        .count();
+                    assert!(
+                        changes <= 1,
+                        "{mode:?} {half} ms switch {switch} t{task}: {changes}"
+                    );
+                }
+                if on(switch * half) {
+                    let served = window
+                        .iter()
+                        .position(|tick| tick.contender >= 1000)
+                        .unwrap_or(usize::MAX);
+                    assert!(
+                        served <= 2,
+                        "{mode:?} {half} ms switch {switch}: served after {served}"
+                    );
+                }
+            }
+        }
+    }
+}

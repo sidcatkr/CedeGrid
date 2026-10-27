@@ -4552,8 +4552,9 @@ mod allowance {
 
     /// Publishing has no churn: a fall publishes at once, a rise at most once per
     /// scale-up interval by at most one scale-up step (the mode's margin of
-    /// capacity), and only changes beyond the contention floor (CPU) or the noise
-    /// tolerance (memory) publish.
+    /// capacity) while contention only falls, and only changes beyond the contention
+    /// floor (CPU) or the noise tolerance (memory) publish. Once contention has fully
+    /// ended, CPU rises in one move (FR-034).
     #[test]
     fn allowances_fall_at_once_and_rise_one_step_per_interval() {
         let cfg = cfg(ContentionMode::Neutral);
@@ -4583,12 +4584,12 @@ mod allowance {
         assert!(fallen + 2000 < first, "{first} -> {fallen}");
         // A small external change within the 80m floor does not publish.
         assert_eq!(run(3050, 1000, 1000), fallen);
-        // External CPU leaves: the allowance rises one 400m step (5% of 8000m) per
-        // 10 s scale-up interval.
+        // External CPU falls but stays: the allowance rises one 400m step (5% of 8000m)
+        // per 10 s scale-up interval.
         let mut now = 1500;
         let mut published = vec![];
         while now <= 31_500 {
-            published.push((now, run(0, 1000, now)));
+            published.push((now, run(1000, 1000, now)));
             now += 500;
         }
         let rises: Vec<(u64, u64)> = published
@@ -4602,6 +4603,11 @@ mod allowance {
             rises.windows(2).all(|w| w[1].0 - w[0].0 >= 10_000),
             "{rises:?}"
         );
+        // External CPU leaves: after the 2 s principal window, one move to the target.
+        let before = published.last().unwrap().1;
+        let returned: Vec<u64> = (1..=5).map(|n| run(0, 1000, now + n * 500)).collect();
+        assert_eq!(returned[..3], [before; 3], "{returned:?}");
+        assert!(returned[4] >= before + 1000, "{before} -> {returned:?}");
     }
 
     /// The reserve is one publish threshold in total: small falls on eight

@@ -736,9 +736,19 @@ impl Interval<'_> {
                     .map(|(previous, _)| previous.saturating_sub(*value))
             })
             .fold(0u64, u64::saturating_add);
+        // Once CPU contention has fully ended, the allowance rises in one move (FR-034).
+        let ended = key == ResourceKey::Cpu && self.cpu_contention_ended;
         for (allocation_id, value, mode) in current {
-            let step = allowance_step(&thresholds, kind, capacity, threshold, mode);
-            let scale_up_ms = thresholds.scale_up_interval_ms(mode, config.monitor.interval_ms);
+            let step = if ended {
+                u64::MAX
+            } else {
+                allowance_step(&thresholds, kind, capacity, threshold, mode)
+            };
+            let scale_up_ms = if ended {
+                0
+            } else {
+                thresholds.scale_up_interval_ms(mode, config.monitor.interval_ms)
+            };
             let id = (allocation_id.clone(), key.clone());
             let published = match prev.allowance_published.get(&id).copied() {
                 None => (value, now),

@@ -288,6 +288,7 @@ impl<'a> Interval<'a> {
             usage_excess,
             guaranteed_drain,
             spare_share,
+            contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
         }
     }
 
@@ -1046,11 +1047,14 @@ struct Frame {
     usage_excess: u64,
     guaranteed_drain: bool,
     spare_share: u64,
+    /// CPU contention has fully ended: held steps rise without the mode's interval.
+    contention_ended: bool,
 }
 
 impl Frame {
     /// The resource's timing at a job's own mode's pace: each job yields and
-    /// rises at its own mode's pace.
+    /// rises at its own mode's pace, and once CPU contention has fully ended
+    /// it rises after the dwell alone (FR-034).
     fn timing_for(&self, config: &Config, mode: ContentionMode) -> LadderTiming {
         let paced = LadderTiming::new(
             &config.contention.thresholds(self.kind),
@@ -1059,7 +1063,11 @@ impl Frame {
         );
         LadderTiming {
             response_ms: paced.response_ms,
-            scale_up_ms: paced.scale_up_ms,
+            scale_up_ms: if self.contention_ended {
+                0
+            } else {
+                paced.scale_up_ms
+            },
             ..self.timing.clone()
         }
     }

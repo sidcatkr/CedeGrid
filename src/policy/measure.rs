@@ -752,6 +752,7 @@ impl<'a> Interval<'a> {
                 .unwrap_or_default(),
             probe: None,
         };
+        self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
         let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
         for target in targets.values_mut() {
@@ -764,6 +765,47 @@ impl<'a> Interval<'a> {
             // Capacity minus the reserve and external usage, within the ancestor quota.
             .min(self.budget.cpu_millicores)
             .saturating_sub(cedegrid);
+    }
+
+    /// Counts the intervals in which every external CPU principal stayed below
+    /// `principal_min_percent`: readable users each, background left out, and what no
+    /// readable principal accounts for as one more (FR-034).
+    fn note_cpu_quiet(&mut self, view: &ModeInput, thresholds: &ResourceThresholds) {
+        let floor = (view
+            .capacity
+            .saturating_mul(u64::from(thresholds.principal_min_percent))
+            / 100)
+            .max(1);
+        let quiet = match self.snapshot.principals.as_ref() {
+            Some(list) => {
+                let mut accounted = 0u64;
+                let mut each_below = true;
+                for principal in list {
+                    let usage = if principal.is_owner {
+                        principal.cpu_millicores.saturating_sub(self.cedegrid_cpu)
+                    } else {
+                        principal.cpu_millicores
+                    };
+                    match principal.uid {
+                        Some(uid) if !principal.is_owner && uid >= self.config.contention.uid_min => {
+                            each_below &= usage < floor;
+                        }
+                        None if !principal.is_owner => continue,
+                        _ => {}
+                    }
+                    accounted = accounted.saturating_add(usage);
+                }
+                each_below && view.external.saturating_sub(accounted) < floor
+            }
+            None => view.external < floor,
+        };
+        self.next.cpu_quiet_intervals = if quiet {
+            self.prev.cpu_quiet_intervals.saturating_add(1)
+        } else {
+            0
+        };
+        self.cpu_contention_ended =
+            self.next.cpu_quiet_intervals >= self.config.contention.principal_window_intervals;
     }
 
     /// RAM: the mode's target beside the contending principals.
