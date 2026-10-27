@@ -176,6 +176,38 @@ thresholds.
   RAM. The node report states that cause per resource as a structured field; a report without it
   stays fail-closed. Any other cause still refuses, and the request must still fit the budget.
   Placement of new reservations and preemption are unchanged.
+- Q: How is own CPU measured for the external estimate, and over what window? → A: In Full, when
+  every own allocation is under one delegated parent, from that parent's `cpu.stat` read once per
+  interval next to the host `/proc/stat` read, with an error of 1 µs plus one scheduler tick per
+  own thread that can run, at most one per scope CPU; CedeGrid's own processes under that parent
+  are measured apart. In Tracked, each process's rate over its own read-to-read interval (a process
+  in its first interval keeps the aggregate divisor), with the tick lag but no read-pass term in
+  the summed bound; a baseline outside the aggregate window stays unknown. The steady-state
+  allowance and the admission budget, with the p95 that feeds it, use own CPU and host busy over
+  a window of at least 8 intervals with one bound for the window; growth detection and the
+  per-interval step decision keep the per-interval bound.
+- Q: How does a node exchange lease requests with the coordinator? → A: In one batch per agent
+  iteration: renewals first, by lease deadline, then initial authorizations, under one clock
+  value. The coordinator answers in one transaction with one synced commit, each item in its own
+  savepoint, with a result per assignment, so one refusal affects only its item and a preparation
+  record persists as before. A batch holds a bounded number of items under the request size limit
+  and splits beyond it; a retried batch is idempotent per item; per-item events stay as before.
+  The batch is a negotiated feature: against a peer without it, the agent sends single requests.
+- Q: What happens to a reservation the policy cancels before it starts? → A: The agent releases it
+  and never requests its initial authorization. A CPU drain planned while an allocation was
+  pending, for an allocation that has started running, is re-planned on the running pass, which
+  never drains for CPU alone.
+- Q: How does the ladder respond when own CPU usage is over the target but external usage did not
+  rise? → A: Enforcement first: each capped allocation is held at its cap by the actuator from its
+  last measured rate, which is not a new step. Own work steps down only when usage stays over the
+  target for `min_step_dwell_intervals` with caps applied. The cause is `own_over_target`, recorded
+  apart from `external_growth`, and the scale-up interval does not restart for it once enforcement
+  holds. A budget that fell because external usage rose keeps the existing path and SC-002's
+  bounds.
+- Q: How is CedeGrid's own CPU counted and reported? → A: The agent's and supervisors' CPU is shown
+  as in use by CedeGrid, attributed to the owner, never as unattributed external usage, so it
+  never forms an anonymous principal. SC-014 counts own tasks plus CedeGrid and states both; with
+  117 tasks on 14 CPUs, CedeGrid's own processes use at most 1% of capacity.
 
 ## Terms
 
@@ -593,6 +625,19 @@ node reports with the expected per-resource values at each step.
   MUST require growth beyond the known measurement error.
 - **FR-007**: Inconsistencies between own and host measurements within the known sampling error
   MUST NOT zero a resource's budget or trigger a drain. They MUST be reported.
+- **FR-073**: Own CPU for the external estimate MUST be measured as follows.
+  - In Full, when every own allocation is under one delegated parent, it is that parent's
+    `cpu.stat` `usage_usec`, read once per interval next to the host's CPU counters. Its error is
+    1 µs plus one scheduler tick per own thread that can run, at most one per scope CPU.
+    CedeGrid's own processes under that parent are measured apart.
+  - In Tracked, each process's rate is taken over its own read-to-read interval, except in its
+    first interval, which keeps the aggregate interval. The summed bound subtracts each source's
+    read error and the tick lag, not the length of the read pass. A baseline outside the aggregate
+    interval is unknown.
+  - The steady-state allowance and the admission budget, with the p95 usage that feeds it, MUST
+    use own CPU and host busy over a window of at least 8 monitor intervals with one bound for
+    the window. Growth detection and the per-interval step decision keep the per-interval bound
+    (SC-002).
 - **FR-008**: An unknown measurement for one allocation or one resource MUST affect only that
   allocation's or resource's admission and steps. In every mode it MUST first hold the current
   step and block expansion. It MAY escalate only after a bounded, configurable unknown window,
@@ -607,7 +652,8 @@ node reports with the expected per-resource values at each step.
   reaches `principal_min_percent`. A principal MUST leave only after its usage has stayed below
   that threshold for `principal_leave_s` (default 60 s). Usage by user IDs below `uid_min` MUST
   count as background external demand: it is subtracted from capacity and never forms a
-  principal.
+  principal. CedeGrid's own processes (the agent and supervisors) count toward the CedeGrid
+  account, never toward the unattributed principal.
 - **FR-060**: Admission headroom for RAM and GPU memory MUST use the peak of external usage over
   `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Peaks are
   kept per external process, identified by PID and start time: a live process keeps its peak for
@@ -629,9 +675,18 @@ node reports with the expected per-resource values at each step.
   - Otherwise memory contention MUST start at the hint step for hint-ready allocations, and at
     drain for the others. GPU memory never takes a cap, and pause MUST NOT be used to resolve
     memory contention.
+  - When own CPU usage is over its target and the budget did not fall because external usage
+    rose, the actuator first holds each capped allocation at its cap from its last measured rate,
+    which is not a new step. Own work steps down only when usage stays over the target for
+    `min_step_dwell_intervals` with caps applied. The cause is `own_over_target`, and the
+    scale-up interval does not restart for it once enforcement holds. A budget that fell because
+    external usage rose keeps the steps and bounds above (SC-002).
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
+  A reservation the policy cancels before it starts MUST be released without its initial
+  authorization. A CPU drain planned while an allocation was pending MUST NOT drain it once it
+  runs: it is re-planned as running work, which CPU contention alone never drains (SC-007).
 - **FR-013**: Steps 1–4 MUST be reversible. When external demand recedes past a reversal
   threshold with hysteresis, steps MUST be undone in reverse order at the mode's scale-up rate.
   The held caps and hints on a resource rise together by at most the spare (the mode's allowance
@@ -667,6 +722,8 @@ node reports with the expected per-resource values at each step.
   through the bounded unknown policy (FR-008).
 - **FR-018**: Yield decisions MUST carry a cause that is preserved from the per-node authority to
   the coordinator. This lets the coordinator tell a yield from a failure for retry accounting.
+  Own usage over its target (`own_over_target`) MUST be recorded apart from external growth
+  (`external_growth`) in decisions, `observe` and `status`.
 
 **Modes**
 
@@ -860,8 +917,9 @@ node reports with the expected per-resource values at each step.
   and GPU compute but 2 s for RAM and GPU memory. GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
   set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Each resource's admission opens on its own cooldown.
-  For CPU admission, running opportunistic work is charged at its p95 usage over
-  `contention.cpu.admission_usage_window_s` (default 60 s) once it has a full window of samples,
+  For CPU admission, running opportunistic work is charged at its p95 usage, measured over the
+  window of FR-073, over `contention.cpu.admission_usage_window_s` (default 60 s) once it has a
+  full window of samples,
   and at max(request, observed) before that, so work in its startup phase is never
   under-charged. While a CPU step holds it back (a pause, or a cap or hint whose target its usage
   reaches) it is charged at the larger of its request and its p95 usage from before the step,
@@ -871,8 +929,16 @@ node reports with the expected per-resource values at each step.
   check MUST admit CPU the same way. RAM admission and the agent's worker limit bound how many
   jobs this CPU credit can admit. In Performance, one heartbeat MUST admit as much as fits within
   the allowance, up to 32 new assignments; in the other modes the agent adds one worker per CPU
-  and RAM cooldown. Launches and per-allocation lease requests MUST NOT hold the node's
-  observation, heartbeat or telemetry past the monitor interval.
+  and RAM cooldown. Launches and lease requests MUST NOT hold the node's observation, heartbeat or
+  telemetry past the monitor interval; lease requests go as one batch per iteration (FR-074).
+- **FR-074**: A node MUST send each iteration's lease requests as one batch where the coordinator
+  negotiates it: renewals first, by lease deadline, then initial authorizations, under one clock
+  value. The coordinator MUST answer a batch in one transaction with one synced commit and a result
+  per assignment. Each item runs in its own savepoint, so a refusal or a failed grant affects only
+  that item, and a preparation record persists as for a single request. A batch MUST hold at most a
+  fixed number of items under the request size limit, larger sets split, and a retried batch MUST
+  be idempotent per item. Per-item events MUST be the same as for single requests. Against a peer
+  without the feature, the node MUST send single requests (FR-032).
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
@@ -1031,6 +1097,8 @@ node reports with the expected per-resource values at each step.
   test MUST fail for an unclassified key. `doctor` and setup MUST list, for each active caution
   option, the keys and values it covers.
 - **FR-069**: `doctor` and `status` MUST show, per resource, how much is held back and why.
+  CedeGrid's own CPU (the agent and supervisors) MUST be shown as in use by CedeGrid, attributed
+  to the owner, never as unattributed external usage.
 - **FR-070**: `noise_tolerance_mib` MUST be at most 1024 MiB at load and at most half of each
   device's effective floor when the agent starts; otherwise the agent refuses to start.
   Settings that lengthen reclaim or let stale telemetry pass are bounded: `monitor.interval_ms`
@@ -1163,9 +1231,10 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
     the drain file, grace + 1 interval (2.5 s).
 - **SC-013**: Over generated observations of every resource, own work's target satisfies
   Yield First ≤ Neutral ≤ Performance in 100% of cases.
-- **SC-014**: On an idle host, own CPU utilization is at least 97% in Performance, 94% in
-  Neutral and 84% in Yield First, and own RAM and GPU memory are within 1% of capacity minus the
-  floor, minus Yield First's margin too.
+- **SC-014**: On an idle host, own CPU utilization, own tasks plus CedeGrid's own processes, is at
+  least 97% in Performance, 94% in Neutral and 84% in Yield First, and own RAM and GPU memory are
+  within 1% of capacity minus the floor, minus Yield First's margin too. Both CPU numbers are
+  stated; with 117 tasks on 14 CPUs, CedeGrid's own processes use at most 1% of capacity.
 - **SC-015**: Beside a steady external user of 1–2%, own work's 5-minute average is at least 90%
   of capacity minus that user and the margin, with no cap or pause cycling.
 - **SC-016**: `doctor` and `status` show, per resource, how much is held back and why: floor,
