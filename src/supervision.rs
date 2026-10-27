@@ -315,6 +315,12 @@ pub enum SupervisorReport {
         hint_ready: bool,
         #[serde(default)]
         observes_drain: bool,
+        /// Each applied step's cause, so a reattached agent reseeds it unchanged.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        causes: std::collections::BTreeMap<
+            crate::contention::ResourceKey,
+            crate::contention::YieldCause,
+        >,
     },
     /// Readiness changed: the worker acked its target file or used the
     /// supervisor socket (FR-062).

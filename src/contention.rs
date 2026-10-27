@@ -188,10 +188,12 @@ pub enum YieldStep {
 }
 
 /// Why a step was taken. It travels with the decision to the coordinator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum YieldCause {
     ExternalGrowth,
+    /// Own usage over its target while the budget did not fall (FR-011).
+    OwnOverTarget,
     FloorBreach,
     UnknownMeasurement,
     EnvelopeBreach,
@@ -227,6 +229,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "external_growth",
         "External demand grew into what own work holds.",
     ),
+    (
+        "own_over_target",
+        "Own usage stayed over its target while the budget did not fall.",
+    ),
     ("floor_breach", "Free memory fell below the no-harm floor."),
     (
         "unknown_measurement",
@@ -246,6 +252,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     (
         "step_reversed_contention_ended",
         "A step taken for external growth was relaxed because external demand fell back.",
+    ),
+    (
+        "step_reversed_own_usage_fell",
+        "A step taken for own usage over its target was relaxed because own usage fell back.",
     ),
     (
         "step_reversed_floor_restored",

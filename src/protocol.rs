@@ -192,6 +192,9 @@ pub struct ResourceContentionReport {
     /// Allocations at each yield step above none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub step_summary: BTreeMap<crate::contention::YieldStep, u32>,
+    /// Steps by cause, so `status` shows own usage over its target apart (FR-018).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cause_summary: BTreeMap<crate::contention::YieldCause, u32>,
     /// What the resource holds back and why (SC-016).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_back: Option<crate::model::HeldBack>,

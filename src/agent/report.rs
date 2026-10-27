@@ -95,8 +95,10 @@ pub fn node_contention_report(
         .iter()
         .filter_map(|(key, status)| {
             let mut step_summary = BTreeMap::new();
+            let mut cause_summary = BTreeMap::new();
             for action in decision.actions.iter().filter(|a| &a.resource == key) {
                 *step_summary.entry(action.step).or_insert(0u32) += 1;
+                *cause_summary.entry(action.cause).or_insert(0u32) += 1;
             }
             Some((
                 key.clone(),
@@ -108,6 +110,7 @@ pub fn node_contention_report(
                     external: status.external,
                     target_share: status.target_share,
                     step_summary,
+                    cause_summary,
                     held_back: status.held_back.clone(),
                 },
             ))

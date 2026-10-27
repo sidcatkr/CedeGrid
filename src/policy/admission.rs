@@ -153,7 +153,9 @@ impl Interval<'_> {
         } else {
             ram_new_now
         };
-        self.next.cpu_stable_since = cpu_safe.then_some(prev.cpu_stable_since.unwrap_or(now));
+        // An enforcement hold of own usage over its target does not restart stability (FR-011).
+        self.next.cpu_stable_since =
+            (cpu_safe || self.cpu_own_hold).then_some(prev.cpu_stable_since.unwrap_or(now));
         self.next.ram_stable_since = ram_safe.then_some(prev.ram_stable_since.unwrap_or(now));
         self.cpu_allowed = cooled(
             config,

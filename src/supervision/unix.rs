@@ -778,6 +778,11 @@ fn apply_runtime_commands(
                     sequence: contention.sequence,
                     hint_ready,
                     observes_drain,
+                    causes: contention
+                        .applied
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.cause))
+                        .collect(),
                 });
             }
             _ => {}

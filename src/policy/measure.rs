@@ -393,6 +393,7 @@ impl<'a> Interval<'a> {
                     busy.saturating_sub(own.saturating_add(self.unknown_charge.cpu_millicores))
                 });
             let bound = (busy - host_lower).saturating_add(own_upper.saturating_sub(own_lower));
+            self.cpu_bound = bound;
             match window {
                 Some(window) if window.abs_diff(interval) <= bound => window,
                 _ => interval,

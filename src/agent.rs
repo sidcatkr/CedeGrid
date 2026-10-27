@@ -137,6 +137,9 @@ enum Event {
         hint_ready: bool,
         #[serde(default)]
         observes_drain: bool,
+        /// Each applied step's cause; an older supervisor reports none.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        causes: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldCause>,
     },
     Readiness {
         hint_ready: bool,
@@ -1667,6 +1670,40 @@ mod drain_tests {
         };
         withhold_authorized_pending(&mut facts, std::slice::from_ref(&pending), |_| true);
         assert!(facts["a"].uncontrollable);
+    }
+
+    /// A reattached supervisor reports each step's cause, so a restarted agent reseeds an
+    /// `own_over_target` step with its own cause; an older supervisor reports none, and its
+    /// steps count as external growth (FR-018).
+    #[test]
+    fn a_reattached_step_keeps_its_cause() {
+        use crate::contention::{ResourceKey, YieldCause, YieldStep};
+        let line = r#"{"event":"state","applied":{"cpu":"cap"},"targets":{"cpu":200},"causes":{"cpu":"own_over_target"},"lease_sequence":3,"sequence":2,"authority":"connected"}"#;
+        let Event::State {
+            applied,
+            targets,
+            causes,
+            ..
+        } = serde_json::from_str(line).unwrap()
+        else {
+            panic!("not a state event");
+        };
+        let steps = super::reconcile::reattached_steps(&applied, &targets, &causes);
+        assert_eq!(steps[&ResourceKey::Cpu].step, YieldStep::Cap);
+        assert_eq!(steps[&ResourceKey::Cpu].target, Some(200));
+        assert_eq!(steps[&ResourceKey::Cpu].cause, YieldCause::OwnOverTarget);
+        let older = r#"{"event":"state","applied":{"cpu":"cap"},"targets":{"cpu":200},"lease_sequence":3,"authority":"connected"}"#;
+        let Event::State {
+            applied,
+            targets,
+            causes,
+            ..
+        } = serde_json::from_str(older).unwrap()
+        else {
+            panic!("not a state event");
+        };
+        let steps = super::reconcile::reattached_steps(&applied, &targets, &causes);
+        assert_eq!(steps[&ResourceKey::Cpu].cause, YieldCause::ExternalGrowth);
     }
 
     #[test]

@@ -175,6 +175,9 @@ pub struct PolicyEngine {
     /// with the external usage they were computed beside, to tell external growth.
     cpu_target: Option<(u64, u64)>,
     ram_target: Option<(u64, u64)>,
+    /// Since when own CPU usage has been over its target while the budget did not fall,
+    /// counted once every held cap is applied (FR-011).
+    cpu_over_since: Option<u64>,
     last_now: Option<u64>,
     node_id: Option<String>,
     /// Collector-relative sample marker and the policy time it first arrived.
@@ -342,6 +345,12 @@ struct Interval<'a> {
     ram_held: bool,
     /// CPU is held because own usage read above host busy.
     cpu_held_inconsistent: bool,
+    /// The per-interval external estimate's own bound: host busy upper less lower, plus own
+    /// upper less lower (FR-073).
+    cpu_bound: u64,
+    /// Own CPU usage is over its target without the budget falling, within the dwell: held
+    /// steps keep their targets and none is entered (FR-011).
+    cpu_own_hold: bool,
     /// CPU and RAM admission, when closed, is closed only by own new allocations.
     cpu_new_only: bool,
     ram_new_only: bool,
@@ -432,6 +441,8 @@ impl<'a> Interval<'a> {
             ram_unknown: false,
             cpu_held: false,
             cpu_held_inconsistent: false,
+            cpu_bound: 0,
+            cpu_own_hold: false,
             cpu_new_only: false,
             ram_new_only: false,
             ram_held: false,

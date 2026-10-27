@@ -250,26 +250,13 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
                 targets,
                 lease_sequence,
                 sequence,
+                causes,
                 ..
             })) => {
                 // Continue above the supervisor's sequences and renew its lease.
                 slot.sequence = lease_sequence;
                 slot.adjust_sequence = sequence;
-                let steps: BTreeMap<_, _> = applied
-                    .iter()
-                    .filter(|(_, step)| **step != crate::contention::YieldStep::None)
-                    .map(|(key, step)| {
-                        (
-                            key.clone(),
-                            crate::contention::StepRequest {
-                                step: *step,
-                                target: targets.get(key).copied(),
-                                cause: crate::contention::YieldCause::ExternalGrowth,
-                                deadline_ms: None,
-                            },
-                        )
-                    })
-                    .collect();
+                let steps = reattached_steps(&applied, &targets, &causes);
                 slot.sent_steps = steps.clone();
                 slot.seed = Some(steps);
                 slot.applied = applied;
@@ -280,6 +267,33 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
             Err(_) => bail!("reattached supervisor reported no state"),
         }
     }
+}
+
+/// The steps a reattached supervisor holds, as the policy's seed. An older supervisor reports
+/// no causes; its steps count as external growth.
+pub(super) fn reattached_steps(
+    applied: &BTreeMap<crate::contention::ResourceKey, crate::contention::YieldStep>,
+    targets: &BTreeMap<crate::contention::ResourceKey, u64>,
+    causes: &BTreeMap<crate::contention::ResourceKey, crate::contention::YieldCause>,
+) -> BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest> {
+    applied
+        .iter()
+        .filter(|(_, step)| **step != crate::contention::YieldStep::None)
+        .map(|(key, step)| {
+            (
+                key.clone(),
+                crate::contention::StepRequest {
+                    step: *step,
+                    target: targets.get(key).copied(),
+                    cause: causes
+                        .get(key)
+                        .copied()
+                        .unwrap_or(crate::contention::YieldCause::ExternalGrowth),
+                    deadline_ms: None,
+                },
+            )
+        })
+        .collect()
 }
 
 fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec<ExecutionRecord>> {

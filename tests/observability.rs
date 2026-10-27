@@ -306,12 +306,13 @@ fn a_scripted_cpu_contention_run_is_shown_at_every_step() {
         assert_shown(&steps[*end], &cfg, &key, kind);
     }
     // Idle: Neutral keeps its 5% margin; the job, which wants the whole CPU, is
-    // capped at that target.
+    // capped at that target for its own usage over it (FR-011).
     let idle = &steps[ends[0]].decision;
     assert!(
-        idle.actions
-            .iter()
-            .all(|a| a.resource == key && a.step == YieldStep::Cap && a.target == Some(30_400)),
+        idle.actions.iter().all(|a| a.resource == key
+            && a.step == YieldStep::Cap
+            && a.target == Some(30_400)
+            && a.cause == cedegrid::contention::YieldCause::OwnOverTarget),
         "{:?}",
         idle.actions
     );
@@ -332,26 +333,28 @@ fn a_scripted_cpu_contention_run_is_shown_at_every_step() {
         "{steady:?}"
     );
     assert!(steady.iter().any(|c| c == "satisfied_demand"), "{steady:?}");
-    // Growth past the fair share caps the job for external growth.
+    // Growth past the fair share: the target falls to the fair share, and the user takes
+    // at least the other half, which counts as external. Own usage falls to the target, so
+    // the idle cap no longer binds and reverses with its cause.
     let grown = &steps[ends[2]].decision;
-    let cap = grown
-        .actions
-        .iter()
-        .find(|a| a.resource == key)
-        .expect("a step for external growth");
-    assert_eq!(cap.code, "yield_step_cap");
-    assert_eq!(cap.cause, cedegrid::contention::YieldCause::ExternalGrowth);
     assert!(grown.resources[&key].target_share.unwrap() <= CPU / 2 + CPU / 100);
-    // The user now takes at least the other half, which counts as external.
     assert!(grown.resources[&key].external.unwrap() >= CPU / 2 - CPU / 100);
-    // The user leaves: the step reverses with its cause and the margin returns.
-    let after: Vec<String> = steps[ends[2] + 1..]
+    let growth: Vec<String> = steps[ends[1] + 1..=ends[2]]
         .iter()
         .flat_map(|s| codes_of(&s.decision, &key))
         .collect();
     assert!(
-        after.iter().any(|c| c == "step_reversed_contention_ended"),
-        "{after:?}"
+        growth.iter().any(|c| c == "step_reversed_own_usage_fell"),
+        "{growth:?}"
+    );
+    // The user leaves: own usage is over the margin's target again and is capped there
+    // with its own cause.
+    let after = &steps[ends[2] + 1..];
+    assert!(
+        after.iter().any(|s| s.decision.actions.iter().any(
+            |a| a.resource == key && a.cause == cedegrid::contention::YieldCause::OwnOverTarget
+        )),
+        "no step for own usage after the user left"
     );
     let last = &steps[ends[3]].decision;
     assert!(
@@ -624,11 +627,13 @@ fn the_catalog_has_one_sentence_per_stable_code() {
         "yield_step_drain",
         "yield_step_terminate",
         "external_growth",
+        "own_over_target",
         "floor_breach",
         "envelope_breach",
         "unknown_measurement",
         "operator_drain",
         "step_reversed_contention_ended",
+        "step_reversed_own_usage_fell",
         "step_reversed_floor_restored",
         "step_reversed_measurement_known",
         "step_reversed_envelope_restored",

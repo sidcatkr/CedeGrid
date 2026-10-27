@@ -3575,6 +3575,7 @@ fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
         external: None,
         target_share: None,
         step_summary: BTreeMap::new(),
+        cause_summary: BTreeMap::new(),
         held_back: None,
     };
     let mut r = report(now);

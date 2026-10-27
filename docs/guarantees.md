@@ -388,6 +388,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `yield_step_drain` | Own work is asked to drain and stop. |
 | `yield_step_terminate` | Own work that did not drain in time is terminated. |
 | `external_growth` | External demand grew into what own work holds. |
+| `own_over_target` | Own usage stayed over its target while the budget did not fall. |
 | `floor_breach` | Free memory fell below the no-harm floor. |
 | `unknown_measurement` | The resource's measurement stayed unknown past the unknown window. |
 | `envelope_breach` | Own work exceeds the operator envelope. |
@@ -395,6 +396,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `coordinator_drain` | The coordinator asked for the allocation to drain. |
 | `lease_expired` | The allocation's lease expired before it was renewed. |
 | `step_reversed_contention_ended` | A step taken for external growth was relaxed because external demand fell back. |
+| `step_reversed_own_usage_fell` | A step taken for own usage over its target was relaxed because own usage fell back. |
 | `step_reversed_floor_restored` | A step taken for a floor breach was relaxed because free memory is back above the floor. |
 | `step_reversed_measurement_known` | A step taken for an unknown measurement was relaxed because the measurement is known again. |
 | `step_reversed_envelope_restored` | A step taken for the operator envelope was relaxed because own work is back within it. |

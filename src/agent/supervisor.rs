@@ -129,6 +129,7 @@ impl SupervisorControl for PipeControl {
                 sequence,
                 hint_ready,
                 observes_drain,
+                causes,
             } => Event::State {
                 applied,
                 targets,
@@ -137,6 +138,7 @@ impl SupervisorControl for PipeControl {
                 authority: if self.agent_lost { "lost" } else { "connected" }.into(),
                 hint_ready,
                 observes_drain,
+                causes,
             },
             supervision::SupervisorReport::Readiness {
                 hint_ready,

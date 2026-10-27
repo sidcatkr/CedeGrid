@@ -5982,3 +5982,262 @@ fn a_pending_pass_cpu_drain_is_replanned_once_the_allocation_runs() {
         assert!(decision.would_drain.is_empty(), "at {now} ms");
     }
 }
+
+/// Own CPU usage over its target while the budget did not fall is enforced first and stepped
+/// down only after the dwell, with its own cause (FR-011, FR-018, research R25).
+mod own_over_target {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
+
+    const CAPACITY: u64 = 4000;
+
+    fn config(mode: ContentionMode) -> Config {
+        let mut config = super::config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        config
+    }
+
+    /// A scoped 4-CPU reading at `now`: own usage per task, external usage, per-interval
+    /// noise within the bound, and a steady window.
+    fn reading(usage: &[u64], external: u64, noise: u64, now: u64) -> (Snapshot, PolicyInput) {
+        let own: u64 = usage.iter().sum();
+        let mut snap = scoped_snapshot();
+        let kernel = snap.kernel.as_mut().unwrap();
+        kernel.monotonic_elapsed_ms = 500 + now;
+        let cpu = &mut kernel.cpu;
+        let busy = (own + external + noise).min(CAPACITY);
+        cpu.busy_millicores = Some(busy);
+        cpu.busy_lower_millicores = Some(busy.saturating_sub(80));
+        cpu.busy_window_millicores = Some((own + external).min(CAPACITY));
+        cpu.busy_window_lower_millicores = Some((own + external).min(CAPACITY).saturating_sub(10));
+        cpu.busy_window_ms = Some(4000);
+        snap.managed_cpu_lower_millicores = Some(own);
+        snap.managed_cpu_window_lower_millicores = Some(own);
+        let ids: Vec<String> = (0..usage.len()).map(|i| format!("t{i}")).collect();
+        let allocations = ids
+            .iter()
+            .zip(usage)
+            .map(|(id, used)| {
+                let mut task = allocation(
+                    id,
+                    AllocationPhase::Running,
+                    resources(250, 0, 0),
+                    Some(resources(*used, 0, 0)),
+                );
+                task.observed_upper = Some(resources(used + 2, 0, 0));
+                task
+            })
+            .collect();
+        let input = PolicyInput {
+            allocations,
+            facts: rootless(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
+            ..PolicyInput::default()
+        };
+        (snap, input)
+    }
+
+    fn cpu_actions(decision: &Decision) -> Vec<(String, YieldStep, Option<u64>, YieldCause)> {
+        decision
+            .actions
+            .iter()
+            .filter(|a| a.resource == ResourceKey::Cpu)
+            .map(|a| (a.allocation_id.clone(), a.step, a.target, a.cause))
+            .collect()
+    }
+
+    #[test]
+    fn own_usage_over_its_target_holds_for_the_dwell_then_steps_with_its_own_cause() {
+        let config = config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        // Two tasks at 1960m beside 40m external: 3920m against a 3880m target.
+        let mut first_step = None;
+        for now in (0..=3000).step_by(500) {
+            let (snap, input) = reading(&[1960, 1960], 40, 0, now);
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            let actions = cpu_actions(&decision);
+            if !actions.is_empty() && first_step.is_none() {
+                // The node report counts steps by cause, so `status` shows it apart.
+                let report = cedegrid::agent::node_contention_report(&config, &decision, 2);
+                assert_eq!(
+                    report.resources[&ResourceKey::Cpu].cause_summary,
+                    std::collections::BTreeMap::from([(YieldCause::OwnOverTarget, 2)])
+                );
+                first_step = Some((now, actions));
+            }
+        }
+        let (at, actions) = first_step.expect("own work never stepped down");
+        assert!(at >= 1500, "stepped at {at} ms, before the dwell");
+        assert!(
+            actions
+                .iter()
+                .all(|(_, step, _, cause)| *step == YieldStep::Cap
+                    && *cause == YieldCause::OwnOverTarget),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_budget_that_falls_keeps_external_growth_and_its_bounds() {
+        let config = config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        let (snap, input) = reading(&[1450, 1450], 40, 0, 0);
+        assert!(cpu_actions(&engine.evaluate(&config, &snap, &input, 0).unwrap()).is_empty());
+        // A 1000m external user arrives: the budget falls to 2880m, and own work steps at once.
+        let (mut snap, input) = reading(&[1450, 1450], 1040, 0, 500);
+        let cpu = &mut snap.kernel.as_mut().unwrap().cpu;
+        cpu.busy_window_millicores = Some(2940 + 125);
+        let actions = cpu_actions(&engine.evaluate(&config, &snap, &input, 500).unwrap());
+        assert!(!actions.is_empty(), "no step for external growth");
+        assert!(
+            actions
+                .iter()
+                .all(|(_, _, _, cause)| *cause == YieldCause::ExternalGrowth),
+            "{actions:?}"
+        );
+    }
+
+    /// Caps already held yield an external increase once between them, at one level, and not
+    /// each the whole increase (FR-011, FR-013).
+    #[test]
+    fn held_caps_yield_external_growth_once_between_them() {
+        let config = config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        // Four tasks at 980m beside 40m external, 40m over the target: after the dwell, all
+        // four hold caps at one level.
+        let mut held = Vec::new();
+        for now in (0..=3000).step_by(500) {
+            let (snap, input) = reading(&[980; 4], 40, 0, now);
+            held = cpu_actions(&engine.evaluate(&config, &snap, &input, now).unwrap());
+        }
+        assert_eq!(held.len(), 4, "{held:?}");
+        assert!(
+            held.iter().all(|(_, _, target, _)| *target == Some(970)),
+            "{held:?}"
+        );
+        // A 400m external user arrives and the host gives own work 3600m: 80m over the new
+        // 3520m target, which the caps give between them, 20m each.
+        let (snap, input) = reading(&[900; 4], 400, 0, 3500);
+        let lowered = cpu_actions(&engine.evaluate(&config, &snap, &input, 3500).unwrap());
+        let after: Vec<u64> = lowered
+            .iter()
+            .map(|(_, _, target, _)| target.unwrap())
+            .collect();
+        let freed: u64 = after
+            .iter()
+            .map(|target| 900u64.saturating_sub(*target))
+            .sum();
+        assert!((76..=84).contains(&freed), "{after:?}");
+        assert!(after.iter().all(|t| t.abs_diff(after[0]) <= 1), "{after:?}");
+    }
+
+    /// One thread per claim, weighted max-min over the capacity.
+    fn schedule(demands: &[u64]) -> Vec<u64> {
+        let mut shares = vec![0u64; demands.len()];
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        let mut remaining = CAPACITY;
+        while !open.is_empty() && remaining > 0 {
+            let level = remaining / open.len() as u64;
+            let (done, rest): (Vec<usize>, Vec<usize>) = open
+                .iter()
+                .partition(|i| demands[**i] - shares[**i] <= level);
+            if done.is_empty() {
+                for i in &open {
+                    shares[*i] += level;
+                }
+                break;
+            }
+            for i in done {
+                remaining -= demands[i] - shares[i];
+                shares[i] = demands[i];
+            }
+            open = rest;
+        }
+        shares
+    }
+
+    /// Report 026's run 6 shape: 16 tasks of 250m that make up lost CPU, on 4 CPUs beside a
+    /// steady 60m user, in Yield First for 5 minutes, read one interval late with
+    /// per-interval noise inside the bound. No pause or drain, caps that change only when
+    /// external usage changes, and own work averaging at least 90% of capacity minus the user
+    /// and the margin (SC-015, SC-007).
+    #[test]
+    fn the_run_6_shape_converges_without_pauses_or_cap_cycling() {
+        const TASKS: usize = 16;
+        const INTERVAL: u64 = 500;
+        let config = config(ContentionMode::YieldFirst);
+        let mut engine = PolicyEngine::new();
+        let mut steps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
+        let mut debt = [0u64; TASKS];
+        let mut last = vec![250u64; TASKS];
+        let mut seed: u64 = 9;
+        let (mut own_sum, mut intervals) = (0u64, 0u64);
+        let mut changes_after_convergence = 0;
+        let mut previous_caps: Option<Vec<(YieldStep, Option<u64>)>> = None;
+        for tick in 0..600u64 {
+            let now = tick * INTERVAL;
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let noise = (seed >> 33) % 40;
+            let mut demands: Vec<u64> = (0..TASKS)
+                .map(|i| {
+                    let want = (250 + debt[i] * 1000 / INTERVAL).min(1000);
+                    match steps[i] {
+                        (YieldStep::Pause, _) => 0,
+                        (YieldStep::Cap, target) => target.unwrap_or(want).min(want),
+                        _ => want,
+                    }
+                })
+                .collect();
+            demands.push(60);
+            let fresh = schedule(&demands);
+            for i in 0..TASKS {
+                debt[i] =
+                    (debt[i] * 1000 + 250 * INTERVAL).saturating_sub(fresh[i] * INTERVAL) / 1000;
+            }
+            // The reading lags one interval; the user gets what the CPUs left it.
+            let own_seen: u64 = last.iter().sum();
+            let external_seen = fresh[TASKS].min(CAPACITY - own_seen);
+            let (snap, input) = reading(&last, external_seen, noise, now);
+            last = fresh[..TASKS].to_vec();
+            own_sum += last.iter().sum::<u64>();
+            intervals += 1;
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            for action in cpu_actions(&decision) {
+                assert!(
+                    action.1 != YieldStep::Pause && action.1 < YieldStep::Drain,
+                    "at {now} ms: {action:?}"
+                );
+            }
+            for (i, step) in steps.iter_mut().enumerate() {
+                *step = decision
+                    .actions
+                    .iter()
+                    .find(|a| a.allocation_id == format!("t{i}") && a.resource == ResourceKey::Cpu)
+                    .map_or((YieldStep::None, None), |a| (a.step, a.target));
+            }
+            if now >= 20_000 {
+                if previous_caps.as_ref().is_some_and(|caps| caps != &steps) {
+                    changes_after_convergence += 1;
+                }
+                previous_caps = Some(steps.clone());
+            }
+        }
+        assert_eq!(
+            changes_after_convergence, 0,
+            "caps changed with external usage steady"
+        );
+        // Capacity less the 60m user and Yield First's 15% margin.
+        let target = CAPACITY - 60 - 600;
+        let average = own_sum / intervals;
+        assert!(
+            average * 10 >= target * 9,
+            "own work averaged {average}m of {target}m"
+        );
+    }
+}
