@@ -484,3 +484,28 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Prediction for item 026**: under a second account, the pinned contender gets about 0.6–0.75
   core, external `cpu.pressure` some avg10 stays above `psi_some_percent` while it waits, and own
   work is reclaimed toward its fair share; SC-004's second bullet would still miss pinned.
+
+## R22. Authorizing a burst's own reservations (item 026)
+
+- **Decision**: the node states, per resource, that its admission is closed only by its own
+  never-measured new allocations or the cooldown only they restarted; at the first authorization
+  of an existing reservation, and only there, the coordinator counts such a CPU or RAM resource
+  as open.
+- **Rationale**: in report 025's Docker burst, 59–63 of 150 reserved tasks were refused because
+  the burst's own launches had closed admission (`allocation_unknown_hold`, then the cooldown),
+  although every one was placed against the budget while admission was open. A structured field
+  lets the coordinator decide without parsing reason text, and an older report, which lacks it,
+  fails closed. Only the first authorization is exempt: new placement and preemption must still
+  see the node's state, and renewals don't check admission.
+- **Refused reservations as the code stands**: the slot keeps asking each iteration; after
+  `prepare_timeout_ms` (10 s) the supervisor gives up ("execution authorization absent", verified
+  release), the agent sends `Fail` with an execution failure, and `record_failure` counts it, so a
+  replay-safe task is requeued with backoff while failures stay under `retry_limit` (3) and its
+  `max_attempts` allow, otherwise it needs reconciliation. FR-018 tells a yield from a failure
+  only by a recorded yield cause, so a refusal at the barrier counts as the task's failure;
+  requeueing without counting it would need the spec to say that a refusal at the barrier is not
+  the task's failure.
+- **Alternatives**: infer the cause from reason codes (rejected: reason text is not an interface);
+  let the agent hide its own unmeasured allocations from the admission it reports (rejected: new
+  placement would then see a node more open than it is).
+

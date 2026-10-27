@@ -610,6 +610,37 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VII: no wire, config or recording change; `launch_slots` stays the same field with a smaller
     maximum.
 
+## Item 026: authorize a burst's own reservations (2026-10-27)
+
+- **Cause, per resource** (FR-028, research R22): the policy sets `ResourceStatus.admission_own_new`
+  when CPU or RAM admission is closed and every cause is the node's own new allocations: an
+  allocation with unknown usage and no earlier observation (its charge goes to an `unknown_new`
+  total beside `unknown_charge`), or the stability cooldown that only they restarted
+  (`PolicyState` keeps, per resource, whether the last reset of its stability had only that
+  cause). The CPU hold from an inconsistent measurement (own above host busy) is tracked apart,
+  so it never counts. The node contention report carries the flag as
+  `ResourceContentionReport.admission_own_new`, default false and skipped when false.
+- **Coordinator**: the first authorization of an existing reservation (`grant`, sequence 0)
+  calls `authorization_placement`, which counts a CPU or RAM resource closed with that flag as
+  open and otherwise applies `placement` unchanged, so `Exhausted` still refuses. New placement and
+  preemption keep `placement` (audit M10); its doc comment says so. GPU resources are never
+  exempt, and a report without the field stays fail-closed.
+- **Refused reservations today**: the agent retries the request each iteration; after
+  `execution.prepare_timeout_ms` the supervisor gives up with a verified release, the agent
+  reports an execution failure, and the coordinator counts it: a replay-safe task is requeued
+  with backoff while failures stay under `retry_limit` and attempts remain, else it needs
+  reconciliation (research R22).
+- **Constitution**:
+  - I: no process is touched; the change is in reporting and authorization.
+  - II: work is authorized only within the budget it was placed against; own steps that hold
+    work back, contention and floor breaches still refuse, so own work cannot grow past others.
+  - III: only never-measured own allocations count, and an unknown host measurement still
+    refuses; a missing field fails closed.
+  - IV: the cause is computed in the pure policy; the coordinator reads a structured field.
+  - VI: tests first for each cause alone, the burst, and placement unchanged.
+  - VII: the field is optional and skipped when false, so 0.2 and earlier 001 reports keep their
+    meaning (fail-closed), and the contract fixture adds a case.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

@@ -308,6 +308,10 @@ usage reaches), `PolicyState`'s CPU usage window for it takes no new samples, an
 charges it at max(request, p95 of that window) with no credit (item 025); no field is added.
 The charge above what it holds now closes admission but is left out of the node's
 charges-exceed-budget check.
+`ResourceStatus.admission_own_new` and `ResourceContentionReport.admission_own_new` (bool, default
+false, skipped when false; item 026) mark a CPU or RAM resource whose admission is closed only by
+the node's own never-measured new allocations or the cooldown only they restarted.
+`PolicyState` keeps, per resource, whether its last stability reset had only that cause.
 `own_only` (default false, skipped when false) marks an interval whose inventory lists only own
 verified PIDs under research R18's conditions: external is 0, own is the device utilization, and
 the policy takes the measured path at once while the streak keeps counting. `PrincipalUsage`
