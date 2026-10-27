@@ -52,6 +52,10 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   causes, `held_back` causes as `held_back_<cause>`, the compute path, `exceptions` and
   `reason_codes`. `reason_codes` carries the prose `reasons` with their codes. A debug
   build asserts that every reported code is in the catalog.
+- An action's `cause` is `own_over_target` when own usage is over its target without external
+  growth, apart from `external_growth` (FR-011, FR-018). CPU's resource status adds `cedegrid`,
+  the CPU in use by CedeGrid's own processes, which `doctor` and `status` show as in use by
+  CedeGrid, never as external usage (FR-069).
 
 ## CLI
 

@@ -188,8 +188,9 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 
 ## YieldCause
 
-- `external_growth`, `floor_breach`, `unknown_measurement`, `envelope_breach`,
-  `operator_drain`, `lease_expired` or `coordinator_drain`.
+- `external_growth`, `own_over_target` (own usage over its target without external growth,
+  FR-011), `floor_breach`, `unknown_measurement`, `envelope_breach`, `operator_drain`,
+  `lease_expired` or `coordinator_drain`.
 - It travels in the Decision, the supervisor control message, `AllocationReport.yield_cause`
   (when negotiated) and `drain_requests.cause` (FR-018).
 
@@ -350,6 +351,36 @@ processes; a PID whose UID cannot be read stays in the unattributed remainder.
 `contention.*` stands for each resource section. A test enumerates every key from the
 configuration types and fails for one without a class (FR-068).
 
+## Own CPU and host busy over a window (FR-073)
+
+- `CpuTopology.busy_window_millicores`, `busy_window_lower_millicores`, `busy_window_ms`: host
+  busy over the kernel tracker's last 8 or more samples, with one tick of rounding per window.
+- `Snapshot.managed_cpu_window_lower_millicores`: own CPU over the same window with one bound;
+  in Full, from the delegated root's `cpu.stat`.
+- `Allocation.observed_window_cpu`: one allocation's CPU over its window, for the admission p95.
+- `Snapshot.cedegrid_cpu_lower_millicores` and its window variant: the agent's and supervisors'
+  CPU, attributed to the owner (FR-059); `ResourceStatus.cedegrid` reports it per resource.
+- All optional, absent by default and skipped when absent, so recorded snapshots replay
+  unchanged (FR-033).
+
+## StepState.pending (`src/contention.rs`)
+
+True for a step planned on the pending pass. The running pass re-plans a pending-pass CPU drain
+of opportunistic work instead of holding it (FR-012).
+
+## GpuSnapshot.background_process_ids (`src/model.rs`)
+
+Listed external contexts of a user ID below `uid_min` that are background this interval: per-
+process utilization is readable and theirs stays below `principal_min_percent` (FR-021). Their
+memory stays in `external_process_ids` and counts as external usage. Default empty, skipped when
+empty.
+
+## CPU contention ended (`src/policy.rs`, `PolicyState`)
+
+Consecutive intervals in which every contending external CPU principal is below
+`principal_min_percent`. From `principal_window_intervals` on, Yield First and Neutral move held
+CPU caps and the allowance to the uncontended target in one move (FR-034).
+
 ## Wire additions (negotiated, `src/protocol.rs`)
 
 | Field | Purpose |
@@ -361,6 +392,7 @@ configuration types and fails for one without a class (FR-068).
 | `AllocationReport.yield_cause` | Why an allocation yielded |
 | `AllocationReport.hint_ready`, `AllocationReport.observes_drain` | Allocation readiness (FR-062) |
 | `ResourceContentionReport.held_back` | What the resource holds back and why (FR-069) |
+| `Request::Leases`, `Response::Leases` | One batch of renewals and initial authorizations per iteration, behind `lease_batch/1` (FR-074) |
 
 See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 

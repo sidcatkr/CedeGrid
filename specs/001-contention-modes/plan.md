@@ -644,6 +644,106 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VII: the field is optional and skipped when false, so 0.2 and earlier 001 reports keep their
     meaning (fail-closed), and the contract fixture adds a case.
 
+## Item 027: exact own measurement, batched leases and 026's failures (2026-10-27)
+
+- **Own CPU and host busy** (FR-073, research R23):
+  - The kernel CPU tracker keeps the last 8 or more counter samples and reports host busy over
+    that window, upper and lower with one tick of rounding per window, beside the per-interval
+    values (`CpuTopology.busy_window_millicores`, `busy_window_lower_millicores`,
+    `busy_window_ms`).
+  - Full: when the cgroup backend runs every own allocation in a leaf directly under
+    `delegated_root`, the root holds no process and its child set equals the own leaves, the
+    kernel collector reads the root's `cpu.stat` next to `/proc/stat` and own CPU comes from it,
+    with an error of 1 µs plus one tick per own thread that can run, at most one per scope CPU.
+    CedeGrid's agent and supervisors never sit under the root (the backend refuses a root with
+    processes and supervisors stay outside their leaves), so nothing needs subtracting there.
+  - Tracked: an established process's delta is divided by its own read interval; a process in
+    its first interval keeps the aggregate divisor, as the native first-interval fix requires. `summed_lower_bound` drops
+    the read-pass term and keeps each source's resolution and the tick lag. Each allocation keeps
+    its baselines for the window, so the window delta comes from cumulative counters with one
+    bound (`Allocation.observed_window_cpu`, `Snapshot.managed_cpu_window_lower_millicores`).
+    All new fields are optional, default absent and skipped when absent.
+  - Policy: `cpu_external` computes the external estimate per interval, as today, and over the
+    window. While the per-interval value stays within its own bound of the window's (host busy
+    upper minus lower, plus own upper minus lower), the window's value sets the allowance, the
+    targets and the admission budget; beyond that bound, growth or fall, the per-interval value
+    applies at once, so SC-002's 2-interval bound and growth detection are unchanged. The
+    admission p95 samples take `observed_window_cpu` when present.
+- **Batched leases** (FR-074, FR-034, research R24):
+  - `Request::Leases {items}` and `Response::Leases {results}` behind the feature
+    `lease_batch/1`, advertised in `COORDINATOR_FEATURES` and learned in `NegotiatedFeatures`.
+  - Coordinator: one session check, one `advance_clock` and `expire`, then one Immediate
+    transaction: renewals first, by lease deadline, then initial authorizations. Each item runs in
+    its own savepoint; a preparation row is written before the item's grant savepoint, so it
+    survives a failed grant as it does today. One commit, a result per item.
+  - Agent: at most 128 items and 1 MiB per request, split beyond; on a batch error it forgets the
+    feature and sends single requests. Per-item events (`authorization_unavailable`,
+    `lease_unavailable`, the `renew` evidence of `control_rpc`) keep their bytes.
+  - Slot pass: journal and checkpoint-head reads are skipped for a slot with no new events while
+    the agent connection's `PRAGMA data_version` is unchanged.
+- **Cancelled reservations** (FR-012, SC-007):
+  - A prepared, unauthorized slot is controllable, so the pending pass may cancel it; `actuate`
+    sends its drain before any `Authorize`, and `service_slots` sends no `Prepared` for a slot
+    with a drain sent. An authorized slot whose journal still reads Prepared is uncontrollable to
+    the pending pass.
+  - `StepState.pending` marks a step planned on the pending pass. The running pass re-plans a
+    pending-pass CPU drain of opportunistic work instead of holding it.
+- **Own usage over its target** (FR-011, FR-018, research R25):
+  - The ladder's cause is `own_over_target` when own usage is over the budget and external usage
+    did not rise beyond its per-interval bound since the last target (`PolicyState.cpu_target`).
+  - Over the target without external growth, held caps keep their targets, which the actuator
+    enforces from the measured rate, and no step is entered until usage has stayed over the
+    target for `min_step_dwell_intervals` with every held cap reported applied; then steps take
+    `own_over_target`. Such steps reverse like other non-external causes, and a binding cap
+    holds. An `own_over_target` hold restarts neither the scale-up interval nor CPU stability.
+  - `YieldCause::OwnOverTarget` joins the catalog and the guarantees table, with reversal code
+    `step_reversed_own_usage_fell`, the drain-permission matches and the reconcile reseed.
+- **CedeGrid's own cost** (FR-059, FR-069, SC-014):
+  - The agent measures its own CPU (process clock) and its supervisors' (verified children) as
+    `Snapshot.cedegrid_cpu_lower_millicores`, per interval and over the window. The policy
+    subtracts it from the external estimate and from the owner's unmanaged principal usage,
+    reports it as `ResourceStatus.cedegrid`, and lowers own tasks' targets and budget by it, so
+    it never forms an unattributed principal. `doctor` and `status` show it as in use by
+    CedeGrid.
+  - The supervisor's running loop waits on its control descriptor, the gate's pidfd and the
+    child server, with a timeout at its next deadline (actuator phase, lifecycle, readiness),
+    instead of a 5 ms sleep. One supervisor per task stays.
+  - `[profile.release]`: `lto = "fat"`, `codegen-units = 1`. `panic` stays `unwind`: the
+    supervisor turns a panicked log-drain thread into an error with cleanup, the agent's
+    blocking launches report panics as join errors, and `Drop` cleanups run on unwinding.
+  - An opt-in Linux test measures the agent's and supervisors' CPU and resident memory at 117
+    tasks. No runtime path starts Python.
+- **System accounts on a GPU** (FR-021): the GPU collector receives `uid_min` and
+  `principal_min_percent`. A listed external context whose user ID is below `uid_min` is
+  background when per-process utilization is readable (the query succeeds or reports no samples)
+  and its sampled utilization stays below `principal_min_percent` of the device
+  (`GpuSnapshot.background_process_ids`, default empty and skipped when empty). Background
+  contexts make no activity unknown and count as neither external compute nor unknown in the
+  compute amount and the own-only rule; their memory stays external.
+- **CPU return once contention ends** (FR-034): `PolicyState` counts consecutive intervals in
+  which every contending external CPU principal, the unattributed remainder included and
+  background excluded, is below `principal_min_percent`. From `principal_window_intervals` on,
+  Yield First and Neutral raise held CPU caps and the CPU allowance in one move to the
+  uncontended target, without the mode's interval; the dwell still applies. Memory, partial
+  falls and admission cooldowns are unchanged.
+- **Snapshot**: recorded scenarios carry none of the new fields, so measurement changes leave
+  them unchanged; the cause and enforcement rule, the pending re-plan and the CPU return change
+  scenarios where own usage was over its target without external growth or a contender left.
+- **Constitution**:
+  - I: no process outside the verified set is read for control or acted on; the root `cpu.stat`
+    is read only when its children are exactly own leaves, and supervisors are verified children.
+  - II: own work still gives back first: external growth keeps today's path and bounds; the hold
+    applies only when no external usage rose, and PSI saturation still reclaims. CedeGrid's own
+    CPU comes out of own targets.
+  - III: a baseline outside its window, a root with foreign children, or unreadable per-process
+    GPU utilization stays unknown; the window never replaces a per-interval reading beyond its
+    bound.
+  - IV: windows and causes are computed in the pure policy from snapshot fields.
+  - V: only read-only files and the delegated subtree are read; no new privilege.
+  - VI: tests first for each part; the run 6 shape replays in the simulator.
+  - VII: every new field is optional; the batch is a negotiated feature with a single-request
+    fallback, and the contract fixture adds a case.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

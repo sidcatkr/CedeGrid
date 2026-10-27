@@ -509,3 +509,63 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   let the agent hide its own unmeasured allocations from the admission it reports (rejected: new
   placement would then see a node more open than it is).
 
+## R23. Own CPU over its own read interval, and a window with one bound (item 027)
+
+- **Decision**: In Full, own CPU is the delegated root's `cpu.stat`, read next to `/proc/stat`.
+  In Tracked, an established process's delta is divided by its own read interval and the summed
+  bound keeps the tick lag but not the read-pass term. The allowance, targets and admission budget
+  use own CPU and host busy over a window of at least 8 intervals with one bound, while the
+  per-interval estimate stays within its own bound of it.
+- **Rationale**: in report 026's run 5 the bound on own CPU was 1441 m at 116 tasks on 14 CPUs and
+  counted as external, so 7.6% of the host stayed idle. Two terms made it: each delta divided by
+  the whole aggregate interval although its process was read for about 30 ms less of it (about
+  6% of own usage), and the read-pass term, one tick plus the pass length per scope CPU (14 ×
+  26 ms per 500 ms). Host busy adds one USER_HZ tick of idle rounding per CPU per interval,
+  2% of each CPU at 500 ms, which a 4 s window cuts to 0.25%.
+- **The first interval**: a worker started mid-interval was once scaled to a full rate and read
+  above host busy natively. Its first delta keeps the aggregate divisor; later deltas
+  cover a process that ran the whole interval.
+- **Pending time over a read pass**: a read lags by the runtime not yet folded at the last tick.
+  Summed over processes read one after another, the strict worst case is the smaller of one tick
+  per own thread and one tick plus the pass length per scope CPU (117 ms per interval at 117
+  tasks). The per-interval bound uses one tick per scope CPU, as decided; runtime pending at one
+  read is folded and counted at a later read, so over the window the overcount is that of the
+  window's first reads only, and the strict worst case stays at 29 m (0.2% of 14 CPUs) over 4 s.
+- **Alternatives**: chain each interval's end read as the next baseline (rejected: the baseline
+  would precede the aggregate interval, which the unknown rule forbids); keep the read-pass term
+  and shorten the pass (rejected: 117 reads cannot be made simultaneous).
+
+## R24. Batched lease requests (item 027)
+
+- **Decision**: one request per agent iteration carries every due renewal and initial
+  authorization, renewals first by deadline; the coordinator answers in one transaction with a
+  savepoint per item and one synced commit.
+- **Rationale**: each renewal cost a synced coordinator write of about 9 ms natively, and renewals
+  shared half of each monitor interval, so a node kept about 117 leases renewed; at 150, 123
+  leases expired (report 026, run 0). R19 rejected concurrent requests because the coordinator
+  serializes synced writes; a batch removes the writes instead, one commit per iteration whatever
+  the count. Bounding a batch (128 items, 1 MiB) keeps it under the 3 MiB request limit.
+- **Compatibility**: `Request` denies unknown fields and an older coordinator rejects an unknown
+  `op` before any state change, so the batch is a new variant behind `lease_batch/1`; on a batch
+  error the agent forgets the feature and sends single requests. Per-item events keep their
+  bytes, so the 0.2 gate's `renew` counts do not change.
+- **Alternatives**: renew at a fraction of the lease (rejected as the only change: the ceiling
+  stays linear); concurrent single requests (R19).
+
+## R25. Yield First over its target (item 027)
+
+- **Decision**: own usage over its target without external growth is enforced first and stepped
+  down only after `min_step_dwell_intervals` with caps applied; its cause is `own_over_target`.
+- **Finding from run 6** (report 026, `run6-trace.txt`): every burst above the target (to 3420,
+  3685 and 3208 m against about 3150) came within 1.5 s after a `step_reversed_contention_ended`
+  reversal, and none after a raise alone. Those reversals were driven by the external reading,
+  168–385 m beside a 60 m user, as CedeGrid's own 41 m, the measurement bound and noise counted as
+  external; once an `external_growth` cap's trigger fell below the hysteresis, the cap was removed
+  and catch-up tasks spent their banked time at a full core. The actuator's start after a raise
+  (R20) held its caps. So the overshoot is catch-up work after reversals, set off by the
+  measurement; each burst then stepped own work down and restarted the 30 s interval.
+- **Rationale**: a cap the actuator already enforces needs no new step, and a step taken for
+  noise is what reverses and sets off the next burst. Steps for external growth keep their path
+  and bounds (SC-002).
+- **Alternatives**: rerun only (rejected by the reviewer); longer hysteresis for every cause
+  (rejected: slows the response to real external growth).

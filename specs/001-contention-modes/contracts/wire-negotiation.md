@@ -6,6 +6,24 @@
 |---|---|
 | `api/1` | Today's protocol |
 | `contention/1` | Everything below; frozen when released, so a later field needs `contention/2` |
+| `lease_batch/1` | `Request::Leases` and `Response::Leases` (FR-074) |
+
+## Lease batches (`lease_batch/1`)
+
+- **Request**: `{"op": "leases", "items": [..]}`; each item is a `prepared` or `renew` request
+  with the fields of the single request. At most 128 items and 1 MiB per request; the agent
+  splits larger sets.
+- **Order and clock**: the coordinator checks the session, advances its clock and expires leases
+  once, then serves renewals first, by lease deadline, then initial authorizations, all at one
+  clock value, in one transaction with one synced commit.
+- **Per item**: each item runs in its own savepoint and gets its own result, `lease` or
+  `error` with the single request's message. A preparation row is written before the item's
+  grant, so it survives a failed grant, as for a single request. A retried batch is idempotent
+  per item (the same sequence rules as single requests).
+- **Events**: the agent emits the same per-item events as for single requests
+  (`authorization_unavailable`, `lease_unavailable`, `control_rpc` with `operation: "renew"`).
+- **Old coordinator**: it never advertises `lease_batch/1`; if a batch is refused anyway, it was
+  refused before any state change, and the agent forgets the feature and sends single requests.
 
 ## Sequence
 
