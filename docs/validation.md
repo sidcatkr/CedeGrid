@@ -52,9 +52,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 - **GPU.** Verified on one consumer device only (see
   [Native gate results](#native-gate-results-feature-001)). Other devices and drivers are not
   verified. An interval that lists only own verified processes is measured, but on the test
-  host the display manager always lists a GPU process, so a short GPU job in Neutral still runs
-  capped at half the device for about 10 s after it starts. The GPU attribution tolerance stays
-  15 points until a second device is measured; the first device's largest gap was 5.
+  host the display manager always lists a GPU process, so a short GPU job in Neutral ran
+  capped at half the device for about 10 s after it started. Since item 027 an idle context of
+  a user ID below `uid_min` is background while per-process utilization is readable; the
+  native rerun on the test host is pending. The GPU attribution tolerance stays 15 points until a second device is measured;
+  the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
@@ -66,27 +68,40 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 - **Idle utilization.** SC-014 is not met on the test host: on 14 CPUs own CPU work reaches
   91.4% of the scope in Performance (89.6% with 116 tasks of 100 m), 87.0% in Neutral and 73.0%
   in Yield First. Of the
-  shortfall, CedeGrid's agent and supervisors take 325–489 m and the bound on own measurement
-  513–907 m; both count as external (see
-  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)). Open: attributing
-  each supervisor's CPU to its allocation, a 173 m gap between the tasks' `/proc` usage and the
-  decisions' upper bound with 113 tasks, and the collector's read pass, whose length widens the
-  summed own-CPU bound.
-- **Victims of an excess.** A contended CPU excess goes to victims in order, each capped by the
-  whole excess left, and a cap to zero becomes a pause; splitting an excess by usage is not
-  done yet.
+  shortfall, CedeGrid's agent and supervisors took 325–489 m and the bound on own measurement
+  513–907 m; both counted as external (see
+  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)). Since item 027,
+  CedeGrid's CPU is in use by CedeGrid on the owner's side, the summed own-CPU bound no longer
+  widens with the read pass, and a window of 8 intervals carries one bound; the native rerun
+  is pending. Open: a 173 m gap between the tasks' `/proc` usage and the decisions' upper bound
+  with 113 tasks.
+- **CedeGrid's own cost.** SC-014 counts own tasks plus CedeGrid with a 1% bound for CedeGrid
+  at 117 tasks on 14 CPUs (140 m). In the Docker Linux check (6 CPUs, 117 light tasks, release
+  build with fat LTO, 60 s) the agent used 108 m and the 117 supervisors 34 m in all, 142 m;
+  supervisors that passed every 100 ms used 85–125 m. The agent's top costs by stage are
+  sampling (about 64 m: every task's identity and clock and every host process for principals,
+  each interval) and the slot pass (about 21 m). Fat LTO lowered the agent's cost by about 12%
+  (127 to 112 m). Resident memory: the agent 52 MiB proportional, a supervisor 1.6 MiB
+  proportional (9–11 MiB counting shared pages). The test host run is pending.
+- **Victims of an excess.** Caps already held give a contended CPU excess between them at one
+  level within their tier, and own usage over its target is shared the same way; a new victim
+  is still capped by the whole excess left, in cost order, and a cap to zero becomes a pause.
 - **Launch bursts.** A node renews each running assignment's lease every heartbeat (2 s by
-  default). Each renewal is a synced coordinator write, about 9 ms on the test host, and
-  renewals share half of each monitor interval, so one node keeps about 117 leases renewed. In
+  default). Each renewal is a synced coordinator write, about 9 ms on the test host. Without
+  lease batches, renewals share half of each monitor interval, so one node keeps about 117
+  leases renewed; since item 027 a coordinator that offers `lease_batch/1` takes one request
+  per iteration in one transaction, and the native burst rerun is pending. In
   the native burst gate, 150 light tasks admitted at once, 123 leases expired before their first
   authorization or a renewal: 67 tasks never started, 81 were drained after starting, and the
   longest gap between observations was 1.25 s against a 1 s bound. Where synced writes cost
   50–90 ms (Docker, macOS) the limit is lower. A reservation is no longer refused because its
   own burst closed admission (see [Reruns with launch pacing](#reruns-with-launch-pacing)).
 - **Cancelled reservations.** Under contention a node may cancel a reservation that has not
-  started. If the coordinator authorizes it before the cancellation lands, the node drains it
-  once it runs, even when CPU is the only contended resource: on the test host, 4 of 16 tasks in
-  a Yield First run and 1 of 117 in a Performance run.
+  started. Before item 027, if the coordinator authorized it before the cancellation landed,
+  the node drained it once it ran, even when CPU was the only contended resource: on the test
+  host, 4 of 16 tasks in a Yield First run and 1 of 117 in a Performance run. A cancelled
+  reservation is now released before authorization, and a CPU drain planned while pending is
+  planned again as running work; the native rerun is pending.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.

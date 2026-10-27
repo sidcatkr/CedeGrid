@@ -89,7 +89,13 @@ both process queries succeed, every listed process is an own verified process ch
 through its pidfd, no MPS is present, device utilization is known and memory attributed
 to no listed process has not grown beyond the last measured, own-only or empty interval
 plus the noise tolerance is measured at once with no external compute, so a new own
-process neither restarts the window nor turns the device Unknown. Unsupported queries,
+process neither restarts the window nor turns the device Unknown. A context of a user ID
+below `contention.uid_min`, such as a display server's, is background rather than activity
+while per-process utilization is readable for the device (the query succeeds or reports no
+samples) and its own utilization stays below `principal_min_percent`: it is neither
+external compute nor unknown activity, its share of device time is nobody's, and its
+memory still counts as external usage, as `never_share_occupied_gpus` still counts the
+context. Where per-process utilization is not readable it stays unknown activity. Unsupported queries,
 stale samples, an incomplete process list or MPS leave it activity of unknown amount,
 one principal, under which Neutral and Performance hold the fair share: once the
 supervisor reports a duty cycle applied, own work counts as holding at most that duty,
@@ -121,7 +127,10 @@ the budget. RAM admission and the agent's worker
 limit bound how many jobs this admits. The reported schedulable CPU budget adds what
 running opportunistic work is charged above that usage, so the coordinator and the
 launch check, which charge requests, admit the same. A pending allocation consumes its
-full reservation. Yielding judges running work on what it holds: CPU and RAM usage, and
+full reservation. A reservation the policy cancels before it is authorized is released: its
+supervisor gets the drain before any authorization, and no authorization is requested for
+it. A CPU drain planned while an allocation was pending is planned again as running work
+once it runs, and CPU contention alone never drains running work. Yielding judges running work on what it holds: CPU and RAM usage, and
 GPU memory usage for work that takes a hint, else its charge, since its growth cannot be
 bounded.
 Subtract attributed managed usage from total system usage before classifying the
@@ -131,10 +140,25 @@ Own CPU comes from the allocation's cgroup leaf (`cpu.stat`, only while every me
 an own verified process), else the process CPU clock read while a pidfd shows the
 verified process alive, else the `/proc` tick counters. Each source's read error is
 subtracted: its resolution plus one scheduler tick per thread that can be running, or
-two counter ticks for the tick counters. A change of source gives no reading for that
-interval. Summed over own work for a decision, pending time counts at most one tick per
-scope CPU at each read, widened by how long the reads take, since only a task running at
-the read has any; the sum stays between the sums of the per-allocation bounds.
+two counter ticks for the tick counters. A process that ran the whole interval is divided
+by its own read interval, a new one by the whole aggregate interval. A change of source
+gives no reading for that interval. Summed over own work for a decision, pending time
+counts at most one tick per scope CPU at each read, since only a task running at the read
+has any; the sum stays between the sums of the per-allocation bounds. With the cgroup
+backend, while every own allocation is a leaf directly under the delegated root, the root
+holds no process and its children are exactly those leaves, own CPU comes from the root's
+`cpu.stat` read beside `/proc/stat`. Over the last 8 intervals, host busy time and own CPU
+each carry one bound for the whole window: the window's external estimate sets the
+allowance, the targets, the admission budget and the p95 usage samples while this
+interval's estimate stays within its own bound of it, and an estimate beyond that bound,
+growth or fall, applies at once, so the 2-interval reclaim bound is unchanged.
+
+CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
+the owner's side: it comes out of external usage and the owner's unmanaged usage, never
+forms an unattributed principal, and lowers own tasks' budget and targets by its amount, so
+own tasks and CedeGrid together stay within the owner's share. `doctor` shows it as
+`in use (CedeGrid)` and the node report carries it per resource. The agent reports its
+loop's own CPU by stage once a minute (`loop_cost`).
 
 Each resource runs in a contention mode, and for every resource and observation the
 targets are ordered: Yield First ≤ Neutral ≤ Performance. Capacity no workload wants
@@ -164,8 +188,10 @@ plus the contention floor. It then no longer contends until its usage exceeds th
 demand. A larger demand gets the fair share at once and is then watched for one response
 window: if the host has capacity to spare and its usage stayed within its baseline plus
 the contention floor, it is recorded the same way, so own work scales back up at the
-normal rate and stays up; a recorded user that returns rejoins at once. Activity of
-unknown amount is never recorded. On contended compute, Yield First pauses opportunistic
+normal rate and stays up; a recorded user that returns rejoins at once, and while the
+resource is saturated a recorded user using clearly less than its recorded demand counts
+at that demand, so it gets it back within 2 intervals. Activity of unknown amount is never
+recorded. On contended compute, Yield First pauses opportunistic
 work, and after `pause_bound_s` (10 s) keeps it at the 5% minimum duty while the
 contention lasts; while a small demand is probed it steps down with the probe instead.
 While own work holds more than capacity minus Yield First's margin, saturation may be
@@ -181,16 +207,33 @@ compute and 2 s on memory. A held step still moves no faster than the minimum st
 On an idle host, Performance reaches `performance_ramp_percent` (default 90%) of available
 capacity minus its margin within `performance_ramp_s` (default 10 s): once the agent's
 growth cooldown allows, one heartbeat admits as much as fits within the allowance, at most
-32 new assignments. Launches run off the agent's observation path, and per-allocation lease
-requests share half the monitor interval, so launches do not hold observations back. Lease
-renewals share that half too, which limits how many running assignments one node keeps
-renewed: about 117 on the test host (`docs/validation.md`, Launch bursts). On memory, Yield
+32 new assignments. Launches run off the agent's observation path. A coordinator that offers
+`lease_batch/1` gets one lease request per iteration: renewals first by lease deadline,
+then initial authorizations, at most 128 items and 1 MiB per request, each item granted or
+refused on its own in one transaction, and a retried batch is idempotent per item. Against
+a coordinator without batches, or after a refused batch, per-allocation requests share half
+the monitor interval, so launches do not hold observations back; renewals share that half
+too, which limits how many running assignments one node keeps renewed: about 117 on the
+test host (`docs/validation.md`, Launch bursts). On memory, Yield
 First keeps 20% free beyond the floor and the other modes only the floor. The CPU idle reserve is the larger of
 `cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
 margins are configurable per resource. In every mode, contended CPU returns within 2
 monitor intervals except in Performance, which follows what external work takes: the
-first step applies at once. While a resource is not contended, a held cap or hint rises
-again toward the mode's target at the mode's scale-up rate. A Guaranteed allocation's
+first step applies at once. Own CPU usage over its target while the budget did not fall
+(external usage did not rise beyond its per-interval bound and no contention lowered the
+target) is enforced first: held caps keep their targets, which supervisors hold from the
+measured rate, and no step is entered until usage has stayed over the target for
+`min_step_dwell_intervals` with every held cap applied; then own work steps with cause
+`own_over_target`, shared at one level within each mode tier, and such a step reverses
+(`step_reversed_own_usage_fell`) once usage falls back and the cap no longer binds. A
+budget that fell steps at once with `external_growth`. Caps already held give an external
+increase between them, lowered at one level within their tier, rather than each by the
+whole increase. While a resource is not contended, a held cap or hint rises again toward
+the mode's target at the mode's scale-up rate. On CPU in Yield First and Neutral, once
+every external principal, the unattributed remainder included and background left out,
+has stayed below `principal_min_percent` for `principal_window_intervals`, held caps rise
+to the target after the step dwell alone and the CPU allowance in one move; while
+contention only falls, the scale-up interval applies. A Guaranteed allocation's
 CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
@@ -234,8 +277,8 @@ current cap or hint target and the operator envelope, never below a Guaranteed r
 and only current usage while a measurement is unknown. If every allocation grows to its
 allowance at once, the totals stay within the mode's allowance. One publish threshold in
 total is held back: falls publish together once the published values exceed the current
-allowances by more than it, and a rise moves at most one step per scale-up interval: the
-mode's margin of capacity on CPU, and a fixed 20%, 5% or 2% of capacity in Yield First,
+allowances by more than it, and a rise moves at most one step per scale-up interval, except
+on CPU once contention has fully ended: the mode's margin of capacity on CPU, and a fixed 20%, 5% or 2% of capacity in Yield First,
 Neutral or Performance on memory, which keeps only the floor under Neutral and Performance
 and so has no margin there.
 
@@ -476,6 +519,12 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 Trusted commands must remain inside the supervisor's lifecycle and must not create
 escaping daemons. Workloads requiring that behavior need an explicit adapter or
 a supported containment backend. The system is not a sandbox for hostile programs.
+
+A running supervisor waits for a control line, its leader's exit through the pidfd or a
+new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,
+TERM and KILL deadlines, the readiness check and the release confirmation, and passes at
+least once a second. Without a pidfd, while SDK connections or mediated children are
+active, or while a control or drain-file write fails, it passes every 5 ms.
 
 The Linux supervisor acquires a pidfd before any child reaping, verifies boot ID,
 start time, assignment ID and generation, and uses the stable handle for signaling
