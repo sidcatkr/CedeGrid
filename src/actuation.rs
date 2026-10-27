@@ -29,6 +29,9 @@ pub struct RootlessActuator {
     phase_started: Instant,
     /// CPU time and instant at the start of the current running phase.
     run_mark: Option<(Duration, Instant)>,
+    /// The family's natural CPU rate in millicores, from its last measured
+    /// running phase.
+    rate: Option<f64>,
 }
 
 impl RootlessActuator {
@@ -44,6 +47,7 @@ impl RootlessActuator {
             gpu_duty: 1.0,
             phase_started: Instant::now(),
             run_mark: None,
+            rate: None,
         }
     }
 
@@ -129,7 +133,11 @@ impl Actuator for RootlessActuator {
                 self.paused.remove(&kind);
                 let target = target.unwrap_or(self.requested_cpu / 2);
                 self.cap = Some(target);
-                self.duty = (target as f64 / self.requested_cpu as f64).clamp(MIN_DUTY, 1.0);
+                // Against the measured rate, a changed cap holds from its first period;
+                // against the request, one above it would run uncapped for a period
+                // (research R20).
+                let rate = self.rate.unwrap_or(self.requested_cpu as f64);
+                self.duty = (target as f64 / rate).clamp(MIN_DUTY, 1.0);
             }
             _ => {
                 self.paused.remove(&kind);
@@ -166,6 +174,7 @@ impl Actuator for RootlessActuator {
                     // The family runs unthrottled in this phase, so the rate is its
                     // natural usage and target / rate is the share that meets the cap.
                     if rate > 1.0 {
+                        self.rate = Some(rate);
                         self.duty = (target as f64 / rate).clamp(MIN_DUTY, 1.0);
                     }
                 }
@@ -507,5 +516,56 @@ mod tests {
         let unavailable =
             actuator(AllocationClass::Guaranteed).unavailable(ResourceKind::GpuCompute);
         assert!(unavailable.contains(&YieldStep::Cap) && unavailable.contains(&YieldStep::Pause));
+    }
+
+    /// A family that runs a full core whenever it runs.
+    struct Spinner(Instant);
+
+    impl Family for Spinner {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            Vec::new()
+        }
+        fn signal(&mut self, _: i32) -> Result<()> {
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            Some(self.0.elapsed())
+        }
+    }
+
+    /// A changed cap starts at its target over the family's measured natural rate,
+    /// so a cap raised above the request does not run uncapped for a period and a
+    /// task that makes up lost CPU does not burst to a full core (research R20).
+    #[test]
+    fn a_changed_cap_starts_at_its_target_over_the_measured_rate() {
+        let settings = |cpu_millicores| ActuatorSettings {
+            class: AllocationClass::Opportunistic,
+            requested: Resources {
+                cpu_millicores,
+                ..Resources::default()
+            },
+            period: Duration::from_millis(100),
+            ram_noise_tolerance_mib: 256,
+            ram_calm_window: Duration::from_millis(1500),
+        };
+        let mut family = Spinner(Instant::now());
+        let mut actuator = RootlessActuator::new(&settings(250));
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
+            .unwrap();
+        // One running phase measures the family at about a full core.
+        std::thread::sleep(Duration::from_millis(60));
+        actuator.tick(&mut family).unwrap();
+        assert!((actuator.duty() - 0.1).abs() < 0.03, "{}", actuator.duty());
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(300))
+            .unwrap();
+        assert!((actuator.duty() - 0.3).abs() < 0.05, "{}", actuator.duty());
+        // Without a measured rate, a cap starts at its target over the request.
+        let mut fresh = RootlessActuator::new(&settings(250));
+        fresh
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
+            .unwrap();
+        assert_eq!(fresh.duty(), 0.4);
     }
 }
