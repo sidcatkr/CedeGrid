@@ -62,10 +62,22 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   about 0.7 of the core it wants; the same run under a second account is pending, so SC-004's
   second bullet is open (see [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
 - **Idle utilization.** SC-014 is not met on the test host: on 14 CPUs own CPU work reaches
-  91.4% of the scope in Performance, 87.0% in Neutral and 73.0% in Yield First. CedeGrid's own
-  processes and the bound on own measurement count as external, and with many tasks the agent's
-  loop runs slower than its interval (see
-  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
+  91.4% of the scope in Performance, 87.0% in Neutral and 73.0% in Yield First. Of the
+  shortfall, CedeGrid's agent and supervisors take 325–489 m and the bound on own measurement
+  513–907 m; both count as external (see
+  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)). Open: attributing
+  each supervisor's CPU to its allocation, a 173 m gap between the tasks' `/proc` usage and the
+  decisions' upper bound with 113 tasks, and the collector's read pass, whose length widens the
+  summed own-CPU bound.
+- **Victims of an excess.** A contended CPU excess goes to victims in order, each capped by the
+  whole excess left, and a cap to zero becomes a pause; splitting an excess by usage is not
+  done yet.
+- **Launch bursts.** The coordinator refuses a reserved assignment's initial authorization while
+  the node's latest report shows its admission closed, which a burst of new allocations whose
+  usage is not yet measured causes: in the Docker Linux check, 59–63 of 150 assignments
+  admitted at once were refused this way and failed. Each lease request is a synced coordinator
+  write; where those cost 50–90 ms (Docker, macOS), renewing 150 leases every heartbeat is more
+  than the coordinator serves.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.

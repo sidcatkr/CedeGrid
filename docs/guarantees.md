@@ -74,8 +74,9 @@ of yielding fully, so Guaranteed GPU work needs no special contract. Under exter
 compute activity, own GPU work gets a compute share by pausing it for part of each
 period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
 and kernels already submitted keep running, so the effective granularity is the period
-plus the longest kernel. A process with a CPU cap and a GPU compute share runs one cycle
-at the smaller duty; Guaranteed work takes no GPU compute step. External compute is
+plus the longest kernel. A changed CPU cap starts at its target over the family's last
+measured natural rate, so it holds from its first period. A process with a CPU cap and a GPU
+compute share runs one cycle at the smaller duty; Guaranteed work takes no GPU compute step. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
 utilization; a measured amount takes the CPU paths, with external processes grouped into
@@ -112,7 +113,11 @@ For admission, each running or draining allocation is charged the greater of its
 and observed usage once, except that running opportunistic CPU is charged at its p95
 usage over `contention.cpu.admission_usage_window_s` (60 s) once it has a full window of
 samples, so work in its startup phase is charged its request: CPU is compressible, so
-caps and the kernel share it if everyone spikes. RAM admission and the agent's worker
+caps and the kernel share it if everyone spikes. While a pause, or a cap or hint its usage
+reaches, holds an allocation back, it is charged the greater of its request and its p95
+usage from before the step, with no credit, so usage a cap holds back never becomes room
+for more work; that charge closes admission but does not by itself mark own usage as beyond
+the budget. RAM admission and the agent's worker
 limit bound how many jobs this admits. The reported schedulable CPU budget adds what
 running opportunistic work is charged above that usage, so the coordinator and the
 launch check, which charge requests, admit the same. A pending allocation consumes its
@@ -175,7 +180,10 @@ scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU 
 compute and 2 s on memory. A held step still moves no faster than the minimum step dwell.
 On an idle host, Performance reaches `performance_ramp_percent` (default 90%) of available
 capacity minus its margin within `performance_ramp_s` (default 10 s): once the agent's
-growth cooldown allows, one heartbeat admits as much as fits within the allowance. On memory, Yield First keeps 20% free beyond the floor
+growth cooldown allows, one heartbeat admits as much as fits within the allowance, at most
+32 new assignments. Launches run off the agent's observation path, and per-allocation lease
+requests share half the monitor interval, so a burst of launches does not hold observations
+or telemetry back. On memory, Yield First keeps 20% free beyond the floor
 and the other modes only the floor. The CPU idle reserve is the larger of
 `cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
 margins are configurable per resource. In every mode, contended CPU returns within 2
