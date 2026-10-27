@@ -58,11 +58,14 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
-  compute. A CPU-bound contender started mid-ramp under the account that runs CedeGrid gets
-  about 0.7 of the core it wants; the same run under a second account is pending, so SC-004's
-  second bullet is open (see [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
+  compute. A one-core contender started mid-ramp under a second unprivileged account reaches
+  0.9 core 2–3 s after it starts, pinned to one scope CPU or not, and holds a median of
+  0.92–0.94 core. Under the account that runs CedeGrid the same contender gets about 0.7 core,
+  as SC-002 allows for that account's own programs (see
+  [Reruns with launch pacing](#reruns-with-launch-pacing)).
 - **Idle utilization.** SC-014 is not met on the test host: on 14 CPUs own CPU work reaches
-  91.4% of the scope in Performance, 87.0% in Neutral and 73.0% in Yield First. Of the
+  91.4% of the scope in Performance (89.6% with 116 tasks of 100 m), 87.0% in Neutral and 73.0%
+  in Yield First. Of the
   shortfall, CedeGrid's agent and supervisors take 325–489 m and the bound on own measurement
   513–907 m; both count as external (see
   [Reruns with exact own measurement](#reruns-with-exact-own-measurement)). Open: attributing
@@ -72,12 +75,18 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 - **Victims of an excess.** A contended CPU excess goes to victims in order, each capped by the
   whole excess left, and a cap to zero becomes a pause; splitting an excess by usage is not
   done yet.
-- **Launch bursts.** The coordinator refuses a reserved assignment's initial authorization while
-  the node's latest report shows its admission closed, which a burst of new allocations whose
-  usage is not yet measured causes: in the Docker Linux check, 59–63 of 150 assignments
-  admitted at once were refused this way and failed. Each lease request is a synced coordinator
-  write; where those cost 50–90 ms (Docker, macOS), renewing 150 leases every heartbeat is more
-  than the coordinator serves.
+- **Launch bursts.** A node renews each running assignment's lease every heartbeat (2 s by
+  default). Each renewal is a synced coordinator write, about 9 ms on the test host, and
+  renewals share half of each monitor interval, so one node keeps about 117 leases renewed. In
+  the native burst gate, 150 light tasks admitted at once, 123 leases expired before their first
+  authorization or a renewal: 67 tasks never started, 81 were drained after starting, and the
+  longest gap between observations was 1.25 s against a 1 s bound. Where synced writes cost
+  50–90 ms (Docker, macOS) the limit is lower. A reservation is no longer refused because its
+  own burst closed admission (see [Reruns with launch pacing](#reruns-with-launch-pacing)).
+- **Cancelled reservations.** Under contention a node may cancel a reservation that has not
+  started. If the coordinator authorizes it before the cancellation lands, the node drains it
+  once it runs, even when CPU is the only contended resource: on the test host, 4 of 16 tasks in
+  a Yield First run and 1 of 117 in a Performance run.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
@@ -98,7 +107,7 @@ and `Cargo.lock` are the same at every commit listed, so each gate ran the same 
 |---|---|---|---|
 | T054, delegated cgroup steps (quickstart §4) | `4d631d0`, `893c1c2` | `cpu.weight`, `cpu.max` and `cgroup.freeze` written, read back and restored; with a foreign test-owned process in the leaf, LowerShare is refused and Cap falls back to the rootless duty cycle ("cgroup write refused"), leaving the leaf unchanged | pass |
 | T138, RAM cap | `4d631d0`, `893c1c2` | `memory.high` written, read back and restored to `max`; swap is on, so the swap-off `memory.stat` check does not apply | pass |
-| T141e, PSI | `4d631d0`, `893c1c2` | (1) status available, 10 external cgroups, external avg10 0; (3) 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples; (2) not run: it needs a load under another account or in a system slice | open |
+| T141e, PSI | `4d631d0`, `893c1c2` | (1) status available, 10 external cgroups, external avg10 0; (3) 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples; (2) under another account on 2026-10-27, in [Reruns with launch pacing](#reruns-with-launch-pacing) | pass |
 | T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `893c1c2`, `1c8a850` | `ramp_seconds` 2.784 idle, 2.728 and 2.762 with a contender (target 10 s); the contender, one busy loop started at 3 s, gets a median of 0.72 core after 10 s pinned and unpinned, and 0.9 core in 7% and 0% of half-second samples; `foreign_actions` 0 | ramp pass, contender fail (SC-004) |
 | T088, GPU on an occupied device | `893c1c2` | owned-context test passes; a fresh external CUDA context takes 74 MiB, so the 512 MiB minimum stays; with an idle external context, 100 of 100 GPU tasks complete in Neutral and in Performance, admission open, no GPU step, unattributed device memory 203 MiB; GPU activity reads Unknown in 88% of those sessions' samples; paused: 0 completions, VRAM unchanged; 50% duty cycle at 500 ms gives 0.50 of baseline, longest gap 258 ms, longest kernel 4.4 ms; T152: summed per-process SM differs from device utilization by at most 2, 2 and 5 points with 1, 2 and 4 processes | pass |
 | T117, CPU reclaim (Yield First, Neutral, Performance) | `1c8a850` | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
@@ -143,6 +152,23 @@ What holds own CPU work below the SC-014 targets on this host:
   Launching 134 tasks at once stalled it 4.2 s, past the coordinator's 3 s telemetry limit, so
   every initial authorization was refused and all 140 tasks failed. The launch barrier held
   and every release was verified.
+
+### Reruns with launch pacing
+
+Run on 2026-10-27 on the same test host at `07c2d8b`, which launches assignments off the
+agent's loop, at most 32 per heartbeat, with lease requests sharing half of each monitor
+interval, and authorizes a burst's own reservations while admission is closed only by that
+burst. Loads under another account ran as a second unprivileged account, which started and
+stopped them; CedeGrid did not act on them. Loop costs come from a copy of the same commit with
+stage timing added.
+
+| Gate | Values | Result |
+|---|---|---|
+| Launch-burst gate (150 light tasks at once, Performance) | longest gap between observations 1253 ms (bound 1000 ms); 8 of 150 tasks running at the stop; no refusal for stale evidence or for admission closed by the burst's own allocations, as admission stayed open until leases expired; 123 leases expired before the first authorization or a renewal, so 67 tasks never started and 81 were drained after starting; later, 36 requests for the expired tasks were refused pending reconciliation and 8 for admission closed while those tasks were released. Loop with 150 slots: 659 ms per iteration at the median and 1112 ms at p95, of which lease requests 575 ms at the median and heartbeats up to 515 ms | fail |
+| T178, Performance ramp with a contender under a second unprivileged account (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.591 idle, 2.686 pinned, 1.173 unpinned; the contender, one busy loop started about 3.6 s after submission, reaches 0.9 core in 3.0 s pinned and 2.0 s unpinned, with a median of 0.94 and 0.92 core after 10 s and 0.9 core or more in 81% and 76% of half-second samples; its account's CPU pressure some avg10 stays near 5.5, below `psi_some_percent` (10), so no decision reports `saturated_by_psi`, and Performance's target is capacity minus external minus the margin (about 2730 m of 4000); `foreign_actions` 0 | pass |
+| T141e step 2, PSI under another account | eight busy loops of a second unprivileged account on 2 CPUs: external some avg10 67.9–92.0 in all 30 samples, `saturated_by_psi` on CPU in all 30, busy 10.1–11.2% (`saturation_percent` 98) | pass |
+| SC-014, 14 CPUs, 100 m tasks, steady loop (Performance) | 116 tasks admitted in 17.3 s, at most 32 per heartbeat; longest gap between observations 749 ms; no refusal; own tasks 89.6% of capacity, 92.3% with CedeGrid's own processes (target 97%); CedeGrid's 386 m and the own-measurement bound's 1441 m count as external; one running task drained after its cancelled reservation was authorized. Loop with 117 slots: 341 ms of work per 500 ms interval at the median, of which lease renewals 263 ms, sampling 58 ms and heartbeats up to 59 ms | burst pass, SC-014 fail |
+| SC-015, 4 CPUs beside a 60 m external user (Yield First, catch-up loop) | own tasks 2661 m, 84.0% of capacity minus the external user and the margin (target 90%); 65 step changes and 105 paused samples; 4 of 16 running tasks drained after their cancelled reservations were authorized | fail |
 
 ## Rules for validation runs
 

@@ -930,6 +930,9 @@ each step.
   *Open after the test host's run on 2026-10-26 (`docs/validation.md`): CPU reclaim (SC-002,
   SC-012) passes; SC-004's contender bullet (T178), SC-014 and Neutral's matched GPU throughput
   miss; SC-003's convergence is not exercised by the runner. Report 021, Decisions 1–3.*
+  *On 2026-10-27 SC-004's contender bullet passes under a second unprivileged account (T178);
+  SC-014 (89.6% with 100 m tasks) and SC-015 in Yield First with the catch-up loop (84.0%,
+  65 step changes) still miss.*
 - [X] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
   confirmed near-minimum floor:
   - run the `tools/pressure.py` scenario with the actuation audit hook;
@@ -976,7 +979,7 @@ each step.
   deliver it like targets; add it to the contract fixture and the cross-SDK interop checks. Test in
   `tests/managed_supervision.rs`, `python/tests/test_worker.py` and
   `npm/tests/worker-targets.test.ts`.
-- [ ] T141 Add PSI `cpu.some` as a secondary saturation signal next to `saturation_percent`
+- [X] T141 Add PSI `cpu.some` as a secondary saturation signal next to `saturation_percent`
   (follow-up, not blocking). *Spec amendment required first*: amend Saturated and Contended in
   the spec's Terms, `data-model.md` and `docs/guarantees.md`, and add the PSI native gate to
   [native-gates.md](native-gates.md). Then read it in `src/kernel.rs` (read-only), treat the CPU
@@ -996,9 +999,9 @@ each step.
   - [X] T141d Show external PSI, own PSI and the saturating signal in `observe` and `doctor`,
     with `saturated_by_psi`, `psi_system_only`, `psi_unknown` and `held_back.contention_psi` in
     the catalog and `docs/guarantees.md`.
-  - [ ] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
-    *Steps 1 and 3 passed on the test host on 2026-10-26; step 2 needs a load under another
-    account or in a system slice (report 021, Decision 4).*
+  - [X] T141e Native gate, deferred like T054; see [native-gates.md](native-gates.md).
+    *Steps 1 and 3 passed on the test host on 2026-10-26; step 2 passed on 2026-10-27 under a
+    second unprivileged account (`docs/validation.md`, Reruns with launch pacing).*
 
 ## Phase 12: Revisions from review items 002–013 (done)
 
@@ -1083,9 +1086,11 @@ no behavior beyond what those commits did.
 
 ## Phase 15: Convergence (item 017 Part 4)
 
-- [ ] T178 Run the Performance ramp gate (`tools/ramp_gate.py`, "Performance ramp gate" in native-gates.md) on the authorized test host, idle and with a contender started mid-ramp, and record `ramp_seconds`, `contender_served_seconds` and `foreign_actions` in docs/validation.md. *Deferred: runs only with the user's approval in the session.* Per SC-004 and plan: ramp gate (missing)
-  *Open after the test host's run on 2026-10-26: the ramp passes (2.7–2.8 s), but the
-  contender gets about 0.72 core (SC-004, second bullet; report 021, Decisions 1 and 2).*
+- [X] T178 Run the Performance ramp gate (`tools/ramp_gate.py`, "Performance ramp gate" in native-gates.md) on the authorized test host, idle and with a contender started mid-ramp, and record `ramp_seconds`, `contender_served_seconds` and `foreign_actions` in docs/validation.md. *Deferred: runs only with the user's approval in the session.* Per SC-004 and plan: ramp gate (missing)
+  *On 2026-10-26 the ramp passed (2.7–2.8 s) and a contender under the account that runs
+  CedeGrid got about 0.72 core. On 2026-10-27, under a second unprivileged account, the ramp
+  took 2.6, 2.7 and 1.2 s and the contender reached 0.9 core in 3.0 s pinned and 2.0 s unpinned
+  (median 0.94 and 0.92 core), `foreign_actions` 0 (SC-004; `docs/validation.md`).*
 - [X] T179 Add the ramp tests (`cargo test --locked --test contention ramp`) and the held-back ceiling test to quickstart §1, and list `tools/ramp_gate.py` in the docs/validation.md matrix and the Performance ramp's hardware evidence under its open gates. Per plan: Faster Performance ramp and Item 017 fixes (partial)
 
 ---

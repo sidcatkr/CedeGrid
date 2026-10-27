@@ -182,9 +182,10 @@ On an idle host, Performance reaches `performance_ramp_percent` (default 90%) of
 capacity minus its margin within `performance_ramp_s` (default 10 s): once the agent's
 growth cooldown allows, one heartbeat admits as much as fits within the allowance, at most
 32 new assignments. Launches run off the agent's observation path, and per-allocation lease
-requests share half the monitor interval, so a burst of launches does not hold observations
-or telemetry back. On memory, Yield First keeps 20% free beyond the floor
-and the other modes only the floor. The CPU idle reserve is the larger of
+requests share half the monitor interval, so launches do not hold observations back. Lease
+renewals share that half too, which limits how many running assignments one node keeps
+renewed: about 117 on the test host (`docs/validation.md`, Launch bursts). On memory, Yield
+First keeps 20% free beyond the floor and the other modes only the floor. The CPU idle reserve is the larger of
 `cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
 margins are configurable per resource. In every mode, contended CPU returns within 2
 monitor intervals except in Performance, which follows what external work takes: the
