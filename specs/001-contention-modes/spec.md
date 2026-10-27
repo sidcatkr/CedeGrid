@@ -208,6 +208,16 @@ thresholds.
   as in use by CedeGrid, attributed to the owner, never as unattributed external usage, so it
   never forms an anonymous principal. SC-014 counts own tasks plus CedeGrid and states both; with
   117 tasks on 14 CPUs, CedeGrid's own processes use at most 1% of capacity.
+- Q: When does a system account's context on a GPU count as background rather than unknown
+  activity? → A: Only when per-process GPU utilization is readable for that device and the
+  context's utilization stays below `principal_min_percent`. Its memory counts as external usage
+  in every case. Where per-process utilization is not readable, it stays unknown activity.
+- Q: How fast does own CPU return in Yield First and Neutral once every contending principal has
+  gone? → A: When every contending external principal (background does not count) has stayed
+  below `principal_min_percent` for `principal_window_intervals`, the next scale-up is one move to
+  the uncontended target, without waiting for the mode's interval (the user's decision,
+  2026-10-27). The interval still applies while a principal is active, and on memory. SC-009 and
+  SC-002 are unchanged.
 
 ## Terms
 
@@ -743,7 +753,7 @@ node reports with the expected per-resource values at each step.
     work steps down with the probe instead. External activity that fits in the margin only
     lowers the cap by its amount;
   - count unknown activity as external demand;
-  - scale up slowly.
+  - scale up slowly, except once contention has fully ended (FR-034).
 - **FR-021**: Neutral MUST:
   - let own work use idle capacity minus the Neutral margin (default 5%, between the
     Performance and Yield First margins) on CPU and GPU compute; memory keeps only the floors;
@@ -785,7 +795,11 @@ node reports with the expected per-resource values at each step.
   process with both queries successful, plus `contention.gpu_memory.noise_tolerance_mib`; such an
   interval keeps the device on the measured path and does not restart its quiet window. Otherwise it MUST stay activity of unknown amount
   when either query is unsupported, samples are not fresh, the process inventory is incomplete,
-  or an MPS control daemon or server is present. A device MUST switch to the unknown path at once
+  or an MPS control daemon or server is present. A context of a user ID below `uid_min` counts as
+  background, not as unknown activity, when per-process utilization is readable for that device
+  (the query succeeds or reports no samples) and the context's utilization stays below
+  `principal_min_percent`; its memory still counts as external usage, and where per-process
+  utilization is not readable it stays unknown activity. A device MUST switch to the unknown path at once
   and return to the measured path only after `quiet_window_intervals` consecutive measured
   intervals. A measured amount takes the CPU paths: external processes are
   principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
@@ -931,6 +945,10 @@ node reports with the expected per-resource values at each step.
   the allowance, up to 32 new assignments; in the other modes the agent adds one worker per CPU
   and RAM cooldown. Launches and lease requests MUST NOT hold the node's observation, heartbeat or
   telemetry past the monitor interval; lease requests go as one batch per iteration (FR-074).
+  On CPU in Yield First and Neutral, once every contending external principal (background does
+  not count) has stayed below `principal_min_percent` for `principal_window_intervals`, the next
+  scale-up is one move to the uncontended target, without waiting for the mode's interval. The
+  interval still applies while a principal is active, and on memory; SC-009 and SC-002 hold.
 - **FR-074**: A node MUST send each iteration's lease requests as one batch where the coordinator
   negotiates it: renewals first, by lease deadline, then initial authorizations, under one clock
   value. The coordinator MUST answer a batch in one transaction with one synced commit and a result
@@ -1252,8 +1270,8 @@ times assume the default 500 ms monitor interval.
 | Yield First margin | 15% of compute, 20% of memory beyond the floor | Generous by design, yet compute is reclaimed within an interval, so it needs less than memory. |
 | Yield First response time | 3 monitor intervals (1.5 s) for escalating past a step that did not free the excess | One interval to observe, one to confirm, one to apply and measure. The first step applies at once, so contended CPU returns within 2 intervals (SC-002). |
 | CPU reclaim | 2 monitor intervals in Yield First and Neutral; in Performance at least the margin per interval down to the fair share | One interval to observe the demand (a per-interval average), one with the step applied. On a saturated host the contended target applies at once instead of shrinking one margin per interval, except for Performance, which keeps what external demand does not take, and a probed small demand. |
-| Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. |
-| Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. |
+| Yield First scale-up | 1 step per 30 s | Matches today's 30 s scale-up cooldown, which is the most conservative existing default. One move once contention has fully ended (FR-034). |
+| Neutral scale-up | 1 step per 10 s | Reaches the fair share well inside the 60 s convergence time while staying damped. One move once contention has fully ended (FR-034). |
 | Performance scale-up | CPU and GPU compute: 1 step per monitor interval (500 ms); RAM and GPU memory: 1 step per 2 s; a held step still waits the step dwell (3 intervals) | Compute is reclaimed within an interval, so it can rise as fast as it is observed; memory keeps its damping because it is slow to reclaim. |
 | Neutral convergence time and tolerance | 60 s, ±15 percentage points | Share changes go through damped steps; memory relies on cooperative hints. Twice the originally proposed 30 s and ±10 leaves room for both until measured. |
 | Neutral margin | 5% of capacity (CPU, GPU compute), plus the floors (memory) | Between the other two margins, so the modes stay ordered; it leaves external demand room to show growth without idling compute that is reclaimed within an interval. |
