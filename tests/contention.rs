@@ -3850,3 +3850,241 @@ mod t178_contender {
         assert!((3..=10).contains(&owner), "{owner}");
     }
 }
+
+/// Held caps rise within the spare, and tasks that make up lost CPU do not cycle
+/// once caps hold from their first period (FR-013, SC-015, report 024).
+mod cap_rises {
+    use super::*;
+    use crate::snapshot::PolicyEngine;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const CAPACITY: u64 = 4000;
+    const INTERVAL: u64 = 500;
+    const TASKS: usize = 13;
+    const TASK: u64 = 250;
+
+    /// One thread per claim, weighted max-min over CAPACITY.
+    fn schedule(demands: &[u64]) -> Vec<u64> {
+        let mut shares = vec![0u64; demands.len()];
+        let mut open: Vec<usize> = (0..demands.len()).filter(|i| demands[*i] > 0).collect();
+        let mut remaining = CAPACITY;
+        while !open.is_empty() && remaining > 0 {
+            let level = remaining / open.len() as u64;
+            let (done, rest): (Vec<usize>, Vec<usize>) = open
+                .iter()
+                .partition(|i| demands[**i] - shares[**i] <= level);
+            if done.is_empty() {
+                for i in &open {
+                    shares[*i] += level;
+                }
+                break;
+            }
+            for i in done {
+                remaining -= demands[i] - shares[i];
+                shares[i] = demands[i];
+            }
+            open = rest;
+        }
+        shares
+    }
+
+    struct Interval {
+        own: u64,
+        decision: Decision,
+        usage: Vec<u64>,
+    }
+
+    /// 13 tasks of 250m in Yield First on 4 CPUs beside 190-350m of external noise
+    /// and, from `spike.0` to `spike.1`, 800m more. Each task makes up CPU lost to a
+    /// cap or pause, up to a full core; a cap holds from its first period; the
+    /// policy reads each interval's usage one interval late, as a reading lags caps.
+    fn run(ticks: u64, spike: (u64, u64)) -> Vec<Interval> {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = ContentionMode::YieldFirst;
+        let mut engine = PolicyEngine::new();
+        let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
+        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
+        let mut debt = vec![0u64; TASKS];
+        let mut last = vec![TASK; TASKS];
+        let mut seed: u64 = 7;
+        let mut out = Vec::new();
+        for tick in 0..ticks {
+            let now = tick * INTERVAL;
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let mut external = 190 + (seed >> 33) % 161;
+            if (spike.0..spike.1).contains(&now) {
+                external += 800;
+            }
+            let mut demands: Vec<u64> = (0..TASKS)
+                .map(|i| {
+                    let want = (TASK + debt[i] * 1000 / INTERVAL).min(1000);
+                    match caps[i] {
+                        (YieldStep::Pause, _) => 0,
+                        (YieldStep::Cap, target) => target.unwrap_or(want).min(want),
+                        _ => want,
+                    }
+                })
+                .collect();
+            demands.push(external);
+            let fresh = schedule(&demands);
+            let seen = last.clone();
+            let own_seen: u64 = seen.iter().sum();
+            let external_seen = fresh[TASKS].min(CAPACITY - own_seen);
+            for i in 0..TASKS {
+                debt[i] =
+                    (debt[i] * 1000 + TASK * INTERVAL).saturating_sub(fresh[i] * INTERVAL) / 1000;
+            }
+            last = fresh[..TASKS].to_vec();
+            let mut snap = snapshot(own_seen + external_seen);
+            snap.cpu_capacity_millicores = CAPACITY;
+            snap.physical_cores = Some(4);
+            let input = PolicyInput {
+                allocations: ids
+                    .iter()
+                    .zip(&seen)
+                    .map(|(id, used)| {
+                        allocation(id, AllocationClass::Opportunistic, TASK, Some(*used))
+                    })
+                    .collect(),
+                facts: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            AllocationFacts {
+                                unavailable: BTreeMap::from([(
+                                    ResourceKey::Cpu,
+                                    [YieldStep::LowerShare].into(),
+                                )]),
+                                ..AllocationFacts::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                caps[i] = decision
+                    .actions
+                    .iter()
+                    .find(|a| &a.allocation_id == id && a.resource == ResourceKey::Cpu)
+                    .map_or((YieldStep::None, None), |a| (a.step, a.target));
+            }
+            out.push(Interval {
+                own: own_seen,
+                decision,
+                usage: seen,
+            });
+        }
+        out
+    }
+
+    fn cpu_targets(decision: &Decision) -> BTreeMap<String, Option<u64>> {
+        decision
+            .actions
+            .iter()
+            .filter(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap)
+            .map(|a| (a.allocation_id.clone(), a.target))
+            .collect()
+    }
+
+    /// Every round in which held caps rise totals at most the spare over usage,
+    /// split equally among the held steps (FR-013).
+    #[test]
+    fn a_round_of_rises_stays_within_the_spare_and_splits_it_equally() {
+        let run = run(1200, (200_000, 220_000));
+        let mut rounds = 0;
+        for pair in run.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            let (old, new) = (cpu_targets(&before.decision), cpu_targets(&after.decision));
+            let risen: Vec<&String> = new
+                .iter()
+                .filter(|(id, target)| old.get(*id).is_some_and(|old| *target > old))
+                .map(|(id, _)| id)
+                .collect();
+            if risen.is_empty() {
+                continue;
+            }
+            rounds += 1;
+            let budget = after.decision.managed_budget.cpu_millicores;
+            let spare = budget.saturating_sub(after.own);
+            let held = after
+                .decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Cpu)
+                .count() as u64;
+            let index = |id: &String| id[1..].parse::<usize>().unwrap();
+            let over_usage: Vec<u64> = risen
+                .iter()
+                .map(|id| new[*id].unwrap().saturating_sub(after.usage[index(id)]))
+                .collect();
+            assert!(
+                over_usage.iter().sum::<u64>() <= spare + held,
+                "{over_usage:?} > {spare}"
+            );
+            let share = spare / held.max(1);
+            assert!(
+                over_usage.iter().all(|r| *r <= share + 1),
+                "{over_usage:?} vs {share}"
+            );
+        }
+        assert!(rounds > 0, "caps rose at least once");
+    }
+
+    /// With caps that hold from their first period, tasks that make up lost CPU
+    /// settle near the share after an external spike: no pause and at most two
+    /// step changes in the last 300 s, and own work at 90% of the share or more
+    /// (SC-015).
+    #[test]
+    fn tasks_that_make_up_lost_cpu_do_not_cycle_under_caps_that_hold() {
+        let run = run(2400, (200_000, 220_000));
+        let tail = &run[run.len() - 600..];
+        // A change of step (none, cap, pause) per task, as the host harness counted.
+        let steps = |decision: &Decision| -> BTreeMap<String, YieldStep> {
+            decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Cpu)
+                .map(|a| (a.allocation_id.clone(), a.step))
+                .collect()
+        };
+        let changes: usize = tail
+            .windows(2)
+            .map(|pair| {
+                let (before, after) = (steps(&pair[0].decision), steps(&pair[1].decision));
+                (0..TASKS)
+                    .map(|i| format!("t{i}"))
+                    .filter(|id| before.get(id) != after.get(id))
+                    .count()
+            })
+            .sum();
+        let paused = tail.iter().any(|interval| {
+            interval
+                .decision
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Pause)
+        });
+        let own = tail.iter().map(|interval| interval.own).sum::<u64>() / tail.len() as u64;
+        let share = tail
+            .iter()
+            .map(|interval| {
+                interval.decision.resources[&ResourceKey::Cpu]
+                    .target_share
+                    .unwrap()
+            })
+            .sum::<u64>()
+            / tail.len() as u64;
+        assert!(!paused);
+        assert!(changes <= 2, "{changes} step changes in the last 300 s");
+        assert!(
+            own * 10 >= share * 9,
+            "own {own} against a share of {share}"
+        );
+    }
+}
