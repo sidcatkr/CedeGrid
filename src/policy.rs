@@ -351,6 +351,8 @@ struct Interval<'a> {
     /// Own CPU usage is over its target without the budget falling, within the dwell: held
     /// steps keep their targets and none is entered (FR-011).
     cpu_own_hold: bool,
+    /// CedeGrid's own CPU this interval: own work's side, out of external usage (FR-069).
+    cedegrid_cpu: u64,
     /// CPU and RAM admission, when closed, is closed only by own new allocations.
     cpu_new_only: bool,
     ram_new_only: bool,
@@ -443,6 +445,7 @@ impl<'a> Interval<'a> {
             cpu_held_inconsistent: false,
             cpu_bound: 0,
             cpu_own_hold: false,
+            cedegrid_cpu: 0,
             cpu_new_only: false,
             ram_new_only: false,
             ram_held: false,

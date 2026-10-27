@@ -205,6 +205,10 @@ struct AgentLoop<'a> {
     client: std::sync::Arc<NodeClient>,
     namespace_guard: NamespaceGuard,
     collector: ManagedCollector,
+    /// The agent's and its supervisors' own CPU (FR-069).
+    cedegrid_cpu: crate::telemetry::CedegridCpu,
+    /// The loop's own CPU by stage (SC-014).
+    cost: LoopCost,
     policy: PolicyEngine,
     slots: BTreeMap<String, ChildSlot>,
     refusals: BTreeMap<String, (Assignment, String)>,
@@ -868,6 +872,42 @@ impl AgentLoop<'_> {
         Ok(())
     }
 
+    /// CedeGrid's own CPU this interval, from the agent's process clock and its live
+    /// supervisors' (FR-069). Without the agent's clock it stays unknown.
+    fn note_cedegrid_cpu(&mut self, snapshot: &mut crate::model::Snapshot) {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(agent_ns) = crate::telemetry::own_process_cpu_ns() else {
+                return;
+            };
+            let mut supervisors = Vec::new();
+            for (id, slot) in &mut self.slots {
+                let ns = match &mut slot.child {
+                    // Unreaped, so the PID is still this child's.
+                    SupervisorProcess::Owned(child) => match child.try_wait() {
+                        Ok(None) => crate::telemetry::supervisor_cpu_ns(child.id(), None),
+                        _ => None,
+                    },
+                    SupervisorProcess::Attached(identity) => {
+                        crate::telemetry::supervisor_cpu_ns(identity.pid, Some(identity))
+                    }
+                };
+                if let Some(ns) = ns {
+                    supervisors.push((id.clone(), ns));
+                }
+            }
+            if let Some((interval, window)) =
+                self.cedegrid_cpu
+                    .sample(Instant::now(), agent_ns, &supervisors)
+            {
+                snapshot.cedegrid_cpu_lower_millicores = Some(interval);
+                snapshot.cedegrid_cpu_window_lower_millicores = Some(window);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (snapshot, &self.cedegrid_cpu);
+    }
+
     async fn observe(
         &mut self,
         records: &[ExecutionRecord],
@@ -885,9 +925,13 @@ impl AgentLoop<'_> {
             self.collector.next_cpu_sample_at(),
         ))
         .await;
+        let mut mark = LoopCost::thread_ns();
         let (mut snapshot, allocations) = self
             .collector
             .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
+        mark = self.cost.charge("sample", mark);
+        self.note_cedegrid_cpu(&mut snapshot);
+        mark = self.cost.charge("cedegrid_clocks", mark);
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
         // Limits that depend on the host are checked once; the agent stops if they fail.
         if !self.host_checked {
@@ -925,6 +969,7 @@ impl AgentLoop<'_> {
             },
             self.start.elapsed().as_millis() as u64,
         )?;
+        let mark = self.cost.charge("policy", mark);
         decision.managed_budget = minimum(&decision.managed_budget, &agent.capacity);
         decision.observe_only = false;
         decision.admission_headroom = minimum(
@@ -934,6 +979,7 @@ impl AgentLoop<'_> {
                 &allocation_charge(&allocations),
             ),
         );
+        self.cost.charge("decision", mark);
         Ok((snapshot, allocations, decision))
     }
 
@@ -1491,6 +1537,9 @@ impl AgentLoop<'_> {
 
 /// Run a node service until shutdown or its configured finite envelope. Every
 /// managed workload has a separate supervisor; disconnects do not stop its clock.
+/// How often the agent reports its loop's own CPU by stage.
+const LOOP_COST_PERIOD: Duration = Duration::from_secs(60);
+
 pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Result<()> {
     ensure!(
         config.execution.enabled,
@@ -1649,6 +1698,8 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         client,
         namespace_guard,
         collector,
+        cedegrid_cpu: crate::telemetry::CedegridCpu::default(),
+        cost: LoopCost::new(start, LOOP_COST_PERIOD),
         policy,
         slots: BTreeMap::new(),
         refusals,
@@ -1679,23 +1730,36 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         // run once immediately and return to the original cadence.
         next_observation =
             next_periodic_wake(next_observation, observation_interval, Instant::now());
+        let mut mark = LoopCost::thread_ns();
         if let Some(guard) = &replay_journal {
             guard.verify(config)?;
         }
         state.collect_preparations().await?;
         state.collect_publications().await?;
+        mark = state.cost.charge("collect", mark);
         state.service_slots().await?;
+        mark = state.cost.charge("slots", mark);
         let records = state.store.executions()?;
         collect_released_spool(config, &state.store, &records, &state.publishing)?;
         state.retire_slots(&records)?;
         state.recover_outbox(&records)?;
+        state.cost.charge("records", mark);
+        // Observation charges its own stages.
         let (snapshot, allocations, mut decision) = state.observe(&records).await?;
+        mark = LoopCost::thread_ns();
         state.share_observation(&snapshot);
         state.actuate(&mut decision, &allocations)?;
+        mark = state.cost.charge("actuate", mark);
         state.store.append_observation(&snapshot, &decision)?;
+        mark = state.cost.charge("store", mark);
         state
             .heartbeat(&records, &snapshot, &allocations, &decision)
             .await?;
+        state.cost.charge("heartbeat", mark);
+        state.cost.iteration();
+        if let Some(report) = state.cost.take_report(Instant::now()) {
+            emit(&report)?;
+        }
         if state.stop_due(&records)? {
             break;
         }
@@ -1704,6 +1768,82 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     state.shutdown().await?;
     drop(lock);
     Ok(())
+}
+
+/// The agent loop's own CPU by stage, in this thread's CPU time, reported once a period so
+/// CedeGrid's cost can be told apart by stage (SC-014).
+pub(super) struct LoopCost {
+    stages: BTreeMap<&'static str, u64>,
+    iterations: u64,
+    since: Instant,
+    period: Duration,
+}
+
+impl LoopCost {
+    pub(super) fn new(now: Instant, period: Duration) -> Self {
+        Self {
+            stages: BTreeMap::new(),
+            iterations: 0,
+            since: now,
+            period,
+        }
+    }
+
+    /// This thread's CPU time; zero where the clock is unavailable.
+    fn thread_ns() -> u64 {
+        #[cfg(unix)]
+        {
+            let mut time = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: valid output pointer.
+            if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0 {
+                return u64::try_from(time.tv_sec)
+                    .unwrap_or(0)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(u64::try_from(time.tv_nsec).unwrap_or(0));
+            }
+        }
+        0
+    }
+
+    /// Charges the thread CPU used since `mark` to `stage` and returns the new mark.
+    fn charge(&mut self, stage: &'static str, mark: u64) -> u64 {
+        let now = Self::thread_ns();
+        self.record(stage, now.saturating_sub(mark));
+        now
+    }
+
+    pub(super) fn record(&mut self, stage: &'static str, ns: u64) {
+        let total = self.stages.entry(stage).or_default();
+        *total = total.saturating_add(ns);
+    }
+
+    pub(super) fn iteration(&mut self) {
+        self.iterations += 1;
+    }
+
+    /// The report once the period has passed, after which counting starts again.
+    pub(super) fn take_report(&mut self, now: Instant) -> Option<serde_json::Value> {
+        let elapsed = now.saturating_duration_since(self.since);
+        if elapsed < self.period {
+            return None;
+        }
+        let stages: BTreeMap<&str, u64> = self
+            .stages
+            .iter()
+            .map(|(stage, ns)| (*stage, ns / 1000))
+            .collect();
+        let report = serde_json::json!({
+            "event": "loop_cost",
+            "period_ms": elapsed.as_millis() as u64,
+            "iterations": self.iterations,
+            "thread_cpu_us": stages,
+        });
+        *self = Self::new(now, self.period);
+        Some(report)
+    }
 }
 
 async fn shutdown_signal() {

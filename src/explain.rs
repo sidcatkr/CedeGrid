@@ -171,6 +171,9 @@ pub fn doctor_text(
         if let Some(unattributed) = status.unattributed {
             usage.push(format!("unattributed {}", amount(kind, unattributed)));
         }
+        if let Some(cedegrid) = status.cedegrid {
+            usage.push(format!("in use (CedeGrid) {}", amount(kind, cedegrid)));
+        }
         if let Some(target) = status.target_share {
             usage.push(format!("target share {}", amount(kind, target)));
         }

@@ -168,6 +168,7 @@ ALLOWLIST = (
     'tests/managed_supervision.rs',
     'tests/namespace.rs',
     'tests/observability.rs',
+    'tests/own_cost.rs',
     'tests/pagination.rs',
     'tests/policy.rs',
     'tests/replay_state.rs',

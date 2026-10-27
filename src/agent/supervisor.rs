@@ -4,6 +4,9 @@ use super::*;
 
 struct PipeControl {
     rx: mpsc::Receiver<Incoming>,
+    /// Turns readable when a line arrives on `rx`.
+    #[cfg(unix)]
+    wake: supervision::Wake,
     /// Writes events to an authenticated control-socket controller as well.
     #[cfg(unix)]
     sink: Option<supervision::control_socket::Sink>,
@@ -78,6 +81,10 @@ impl SupervisorControl for PipeControl {
                 }
             }
         }
+    }
+    #[cfg(unix)]
+    fn wake(&self) -> Option<&supervision::Wake> {
+        Some(&self.wake)
     }
     fn initial_remaining_ms(&self) -> Option<u64> {
         self.remaining_ms.map(|r| {
@@ -346,15 +353,23 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         Ok(control) => Incoming::Control(control),
         Err(error) => Incoming::Unknown(error.to_string()),
     };
+    #[cfg(unix)]
+    let wake = supervision::Wake::new()?;
     let stdin_tx = tx.clone();
+    #[cfg(unix)]
+    let stdin_wake = wake.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(std::io::stdin()).lines() {
             let Ok(line) = line else { break };
             if stdin_tx.send(parse(&line)).is_err() {
                 return;
             }
+            #[cfg(unix)]
+            stdin_wake.notify();
         }
         let _ = stdin_tx.send(Incoming::Lost);
+        #[cfg(unix)]
+        stdin_wake.notify();
     });
     // A restarted agent reattaches through this socket (research R2).
     #[cfg(unix)]
@@ -366,6 +381,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
                 &serde_json::json!({"path": listener.path()}),
             )?;
             let socket_tx = std::sync::Mutex::new(tx.clone());
+            let socket_wake = wake.clone();
             Some(listener.serve(move |line| {
                 let message = match line {
                     supervision::control_socket::Line::Attached => Incoming::Attached,
@@ -373,6 +389,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
                     supervision::control_socket::Line::Text(line) => parse(&line),
                 };
                 let _ = socket_tx.lock().map(|tx| tx.send(message));
+                socket_wake.notify();
             }))
         }
         None => None,
@@ -385,6 +402,8 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     };
     let mut control = PipeControl {
         rx,
+        #[cfg(unix)]
+        wake,
         #[cfg(unix)]
         sink,
         stdin_open: true,

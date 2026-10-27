@@ -190,6 +190,18 @@ impl Actuator for RootlessActuator {
         Ok(())
     }
 
+    fn next_deadline(&self) -> Option<Instant> {
+        if !self.paused.is_empty() || (self.cap.is_none() && self.gpu_duty >= 1.0) {
+            return None;
+        }
+        let share = if self.stopped {
+            1.0 - self.duty()
+        } else {
+            self.duty()
+        };
+        Some(self.phase_started + self.period.mul_f64(share))
+    }
+
     fn release(&mut self, family: &mut dyn Family) -> Result<()> {
         self.paused.clear();
         self.cap = None;
@@ -467,6 +479,28 @@ mod tests {
             ram_noise_tolerance_mib: 256,
             ram_calm_window: Duration::from_millis(1500),
         })
+    }
+
+    /// The next phase switch of a duty cycle is the supervisor's next deadline; without a
+    /// duty cycle there is none (plan "Item 027").
+    #[test]
+    fn the_next_deadline_is_the_duty_cycles_phase_switch() {
+        let mut family = Recorder::default();
+        let mut cap = actuator(AllocationClass::Opportunistic);
+        assert_eq!(cap.next_deadline(), None);
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        cap.duty = 0.25;
+        let running = cap.next_deadline().unwrap();
+        assert_eq!(running, cap.phase_started + Duration::from_millis(25));
+        cap.stopped = true;
+        assert_eq!(
+            cap.next_deadline(),
+            Some(cap.phase_started + Duration::from_millis(75))
+        );
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(cap.next_deadline(), None);
     }
 
     /// A GPU compute cap is a pause duty cycle at the target's share of the device;

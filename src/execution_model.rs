@@ -218,6 +218,11 @@ pub trait Actuator {
     ) -> Result<crate::contention::YieldStep>;
     /// Advance time-driven mechanisms such as a duty cycle.
     fn tick(&mut self, family: &mut dyn Family) -> Result<()>;
+    /// When `tick` next has work to do, such as a duty cycle's phase switch; `None` when
+    /// nothing is time-driven.
+    fn next_deadline(&self) -> Option<std::time::Instant> {
+        None
+    }
     /// A note on how the last step was applied, such as a fallback.
     fn take_detail(&mut self) -> Option<String> {
         None

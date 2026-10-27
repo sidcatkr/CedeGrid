@@ -208,6 +208,24 @@ impl Lifecycle {
     pub fn drain_requested_ms(&self) -> Option<u64> {
         self.drain_at_ms
     }
+    /// The next deadline at which `tick` changes the phase: the lease expiry while
+    /// opportunistic work runs, then TERM and KILL after a drain.
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        match (self.phase, self.drain_at_ms) {
+            (LifecyclePhase::Running, None) => {
+                (self.class == AllocationClass::Opportunistic).then_some(self.lease_deadline_ms)
+            }
+            (LifecyclePhase::Running | LifecyclePhase::Draining, Some(start)) => {
+                Some(start.saturating_add(self.drain_wait_ms()))
+            }
+            (LifecyclePhase::Terminating, Some(start)) => Some(
+                start
+                    .saturating_add(self.drain_wait_ms())
+                    .saturating_add(self.term_ms),
+            ),
+            _ => None,
+        }
+    }
     /// When SIGTERM is due: the drain request plus the drain timeout.
     pub fn termination_deadline_ms(&self) -> Option<u64> {
         self.drain_at_ms
@@ -271,6 +289,46 @@ pub trait SupervisorControl {
     /// Deliver an `adjusted` or `state` report to the policy authority.
     fn report(&mut self, _report: SupervisorReport) -> Result<()> {
         Ok(())
+    }
+    /// A descriptor that turns readable when a control line arrives, so the supervisor
+    /// can wait for its next deadline; without one it polls every pass.
+    #[cfg(unix)]
+    fn wake(&self) -> Option<&Wake> {
+        None
+    }
+}
+
+/// Wakes a supervisor that waits for its next deadline when a control line arrives.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct Wake(
+    std::sync::Arc<(
+        std::os::unix::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    )>,
+);
+
+#[cfg(unix)]
+impl Wake {
+    pub fn new() -> Result<Self> {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        writer.set_nonblocking(true)?;
+        Ok(Self(std::sync::Arc::new((reader, writer))))
+    }
+    /// A full socket buffer already wakes the reader, so a refused write loses nothing.
+    pub fn notify(&self) {
+        use std::io::Write;
+        let _ = (&self.0.1).write(&[1]);
+    }
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.0.0.as_raw_fd()
+    }
+    pub fn drain(&self) {
+        use std::io::Read;
+        let mut buffer = [0u8; 64];
+        while matches!((&self.0.0).read(&mut buffer), Ok(read) if read > 0) {}
     }
 }
 /// Reports from a supervisor about the steps it applied.
@@ -612,6 +670,45 @@ mod tests {
             opportunistic.tick(100_000),
             LifecyclePhase::NeedsReconciliation
         );
+    }
+    /// The supervisor waits until the next lifecycle deadline: the lease expiry while it
+    /// runs, then TERM and KILL after a drain (plan "Item 027").
+    #[test]
+    fn the_next_deadline_is_the_lease_then_term_then_kill() {
+        let mut state = lifecycle(AllocationClass::Opportunistic);
+        assert_eq!(state.next_deadline_ms(), Some(100));
+        state.request_drain(40);
+        assert_eq!(state.next_deadline_ms(), Some(70));
+        assert_eq!(state.tick(70), LifecyclePhase::Terminating);
+        assert_eq!(state.next_deadline_ms(), Some(90));
+        assert_eq!(state.tick(90), LifecyclePhase::KillRequested);
+        assert_eq!(state.next_deadline_ms(), None);
+        // Guaranteed work has no lease expiry.
+        assert_eq!(
+            lifecycle(AllocationClass::Guaranteed).next_deadline_ms(),
+            None
+        );
+    }
+    /// A control line wakes a supervisor that waits on the wake socket.
+    #[cfg(unix)]
+    #[test]
+    fn a_wake_makes_its_descriptor_readable_once_drained() {
+        let wake = Wake::new().unwrap();
+        let readable = |fd| {
+            let mut item = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd.
+            unsafe { libc::poll(&mut item, 1, 0) == 1 }
+        };
+        assert!(!readable(wake.fd()));
+        wake.clone().notify();
+        wake.notify();
+        assert!(readable(wake.fd()));
+        wake.drain();
+        assert!(!readable(wake.fd()));
     }
     #[test]
     fn grants_are_fenced_and_cannot_resurrect_expired_allocation() {

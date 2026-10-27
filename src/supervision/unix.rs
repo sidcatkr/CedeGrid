@@ -792,6 +792,32 @@ fn apply_runtime_commands(
 
 /// Bounded attempts for a journal transition after EXEC (research R3).
 const JOURNAL_ATTEMPTS: u32 = 4;
+/// The running loop's pass while a source it watches has no event to wait on.
+const PASS: Duration = Duration::from_millis(5);
+/// The longest wait for an event before the running loop passes anyway.
+const IDLE_PASS: Duration = Duration::from_millis(100);
+
+/// Waits until a descriptor turns readable or `until` passes, whichever comes first. An
+/// interrupted or failed wait only ends this pass early.
+fn wait_for_events(fds: &[std::os::fd::RawFd], until: Instant) {
+    let timeout = until.saturating_duration_since(Instant::now());
+    if fds.is_empty() {
+        std::thread::sleep(timeout);
+        return;
+    }
+    let mut items: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|fd| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // Rounded up, so the pass never comes before its deadline.
+    let ms = i32::try_from(timeout.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
+    // SAFETY: `items` holds `items.len()` valid pollfd entries for the call.
+    unsafe { libc::poll(items.as_mut_ptr(), items.len() as libc::nfds_t, ms) };
+}
 
 fn persist_with_retry(journal: &dyn ExecutionJournal, record: &ExecutionRecord) -> Result<()> {
     let mut delay = Duration::from_millis(10);
@@ -1440,7 +1466,47 @@ pub(super) fn supervise(
                     "resource release remains unconfirmed after forced termination"
                 );
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // Wait for a control line, the leader's exit or a new SDK connection until the
+            // next deadline; a source without an event keeps the short pass.
+            let mut fds = Vec::new();
+            let mut busy = control_failing
+                || (drain_started_ms.is_some() && !drain_notified)
+                || children.as_ref().is_some_and(|server| !server.idle());
+            match control.wake() {
+                Some(wake) => fds.push(wake.fd()),
+                None => busy = true,
+            }
+            if leader_status.is_none() {
+                match owned.pidfd.as_ref() {
+                    Some(pidfd) => fds.push(pidfd.as_raw_fd()),
+                    None => busy = true,
+                }
+            }
+            if let Some(server) = children.as_ref().filter(|server| server.idle()) {
+                fds.push(server.listener_fd());
+            }
+            let now = Instant::now();
+            let deadlines = [
+                lifecycle
+                    .next_deadline_ms()
+                    .map(|ms| start + Duration::from_millis(ms)),
+                actuator.next_deadline(),
+                (!readiness.0).then(|| readiness_checked_at.map_or(now, |at| at + duty_period)),
+                (phase == LifecyclePhase::KillRequested && !killed).then(|| {
+                    term_sent_at.map_or(now, |sent| {
+                        sent + Duration::from_millis(options.term_grace_ms)
+                    })
+                }),
+                kill_at.map(|at| at + Duration::from_millis(options.release_confirm_timeout_ms)),
+            ];
+            let until = deadlines
+                .into_iter()
+                .flatten()
+                .fold(now + if busy { PASS } else { IDLE_PASS }, Instant::min);
+            wait_for_events(&fds, until);
+            if let Some(wake) = control.wake() {
+                wake.drain();
+            }
         }
     })();
     match result {

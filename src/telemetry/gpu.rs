@@ -336,6 +336,62 @@ pub(super) fn classify_activity(
     (activity, fresh_id, next)
 }
 
+/// Listed external contexts that are background this interval (FR-021): a user ID below
+/// `uid_min`, per-process utilization readable from a fresh baseline (the query succeeds or
+/// reports no samples), and the context's average utilization below `min_percent`.
+pub(super) fn background_contexts(
+    external: Option<&[u32]>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    uid_of: impl Fn(u32) -> Option<u32>,
+    uid_min: u32,
+    min_percent: u8,
+) -> BTreeSet<u32> {
+    let (Some(external), Some(previous)) = (external, previous) else {
+        return BTreeSet::new();
+    };
+    let samples: &[ProcessUtilizationSample] = match samples {
+        Ok(samples) => samples,
+        Err(NvmlError::NotFound) => &[],
+        Err(_) => return BTreeSet::new(),
+    };
+    external
+        .iter()
+        .copied()
+        .filter(|pid| uid_of(*pid).is_some_and(|uid| uid < uid_min))
+        .filter(|pid| {
+            let fresh: Vec<u64> = samples
+                .iter()
+                .filter(|s| s.pid == *pid && s.timestamp > previous)
+                .map(|s| u64::from(s.sm_util.min(100)))
+                .collect();
+            let average = fresh.iter().sum::<u64>() / (fresh.len() as u64).max(1);
+            average < u64::from(min_percent)
+        })
+        .collect()
+}
+
+/// A listed context's user ID when all four UID slots agree; otherwise it is unattributed.
+pub(super) fn context_uid(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let uids: Vec<u32> = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))?
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()
+            .ok()?;
+        (uids.len() == 4 && uids.iter().all(|uid| *uid == uids[0])).then(|| uids[0])
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// External and own GPU compute of one interval, in thousandths of device time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ComputeAmount {
@@ -370,6 +426,7 @@ pub(super) fn process_name(pid: u32) -> Option<String> {
 /// of device utilization over the same interval (FR-021). While an external PID is
 /// listed, device time nobody accounts for is external too, the unattributed
 /// part; with own PIDs only it is sampling error on own work.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn measure_compute(
     external: Option<&[u32]>,
     own: &BTreeSet<u32>,
@@ -378,6 +435,7 @@ pub(super) fn measure_compute(
     device: Option<u32>,
     mps: bool,
     tolerance: u8,
+    background: &BTreeSet<u32>,
 ) -> (ComputeAmount, BTreeMap<u32, u64>) {
     let unknown = |reason: &str| (ComputeAmount::Unknown(reason.into()), BTreeMap::new());
     if mps {
@@ -412,16 +470,20 @@ pub(super) fn measure_compute(
         *sum += u64::from(sample.sm_util.min(100));
         *count += 1;
     }
-    let (mut external_percent, mut own_percent) = (0u64, 0u64);
+    let (mut external_percent, mut own_percent, mut background_percent) = (0u64, 0u64, 0u64);
     let mut by_pid = BTreeMap::new();
     for (pid, (sum, count)) in per_pid {
-        if own.contains(&pid) {
+        // Background contexts are neither side: their share leaves the device's time.
+        if background.contains(&pid) {
+            background_percent += sum / count;
+        } else if own.contains(&pid) {
             own_percent += sum / count;
         } else {
             external_percent += sum / count;
             by_pid.insert(pid, (sum / count).min(100) * 10);
         }
     }
+    let device = device.saturating_sub(u32::try_from(background_percent).unwrap_or(u32::MAX));
     let total = external_percent + own_percent;
     if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
         return (

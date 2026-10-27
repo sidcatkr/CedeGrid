@@ -111,6 +111,7 @@ pub fn node_contention_report(
                     target_share: status.target_share,
                     step_summary,
                     cause_summary,
+                    cedegrid: status.cedegrid,
                     held_back: status.held_back.clone(),
                 },
             ))

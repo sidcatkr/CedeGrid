@@ -347,9 +347,11 @@ impl Interval<'_> {
     /// saturates), and the cooldown.
     fn cpu_held_back(&self) -> HeldBack {
         let config = self.config;
+        // CedeGrid's own CPU is in use, not held back (FR-069).
         let available = self
             .cpu_capacity
-            .saturating_sub(self.external_of(&ResourceKey::Cpu));
+            .saturating_sub(self.external_of(&ResourceKey::Cpu))
+            .saturating_sub(self.cedegrid_cpu);
         let mut held = HeldBack::default();
         if self.cpu_unknown || self.cpu_held {
             held.unknown = available;

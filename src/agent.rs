@@ -1672,6 +1672,28 @@ mod drain_tests {
         assert!(facts["a"].uncontrollable);
     }
 
+    /// The agent loop's own CPU by stage is reported once a period, then starts again
+    /// (SC-014).
+    #[test]
+    fn loop_cost_reports_each_stage_once_a_period() {
+        use super::service::LoopCost;
+        let start = Instant::now();
+        let mut cost = LoopCost::new(start, Duration::from_secs(60));
+        cost.record("observe", 3_000_000);
+        cost.record("heartbeat", 1_000_000);
+        cost.iteration();
+        cost.record("observe", 2_000_000);
+        cost.iteration();
+        assert_eq!(cost.take_report(start + Duration::from_secs(59)), None);
+        let report = cost.take_report(start + Duration::from_secs(60)).unwrap();
+        assert_eq!(report["event"], "loop_cost");
+        assert_eq!(report["iterations"], 2);
+        assert_eq!(report["thread_cpu_us"]["observe"], 5000);
+        assert_eq!(report["thread_cpu_us"]["heartbeat"], 1000);
+        assert_eq!(report["period_ms"], 60_000);
+        assert_eq!(cost.take_report(start + Duration::from_secs(61)), None);
+    }
+
     /// A reattached supervisor reports each step's cause, so a restarted agent reseeds an
     /// `own_over_target` step with its own cause; an older supervisor reports none, and its
     /// steps count as external growth (FR-018).

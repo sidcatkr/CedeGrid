@@ -379,8 +379,18 @@ impl<'a> Interval<'a> {
                     ),
                 );
             }
-            let interval =
-                busy.saturating_sub(own_lower.saturating_add(self.unknown_charge.cpu_millicores));
+            // CedeGrid's own CPU is on own work's side; beyond what host busy leaves, it is
+            // clamped rather than making the reading inconsistent (FR-069).
+            let own_charged = own_lower.saturating_add(self.unknown_charge.cpu_millicores);
+            let cedegrid = snapshot
+                .cedegrid_cpu_lower_millicores
+                .unwrap_or(0)
+                .min(busy.saturating_sub(own_charged));
+            self.cedegrid_cpu = cedegrid;
+            if snapshot.cedegrid_cpu_lower_millicores.is_some() {
+                self.statuses.entry(ResourceKey::Cpu).or_default().cedegrid = Some(cedegrid);
+            }
+            let interval = busy.saturating_sub(own_charged.saturating_add(cedegrid));
             // Over the window, host busy and own CPU carry one bound for the whole window. Its
             // estimate sets the steady state while this interval's stays within its own bound
             // of it; beyond that bound, growth or fall, this interval's applies at once (FR-073).
@@ -390,7 +400,13 @@ impl<'a> Interval<'a> {
                 .zip(snapshot.managed_cpu_window_lower_millicores)
                 .filter(|(busy, own)| own <= busy)
                 .map(|(busy, own)| {
-                    busy.saturating_sub(own.saturating_add(self.unknown_charge.cpu_millicores))
+                    let cedegrid = snapshot
+                        .cedegrid_cpu_window_lower_millicores
+                        .unwrap_or(cedegrid);
+                    busy.saturating_sub(
+                        own.saturating_add(self.unknown_charge.cpu_millicores)
+                            .saturating_add(cedegrid),
+                    )
                 });
             let bound = (busy - host_lower).saturating_add(own_upper.saturating_sub(own_lower));
             self.cpu_bound = bound;
@@ -693,14 +709,25 @@ impl<'a> Interval<'a> {
     pub(super) fn cpu_target(&mut self) {
         let config = self.config;
         let saturated = self.cpu_saturation();
+        // CedeGrid's own CPU comes out of own tasks' budget and targets (FR-069).
+        let cedegrid = self.cedegrid_cpu;
         if self.cpu_unknown || self.cpu_held {
+            self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_sub(cedegrid);
             return;
         }
-        self.floor_available
-            .insert(ResourceKey::Cpu, self.budget.cpu_millicores);
+        self.floor_available.insert(
+            ResourceKey::Cpu,
+            self.budget.cpu_millicores.saturating_sub(cedegrid),
+        );
         let capacity = self.cpu_capacity;
-        let (members, background) =
+        let (mut members, background) =
             self.principals(ResourceKey::Cpu, capacity, &|p| p.cpu_millicores);
+        // The agent and supervisors run as the owner: their CPU is not the owner's unmanaged use.
+        for (principal, usage) in members.iter_mut().flatten() {
+            if principal.is_owner {
+                *usage = usage.saturating_sub(cedegrid);
+            }
+        }
         let thresholds = config.contention.thresholds(ResourceKind::Cpu);
         let status = self.statuses.get(&ResourceKey::Cpu);
         let mut view = ModeInput {
@@ -708,7 +735,10 @@ impl<'a> Interval<'a> {
             mode: governing(config, ResourceKind::Cpu),
             capacity,
             external: status.and_then(|s| s.external).unwrap_or(0),
-            own: status.and_then(|s| s.own).map_or(0, |(lower, _)| lower),
+            own: status
+                .and_then(|s| s.own)
+                .map_or(0, |(lower, _)| lower)
+                .saturating_add(cedegrid),
             principals: members,
             background,
             saturated,
@@ -723,15 +753,17 @@ impl<'a> Interval<'a> {
             probe: None,
         };
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
-        self.mode_targets.insert(
-            ResourceKey::Cpu,
-            targets_of(&view, &thresholds, self.budget.cpu_millicores),
-        );
+        let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
+        for target in targets.values_mut() {
+            *target = target.saturating_sub(cedegrid);
+        }
+        self.mode_targets.insert(ResourceKey::Cpu, targets);
         // The idle reserve is the larger of the explicit reserve and the mode's
         // margin of total capacity; the two never stack.
         self.budget.cpu_millicores = own_allowance(&view, &thresholds)
             // Capacity minus the reserve and external usage, within the ancestor quota.
-            .min(self.budget.cpu_millicores);
+            .min(self.budget.cpu_millicores)
+            .saturating_sub(cedegrid);
     }
 
     /// RAM: the mode's target beside the contending principals.
@@ -1013,8 +1045,13 @@ impl<'a> Interval<'a> {
         let fresh_sample = gpu
             .compute_sample_id
             .is_some_and(|sample| previous.sample_id.is_none_or(|previous| sample > previous));
+        // A background context listed without a fresh sample is no activity (FR-021).
         let activity_unknown = gpu.external_compute == ComputeActivity::Unknown
-            || (!memory.pids.is_empty() && !fresh_sample);
+            || (memory
+                .pids
+                .iter()
+                .any(|pid| !gpu.background_process_ids.contains(pid))
+                && !fresh_sample);
         let telemetry_unknown = !gpu_observable(self.snapshot.observed_at_unix_ms, gpu)
             || memory.unknown_own > 0
             || gpu

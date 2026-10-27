@@ -365,6 +365,7 @@ fn gpu_snapshot() -> Snapshot {
         own_compute_milli: None,
         compute_amount_unknown: None,
         own_only: false,
+        background_process_ids: vec![],
     });
     result
 }
@@ -3596,6 +3597,49 @@ fn gpu_admission_follows_the_mode() {
     }
 }
 
+/// A system account's context the collector found background makes no activity unknown,
+/// even without a fresh sample, so a Yield First device stays open; its memory stays
+/// external (FR-021).
+#[test]
+fn a_background_gpu_context_is_not_unknown_activity() {
+    use cedegrid::contention::{Admission, ContentionMode::YieldFirst, ResourceKey};
+    let (cfg, mut snap) = us5_device(
+        YieldFirst,
+        ComputeActivity::Idle,
+        Some(vec![42]),
+        Some(6000),
+        false,
+    );
+    let compute = ResourceKey::GpuCompute("GPU-test".into());
+    let evaluate = |snap: &Snapshot| {
+        let mut engine = PolicyEngine::new();
+        engine
+            .evaluate(&cfg, snap, &PolicyInput::default(), 0)
+            .unwrap();
+        // The same sample again: no fresh evidence.
+        engine
+            .evaluate(&cfg, snap, &PolicyInput::default(), 500)
+            .unwrap()
+    };
+    let unknown = evaluate(&snap);
+    assert_eq!(
+        unknown.resources[&compute].activity,
+        Some(ComputeActivity::Unknown)
+    );
+    snap.gpus[0].background_process_ids = vec![42];
+    let background = evaluate(&snap);
+    assert_eq!(
+        background.resources[&compute].activity,
+        Some(ComputeActivity::Idle)
+    );
+    assert_eq!(
+        background.resources[&compute].admission,
+        Some(Admission::Open)
+    );
+    let memory = &background.resources[&ResourceKey::GpuMemory("GPU-test".into())];
+    assert_eq!(memory.external, Some(6000));
+}
+
 /// The launch recheck applies the same admission to the job's effective mode on a
 /// fresh observation, and refuses a request that would leave less than the floor
 /// free (FR-026, FR-027).
@@ -6238,6 +6282,99 @@ mod own_over_target {
         assert!(
             average * 10 >= target * 9,
             "own work averaged {average}m of {target}m"
+        );
+    }
+}
+
+/// CedeGrid's own CPU, the agent and its supervisors, is in use by CedeGrid on the owner's
+/// side: it is taken out of external usage and the owner's unmanaged usage and lowers own
+/// tasks' budget, so it never forms an unattributed principal (FR-059, FR-069, SC-014).
+mod cedegrid_usage {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+
+    fn config() -> Config {
+        let mut config = super::config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = ContentionMode::Neutral;
+        config
+    }
+
+    /// Own tasks use 6000m of 8000m; CedeGrid 400m.
+    fn reading(busy: u64, principals: Option<Vec<PrincipalUsage>>) -> (Snapshot, PolicyInput) {
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(busy);
+        snap.cedegrid_cpu_lower_millicores = Some(400);
+        snap.principals = principals;
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(6000, 0, 0),
+                Some(resources(6000, 0, 0)),
+            )],
+            facts: rootless(&["job"]),
+            ..PolicyInput::default()
+        };
+        (snap, input)
+    }
+
+    #[test]
+    fn cedegrid_cpu_is_not_an_unattributed_principal() {
+        let config = config();
+        let (snap, input) = reading(6400, None);
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &snap, &input, 0)
+            .unwrap();
+        let cpu = &decision.resources[&ResourceKey::Cpu];
+        assert_eq!(cpu.external, Some(0));
+        assert_eq!(cpu.cedegrid, Some(400));
+        // Neutral keeps its 800m margin; CedeGrid's 400m comes out of own work's 7200m.
+        assert_eq!(cpu.target_share, Some(6800));
+        let report = cedegrid::agent::node_contention_report(&config, &decision, 1);
+        assert_eq!(report.resources[&ResourceKey::Cpu].cedegrid, Some(400));
+        let text = cedegrid::explain::doctor_text(&config, &snap, &decision, &[]);
+        assert!(text.contains("in use (CedeGrid) 400 m"), "{text}");
+        // In use, not held back: Neutral's margin is all the CPU keeps free.
+        let held = cpu.held_back.as_ref().unwrap();
+        assert_eq!((held.margin, held.contention), (800, 0));
+    }
+
+    #[test]
+    fn cedegrid_cpu_comes_out_of_the_owners_unmanaged_usage() {
+        let config = config();
+        // The owner's processes use 500m beside own tasks: CedeGrid's 400m and a 100m program.
+        let owner = PrincipalUsage {
+            uid: Some(1000),
+            is_owner: true,
+            cpu_millicores: 500,
+            ..PrincipalUsage::default()
+        };
+        let (snap, input) = reading(6500, Some(vec![owner]));
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &snap, &input, 0)
+            .unwrap();
+        let cpu = &decision.resources[&ResourceKey::Cpu];
+        assert_eq!(cpu.external, Some(100));
+        assert_eq!(cpu.cedegrid, Some(400));
+        assert_eq!(cpu.target_share, Some(6700));
+    }
+
+    /// CedeGrid's reading never makes the host reading inconsistent: beyond what the host
+    /// reports busy, it is clamped.
+    #[test]
+    fn cedegrid_cpu_beyond_host_busy_is_clamped() {
+        let config = config();
+        let (snap, input) = reading(6200, None);
+        let decision = PolicyEngine::new()
+            .evaluate(&config, &snap, &input, 0)
+            .unwrap();
+        let cpu = &decision.resources[&ResourceKey::Cpu];
+        assert_eq!(cpu.external, Some(0));
+        assert_eq!(cpu.cedegrid, Some(200));
+        assert_ne!(
+            cpu.measurement,
+            Some(cedegrid::contention::Measurement::Unknown)
         );
     }
 }

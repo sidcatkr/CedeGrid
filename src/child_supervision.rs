@@ -110,6 +110,15 @@ impl ChildServer {
     fn served(&self) -> bool {
         self.served
     }
+    /// No connection or mediated child needs a pass: only a new connection can, and it
+    /// makes the listener readable.
+    fn idle(&self) -> bool {
+        self.connections.is_empty() && self.children.is_empty()
+    }
+    fn listener_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.listener.as_raw_fd()
+    }
     /// Verified identities of mediated children that are running user code.
     /// Private directories of running children, for resource targets.
     fn target_directories(&self) -> Vec<PathBuf> {

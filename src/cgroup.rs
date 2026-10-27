@@ -19,6 +19,8 @@ use std::{
 };
 
 const MIB: u64 = 1024 * 1024;
+/// How often a held RAM cap is checked for throttling without freeing memory.
+const RAM_CAP_CHECK: Duration = Duration::from_millis(100);
 const WRITABLE_CONTROLS: &[&str] = &[
     "cgroup.procs",
     "cpu.weight",
@@ -759,6 +761,16 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
         self.fallback.tick(family)?;
         self.check_ram_cap(family)
+    }
+
+    /// The duty cycle's next phase switch and, while a RAM cap holds, its next check.
+    fn next_deadline(&self) -> Option<Instant> {
+        let ram = (self.ram_cap.is_some() && self.ram_refused.is_none())
+            .then(|| Instant::now() + RAM_CAP_CHECK);
+        match (self.fallback.next_deadline(), ram) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn take_detail(&mut self) -> Option<String> {

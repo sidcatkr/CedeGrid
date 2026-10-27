@@ -17,7 +17,9 @@ pub use gpu::GpuReleaseGuard;
 pub use gpu::external_gpu_process_identity;
 use gpu::*;
 mod managed;
-pub use managed::ManagedCollector;
+pub use managed::{CedegridCpu, ManagedCollector};
+#[cfg(target_os = "linux")]
+pub use managed::{own_process_cpu_ns, supervisor_cpu_ns};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -54,6 +56,10 @@ pub struct Collector {
     gpu_memory_tolerance_mib: u64,
     quiet_window_intervals: u32,
     attribution_tolerance_percent: u8,
+    /// User IDs below this are system accounts; their idle GPU contexts are background.
+    uid_min: u32,
+    /// GPU compute's `principal_min_percent`, below which such a context is idle.
+    gpu_principal_min_percent: u8,
     /// Every visible process, for principal aggregation only.
     processes: System,
     /// External context memory per device and PID from the last GPU sample.
@@ -273,6 +279,11 @@ impl Collector {
                 crate::contention::ResourceKind::GpuCompute,
             )
             .attribution_tolerance_percent,
+            uid_min: crate::config::Config::default().contention.uid_min,
+            gpu_principal_min_percent: crate::contention::ResourceThresholds::defaults(
+                crate::contention::ResourceKind::GpuCompute,
+            )
+            .principal_min_percent,
             processes: System::new(),
             external_gpu_memory: BTreeMap::new(),
             external_gpu_compute: BTreeMap::new(),
@@ -355,6 +366,11 @@ impl Collector {
             .contention
             .thresholds(crate::contention::ResourceKind::GpuCompute)
             .attribution_tolerance_percent;
+        collector.uid_min = config.contention.uid_min;
+        collector.gpu_principal_min_percent = config
+            .contention
+            .thresholds(crate::contention::ResourceKind::GpuCompute)
+            .principal_min_percent;
         Ok(collector)
     }
 
@@ -724,8 +740,24 @@ impl Collector {
             // submitted cursor in diagnostics even if it expires during the call.
             let baseline_age = baseline.map(|(_, at)| at.elapsed());
             let activity_baseline = fresh_cursor(previous, baseline_age, self.gpu_sample_max_age);
-            let (external_compute, compute_sample_id, next_cursor) = classify_activity(
+            // A system account's idle context is background, not activity (FR-021).
+            let background = background_contexts(
                 external_process_ids.as_deref(),
+                activity_baseline,
+                &samples,
+                context_uid,
+                self.uid_min,
+                self.gpu_principal_min_percent,
+            );
+            let active_external: Option<Vec<u32>> =
+                external_process_ids.as_ref().map(|pids: &Vec<u32>| {
+                    pids.iter()
+                        .copied()
+                        .filter(|pid| !background.contains(pid))
+                        .collect()
+                });
+            let (external_compute, compute_sample_id, next_cursor) = classify_activity(
+                active_external.as_deref(),
                 activity_baseline,
                 samples.as_deref().ok(),
             );
@@ -746,7 +778,9 @@ impl Collector {
             // device's time is own work, without fresh samples (FR-021, R18).
             let queries_ok = compute_info.is_ok() && graphics_info.is_ok();
             let listed = merge_process_lists(compute.as_deref().ok(), graphics.as_deref().ok());
+            // Background contexts may be listed beside own work, which must be listed too.
             let own_only = utilization_percent.is_some()
+                && listed.iter().flatten().any(|pid| !background.contains(pid))
                 && own_only_interval(
                     &OwnOnlyEvidence {
                         queries_ok,
@@ -757,16 +791,18 @@ impl Collector {
                         tolerance_mib: self.gpu_memory_tolerance_mib,
                     },
                     |pid| {
-                        self.managed_identities
-                            .get(&pid)
-                            .is_some_and(own_process_verified)
+                        background.contains(&pid)
+                            || self
+                                .managed_identities
+                                .get(&pid)
+                                .is_some_and(own_process_verified)
                     },
                 );
             let quiet = self.gpu_quiet.entry(uuid.clone()).or_default();
             let quiet_ticks = advance_quiet(
                 quiet,
-                external_process_ids.as_deref(),
-                own_only || quiet_tick(external_process_ids.as_deref(), previous, &samples),
+                active_external.as_deref(),
+                own_only || quiet_tick(active_external.as_deref(), previous, &samples),
             );
             let external_compute =
                 quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
@@ -779,13 +815,14 @@ impl Collector {
                     BTreeMap::new(),
                 ),
                 _ => measure_compute(
-                    external_process_ids.as_deref(),
+                    active_external.as_deref(),
                     &self.managed_pids,
                     activity_baseline,
                     &samples,
                     utilization_percent,
                     mps,
                     self.attribution_tolerance_percent,
+                    &background,
                 ),
             };
             if sets_memory_baseline(
@@ -871,6 +908,7 @@ impl Collector {
                     ComputeAmount::Unknown(reason) => Some(reason),
                 },
                 own_only,
+                background_process_ids: background.into_iter().collect(),
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -1123,6 +1161,107 @@ mod tests {
         }
     }
 
+    /// A system account's context (user ID below `uid_min`) is background while per-process
+    /// utilization is readable and its own stays below `principal_min_percent`; a user's
+    /// context, an unreadable query or one without a fresh baseline never is (FR-021).
+    #[test]
+    fn system_account_contexts_are_background_only_while_readable_and_idle() {
+        let uid = |pid: u32| match pid {
+            10 | 12 => Some(120),
+            11 => Some(1000),
+            _ => None,
+        };
+        let fresh: std::result::Result<_, NvmlError> = Ok(vec![
+            gpu_sample(10, 110, 2),
+            gpu_sample(12, 110, 20),
+            gpu_sample(11, 110, 50),
+            // Older than the cursor: not this interval.
+            gpu_sample(10, 90, 90),
+        ]);
+        assert_eq!(
+            background_contexts(Some(&[10, 11, 12, 13]), Some(100), &fresh, uid, 1000, 5),
+            BTreeSet::from([10])
+        );
+        // No samples: every system context is idle.
+        assert_eq!(
+            background_contexts(
+                Some(&[10, 11, 12]),
+                Some(100),
+                &Err(NvmlError::NotFound),
+                uid,
+                1000,
+                5
+            ),
+            BTreeSet::from([10, 12])
+        );
+        assert!(
+            background_contexts(
+                Some(&[10]),
+                Some(100),
+                &Err(NvmlError::NotSupported),
+                uid,
+                1000,
+                5
+            )
+            .is_empty()
+        );
+        assert!(background_contexts(Some(&[10]), None, &fresh, uid, 1000, 5).is_empty());
+        assert!(background_contexts(None, Some(100), &fresh, uid, 1000, 5).is_empty());
+    }
+
+    /// Background contexts count as neither external compute nor unknown: own work keeps the
+    /// device's time less theirs, and listing only them is idle (FR-021).
+    #[test]
+    fn background_contexts_are_not_external_compute() {
+        let own = BTreeSet::from([7]);
+        let background = BTreeSet::from([42]);
+        let samples = Ok(vec![gpu_sample(42, 110, 3), gpu_sample(7, 110, 60)]);
+        assert_eq!(
+            measure_compute(
+                Some(&[]),
+                &own,
+                Some(100),
+                &samples,
+                Some(63),
+                false,
+                15,
+                &background
+            )
+            .0,
+            ComputeAmount::Measured {
+                external: 0,
+                own: 600
+            }
+        );
+        let both = Ok(vec![
+            gpu_sample(42, 110, 3),
+            gpu_sample(43, 110, 20),
+            gpu_sample(7, 110, 60),
+        ]);
+        let (amount, by_pid) = measure_compute(
+            Some(&[43]),
+            &own,
+            Some(100),
+            &both,
+            Some(83),
+            false,
+            15,
+            &background,
+        );
+        assert_eq!(
+            amount,
+            ComputeAmount::Measured {
+                external: 200,
+                own: 600
+            }
+        );
+        assert_eq!(by_pid, BTreeMap::from([(43, 200)]));
+        assert_eq!(
+            classify_activity(Some(&[]), Some(100), None).0,
+            ComputeActivity::Idle
+        );
+    }
+
     /// External GPU compute is measured from fresh per-process samples, averaged
     /// per PID and capped at 100, when their sum is within the tolerance of device
     /// utilization; otherwise, and without support, a baseline, a complete
@@ -1135,7 +1274,17 @@ mod tests {
         };
         let measure = |samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
                        device: Option<u32>| {
-            measure_compute(Some(&[42]), &own, Some(100), samples, device, false, 15).0
+            measure_compute(
+                Some(&[42]),
+                &own,
+                Some(100),
+                samples,
+                device,
+                false,
+                15,
+                &BTreeSet::new(),
+            )
+            .0
         };
         // One external PID at 5% beside own work at 94%, on a device at 100%: the
         // unattributed point counts as external while an external PID is listed.
@@ -1194,7 +1343,17 @@ mod tests {
         // With own PIDs only, the remainder is sampling error on own work.
         let own_only = ok(vec![gpu_sample(7, 110, 85)]);
         assert_eq!(
-            measure_compute(Some(&[]), &own, Some(100), &own_only, Some(100), false, 15).0,
+            measure_compute(
+                Some(&[]),
+                &own,
+                Some(100),
+                &own_only,
+                Some(100),
+                false,
+                15,
+                &BTreeSet::new()
+            )
+            .0,
             ComputeAmount::Measured {
                 external: 0,
                 own: 1000
@@ -1207,15 +1366,35 @@ mod tests {
         ));
         assert!(matches!(measure(&five, None), ComputeAmount::Unknown(_)));
         assert!(matches!(
-            measure_compute(None, &own, Some(100), &five, Some(100), false, 15).0,
+            measure_compute(
+                None,
+                &own,
+                Some(100),
+                &five,
+                Some(100),
+                false,
+                15,
+                &BTreeSet::new()
+            )
+            .0,
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, None, &five, Some(100), false, 15).0,
+            measure_compute(
+                Some(&[42]),
+                &own,
+                None,
+                &five,
+                Some(100),
+                false,
+                15,
+                &BTreeSet::new()
+            )
+            .0,
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15).0,
+            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15, &BTreeSet::new()).0,
             ComputeAmount::Unknown(reason) if reason.contains("MPS")
         ));
         // A PID above 100 counts as 100.
@@ -2694,5 +2873,59 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(clock_reading(&identity, 1, MS).is_none());
+    }
+
+    /// CedeGrid's own CPU is the agent's and its supervisors' clock deltas over wall time, per
+    /// interval and over the window; a supervisor first seen is a baseline, and one gone adds
+    /// nothing (FR-069).
+    #[test]
+    fn cedegrid_cpu_is_the_agent_and_supervisor_clock_deltas() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut cpu = CedegridCpu::default();
+        assert_eq!(
+            cpu.sample(at(0), 1_000_000, &[("a".into(), 5_000_000)]),
+            None
+        );
+        // 500 ms later: the agent used 10 ms and supervisor a 15 ms; b is new.
+        let first = cpu.sample(
+            at(500),
+            11_000_000,
+            &[("a".into(), 20_000_000), ("b".into(), 90_000_000)],
+        );
+        assert_eq!(first, Some((50, 50)));
+        // a is gone; the agent used 5 ms and b 45 ms.
+        let second = cpu.sample(at(1000), 16_000_000, &[("b".into(), 135_000_000)]);
+        assert_eq!(second, Some((100, 75)));
+        // The window keeps the last eight intervals.
+        for n in 0..8 {
+            cpu.sample(at(1500 + n * 500), 16_000_000, &[("b".into(), 135_000_000)]);
+        }
+        assert_eq!(
+            cpu.sample(at(5500), 16_000_000, &[("b".into(), 135_000_000)]),
+            Some((0, 0))
+        );
+    }
+
+    /// The agent reads its own and a supervisor's whole-process CPU from process clocks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cedegrid_clocks_read_whole_process_cpu() {
+        let before = own_process_cpu_ns().unwrap();
+        let spin = Instant::now();
+        while spin.elapsed() < Duration::from_millis(50) {
+            std::hint::black_box(spin.elapsed());
+        }
+        assert!(own_process_cpu_ns().unwrap() >= before + 20_000_000);
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while :; do :; done")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        let used = supervisor_cpu_ns(child.id(), None).unwrap();
+        assert!(used >= 100_000_000, "{used}");
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }

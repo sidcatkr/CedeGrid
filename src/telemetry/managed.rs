@@ -2,6 +2,102 @@
 //! snapshot, with CPU usage bounds.
 use super::*;
 
+/// CedeGrid's own CPU, the agent's process clock and its supervisors', per interval and over
+/// the last `CPU_WINDOW_INTERVALS` intervals (FR-069). A supervisor first seen is a baseline
+/// and one gone adds nothing, so both values are lower bounds.
+#[derive(Debug, Default)]
+pub struct CedegridCpu {
+    previous: Option<(Instant, u64)>,
+    supervisors: BTreeMap<String, u64>,
+    window: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl CedegridCpu {
+    /// The agent's clock and each supervisor's, keyed by assignment, at `at`: millicores over
+    /// this interval and over the window, or `None` for the first sample.
+    pub fn sample(
+        &mut self,
+        at: Instant,
+        agent_ns: u64,
+        supervisors: &[(String, u64)],
+    ) -> Option<(u64, u64)> {
+        let previous = self.previous.replace((at, agent_ns));
+        let mut used = previous.map_or(0, |(_, ns)| agent_ns.saturating_sub(ns));
+        for (key, ns) in supervisors {
+            if let Some(before) = self.supervisors.get(key) {
+                used = used.saturating_add(ns.saturating_sub(*before));
+            }
+        }
+        self.supervisors = supervisors.iter().cloned().collect();
+        let (before, _) = previous?;
+        let wall = u64::try_from(at.saturating_duration_since(before).as_nanos()).ok()?;
+        if wall == 0 {
+            return None;
+        }
+        self.window.push_back((used, wall));
+        while self.window.len() > crate::kernel::CPU_WINDOW_INTERVALS {
+            self.window.pop_front();
+        }
+        let (window_used, window_wall) = self
+            .window
+            .iter()
+            .fold((0u64, 0u64), |(u, w), (used, wall)| {
+                (u.saturating_add(*used), w.saturating_add(*wall))
+            });
+        let millicores = |used: u64, wall: u64| {
+            u64::try_from(u128::from(used) * 1000 / u128::from(wall.max(1))).unwrap_or(u64::MAX)
+        };
+        Some((millicores(used, wall), millicores(window_used, window_wall)))
+    }
+}
+
+/// The calling process's CPU time, all threads, from its process clock.
+#[cfg(target_os = "linux")]
+pub fn own_process_cpu_ns() -> Option<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid output pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) } != 0 {
+        return None;
+    }
+    u64::try_from(time.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()?)
+}
+
+/// A supervisor's CPU time, all threads, from its process clock. An owned supervisor is the
+/// agent's unreaped child, so its PID cannot name another process; an attached one is read
+/// only while a pidfd and its verified identity show it alive.
+#[cfg(target_os = "linux")]
+pub fn supervisor_cpu_ns(
+    pid: u32,
+    attached: Option<&crate::execution_model::ProcessIdentity>,
+) -> Option<u64> {
+    if let Some(identity) = attached {
+        return clock_reading(identity, 1, 1).map(|reading| reading.ns);
+    }
+    let mut clock: libc::clockid_t = 0;
+    // SAFETY: valid output pointer; the call only names the clock.
+    if unsafe { libc::clock_getcpuclockid(pid as libc::pid_t, &mut clock) } != 0 {
+        return None;
+    }
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid output pointer.
+    if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
+        return None;
+    }
+    u64::try_from(time.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()?)
+}
+
 /// Matching-scope live attribution for explicitly registered single-process jobs.
 /// The registry is checked on both sides of sampling to fence PID reuse. Process
 /// RSS is not subtracted from system memory: shared/file-backed pages would invent

@@ -105,6 +105,13 @@ hex = "0.4"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Whole-program optimization for the agent and its per-task supervisors (SC-014). Panics
+# stay unwinding: the supervisor's log-drain join, the agent's blocking-task joins and Drop
+# cleanups rely on it.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
