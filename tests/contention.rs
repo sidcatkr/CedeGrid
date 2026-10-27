@@ -3905,7 +3905,7 @@ mod cap_rises {
         let mut engine = PolicyEngine::new();
         let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
         let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
-        let mut debt = vec![0u64; TASKS];
+        let mut debt = [0u64; TASKS];
         let mut last = vec![TASK; TASKS];
         let mut seed: u64 = 7;
         let mut out = Vec::new();
