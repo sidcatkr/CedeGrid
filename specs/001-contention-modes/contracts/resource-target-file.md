@@ -56,6 +56,15 @@ fsync, and renaming it over the target.
   (the mode's margin of capacity on CPU; on memory a mechanism constant of 20%, 5% or 2% of
   capacity per mode, since Neutral and Performance keep only the floor there), and only beyond
   one threshold.
+- **Save progress (item 029, FR-075).** Optional `save_progress_sequence`, published also without
+  a target: it rises once per floor-breach episode that others' growth caused while the
+  allocation's memory was within its fair share. A rise asks the worker to save its progress now;
+  it is not a drain and asks for no memory back, and it keeps `sequence`, `step`, `targets` and
+  the allowance. Both SDKs call each `on_save_progress` hook once per new value. Readers that do
+  not know the key ignore it.
+- **Reading cost (item 029).** The SDKs re-read and parse the file only when its stat identity
+  (inode, size, modification time in nanoseconds) changes; a writer that replaces the file by an
+  atomic rename always gives it a new inode, so a rewrite within one mtime tick is still seen.
 - **Acknowledgement.** The SDK writes the highest sequence it has seen to
   `resource-target.ack` in the same directory, starting with `0` on its first poll. The ack only
   shows that the worker can read hints; the supervisor reports it as `hint_ready`, and

@@ -107,6 +107,11 @@ membership equals the verified PID set.
     existing worker threads.
   - **Verify natively:** the `RLIMIT_NICE` defaults on the target hosts.
 - **Alternatives considered.** A runtime renice ladder. Rejected: one-way, and per-thread.
+- **Item 029.** Only Yield First tasks launch at `cpu.nice`. Where users share one CPU cgroup,
+  the kernel weights nice 10 at 110 against 1024 for nice 0, so a contended core gives own work
+  about a tenth, far below the fair share Neutral and Performance promise; and with
+  `RLIMIT_NICE` 0 the nice can never be lowered again. Neutral and Performance launch at nice 0
+  and yield through the caps; a task that later leaves Yield First keeps nice 10.
 
 ## R6. Resource-target channel for workers
 
@@ -602,3 +607,22 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: keep GPU compute Cap unavailable in Full (rejected: Full then pauses where
   Tracked holds a share, so Full does less than Tracked); always use SIGSTOP in Full (rejected:
   it reaches only the verified family's listed processes, and Full already has the freeze).
+
+## R28. OOM order by fault and the unprivileged `oom_score_adj` (item 029)
+
+- **Decision**: each own task's `oom_score_adj` at launch is its baseline. In-share own work stays
+  there; the tasks that make up own memory above its fair share go to 1000 and return to the
+  baseline afterwards. The supervisor writes a member's value through the member's `/proc/<pid>`
+  directory, opened and then confirmed through the member's pidfd.
+- **Kernel facts** (`fs/proc/base.c` `__set_oom_adj`, `mm/oom_kill.c` `oom_badness`, v6.6): the
+  killer takes the highest badness, RSS + swap + page tables + `oom_score_adj` × totalpages /
+  1000. Without `CAP_SYS_RESOURCE` a process may set any value at or above its
+  `oom_score_adj_min`, which only a privileged writer sets and children inherit; so own work can
+  be raised and lowered back to the baseline it launched with, never below it.
+- **Rationale**: without privileges CedeGrid cannot make the kernel take another user's process
+  before a larger own one; it can order own processes, and keep in-share own work at everyone
+  else's baseline. A `/proc/<pid>` directory opened while the pidfd shows the process alive stays
+  bound to that process, so the write cannot reach a reused PID.
+- **Alternatives**: every own process at 1000 (rejected by constitution 7.0.0: in-share own work
+  died first for others' growth; kept as the opt-in `ram.prefer_own_oom_victim`); a negative
+  value for in-share work (needs privilege; a later System mode).

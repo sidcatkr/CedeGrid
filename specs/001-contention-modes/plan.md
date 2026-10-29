@@ -836,6 +836,111 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VI: tests first for availability, the duty's off phase, held steps together and the credit.
   - VII: no wire, config or SDK change.
 
+## Item 029: own-work efficiency, OOM order by fault, floors by mode (2026-10-29)
+
+Constitution 7.0.0 (Principle II redefined, approved by the maintainer on 2026-10-29) and
+Session 2026-10-29's nine answers. Parts 0–2 are local; Part 3 (test-host runs) waits for the
+maintainer's typed approval after report 029-2.
+
+- **SDK drain and target check (Part 0)**: `ResourceSignals.poll()` (Python) and the TS
+  `ResourceSignals.poll()` re-read and parse the target file only when its stat identity (inode,
+  size, `mtime_ns`) changes, else return the cached result; `draining()` is that stat plus the
+  drain-file check it already made. Hook semantics are unchanged: a new sequence fires each hook
+  once, and a file replaced by an atomic rename within one mtime tick is seen through its new
+  inode. An opt-in microbenchmark (`CEDEGRID_SDK_BENCH=1`) reports µs per call before and after
+  (target ≥ 10× cheaper unchanged). The SDK docs say to call `safe_point()` or `draining()` at
+  natural safe points.
+- **Launch nice by mode (Part 0b, FR-011)**: the supervisor's gate setup applies `cpu.nice` only
+  when the task's effective CPU mode (`contention::effective_mode` of the node mode, the job's
+  request and the node cap) is Yield First; the rootless backend's `prepare` stops adding the
+  nice by class alone. The `cpu.nice` control evidence records the launch nice, and `status` and
+  `explain` show it for a task now in another mode. Research R5 gains the by-mode rule.
+- **OOM order by fault (Part 0c, FR-023)**: the worker gate no longer writes 1000 at launch; it
+  reads `oom_score_adj` before exec as the baseline, carried in the execution record. The policy
+  marks, per memory resource RAM, the allocations whose memory makes up own usage above its fair
+  share, in the ladder's memory victim order (FR-016), as `oom_preferred` in the decision; the
+  agent sends the flag to the supervisor with the next adjust line, and the supervisor writes
+  1000, or the baseline when the flag clears, to every verified family member. Each write opens
+  the member's `/proc/<pid>` directory, confirms through the member's pidfd that it is still the
+  verified process, and writes `oom_score_adj` through that directory; a member that dies in
+  between is skipped. Children inherit the value at fork. `ram.prefer_own_oom_victim = true`
+  (default false, setup risk class "risk to own work") keeps every own task at 1000 from launch.
+  Every change is evidence (`oom_score_adj` control: task, from, to, cause, own memory and fair
+  share). GPU memory has no kernel OOM killer, so the order applies to RAM.
+- **Performance is the default (Part 0d, FR-030, FR-031, FR-043–051)**: `contention.default_mode`
+  defaults to Performance; Performance leaves the caution list (no acknowledgement needed; an
+  existing `performance_mode` entry still loads); setup preselects Performance; `config
+  example`, docs and the tests that assumed Neutral set Neutral where they test Neutral. A file
+  with no mode setting gets one `default_mode_changed` notice in `doctor` and the migration note.
+  The spec overview, README and `docs/guarantees.md` lead with the purpose.
+- **Floors by mode (Part 0e, FR-023, FR-024, FR-063)**: in Performance and Aggressive a memory
+  floor breach's excess is at most own memory above its memory fair share: the frame's floor
+  excess is capped at `judged_total − fair_share`, so in-share own memory is not hinted, drained
+  or sent TERM, on the critical path and for Guaranteed memory too, while own memory above the
+  fair share steps as before. The RAM fair share is the share `ram_target` computes beside the
+  principals; GPU memory, which forms no principals, uses the equal split of the device among
+  own work and the active external GPU principals, as GPU compute does. Yield First and Neutral
+  are unchanged. The envelope breach path is unchanged in every mode.
+- **Save-progress and OOM recovery (Part 0f, FR-075, FR-076)**:
+  - The policy keeps a per-resource breach episode; when a floor breach starts while own memory
+    is within its fair share, the decision lists the in-share allocations once as
+    `save_progress`. The agent forwards it, and the supervisor's target file carries a
+    `save_progress_sequence`; both SDKs fire an `on_save_progress` hook once per new sequence
+    (worker-context change in Rust, Python and TypeScript with the contract fixture).
+  - The agent reads the host's `/proc/vmstat` `oom_kill` each interval (read-only telemetry) and,
+    in Full, the leaf's `memory.events` `oom_kill`. A task that ended by SIGKILL in an interval
+    where either rose is OOM-killed; the agent records the last observation's own memory against
+    its fair share and the principals above theirs.
+  - In-share kills are reported to the coordinator as a yield with cause `oom_not_own_fault`,
+    which requeues without a failure or an attempt; the agent's memory admission, closed while
+    the floor is breached, keeps it from starting again until free memory is above the floor.
+    Own-fault kills stay failures. Wire change in Rust, Python and TypeScript with the fixture.
+- **No pause below the fair share in Performance (Part 0g, FR-008, FR-014, FR-022)**: the ladder
+  input carries a compute floor (the fair share) for Performance and Aggressive. A cap's target
+  never goes below it; a cap that misses its target after the hold window is re-entered at a
+  target recomputed from the measured rate instead of escalating; pause is chosen only when the
+  cap is at the minimum duty and usage is still above the fair share, with a pause bound of one
+  monitor interval, then back to the cap. Yield First and Neutral keep their ladder.
+- **The decisions on report 027 (Part 0h)**:
+  - Run 2, descriptors (FR-077): the agent raises its soft `RLIMIT_NOFILE` to the hard limit at
+    start; the supervisor spec carries the original soft limit and the worker gate restores it
+    before exec. Before a launch, the agent checks its open descriptors plus the task's need
+    (pipes, capture file, state connection, pidfd, and a launch's transient pipes) against the
+    limit with headroom, and refuses the launch with `descriptor_limit` otherwise. An `EMFILE` or
+    `ENFILE` while sampling marks the interval's affected readings unknown; while launching, it
+    refuses the launch; the loop never exits on it. The held pidfd stays. A shared state
+    connection is used only if the decision snapshots stay identical.
+  - Run 1: recorded in `docs/validation.md` (done in item 027); no measurement change.
+  - Run 5, hysteresis (FR-013): a cap held with cause `own_over_target` is not removed or raised
+    while own work's total stays over its target, within the hold window; held caps reverse once
+    the total is below the target by the contention floor.
+  - Run 6, the quiet count (FR-034): `note_cpu_quiet` uses this interval's unattributed external
+    estimate, not the window's, against the larger of `principal_min_percent` of capacity and
+    the scope's per-interval measurement band.
+  - Run 3: recorded in `docs/validation.md` (done in item 027); the p95 charge is unchanged.
+- **Harness (Part 1)**: `tools/pressure_probe.py` checks every 50 ms in both probes, with a no-op
+  context when unmanaged; `tools/pressure_comparison.py` gains an `own-efficiency` profile with
+  defaults only and the agent and coordinator pinned outside the probe's scope, recorded in the
+  report; the T117/T118 profiles keep their reserve, labelled in `docs/validation.md`.
+- **Record (Part 2)**: `docs/validation.md` explains the old 0.93–0.94 and 0.71–0.80 ratios as
+  profile effects from the decision fields; `docs/guarantees.md`, README, data-model and the 004
+  Aggressive note ("memory floors kept down to the fair share") follow the amendment.
+- **Constitution**:
+  - I: the runtime `oom_score_adj` write reaches only verified family members, through the
+    member's pidfd and its `/proc` directory; no other process is touched.
+  - II (7.0.0): OOM order by fault, floors by mode, the loss rule and Performance as the default
+    are what this item implements; launching Neutral and Performance at nice 0 is the default
+    priority, never above it.
+  - III: an `EMFILE` reading is unknown, never free; a missing `oom_kill` count leaves a kill
+    unclassified, so it is a normal failure.
+  - IV: the fair-share caps, `oom_preferred`, `save_progress` and the quiet count are pure policy
+    outputs; the writes stay in the supervisor.
+  - V: no privilege: raising one's own soft limit to the hard limit and raising or restoring
+    one's own `oom_score_adj` need none.
+  - VI: tests first in every group.
+  - VII: the worker-context and wire additions are optional fields, in all three languages with
+    the contract fixture; old configurations load, with the default-mode notice.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

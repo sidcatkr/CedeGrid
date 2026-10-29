@@ -79,6 +79,10 @@ its p95 usage, so request-based charges at the coordinator admit by usage (FR-03
 - A failure counts as a yield only when its cause records one:
   - the agent-reported `yield_cause`, or
   - the coordinator's own `drain_requests.cause`, persisted when the drain was issued.
+- An out-of-memory kill while own memory was within its fair share is reported with
+  `yield_cause` `oom_not_own_fault` (FR-076): the task is requeued without a failure or an
+  attempt, and the agent's memory admission keeps it from starting until free memory is back
+  above the floor. Its status says an out-of-memory condition it did not cause killed it.
 - String matching on `detail` is removed (FR-018).
 - A cancelled task becomes terminal and is not requeued (audit A18).
 

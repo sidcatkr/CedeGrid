@@ -18,11 +18,11 @@ Serialization contracts are in [contracts/](contracts/).
 
 | Field | Type | Default | Rule |
 |---|---|---|---|
-| `default_mode` | ContentionMode | `neutral` | Q1 |
-| `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode`; `performance` needs `performance_mode` (FR-054) |
+| `default_mode` | ContentionMode | `performance` (item 029; `neutral` before) | Q1; a file without it gets one `default_mode_changed` notice |
+| `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode` |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | Performance on any resource or as `max_mode` without `performance_mode` fails to load; a margin below its default without `reduced_margin`, or a detection setting beyond its default without `relaxed_detection` (`saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
+| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | `performance_mode` still loads but is no longer needed (item 029); a margin below its default without `reduced_margin`, or a detection setting beyond its default without `relaxed_detection` (`saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
 | `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
@@ -46,7 +46,15 @@ Serialization contracts are in [contracts/](contracts/).
   twice the minimum. The load warns when the settings alone decide this; for a floor a
   percentage sets, the agent warns once when it first samples the host
   (`Config::host_floor_warnings`).
-- A negative `cpu.nice` warns and is treated as 0 (R5).
+- A negative `cpu.nice` warns and is treated as 0 (R5). Only Yield First tasks launch at
+  `cpu.nice`; the others launch at nice 0 (item 029).
+- `ram.prefer_own_oom_victim` (bool, default false, risk to own work): every own task at
+  `oom_score_adj` 1000 from launch instead of OOM order by fault (FR-023).
+- Decision additions (item 029): per allocation `oom_preferred` (RAM, own memory above its fair
+  share, in victim order) and `save_progress` (in-share tasks at a floor breach others' growth
+  caused, once per episode). Execution evidence: the launch `oom_score_adj` baseline and every
+  change (task, from, to, cause, own memory and fair share). Task outcome cause
+  `oom_not_own_fault`: a requeue that counts no failure or attempt (FR-076).
 
 ## ResourceThresholds (`src/config.rs`)
 

@@ -30,6 +30,8 @@ These are new:
 | `adjust` | `sequence` (monotonic), `resources: {<ResourceKey>: {step, target?, cause, deadline_ms?}}` | Apply one step per resource; a hint's `deadline_ms` is the deadline the policy enforces |
 | `query` | none | Ask for the current applied state |
 | `allowance` | `allowance: {cpu_millicores?, ram_mib?, gpu_memory_mib?}` | Publish what the allocation may grow to now in its resource-target file, under the next `allowance_sequence` (FR-071) |
+| `oom` | `preferred` (bool) | Set every verified family member's `oom_score_adj` to 1000, or back to the launch baseline when false, through each member's pidfd and `/proc/<pid>` directory (FR-023, item 029) |
+| `save_progress` | none | Raise the resource-target file's `save_progress_sequence` once (FR-075, item 029) |
 
 ## Supervisor → agent (`Event`)
 
