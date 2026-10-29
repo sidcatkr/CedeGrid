@@ -807,6 +807,16 @@ pub struct StepState {
     /// is re-planned once the allocation runs (FR-012).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    /// A Performance compute cap applied again after it missed its target (FR-022).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recomputed: bool,
+}
+
+/// Own work's fair share and usage on a compute resource in Performance (FR-022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeFloor {
+    pub fair_share: u64,
+    pub own_usage: u64,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -830,6 +840,8 @@ pub struct LadderInput {
     pub usage: Option<u64>,
     /// Free memory above the floor, for a memory resource, when known.
     pub room: Option<u64>,
+    /// Performance and Aggressive compute: no pause below the fair share (FR-022).
+    pub compute_floor: Option<ComputeFloor>,
 }
 
 /// Mode-dependent ladder timing in milliseconds.
@@ -865,7 +877,15 @@ impl LadderTiming {
             response_ms,
             dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
             scale_up_ms: thresholds.scale_up_interval_ms(mode, interval_ms),
-            pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
+            // Performance compute pauses for at most one interval (FR-022).
+            pause_bound_ms: if thresholds.compute && mode >= ContentionMode::Performance {
+                thresholds
+                    .pause_bound_s
+                    .saturating_mul(1000)
+                    .min(interval_ms)
+            } else {
+                thresholds.pause_bound_s.saturating_mul(1000)
+            },
             hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,
             reversal_room_min: thresholds.noise_tolerance_mib,
@@ -919,6 +939,7 @@ impl LadderInput {
             if step == YieldStep::Cap
                 && self.cause == YieldCause::ExternalGrowth
                 && self.target == Some(0)
+                && self.compute_floor.is_none()
                 && self.applies(YieldStep::Pause)
                 && !self.unavailable.contains(&YieldStep::Pause)
             {
@@ -974,6 +995,7 @@ pub fn plan_step(
             after_pause: false,
             to_free: (input.excess > 0).then_some(input.excess),
             pending: false,
+            recomputed: false,
         }),
         skipped,
     };
@@ -994,6 +1016,22 @@ pub fn plan_step(
         }
         Some(decision)
     };
+    // In Performance compute a pause lasts at most its bound, one interval, and then
+    // the cap returns; it never moves on to a later step (FR-022).
+    if current == YieldStep::Pause
+        && input.compute_floor.is_some()
+        && since_change >= timing.pause_bound_ms
+        && input.applies(YieldStep::Cap)
+        && !input.unavailable.contains(&YieldStep::Cap)
+    {
+        let mut decision = enter(YieldStep::Cap, Vec::new());
+        if let Some(capped) = decision.state.as_mut() {
+            capped.target = Some(input.target.unwrap_or(0));
+            capped.after_pause = true;
+            capped.recomputed = true;
+        }
+        return decision;
+    }
     if input.excess > 0 {
         let contended_since = state.and_then(|s| s.contended_since_ms).unwrap_or(now_ms);
         let anchor = state.map_or(now_ms, |s| s.entered_at_ms.max(contended_since));
@@ -1006,6 +1044,7 @@ pub fn plan_step(
         let cap_to_zero = current == YieldStep::Cap
             && input.cause == YieldCause::ExternalGrowth
             && input.target == Some(0)
+            && input.compute_floor.is_none()
             && input.applies(YieldStep::Pause)
             && !input.unavailable.contains(&YieldStep::Pause);
         let pause_bound = current == YieldStep::Pause && persisted >= timing.pause_bound_ms;
@@ -1029,6 +1068,23 @@ pub fn plan_step(
                 || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
             || input.unavailable.contains(&current)
             || cap_to_zero;
+        // In Performance compute a cap that missed its target is recomputed and applied
+        // again; only one that still misses, at the minimum duty, with own usage above the
+        // fair share goes on to a pause (FR-022).
+        if due
+            && !after_pause
+            && current == YieldStep::Cap
+            && !input.unavailable.contains(&current)
+            && let Some(floor) = input.compute_floor
+            && !(state.is_some_and(|s| s.recomputed) && floor.own_usage > floor.fair_share)
+        {
+            let mut decision = enter(YieldStep::Cap, Vec::new());
+            if let Some(capped) = decision.state.as_mut() {
+                capped.recomputed = true;
+                capped.contended_since_ms = Some(contended_since);
+            }
+            return decision;
+        }
         if due && !after_pause {
             let (next, skipped) = input.next_step(current);
             if let Some(next) = next {

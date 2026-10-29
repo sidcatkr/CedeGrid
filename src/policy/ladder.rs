@@ -389,6 +389,11 @@ impl<'a> Interval<'a> {
             usage_excess,
             guaranteed_drain,
             spare_share,
+            own_usage: if kind == ResourceKind::Cpu {
+                cpu_usage
+            } else {
+                judged_total
+            },
             contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
         }
     }
@@ -592,6 +597,29 @@ impl<'a> Interval<'a> {
         }
     }
 
+    /// Performance and Aggressive CPU: the Neutral target, which under contention is own
+    /// work's fair share, below which a cap never pauses (FR-022).
+    fn compute_floor(
+        &self,
+        key: &ResourceKey,
+        mode: ContentionMode,
+        own_usage: u64,
+    ) -> Option<ComputeFloor> {
+        (governing(self.config, key.kind()) >= ContentionMode::Performance
+            && mode >= ContentionMode::Performance)
+            .then(|| {
+                self.mode_targets
+                    .get(key)?
+                    .get(&ContentionMode::Neutral)
+                    .copied()
+            })
+            .flatten()
+            .map(|fair_share| ComputeFloor {
+                fair_share,
+                own_usage,
+            })
+    }
+
     /// What a job's own mode allows it on a resource; Guaranteed keeps its CPU
     /// request, and memory in Performance and Aggressive its fair share (FR-023).
     fn ceiling(&self, key: &ResourceKey, allocation: &Allocation) -> Option<u64> {
@@ -684,6 +712,11 @@ impl<'a> Interval<'a> {
                 cause: frame.cause,
                 usage: (kind == ResourceKind::Cpu && !pending_pass)
                     .then(|| victim.amount.saturating_add(kept)),
+                compute_floor: if kind == ResourceKind::Cpu && !pending_pass {
+                    self.compute_floor(key, victim.mode, frame.own_usage)
+                } else {
+                    None
+                },
                 // What the allocation may use: while contended, a cap
                 // or hint target; while calm, its usage plus its share
                 // of the spare, toward which a held cap rises; never
@@ -805,6 +838,15 @@ impl<'a> Interval<'a> {
                     cause: frame.cause,
                     target: None,
                     usage: None,
+                    compute_floor: if kind == ResourceKind::Cpu {
+                        self.compute_floor(
+                            key,
+                            self.allocation_modes[&allocation.id][&kind],
+                            frame.own_usage,
+                        )
+                    } else {
+                        None
+                    },
                 },
                 &frame.timing_for(config, self.allocation_modes[&allocation.id][&kind]),
                 now,
@@ -958,6 +1000,14 @@ impl<'a> Interval<'a> {
                     measurement_known: frame.measurement_known,
                     cause: frame.cause,
                     usage: budget.own.map(|_| frame.share),
+                    compute_floor: (governing(config, kind) >= ContentionMode::Performance
+                        && victim.mode >= ContentionMode::Performance)
+                        .then(|| budget.targets.get(&ContentionMode::Neutral))
+                        .flatten()
+                        .map(|fair_share| ComputeFloor {
+                            fair_share: *fair_share,
+                            own_usage: frame.share.saturating_mul(frame.running.len() as u64),
+                        }),
                     target: Some(
                         if contended_victim {
                             frame.share.saturating_sub(excess)
@@ -1032,6 +1082,7 @@ impl<'a> Interval<'a> {
                     cause: frame.cause,
                     target: None,
                     usage: None,
+                    compute_floor: None,
                 },
                 &LadderTiming::new(
                     &config.contention.thresholds(kind),
@@ -1160,6 +1211,8 @@ struct Frame {
     usage_excess: u64,
     guaranteed_drain: bool,
     spare_share: u64,
+    /// Own usage on the resource: CPU in use, or memory as judged.
+    own_usage: u64,
     /// CPU contention has fully ended: held steps rise without the mode's interval.
     contention_ended: bool,
 }

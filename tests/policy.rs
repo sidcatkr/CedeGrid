@@ -2332,6 +2332,38 @@ fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
     );
 }
 
+/// Performance never pauses own CPU within its fair share: a cap that misses its target is
+/// applied again, and a pause, if any, lasts one interval (FR-022).
+#[test]
+fn performance_cpu_contention_holds_the_cap_instead_of_pausing() {
+    use cedegrid::contention::{ContentionMode, YieldStep};
+    let mut cfg = config();
+    cfg.contention.default_mode = ContentionMode::Performance;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(7000);
+    let mut engine = PolicyEngine::new();
+    let mut paused = 0;
+    // Usage never falls in this recording, so every cap looks ineffective.
+    for now in (0..40_000).step_by(500) {
+        let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+        assert!(decision.would_drain.is_empty(), "at {now}");
+        if decision.actions.iter().any(|a| a.step == YieldStep::Pause) {
+            paused += 1;
+        }
+    }
+    assert!(paused <= 1, "paused for {paused} intervals");
+}
+
 /// CPU/RAM admission waits its own cooldown, whose default follows the mode's
 /// scale-up interval; the GPU cooldown never gates it (audit M1).
 #[test]

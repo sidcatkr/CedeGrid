@@ -104,6 +104,7 @@ mod ladder {
             cause: YieldCause::ExternalGrowth,
             target: None,
             usage: None,
+            compute_floor: None,
         }
     }
 
@@ -192,6 +193,80 @@ mod ladder {
         assert_eq!(
             changes[..2],
             [(0, YieldStep::Cap), (5000, YieldStep::Pause)]
+        );
+    }
+
+    /// Performance compute (FR-022): a cap that misses its target after the hold window is
+    /// recomputed and applied again, never escalated to a pause, while own usage is within
+    /// its fair share; Neutral escalates as before.
+    #[test]
+    fn performance_compute_recomputes_a_missing_cap_instead_of_pausing() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let at = |floor: Option<ComputeFloor>| {
+                move |_: u64| LadderInput {
+                    unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+                    target: Some(4000),
+                    usage: Some(6000),
+                    compute_floor: floor,
+                    ..input(kind, 2000, 4000)
+                }
+            };
+            let within = Some(ComputeFloor {
+                fair_share: 4000,
+                own_usage: 4000,
+            });
+            let performance = timing(kind, ContentionMode::Performance);
+            let (state, changes) = run(None, &performance, 0..80, at(within));
+            assert_eq!(changes, [(0, YieldStep::Cap)], "{kind:?}");
+            let state = state.unwrap();
+            assert!(state.recomputed, "{kind:?}");
+            assert!(
+                state.entered_at_ms > 0,
+                "the cap was applied again: {state:?}"
+            );
+            let neutral = timing(kind, ContentionMode::Neutral);
+            let (_, changes) = run(None, &neutral, 0..80, at(None));
+            assert!(
+                changes.iter().any(|(_, step)| *step == YieldStep::Pause),
+                "{kind:?}: {changes:?}"
+            );
+        }
+    }
+
+    /// A Performance cap that still misses after it was recomputed is at the minimum duty;
+    /// with own usage above its fair share it pauses for at most one monitor interval and
+    /// returns to the cap, which does not pause again (FR-022, FR-014).
+    #[test]
+    fn a_performance_cap_at_the_minimum_duty_pauses_one_interval_at_most() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let performance = timing(kind, ContentionMode::Performance);
+            assert_eq!(performance.pause_bound_ms, INTERVAL, "{kind:?}");
+            let (_, changes) = run(None, &performance, 0..120, |_| LadderInput {
+                unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+                target: Some(4000),
+                usage: Some(6000),
+                compute_floor: Some(ComputeFloor {
+                    fair_share: 4000,
+                    own_usage: 6000,
+                }),
+                ..input(kind, 2000, 4000)
+            });
+            let steps: Vec<_> = changes.iter().map(|(_, step)| *step).collect();
+            assert_eq!(
+                steps,
+                [YieldStep::Cap, YieldStep::Pause, YieldStep::Cap],
+                "{kind:?}"
+            );
+            assert_eq!(
+                changes[2].0 - changes[1].0,
+                INTERVAL,
+                "{kind:?}: {changes:?}"
+            );
+        }
+        // Memory and Neutral compute keep their pause bound.
+        assert_eq!(
+            timing(ResourceKind::Cpu, ContentionMode::Neutral).pause_bound_ms,
+            ResourceThresholds::defaults(ResourceKind::Cpu).pause_bound_s * 1000
         );
     }
 
@@ -311,6 +386,7 @@ mod ladder {
             contended_since_ms: Some(0),
             after_pause: false,
             pending: false,
+            recomputed: false,
         };
         let before = plan_step(
             Some(&paused),
@@ -344,6 +420,7 @@ mod ladder {
             contended_since_ms: Some(0),
             after_pause: false,
             pending: false,
+            recomputed: false,
         };
         let plain = |excess| LadderInput {
             room: None,
@@ -386,6 +463,7 @@ mod ladder {
             contended_since_ms: None,
             after_pause: false,
             pending: false,
+            recomputed: false,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
         let (held, changes) = run(Some(capped.clone()), &cpu, 1..40, |_| {
@@ -418,6 +496,7 @@ mod ladder {
                 contended_since_ms: None,
                 after_pause: false,
                 pending: false,
+                recomputed: false,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
                 input(ResourceKind::Cpu, 0, 0)

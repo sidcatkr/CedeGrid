@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    Admission, ContentionMode, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
-    ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts, YieldCause, YieldStep,
-    guaranteed_may_drain, own_allowance, plan_step, victim_order,
+    Admission, ComputeFloor, ContentionMode, LadderInput, LadderTiming, Measurement, ModeInput,
+    Principal, ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts, YieldCause,
+    YieldStep, guaranteed_may_drain, own_allowance, plan_step, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -261,6 +261,7 @@ impl PolicyEngine {
                 after_pause: false,
                 to_free: None,
                 pending: false,
+                recomputed: false,
             },
         );
     }
