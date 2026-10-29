@@ -3825,7 +3825,7 @@ fn decision_snapshot() {
 mod t178_contender {
     use super::*;
     use crate::snapshot::PolicyEngine;
-    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+    use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind, YieldCause, YieldStep};
 
     const CAPACITY: u64 = 4000;
     const INTERVAL: u64 = 500;
@@ -3941,6 +3941,122 @@ mod t178_contender {
             }
         }
         served
+    }
+
+    /// Report 027 run 5 (FR-013): in Performance, with one task waiting on I/O now and then
+    /// while own work's total stays within the contention floor of its target, no held
+    /// `own_over_target` cap is raised or removed; own work stays at its target within the
+    /// contention floor and the contender keeps its core.
+    #[test]
+    fn own_over_target_caps_hold_while_one_task_dips() {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = ContentionMode::Performance;
+        // The contention floor: principal_min_percent of capacity.
+        let floor = CAPACITY
+            * u64::from(
+                config
+                    .contention
+                    .thresholds(ResourceKind::Cpu)
+                    .principal_min_percent,
+            )
+            / 100;
+        let mut engine = PolicyEngine::new();
+        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
+        let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
+        let mut last: BTreeMap<String, Option<u64>> = BTreeMap::new();
+        for tick in 0..120u64 {
+            let now = tick * INTERVAL;
+            let mut demands: Vec<u64> = caps
+                .iter()
+                .map(|(step, target)| match step {
+                    YieldStep::Pause => 0,
+                    YieldStep::Cap => target.unwrap_or(TASK).min(TASK),
+                    _ => TASK,
+                })
+                .collect();
+            // t0 waits on I/O for two intervals in every ten, using 30 less.
+            if tick % 10 == 4 || tick % 10 == 5 {
+                demands[0] = demands[0].saturating_sub(30);
+            }
+            // The contender starts once own work holds the host, as in run 5.
+            demands.push(if now >= 10_000 { CONTENDER } else { 0 });
+            let usage = schedule(&demands);
+            let contender = usage[TASKS];
+            let own: u64 = usage[..TASKS].iter().sum();
+            let mut snap = snapshot(own + contender);
+            snap.cpu_capacity_millicores = CAPACITY;
+            snap.physical_cores = Some(4);
+            snap.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: contender,
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let input = PolicyInput {
+                allocations: ids
+                    .iter()
+                    .zip(&usage)
+                    .map(|(id, used)| {
+                        allocation(id, AllocationClass::Opportunistic, TASK, Some(*used))
+                    })
+                    .collect(),
+                facts: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            AllocationFacts {
+                                unavailable: BTreeMap::from([(
+                                    ResourceKey::Cpu,
+                                    [YieldStep::LowerShare].into(),
+                                )]),
+                                ..AllocationFacts::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            let target = decision.managed_budget.cpu_millicores;
+            for (i, id) in ids.iter().enumerate() {
+                let action = decision
+                    .actions
+                    .iter()
+                    .find(|a| &a.allocation_id == id && a.resource == ResourceKey::Cpu);
+                caps[i] = action.map_or((YieldStep::None, None), |a| (a.step, a.target));
+                // Settled after 20 s: no held own-over-target cap is relaxed while own
+                // work is not below its target by the contention floor.
+                let held = action
+                    .filter(|a| a.step == YieldStep::Cap && a.cause == YieldCause::OwnOverTarget);
+                if now >= 20_000
+                    && own + floor > target
+                    && let Some(Some(before)) = last.get(id)
+                {
+                    let after = held.and_then(|a| a.target);
+                    assert!(
+                        after.is_some_and(|after| after <= *before),
+                        "at {now} {id}: {before} relaxed to {after:?} with own {own} beside {target}"
+                    );
+                }
+                last.insert(id.clone(), held.and_then(|a| a.target));
+            }
+            if now >= 20_000 {
+                assert!(own <= target + floor, "at {now}: own {own} beside {target}");
+                assert!(
+                    own + 2 * floor >= target,
+                    "at {now}: own {own} lost beside {target}"
+                );
+                assert!(contender >= CONTENDER, "at {now}: contender {contender}");
+            }
+        }
     }
 
     /// The first interval, counted from the contender's start, in which it gets

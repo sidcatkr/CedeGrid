@@ -688,6 +688,16 @@ impl<'a> Interval<'a> {
             ]);
         }
         let contended = excess > 0 && victim.frees;
+        if kind == ResourceKind::Cpu
+            && !pending_pass
+            && !contended
+            && let Some(held) = state.filter(|s| self.holds_own_cap(s, frame))
+        {
+            self.next
+                .ladder
+                .insert((victim.id.clone(), key.clone()), held.clone());
+            return;
+        }
         let mut decision = plan_step(
             state,
             &LadderInput {
@@ -796,6 +806,22 @@ impl<'a> Interval<'a> {
         }
     }
 
+    /// Hysteresis for `own_over_target` caps (FR-013): while own work is not below its
+    /// target by the contention floor, a held cap is not relaxed because one task's usage
+    /// fell, so own work stays at its target and the contender's share holds.
+    fn holds_own_cap(&self, state: &StepState, frame: &Frame) -> bool {
+        let floor = (self.cpu_capacity.saturating_mul(u64::from(
+            self.config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .principal_min_percent,
+        )) / 100)
+            .max(1);
+        state.step == YieldStep::Cap
+            && state.cause == YieldCause::OwnOverTarget
+            && frame.own_usage.saturating_add(floor) > self.budget.cpu_millicores
+    }
+
     /// Steps of allocations that are no longer candidates hold or reverse.
     fn hold_or_reverse(&mut self, frame: &Frame, planned: &BTreeSet<String>) {
         let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
@@ -813,6 +839,12 @@ impl<'a> Interval<'a> {
                 allocation.phase == AllocationPhase::Pending,
                 is_guaranteed(allocation),
             ) {
+                continue;
+            }
+            if kind == ResourceKind::Cpu && self.holds_own_cap(state, frame) {
+                self.next
+                    .ladder
+                    .insert((id.clone(), step_key.clone()), state.clone());
                 continue;
             }
             let decision = plan_step(
