@@ -79,6 +79,11 @@ impl RootlessActuator {
         self.period
     }
 
+    /// A CPU cap runs as this duty cycle.
+    pub fn cpu_capped(&self) -> bool {
+        self.cap.is_some()
+    }
+
     /// The share of each period the family runs under the applied caps.
     pub fn duty(&self) -> f64 {
         let cpu = if self.cap.is_some() { self.duty } else { 1.0 };

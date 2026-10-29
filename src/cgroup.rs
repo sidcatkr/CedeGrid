@@ -821,7 +821,10 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 }
             }
             // The duty starts in its on phase; `tick` freezes the leaf for each off phase.
-            (ResourceKind::GpuCompute, YieldStep::Cap) if self.authorized("cgroup.freeze") => {
+            // Beside a rootless CPU duty the share joins that cycle instead.
+            (ResourceKind::GpuCompute, YieldStep::Cap)
+                if self.authorized("cgroup.freeze") && !self.fallback.cpu_capped() =>
+            {
                 self.gpu_duty = Some(FreezeDuty {
                     target,
                     duty: crate::actuation::gpu_compute_duty(target),
@@ -835,6 +838,19 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
             (_, step) => {
                 self.fallback.apply(family, kind, step, target)?;
             }
+        }
+        // One duty cycle per family: a GPU share moves to a rootless CPU duty's cycle.
+        if kind == ResourceKind::Cpu
+            && self.fallback.cpu_capped()
+            && let Some(duty) = self.gpu_duty.take()
+        {
+            self.restore(family, ResourceKind::GpuCompute)?;
+            self.fallback.apply(
+                family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                duty.target,
+            )?;
         }
         Ok(step)
     }
