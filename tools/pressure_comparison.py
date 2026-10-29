@@ -26,6 +26,8 @@ from validation_runtime import OwnedProcess,atomic_json,inside_home,home_executa
 from runtime_config import atomic_runtime_config, scale_up_cooldowns, read_runtime_config
 
 CONTENTION_MODES=('yield_first','neutral','performance')
+# protection: the T117/T118 gate, one physical core reserved; own-efficiency: the defaults.
+PROFILES=('protection','own-efficiency')
 # Mirrors MIN_RAM_FLOOR_MIB in src/config.rs; below twice it a floor is a caution option.
 MIN_RAM_FLOOR_MIB=512
 TARGETS={'matched_idle_throughput_ratio_min':.90,'decision_p95_seconds_max':1.,
@@ -45,7 +47,6 @@ def node_contention(node,mode,ram_floor_mib=None):
     if mode not in CONTENTION_MODES:raise ValueError('unknown contention mode')
     node=copy.deepcopy(node);caution=[]
     contention={'default_mode':mode,**scale_up_cooldowns(3000)}
-    if mode=='performance':caution.append('performance_mode')
     if ram_floor_mib is not None:
         if type(ram_floor_mib) is not int or ram_floor_mib<MIN_RAM_FLOOR_MIB:
             raise ValueError(f'RAM floor must be at least {MIN_RAM_FLOOR_MIB} MiB')
@@ -54,6 +55,29 @@ def node_contention(node,mode,ram_floor_mib=None):
     if caution:contention['acknowledge_caution']=caution
     node['contention']=contention
     return node
+
+
+def profile_settings(profile,node,agent,mode,ram_floor_mib,cpus,host_cpus,probe_mode,gpu_uuid):
+    """The node and agent settings and the process placement for one profile. Protection
+    reserves one physical core and sets the mode; own-efficiency keeps the defaults and
+    runs the coordinator and the harness on CPUs outside the probe's scope. The agent's
+    scope is its own affinity, so it stays on the scope's CPUs in both."""
+    if profile not in PROFILES:raise ValueError('unknown profile')
+    node=copy.deepcopy(node);agent=copy.deepcopy(agent)
+    node['node_mode']='opportunistic'
+    agent.update(max_workers=1,capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096,
+        'gpu_memory_mib':{gpu_uuid:1024} if probe_mode=='gpu' else {}})
+    if profile=='protection':
+        node['cpu']['reserve_physical_cores']=1;node['gpu']['scale_up_cooldown_ms']=3000
+        node=node_contention(node,mode,ram_floor_mib);outside=list(cpus)
+    else:
+        node['cpu'].pop('reserve_physical_cores',None);node.pop('contention',None)
+        outside=sorted(set(host_cpus)-set(cpus))
+        if not outside:raise ValueError('own-efficiency needs CPUs outside the probe scope')
+    placement={'profile':profile,'probe_cpu':cpus[0],'agent_scope_cpus':list(cpus),
+        'coordinator_and_harness_cpus':outside,
+        'reserve_physical_cores':node['cpu'].get('reserve_physical_cores',0)}
+    return node,agent,placement
 
 
 def step_timing(history,assignments,onset_unix,ended_unix=None):
@@ -210,14 +234,14 @@ def run(args):
     python=home_executable(root/'venv-isolated/bin/python');binary=inside_home(manager/'target/release/cedegrid')
     cpus=physical_cpus(2 if args.mode=='cpu' else 3)
     if len(cpus)!=(2 if args.mode=='cpu' else 3):raise RuntimeError('required physical CPU scope unavailable')
-    os.sched_setaffinity(0,cpus)
+    host_cpus=sorted(os.sched_getaffinity(0));os.sched_setaffinity(0,cpus)
     run_id='pressure-'+uuid.uuid4().hex;node_id='pressure-node-'+uuid.uuid4().hex
     worker_env=dict(TMPDIR=str(root/'tmp'),XDG_CACHE_HOME=str(root/'cache'),
         PYTHONPATH=str(manager/'python'),PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
         CUDA_VISIBLE_DEVICES=args.gpu_uuid if args.mode=='gpu' else '',CUDA_CACHE_PATH=str(root/'cache/cuda'))
     env={**os.environ,**worker_env}
     report={'schema_version':1,'run_id':run_id,'mode':args.mode,'targets':TARGETS,'cases':[],
-        'contention_mode':args.contention_mode,'ram_floor_mib':args.ram_floor_mib,
+        'contention_mode':args.contention_mode,'ram_floor_mib':args.ram_floor_mib,'profile':args.profile,
         'started_unix':time.time(),'status':'running','manager_binary_sha256':sha256_file(binary),
         'cpu_ids':cpus,'gpu_uuid':args.gpu_uuid,'wall_time_seconds':1200,'actual_24_hour_soak':False,
         'scope':'one-node native synthetic agent-policy comparison; not two-node application acceptance',
@@ -243,14 +267,18 @@ def run(args):
         time.sleep(.2)
     try:
         client=deployment(output,binary,cpus,node_id,args.gpu_uuid,1200,env)
-        node=read_runtime_config(output/'node.toml');node['cpu']['reserve_physical_cores']=1
-        node['node_mode']='opportunistic';node['gpu']['scale_up_cooldown_ms']=3000
-        node=node_contention(node,args.contention_mode,args.ram_floor_mib)
+        node,agent,placement=profile_settings(args.profile,read_runtime_config(output/'node.toml'),
+            read_runtime_config(output/'agent.toml'),args.contention_mode,args.ram_floor_mib,cpus,host_cpus,
+            args.mode,args.gpu_uuid)
+        report['placement']=placement
+        # The coordinator and every harness poll run where the placement puts them; the
+        # agent pins itself to its scope and each probe to its CPU.
+        os.sched_setaffinity(0,placement['coordinator_and_harness_cpus'])
         atomic_runtime_config(output/'node.toml',node, 'node')
-        agent=read_runtime_config(output/'agent.toml');agent.update(max_workers=1,
-            capacity={'cpu_millicores':len(cpus)*1000,'ram_mib':4096,'gpu_memory_mib':{args.gpu_uuid:1024} if args.mode=='gpu' else {}})
         atomic_runtime_config(output/'agent.toml',agent, 'agent')
-        doctor=subprocess.run([str(binary),'--config',str(output/'node.toml'),'doctor'],capture_output=True,text=True,timeout=30,check=True,env=env)
+        # doctor judges the scope from its own affinity, so it runs on the scope's CPUs.
+        doctor=subprocess.run([str(binary),'--config',str(output/'node.toml'),'doctor'],capture_output=True,text=True,timeout=30,check=True,env=env,
+            preexec_fn=lambda:os.sched_setaffinity(0,cpus))
         atomic_json(output/'doctor.json',json.loads(doctor.stdout))
         observations=(output/'observations.jsonl').open('x')
         services['coordinator']=OwnedProcess([str(binary),'coordinator','--deployment',str(output/'coordinator.toml')],manager,output/'coordinator.log',env)
@@ -406,7 +434,9 @@ if __name__=='__main__':
     parser.add_argument('--root',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--mode',choices=['cpu','gpu'],required=True);parser.add_argument('--gpu-uuid',required=True)
     parser.add_argument('--contention-mode',choices=CONTENTION_MODES,default='neutral',
-        help='node default mode for the run; performance is acknowledged as a caution option')
+        help='node default mode for the protection profile')
+    parser.add_argument('--profile',choices=PROFILES,default='protection',
+        help='protection reserves one physical core and sets the mode; own-efficiency keeps every default and runs the coordinator outside the probe scope')
     parser.add_argument('--ram-floor-mib',type=int,
         help=f'RAM floor of exactly this many MiB (reserve_percent 0), at least {MIN_RAM_FLOOR_MIB}; below twice that, small_floor is acknowledged')
     parser.add_argument('--execute',action='store_true');args=parser.parse_args()

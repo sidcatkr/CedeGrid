@@ -8,16 +8,37 @@ from pathlib import Path
 import time
 from validation_runtime import atomic_json,inside_home,local_guard
 
+# Both probes look for a drain this often, so the check costs them the same.
+CHECK_SECONDS=.05
+
+
+class NoContext:
+    """The unmanaged probe's context: the managed probe's drain checks, which never drain."""
+    def draining(self):return False
+    def complete(self,result):return None
+
+
+def checker(context,output,clock=time.monotonic):
+    """A stop check that asks the context and the STOP file at most every CHECK_SECONDS."""
+    due=[0.]
+    def check():
+        now=clock()
+        if now<due[0]:return False
+        due[0]=now+CHECK_SECONDS
+        return context.draining() or (output/'STOP').exists()
+    return check
+
 
 def run(args):
     if args.mode not in {'cpu','gpu'} or not 0<args.seconds<=60:
         raise ValueError('explicit CPU/GPU probe must finish within60s')
     output=inside_home(args.output);output.mkdir(parents=True,exist_ok=False)
     os.sched_setaffinity(0,{args.cpu})
-    context=None
+    context=NoContext()
     if os.environ.get('CEDEGRID_CONTEXT'):
         from cedegrid import WorkerContext
         context=WorkerContext.from_env()
+    stopped=checker(context,output)
     gpu=None
     if args.mode=='gpu':
         import torch
@@ -31,7 +52,7 @@ def run(args):
     atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic()})
     deadline=time.monotonic()+args.seconds;started=time.monotonic();units=0;drained=False;next_guard=0
     while time.monotonic()<deadline:
-        if (context is not None and context.draining()) or (output/'STOP').exists():
+        if stopped():
             drained=True;break
         if time.monotonic()>=next_guard:
             guard=local_guard(output,{'min_ram_free_bytes':16*1024**3,'min_disk_free_bytes':16*1024**3})
@@ -51,9 +72,10 @@ def run(args):
             torch.mm(a,b,out=c);torch.cuda.synchronize()
         units+=1
     result={'mode':args.mode,'completed_units':units,'elapsed_seconds':time.monotonic()-started,
-        'drained':drained,'finished_monotonic':time.monotonic(),'managed':context is not None}
+        'drained':drained,'finished_monotonic':time.monotonic(),'managed':not isinstance(context,NoContext),
+        'check_seconds':CHECK_SECONDS}
     atomic_json(output/'result.json',result)
-    if context is not None:context.complete(result)
+    context.complete(result)
     if gpu is not None:gpu.close()
     return result
 

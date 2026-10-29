@@ -74,7 +74,7 @@ class GateRunnerTests(unittest.TestCase):
         self.assertNotIn('acknowledge_caution',neutral['contention'])
         self.assertEqual(neutral['ram'],{'reserve_percent':5})
         performance=comparison.node_contention(base,'performance',ram_floor_mib=512)
-        self.assertEqual(performance['contention']['acknowledge_caution'],['performance_mode','small_floor'])
+        self.assertEqual(performance['contention']['acknowledge_caution'],['small_floor'])
         self.assertEqual(performance['ram'],{'reserve_percent':0,'reserve_mib':512})
         self.assertNotIn('acknowledge_caution',comparison.node_contention(base,'yield_first',ram_floor_mib=4096)['contention'])
         self.assertEqual(base['ram'],{'reserve_percent':5},'the input stays unchanged')
@@ -153,8 +153,50 @@ class GateRunnerTests(unittest.TestCase):
     def test_usage_names_the_gate_options(self):
         usage=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),'--help'],
             capture_output=True,text=True,check=True).stdout
-        for option in ['--contention-mode','{yield_first,neutral,performance}','--ram-floor-mib']:
+        for option in ['--contention-mode','{yield_first,neutral,performance}','--ram-floor-mib',
+                '--profile','{protection,own-efficiency}']:
             self.assertIn(option,usage)
+
+    def test_both_probes_check_for_a_drain_every_50_ms(self):
+        import pressure_probe
+        class Counting:
+            calls=0
+            def draining(self):Counting.calls+=1;return False
+        clock=[0.]
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+            for context in [Counting(),pressure_probe.NoContext()]:
+                check=pressure_probe.checker(context,Path(temporary),clock=lambda:clock[0])
+                stops=[]
+                for at in [0,.01,.049,.05,.07,.12]:
+                    clock[0]=at;stops.append(check())
+                self.assertEqual(stops,[False]*6)
+            self.assertEqual(Counting.calls,3,'checked at 0, .05 and .12 s')
+            # The unmanaged probe's context never drains and completes nothing.
+            self.assertFalse(pressure_probe.NoContext().draining())
+            self.assertIsNone(pressure_probe.NoContext().complete({}))
+            (Path(temporary)/'STOP').write_text('')
+            clock[0]=1.
+            self.assertTrue(pressure_probe.checker(pressure_probe.NoContext(),Path(temporary),clock=lambda:clock[0])())
+
+    def test_the_own_efficiency_profile_uses_the_defaults_outside_the_probes_scope(self):
+        node={'node_mode':'guaranteed','cpu':{'reserve_physical_cores':1,'nice':0},
+            'gpu':{'scale_up_cooldown_ms':30000},'contention':{'default_mode':'neutral'}}
+        agent={'cpu_affinity':[2,3],'max_workers':3}
+        tuned,deployed,placement=comparison.profile_settings('own-efficiency',node,agent,'performance',None,[2,3],[0,1,2,3],'cpu','GPU-x')
+        self.assertNotIn('contention',tuned,'the default mode, Performance')
+        self.assertNotIn('reserve_physical_cores',tuned['cpu'])
+        self.assertEqual(tuned['gpu'],{'scale_up_cooldown_ms':30000})
+        self.assertEqual(deployed['cpu_affinity'],[2,3])
+        self.assertEqual(placement,{'profile':'own-efficiency','probe_cpu':2,'agent_scope_cpus':[2,3],
+            'coordinator_and_harness_cpus':[0,1],'reserve_physical_cores':0})
+        with self.assertRaisesRegex(ValueError,'outside'):
+            comparison.profile_settings('own-efficiency',node,agent,'performance',None,[2,3],[2,3],'cpu','GPU-x')
+        tuned,_,placement=comparison.profile_settings('protection',node,agent,'neutral',None,[2,3],[0,1,2,3],'cpu','GPU-x')
+        self.assertEqual(tuned['cpu']['reserve_physical_cores'],1)
+        self.assertEqual(tuned['contention']['default_mode'],'neutral')
+        self.assertEqual(placement['reserve_physical_cores'],1)
+        self.assertEqual(placement['coordinator_and_harness_cpus'],[2,3])
+        self.assertEqual(node['contention'],{'default_mode':'neutral'},'the input stays unchanged')
 
     @staticmethod
     def fake_host(root,nice=0,scope='protected.scope'):
