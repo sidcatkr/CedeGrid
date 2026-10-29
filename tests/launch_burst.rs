@@ -98,6 +98,22 @@ fn running(state: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Allocations the coordinator fenced because their lease expired.
+fn lease_expiries(coordinator: &Path) -> usize {
+    let Ok(db) = rusqlite::Connection::open_with_flags(
+        coordinator.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return 0;
+    };
+    db.query_row(
+        "SELECT count(*) FROM allocation_fences WHERE reason='lease expired'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_or(0, |n| n as usize)
+}
+
 fn observation_times(state: &Path) -> Vec<u64> {
     let db = rusqlite::Connection::open_with_flags(
         state.join("state.sqlite3"),
@@ -293,6 +309,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
     // Two more heartbeats after the last launch, then stop.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let ran = running(&state);
+    let expired = lease_expiries(&root.join("coordinator"));
     agent_service.stop(Duration::from_secs(30));
     coordinator_service.stop(Duration::from_secs(5));
     let log = fs::read_to_string(root.join("agent.stdout.log")).unwrap();
@@ -316,7 +333,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .unwrap_or(0);
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
-        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
+        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
         if all_running.is_some() {
             "all ran"
         } else {

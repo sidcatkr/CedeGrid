@@ -295,6 +295,54 @@ Record from each `report.json` in `docs/validation.md`:
   including the contender (SC-005).
 - `owned_cleanup`: every exit code, and `guard`.
 
+## Item 027 native gates (T228)
+
+Runs only on the authorized test host, with the user's typed approval for item 027, under the
+host rules of items 021 and 026: user-space only, `nohup` with logs, an idle check before and
+after each run, nothing on the shared host, and loads of the second unprivileged account started
+and stopped by that account under `timeout`, with a marker among the loop's arguments.
+`$repo` is a `git archive` of the final commit built with `cargo build --locked --release`;
+`$H` holds the validation harness kept with the evidence (`sc014_015.py` from item 024, and
+`idle_027.py`, `idle-full-027.sh`, `return_027.py`, `gpu-027.sh`, `run-peer-027.sh` and
+`peer-contender-027.sh`); `$py` is `venv-isolated/bin/python`.
+
+```sh
+# 0. Second account: it is no admin and `sudo -n` fails.
+ssh <second account>@<test host> 'id -u; id -Gn; sudo -n true; echo sudo=$?'
+# 1. Idle, 60 s, Tracked and Full (an empty delegated root inside a delegated user scope).
+$py $H/idle_027.py --repo $repo --root $root --output <dir> --cpus 4 --backend tracked   # and --cpus 14
+systemd-run --user --scope -p Delegate=yes --quiet --unit cedegrid-027-idle-<n> \
+  bash $H/idle-full-027.sh $repo 4 <dir>                                              # and 14
+# 2. Launch burst (150 light tasks, Performance).
+CEDEGRID_TEST_LAUNCH_BURST=1 cargo test --locked --release --test launch_burst -- --ignored --nocapture
+# 3. SC-014, steady loop, 100 m tasks: 14 CPUs in each mode, then 4 CPUs in Performance.
+$py $H/sc014_015.py --repo $repo --root $root --output <dir> --mode <mode> --cpus 14 \
+  --task-millicores 100 --seconds 90 --warmup-max 1200 --task-loop steady
+# 4. SC-015, Yield First, 4 CPUs, 250 m tasks beside a 60 m external user, both loops.
+$py $H/sc014_015.py ... --mode yield_first --cpus 4 --task-millicores 250 --seconds 330 \
+  --external-millicores 60 --warmup-max 1200 --task-loop catch-up    # and steady
+# 5. T178 pinned, contender under the second account (as item 026 run 2).
+bash $H/run-peer-027.sh <commit> pinned <epoch> <uid>
+ssh <second account>@<test host> 'T=<epoch+3> CPUS=<last scope CPU> S=40 sh -s' < $H/peer-contender-027.sh
+# 6. Return after contention, Yield First, 4 CPUs: the harness writes ready.json with the epoch;
+#    the second account's one-core contender runs 30 s from it.
+$py $H/return_027.py --repo $repo --root $root --output <dir> --contender-uid <uid>
+ssh <second account>@<test host> 'T=<epoch> CPUS=<cpu> S=30 sh -s' < $H/peer-contender-027.sh
+# GPU (Part 5): per-process utilization, listed contexts and their user IDs, the policy's view.
+bash $H/gpu-027.sh $repo
+```
+
+Gates, from each run's `report.json` or log: run 1, the decisions' CPU external estimate (which
+no longer counts CedeGrid) at p95 at most 1% of capacity; run 2, longest observation gap at most
+1 s, no lease expiry, no drain, all 150 tasks run or complete; run 3, own tasks at least 97%,
+94% and 84% of capacity in Performance, Neutral and Yield First on 14 CPUs and 97% in
+Performance on 4, with CedeGrid's CPU stated apart; run 4, own work at least 90% of capacity
+minus the user and the margin, no pause, no cap cycling, no drain; run 5, the contender at 0.9
+core within SC-012's bound; run 6, own work at the contended target within 2 intervals of the
+contender's first observed usage (SC-002) and back at the uncontended target within 3 s of its
+last; run 7 (from run 3's Performance run on 14 CPUs), the observation interval's p50, p95 and
+maximum, the agent's `loop_cost` stages and CedeGrid's CPU.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

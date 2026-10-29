@@ -179,7 +179,8 @@ principals' demand. Until a user joins, its usage counts
 toward one unattributed principal, together with processes whose owner cannot be read,
 so contention is seen at once. A host that mounts `/proc` with `hidepid=2` always takes
 this path for other accounts. Usage by lower UIDs is background demand: it comes off the
-capacity and never contends.
+capacity and never contends. A principal's usage sums its processes, each counted once: a
+process's threads are part of it, not processes of their own.
 
 Under saturation, a contending principal whose unknown demand is below one margin step
 is probed: own work steps down by the mode's margin per response window, and a principal

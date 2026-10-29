@@ -77,12 +77,24 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   with 113 tasks.
 - **CedeGrid's own cost.** SC-014 counts own tasks plus CedeGrid with a 1% bound for CedeGrid
   at 117 tasks on 14 CPUs (140 m). In the Docker Linux check (6 CPUs, 117 light tasks, release
-  build with fat LTO, 60 s) the agent used 108 m and the 117 supervisors 34 m in all, 142 m;
-  supervisors that passed every 100 ms used 85–125 m. The agent's top costs by stage are
-  sampling (about 64 m: every task's identity and clock and every host process for principals,
-  each interval) and the slot pass (about 21 m). Fat LTO lowered the agent's cost by about 12%
-  (127 to 112 m). Resident memory: the agent 52 MiB proportional, a supervisor 1.6 MiB
-  proportional (9–11 MiB counting shared pages). The test host run is pending.
+  build with fat LTO, 60 s), with supervisors that wait on events, the agent used 108 m and the
+  117 supervisors 34 m in all, 142 m; supervisors that passed every 100 ms used 85–125 m. The
+  agent's sampling stage then took 55.7 ms per second. Two changes that leave every decision as
+  it was cut it to 30.2 ms per second and the agent to 74 m, CedeGrid about 109 m in all
+  (0.78% of 14 CPUs), measured back to back: own tasks are re-verified through the pidfd held
+  since their first check and their counters read from `/proc` directly instead of through two
+  sysinfo refreshes per interval (from 5.7 to 0.4 ms per interval), and principals come from one
+  `/proc/<pid>/stat` read per process (from 10.9 to 2.9 ms per interval). The rest of the stage
+  is reading each task's clock and anonymous memory (about 7 ms per interval). Fat LTO lowered
+  the agent's cost by about 12% (127 to 112 m). Resident memory: the agent 52 MiB proportional,
+  a supervisor 1.6 MiB proportional (9–11 MiB counting shared pages). The test host run is
+  pending.
+- **Principals counted threads.** Until item 027's decisions on report 027-1, principal usage
+  came from a sysinfo refresh that lists every thread as a process of its own, so a process's
+  CPU counted once for the process and again for each thread, its resident memory once per
+  thread, and own tasks' threads, not in the managed set, as the owner's unmanaged usage
+  (research R26). Each process now counts once. Earlier native results that read principal
+  usage, such as T178's contender share and SC-015, ran with the old count.
 - **Victims of an excess.** Caps already held give a contended CPU excess between them at one
   level within their tier, and own usage over its target is shared the same way; a new victim
   is still capped by the whole excess left, in cost order, and a cap to zero becomes a pause.

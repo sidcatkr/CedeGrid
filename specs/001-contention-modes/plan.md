@@ -763,7 +763,9 @@ Measurement only: the policy rules and the decision snapshot do not change.
     the PID still names the verified process) instead of re-reading `/proc` identity, and the
     process clock is read under the held pidfd. A dead pidfd, a changed identity or a new
     allocation goes through the full identity check once; released allocations drop their
-    handle. Linux only; other platforms keep today's path.
+    handle. The two sysinfo refreshes of own PIDs per interval go too: their `/proc` tick
+    counters are read only when that last source applies, and resident memory from `statm`, the
+    values sysinfo returned. Linux only; other platforms keep today's path.
   - Principals: on Linux a process table reads each `/proc/<pid>/stat` once per interval for CPU
     ticks, start time and resident pages, and a process's real UID once from `status`, cached by
     PID and start time. Per-process CPU is computed as sysinfo computes it (ticks over the global

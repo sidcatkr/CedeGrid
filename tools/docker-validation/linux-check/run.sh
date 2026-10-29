@@ -7,6 +7,9 @@ set -eu
 tar -C /src --exclude=./target --exclude='./.agent-test-*' --exclude='./.distributed-service-*' \
     --exclude=./npm/node_modules --exclude=./.git -cf - . | tar -C "$HOME/work" -xf -
 cd "$HOME/work"
+# A `git archive` stamps files with its commit time, which can be older than a build kept in the
+# target volume; newer stamps make cargo rebuild what changed.
+find src tests -type f -exec touch {} +
 mkdir -p .runtime/tmp
 export TMPDIR="$HOME/work/.runtime/tmp"
 python3 -m venv .runtime/test-python

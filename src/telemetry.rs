@@ -1874,9 +1874,16 @@ mod tests {
         };
         collector.prime(&[record]);
         assert_eq!(collector.previous.len(), 1);
+        // Linux keeps a pidfd per verified process; other platforms a sysinfo entry.
+        #[cfg(target_os = "linux")]
+        assert!(!collector.handles.is_empty());
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(collector.processes.processes().len(), 1);
         collector.sample(&[]).unwrap();
         assert!(collector.previous.is_empty());
+        #[cfg(target_os = "linux")]
+        assert!(collector.handles.is_empty());
+        #[cfg(not(target_os = "linux"))]
         assert!(collector.processes.processes().is_empty());
     }
 
@@ -3060,5 +3067,30 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         spin.join().unwrap();
+    }
+
+    /// On Linux an own process's tick counters and resident memory are read from `/proc`
+    /// directly, and match what sysinfo's refresh gave for the same process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_process_counters_match_sysinfos() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let collector = ManagedCollector::new(&crate::config::Config::default()).unwrap();
+        // A process still loading changes its resident memory between the two reads.
+        std::thread::sleep(Duration::from_millis(300));
+        let pid = sysinfo::Pid::from_u32(child.id());
+        let mut system = System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let process = system.process(pid).unwrap();
+        assert_eq!(collector.resident_bytes(child.id()), Some(process.memory()));
+        assert_eq!(
+            collector.stat_cpu_ms(child.id()),
+            Some(process.accumulated_cpu_time())
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }
