@@ -3945,6 +3945,62 @@ fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
     }
 }
 
+/// The policy credits a GPU compute cap its supervisor reports applied at the cap's duty
+/// from the reported facts alone. Full and Tracked report the same facts for that cap
+/// (`tests/cgroup.rs`), so own work is credited alike in both (plan "Item 028").
+#[test]
+fn a_reported_gpu_compute_cap_is_credited_at_its_duty() {
+    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (cfg, mut snap) = us5_device(
+        Neutral,
+        ComputeActivity::Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    snap.gpus[0].compute_amount_unknown = Some("not measured".into());
+    let input = |applied: bool| {
+        let mut facts = rootless(&["job"]);
+        let job = facts.get_mut("job").unwrap();
+        // The GPU compute steps either actuator reports unavailable.
+        job.unavailable.insert(
+            key.clone(),
+            std::collections::BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+        );
+        if applied {
+            job.applied.insert(key.clone(), YieldStep::Cap);
+        }
+        PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(100, 100, 2000),
+                Some(resources(100, 100, 2000)),
+            )],
+            facts,
+            ..PolicyInput::default()
+        }
+    };
+    let mut engine = PolicyEngine::new();
+    snap.gpus[0].compute_sample_id = Some(1);
+    let first = engine.evaluate(&cfg, &snap, &input(false), 0).unwrap();
+    let action = first.actions.iter().find(|a| a.resource == key).unwrap();
+    assert_eq!((action.step, action.target), (YieldStep::Cap, Some(500)));
+    snap.gpus[0].compute_sample_id = Some(2);
+    let second = engine.evaluate(&cfg, &snap, &input(true), 500).unwrap();
+    let status = &second.resources[&key];
+    assert_eq!(status.own, Some((500, 500)));
+    assert!(
+        status
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "applied_duty_credit"),
+        "{:?}",
+        status.reasons
+    );
+}
+
 /// External GPU compute is grouped by UID, as CPU principals are: two external
 /// users each wanting half the device leave Neutral own work a third (FR-021).
 #[test]

@@ -430,6 +430,16 @@ struct RamCap {
     throttled_since: Option<Instant>,
 }
 
+/// A GPU compute share whose off phase freezes the leaf (research R27).
+#[derive(Clone, Copy)]
+struct FreezeDuty {
+    target: Option<u64>,
+    /// The share of each period own work runs.
+    duty: f64,
+    frozen: bool,
+    phase_started: Instant,
+}
+
 /// Runtime steps through authorized delegated controls (research R4), with the
 /// rootless mechanisms as fallback for steps whose control is not authorized
 /// or whose write is refused.
@@ -454,6 +464,8 @@ pub struct CgroupActuator<L: LeafIo> {
     ram_cap: Option<RamCap>,
     /// Why the RAM cap step is unavailable for this allocation, as a catalog code.
     ram_refused: Option<&'static str>,
+    /// The GPU compute share, while it runs as a freeze duty.
+    gpu_duty: Option<FreezeDuty>,
 }
 
 impl<L: LeafIo> CgroupActuator<L> {
@@ -485,6 +497,7 @@ impl<L: LeafIo> CgroupActuator<L> {
             ram_calm_window: settings.ram_calm_window,
             ram_cap: None,
             ram_refused: None,
+            gpu_duty: None,
         }
     }
 
@@ -635,10 +648,10 @@ impl<L: LeafIo> CgroupActuator<L> {
         Ok(())
     }
 
-    /// Freeze and confirm through `cgroup.events` within a bound.
-    fn freeze(&mut self, family: &dyn Family, kind: ResourceKind) -> Result<()> {
+    /// Freeze and confirm through `cgroup.events` within `bound`.
+    fn freeze(&mut self, family: &dyn Family, kind: ResourceKind, bound: Duration) -> Result<()> {
         self.write(family, kind, "cgroup.freeze", "1")?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + bound;
         loop {
             let events = self.leaf.read("cgroup.events")?;
             if events
@@ -649,10 +662,60 @@ impl<L: LeafIo> CgroupActuator<L> {
             }
             if std::time::Instant::now() >= deadline {
                 self.restore(family, kind)?;
-                bail!("cgroup did not report frozen within its bound");
+                bail!(
+                    "cgroup did not report frozen within {} ms",
+                    bound.as_millis()
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// Another resource holds the leaf frozen.
+    fn freeze_held_elsewhere(&self) -> bool {
+        self.written.iter().any(|(kind, controls)| {
+            *kind != ResourceKind::GpuCompute && controls.contains("cgroup.freeze")
+        })
+    }
+
+    /// Switch the freeze duty's phase when it is due. The off phase's readback is bounded
+    /// by the off phase; a refusal moves the share to the rootless duty. While another
+    /// resource holds the freeze the leaf stays frozen and the cycle waits.
+    fn tick_gpu_duty(&mut self, family: &mut dyn Family) -> Result<()> {
+        let Some(duty) = self.gpu_duty else {
+            return Ok(());
+        };
+        if duty.duty >= 1.0 || self.freeze_held_elsewhere() {
+            return Ok(());
+        }
+        let period = self.fallback.period();
+        let elapsed = duty.phase_started.elapsed();
+        if !duty.frozen {
+            if elapsed < period.mul_f64(duty.duty) {
+                return Ok(());
+            }
+            let off = period.mul_f64(1.0 - duty.duty);
+            if let Err(refusal) = self.freeze(family, ResourceKind::GpuCompute, off) {
+                self.gpu_duty = None;
+                return self.fall_back(
+                    family,
+                    ResourceKind::GpuCompute,
+                    YieldStep::Cap,
+                    duty.target,
+                    refusal,
+                );
+            }
+        } else if elapsed >= period.mul_f64(1.0 - duty.duty) {
+            self.restore(family, ResourceKind::GpuCompute)?;
+        } else {
+            return Ok(());
+        }
+        self.gpu_duty = Some(FreezeDuty {
+            frozen: !duty.frozen,
+            phase_started: Instant::now(),
+            ..duty
+        });
+        Ok(())
     }
 
     /// Apply a refused step through the rootless mechanism, which reaches only
@@ -694,10 +757,13 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                     steps.insert(YieldStep::Pause);
                 }
             }
+            // A share is a duty whose off phase freezes the leaf, or the rootless duty.
             ResourceKind::GpuCompute => {
-                steps.extend([YieldStep::LowerShare, YieldStep::Cap]);
-                if !self.authorized("cgroup.freeze") && fallback.contains(&YieldStep::Pause) {
-                    steps.insert(YieldStep::Pause);
+                steps.insert(YieldStep::LowerShare);
+                for step in [YieldStep::Cap, YieldStep::Pause] {
+                    if !self.authorized("cgroup.freeze") && fallback.contains(&step) {
+                        steps.insert(step);
+                    }
                 }
             }
             ResourceKind::Ram => {
@@ -710,9 +776,12 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 steps.extend([YieldStep::LowerShare, YieldStep::Cap, YieldStep::Pause]);
             }
         }
-        // Guaranteed work is never paused (FR-024).
+        // Guaranteed work is never paused, so it takes no GPU compute duty either (FR-024).
         if self.class == AllocationClass::Guaranteed {
             steps.insert(YieldStep::Pause);
+            if kind == ResourceKind::GpuCompute {
+                steps.insert(YieldStep::Cap);
+            }
         }
         steps
     }
@@ -731,6 +800,9 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         );
         // One step per resource: undo the previous one before applying the next.
         self.restore(family, kind)?;
+        if kind == ResourceKind::GpuCompute {
+            self.gpu_duty = None;
+        }
         self.fallback.apply(family, kind, YieldStep::None, None)?;
         match (kind, step) {
             (_, YieldStep::None) => {}
@@ -744,9 +816,18 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 }
             }
             (_, YieldStep::Pause) if self.authorized("cgroup.freeze") => {
-                if let Err(refusal) = self.freeze(family, kind) {
+                if let Err(refusal) = self.freeze(family, kind, Duration::from_secs(1)) {
                     self.fall_back(family, kind, step, target, refusal)?;
                 }
+            }
+            // The duty starts in its on phase; `tick` freezes the leaf for each off phase.
+            (ResourceKind::GpuCompute, YieldStep::Cap) if self.authorized("cgroup.freeze") => {
+                self.gpu_duty = Some(FreezeDuty {
+                    target,
+                    duty: crate::actuation::gpu_compute_duty(target),
+                    frozen: false,
+                    phase_started: Instant::now(),
+                });
             }
             (ResourceKind::Ram, YieldStep::Cap) => {
                 self.cap_ram(family, target)?;
@@ -760,17 +841,30 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
         self.fallback.tick(family)?;
+        self.tick_gpu_duty(family)?;
         self.check_ram_cap(family)
     }
 
-    /// The duty cycle's next phase switch and, while a RAM cap holds, its next check.
+    /// The duty cycles' next phase switch and, while a RAM cap holds, its next check.
     fn next_deadline(&self) -> Option<Instant> {
         let ram = (self.ram_cap.is_some() && self.ram_refused.is_none())
             .then(|| Instant::now() + RAM_CAP_CHECK);
-        match (self.fallback.next_deadline(), ram) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let period = self.fallback.period();
+        let duty = self
+            .gpu_duty
+            .filter(|duty| duty.duty < 1.0 && !self.freeze_held_elsewhere())
+            .map(|duty| {
+                let share = if duty.frozen {
+                    1.0 - duty.duty
+                } else {
+                    duty.duty
+                };
+                duty.phase_started + period.mul_f64(share)
+            });
+        [self.fallback.next_deadline(), duty, ram]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn take_detail(&mut self) -> Option<String> {
@@ -835,6 +929,7 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     }
 
     fn release(&mut self, family: &mut dyn Family) -> Result<()> {
+        self.gpu_duty = None;
         let kinds: Vec<_> = self.written.keys().copied().collect();
         let mut result = Ok(());
         for kind in kinds {

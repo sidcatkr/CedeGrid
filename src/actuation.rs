@@ -8,6 +8,12 @@ use std::time::{Duration, Instant};
 /// The smallest share of each period a capped family may run.
 const MIN_DUTY: f64 = 0.05;
 
+/// The share of each period a GPU compute cap lets own work run: its target in
+/// thousandths of the device's time, at least the minimum duty.
+pub(crate) fn gpu_compute_duty(target: Option<u64>) -> f64 {
+    (target.unwrap_or(500) as f64 / 1000.0).clamp(MIN_DUTY, 1.0)
+}
+
 /// Rootless mechanisms (research R4): a SIGSTOP/SIGCONT duty cycle for a CPU cap
 /// and for a GPU compute share, and SIGSTOP for a pause, all through owned
 /// handles. One cycle serves both caps at the smaller duty. Lower share and memory
@@ -68,6 +74,11 @@ impl RootlessActuator {
         Ok(())
     }
 
+    /// The duty-cycle period.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
     /// The share of each period the family runs under the applied caps.
     pub fn duty(&self) -> f64 {
         let cpu = if self.cap.is_some() { self.duty } else { 1.0 };
@@ -126,8 +137,7 @@ impl Actuator for RootlessActuator {
             }
             YieldStep::Cap if kind == ResourceKind::GpuCompute => {
                 self.paused.remove(&kind);
-                let target = target.unwrap_or(500);
-                self.gpu_duty = (target as f64 / 1000.0).clamp(MIN_DUTY, 1.0);
+                self.gpu_duty = gpu_compute_duty(target);
             }
             YieldStep::Cap => {
                 self.paused.remove(&kind);

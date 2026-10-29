@@ -765,6 +765,261 @@ mod runtime_steps {
         assert!(family.signals.is_empty());
     }
 
+    /// A family that records when each signal was sent.
+    struct Timed {
+        pids: Vec<u32>,
+        signals: Vec<(i32, std::time::Instant)>,
+    }
+    impl Family for Timed {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            Recorder {
+                pids: self.pids.clone(),
+                signals: vec![],
+            }
+            .identities()
+        }
+        fn signal(&mut self, signal: i32) -> anyhow::Result<()> {
+            self.signals.push((signal, std::time::Instant::now()));
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            None
+        }
+    }
+
+    fn timed(pid: u32) -> Timed {
+        Timed {
+            pids: vec![pid],
+            signals: vec![],
+        }
+    }
+
+    /// Ticks the actuator about every millisecond for `periods` duty periods of 100 ms and
+    /// returns the share of that time the leaf was frozen and the family stopped.
+    fn off_shares(
+        actuator: &mut dyn Actuator,
+        family: &mut Timed,
+        dir: &Path,
+        periods: u64,
+    ) -> (f64, f64) {
+        let start = std::time::Instant::now();
+        let end = start + Duration::from_millis(100 * periods);
+        let (mut frozen, mut last) = (Duration::ZERO, start);
+        while std::time::Instant::now() < end {
+            actuator.tick(family).unwrap();
+            let now = std::time::Instant::now();
+            if read(dir, "cgroup.freeze") == "1" {
+                frozen += now - last;
+            }
+            last = now;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (mut stopped, mut since) = (Duration::ZERO, None);
+        for (signal, at) in &family.signals {
+            match *signal {
+                libc::SIGSTOP => since = Some((*at).max(start)),
+                libc::SIGCONT => {
+                    if let Some(from) = since.take() {
+                        stopped += at.saturating_duration_since(from);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = since {
+            stopped += last.saturating_duration_since(from);
+        }
+        let total = (last - start).as_secs_f64();
+        (frozen.as_secs_f64() / total, stopped.as_secs_f64() / total)
+    }
+
+    /// Full offers Opportunistic work the GPU compute share Tracked offers, with
+    /// `cgroup.freeze` authorized or not, and Guaranteed work no GPU compute step
+    /// (FR-024). For every resource, Full offers each step Tracked offers (plan "Item 028").
+    #[test]
+    fn full_offers_every_step_tracked_offers() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "71\n");
+        let all = [
+            "cgroup.procs",
+            "cpu.weight",
+            "cpu.max",
+            "cgroup.freeze",
+            "memory.high",
+        ];
+        for class in [AllocationClass::Opportunistic, AllocationClass::Guaranteed] {
+            let tracked = cedegrid::actuation::RootlessActuator::new(&settings(class));
+            for controls in [&all[..], &["cgroup.procs"][..]] {
+                let full = CgroupActuator::new(
+                    DirectoryLeaf::open(&dir).unwrap(),
+                    &config(controls),
+                    &settings(class),
+                );
+                for kind in [
+                    ResourceKind::Cpu,
+                    ResourceKind::GpuCompute,
+                    ResourceKind::Ram,
+                    ResourceKind::GpuMemory,
+                ] {
+                    for step in [
+                        YieldStep::LowerShare,
+                        YieldStep::Cap,
+                        YieldStep::Pause,
+                        YieldStep::Hint,
+                    ] {
+                        assert!(
+                            tracked.unavailable(kind).contains(&step)
+                                || !full.unavailable(kind).contains(&step),
+                            "{class:?} {kind:?} {step:?} with {controls:?}"
+                        );
+                    }
+                }
+                let gpu = full.unavailable(ResourceKind::GpuCompute);
+                match class {
+                    AllocationClass::Guaranteed => assert!(
+                        gpu.contains(&YieldStep::Cap) && gpu.contains(&YieldStep::Pause),
+                        "{controls:?}"
+                    ),
+                    _ => assert!(!gpu.contains(&YieldStep::Cap), "{controls:?}"),
+                }
+            }
+        }
+    }
+
+    /// In Full a GPU compute cap is a duty cycle at the target's share of each period
+    /// (research R27). With `cgroup.freeze` authorized its off phase freezes the leaf,
+    /// confirmed through `cgroup.events`, and sends no signal; otherwise it stops the
+    /// verified family. A duty starts in its on phase.
+    #[test]
+    fn a_gpu_compute_cap_in_full_is_a_duty_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "72\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = timed(72);
+        let step = actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(500),
+            )
+            .unwrap();
+        assert_eq!(step, YieldStep::Cap);
+        assert_eq!(read(&dir, "cgroup.freeze"), "0", "the duty starts running");
+        assert!(actuator.next_deadline().is_some());
+        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 6);
+        assert!((frozen - 0.5).abs() < 0.05, "frozen {frozen}");
+        assert!(family.signals.is_empty());
+        actuator
+            .apply(&mut family, ResourceKind::GpuCompute, YieldStep::None, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
+        assert_eq!(actuator.next_deadline(), None);
+
+        let mut rootless = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config(&["cgroup.procs", "cpu.weight", "cpu.max"]),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = timed(72);
+        rootless
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(500),
+            )
+            .unwrap();
+        let (frozen, stopped) = off_shares(&mut rootless, &mut family, &dir, 6);
+        assert_eq!(frozen, 0.0, "no unauthorized write");
+        assert!((stopped - 0.5).abs() < 0.05, "stopped {stopped}");
+        rootless.release(&mut family).unwrap();
+        assert_eq!(family.signals.last().map(|s| s.0), Some(libc::SIGCONT));
+    }
+
+    /// A refused duty freeze, or a leaf that does not report frozen within the off
+    /// phase, falls back to the rootless duty and keeps why as the step's detail.
+    #[test]
+    fn a_refused_duty_freeze_falls_back_to_the_rootless_duty() {
+        let temp = tempfile::tempdir().unwrap();
+        for (members, events, why) in [
+            ("75\n99\n", "populated 1\nfrozen 1\n", "membership"),
+            ("75\n", "populated 1\nfrozen 0\n", "frozen"),
+        ] {
+            let dir = temp.path().join(why);
+            fs::create_dir(&dir).unwrap();
+            leaf(&dir, members);
+            fs::write(dir.join("cgroup.events"), events).unwrap();
+            let mut actuator = CgroupActuator::new(
+                DirectoryLeaf::open(&dir).unwrap(),
+                &all_controls(),
+                &settings(AllocationClass::Opportunistic),
+            );
+            let mut family = timed(75);
+            actuator
+                .apply(
+                    &mut family,
+                    ResourceKind::GpuCompute,
+                    YieldStep::Cap,
+                    Some(500),
+                )
+                .unwrap();
+            let (_, stopped) = off_shares(&mut actuator, &mut family, &dir, 4);
+            assert_eq!(read(&dir, "cgroup.freeze"), "0", "{why}");
+            assert!(stopped > 0.25, "{why}: stopped {stopped}");
+            let detail = actuator.take_detail().unwrap_or_default();
+            assert!(
+                detail.contains("rootless") && detail.contains(why),
+                "{why}: {detail}"
+            );
+        }
+    }
+
+    /// Full and Tracked report the same state for a GPU compute cap, so the policy
+    /// credits the applied duty alike (`applied_duty_credit`, plan "Item 028").
+    #[test]
+    fn full_and_tracked_report_a_gpu_compute_cap_alike() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "76\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut full = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut tracked =
+            cedegrid::actuation::RootlessActuator::new(&settings(AllocationClass::Opportunistic));
+        let mut reports = vec![];
+        for actuator in [&mut full as &mut dyn Actuator, &mut tracked] {
+            let mut family = timed(76);
+            let unavailable = actuator.unavailable(ResourceKind::GpuCompute);
+            let step = actuator
+                .apply(
+                    &mut family,
+                    ResourceKind::GpuCompute,
+                    YieldStep::Cap,
+                    Some(500),
+                )
+                .unwrap();
+            reports.push((
+                unavailable,
+                step,
+                actuator.applied_target(ResourceKind::GpuCompute),
+                actuator.step_code(ResourceKind::GpuCompute),
+            ));
+            actuator.release(&mut family).unwrap();
+        }
+        assert_eq!(reports[0], reports[1]);
+    }
+
     const MIB: u64 = 1024 * 1024;
 
     /// A leaf with 2048 MiB anonymous, 1024 MiB file and 100 MiB unevictable
