@@ -17,6 +17,8 @@ pub use gpu::GpuReleaseGuard;
 pub use gpu::external_gpu_process_identity;
 use gpu::*;
 mod managed;
+#[cfg(target_os = "linux")]
+mod processes;
 pub use managed::{CedegridCpu, ManagedCollector};
 #[cfg(target_os = "linux")]
 pub use managed::{own_process_cpu_ns, supervisor_cpu_ns};
@@ -62,6 +64,9 @@ pub struct Collector {
     gpu_principal_min_percent: u8,
     /// Every visible process, for principal aggregation only.
     processes: System,
+    /// Linux principals and external processes, one `stat` read per process (research R26).
+    #[cfg(target_os = "linux")]
+    process_table: Option<processes::ProcessTable>,
     /// External context memory per device and PID from the last GPU sample.
     external_gpu_memory: BTreeMap<String, BTreeMap<u32, u64>>,
     /// Measured external GPU compute per device and PID from the last GPU sample.
@@ -285,6 +290,8 @@ impl Collector {
             )
             .principal_min_percent,
             processes: System::new(),
+            #[cfg(target_os = "linux")]
+            process_table: processes::ProcessTable::new(),
             external_gpu_memory: BTreeMap::new(),
             external_gpu_compute: BTreeMap::new(),
             tracked_external: BTreeSet::new(),
@@ -300,6 +307,11 @@ impl Collector {
         Vec<PrincipalUsage>,
         Vec<crate::model::ExternalProcessMemory>,
     )> {
+        #[cfg(target_os = "linux")]
+        if let Some(table) = self.process_table.as_mut() {
+            let samples = table.sample();
+            return Some(self.principals_from(&samples));
+        }
         if !sysinfo::IS_SUPPORTED_SYSTEM {
             return None;
         }
@@ -324,24 +336,35 @@ impl Collector {
                 start_time: process.start_time(),
             })
             .collect();
+        Some(self.principals_from(&samples))
+    }
+
+    /// Principals and the external processes tracked for memory peaks, from one process sample.
+    fn principals_from(
+        &mut self,
+        samples: &[ProcessSample],
+    ) -> (
+        Vec<PrincipalUsage>,
+        Vec<crate::model::ExternalProcessMemory>,
+    ) {
         let external = external_memory_processes(
-            &samples,
+            samples,
             &self.external_gpu_memory,
             &self.managed_pids,
             &self.tracked_external,
             self.system.total_memory() / MIB,
         );
         self.tracked_external = external.iter().map(|p| (p.pid, p.start_time)).collect();
-        Some((
+        (
             aggregate_principals(
-                &samples,
+                samples,
                 &self.external_gpu_memory,
                 &self.external_gpu_compute,
                 owner_uid(),
                 &self.managed_pids,
             ),
             external,
-        ))
+        )
     }
 
     pub fn with_kernel(node_id: &str, config: crate::kernel::KernelConfig) -> Result<Self> {
@@ -763,11 +786,14 @@ impl Collector {
             );
             // The MPS control daemon may serve any device; its server and clients
             // appear in the device's process lists.
-            let mps = self
+            let listed_mps = self
                 .processes
                 .processes()
                 .values()
-                .any(|process| is_mps_process(&process.name().to_string_lossy()))
+                .any(|process| is_mps_process(&process.name().to_string_lossy()));
+            #[cfg(target_os = "linux")]
+            let listed_mps = listed_mps || self.process_table.as_ref().is_some_and(|t| t.mps);
+            let mps = listed_mps
                 || compute
                     .iter()
                     .chain(&graphics)
@@ -2927,5 +2953,112 @@ mod tests {
         assert!(used >= 100_000_000, "{used}");
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    /// An own process is verified through `/proc` once; later checks go through the pidfd held
+    /// since, a mismatched identity gets no handle, and an exited process loses its handle.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_handles_reverify_own_processes_without_rereading_identity() {
+        use std::cell::Cell;
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let identity = crate::supervision::process_identity(child.id(), "held", 0).unwrap();
+        let reads = Cell::new(0);
+        let open = |id: &crate::execution_model::ProcessIdentity| {
+            reads.set(reads.get() + 1);
+            verified_pidfd(id)
+        };
+        let mut handles = HeldHandles::default();
+        assert!(handles.verify_with(&identity, &open));
+        assert!(handles.verify_with(&identity, &open));
+        assert!(handles.alive(&identity));
+        assert_eq!(reads.get(), 1, "the second check reads no identity");
+        let tick = scheduler_tick_ns(None);
+        assert!(handles.clock_reading(&identity, 1, tick).is_some());
+        let mut other = identity.clone();
+        other.start_time += 1;
+        assert!(!handles.verify_with(&other, &open));
+        assert!(!handles.alive(&other));
+        assert!(handles.verify_with(&identity, &open));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!handles.verify_with(&identity, &open));
+        assert!(!handles.alive(&identity));
+        assert!(handles.clock_reading(&identity, 1, tick).is_none());
+        assert!(handles.is_empty());
+    }
+
+    /// A `/proc/<pid>/stat` line splits after the last parenthesis, whatever the command holds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stat_line_parses_whatever_the_command_holds() {
+        let line = "4242 (a (b) c) S 1 4242 4242 0 -1 4194304 10 0 0 0 150 50 0 0 20 0 3 0 98765 \
+                    1000000 512 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 2 0 0 0 0 0";
+        let fields = processes::parse_stat(line).unwrap();
+        assert_eq!(fields.cpu_ticks, 200);
+        assert_eq!(fields.start_ticks, 98765);
+        assert_eq!(fields.rss_pages, 512);
+        assert!(processes::parse_stat("4242 (truncated").is_none());
+    }
+
+    /// Per-process CPU is computed as sysinfo computes it: CPU ticks over the global ticks per
+    /// CPU, at most the CPU count (research R26).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_cpu_is_ticks_over_global_ticks_per_cpu() {
+        assert_eq!(processes::cpu_millicores(50, 400, 4), 500);
+        assert_eq!(processes::cpu_millicores(1000, 400, 4), 4000);
+        assert_eq!(processes::cpu_millicores(0, 400, 4), 0);
+        assert_eq!(processes::cpu_millicores(5, 0, 4), 4000);
+    }
+
+    /// The process table lists processes, never their threads, reads each process's UID once,
+    /// and gives a busy process its CPU from the second sample on (research R26, FR-059).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_process_table_counts_processes_once_and_reads_a_uid_once() {
+        let spin = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(800)));
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .unwrap();
+        let mut table = processes::ProcessTable::new().unwrap();
+        let first = table.sample();
+        let me = std::process::id();
+        let busy = child.id();
+        assert!(first.iter().all(|p| p.cpu_millicores == 0));
+        let threads: Vec<u32> = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|tid| *tid != me)
+            .collect();
+        assert!(!threads.is_empty(), "the test runs threads");
+        assert!(first.iter().any(|p| p.pid == me));
+        assert!(first.iter().all(|p| !threads.contains(&p.pid)));
+        let pids: BTreeSet<u32> = first.iter().map(|p| p.pid).collect();
+        assert_eq!(pids.len(), first.len(), "one entry per process");
+        let reads = table.uid_reads();
+        std::thread::sleep(Duration::from_millis(500));
+        let second = table.sample();
+        let child_cpu = second
+            .iter()
+            .find(|p| p.pid == busy)
+            .unwrap()
+            .cpu_millicores;
+        assert!(child_cpu >= 300, "{child_cpu}");
+        assert_eq!(
+            second.iter().find(|p| p.pid == me).unwrap().uid,
+            Some(unsafe { libc::getuid() })
+        );
+        assert!(
+            table.uid_reads() <= reads + 2,
+            "a UID is read once per process"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        spin.join().unwrap();
     }
 }

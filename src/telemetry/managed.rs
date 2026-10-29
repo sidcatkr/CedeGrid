@@ -98,6 +98,125 @@ pub fn supervisor_cpu_ns(
         .checked_add(u64::try_from(time.tv_nsec).ok()?)
 }
 
+/// Pidfds of own processes whose identity was checked through `/proc` once: later intervals
+/// re-verify through the handle, which denotes that process and no later one with its PID,
+/// instead of re-reading the identity (SC-014). An exited process or another identity goes
+/// through the full check again. Other platforms re-read the identity each time.
+#[derive(Default)]
+pub(super) struct HeldHandles {
+    #[cfg(target_os = "linux")]
+    handles: BTreeMap<
+        u32,
+        (
+            crate::execution_model::ProcessIdentity,
+            std::os::fd::OwnedFd,
+        ),
+    >,
+}
+
+impl HeldHandles {
+    /// Whether `identity` names a live own process: through its held pidfd, else a full check
+    /// that keeps the pidfd it opens.
+    pub(super) fn verify(&mut self, identity: &crate::execution_model::ProcessIdentity) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.verify_with(identity, &verified_pidfd)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::supervision::process_identity(
+                identity.pid,
+                &identity.assignment_id,
+                identity.generation,
+            )
+            .ok()
+            .as_ref()
+                == Some(identity)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn verify_with(
+        &mut self,
+        identity: &crate::execution_model::ProcessIdentity,
+        open: &dyn Fn(&crate::execution_model::ProcessIdentity) -> Option<std::os::fd::OwnedFd>,
+    ) -> bool {
+        match self.handles.get(&identity.pid) {
+            Some((held, pidfd)) if held == identity => {
+                if pidfd_alive(pidfd) == Some(true) {
+                    return true;
+                }
+                self.handles.remove(&identity.pid);
+            }
+            Some((_, pidfd)) if pidfd_alive(pidfd) != Some(true) => {
+                self.handles.remove(&identity.pid);
+            }
+            _ => {}
+        }
+        if self.handles.contains_key(&identity.pid) {
+            // A live process with another identity holds this PID.
+            return false;
+        }
+        match open(identity) {
+            Some(pidfd) => {
+                self.handles.insert(identity.pid, (identity.clone(), pidfd));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the held handle for `identity` still shows it alive; no `/proc` read.
+    pub(super) fn alive(&self, identity: &crate::execution_model::ProcessIdentity) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.handles
+                .get(&identity.pid)
+                .is_some_and(|(held, pidfd)| held == identity && pidfd_alive(pidfd) == Some(true))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::supervision::process_identity(
+                identity.pid,
+                &identity.assignment_id,
+                identity.generation,
+            )
+            .ok()
+            .as_ref()
+                == Some(identity)
+        }
+    }
+
+    /// The process clock read under the held pidfd, which shows the process alive before and
+    /// after the read.
+    #[cfg(target_os = "linux")]
+    pub(super) fn clock_reading(
+        &self,
+        identity: &crate::execution_model::ProcessIdentity,
+        cpus: u64,
+        tick_ns: u64,
+    ) -> Option<CpuReading> {
+        let (held, pidfd) = self.handles.get(&identity.pid)?;
+        if held != identity || pidfd_alive(pidfd) != Some(true) {
+            return None;
+        }
+        clock_reading_under(pidfd, identity.pid, cpus, tick_ns)
+    }
+
+    /// Drops the handles of processes no longer in `keep`.
+    pub(super) fn retain(&mut self, keep: &BTreeSet<u32>) {
+        #[cfg(target_os = "linux")]
+        self.handles.retain(|pid, _| keep.contains(pid));
+        #[cfg(not(target_os = "linux"))]
+        let _ = keep;
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+}
+
 /// Matching-scope live attribution for explicitly registered single-process jobs.
 /// The registry is checked on both sides of sampling to fence PID reuse. Process
 /// RSS is not subtracted from system memory: shared/file-backed pages would invent
@@ -118,6 +237,8 @@ pub struct ManagedCollector {
     precise_cpu: bool,
     /// The cgroup backend's delegated root, whose `cpu.stat` gives own CPU in Full.
     delegated_root: Option<std::path::PathBuf>,
+    /// Pidfds of own processes verified once, for each interval's re-verification.
+    handles: HeldHandles,
 }
 
 /// A CPU reading taken as the start of an allocation's next delta.
@@ -161,6 +282,7 @@ impl ManagedCollector {
             scoped_cpu: config.kernel.enabled,
             previous: BTreeMap::new(),
             window_baselines: BTreeMap::new(),
+            handles: HeldHandles::default(),
             delegated_root: config
                 .cgroup
                 .enabled
@@ -194,7 +316,7 @@ impl ManagedCollector {
             {
                 return (Some(reading), Some(members));
             }
-            if let Some(reading) = clock_reading(identity, cpus, self.tick_ns) {
+            if let Some(reading) = self.handles.clock_reading(identity, cpus, self.tick_ns) {
                 return (Some(reading), None);
             }
         }
@@ -231,14 +353,7 @@ impl ManagedCollector {
         let cpus = scope_cpus();
         for record in records {
             if let Some(identity) = &record.identity
-                && crate::supervision::process_identity(
-                    identity.pid,
-                    &identity.assignment_id,
-                    identity.generation,
-                )
-                .ok()
-                .as_ref()
-                    == Some(identity)
+                && self.handles.verify(identity)
                 && !self.previous.contains_key(&record.assignment_id)
                 && let (Some(reading), _) = self.read_cpu(
                     record,
@@ -370,15 +485,13 @@ impl ManagedCollector {
                 .iter()
                 .any(|record| record.assignment_id == *assignment)
         });
-        let verified: BTreeSet<_> = active
-            .iter()
-            .filter_map(|r| r.identity.as_ref())
-            .filter(|id| {
-                crate::supervision::process_identity(id.pid, &id.assignment_id, id.generation)
-                    .ok()
-                    .as_ref()
-                    == Some(id)
-            })
+        // Each own process is checked through `/proc` once, then through its held pidfd.
+        let identities: Vec<_> = active.iter().filter_map(|r| r.identity.as_ref()).collect();
+        self.handles
+            .retain(&identities.iter().map(|id| id.pid).collect::<BTreeSet<_>>());
+        let verified: BTreeSet<_> = identities
+            .into_iter()
+            .filter(|id| self.handles.verify(id))
             .map(|id| id.pid)
             .collect();
         self.collector.set_managed_identities(
@@ -506,16 +619,7 @@ impl ManagedCollector {
             let mut window_cpu = None;
             let bounds = (|| -> Option<(Resources, Resources)> {
                 let id = record.identity.as_ref()?;
-                if !verified.contains(&id.pid)
-                    || crate::supervision::process_identity(
-                        id.pid,
-                        &id.assignment_id,
-                        id.generation,
-                    )
-                    .ok()
-                    .as_ref()
-                        != Some(id)
-                {
+                if !verified.contains(&id.pid) || !self.handles.alive(id) {
                     return None;
                 }
                 if !process_scope_matches(id.pid, &snapshot, self.scoped_cpu) {
@@ -1143,10 +1247,25 @@ pub(super) fn clock_reading(
     tick_ns: u64,
 ) -> Option<CpuReading> {
     let pidfd = verified_pidfd(identity)?;
-    let threads_before = process_threads(identity.pid)?;
+    clock_reading_under(&pidfd, identity.pid, cpus, tick_ns)
+}
+
+/// The process clock of `pid`, read while `pidfd`, which denotes that process, shows it alive
+/// before and after the read.
+#[cfg(target_os = "linux")]
+fn clock_reading_under(
+    pidfd: &std::os::fd::OwnedFd,
+    pid: u32,
+    cpus: u64,
+    tick_ns: u64,
+) -> Option<CpuReading> {
+    if !pidfd_alive(pidfd)? {
+        return None;
+    }
+    let threads_before = process_threads(pid)?;
     let mut clock: libc::clockid_t = 0;
     // SAFETY: valid output pointer; the call only names the clock.
-    if unsafe { libc::clock_getcpuclockid(identity.pid as libc::pid_t, &mut clock) } != 0 {
+    if unsafe { libc::clock_getcpuclockid(pid as libc::pid_t, &mut clock) } != 0 {
         return None;
     }
     let mut time = libc::timespec {
@@ -1157,9 +1276,9 @@ pub(super) fn clock_reading(
     if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
         return None;
     }
-    let threads_after = process_threads(identity.pid)?;
+    let threads_after = process_threads(pid)?;
     // Still alive, so no other process held the PID during the read.
-    if !pidfd_alive(&pidfd)? {
+    if !pidfd_alive(pidfd)? {
         return None;
     }
     let ns = u64::try_from(time.tv_sec)

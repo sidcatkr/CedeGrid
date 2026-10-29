@@ -692,6 +692,23 @@ mod neutral {
         }
     }
 
+    /// Under saturation a satisfied principal using less than its recorded demand by more than
+    /// the contention floor counts at that demand in own work's allowance; without saturation,
+    /// or within the floor of its demand, at its usage (FR-021, SC-002).
+    #[test]
+    fn a_satisfied_principal_below_its_demand_under_saturation_counts_at_its_demand() {
+        let margin = 400;
+        let mut view = input(ResourceKind::Cpu, ContentionMode::Neutral, 8000, 235);
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 235)]);
+        view.satisfied = vec![(Some(2000), 1080)];
+        assert_eq!(allowance(&view), 8000 - 235 - margin);
+        view.saturated = true;
+        assert_eq!(allowance(&view), 8000 - 1080 - margin);
+        view.external = 1040;
+        view.principals = Some(vec![principal(Some(1000), 0), principal(Some(2000), 1040)]);
+        assert_eq!(allowance(&view), 8000 - 1040 - margin);
+    }
+
     #[test]
     fn own_work_keeps_its_share_and_idle_capacity_but_never_more_under_contention() {
         // Idle capacity is own work's to use, minus the Neutral margin (FR-021).
