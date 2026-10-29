@@ -917,7 +917,7 @@ mod runtime_steps {
         assert_eq!(step, YieldStep::Cap);
         assert_eq!(read(&dir, "cgroup.freeze"), "0", "the duty starts running");
         assert!(actuator.next_deadline().is_some());
-        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 6);
+        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 10);
         assert!((frozen - 0.5).abs() < 0.05, "frozen {frozen}");
         assert!(family.signals.is_empty());
         actuator
@@ -940,7 +940,7 @@ mod runtime_steps {
                 Some(500),
             )
             .unwrap();
-        let (frozen, stopped) = off_shares(&mut rootless, &mut family, &dir, 6);
+        let (frozen, stopped) = off_shares(&mut rootless, &mut family, &dir, 10);
         assert_eq!(frozen, 0.0, "no unauthorized write");
         assert!((stopped - 0.5).abs() < 0.05, "stopped {stopped}");
         rootless.release(&mut family).unwrap();
@@ -1008,7 +1008,7 @@ mod runtime_steps {
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
             .unwrap();
         gpu(&mut actuator, &mut family, YieldStep::Cap);
-        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 4);
+        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 10);
         assert!((frozen - 0.5).abs() < 0.05, "frozen {frozen}");
         assert_eq!(read(&dir, "cpu.max"), "25000 100000");
         gpu(&mut actuator, &mut family, YieldStep::None);
@@ -1021,7 +1021,7 @@ mod runtime_steps {
             .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
             .unwrap();
         assert_eq!(read(&dir, "cpu.max"), "max 100000");
-        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 6);
+        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 10);
         assert!((frozen - 0.5).abs() < 0.05, "frozen {frozen}");
         actuator.release(&mut family).unwrap();
         assert_eq!(read(&dir, "cgroup.freeze"), "0");
@@ -1060,7 +1060,7 @@ mod runtime_steps {
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
             .unwrap();
-        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 4);
+        let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 10);
         assert!((frozen - 0.5).abs() < 0.05, "frozen {frozen}");
         actuator
             .apply(&mut family, ResourceKind::GpuCompute, YieldStep::None, None)
@@ -1116,7 +1116,7 @@ mod runtime_steps {
                     .apply(&mut family, kind, YieldStep::Cap, target)
                     .unwrap();
             }
-            let (frozen, stopped) = off_shares(&mut actuator, &mut family, &dir, 6);
+            let (frozen, stopped) = off_shares(&mut actuator, &mut family, &dir, 10);
             assert_eq!(frozen, 0.0, "gpu first {gpu_first}");
             assert!(
                 (stopped - 0.75).abs() < 0.05,
@@ -1130,7 +1130,7 @@ mod runtime_steps {
             actuator
                 .apply(&mut family, reversed, YieldStep::None, None)
                 .unwrap();
-            let (frozen, stopped) = off_shares(&mut actuator, &mut family, &dir, 6);
+            let (frozen, stopped) = off_shares(&mut actuator, &mut family, &dir, 10);
             let left = if gpu_first { 0.25 } else { 0.75 };
             assert_eq!(frozen, 0.0, "gpu first {gpu_first}");
             assert!(
