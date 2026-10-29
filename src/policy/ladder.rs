@@ -218,6 +218,28 @@ impl<'a> Interval<'a> {
             .map(|a| judged(input, &self.charges, &key, a))
             .fold(0u64, u64::saturating_add);
         let (floor_breach, envelope_breach) = self.breaches(&key, judged_total);
+        // A breach episode that starts with own memory within its fair share is others'
+        // growth: its in-share tasks are asked once to save their progress (FR-075).
+        if kind.is_memory()
+            && floor_breach
+            && !self.prev.floor_breach_since.contains_key(&key)
+            && self
+                .memory_fair_share
+                .get(&key)
+                .is_some_and(|fair| judged_total <= *fair)
+        {
+            self.save_progress.extend(
+                input
+                    .allocations
+                    .iter()
+                    .filter(|a| {
+                        a.phase != AllocationPhase::Pending
+                            && a.phase != AllocationPhase::Draining
+                            && judged(input, &self.charges, &key, a) > 0
+                    })
+                    .map(|a| a.id.clone()),
+            );
+        }
         let mut cause = if held || gpu_unknown {
             YieldCause::UnknownMeasurement
         } else if floor_breach {

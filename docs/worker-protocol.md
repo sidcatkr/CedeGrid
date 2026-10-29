@@ -116,10 +116,14 @@ the poll. A managed child finds the current target in its own directory when it
 starts. `WorkerContext.resource_allowance()` and
 `on_resource_allowance(callback)` do the same for the allowance, once per new
 `allowance_sequence`; an allowance-only change never calls `on_resource_target`.
-`ResourceSignals.from_env()` needs only the two environment variables, so managed
-children can use it. The TypeScript names are `resourceTargets()`,
-`onResourceTarget()`, `resourceAllowance()`, `onResourceAllowance()` and
-`ResourceSignals.fromEnv()`.
+`on_save_progress(callback)` calls `callback(sequence)` once per new
+`save_progress_sequence`: free memory fell below a floor through others' growth while
+own work was within its fair share, so save progress now. It is not a drain and asks
+for no memory back, and a hook registered after a request was handled is not called
+for it. `ResourceSignals.from_env()` needs only the two environment variables, so
+managed children can use it. The TypeScript names are `resourceTargets()`,
+`onResourceTarget()`, `resourceAllowance()`, `onResourceAllowance()`,
+`onSaveProgress()` and `ResourceSignals.fromEnv()`.
 
 Call `safe_point()` or `draining()` at natural safe points, such as once per batch or
 per step. A call re-reads the target file only when its stat identity changed, so while

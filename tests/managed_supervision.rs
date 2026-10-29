@@ -1517,6 +1517,60 @@ child.wait(timeout=6,poll_interval=.01)
     );
 }
 
+/// A save-progress line raises the target file's `save_progress_sequence` once, with no
+/// target and apart from the allowance: the worker's hook fires once per new value and
+/// no target or allowance hook fires for it (FR-075).
+#[test]
+fn save_progress_lines_reach_the_worker_once_each() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(
+        dir.path(),
+        r#"
+import json,time
+from pathlib import Path
+from cedegrid import ResourceSignals
+d=Path.cwd();signals=ResourceSignals.from_env();targets=[];allowances=[];saves=[]
+signals.on_resource_target(lambda t: targets.append(t.sequence))
+signals.on_resource_allowance(lambda a: allowances.append(a.sequence))
+signals.on_save_progress(lambda sequence: saves.append(sequence))
+signals.draining()
+(d/'ready').write_text('1')
+while not (d/'stop').exists():
+    signals.draining()
+    time.sleep(0.005)
+(d/'seen').write_text(json.dumps({'targets':targets,'allowances':allowances,'saves':saves}))
+"#,
+    );
+    let mut script = AllowanceScript {
+        dir: dir.path().to_owned(),
+        commands: vec![
+            supervision::SupervisorCommand::SaveProgress,
+            allowance(1000, 2000),
+            supervision::SupervisorCommand::SaveProgress,
+        ],
+        sent: 0,
+        last: None,
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut script,
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    let seen: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("seen")).unwrap()).unwrap();
+    assert_eq!(
+        seen,
+        serde_json::json!({"targets": [], "allowances": [1], "saves": [1, 2]})
+    );
+}
+
 /// What the fake RAM cap holds, shared between its actuator and the test.
 #[derive(Default)]
 struct FakeRam {

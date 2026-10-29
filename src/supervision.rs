@@ -436,6 +436,8 @@ pub enum SupervisorCommand {
     Oom {
         preferred: bool,
     },
+    /// Ask the worker to save its progress now (FR-075).
+    SaveProgress,
 }
 #[cfg(unix)]
 struct LocalControl;

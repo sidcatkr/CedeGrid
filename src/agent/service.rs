@@ -1159,6 +1159,22 @@ impl AgentLoop<'_> {
                 }));
             }
         }
+        // A save-progress request goes once, as the policy lists it once per episode (FR-075).
+        for id in &decision.save_progress {
+            let Some(slot) = self.slots.get_mut(id.as_str()) else {
+                continue;
+            };
+            if slot.exited || slot.sequence == 0 || slot.drain_sent_at.is_some() {
+                continue;
+            }
+            if send(slot, &Control::SaveProgress).is_ok() {
+                emit(&serde_json::json!({
+                    "event": "save_progress",
+                    "task_id": slot.assignment.request.task_id,
+                    "assignment_id": slot.assignment.request.assignment_id,
+                }))?;
+            }
+        }
         Ok(())
     }
 

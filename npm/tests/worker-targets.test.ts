@@ -173,6 +173,42 @@ test('allowance hooks fire now and on each change, apart from targets', () => {
     finally { f.done(); }
 });
 
+test('save-progress hooks fire once per new value, apart from targets', () => {
+    const f = fixture();
+    try {
+        const targets: bigint[] = [];
+        const allowances: bigint[] = [];
+        const saves: bigint[] = [];
+        f.context.onResourceTarget(t => targets.push(t.sequence));
+        f.context.onResourceAllowance(a => allowances.push(a.sequence));
+        f.context.onSaveProgress(() => { throw new Error('hook failed'); });
+        f.context.onSaveProgress(sequence => saves.push(sequence));
+        const file: Record<string, unknown> = { version: 1, sequence: 0, deadline_unix_ms: 0, step: 'none', targets: {}, save_progress_sequence: 1 };
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        f.context.draining();
+        // A save-progress request is no target and no allowance; a failing hook stops nothing.
+        assert.deepEqual([targets, allowances, saves], [[], [], [1n]]);
+        assert.equal(f.context.resourceTargets(), null);
+        Object.assign(file, { allowance: { ram_mib: 20480 }, allowance_sequence: 1 });
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        assert.deepEqual([targets, allowances, saves], [[], [1n], [1n]]);
+        Object.assign(file, { save_progress_sequence: 2 });
+        writeFileSync(f.targetFile, JSON.stringify(file));
+        f.context.draining();
+        f.context.draining();
+        assert.deepEqual(saves, [1n, 2n]);
+        // A late subscriber is not asked again for a request already seen.
+        const late: bigint[] = [];
+        f.context.onSaveProgress(sequence => late.push(sequence));
+        f.context.draining();
+        assert.deepEqual(late, []);
+        assert.throws(() => f.context.onSaveProgress(undefined as unknown as () => void));
+    }
+    finally { f.done(); }
+});
+
 test('target file interop cases', () => {
     const cases = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).target_file_cases;
     const f = fixture();
@@ -186,6 +222,7 @@ test('target file interop cases', () => {
             const a = signals.resourceAllowance();
             assert.deepEqual(t && { sequence: Number(t.sequence), deadline_unix_ms: Number(t.deadlineUnixMs), step: t.step, cpu_millicores: number(t.cpuMillicores), ram_mib: number(t.ramMib), gpu_memory_mib: gpu(t.gpuMemoryMib) }, c.targets, c.id);
             assert.deepEqual(a && { sequence: Number(a.sequence), cpu_millicores: number(a.cpuMillicores), ram_mib: number(a.ramMib), gpu_memory_mib: gpu(a.gpuMemoryMib) }, c.allowance, c.id);
+            assert.equal(Number(signals.saveProgressSequence()), c.save_progress, c.id);
         }
     }
     finally { f.done(); }

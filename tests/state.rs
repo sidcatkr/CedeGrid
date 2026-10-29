@@ -83,6 +83,7 @@ fn observation() -> (Snapshot, Decision) {
         max_mode: None,
         allowances: Default::default(),
         oom_preferred: Default::default(),
+        save_progress: Default::default(),
         ram_fair_share_mib: None,
         cpu_admission_credit_millicores: 0,
     };

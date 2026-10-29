@@ -449,7 +449,8 @@ fn apply_control_commands(
             command @ (SupervisorCommand::Adjust { .. }
             | SupervisorCommand::Query
             | SupervisorCommand::Allowance { .. }
-            | SupervisorCommand::Oom { .. }) => runtime.push(command),
+            | SupervisorCommand::Oom { .. }
+            | SupervisorCommand::SaveProgress) => runtime.push(command),
         }
     }
     runtime
@@ -794,6 +795,11 @@ fn apply_runtime_commands(
                     && let Err(error) = targets.publish_allowance(directories)
                 {
                     eprintln!("resource allowance unavailable: {error:#}");
+                }
+            }
+            SupervisorCommand::SaveProgress => {
+                if let Err(error) = targets.publish_save_progress(directories) {
+                    eprintln!("save-progress request unavailable: {error:#}");
                 }
             }
             SupervisorCommand::Query => {

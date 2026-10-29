@@ -225,6 +225,33 @@ class ResourceTargetTests(unittest.TestCase):
         self.context.on_resource_allowance(lambda a: late.append(a.sequence))
         self.assertEqual(late, [2])
         self.assertEqual(self.context.resource_allowance().ram_mib, 16384)
+    def test_save_progress_hooks_fire_once_per_new_value_apart_from_targets(self):
+        targets, allowances, saves = [], [], []
+        self.context.on_resource_target(lambda t: targets.append(t.sequence))
+        self.context.on_resource_allowance(lambda a: allowances.append(a.sequence))
+        def failing(_): raise RuntimeError('hook failed')
+        self.context.on_save_progress(failing)
+        self.context.on_save_progress(lambda sequence: saves.append(sequence))
+        file = {'version':1,'sequence':0,'deadline_unix_ms':0,'step':'none','targets':{},
+                'save_progress_sequence':1}
+        self.write_file(file)
+        self.context.draining(); self.context.draining()
+        # A save-progress request is no target and no allowance; a failing hook stops nothing.
+        self.assertEqual((targets, allowances, saves), ([], [], [1]))
+        self.assertIsNone(self.context.resource_targets())
+        file.update(allowance={'ram_mib':20480}, allowance_sequence=1)
+        self.write_file(file); self.context.draining()
+        self.assertEqual((targets, allowances, saves), ([], [1], [1]))
+        file.update(save_progress_sequence=2)
+        self.write_file(file); self.context.draining(); self.context.draining()
+        self.assertEqual(saves, [1, 2])
+        # A late subscriber is not asked again for a request already seen.
+        late = []
+        self.context.on_save_progress(lambda sequence: late.append(sequence))
+        self.context.draining()
+        self.assertEqual(late, [])
+        with self.assertRaises(ValueError):
+            self.context.on_save_progress(None)
     def replace(self, sequence, mtime_ns=None, **targets):
         """Write a target the way the supervisor does: a new file renamed over the old one."""
         import json, os
@@ -289,6 +316,7 @@ class ResourceTargetTests(unittest.TestCase):
                 'ram_mib':allowance.ram_mib,'gpu_memory_mib':allowance.gpu_memory_mib}
             self.assertEqual(got_targets, case['targets'], case['id'])
             self.assertEqual(got_allowance, case['allowance'], case['id'])
+            self.assertEqual(signals.save_progress_sequence(), case['save_progress'], case['id'])
     def test_worker_context_cases(self):
         import json
         from cedegrid.errors import ValidationError

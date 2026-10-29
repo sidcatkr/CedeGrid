@@ -412,6 +412,8 @@ struct Interval<'a> {
     /// Own work's memory fair share beside each memory resource's principals, where its
     /// usage is known (FR-023).
     memory_fair_share: BTreeMap<ResourceKey, u64>,
+    /// In-share allocations to save their progress this interval (FR-075).
+    save_progress: BTreeSet<String>,
 }
 
 impl<'a> Interval<'a> {
@@ -493,6 +495,7 @@ impl<'a> Interval<'a> {
             headroom: Resources::default(),
             allowances: BTreeMap::new(),
             memory_fair_share: BTreeMap::new(),
+            save_progress: BTreeSet::new(),
         }
     }
 
@@ -531,6 +534,7 @@ impl<'a> Interval<'a> {
             max_mode: Some(config.contention.max_mode()),
             allowances: self.allowances,
             oom_preferred: self.next.oom_preferred.clone(),
+            save_progress: self.save_progress,
             ram_fair_share_mib: self.memory_fair_share.get(&ResourceKey::Ram).copied(),
             cpu_admission_credit_millicores: self
                 .cpu_credit

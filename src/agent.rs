@@ -192,6 +192,8 @@ enum Control {
     },
     /// Make the family preferred OOM victims, or return it to its baseline (FR-023).
     Oom { preferred: bool },
+    /// Ask the worker to save its progress (FR-075).
+    SaveProgress,
     /// The agent's latest GPU observation. Supervisors run no collector of
     /// their own; GPU launch rechecks use this (research R1).
     Observation {

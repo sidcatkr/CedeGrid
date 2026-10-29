@@ -6781,3 +6781,73 @@ mod floors_by_mode {
         }
     }
 }
+
+/// The save-progress signal (FR-075): in-share own tasks are listed once per floor-breach
+/// episode others' growth caused; an own-fault breach lists nobody.
+mod save_progress {
+    use super::*;
+    use cedegrid::contention::ContentionMode;
+    use std::collections::BTreeSet;
+
+    fn listed(mode: ContentionMode, own: [u64; 2], free: &[u64]) -> Vec<BTreeSet<String>> {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        let mut engine = PolicyEngine::new();
+        let input = PolicyInput {
+            allocations: vec![
+                allocation(
+                    "a",
+                    AllocationPhase::Running,
+                    resources(100, own[0], 0),
+                    Some(resources(100, own[0], 0)),
+                ),
+                allocation(
+                    "b",
+                    AllocationPhase::Running,
+                    resources(100, own[1], 0),
+                    Some(resources(100, own[1], 0)),
+                ),
+            ],
+            facts: rootless(&["a", "b"]),
+            ..PolicyInput::default()
+        };
+        free.iter()
+            .enumerate()
+            .map(|(i, available)| {
+                let mut snap = snapshot();
+                snap.available_ram_mib = Some(*available);
+                engine
+                    .evaluate(&cfg, &snap, &input, i as u64 * 500)
+                    .unwrap()
+                    .save_progress
+            })
+            .collect()
+    }
+
+    #[test]
+    fn in_share_tasks_are_listed_once_per_episode_others_caused() {
+        let both = BTreeSet::from(["a".to_string(), "b".to_string()]);
+        let none = BTreeSet::new();
+        for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+            // 14 000 MiB own is within its 15 500 MiB share; 17 500 MiB external breaches the
+            // floor twice, with a calm interval between.
+            assert_eq!(
+                listed(
+                    mode,
+                    [8_000, 6_000],
+                    &[10_000, 500, 500, 500, 10_000, 500, 500]
+                ),
+                [&none, &both, &none, &none, &none, &both, &none].map(Clone::clone),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_own_fault_breach_lists_nobody() {
+        // 16 000 MiB own is above its 15 500 MiB share beside 16 000 MiB external.
+        for listed in listed(ContentionMode::Performance, [10_000, 6_000], &[0, 0, 0]) {
+            assert!(listed.is_empty(), "{listed:?}");
+        }
+    }
+}

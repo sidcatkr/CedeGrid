@@ -293,6 +293,9 @@ pub struct ResourceTarget {
     pub allowance: Option<TargetAmounts>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub allowance_sequence: u64,
+    /// Rises once per save-progress request (FR-075).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub save_progress_sequence: u64,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -359,6 +362,7 @@ pub struct TargetChannel {
     deadline_unix_ms: u64,
     allowance: Option<TargetAmounts>,
     allowance_sequence: u64,
+    save_progress_sequence: u64,
 }
 
 impl TargetChannel {
@@ -407,6 +411,13 @@ impl TargetChannel {
         self.write(directories)
     }
 
+    /// Ask the worker to save its progress: the next save-progress sequence, with the
+    /// targets and allowance as last published (FR-075).
+    pub fn publish_save_progress(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
+        self.save_progress_sequence += 1;
+        self.write(directories)
+    }
+
     /// Write the current hints with the next sequence; no hints relax them.
     pub fn publish(&mut self, directories: &[std::path::PathBuf]) -> Result<()> {
         self.sequence += 1;
@@ -448,6 +459,7 @@ impl TargetChannel {
             targets,
             allowance: self.allowance.clone(),
             allowance_sequence: self.allowance_sequence,
+            save_progress_sequence: self.save_progress_sequence,
         };
         let mut result = Ok(());
         for directory in directories {

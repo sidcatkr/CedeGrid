@@ -199,28 +199,32 @@ function amounts(value: any): { cpu?: bigint; ram?: bigint; gpu: Record<string, 
         return null;
     return { cpu, ram, gpu: { ...gpu } };
 }
-/** Parse a target file into targets and allowance. A missing, invalid or
- * newer-version file is neither; sequence 0 means no target was published yet,
- * and an invalid allowance is ignored without losing the target. */
-function readSignals(path: string): [ResourceTargets | null, ResourceAllowance | null] {
+type Signals = [ResourceTargets | null, ResourceAllowance | null, bigint];
+/** Parse a target file into targets, allowance and the save-progress sequence. A missing,
+ * invalid or newer-version file is none of them; sequence 0 means no target was published
+ * yet, and an invalid allowance or save-progress sequence is ignored without losing the
+ * target. */
+function readSignals(path: string): Signals {
     let value: any;
     try {
         value = parseJson(readFileSync(path, 'utf8'));
     }
     catch {
-        return [null, null];
+        return [null, null, 0n];
     }
     if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1n)
-        return [null, null];
+        return [null, null, 0n];
     const { sequence, deadline_unix_ms: deadline, step } = value;
     const targets = amounts(value.targets);
     if (!amount(sequence) || !amount(deadline) || typeof step !== 'string' || !targets)
-        return [null, null];
+        return [null, null, 0n];
     const allowance = amounts(value.allowance);
     const allowanceSequence = value.allowance_sequence ?? 0n;
+    const saveProgress = value.save_progress_sequence ?? 0n;
     return [
         sequence > 0n ? { sequence, deadlineUnixMs: deadline, step, cpuMillicores: targets.cpu, ramMib: targets.ram, gpuMemoryMib: targets.gpu } : null,
         allowance && amount(allowanceSequence) && allowanceSequence > 0n ? { sequence: allowanceSequence, cpuMillicores: allowance.cpu, ramMib: allowance.ram, gpuMemoryMib: allowance.gpu } : null,
+        amount(saveProgress) ? saveProgress : 0n,
     ];
 }
 /** Drain and resource-target signals from CEDEGRID_DRAIN_FILE and
@@ -228,18 +232,20 @@ function readSignals(path: string): [ResourceTargets | null, ResourceAllowance |
 export class ResourceSignals {
     private readonly hooks: Array<(targets: ResourceTargets) => void> = [];
     private readonly allowanceHooks: Array<(allowance: ResourceAllowance) => void> = [];
+    private readonly saveHooks: Array<(sequence: bigint) => void> = [];
     private notified?: bigint;
     private allowanceNotified?: bigint;
+    private saveNotified = 0n;
     private acked?: bigint;
     private identity?: string | null;
-    private cached: [ResourceTargets | null, ResourceAllowance | null] = [null, null];
+    private cached: Signals = [null, null, 0n];
     constructor(readonly drainFile?: string, readonly targetFile?: string) { }
     static fromEnv(): ResourceSignals { return new ResourceSignals(process.env.CEDEGRID_DRAIN_FILE || undefined, process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined); }
     /** Parse the file only when its stat identity changed: the supervisor replaces it by
      * rename, so a new target always has a new inode. */
-    private read(): [ResourceTargets | null, ResourceAllowance | null] {
+    private read(): Signals {
         if (!this.targetFile)
-            return [null, null];
+            return [null, null, 0n];
         let identity: string | null = null;
         try {
             const stat = statSync(this.targetFile, { bigint: true, throwIfNoEntry: false });
@@ -250,13 +256,15 @@ export class ResourceSignals {
         }
         if (identity !== this.identity) {
             this.identity = identity;
-            this.cached = identity ? readSignals(this.targetFile) : [null, null];
+            this.cached = identity ? readSignals(this.targetFile) : [null, null, 0n];
         }
         this.acknowledge(this.cached[0] ? this.cached[0].sequence : 0n);
         return this.cached;
     }
     resourceTargets(): ResourceTargets | null { return this.read()[0]; }
     resourceAllowance(): ResourceAllowance | null { return this.read()[1]; }
+    /** How many save-progress requests the supervisor has published, 0n for none. */
+    saveProgressSequence(): bigint { return this.read()[2]; }
     /** Call `callback` now with the current target, then once per new one. */
     onResourceTarget(callback: (targets: ResourceTargets) => void): void {
         if (typeof callback !== 'function')
@@ -284,9 +292,17 @@ export class ResourceSignals {
         else
             ResourceSignals.call(callback, allowance);
     }
+    /** Call `callback(sequence)` once per new save-progress request (FR-075): save
+     * progress now. It is not a drain and asks for no memory back. */
+    onSaveProgress(callback: (sequence: bigint) => void): void {
+        if (typeof callback !== 'function')
+            throw new ValidationError('save-progress callback must be a function');
+        this.saveHooks.push(callback);
+        this.poll();
+    }
     /** Read the file and call each hook once per new sequence of its kind. */
     poll(): ResourceTargets | null {
-        const [targets, allowance] = this.read();
+        const [targets, allowance, saveProgress] = this.read();
         if (targets && (this.notified === undefined || targets.sequence > this.notified)) {
             this.notified = targets.sequence;
             for (const callback of [...this.hooks])
@@ -296,6 +312,11 @@ export class ResourceSignals {
             this.allowanceNotified = allowance.sequence;
             for (const callback of [...this.allowanceHooks])
                 ResourceSignals.call(callback, allowance);
+        }
+        if (saveProgress > this.saveNotified && this.saveHooks.length > 0) {
+            this.saveNotified = saveProgress;
+            for (const callback of [...this.saveHooks])
+                ResourceSignals.call(callback, saveProgress);
         }
         return targets;
     }
@@ -354,6 +375,8 @@ export class WorkerContext {
     resourceAllowance(): ResourceAllowance | null { return this.signals.resourceAllowance(); }
     /** Call `callback(allowance)` now, then once per new allowance, during drain polls (FR-071). */
     onResourceAllowance(callback: (allowance: ResourceAllowance) => void): void { this.signals.onResourceAllowance(callback); }
+    /** Call `callback(sequence)` once per new save-progress request, during drain polls (FR-075). */
+    onSaveProgress(callback: (sequence: bigint) => void): void { this.signals.onSaveProgress(callback); }
     draining(): boolean { this.signals.poll(); const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
         this.drainNotified = true;
         for (const callback of this.drainHooks)

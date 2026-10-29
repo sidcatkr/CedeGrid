@@ -101,7 +101,12 @@
       "id": "CFG-07-performance-loads-without-acknowledgement",
       "kind": "node",
       "toml": "config_version = 1\n[contention]\ndefault_mode = \"performance\"\n",
-      "expected": {"cpu_weight": {"kind": "integer", "decimal": "10"}}
+      "expected": {
+        "cpu_weight": {
+          "kind": "integer",
+          "decimal": "10"
+        }
+      }
     },
     {
       "id": "CFG-07-noise-tolerance-bound",
@@ -779,7 +784,8 @@
         "gpu_memory_mib": {
           "GPU-a": 18432
         }
-      }
+      },
+      "save_progress": 0
     },
     {
       "id": "TF-02",
@@ -816,7 +822,8 @@
         "gpu_memory_mib": {
           "GPU-a": 18432
         }
-      }
+      },
+      "save_progress": 0
     },
     {
       "id": "TF-03",
@@ -836,7 +843,8 @@
         "ram_mib": null,
         "gpu_memory_mib": {}
       },
-      "allowance": null
+      "allowance": null,
+      "save_progress": 0
     },
     {
       "id": "TF-04",
@@ -862,7 +870,8 @@
         "ram_mib": null,
         "gpu_memory_mib": {}
       },
-      "allowance": null
+      "allowance": null,
+      "save_progress": 0
     },
     {
       "id": "TF-05",
@@ -883,7 +892,47 @@
         "allowance_sequence": 1
       },
       "targets": null,
-      "allowance": null
+      "allowance": null,
+      "save_progress": 0
+    },
+    {
+      "id": "TF-06",
+      "description": "A save-progress request without a target or an allowance.",
+      "file": {
+        "version": 1,
+        "sequence": 0,
+        "deadline_unix_ms": 0,
+        "step": "none",
+        "targets": {},
+        "save_progress_sequence": 1
+      },
+      "targets": null,
+      "allowance": null,
+      "save_progress": 1
+    },
+    {
+      "id": "TF-07",
+      "description": "An invalid save-progress sequence is ignored and the target kept.",
+      "file": {
+        "version": 1,
+        "sequence": 7,
+        "deadline_unix_ms": 1793000000000,
+        "step": "hint",
+        "targets": {
+          "ram_mib": 4096
+        },
+        "save_progress_sequence": -1
+      },
+      "targets": {
+        "sequence": 7,
+        "deadline_unix_ms": 1793000000000,
+        "step": "hint",
+        "cpu_millicores": null,
+        "ram_mib": 4096,
+        "gpu_memory_mib": {}
+      },
+      "allowance": null,
+      "save_progress": 0
     }
   ],
   "worker_context_cases": [

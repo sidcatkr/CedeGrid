@@ -116,25 +116,28 @@ def _amounts(value):
 
 
 def _read_signals(path: Path):
-    """Parse a target file into (targets, allowance). A missing, invalid or
-    newer-version file is neither; sequence 0 means no target was published yet,
-    and an invalid allowance is ignored without losing the target."""
+    """Parse a target file into (targets, allowance, save-progress sequence). A missing,
+    invalid or newer-version file is none of them; sequence 0 means no target was
+    published yet, and an invalid allowance or save-progress sequence is ignored without
+    losing the target."""
     from .codec import parse_json
     try:
         value = parse_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
-        return None, None
+        return None, None, 0
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
-        return None, None
+        return None, None, 0
     sequence, deadline, step = (value.get(k) for k in ("sequence", "deadline_unix_ms", "step"))
     def amount(v): return type(v) is int and v >= 0
     targets = _amounts(value.get("targets"))
     if not (amount(sequence) and amount(deadline) and type(step) is str and targets is not None):
-        return None, None
+        return None, None, 0
     allowance, allowance_sequence = _amounts(value.get("allowance")), value.get("allowance_sequence", 0)
     allowance = (ResourceAllowance(allowance_sequence, *allowance)
                  if allowance is not None and amount(allowance_sequence) and allowance_sequence > 0 else None)
-    return (ResourceTargets(sequence, deadline, step, *targets) if sequence > 0 else None), allowance
+    save_progress = value.get("save_progress_sequence", 0)
+    return ((ResourceTargets(sequence, deadline, step, *targets) if sequence > 0 else None), allowance,
+            save_progress if amount(save_progress) else 0)
 
 
 class ResourceSignals:
@@ -145,7 +148,8 @@ class ResourceSignals:
         self.target_file = Path(target_file) if target_file else None
         self._hooks, self._notified, self._acked = [], None, None
         self._allowance_hooks, self._allowance_notified = [], None
-        self._identity, self._cached = (), (None, None)
+        self._save_hooks, self._save_notified = [], 0
+        self._identity, self._cached = (), (None, None, 0)
 
     @classmethod
     def from_env(cls):
@@ -156,7 +160,7 @@ class ResourceSignals:
         """Parse the file only when its stat identity changed: the supervisor replaces it
         by rename, so a new target always has a new inode."""
         if self.target_file is None:
-            return None, None
+            return None, None, 0
         try:
             stat = self.target_file.stat()
             identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
@@ -164,16 +168,19 @@ class ResourceSignals:
             identity = None
         if identity != self._identity:
             self._identity = identity
-            self._cached = _read_signals(self.target_file) if identity else (None, None)
-        targets, allowance = self._cached
-        self._acknowledge(targets.sequence if targets else 0)
-        return targets, allowance
+            self._cached = _read_signals(self.target_file) if identity else (None, None, 0)
+        self._acknowledge(self._cached[0].sequence if self._cached[0] else 0)
+        return self._cached
 
     def resource_targets(self) -> ResourceTargets | None:
         return self._read()[0]
 
     def resource_allowance(self) -> ResourceAllowance | None:
         return self._read()[1]
+
+    def save_progress_sequence(self) -> int:
+        """How many save-progress requests the supervisor has published, 0 for none."""
+        return self._read()[2]
 
     def on_resource_target(self, callback):
         """Call `callback(targets)` now with the current target, then once per new one."""
@@ -202,9 +209,17 @@ class ResourceSignals:
         else:
             self._call(callback, allowance)
 
+    def on_save_progress(self, callback):
+        """Call `callback(sequence)` once per new save-progress request (FR-075): save
+        progress now. It is not a drain and asks for no memory back."""
+        if not callable(callback):
+            raise ValueError("save-progress callback must be callable")
+        self._save_hooks.append(callback)
+        self.poll()
+
     def poll(self) -> ResourceTargets | None:
         """Read the file and call each hook once per new sequence of its kind."""
-        targets, allowance = self._read()
+        targets, allowance, save_progress = self._read()
         if targets is not None and (self._notified is None or targets.sequence > self._notified):
             self._notified = targets.sequence
             for callback in list(self._hooks):
@@ -214,6 +229,10 @@ class ResourceSignals:
             self._allowance_notified = allowance.sequence
             for callback in list(self._allowance_hooks):
                 self._call(callback, allowance)
+        if save_progress > self._save_notified and self._save_hooks:
+            self._save_notified = save_progress
+            for callback in list(self._save_hooks):
+                self._call(callback, save_progress)
         return targets
 
     def draining(self) -> bool:
@@ -305,6 +324,11 @@ class WorkerContext:
         """Call `callback(allowance)` now with the current allowance, then once per
         new one, during drain polls (FR-071)."""
         self._signals.on_resource_allowance(callback)
+
+    def on_save_progress(self, callback):
+        """Call `callback(sequence)` once per new save-progress request, during drain
+        polls (FR-075)."""
+        self._signals.on_save_progress(callback)
 
     def draining(self):
         self._signals.poll()

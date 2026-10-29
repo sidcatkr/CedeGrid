@@ -56,7 +56,8 @@ impl SupervisorControl for PipeControl {
                 Control::Adjust { .. }
                 | Control::Query
                 | Control::Allowance { .. }
-                | Control::Oom { .. } => {}
+                | Control::Oom { .. }
+                | Control::SaveProgress => {}
                 Control::Authorize {
                     lease,
                     expires_monotonic_ms,
@@ -286,6 +287,9 @@ impl PipeControl {
                 }
                 Ok(Incoming::Control(Control::Oom { preferred })) => {
                     commands.push(SupervisorCommand::Oom { preferred })
+                }
+                Ok(Incoming::Control(Control::SaveProgress)) => {
+                    commands.push(SupervisorCommand::SaveProgress)
                 }
                 Ok(Incoming::Control(Control::Authorize { .. })) => {}
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),

@@ -1428,8 +1428,9 @@ fn legacy_gpu_execution_modes_are_interpreted_with_a_warning() {
 }
 
 /// The supervisor writes the target files the SDKs read: a fresh channel with an
-/// allowance writes exactly TF-01, and every valid case round-trips through the
-/// writer's type (contracts/resource-target-file.md, FR-071).
+/// allowance writes exactly TF-01, one with a save-progress request TF-06, and every
+/// valid case round-trips through the writer's type (contracts/resource-target-file.md,
+/// FR-071, FR-075).
 #[test]
 fn the_supervisor_writes_the_target_files_the_sdks_read() {
     use cedegrid::actuation::{ResourceTarget, TARGET_FILE, TargetChannel};
@@ -1445,7 +1446,15 @@ fn the_supervisor_writes_the_target_files_the_sdks_read() {
     let written: Value =
         serde_json::from_slice(&fs::read(dir.path().join(TARGET_FILE)).unwrap()).unwrap();
     assert_eq!(written, tf01["file"]);
-    for id in ["TF-01", "TF-02", "TF-03"] {
+    // A save-progress request on a fresh channel writes exactly TF-06 (FR-075).
+    let fresh = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    TargetChannel::new(5000)
+        .publish_save_progress(&[fresh.path().to_owned()])
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&fs::read(fresh.path().join(TARGET_FILE)).unwrap()).unwrap();
+    assert_eq!(written, case("TF-06")["file"]);
+    for id in ["TF-01", "TF-02", "TF-03", "TF-06"] {
         let file = case(id)["file"].clone();
         let target: ResourceTarget = serde_json::from_value(file.clone()).unwrap();
         assert_eq!(serde_json::to_value(&target).unwrap(), file, "{id}");
