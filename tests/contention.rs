@@ -1049,6 +1049,14 @@ mod guaranteed_policy {
     use super::*;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
 
+    /// These tests test the floors first, which hold in Neutral; Performance keeps in-share
+    /// memory (FR-023, tests/policy.rs `floors_by_mode`).
+    fn config() -> Config {
+        let mut result = super::config();
+        result.contention.default_mode = ContentionMode::Neutral;
+        result
+    }
+
     fn ram(id: &str, class: AllocationClass, phase: AllocationPhase, mib: u64) -> Allocation {
         let resources = Resources {
             ram_mib: mib,
@@ -2782,7 +2790,15 @@ mod ramp {
 mod hints {
     use super::*;
     use crate::snapshot::PolicyEngine;
-    use cedegrid::contention::{ResourceKey, YieldCause, YieldStep};
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
+
+    /// These tests test the floors first, which hold in Neutral; Performance keeps in-share
+    /// memory (FR-023, tests/policy.rs `floors_by_mode`).
+    fn config() -> Config {
+        let mut result = super::config();
+        result.contention.default_mode = ContentionMode::Neutral;
+        result
+    }
 
     /// The worker's RAM action at each interval: step, target and cause.
     type Steps = Vec<(u64, Option<(YieldStep, Option<u64>, YieldCause)>)>;
@@ -2905,6 +2921,14 @@ mod ram_cap {
     use super::*;
     use crate::snapshot::PolicyEngine;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldCause, YieldStep};
+
+    /// These tests test the floors first, which hold in Neutral; Performance keeps in-share
+    /// memory (FR-023, tests/policy.rs `floors_by_mode`).
+    fn config() -> Config {
+        let mut result = super::config();
+        result.contention.default_mode = ContentionMode::Neutral;
+        result
+    }
 
     type Action = Option<(YieldStep, Option<u64>, YieldCause)>;
 

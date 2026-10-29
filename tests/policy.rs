@@ -6548,3 +6548,236 @@ mod oom_order {
         );
     }
 }
+
+/// Floors by mode (FR-023, FR-024, FR-063, FR-065): in Performance a floor breach steps own
+/// memory only down to its fair share; Yield First and Neutral keep the floors first.
+mod floors_by_mode {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    fn config_in(mode: ContentionMode) -> Config {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        cfg
+    }
+
+    /// Facts for workers that take a hint and observe the drain file, without a cap.
+    fn hinted(ids: &[&str]) -> BTreeMap<String, AllocationFacts> {
+        ids.iter()
+            .map(|id| {
+                let mut facts = AllocationFacts {
+                    hint_ready: true,
+                    observes_drain: true,
+                    ..AllocationFacts::default()
+                };
+                facts
+                    .unavailable
+                    .insert(ResourceKey::Ram, [YieldStep::Cap].into());
+                (id.to_string(), facts)
+            })
+            .collect()
+    }
+
+    fn ram_job(id: &str, class: AllocationClass, mib: u64) -> Allocation {
+        let mut job = allocation(
+            id,
+            AllocationPhase::Running,
+            resources(100, mib, 0),
+            Some(resources(100, mib, 0)),
+        );
+        job.class = class;
+        job
+    }
+
+    /// Every RAM action over `until_ms`, with external usage leaving `available` MiB free
+    /// on 32 000 MiB with a 1 000 MiB floor.
+    fn ram_actions(
+        cfg: &Config,
+        jobs: &[Allocation],
+        facts: BTreeMap<String, AllocationFacts>,
+        available: u64,
+        until_ms: u64,
+    ) -> Vec<(u64, YieldAction)> {
+        let mut engine = PolicyEngine::new();
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(available);
+        let input = PolicyInput {
+            allocations: jobs.to_vec(),
+            facts,
+            ..PolicyInput::default()
+        };
+        let mut actions = Vec::new();
+        for now in (0..=until_ms).step_by(500) {
+            let decision = engine.evaluate(cfg, &snap, &input, now).unwrap();
+            assert!(
+                codes(&decision, "ram").contains(&"floor_breach".to_string()),
+                "at {now}: {:?}",
+                decision.resources
+            );
+            actions.extend(
+                decision
+                    .actions
+                    .into_iter()
+                    .filter(|a| a.resource == ResourceKey::Ram)
+                    .map(|a| (now, a)),
+            );
+        }
+        actions
+    }
+
+    /// Own work holds 14 000 MiB, within its 15 500 MiB fair share, and external growth to
+    /// 17 500 MiB or more breaches the floor. In Performance nothing of own work is hinted,
+    /// drained or sent TERM, Guaranteed or not, on the critical path too; Yield First and
+    /// Neutral step it.
+    #[test]
+    fn in_share_own_memory_keeps_its_place_for_a_breach_others_caused() {
+        for class in [AllocationClass::Opportunistic, AllocationClass::Guaranteed] {
+            let jobs = [ram_job("a", class, 8_000), ram_job("b", class, 6_000)];
+            // 500 MiB free is a breach; 0 MiB free is critical (FR-063).
+            for available in [500, 0] {
+                for facts in [hinted(&["a", "b"]), rootless(&["a", "b"])] {
+                    let kept = ram_actions(
+                        &config_in(ContentionMode::Performance),
+                        &jobs,
+                        facts.clone(),
+                        available,
+                        30_000,
+                    );
+                    assert!(kept.is_empty(), "{class:?} at {available}: {kept:?}");
+                    for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+                        let stepped =
+                            ram_actions(&config_in(mode), &jobs, facts.clone(), available, 30_000);
+                        assert!(
+                            !stepped.is_empty(),
+                            "{mode:?} {class:?} at {available} steps own memory"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Own work holds 15 800 MiB beside 15 600 MiB external, 300 MiB above its 15 500 MiB fair
+    /// share, and the floor needs 400 MiB. Performance hints the 300 MiB and no more; Neutral
+    /// hints all 400 MiB.
+    #[test]
+    fn own_memory_above_its_fair_share_steps_down_to_it_and_no_further() {
+        let jobs = [
+            ram_job("a", AllocationClass::Opportunistic, 9_800),
+            ram_job("b", AllocationClass::Opportunistic, 6_000),
+        ];
+        let first = |mode| {
+            ram_actions(&config_in(mode), &jobs, hinted(&["a", "b"]), 600, 0)
+                .into_iter()
+                .map(|(_, a)| (a.allocation_id, a.step, a.target))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            first(ContentionMode::Performance),
+            [("b".to_string(), YieldStep::Hint, Some(5_700))]
+        );
+        assert_eq!(
+            first(ContentionMode::Neutral),
+            [("b".to_string(), YieldStep::Hint, Some(5_600))]
+        );
+    }
+
+    /// GPU memory: own work's 6 000 MiB is within its fair share of the device beside
+    /// 9 500 MiB external, which breaches the 1 000 MiB floor. Performance leaves own work
+    /// alone; Neutral steps it.
+    #[test]
+    fn in_share_gpu_memory_keeps_its_place_for_a_breach_others_caused() {
+        let job = allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 1_000, 6_000),
+            Some(resources(100, 1_000, 6_000)),
+        );
+        let facts = BTreeMap::from([(
+            "job".to_string(),
+            AllocationFacts {
+                hint_ready: true,
+                observes_drain: true,
+                ..AllocationFacts::default()
+            },
+        )]);
+        let gpu_actions = |mode| {
+            let cfg = config_in(mode);
+            let mut engine = PolicyEngine::new();
+            let input = PolicyInput {
+                allocations: vec![job.clone()],
+                facts: facts.clone(),
+                ..PolicyInput::default()
+            };
+            let mut actions = Vec::new();
+            for now in (0..=20_000).step_by(500) {
+                let mut snap = gpu_snapshot();
+                snap.gpus[0].utilization_percent = Some(0);
+                snap.gpus[0].external_process_ids = Some(vec![4242]);
+                // External usage grows from 3 000 to 9 500 MiB after the first second.
+                snap.gpus[0].used_memory_mib = Some(if now < 1_000 { 9_000 } else { 15_500 });
+                let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+                actions.extend(
+                    decision
+                        .actions
+                        .into_iter()
+                        .filter(|a| a.resource == ResourceKey::GpuMemory("GPU-test".into())),
+                );
+            }
+            actions
+        };
+        let kept = gpu_actions(ContentionMode::Performance);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert!(!gpu_actions(ContentionMode::Neutral).is_empty());
+    }
+
+    /// What own work keeps of RAM after this interval's steps.
+    fn kept(cfg: &Config, jobs: &[Allocation], available: u64) -> u64 {
+        let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+        let total: u64 = jobs.iter().map(|j| j.requested.ram_mib).sum();
+        let freed: u64 = ram_actions(cfg, jobs, hinted(&ids), available, 0)
+            .into_iter()
+            .map(|(_, action)| {
+                let amount = jobs
+                    .iter()
+                    .find(|j| j.id == action.allocation_id)
+                    .map_or(0, |j| j.requested.ram_mib);
+                match action.step {
+                    YieldStep::Hint | YieldStep::Cap => {
+                        amount.saturating_sub(action.target.unwrap_or(amount))
+                    }
+                    _ => amount,
+                }
+            })
+            .sum();
+        total.saturating_sub(freed)
+    }
+
+    /// Own memory in Yield First ≤ Neutral ≤ Performance for every breach (FR-065).
+    #[test]
+    fn own_memory_keeps_the_mode_order_through_a_breach() {
+        for a in (2_000..=14_000).step_by(3_000) {
+            for b in (1_000..=7_000).step_by(2_000) {
+                let jobs = [
+                    ram_job("a", AllocationClass::Opportunistic, a),
+                    ram_job("b", AllocationClass::Opportunistic, b),
+                ];
+                for available in [0, 300, 700] {
+                    if a + b > 32_000 - available {
+                        continue;
+                    }
+                    let [yield_first, neutral, performance] = [
+                        ContentionMode::YieldFirst,
+                        ContentionMode::Neutral,
+                        ContentionMode::Performance,
+                    ]
+                    .map(|mode| kept(&config_in(mode), &jobs, available));
+                    assert!(
+                        yield_first <= neutral && neutral <= performance,
+                        "a {a} b {b} free {available}: {yield_first} {neutral} {performance}"
+                    );
+                }
+            }
+        }
+    }
+}

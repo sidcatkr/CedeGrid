@@ -21,7 +21,7 @@ impl<'a> Interval<'a> {
             self.next.oom_preferred = running().map(|a| a.id.clone()).collect();
             return;
         }
-        let Some(fair) = self.ram_fair_share else {
+        let Some(fair) = self.memory_fair_share.get(&ResourceKey::Ram).copied() else {
             self.next.oom_preferred = self.prev.oom_preferred.clone();
             return;
         };
@@ -241,11 +241,35 @@ impl<'a> Interval<'a> {
             .fold(self.unknown_charge.cpu_millicores, u64::saturating_add);
         // Running work yields for what it holds, not for its charge: a
         // charge-only shortfall blocks admission and steps nothing.
-        let usage_excess = if kind == ResourceKind::Cpu {
+        let mut usage_excess = if kind == ResourceKind::Cpu {
             cpu_usage.saturating_sub(self.budget.cpu_millicores)
         } else {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
+        // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes only own
+        // memory above its fair share; in-share memory of work in those modes stays. The
+        // envelope still applies in full.
+        if cause == YieldCause::FloorBreach
+            && governing(config, kind) >= ContentionMode::Performance
+            && let Some(fair) = self.memory_fair_share.get(&key).copied()
+        {
+            let protected = input
+                .allocations
+                .iter()
+                .filter(|a| {
+                    a.phase != AllocationPhase::Pending
+                        && a.phase != AllocationPhase::Draining
+                        && self.allocation_modes[&a.id][&kind] >= ContentionMode::Performance
+                })
+                .map(|a| judged(input, &self.charges, &key, a))
+                .fold(0u64, u64::saturating_add)
+                .min(fair);
+            let envelope_excess = input.envelope.as_ref().map_or(0, |envelope| {
+                judged_total.saturating_sub(amount_of(&key, envelope))
+            });
+            usage_excess =
+                usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
+        }
         if usage_excess > 0 {
             note_excess(&mut self.over_target, &key, usage_excess);
         }
@@ -547,12 +571,22 @@ impl<'a> Interval<'a> {
     }
 
     /// What a job's own mode allows it on a resource; Guaranteed keeps its CPU
-    /// request.
+    /// request, and memory in Performance and Aggressive its fair share (FR-023).
     fn ceiling(&self, key: &ResourceKey, allocation: &Allocation) -> Option<u64> {
         let kind = key.kind();
-        self.mode_targets.get(key).map(|targets| {
-            targets[&self.allocation_modes[&allocation.id][&kind]].max(kept_cpu(kind, allocation))
-        })
+        let mode = self.allocation_modes[&allocation.id][&kind];
+        let fair = self
+            .memory_fair_share
+            .get(key)
+            .filter(|_| {
+                mode >= ContentionMode::Performance
+                    && governing(self.config, kind) >= ContentionMode::Performance
+            })
+            .copied()
+            .unwrap_or(0);
+        self.mode_targets
+            .get(key)
+            .map(|targets| targets[&mode].max(kept_cpu(kind, allocation)).max(fair))
     }
 
     /// One victim's next step on a resource, and what it frees of `remaining`.

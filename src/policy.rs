@@ -409,8 +409,9 @@ struct Interval<'a> {
     peak_excess: BTreeMap<ResourceKey, u64>,
     headroom: Resources,
     allowances: BTreeMap<String, ResourceAmounts>,
-    /// Own work's RAM fair share beside the RAM principals, when RAM is known.
-    ram_fair_share: Option<u64>,
+    /// Own work's memory fair share beside each memory resource's principals, where its
+    /// usage is known (FR-023).
+    memory_fair_share: BTreeMap<ResourceKey, u64>,
 }
 
 impl<'a> Interval<'a> {
@@ -491,7 +492,7 @@ impl<'a> Interval<'a> {
             peak_excess: BTreeMap::new(),
             headroom: Resources::default(),
             allowances: BTreeMap::new(),
-            ram_fair_share: None,
+            memory_fair_share: BTreeMap::new(),
         }
     }
 
@@ -530,7 +531,7 @@ impl<'a> Interval<'a> {
             max_mode: Some(config.contention.max_mode()),
             allowances: self.allowances,
             oom_preferred: self.next.oom_preferred.clone(),
-            ram_fair_share_mib: self.ram_fair_share,
+            ram_fair_share_mib: self.memory_fair_share.get(&ResourceKey::Ram).copied(),
             cpu_admission_credit_millicores: self
                 .cpu_credit
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX))

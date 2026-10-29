@@ -861,7 +861,10 @@ impl<'a> Interval<'a> {
         self.mode_targets
             .insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
         self.budget.ram_mib = own_allowance(&view, &thresholds);
-        self.ram_fair_share = Some(crate::contention::neutral_share(&view, &thresholds));
+        self.memory_fair_share.insert(
+            ResourceKey::Ram,
+            crate::contention::neutral_share(&view, &thresholds),
+        );
     }
 
     /// The operator envelope bounds own work per resource (FR-057). Each floor,
@@ -1386,6 +1389,10 @@ impl<'a> Interval<'a> {
             self.mode_targets.insert(
                 key.clone(),
                 targets_of(&view, &thresholds, envelope_gpu.unwrap_or(u64::MAX)),
+            );
+            self.memory_fair_share.insert(
+                key.clone(),
+                crate::contention::neutral_share(&view, &thresholds),
             );
             own_allowance(&view, &thresholds)
         };
