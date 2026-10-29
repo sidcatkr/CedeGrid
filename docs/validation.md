@@ -54,8 +54,9 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   verified. An interval that lists only own verified processes is measured, but on the test
   host the display manager always lists a GPU process, so a short GPU job in Neutral ran
   capped at half the device for about 10 s after it started. Since item 027 an idle context of
-  a user ID below `uid_min` is background while per-process utilization is readable; the
-  native rerun on the test host is pending. The GPU attribution tolerance stays 15 points until a second device is measured;
+  a user ID below `uid_min` is background while per-process utilization is readable. On the
+  test host per-process utilization is readable, but the greeter runs under a user ID at or above
+  `uid_min`, so its context still counts and GPU activity stays unknown. The GPU attribution tolerance stays 15 points until a second device is measured;
   the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
@@ -64,17 +65,25 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   0.9 core 2–3 s after it starts, pinned to one scope CPU or not, and holds a median of
   0.92–0.94 core. Under the account that runs CedeGrid the same contender gets about 0.7 core,
   as SC-002 allows for that account's own programs (see
-  [Reruns with launch pacing](#reruns-with-launch-pacing)).
-- **Idle utilization.** SC-014 is not met on the test host: on 14 CPUs own CPU work reaches
-  91.4% of the scope in Performance (89.6% with 116 tasks of 100 m), 87.0% in Neutral and 73.0%
-  in Yield First. Of the
-  shortfall, CedeGrid's agent and supervisors took 325–489 m and the bound on own measurement
-  513–907 m; both counted as external (see
-  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)). Since item 027,
-  CedeGrid's CPU is in use by CedeGrid on the owner's side, the summed own-CPU bound no longer
-  widens with the read pass, and a window of 8 intervals carries one bound; the native rerun
-  is pending. Open: a 173 m gap between the tasks' `/proc` usage and the decisions' upper bound
-  with 113 tasks.
+  [Reruns with launch pacing](#reruns-with-launch-pacing)). At item 027's commit the pinned
+  contender held a median of 0.90 core, 0.9 core or more in 61% of samples, while own work
+  stayed 80 m over its target and its caps were relaxed and set again every few intervals (see
+  [Reruns after item 027](#reruns-after-item-027)).
+- **Return after contention.** In Yield First the target returns one interval after a
+  contender's last usage, but held caps wait until the external estimate that no principal
+  accounts for has stayed below `principal_min_percent` for `principal_window_intervals`. The
+  8-interval window keeps that estimate up for about 4 s, so on the test host own work was back
+  at its uncontended target 7.5 s after the contender stopped.
+- **Idle utilization.** At item 027's commit, on 14 CPUs with 100 m tasks, own tasks reach
+  97.4% of capacity in Performance (98.2% with CedeGrid), 92.3% in Neutral (92.9%) and 81.8% in
+  Yield First (82.4%), against SC-014's 97%, 94% and 84%; on 4 CPUs Performance reaches 97.1%
+  with CedeGrid. The bound on own measurement now takes 16–35 m and CedeGrid 77–104 m. In
+  Neutral and Yield First, admission charges each running task at its p95 usage (FR-034), and
+  the steady tasks' p95 is above their mean, so the charges fill the share while the tasks' mean
+  use stays 242 m and 304 m below the target (`held_back` reports it as `charge_shortfall`); the
+  external estimate, mostly its measurement band, takes another 88 m and 155 m. Before item 027
+  the same scope reached 91.4%, 87.0% and 73.0% (see
+  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
 - **CedeGrid's own cost.** SC-014 counts own tasks plus CedeGrid with a 1% bound for CedeGrid
   at 117 tasks on 14 CPUs (140 m). In the Docker Linux check (6 CPUs, 117 light tasks, release
   build with fat LTO, 60 s), with supervisors that wait on events, the agent used 108 m and the
@@ -87,8 +96,9 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   `/proc/<pid>/stat` read per process (from 10.9 to 2.9 ms per interval). The rest of the stage
   is reading each task's clock and anonymous memory (about 7 ms per interval). Fat LTO lowered
   the agent's cost by about 12% (127 to 112 m). Resident memory: the agent 52 MiB proportional,
-  a supervisor 1.6 MiB proportional (9–11 MiB counting shared pages). The test host run is
-  pending.
+  a supervisor 1.6 MiB proportional (9–11 MiB counting shared pages). On the test host, with
+  129 tasks on 14 CPUs, CedeGrid used 104 m (0.74% of capacity), and the agent's sample stage
+  took 60 ms per second.
 - **Principals counted threads.** Until item 027's decisions on report 027-1, principal usage
   came from a sysinfo refresh that lists every thread as a process of its own, so a process's
   CPU counted once for the process and again for each thread, its resident memory once per
@@ -102,7 +112,13 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   default). Each renewal is a synced coordinator write, about 9 ms on the test host. Without
   lease batches, renewals share half of each monitor interval, so one node keeps about 117
   leases renewed; since item 027 a coordinator that offers `lease_batch/1` takes one request
-  per iteration in one transaction, and the native burst rerun is pending. In
+  per iteration in one transaction. In the native rerun at item 027's commit no lease expired
+  and the longest gap between observations was 905 ms, but the agent exited with "Too many open
+  files" after 137 of the 150 tasks had started: the host's soft limit is 1024 descriptors, and
+  the agent holds about 7 per running task (three supervisor pipes, a state database connection
+  and its WAL, the pidfd held since the task's first check, and the stderr capture), plus pipes
+  for each launch in progress. Each started task's supervisor drained it once the agent was
+  gone. Before item 027, in
   the native burst gate, 150 light tasks admitted at once, 123 leases expired before their first
   authorization or a renewal: 67 tasks never started, 81 were drained after starting, and the
   longest gap between observations was 1.25 s against a 1 s bound. Where synced writes cost
@@ -113,7 +129,8 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   the node drained it once it ran, even when CPU was the only contended resource: on the test
   host, 4 of 16 tasks in a Yield First run and 1 of 117 in a Performance run. A cancelled
   reservation is now released before authorization, and a CPU drain planned while pending is
-  planned again as running work; the native rerun is pending.
+  planned again as running work. In item 027's native runs no task was drained except by each
+  harness's own cancel at its end.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
@@ -196,6 +213,26 @@ stage timing added.
 | T141e step 2, PSI under another account | eight busy loops of a second unprivileged account on 2 CPUs: external some avg10 67.9–92.0 in all 30 samples, `saturated_by_psi` on CPU in all 30, busy 10.1–11.2% (`saturation_percent` 98) | pass |
 | SC-014, 14 CPUs, 100 m tasks, steady loop (Performance) | 116 tasks admitted in 17.3 s, at most 32 per heartbeat; longest gap between observations 749 ms; no refusal; own tasks 89.6% of capacity, 92.3% with CedeGrid's own processes (target 97%); CedeGrid's 386 m and the own-measurement bound's 1441 m count as external; one running task drained after its cancelled reservation was authorized. Loop with 117 slots: 341 ms of work per 500 ms interval at the median, of which lease renewals 263 ms, sampling 58 ms and heartbeats up to 59 ms | burst pass, SC-014 fail |
 | SC-015, 4 CPUs beside a 60 m external user (Yield First, catch-up loop) | own tasks 2661 m, 84.0% of capacity minus the external user and the margin (target 90%); 65 step changes and 105 paused samples; 4 of 16 running tasks drained after their cancelled reservations were authorized | fail |
+
+### Reruns after item 027
+
+Run on 2026-10-29 on the same test host at `9916e59`, a release build with fat LTO, with the
+commands under "Item 027 native gates" in `specs/001-contention-modes/native-gates.md`. Loads
+under another account ran as a second unprivileged account, which started and stopped them;
+CedeGrid did not act on them. In runs 3, 4 and 6 every drain was the harness's own cancel after
+its measurement window.
+
+| Gate | Values | Result |
+|---|---|---|
+| Run 1, idle 60 s (external estimate at p95 at most 1% of capacity) | Tracked 42 m on 4 CPUs (1.05%) and 99 m on 14 (0.71%); Full 41 m (1.02%) and 95 m (0.68%); CedeGrid 8–9 m at the median. The estimate is the window's upper bound on host busy minus own work and CedeGrid: on 4 CPUs the window's busy bounds were 7 m and 41 m at the median, while the host's busy with no CedeGrid process was 2.5 m (7.4 m at p95) | 14 CPUs pass, 4 CPUs fail |
+| Run 2, launch burst (150 light tasks at once, Performance) | longest gap between observations 905 ms (879 ms in a second run); no lease expired, no refusal, no supervisor error; 142 tasks reserved and 137 started, then the agent exited with "Too many open files" (soft limit 1024), and each supervisor drained its task | fail |
+| Run 3, SC-014, 14 CPUs, 100 m tasks, steady loop | Performance: 129 tasks, own tasks 97.4% of capacity, 98.2% with CedeGrid's 104 m, no step. With warm-ups long enough for one-worker growth (all admitted after 24 and 57 minutes): Neutral 121 tasks, 92.3% and 92.9% with CedeGrid's 95 m; Yield First 108 tasks, 81.8% and 82.4% with 77 m; no step in either. Admission's p95 charges for running tasks exceed the share by 170 m and 226 m, so no further task fits | Performance pass, Neutral and Yield First fail |
+| Run 3, SC-014, 4 CPUs, 100 m tasks, Performance | 36 tasks, own tasks 96.6% of capacity, 97.1% with CedeGrid's 19 m, no step | pass |
+| Run 4, SC-015, Yield First, 4 CPUs, 250 m tasks beside a 60 m user | 13 tasks; own tasks 96.0% (catch-up loop) and 97.2% (steady) of capacity minus the user and the margin; no step, no pause | pass |
+| Run 5, T178 pinned, contender under a second account (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.554; the contender reaches 0.9 core 2.5 s after it starts (8.5 s by the gate's own sampler) and holds a median of 0.90 core after 10 s, 0.9 core or more in 61% of samples; own work stays 80 m over its target; 4–14 tasks hold `own_over_target` caps of 239–253 m, about 4 change target each interval, and over 51 intervals 32 caps were relaxed to none and 35 added; `foreign_actions` 0 | contender pass, caps cycle |
+| Run 6, return after contention (Yield First, 4 CPUs, 13 tasks of 250 m, one-core contender for 30 s) | own work at the contended target in the interval the contender is first observed; after its last usage the target returns in 1 interval, held caps rise in one move 5.5 s later, and own work is at 98% of the uncontended target 7.5 s after the last usage (bound 3 s); no drain | SC-002 pass, return fail |
+| Run 7, loop with 129 tasks (run 3's 14-CPU Performance run) | observation interval p50 498 ms, p95 533 ms, maximum 609 ms; CedeGrid 104 m (0.74% of capacity); agent `loop_cost` per minute: sample 3.6 s, slots 1.08 s, policy 0.18 s, heartbeat 0.15 s | pass |
+| GPU (Part 5) | per-process utilization readable (`NVML_SUCCESS`); the one listed context is the greeter's graphics context, under a user ID at or above `uid_min`, so it is not background; GPU activity stays unknown and admission open | as specified |
 
 ## Rules for validation runs
 

@@ -303,8 +303,8 @@ after each run, nothing on the shared host, and loads of the second unprivileged
 and stopped by that account under `timeout`, with a marker among the loop's arguments.
 `$repo` is a `git archive` of the final commit built with `cargo build --locked --release`;
 `$H` holds the validation harness kept with the evidence (`sc014_015.py` from item 024, and
-`idle_027.py`, `idle-full-027.sh`, `return_027.py`, `gpu-027.sh`, `run-peer-027.sh` and
-`peer-contender-027.sh`); `$py` is `venv-isolated/bin/python`.
+`idle_027.py`, `idle-full-027.sh`, `return_027.py`, `gpu-027.sh`, `run-peer-027.sh`,
+`peer-contender-027.sh` and `sc014-rerun-027.sh`); `$py` is `venv-isolated/bin/python`.
 
 ```sh
 # 0. Second account: it is no admin and `sudo -n` fails.
@@ -318,6 +318,8 @@ CEDEGRID_TEST_LAUNCH_BURST=1 cargo test --locked --release --test launch_burst -
 # 3. SC-014, steady loop, 100 m tasks: 14 CPUs in each mode, then 4 CPUs in Performance.
 $py $H/sc014_015.py --repo $repo --root $root --output <dir> --mode <mode> --cpus 14 \
   --task-millicores 100 --seconds 90 --warmup-max 1200 --task-loop steady
+#    Neutral and Yield First add one worker per 10 s and 30 s, so on 14 CPUs they need
+#    --warmup-max 2400 and 4800 (sc014-rerun-027.sh).
 # 4. SC-015, Yield First, 4 CPUs, 250 m tasks beside a 60 m external user, both loops.
 $py $H/sc014_015.py ... --mode yield_first --cpus 4 --task-millicores 250 --seconds 330 \
   --external-millicores 60 --warmup-max 1200 --task-loop catch-up    # and steady
