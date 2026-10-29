@@ -182,8 +182,12 @@ class GateRunnerTests(unittest.TestCase):
         node={'node_mode':'guaranteed','cpu':{'reserve_physical_cores':1,'nice':0},
             'gpu':{'scale_up_cooldown_ms':30000},'contention':{'default_mode':'neutral'}}
         agent={'cpu_affinity':[2,3],'max_workers':3}
-        tuned,deployed,placement=comparison.profile_settings('own-efficiency',node,agent,'performance',None,[2,3],[0,1,2,3],'cpu','GPU-x')
+        tuned,deployed,placement=comparison.profile_settings('own-efficiency',node,agent,None,None,[2,3],[0,1,2,3],'cpu','GPU-x')
         self.assertNotIn('contention',tuned,'the default mode, Performance')
+        neutral,_,_=comparison.profile_settings('own-efficiency',node,agent,'neutral',None,[2,3],[0,1,2,3],'cpu','GPU-x')
+        self.assertEqual(neutral['contention'],{'default_mode':'neutral'},'a given mode and nothing else')
+        with self.assertRaisesRegex(ValueError,'floors'):
+            comparison.profile_settings('own-efficiency',node,agent,None,1024,[2,3],[0,1,2,3],'cpu','GPU-x')
         self.assertNotIn('reserve_physical_cores',tuned['cpu'])
         self.assertEqual(tuned['gpu'],{'scale_up_cooldown_ms':30000})
         self.assertEqual(deployed['cpu_affinity'],[2,3])
@@ -191,7 +195,7 @@ class GateRunnerTests(unittest.TestCase):
             'coordinator_and_harness_cpus':[0,1],'reserve_physical_cores':0})
         with self.assertRaisesRegex(ValueError,'outside'):
             comparison.profile_settings('own-efficiency',node,agent,'performance',None,[2,3],[2,3],'cpu','GPU-x')
-        tuned,_,placement=comparison.profile_settings('protection',node,agent,'neutral',None,[2,3],[0,1,2,3],'cpu','GPU-x')
+        tuned,_,placement=comparison.profile_settings('protection',node,agent,None,None,[2,3],[0,1,2,3],'cpu','GPU-x')
         self.assertEqual(tuned['cpu']['reserve_physical_cores'],1)
         self.assertEqual(tuned['contention']['default_mode'],'neutral')
         self.assertEqual(placement['reserve_physical_cores'],1)

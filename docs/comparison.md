@@ -222,10 +222,14 @@ this runner never ignores desktop processes or overrides unknown telemetry.
 Omitting `--execute` only prints the envelope. There is no shared-server approval
 flag: this command does not extend authorization to burst.
 
-`--contention-mode {yield_first,neutral,performance}` sets the node's default mode
-for the run (Neutral by default; Performance is acknowledged as a caution option),
-and `--ram-floor-mib N` sets a RAM floor of exactly N MiB, at least 512, with
-`small_floor` acknowledged below 1024. A graduated step on the probe counts as a
+`--profile protection` (the default) is the T117/T118 setup: one physical core
+reserved, `--contention-mode {yield_first,neutral,performance}` for the node's default
+mode (Neutral when unset), and `--ram-floor-mib N` for a RAM floor of exactly N MiB, at
+least 512, with `small_floor` acknowledged below 1024. `--profile own-efficiency` keeps
+every default but a given mode (Performance when unset), runs the coordinator and the
+harness on CPUs outside the probe's scope, and records that placement in `report.json`;
+the agent stays on its scope's CPUs, since its scope is its own affinity. Both probes
+check for a drain every 50 ms. A graduated step on the probe counts as a
 yield. `report.json` then carries each managed contention case's `step_timing`
 from `cedegrid history` (per resource: time to the first step, to reclaim and to
 reversal) and an `sc005` section. That section holds the history audit and the

@@ -345,6 +345,59 @@ contender's first observed usage (SC-002) and back at the uncontended target wit
 last; run 7 (from run 3's Performance run on 14 CPUs), the observation interval's p50, p95 and
 maximum, the agent's `loop_cost` stages and CedeGrid's CPU.
 
+## Item 029 native gates (T275)
+
+Runs only on the authorized test host, with the user's typed approval for item 029 Part 3,
+under the host rules of items 021, 026 and 027: user-space only, `nohup` with logs, an idle
+check before and after each run, nothing on the shared host, and loads of the second
+unprivileged account started and stopped by that account under `timeout`, with a marker among
+the loop's arguments. `$repo`, `$root`, `$py` and the `gate` function are as above, from a
+`git archive` of the final commit. Harness pieces not in the repository are written for the run
+and kept with the evidence in `$H` (`same-core-029.py`, `fixed-baseline-029.py`,
+`gpu-own-029.py`, `gpu-cpu-029.py`, with item 027's `run-peer-027.sh`,
+`peer-contender-027.sh` and `return_027.py`).
+
+```sh
+# 1. Idle: own throughput with vs without CedeGrid in each mode, at the 50 ms cadence.
+gate e029-idle-performance cpu --profile own-efficiency
+gate e029-idle-neutral cpu --profile own-efficiency --contention-mode neutral
+gate e029-idle-yield_first cpu --profile own-efficiency --contention-mode yield_first
+# 2. A light other user on the probe's cores (the second account, below its fair share),
+#    and 3. a saturating one, each mode, with and without CedeGrid.
+$py $H/same-core-029.py --repo $repo --root $root --output <dir> --mode <mode> --load light
+ssh <second account>@<test host> 'T=<epoch> CPUS=<probe cpus> S=60 LOAD=light sh -s' < $H/peer-contender-027.sh
+$py $H/same-core-029.py ... --load saturating        # the same with LOAD=saturating
+# 4. Fixed allocation: taskset to half the scope vs CedeGrid in Performance, beside the
+#    second account's load on 30 s / off 30 s for 5 minutes.
+$py $H/fixed-baseline-029.py --repo $repo --root $root --output <dir> --seconds 300
+# 5. GPU in each mode: idle, a light and a saturating other user on the same device.
+gate e029-gpu-idle-<mode> gpu --profile own-efficiency --contention-mode <mode>
+$py $H/gpu-own-029.py --repo $repo --root $root --output <dir> --mode <mode> --load <light|saturating>
+# 6. A GPU job whose loader threads use more CPU than its fair share, beside the second
+#    account saturating the same CPUs, in Tracked (forced) and in Full.
+$py $H/gpu-cpu-029.py --repo $repo --root $root --output <dir> --backend <tracked|full>
+# 7. Report 027's failed runs again: run 2, the launch burst of 150 tasks; run 5, the
+#    pinned contender; run 6, the return after contention on 4 CPUs in Yield First and in
+#    Performance.
+CEDEGRID_TEST_LAUNCH_BURST=1 cargo test --locked --release --test launch_burst -- --ignored --nocapture
+bash $H/run-peer-027.sh <commit> pinned <epoch> <uid>
+ssh <second account>@<test host> 'T=<epoch+3> CPUS=<last scope CPU> S=40 sh -s' < $H/peer-contender-027.sh
+$py $H/return_027.py --repo $repo --root $root --output <dir> --contender-uid <uid> --mode <yield_first|performance>
+ssh <second account>@<test host> 'T=<epoch> CPUS=<cpu> S=30 sh -s' < $H/peer-contender-027.sh
+```
+
+Gates, from each run's `report.json` or log: run 1, `matched_idle_throughput_ratio_min` at
+least 0.99 in each mode, with the placement recorded; run 2, no step and own throughput at least
+0.99 of without; run 3, own work at capacity minus the other user's demand minus the mode's
+margin, with the other user's p99 against alone and own throughput, each with and without
+CedeGrid; run 4, total own work and the other user's p99 for both; run 5, at least 0.99 idle,
+and per mode whether own GPU work alone is capped at its start for another account's idle
+context, and for how long; run 6, own GPU utilization and units per second with and without
+CedeGrid in Tracked and in Full; run 7, run 2 with no agent exit, no lease expiry, the longest
+observation gap within 1 s and the agent's open descriptors at the peak, run 5 with the
+contender's median, own work against its target and cap changes per minute, and run 6 back at
+the uncontended target within 3 s in both modes.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
@@ -368,7 +421,7 @@ for CPU runs too. Read access to the kernel log is needed for the OOM check (`jo
 works for members of `adm` or `systemd-journal`). Nothing else may run on the pinned CPUs.
 
 **The runner (T153).** `tools/pressure_comparison.py` takes `--contention-mode
-{yield_first,neutral,performance}` (Performance is acknowledged as a caution option) and
+{yield_first,neutral,performance}` (Neutral when unset in this, the protection profile) and
 `--ram-floor-mib N` (a floor of exactly N MiB, at least 512, with `small_floor` acknowledged
 below 1024). Each run's `report.json` carries:
 

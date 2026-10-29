@@ -59,9 +59,10 @@ def node_contention(node,mode,ram_floor_mib=None):
 
 def profile_settings(profile,node,agent,mode,ram_floor_mib,cpus,host_cpus,probe_mode,gpu_uuid):
     """The node and agent settings and the process placement for one profile. Protection
-    reserves one physical core and sets the mode; own-efficiency keeps the defaults and
-    runs the coordinator and the harness on CPUs outside the probe's scope. The agent's
-    scope is its own affinity, so it stays on the scope's CPUs in both."""
+    reserves one physical core and sets the mode (Neutral unless given); own-efficiency
+    keeps every default but a given mode and runs the coordinator and the harness on CPUs
+    outside the probe's scope. The agent's scope is its own affinity, so it stays on the
+    scope's CPUs in both."""
     if profile not in PROFILES:raise ValueError('unknown profile')
     node=copy.deepcopy(node);agent=copy.deepcopy(agent)
     node['node_mode']='opportunistic'
@@ -69,9 +70,13 @@ def profile_settings(profile,node,agent,mode,ram_floor_mib,cpus,host_cpus,probe_
         'gpu_memory_mib':{gpu_uuid:1024} if probe_mode=='gpu' else {}})
     if profile=='protection':
         node['cpu']['reserve_physical_cores']=1;node['gpu']['scale_up_cooldown_ms']=3000
-        node=node_contention(node,mode,ram_floor_mib);outside=list(cpus)
+        node=node_contention(node,mode or 'neutral',ram_floor_mib);outside=list(cpus)
     else:
+        if ram_floor_mib is not None:raise ValueError('own-efficiency keeps the default floors')
         node['cpu'].pop('reserve_physical_cores',None);node.pop('contention',None)
+        if mode is not None:
+            if mode not in CONTENTION_MODES:raise ValueError('unknown contention mode')
+            node['contention']={'default_mode':mode}
         outside=sorted(set(host_cpus)-set(cpus))
         if not outside:raise ValueError('own-efficiency needs CPUs outside the probe scope')
     placement={'profile':profile,'probe_cpu':cpus[0],'agent_scope_cpus':list(cpus),
@@ -433,14 +438,14 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--mode',choices=['cpu','gpu'],required=True);parser.add_argument('--gpu-uuid',required=True)
-    parser.add_argument('--contention-mode',choices=CONTENTION_MODES,default='neutral',
-        help='node default mode for the protection profile')
+    parser.add_argument('--contention-mode',choices=CONTENTION_MODES,
+        help='node default mode: Neutral when unset in the protection profile, the default (Performance) in own-efficiency')
     parser.add_argument('--profile',choices=PROFILES,default='protection',
         help='protection reserves one physical core and sets the mode; own-efficiency keeps every default and runs the coordinator outside the probe scope')
     parser.add_argument('--ram-floor-mib',type=int,
         help=f'RAM floor of exactly this many MiB (reserve_percent 0), at least {MIN_RAM_FLOOR_MIB}; below twice that, small_floor is acknowledged')
     parser.add_argument('--execute',action='store_true');args=parser.parse_args()
-    try:node_contention({},args.contention_mode,args.ram_floor_mib)
+    try:profile_settings(args.profile,{'cpu':{},'gpu':{}},{},args.contention_mode,args.ram_floor_mib,[0,1],[0,1,2],args.mode,args.gpu_uuid)
     except ValueError as error:parser.error(str(error))
     if not args.execute:print(json.dumps({'mode':'plan_only','configuration':vars(args),'targets':TARGETS}));sys.exit(0)
     result=run(args);print(json.dumps(result,indent=2));sys.exit(0 if result['status']=='completed_pending_metric_review' else 1)
