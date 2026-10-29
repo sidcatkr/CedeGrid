@@ -1010,11 +1010,23 @@ struct TargetScript {
     /// One `adjusted` report per command; readiness changes are kept apart.
     reports: Vec<supervision::SupervisorReport>,
     readiness: Vec<(bool, bool)>,
+    /// A marker the worker writes once it has seen the last step; `stop` waits for it, at most
+    /// 5 s, so the worker's poll cannot miss that step between two supervisor passes.
+    stop_gate: Option<&'static str>,
+    gate_since: Option<std::time::Instant>,
 }
 impl supervision::SupervisorControl for TargetScript {
     fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
         use cedegrid::contention::{StepRequest, YieldCause};
         if self.sent == self.reports.len() && self.sent == self.steps.len() {
+            if let Some(gate) = self.stop_gate {
+                let since = *self.gate_since.get_or_insert_with(std::time::Instant::now);
+                if !self.dir.join(gate).exists()
+                    && since.elapsed() < std::time::Duration::from_secs(5)
+                {
+                    return Ok(vec![]);
+                }
+            }
             fs::write(self.dir.join("stop"), "").unwrap();
             return Ok(vec![]);
         }
@@ -1062,12 +1074,13 @@ fn run_targets_on(
     code: &str,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
 ) -> (tempfile::TempDir, TargetScript) {
-    run_targets_with(key, None, code, steps)
+    run_targets_with(key, None, None, code, steps)
 }
 
 fn run_targets_with(
     key: cedegrid::contention::ResourceKey,
     deadline_ms: Option<u64>,
+    stop_gate: Option<&'static str>,
     code: &str,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
 ) -> (tempfile::TempDir, TargetScript) {
@@ -1082,6 +1095,8 @@ fn run_targets_with(
         sent: 0,
         reports: vec![],
         readiness: vec![],
+        stop_gate,
+        gate_since: None,
     };
     let outcome = supervision::supervise_controlled(
         &request,
@@ -1223,6 +1238,7 @@ fn a_hint_carries_the_deadline_the_policy_enforces() {
     let (dir, _script) = run_targets_with(
         ResourceKey::Ram,
         Some(1000),
+        Some("seen"),
         r#"
 import time
 from pathlib import Path
@@ -1232,7 +1248,8 @@ signals.draining()
 (d/'ready').write_text('1')
 while not (d/'stop').exists():
     t=signals.resource_targets()
-    if t is not None and left is None: left=t.deadline_unix_ms-int(time.time()*1000)
+    if t is not None and left is None:
+        left=t.deadline_unix_ms-int(time.time()*1000);(d/'seen').write_text('1')
     time.sleep(0.005)
 (d/'left').write_text(str(left))
 "#,
