@@ -138,8 +138,8 @@ for batch in batches():
 
 ```sh
 dir="$(mktemp -d)"
-cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --default-mode performance
-cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --default-mode performance --acknowledge-caution performance_mode
+cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --ram-floor-mib 600
+cargo run --locked -- --config "$dir/node.toml" setup --non-interactive --json --role node --ram-floor-mib 600 --acknowledge-caution small_floor
 cargo test --locked --test cli -- no_color_writes the_interface_and_flags
 ```
 
@@ -147,7 +147,8 @@ The directory must exist, and a new file needs `--role`.
 
 **Expected:**
 - The first command exits 3 with `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and writes nothing.
-- The second writes the file and reports the `performance_mode` option as `caution`.
+- The second writes the file and reports the `small_floor` option as `caution`. Performance, the
+  default since item 029, needs no acknowledgement.
 - With `NO_COLOR=1`, the interface's output contains no escape sequences but keeps the
   `[caution]` label.
 - The interface and flags produce byte-identical files (SC-011).

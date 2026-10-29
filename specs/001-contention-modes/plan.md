@@ -877,10 +877,12 @@ maintainer's typed approval after report 029-2.
   floor breach's excess is at most own memory above its memory fair share: the frame's floor
   excess is capped at `judged_total − fair_share`, so in-share own memory is not hinted, drained
   or sent TERM, on the critical path and for Guaranteed memory too, while own memory above the
-  fair share steps as before. The RAM fair share is the share `ram_target` computes beside the
-  principals; GPU memory, which forms no principals, uses the equal split of the device among
-  own work and the active external GPU principals, as GPU compute does. Yield First and Neutral
-  are unchanged. The envelope breach path is unchanged in every mode.
+  fair share steps as before. Memory targets use no fair share today (outside Yield First,
+  `own_allowance` is capacity minus external), so the memory fair share is the equal split
+  compute uses: `neutral_share` of the RAM view `ram_target` builds beside the RAM principals,
+  and for GPU memory, which forms no principals of its own, the same split over the device's
+  GPU compute principals. Yield First and Neutral are unchanged. The envelope breach path is
+  unchanged in every mode.
 - **Save-progress and OOM recovery (Part 0f, FR-075, FR-076)**:
   - The policy keeps a per-resource breach episode; when a floor breach starts while own memory
     is within its fair share, the decision lists the in-share allocations once as
@@ -905,8 +907,10 @@ maintainer's typed approval after report 029-2.
   - Run 2, descriptors (FR-077): the agent raises its soft `RLIMIT_NOFILE` to the hard limit at
     start; the supervisor spec carries the original soft limit and the worker gate restores it
     before exec. Before a launch, the agent checks its open descriptors plus the task's need
-    (pipes, capture file, state connection, pidfd, and a launch's transient pipes) against the
-    limit with headroom, and refuses the launch with `descriptor_limit` otherwise. An `EMFILE` or
+    against the limit and refuses the launch with `descriptor_limit` otherwise: 8 per running
+    task (measured on the test host at 7: three supervisor pipes, a state connection and its
+    WAL, the held pidfd, the stderr capture), 8 more for each launch in progress, and 64 kept
+    free for the agent's own reads. An `EMFILE` or
     `ENFILE` while sampling marks the interval's affected readings unknown; while launching, it
     refuses the launch; the loop never exits on it. The held pidfd stays. A shared state
     connection is used only if the decision snapshots stay identical.
