@@ -613,7 +613,8 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Decision**: each own task's `oom_score_adj` at launch is its baseline. In-share own work stays
   there; the tasks that make up own memory above its fair share go to 1000 and return to the
   baseline afterwards. The supervisor writes a member's value through the member's `/proc/<pid>`
-  directory, opened and then confirmed through the member's pidfd.
+  directory under Principle I's rule for calls that take only an ID: pidfd alive before, start
+  time read through the directory and matched, pidfd alive after.
 - **Kernel facts** (`fs/proc/base.c` `__set_oom_adj`, `mm/oom_kill.c` `oom_badness`, v6.6): the
   killer takes the highest badness, RSS + swap + page tables + `oom_score_adj` × totalpages /
   1000. Without `CAP_SYS_RESOURCE` a process may set any value at or above its

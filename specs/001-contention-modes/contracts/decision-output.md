@@ -36,6 +36,10 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   max_mode)`. A resource's `effective_mode` is the node's, which sets the aggregate; per-job
   modes order yielding inside it. A request above the cap adds `mode_capped` to the resource's
   reasons.
+- Item 029 adds, per allocation, `oom_preferred` (RAM: own memory above its fair share, the
+  allocations that make up the excess in victim order; FR-023) and `save_progress` (in-share
+  allocations at a floor breach others' growth caused, once per episode; FR-075). Both are
+  omitted when empty.
 - `would_drain` and the prose `reasons` remain for 0.2 readers and recorded replays.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from

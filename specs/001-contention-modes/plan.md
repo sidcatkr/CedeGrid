@@ -860,11 +860,14 @@ maintainer's typed approval after report 029-2.
   marks, per memory resource RAM, the allocations whose memory makes up own usage above its fair
   share, in the ladder's memory victim order (FR-016), as `oom_preferred` in the decision; the
   agent sends the flag to the supervisor with the next adjust line, and the supervisor writes
-  1000, or the baseline when the flag clears, to every verified family member. Each write opens
-  the member's `/proc/<pid>` directory, confirms through the member's pidfd that it is still the
-  verified process, and writes `oom_score_adj` through that directory; a member that dies in
-  between is skipped. Children inherit the value at fork. `ram.prefer_own_oom_victim = true`
-  (default false, setup risk class "risk to own work") keeps every own task at 1000 from launch.
+  1000, or the baseline when the flag clears, to every verified family member. The write takes
+  only a PID path, so it follows Principle I's rule for such calls: the member's pidfd shows it
+  alive, the supervisor opens its `/proc/<pid>` directory and reads the start time through it,
+  which must match the verified identity, writes `oom_score_adj` through that directory, and
+  checks the pidfd again after the write; any failed check skips the member and reports it as
+  possibly misdirected, as the thread-ID rule requires. Children inherit the value at fork. `ram.prefer_own_oom_victim = true`
+  (default false; key class `Safe`, as it affects only own work, and setup shows it as a risk to
+  own work) keeps every own task at 1000 from launch.
   Every change is evidence (`oom_score_adj` control: task, from, to, cause, own memory and fair
   share). GPU memory has no kernel OOM killer, so the order applies to RAM.
 - **Performance is the default (Part 0d, FR-030, FR-031, FR-043–051)**: `contention.default_mode`
@@ -916,7 +919,8 @@ maintainer's typed approval after report 029-2.
     connection is used only if the decision snapshots stay identical.
   - Run 1: recorded in `docs/validation.md` (done in item 027); no measurement change.
   - Run 5, hysteresis (FR-013): a cap held with cause `own_over_target` is not removed or raised
-    while own work's total stays over its target, within the hold window; held caps reverse once
+    while own work's total stays over its target, within the hold window (the step dwell,
+    `min_step_dwell_intervals`, which the own-over-target hold already uses); held caps reverse once
     the total is below the target by the contention floor.
   - Run 6, the quiet count (FR-034): `note_cpu_quiet` uses this interval's unattributed external
     estimate, not the window's, against the larger of `principal_min_percent` of capacity and

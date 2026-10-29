@@ -5,11 +5,11 @@ Defaults are provisional, to validate on real hardware.
 
 ```toml
 [contention]
-default_mode = "neutral"            # "yield_first" | "neutral" | "performance"
+default_mode = "performance"        # "yield_first" | "neutral" | "performance" (default since item 029)
 max_mode = "neutral"                # node cap; jobs run at min(requested, max_mode); unset, the most aggressive node mode
 floor_policy = "a"                  # the only value; "b" and "c" fail to load
 neutral_memory_policy = "a"         # the only value; "b" fails to load
-acknowledge_caution = []             # "performance_mode", "small_floor", "reduced_margin", "relaxed_detection" [caution]
+acknowledge_caution = []             # "small_floor", "reduced_margin", "relaxed_detection" [caution]; "performance_mode" still loads
 guaranteed_hint_deadline_s = 5      # 1-30
 critical_floor_percent = 50         # a breach is critical below this share of the floor
 critical_hint_deadline_s = 1        # hint deadline on the critical path
@@ -94,12 +94,9 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
   `contention.floor_policy = "<v>" was removed: Guaranteed memory is released last under policy A; tune contention.guaranteed_hint_deadline_s and contention.ram.guaranteed_breach_window_s`.
   `neutral_memory_policy = "b"` fails with
   `contention.neutral_memory_policy = "b" was removed: floors always come before the fair share; size them with ram.reserve_mib, ram.reserve_percent, gpu.reserve_vram_mib and gpu.reserve_vram_percent`.
-- **Performance without `acknowledge_caution` containing `performance_mode`.** Loading fails
-  with `ERR_CEDEGRID_CONFIG`, whose message carries `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and
-  names the entry.
 - **A margin below its default, or a detection setting beyond it.** Without `reduced_margin`
-  or `relaxed_detection` respectively, loading fails the same way, naming the settings and the
-  entry. Moving a setting toward leaving more to external demand needs nothing.
+  or `relaxed_detection` respectively, loading fails with `ERR_CEDEGRID_CONFIG`, whose message
+  carries `ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED` and names the settings and the entry. Moving a setting toward leaving more to external demand needs nothing.
 - **Noise tolerance.** Above 1024 MiB, loading fails. When the agent starts, a tolerance above
   half of any GPU's effective floor stops it with an error naming the device and its floor.
 - **Bounds.** `monitor.interval_ms` and `kernel.monitor_interval_ms` above 10000,
@@ -110,8 +107,11 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice
   the minimum with a warning: at load when the settings alone decide it, or once when the agent
   first samples the host for a floor a percentage sets.
-- **Performance.** `max_mode = "performance"`, `default_mode = "performance"` or any
-  per-resource Performance mode needs `performance_mode`.
+- **Performance.** The default since item 029 and no caution option: it needs no entry, and an
+  existing `performance_mode` entry still loads. A file without `default_mode` gets one
+  `default_mode_changed` notice in `doctor`.
+- **`ram.prefer_own_oom_victim`** (default false): every own task at `oom_score_adj` 1000 from
+  launch instead of OOM order by fault (FR-023); setup marks it as a risk to own work.
 - **An active caution option.** `doctor` and `status` show it with its marker; `doctor` also
   lists the keys and values it covers (FR-043, FR-068).
 - **Negative `cpu.nice`.** Warns, and is treated as 0.

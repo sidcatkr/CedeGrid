@@ -818,7 +818,7 @@ node reports with the expected per-resource values at each step.
   The held caps and hints on a resource rise together by at most the spare (the mode's allowance
   minus current usage) in one round, split equally among the held steps.
   A cap held for own usage over its target MUST NOT be removed or raised within the hold window
-  because one task's usage fell while own work's total stays over its target; held caps reverse
+  (the step dwell, `min_step_dwell_intervals`) because one task's usage fell while own work's total stays over its target; held caps reverse
   once that total is below the target by the contention floor.
   A step taken for an envelope breach or an unknown measurement MUST reverse once that cause has
   stayed clear, whatever the external level. A step taken for a floor breach MUST reverse only
@@ -945,7 +945,7 @@ node reports with the expected per-resource values at each step.
     minus observed external usage minus the margin: give back what external demand takes, and
     never go below the fair share;
   - on CPU and GPU compute, in Tracked and Full, never take a step that targets below the fair
-    share: a cap that misses its target after the hold window is recomputed from the measured
+    share: a cap that misses its target after the hold window (the step dwell) is recomputed from the measured
     rate and applied again, without escalating to pause; only a cap already at the minimum duty
     with own usage still above the fair share may pause, for at most one monitor interval, before
     returning to the cap;

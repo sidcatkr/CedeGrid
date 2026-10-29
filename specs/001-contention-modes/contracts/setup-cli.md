@@ -12,7 +12,7 @@ cedegrid [--config PATH] setup [--non-interactive] [--json]
     [--margin RESOURCE.MODE=PERCENT]...  # MODE: yield_first|neutral|performance; YF >= N >= P
     [--guaranteed-hint-deadline-s N]
     [--set RESOURCE.KEY=VALUE]...        # tuned thresholds, e.g. gpu_memory.noise_tolerance_mib=512
-    [--acknowledge-caution performance_mode|small_floor|reduced_margin|relaxed_detection]...
+    [--acknowledge-caution small_floor|reduced_margin|relaxed_detection]...  # performance_mode is accepted and needs no use
     [--endpoint URL]                     # client
     [--listen ADDRESS] [--state-dir PATH] [--operator-fingerprint HEX]   # coordinator
     [--ca-cert PATH] [--certificate PATH] [--private-key PATH]           # client and coordinator
@@ -71,7 +71,7 @@ setup configures client settings only; node and coordinator setup is refused.
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | Performance on any resource or as the node cap; a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, `memory_peak_window_s` or `quiet_window_intervals` below it |
+  | caution | `[caution]`, yellow (SGR 33) | a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, `memory_peak_window_s` or `quiet_window_intervals` below it |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain. Without color the interface writes no escape sequence
