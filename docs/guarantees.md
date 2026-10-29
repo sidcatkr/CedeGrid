@@ -75,8 +75,12 @@ compute activity, own GPU work gets a compute share by pausing it for part of ea
 period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
 and kernels already submitted keep running, so the effective granularity is the period
 plus the longest kernel. A changed CPU cap starts at its target over the family's last
-measured natural rate, so it holds from its first period. A process with a CPU cap and a GPU
-compute share runs one cycle at the smaller duty; Guaranteed work takes no GPU compute step. External compute is
+measured natural rate, so it holds from its first period. On a delegated cgroup with
+`cgroup.freeze` authorized, the off phase freezes the workload's leaf, confirmed through
+`cgroup.events` within the off phase, and never thaws a freeze a pause holds; otherwise, or
+after a refused freeze, it stops the verified processes, as without a delegated cgroup. Where
+the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
+through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
 utilization; a measured amount takes the CPU paths, with external processes grouped into

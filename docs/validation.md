@@ -56,7 +56,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   capped at half the device for about 10 s after it started. Since item 027 an idle context of
   a user ID below `uid_min` is background while per-process utilization is readable. On the
   test host per-process utilization is readable, but the greeter runs under a user ID at or above
-  `uid_min`, so its context still counts and GPU activity stays unknown. The GPU attribution tolerance stays 15 points until a second device is measured;
+  `uid_min`, so its context still counts and GPU activity stays unknown. Since item 028 a
+  delegated cgroup gives own GPU work the same compute share as the rootless backend, with a
+  leaf freeze for the off phase where `cgroup.freeze` is authorized; before, it paused instead.
+  Tested with fixture leaves only; the native GPU confirmation goes with the next approved native
+  batch. The GPU attribution tolerance stays 15 points until a second device is measured;
   the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
