@@ -446,6 +446,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         prefer_own_oom_victim: spec.config.ram.prefer_own_oom_victim,
         ram_noise_tolerance_mib: spec.config.ram_cap_check().0,
         ram_calm_window_ms: spec.config.ram_cap_check().1,
+        nofile_soft: spec.nofile_soft,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,

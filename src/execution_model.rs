@@ -124,6 +124,9 @@ pub struct GateSetup {
     pub nice: Option<i32>,
     /// The gate's own OOM preference, raised before user execution (FR-023).
     pub oom_score_adj: Option<i32>,
+    /// The soft descriptor limit restored before user execution (FR-077).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile_soft: Option<u64>,
 }
 
 pub trait ExecutionJournal {

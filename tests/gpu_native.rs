@@ -110,6 +110,7 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         prefer_own_oom_victim: false,
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
+        nofile_soft: None,
     };
     let mut control = GpuReadyDrain {
         marker,

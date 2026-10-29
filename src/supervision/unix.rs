@@ -999,6 +999,7 @@ pub(super) fn supervise(
         if cfg!(target_os = "linux") && options.prefer_own_oom_victim {
             setup.oom_score_adj = Some(OOM_PREFERRED);
         }
+        setup.nofile_soft = options.nofile_soft;
         children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
         if let Some(server) = children.as_mut() {
             server.leader_directory = Some(drain.path.clone());
@@ -1700,6 +1701,28 @@ pub(super) fn worker_gate() -> Result<()> {
         ensure!(
             rc == 0,
             "gate nice application failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+    if let Some(soft) = gate.setup.nofile_soft {
+        // The agent raised its soft limit for its own use; the user's command gets back the
+        // one it started with, within the hard limit (FR-077).
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: valid output pointer, then a change to this gate's own soft limit only.
+        let rc = unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+                limit.rlim_cur = (soft as libc::rlim_t).min(limit.rlim_max);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit)
+            } else {
+                -1
+            }
+        };
+        ensure!(
+            rc == 0,
+            "gate descriptor limit restore failed: {}",
             io::Error::last_os_error()
         );
     }

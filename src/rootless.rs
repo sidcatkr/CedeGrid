@@ -31,6 +31,7 @@ impl LaunchBackend for RootlessBackend {
             cgroup_path: None,
             nice: None,
             oom_score_adj: None,
+            nofile_soft: None,
         })
     }
     fn verify(&mut self, _identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {

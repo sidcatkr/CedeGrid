@@ -111,6 +111,7 @@ impl LaunchBackend for Backend {
             cgroup_path: None,
             nice: if self.bad_setup { Some(-1) } else { None },
             oom_score_adj: None,
+            nofile_soft: None,
         })
     }
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {
@@ -186,6 +187,7 @@ fn options() -> SupervisorOptions {
         prefer_own_oom_victim: false,
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
+        nofile_soft: None,
     }
 }
 fn run(
@@ -637,6 +639,34 @@ fn required_nice_has_one_verified_application_record_before_launch() {
 
 /// Work launched outside Yield First keeps the default priority: no nice is applied, so
 /// none is recorded (FR-011).
+/// The worker gate restores the soft descriptor limit the agent started with before the
+/// user's command runs (FR-077).
+#[test]
+fn the_gate_restores_the_original_descriptor_limit() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.argv = vec!["/bin/sh".into(), "-c".into(), "ulimit -n > nofile".into()];
+    let journal = Journal::new();
+    let outcome = run(
+        &req,
+        &SupervisorOptions {
+            lease_ms: 1_000,
+            nofile_soft: Some(100),
+            ..options()
+        },
+        &journal,
+        &mut Backend::new(),
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("nofile"))
+            .unwrap()
+            .trim(),
+        "100"
+    );
+}
+
 #[test]
 fn a_task_outside_yield_first_launches_without_a_nice() {
     let temp = TempDir::new().unwrap();
@@ -1235,6 +1265,7 @@ mod actuation {
             prefer_own_oom_victim: false,
             ram_noise_tolerance_mib: 256,
             ram_calm_window_ms: 1_500,
+            nofile_soft: None,
             ..options()
         }
     }

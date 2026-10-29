@@ -227,6 +227,10 @@ struct AgentLoop<'a> {
     last_growth: Instant,
     /// Slots whose drain already reduced the admitted parallelism.
     counted_drains: BTreeSet<String>,
+    /// Assignments already reported as held back by the descriptor limit (FR-077).
+    descriptor_refused: BTreeSet<String>,
+    /// Whether the descriptor limit holds launch slots back, as last reported.
+    descriptor_limited: bool,
     /// Host floor warnings already printed.
     floor_warnings: BTreeSet<String>,
     /// Whether the first sample passed the host-dependent configuration checks.
@@ -1427,13 +1431,27 @@ impl AgentLoop<'_> {
             .and_then(|s| s.effective_mode)
             == Some(crate::contention::ContentionMode::Performance);
         let launch_slots = if admission_safe && self.stopping.is_none() && !self.spool_full {
-            launch_slots(LaunchPacing {
+            let paced = launch_slots(LaunchPacing {
                 max_workers: agent.max_workers,
                 active: active_workers,
                 admitted: self.admitted_parallelism,
                 may_grow,
                 fill,
-            }) as u32
+            });
+            // Launches whose descriptors would not fit with headroom are refused (FR-077).
+            let room = descriptor_room(self.preparations.len() as u64) as usize;
+            if (paced > room) != self.descriptor_limited {
+                self.descriptor_limited = paced > room;
+                if self.descriptor_limited {
+                    emit(&serde_json::json!({
+                        "event": "launch_refused",
+                        "code": "descriptor_limit",
+                        "launch_slots": room,
+                        "detail": "launches whose descriptors do not fit under the agent's limit with 64 kept free are refused",
+                    }))?;
+                }
+            }
+            paced.min(room) as u32
         } else {
             0
         };
@@ -1564,6 +1582,19 @@ impl AgentLoop<'_> {
                     if active >= agent.max_workers || self.stopping.is_some() {
                         continue;
                     }
+                    // A launch whose descriptors do not fit with headroom is refused and the
+                    // offer left to the coordinator (FR-077).
+                    if descriptor_room(self.preparations.len() as u64) == 0 {
+                        if self.descriptor_refused.insert(id.clone()) {
+                            emit(&serde_json::json!({
+                                "event": "launch_refused",
+                                "code": "descriptor_limit",
+                                "assignment_id": id,
+                                "detail": "the launch's descriptors do not fit under the agent's limit with 64 kept free",
+                            }))?;
+                        }
+                        continue;
+                    }
                     let task_config = config.clone();
                     let task_agent = agent.clone();
                     let task_assignment = assignment.clone();
@@ -1691,6 +1722,9 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         config.execution.enabled,
         "agent execution requires execution.enabled=true"
     );
+    // Room for many tasks' descriptors; each task gets the starting limit back (FR-077).
+    #[cfg(unix)]
+    raise_descriptor_limit()?;
     ensure!(
         agent.max_workers > 0 && agent.max_workers <= 256,
         "invalid maximum worker count"
@@ -1862,6 +1896,8 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         admitted_parallelism: 0,
         last_growth: start,
         counted_drains: BTreeSet::new(),
+        descriptor_refused: BTreeSet::new(),
+        descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
         launch_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(LAUNCH_CONCURRENCY)),
@@ -1877,38 +1913,54 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         // run once immediately and return to the original cadence.
         next_observation =
             next_periodic_wake(next_observation, observation_interval, Instant::now());
-        let mut mark = LoopCost::thread_ns();
-        if let Some(guard) = &replay_journal {
-            guard.verify(config)?;
+        let iteration: Result<bool> = async {
+            let mut mark = LoopCost::thread_ns();
+            if let Some(guard) = &replay_journal {
+                guard.verify(config)?;
+            }
+            state.collect_preparations().await?;
+            state.collect_publications().await?;
+            mark = state.cost.charge("collect", mark);
+            state.service_slots().await?;
+            mark = state.cost.charge("slots", mark);
+            let records = state.store.executions()?;
+            collect_released_spool(config, &state.store, &records, &state.publishing)?;
+            state.retire_slots(&records)?;
+            state.recover_outbox(&records)?;
+            state.cost.charge("records", mark);
+            // Observation charges its own stages.
+            let (snapshot, allocations, mut decision) = state.observe(&records).await?;
+            mark = LoopCost::thread_ns();
+            state.share_observation(&snapshot);
+            state.actuate(&mut decision, &allocations)?;
+            mark = state.cost.charge("actuate", mark);
+            state.store.append_observation(&snapshot, &decision)?;
+            mark = state.cost.charge("store", mark);
+            state
+                .heartbeat(&records, &snapshot, &allocations, &decision)
+                .await?;
+            state.cost.charge("heartbeat", mark);
+            state.cost.iteration();
+            if let Some(report) = state.cost.take_report(Instant::now()) {
+                emit(&report)?;
+            }
+            state.stop_due(&records)
         }
-        state.collect_preparations().await?;
-        state.collect_publications().await?;
-        mark = state.cost.charge("collect", mark);
-        state.service_slots().await?;
-        mark = state.cost.charge("slots", mark);
-        let records = state.store.executions()?;
-        collect_released_spool(config, &state.store, &records, &state.publishing)?;
-        state.retire_slots(&records)?;
-        state.recover_outbox(&records)?;
-        state.cost.charge("records", mark);
-        // Observation charges its own stages.
-        let (snapshot, allocations, mut decision) = state.observe(&records).await?;
-        mark = LoopCost::thread_ns();
-        state.share_observation(&snapshot);
-        state.actuate(&mut decision, &allocations)?;
-        mark = state.cost.charge("actuate", mark);
-        state.store.append_observation(&snapshot, &decision)?;
-        mark = state.cost.charge("store", mark);
-        state
-            .heartbeat(&records, &snapshot, &allocations, &decision)
-            .await?;
-        state.cost.charge("heartbeat", mark);
-        state.cost.iteration();
-        if let Some(report) = state.cost.take_report(Instant::now()) {
-            emit(&report)?;
-        }
-        if state.stop_due(&records)? {
-            break;
+        .await;
+        match iteration {
+            Ok(true) => break,
+            Ok(false) => {}
+            // Running out of descriptors never ends the loop: the interval's readings are
+            // unknown, so nothing new is decided and steps hold; the next one tries again
+            // (FR-077).
+            Err(error) if descriptor_exhausted(&error) => {
+                emit(&serde_json::json!({
+                    "event": "descriptors_exhausted",
+                    "code": "descriptor_limit",
+                    "detail": format!("{error:#}"),
+                }))?;
+            }
+            Err(error) => return Err(error),
         }
         tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now());}}
     }

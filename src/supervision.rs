@@ -30,6 +30,8 @@ pub struct SupervisorOptions {
     /// RAM cap: the noise tolerance and the ineffective-cap calm window.
     pub ram_noise_tolerance_mib: u64,
     pub ram_calm_window_ms: u64,
+    /// The soft descriptor limit the user's command gets back (FR-077).
+    pub nofile_soft: Option<u64>,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -45,6 +47,7 @@ impl Default for SupervisorOptions {
             hint_deadline_ms: 5_000,
             ram_noise_tolerance_mib: 256,
             ram_calm_window_ms: 1_500,
+            nofile_soft: None,
         }
     }
 }

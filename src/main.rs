@@ -870,6 +870,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         prefer_own_oom_victim: config.ram.prefer_own_oom_victim,
         ram_noise_tolerance_mib: config.ram_cap_check().0,
         ram_calm_window_ms: config.ram_cap_check().1,
+        nofile_soft: None,
     };
     let outcome = match supervision::supervise(
         &request,

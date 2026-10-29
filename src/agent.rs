@@ -95,6 +95,9 @@ pub struct SupervisorSpec {
     /// Token for the re-attachable control socket; older specs have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_token: Option<String>,
+    /// The soft descriptor limit the agent started with, restored for the task (FR-077).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile_soft: Option<u64>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -397,6 +400,99 @@ impl ReplayJournalGuard {
         let _ = current;
         Ok(())
     }
+}
+
+/// Descriptors one running task holds: three supervisor pipes, a state connection and its
+/// WAL, the held pidfd and the stderr capture, 7 as measured, with one to spare (FR-077).
+#[cfg(unix)]
+const TASK_DESCRIPTORS: u64 = 8;
+/// Descriptors kept free for the agent's own reads (FR-077).
+#[cfg(unix)]
+const DESCRIPTOR_HEADROOM: u64 = 64;
+
+/// The soft `RLIMIT_NOFILE` the agent started with, which tasks get back (FR-077).
+static STARTING_DESCRIPTOR_LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// How many more launches fit under `soft_limit` with `open` descriptors open and
+/// `launching` launches still opening theirs (FR-077).
+#[cfg(unix)]
+fn launches_that_fit(open: u64, soft_limit: u64, launching: u64) -> u64 {
+    (soft_limit.saturating_sub(open.saturating_add(DESCRIPTOR_HEADROOM)) / TASK_DESCRIPTORS)
+        .saturating_sub(launching)
+}
+
+/// Whether an error came from running out of file descriptors.
+fn descriptor_exhausted(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+    })
+}
+
+/// This process's soft and hard `RLIMIT_NOFILE`.
+#[cfg(unix)]
+// `rlim_t` is not `u64` on every target.
+#[allow(clippy::unnecessary_cast)]
+fn descriptor_limit() -> Option<(u64, u64)> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: valid output pointer.
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0)
+        .then_some((limit.rlim_cur as u64, limit.rlim_max as u64))
+}
+
+/// Raise the agent's own soft `RLIMIT_NOFILE` to its hard limit and remember the soft
+/// limit it had. A hard limit the platform will not grant whole, such as macOS's
+/// unlimited one, is taken as far as the platform allows. Needs no privilege.
+#[cfg(unix)]
+fn raise_descriptor_limit() -> Result<u64> {
+    let (soft, hard) = descriptor_limit().context("RLIMIT_NOFILE is unreadable")?;
+    STARTING_DESCRIPTOR_LIMIT.get_or_init(|| soft);
+    for target in [hard, 1 << 20, 65_536, 10_240] {
+        if target <= soft || target > hard {
+            continue;
+        }
+        let limit = libc::rlimit {
+            rlim_cur: target as libc::rlim_t,
+            rlim_max: hard as libc::rlim_t,
+        };
+        // SAFETY: changes only this process's own soft limit, within its hard limit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } == 0 {
+            break;
+        }
+    }
+    Ok(soft)
+}
+
+/// Descriptors this process has open, counted from its descriptor directory.
+#[cfg(unix)]
+fn open_descriptors() -> Option<u64> {
+    let directory = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    // The count includes the directory's own descriptor, which is one to spare.
+    Some(std::fs::read_dir(directory).ok()?.count() as u64)
+}
+
+/// How many more launches fit now; none when the count or limit is unknown.
+#[cfg(unix)]
+fn descriptor_room(launching: u64) -> u64 {
+    match (open_descriptors(), descriptor_limit()) {
+        (Some(open), Some((soft, _))) => launches_that_fit(open, soft, launching),
+        _ => 0,
+    }
+}
+
+/// Elsewhere handles have no per-process limit of this kind.
+#[cfg(not(unix))]
+fn descriptor_room(_launching: u64) -> u64 {
+    u64::MAX
 }
 
 pub fn execution_backend(
@@ -1959,5 +2055,34 @@ mod pacing_tests {
         assert!(needs_pin(true, false, Some(Some("b")), Some("a")));
         assert!(needs_pin(true, false, Some(Some("a")), None));
         assert!(needs_pin(true, false, None, Some("a")));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod descriptor_tests {
+    use super::*;
+
+    /// 8 per launch on top of what is open, with 64 kept free (FR-077).
+    #[test]
+    fn launches_fit_with_eight_descriptors_each_and_sixty_four_free() {
+        assert_eq!(launches_that_fit(40, 1024, 0), 115);
+        assert_eq!(launches_that_fit(40, 1024, 5), 110);
+        assert_eq!(launches_that_fit(40, 120, 0), 2);
+        assert_eq!(launches_that_fit(40, 120, 2), 0);
+        assert_eq!(launches_that_fit(10, 72, 0), 0);
+        assert_eq!(launches_that_fit(2000, 1024, 0), 0);
+    }
+
+    /// EMFILE and ENFILE anywhere in an error's chain are descriptor exhaustion.
+    #[test]
+    fn emfile_and_enfile_are_descriptor_exhaustion() {
+        for code in [libc::EMFILE, libc::ENFILE] {
+            let error = anyhow::Error::from(std::io::Error::from_raw_os_error(code))
+                .context("read /proc/stat");
+            assert!(descriptor_exhausted(&error), "{code}");
+        }
+        let other = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ENOENT));
+        assert!(!descriptor_exhausted(&other));
+        assert!(!descriptor_exhausted(&anyhow::anyhow!("no descriptors")));
     }
 }

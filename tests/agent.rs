@@ -170,6 +170,7 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
         envelope: None,
         output_dir,
         control_token: None,
+        nofile_soft: None,
     }
 }
 fn start(spec: &SupervisorSpec) -> (Owned, ChildStdin, mpsc::Receiver<serde_json::Value>) {
@@ -1317,6 +1318,39 @@ impl Service {
         )
     }
 
+    /// The agent started under the given soft and hard `RLIMIT_NOFILE`.
+    fn agent_with_limit(&self, log: &str, soft: u64, hard: u64) -> Owned {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cedegrid"));
+        command
+            .arg("--config")
+            .arg(&self.config_file)
+            .arg("agent")
+            .arg("--deployment")
+            .arg(&self.deployment_file)
+            .env("TMPDIR", self.dir.path())
+            .stdout(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.log"))).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.err"))).unwrap(),
+            ));
+        // SAFETY: setrlimit is async-signal-safe and changes only the child.
+        unsafe {
+            command.pre_exec(move || {
+                let limit = libc::rlimit {
+                    rlim_cur: soft as libc::rlim_t,
+                    rlim_max: hard as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Owned(command.spawn().unwrap())
+    }
+
     async fn result(&self, attempts: usize) -> Option<cedegrid::protocol::ResultSubmission> {
         use cedegrid::protocol::*;
         for _ in 0..attempts {
@@ -1842,6 +1876,66 @@ async fn a_cancelled_task_stays_cancelled_across_an_agent_restart() {
     );
     let assignment = service.record().unwrap().assignment_id;
     assert!(service.outcome(&assignment).yielded);
+}
+
+/// A descriptor limit too small for a launch refuses it with `descriptor_limit` and the
+/// agent stays up; under a larger hard limit the task runs and its command sees the soft
+/// limit the agent started with (FR-077).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_raises_its_descriptor_limit_and_refuses_launches_that_do_not_fit() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![
+            python,
+            "-c".into(),
+            "import pathlib,resource; pathlib.Path('nofile').write_text(str(resource.getrlimit(resource.RLIMIT_NOFILE)[0]))".into(),
+        ],
+        |_| {},
+    )
+    .await;
+    // 72 descriptors leave no room once 64 are kept free.
+    let mut tight = service.agent_with_limit("tight", 72, 72);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(
+        tight.try_wait().unwrap().is_none(),
+        "{}",
+        fs::read_to_string(service.dir.path().join("tight.err")).unwrap()
+    );
+    let _ = tight.kill();
+    let _ = tight.wait();
+    let log = fs::read_to_string(service.dir.path().join("tight.log")).unwrap();
+    assert!(log.contains("descriptor_limit"), "{log}");
+    assert!(service.record().is_none(), "nothing launched");
+    let (_, hard) = descriptor_limits();
+    let mut agent = service.agent_with_limit("raised", 200, hard.min(4096));
+    let submission = service.result(200).await;
+    let _ = agent.kill();
+    let _ = agent.wait();
+    assert!(
+        submission.is_some(),
+        "{}",
+        fs::read_to_string(service.dir.path().join("raised.log")).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(service.dir.path().join("nofile")).unwrap(),
+        "200"
+    );
+}
+
+// `rlim_t` is not `u64` on every target.
+#[allow(clippy::unnecessary_cast)]
+fn descriptor_limits() -> (u64, u64) {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: valid output pointer.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0
+    );
+    (limit.rlim_cur as u64, limit.rlim_max as u64)
 }
 
 /// Operator limits through the policy authority (FR-057, FR-058).
