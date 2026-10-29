@@ -807,8 +807,10 @@ impl<'a> Interval<'a> {
     }
 
     /// Hysteresis for `own_over_target` caps (FR-013): while own work is not below its
-    /// target by the contention floor, a held cap is not relaxed because one task's usage
-    /// fell, so own work stays at its target and the contender's share holds.
+    /// target by the contention floor, a held cap within the budget is not relaxed because
+    /// one task's usage fell, so own work stays at its target and the contender's share
+    /// holds. A cap above the whole budget, as after external growth, no longer binds and
+    /// reverses as before.
     fn holds_own_cap(&self, state: &StepState, frame: &Frame) -> bool {
         let floor = (self.cpu_capacity.saturating_mul(u64::from(
             self.config
@@ -820,6 +822,9 @@ impl<'a> Interval<'a> {
         state.step == YieldStep::Cap
             && state.cause == YieldCause::OwnOverTarget
             && frame.own_usage.saturating_add(floor) > self.budget.cpu_millicores
+            && state
+                .target
+                .is_some_and(|target| target <= self.budget.cpu_millicores)
     }
 
     /// Steps of allocations that are no longer candidates hold or reverse.
