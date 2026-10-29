@@ -516,6 +516,13 @@ impl ChildSlot {
             progress_lost_ms: since.elapsed().as_millis() as u64,
             unavailable: self.unavailable.clone(),
             hint_ready: self.hint_ready,
+            launch_nice: self.prepared.as_ref().and_then(|record| {
+                record
+                    .evidence
+                    .iter()
+                    .find(|evidence| evidence.control == "cpu.nice" && evidence.applied)
+                    .and_then(|evidence| evidence.effective.as_deref()?.parse().ok())
+            }),
             observes_drain: self.observes_drain,
             applied: self.applied.clone(),
             applied_targets: self.applied_targets.clone(),

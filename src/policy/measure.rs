@@ -135,6 +135,28 @@ impl<'a> Interval<'a> {
                 (a.id.clone(), modes)
             })
             .collect();
+        // A launch nice cannot be lowered again, so a task that left Yield First keeps it.
+        for allocation in &input.allocations {
+            let nice = input
+                .facts
+                .get(&allocation.id)
+                .and_then(|facts| facts.launch_nice)
+                .filter(|nice| *nice > 0);
+            if let Some(nice) = nice
+                && self.allocation_modes[&allocation.id][&ResourceKind::Cpu]
+                    != ContentionMode::YieldFirst
+            {
+                note(
+                    &mut self.statuses,
+                    ResourceKey::Cpu,
+                    "launch_nice_kept",
+                    format!(
+                        "allocation {} keeps its launch nice {nice} from Yield First; its caps do the yielding",
+                        allocation.id
+                    ),
+                );
+            }
+        }
         // A requested mode above the node cap runs at the cap; say so (FR-030).
         for allocation in &input.allocations {
             for (kind, requested) in &allocation.modes {

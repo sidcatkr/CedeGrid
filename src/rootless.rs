@@ -26,10 +26,10 @@ impl LaunchBackend for RootlessBackend {
                     || (!request.single_process && (1..=8).contains(&request.managed_child_limit))),
             "rootless execution requires single-process or bounded supervisor-mediated children with no-escape contract"
         );
-        let apply_nice = request.class == AllocationClass::Opportunistic;
+        // The supervisor applies the launch nice, which depends on the task's mode.
         Ok(GateSetup {
             cgroup_path: None,
-            nice: apply_nice.then_some(self.nice),
+            nice: None,
             oom_score_adj: None,
         })
     }

@@ -1898,6 +1898,29 @@ impl Config {
         self.cpu.nice.max(0)
     }
 
+    /// The nice a task launches at: `cpu.nice` for Opportunistic work whose CPU mode is
+    /// Yield First, or that requires the `cpu.nice` control; every other task keeps the
+    /// default priority and yields through its caps (FR-011).
+    pub fn launch_nice(&self, request: &crate::execution_model::LaunchRequest) -> i32 {
+        use crate::contention::{ContentionMode, ResourceKind};
+        let mode = crate::contention::effective_mode(
+            self.contention.mode(ResourceKind::Cpu),
+            request
+                .contention
+                .as_ref()
+                .and_then(|job| job.modes.get(&ResourceKind::Cpu).copied()),
+            self.contention.max_mode(),
+        );
+        if request.class == crate::execution_model::AllocationClass::Opportunistic
+            && (mode == ContentionMode::YieldFirst
+                || request.required_controls.iter().any(|c| c == "cpu.nice"))
+        {
+            self.effective_nice()
+        } else {
+            0
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             crate::model::supported_schema(self.schema_version),

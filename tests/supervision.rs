@@ -634,6 +634,38 @@ fn required_nice_has_one_verified_application_record_before_launch() {
     assert_eq!(nice[0].effective.as_deref(), Some("10"));
 }
 
+/// Work launched outside Yield First keeps the default priority: no nice is applied, so
+/// none is recorded (FR-011).
+#[test]
+fn a_task_outside_yield_first_launches_without_a_nice() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.class = AllocationClass::Opportunistic;
+    let journal = Journal::new();
+    let outcome = run(
+        &req,
+        &SupervisorOptions {
+            nice: 0,
+            lease_ms: 1_000,
+            ..options()
+        },
+        &journal,
+        &mut Backend::new(),
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    let records = journal.records.borrow();
+    let prepared = records
+        .iter()
+        .find(|r| r.phase == ExecutionPhase::Prepared)
+        .unwrap();
+    assert!(
+        prepared.evidence.iter().all(|e| e.control != "cpu.nice"),
+        "{:?}",
+        prepared.evidence
+    );
+}
+
 #[test]
 fn external_authorization_refusal_never_runs_user_code() {
     struct Refuse;

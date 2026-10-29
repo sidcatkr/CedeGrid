@@ -4353,3 +4353,62 @@ mod contention_ended {
         }
     }
 }
+
+mod launch_nice {
+    use cedegrid::config::Config;
+    use cedegrid::contention::{ContentionMode::*, ResourceKind};
+    use cedegrid::execution_model::{AllocationClass, JobContention, LaunchRequest};
+    use std::collections::BTreeMap;
+
+    /// Only Yield First Opportunistic work launches at `cpu.nice`; every other mode, and
+    /// Guaranteed work, keeps the default priority and yields through its caps. A task
+    /// that requires the `cpu.nice` control gets it in any mode (FR-011).
+    #[test]
+    fn only_yield_first_opportunistic_work_launches_at_the_configured_nice() {
+        for (node, mode, class, required, nice) in [
+            (YieldFirst, None, AllocationClass::Opportunistic, false, 10),
+            (Neutral, None, AllocationClass::Opportunistic, false, 0),
+            (Performance, None, AllocationClass::Opportunistic, false, 0),
+            (
+                Performance,
+                Some(YieldFirst),
+                AllocationClass::Opportunistic,
+                false,
+                10,
+            ),
+            // The node's mode caps the request.
+            (
+                YieldFirst,
+                Some(Performance),
+                AllocationClass::Opportunistic,
+                false,
+                10,
+            ),
+            (YieldFirst, None, AllocationClass::Guaranteed, false, 0),
+            (Performance, None, AllocationClass::Opportunistic, true, 10),
+        ] {
+            let mut config = Config::default();
+            config.contention.default_mode = node;
+            config
+                .contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            let request: LaunchRequest = serde_json::from_value(serde_json::json!({
+                "task_id": "t", "assignment_id": "a", "argv": ["/bin/true"], "cwd": "/",
+                "env": {}, "resources": {"cpu_millicores": 100, "ram_mib": 16, "gpu_memory_mib": {}},
+                "class": if class == AllocationClass::Guaranteed { "guaranteed" } else { "opportunistic" },
+                "replay_safe": true, "single_process": true, "no_escape": true,
+                "required_controls": if required { vec!["cpu.nice"] } else { vec![] },
+                "contention": mode.map(|mode| JobContention {
+                    modes: BTreeMap::from([(ResourceKind::Cpu, mode)]),
+                }),
+            }))
+            .unwrap();
+            assert_eq!(
+                config.launch_nice(&request),
+                nice,
+                "{node:?} {mode:?} {class:?} required {required}"
+            );
+        }
+    }
+}

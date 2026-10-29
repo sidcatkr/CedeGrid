@@ -943,7 +943,11 @@ pub(super) fn supervise(
             .checked_add(Duration::from_millis(options.prepare_timeout_ms))
             .context("preparation timeout is too large")?;
         let mut setup = backend.prepare(request)?;
-        if request.class == AllocationClass::Opportunistic && setup.nice.is_none() {
+        // The launch nice already reflects the task's mode; 0 leaves the default priority.
+        if request.class == AllocationClass::Opportunistic
+            && setup.nice.is_none()
+            && options.nice > 0
+        {
             setup.nice = Some(options.nice);
         }
         // Every own process is a preferred OOM victim where an unprivileged

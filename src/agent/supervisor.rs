@@ -416,7 +416,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         agent_lost: false,
     };
     let options = SupervisorOptions {
-        nice: spec.config.effective_nice(),
+        nice: spec.config.launch_nice(&spec.assignment.request),
         drain_timeout_ms: spec.config.lifecycle.drain_timeout_ms,
         term_grace_ms: spec.config.lifecycle.term_grace_ms,
         lease_ms: spec.config.lifecycle.allocation_lease_ms,

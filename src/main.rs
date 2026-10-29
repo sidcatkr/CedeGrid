@@ -859,7 +859,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(config.monitor.interval_ms));
     };
     let options = SupervisorOptions {
-        nice: config.effective_nice(),
+        nice: config.launch_nice(&request),
         drain_timeout_ms: config.lifecycle.drain_timeout_ms,
         term_grace_ms: config.lifecycle.term_grace_ms,
         lease_ms: config.lifecycle.allocation_lease_ms,

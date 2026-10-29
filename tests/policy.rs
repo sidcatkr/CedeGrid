@@ -4001,6 +4001,44 @@ fn a_reported_gpu_compute_cap_is_credited_at_its_duty() {
     );
 }
 
+/// A task that launched at the Yield First nice and now runs in another CPU mode keeps
+/// that nice, which an unprivileged process cannot lower; the decision says so (FR-011).
+#[test]
+fn a_kept_launch_nice_is_reported_outside_yield_first() {
+    use cedegrid::contention::{ContentionMode::*, ResourceKey};
+    for (mode, reported) in [(Performance, true), (Neutral, true), (YieldFirst, false)] {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        cfg.contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        let mut facts = rootless(&["job"]);
+        facts.get_mut("job").unwrap().launch_nice = Some(10);
+        let decision = PolicyEngine::new()
+            .evaluate(
+                &cfg,
+                &snapshot(),
+                &PolicyInput {
+                    allocations: vec![allocation(
+                        "job",
+                        AllocationPhase::Running,
+                        resources(1000, 100, 0),
+                        Some(resources(500, 100, 0)),
+                    )],
+                    facts,
+                    ..PolicyInput::default()
+                },
+                0,
+            )
+            .unwrap();
+        let kept = decision.resources[&ResourceKey::Cpu]
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "launch_nice_kept");
+        assert_eq!(kept, reported, "{mode:?}");
+    }
+}
+
 /// External GPU compute is grouped by UID, as CPU principals are: two external
 /// users each wanting half the device leave Neutral own work a third (FR-021).
 #[test]

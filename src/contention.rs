@@ -332,6 +332,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own work steps down by one margin step to learn whether a small external demand is satisfied.",
     ),
     (
+        "launch_nice_kept",
+        "A task launched at the Yield First nice keeps it in another CPU mode, since it cannot be lowered again; its caps do the yielding.",
+    ),
+    (
         "watching_larger_demand",
         "Own work holds the fair share while a larger external demand is watched for one response window.",
     ),

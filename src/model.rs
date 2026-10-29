@@ -367,6 +367,9 @@ pub struct AllocationFacts {
     /// The worker acknowledged its resource-target file (FR-062).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hint_ready: bool,
+    /// The nice the task launched at, when above the default (FR-011).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_nice: Option<i32>,
     /// The worker polls the drain file: it acked targets or used the supervisor socket.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub observes_drain: bool,
