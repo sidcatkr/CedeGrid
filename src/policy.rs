@@ -355,6 +355,8 @@ struct Interval<'a> {
     /// The per-interval external estimate's own bound: host busy upper less lower, plus own
     /// upper less lower (FR-073).
     cpu_bound: u64,
+    /// This interval's external CPU estimate, beside the window's that sets the budget.
+    cpu_interval_external: Option<u64>,
     /// Own CPU usage is over its target without the budget falling, within the dwell: held
     /// steps keep their targets and none is entered (FR-011).
     cpu_own_hold: bool,
@@ -459,6 +461,7 @@ impl<'a> Interval<'a> {
             cpu_held: false,
             cpu_held_inconsistent: false,
             cpu_bound: 0,
+            cpu_interval_external: None,
             cpu_own_hold: false,
             cedegrid_cpu: 0,
             cpu_contention_ended: false,

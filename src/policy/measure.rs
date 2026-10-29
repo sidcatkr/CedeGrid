@@ -432,6 +432,7 @@ impl<'a> Interval<'a> {
                 });
             let bound = (busy - host_lower).saturating_add(own_upper.saturating_sub(own_lower));
             self.cpu_bound = bound;
+            self.cpu_interval_external = Some(interval);
             match window {
                 Some(window) if window.abs_diff(interval) <= bound => window,
                 _ => interval,
@@ -798,10 +799,13 @@ impl<'a> Interval<'a> {
             .saturating_mul(u64::from(thresholds.principal_min_percent))
             / 100)
             .max(1);
+        // This interval's estimate, not the window's, beside the larger of the floor and the
+        // scope's per-interval measurement band (FR-034).
+        let external = self.cpu_interval_external.unwrap_or(view.external);
         let quiet = match self.snapshot.principals.as_ref() {
             Some(list) => {
                 let mut accounted = 0u64;
-                let mut each_below = true;
+                let mut contending = Vec::new();
                 for principal in list {
                     let usage = if principal.is_owner {
                         principal.cpu_millicores.saturating_sub(self.cedegrid_cpu)
@@ -812,16 +816,21 @@ impl<'a> Interval<'a> {
                         Some(uid)
                             if !principal.is_owner && uid >= self.config.contention.uid_min =>
                         {
-                            each_below &= usage < floor;
+                            contending.push(usage);
                         }
                         None if !principal.is_owner => continue,
                         _ => {}
                     }
                     accounted = accounted.saturating_add(usage);
                 }
-                each_below && view.external.saturating_sub(accounted) < floor
+                crate::contention::cpu_quiet(
+                    contending,
+                    external.saturating_sub(accounted),
+                    floor,
+                    self.cpu_bound,
+                )
             }
-            None => view.external < floor,
+            None => crate::contention::cpu_quiet([], external, floor, self.cpu_bound),
         };
         self.next.cpu_quiet_intervals = if quiet {
             self.prev.cpu_quiet_intervals.saturating_add(1)

@@ -4388,6 +4388,16 @@ mod contention_ended {
 
     /// Each interval's usage and steps while the contender wants `demand(now)`.
     fn run(mode: ContentionMode, ticks: u64, demand: impl Fn(u64) -> u64) -> Vec<Tick> {
+        run_with(mode, ticks, demand, |_, _| {})
+    }
+
+    /// `run`, with each interval's snapshot adjusted by `tweak`.
+    fn run_with(
+        mode: ContentionMode,
+        ticks: u64,
+        demand: impl Fn(u64) -> u64,
+        tweak: impl Fn(u64, &mut Snapshot),
+    ) -> Vec<Tick> {
         let mut config = config();
         config.cpu.reserve_physical_cores = 0;
         config.contention.default_mode = mode;
@@ -4424,6 +4434,7 @@ mod contention_ended {
                     ..PrincipalUsage::default()
                 },
             ]);
+            tweak(now, &mut snap);
             let input = PolicyInput {
                 allocations: ids
                     .iter()
@@ -4572,6 +4583,147 @@ mod contention_ended {
                 }
             }
         }
+    }
+    /// A one-core contender drops to half a core, then leaves 5 s later, as in the test
+    /// above: the caps moved less than the mode's interval before it leaves.
+    fn leaving(now: u64) -> u64 {
+        match now {
+            10_000..40_000 => 1000,
+            40_000..45_000 => 500,
+            _ => 0,
+        }
+    }
+
+    /// The quiet count (FR-034): a 4-CPU scope whose per-interval measurement band is 60m,
+    /// above the 40m contention floor, with a 45m unattributed trickle once the contender
+    /// leaves, still counts quiet intervals, so the CPU returns within 2 s and an interval.
+    #[test]
+    fn an_idle_scope_within_its_measurement_band_does_not_hold_the_return_back() {
+        let run = run_with(ContentionMode::Neutral, 200, leaving, |now, snap| {
+            let busy = snap.cpu_busy_millicores.unwrap_or(0);
+            let trickle = if now >= 45_000 { 45 } else { 0 };
+            snap.cpu_busy_millicores = Some(busy + trickle);
+            snap.cpu_busy_lower_millicores = Some((busy + trickle).saturating_sub(60));
+        });
+        let target = run.last().unwrap().share;
+        let after = reached(&run, 45_000, target);
+        assert!(
+            after.is_some_and(|ms| ms <= 2000 + INTERVAL),
+            "{after:?} to reach {target}m"
+        );
+    }
+
+    /// The quiet count uses this interval's unattributed estimate, not the window's: a
+    /// window still showing 70m beside 20m now, within the band of each other, counts as
+    /// quiet, so the CPU returns within 2 s and an interval (FR-034).
+    #[test]
+    fn the_quiet_count_uses_this_intervals_estimate_not_the_windows() {
+        let run = run_with(ContentionMode::Neutral, 200, leaving, |now, snap| {
+            let busy = snap.cpu_busy_millicores.unwrap_or(0);
+            if now >= 45_000 {
+                // A 60m band holds the window's 70m and this interval's 20m together.
+                snap.cpu_busy_millicores = Some(busy + 20);
+                snap.cpu_busy_lower_millicores = Some((busy + 20).saturating_sub(60));
+                snap.kernel = Some(scoped_kernel(
+                    now,
+                    busy + 20,
+                    (busy + 20).saturating_sub(60),
+                    busy + 70,
+                ));
+                snap.managed_cpu_window_lower_millicores =
+                    Some(snap.managed_cpu_lower_millicores.unwrap_or(busy).min(busy));
+            }
+        });
+        let target = run.last().unwrap().share;
+        let after = reached(&run, 45_000, target);
+        assert!(
+            after.is_some_and(|ms| ms <= 2000 + INTERVAL),
+            "{after:?} to reach {target}m"
+        );
+    }
+
+    /// A scoped kernel snapshot of all four CPUs with this interval's busy time, its lower
+    /// bound and the window's.
+    fn scoped_kernel(
+        now: u64,
+        busy: u64,
+        lower: u64,
+        window: u64,
+    ) -> cedegrid::kernel::KernelSnapshot {
+        use cedegrid::kernel::*;
+        KernelSnapshot {
+            schema_version: 1,
+            runtime_os: "linux".into(),
+            kernel_release: Some("fixture".into()),
+            observed_at_unix_ms: 100,
+            monotonic_elapsed_ms: now + 500,
+            sample_interval_ms: Some(INTERVAL),
+            freshness_limit_ms: 1500,
+            controls: vec![],
+            cpu: CpuTopology {
+                allowed_cpu_ids: Some(vec![0, 1, 2, 3]),
+                effective_cgroup_cpu_ids: Some(vec![0, 1, 2, 3]),
+                effective_cpu_ids: Some(vec![0, 1, 2, 3]),
+                cores: (0..4)
+                    .map(|id| CpuCore {
+                        cpu_id: id,
+                        package_id: Some(0),
+                        core_id: Some(id as i32),
+                        thread_siblings: Some(vec![id]),
+                    })
+                    .collect(),
+                effective_cpu_capacity_millicores: Some(CAPACITY),
+                busy_millicores: Some(busy),
+                busy_lower_millicores: Some(lower),
+                busy_status: CpuUsageStatus::Available,
+                busy_interval_ms: Some(INTERVAL),
+                busy_window_millicores: Some(window),
+                busy_window_lower_millicores: Some(window.saturating_sub(busy - lower)),
+                busy_window_ms: Some(4 * INTERVAL),
+                visible_cpu_ceiling_millicores: Some(CAPACITY),
+                detail: "synthetic scoped telemetry".into(),
+            },
+            hierarchy: None,
+            psi: vec![],
+            cpu_pressure: None,
+            limitations: vec![],
+        }
+    }
+
+    /// A contender that stops and comes back within the quiet window restarts the count:
+    /// the return waits the full window after it stops again, then comes within 2 s and an
+    /// interval (FR-034).
+    #[test]
+    fn a_contender_that_comes_back_restarts_the_quiet_count() {
+        let window = u64::from(config().contention.principal_window_intervals);
+        let run = run(ContentionMode::Neutral, 200, |now| match now {
+            45_000..45_500 => 0,
+            45_500..46_000 => 500,
+            now if now >= 46_000 => 0,
+            now => leaving(now),
+        });
+        let target = run.last().unwrap().share;
+        let after = reached(&run, 46_000, target).expect("own work never returned");
+        assert!(
+            after >= (window - 1) * INTERVAL,
+            "{after} ms after it stopped again"
+        );
+        assert!(
+            after <= 2000 + INTERVAL,
+            "{after} ms after it stopped again"
+        );
+    }
+
+    /// The quiet rule itself: every principal and this interval's unattributed estimate
+    /// below the larger of the contention floor and the measurement band (FR-034).
+    #[test]
+    fn quiet_is_judged_against_the_larger_of_the_floor_and_the_band() {
+        use cedegrid::contention::cpu_quiet;
+        assert!(cpu_quiet([10, 30], 35, 40, 0));
+        assert!(!cpu_quiet([10, 45], 35, 40, 0));
+        assert!(!cpu_quiet([10], 45, 40, 20));
+        assert!(cpu_quiet([10, 45], 45, 40, 60));
+        assert!(!cpu_quiet([], 60, 40, 60));
     }
 }
 

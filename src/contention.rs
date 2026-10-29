@@ -1789,6 +1789,20 @@ pub fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
         .saturating_sub(owner_unmanaged)
 }
 
+/// Whether CPU was quiet this interval for the return after contention (FR-034): every
+/// external principal's usage and this interval's unattributed external estimate below the
+/// quiet threshold, the larger of the contention floor and the scope's per-interval
+/// measurement band, so an idle scope's measurement error does not hold the return back.
+pub fn cpu_quiet(
+    principals: impl IntoIterator<Item = u64>,
+    unattributed: u64,
+    floor: u64,
+    band: u64,
+) -> bool {
+    let threshold = floor.max(band);
+    principals.into_iter().all(|usage| usage < threshold) && unattributed < threshold
+}
+
 /// Whether Guaranteed work may be drained (FR-024, FR-057): only for a memory
 /// floor or envelope breach, as the last step of floor policy A, after all
 /// opportunistic work on the resource is released and the breach has lasted
