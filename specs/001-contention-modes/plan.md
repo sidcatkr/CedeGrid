@@ -789,6 +789,53 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - V, VII: no new privilege, field or dependency.
   - VI: tests first for the handle cache, the process table and the test fix.
 
+## Item 028: Full applies the GPU compute share (2026-10-29)
+
+- **Defect**: `CgroupActuator::unavailable` (`src/cgroup.rs`) marks `LowerShare` and `Cap`
+  unavailable for GPU compute in every case. That dates from T042, before T087d gave
+  `RootlessActuator` the GPU duty cycle. So in Full, GPU contention goes straight to Pause
+  (`cgroup.freeze`), then Hint, then Drain, and own GPU work falls to zero instead of holding
+  its share, while Tracked holds it. The spec's GPU compute share names no backend, so it needs
+  no amendment (clarify found none).
+- **Rule**: in Full, GPU compute `Cap` is available to Opportunistic work as in Tracked: a duty
+  cycle of one monitor interval with the target's share of the device and a 5% minimum.
+  Guaranteed work keeps no GPU compute step (FR-024).
+- **Mechanism** (research R27):
+  - With `cgroup.freeze` authorized, the duty's off phase freezes the leaf and confirms it
+    through the same `cgroup.events` readback as Pause. Its on phase thaws the leaf only when no
+    other resource holds the freeze, so a CPU or GPU Pause stays frozen through the cycle.
+  - Without that authorization, the existing SIGSTOP duty runs through the rootless fallback.
+  - A refused freeze write or readback falls back to the rootless duty and keeps the refusal as
+    the step's detail, as other refused cgroup steps do. The duty's readback is bounded by its
+    off phase, not Pause's 1 s, so a slow freeze cannot stretch the cycle or hold the supervisor.
+  - A duty starts in its on phase. Its reversal and `release` thaw only a freeze the duty
+    alone holds.
+- **One duty cycle per family**: where the CPU cap is `cpu.max`, which is not a duty cycle, the
+  GPU duty runs on its own. Where the CPU cap is itself the rootless duty (`cpu.max` not
+  authorized, or its write refused), the GPU share joins that cycle at the smaller duty, as in
+  Tracked. Reversing either step leaves the other in place.
+- **Policy**: unchanged. `applied_duty_credit` credits the duty the supervisor reports applied,
+  whatever the backend.
+- **Audit**, `CgroupActuator::unavailable` against `RootlessActuator::unavailable` per resource:
+  GPU compute `Cap` is the only step Tracked offers and Full does not. On CPU, Full adds
+  LowerShare, Cap and Pause through `cpu.weight`, `cpu.max` and `cgroup.freeze`, or falls back.
+  On RAM, Full adds Cap through `memory.high`, and neither backend pauses. On GPU memory neither
+  actuator offers a step. In both, the hint goes through the resource-target file, not the
+  actuator.
+- **Docs**: `docs/guarantees.md` and `docs/validation.md` state that Full applies the share and
+  how. A native GPU confirmation goes with the next native batch the user approves.
+- **Constitution**:
+  - I: a duty freeze writes only a leaf whose members are exactly the verified family, checked
+    before each write as for Pause; the fallback signals only that family.
+  - II: own GPU work gives back its share under external compute instead of everything, which
+    keeps Full at least as work-conserving as Tracked; external demand gets the same capacity
+    back.
+  - III: a duty not reported applied is still credited as the whole device (FR-008).
+  - IV: the policy is untouched; the mechanism lives in the supervisor's actuator.
+  - V: no new control or privilege; it uses the authorized `cgroup.freeze` or owned signals.
+  - VI: tests first for availability, the duty's off phase, held steps together and the credit.
+  - VII: no wire, config or SDK change.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

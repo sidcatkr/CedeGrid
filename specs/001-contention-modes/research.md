@@ -587,3 +587,18 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: sysinfo with `without_tasks()` (rejected: still reads several files per
   process and re-reads names); principals sampled less often (rejected: changes FR-059's windows).
 
+
+## R27. The GPU compute share in Full (item 028)
+
+- **Decision**: in Full, the GPU compute duty's off phase freezes the leaf through
+  `cgroup.freeze`, confirmed by `cgroup.events` as Pause is, when that control is authorized;
+  otherwise it uses the rootless SIGSTOP duty. The on phase never thaws a freeze another
+  resource holds. Where the CPU cap is also a duty cycle, both share one cycle at the smaller
+  duty.
+- **Rationale**: a freeze covers every process in the leaf, forked children included; it is how
+  Full already pauses; and frozen processes show as sleeping, not stopped. Kernels already
+  submitted keep running in both mechanisms, so the granularity is the same: the period plus
+  the longest kernel.
+- **Alternatives**: keep GPU compute Cap unavailable in Full (rejected: Full then pauses where
+  Tracked holds a share, so Full does less than Tracked); always use SIGSTOP in Full (rejected:
+  it reaches only the verified family's listed processes, and Full already has the freeze).
