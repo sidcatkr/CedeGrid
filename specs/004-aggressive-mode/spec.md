@@ -17,8 +17,14 @@ cap and per-job modes (FR-030), Performance (FR-022), probing (FR-021, FR-072), 
 caution options (FR-043, FR-051) and the mode ordering (FR-065). It uses
 [003-everyday-cli](../003-everyday-cli/spec.md) for `run`, per-job entries and profiles
 (FR-020–FR-026), `ps` and `top` (FR-010, FR-013), the setup interface (FR-030–FR-033) and
-per-user run-queue wait (FR-050). The constitution (6.0.0) applies, in particular Principle II's
+per-user run-queue wait (FR-050). The constitution (7.0.0) applies, in particular Principle II's
 Aggressive mode and its one named exception, unprotected Aggressive.
+
+**Note (2026-10-29, constitution 7.0.0, 001 item 029)**: in both forms, memory floors are kept
+down to the fair share (001 FR-023): at a breach others' growth caused, own memory above its
+fair share takes the floor path and in-share own memory gets the save-progress signal (001
+FR-075). Out-of-memory order by fault replaces the OOM-victim rule, and Performance is 001's
+default mode and no caution option. Where this spec says otherwise, the note applies.
 
 ## Clarifications
 
@@ -105,8 +111,10 @@ demand; the heavy one gets its fair share, not more.
    its run-queue wait and the growth probe reveal the demand, and the protection uses it.
 5. **Given** unknown external GPU or CPU activity, **When** Aggressive runs, **Then** own work
    holds at its fair share, as Performance does.
-6. **Given** a memory floor breach, **When** Aggressive runs, **Then** the normal floor path
-   applies: hint, then drain; above the floors, memory gets no hints or drains.
+6. **Given** a memory floor breach, **When** Aggressive runs, **Then** memory floors are kept
+   down to the fair share: own memory above it takes the floor path (hint, then drain), and
+   in-share own memory gets the save-progress signal; above the floors, memory gets no hints or
+   drains.
 7. **Given** setup, `top` and `ps`, **When** Aggressive is chosen or active, **Then** each shows
    a red `[Aggressive]` label.
 8. **Given** a node cap left at its default, **When** a job requests Aggressive, **Then** it runs
@@ -143,8 +151,8 @@ permitted paths start an unprotected run.
    store it.
 5. **Given** an unprotected run and a contender at any demand, **When** the contender waits,
    **Then** own work does not step CPU or GPU compute down, raises no priority and adds no threads.
-6. **Given** an unprotected run and a memory floor breach, **When** it happens, **Then** the
-   normal floor path applies.
+6. **Given** an unprotected run and a memory floor breach, **When** it happens, **Then** memory
+   floors are kept down to the fair share, as in protected Aggressive.
 7. **Given** an unprotected run, **When** it starts and while it runs, **Then** one warning line
    prints at start, and `ps`, `top`, logs and JSON show a red `UNPROTECTED` marker until the run
    ends.
@@ -207,11 +215,13 @@ permitted paths start an unprotected run.
   its usage plus the probe. Wait alone MUST NOT drive own work below its fair share.
 - **FR-005**: While external activity of unknown amount exists on a compute resource, protected
   Aggressive MUST hold own work at its fair share, as Performance does (001 FR-022).
-- **FR-006**: At a memory floor breach, both forms MUST use the normal floor path (hint, then
-  drain). Own processes stay the preferred OOM victims, so a sudden external allocation may kill
-  own work before it checkpoints. The confirmation text MUST say so.
+- **FR-006**: At a memory floor breach, both forms MUST keep memory floors down to the fair share
+  (001 FR-023): own memory above its fair share takes the floor path (hint, then drain), and
+  in-share own memory gets the save-progress signal (001 FR-075). Out-of-memory order by fault
+  applies, so the kernel may take another workload's process, or own work as the largest
+  process, before own work checkpoints. The confirmation text MUST say so.
 - **FR-007**: Aggressive MUST be a caution option, off by default, with a red `[Aggressive]`
-  label (stronger than Performance's yellow) in setup, `top`, `ps`, `doctor`, `status` and JSON.
+  label in setup, `top`, `ps`, `doctor`, `status` and JSON.
   Choosing it MUST use the caution flow with its own confirmation (001 FR-051), with its own
   acknowledgement name for files and non-interactive use.
 - **FR-008**: The node cap MUST NOT include Aggressive unless an operator raised it to Aggressive
@@ -227,7 +237,7 @@ permitted paths start an unprotected run.
 
 - **FR-010**: Unprotected Aggressive MUST be protected Aggressive with the protection off: own
   work MUST NOT step CPU or GPU compute down for external demand. Floors, Principle I, the
-  OOM-victim rule, the no-priority-raise rule, Guaranteed rules and the operator envelope still
+  out-of-memory order by fault, the no-priority-raise rule, Guaranteed rules and the operator envelope still
   apply in full. While external activity of unknown amount exists, own work MUST NOT grow into
   it.
 - **FR-011**: Only an explicit per-run flag, or the same explicit per-submission SDK field, MAY
@@ -256,8 +266,9 @@ permitted paths start an unprotected run.
 
 - **FR-017**: Neither form MAY raise own priority, add threads or do anything else to win share.
   The split under contention is whatever the kernel and the GPU driver decide.
-- **FR-018**: GPU compute MUST follow the CPU rules in both forms. Memory floors, VRAM floors,
-  Principle I and the OOM-victim rule MUST be unchanged in both forms.
+- **FR-018**: GPU compute MUST follow the CPU rules in both forms. Memory floors (kept down to
+  the fair share), VRAM floors, Principle I and the out-of-memory order by fault MUST be
+  unchanged in both forms.
 - **FR-019**: The CLI and the SDKs MUST offer the same Aggressive and unprotected options, and a
   test MUST fail when they differ.
 - **FR-020**: Performance MUST NOT change in this feature.

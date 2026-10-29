@@ -158,11 +158,11 @@ and `Cargo.lock` are the same at every commit listed, so each gate ran the same 
 | T141e, PSI | `4d631d0`, `893c1c2` | (1) status available, 10 external cgroups, external avg10 0; (3) 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples; (2) under another account on 2026-10-27, in [Reruns with launch pacing](#reruns-with-launch-pacing) | pass |
 | T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `893c1c2`, `1c8a850` | `ramp_seconds` 2.784 idle, 2.728 and 2.762 with a contender (target 10 s); the contender, one busy loop started at 3 s, gets a median of 0.72 core after 10 s pinned and unpinned, and 0.9 core in 7% and 0% of half-second samples; `foreign_actions` 0 | ramp pass, contender fail (SC-004) |
 | T088, GPU on an occupied device | `893c1c2` | owned-context test passes; a fresh external CUDA context takes 74 MiB, so the 512 MiB minimum stays; with an idle external context, 100 of 100 GPU tasks complete in Neutral and in Performance, admission open, no GPU step, unattributed device memory 203 MiB; GPU activity reads Unknown in 88% of those sessions' samples; paused: 0 completions, VRAM unchanged; 50% duty cycle at 500 ms gives 0.50 of baseline, longest gap 258 ms, longest kernel 4.4 ms; T152: summed per-process SM differs from device utilization by at most 2, 2 and 5 points with 1, 2 and 4 processes | pass |
-| T117, CPU reclaim (Yield First, Neutral, Performance) | `1c8a850` | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
-| T117, GPU (Neutral, Performance) | `c0779d3` | GPU compute at the target share 2 intervals after the protected GPU load starts, after up to 6 caps and one pause, no drain; decision p95 0.07 and 0.60 s; post-yield p99 0.77×; matched throughput 0.923 in Performance but 0.723 in Neutral, where each new 20 s job reads as Unknown GPU activity at start, is capped at the fair share and stays capped through the cooldown | Performance pass, Neutral fail |
+| T117, CPU reclaim (Yield First, Neutral, Performance; protection profile, `reserve_physical_cores = 1`) | `1c8a850` | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
+| T117, GPU (Neutral, Performance; protection profile, `reserve_physical_cores = 1`) | `c0779d3` | GPU compute at the target share 2 intervals after the protected GPU load starts, after up to 6 caps and one pause, no drain; decision p95 0.07 and 0.60 s; post-yield p99 0.77×; matched throughput 0.923 in Performance but 0.723 in Neutral, where each new 20 s job reads as Unknown GPU activity at start, is capped at the fair share and stays capped through the cooldown | Performance pass, Neutral fail |
 | T117, SC-014 (4 CPUs, 500 m tasks, idle) | `374637d`, `c0779d3` | own CPU 87.5% of capacity in Neutral and Performance, 75.0% in Yield First (targets 94%, 97% and 84%); the decisions read own work about 330–430 m low and count that as external; with 500 m tasks own use moves in 500 m steps, so this run cannot reach the targets even with exact measurement | fail |
 | T117, SC-015 (beside a 60 m external user) | `374637d`, `c0779d3` | own CPU as a share of capacity minus the user and the margin: 93.6% in Neutral, 90.7% in Performance, 89.8% in Yield First (target 90%); no step change in 5 minutes | Neutral and Performance pass, Yield First fail |
-| T118, SC-005 audit | `1c8a850` (CPU), `c0779d3` (GPU) | CPU and GPU, at the defaults and with Performance and a 512 MiB floor: 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
+| T118, SC-005 audit (protection profile, `reserve_physical_cores = 1`) | `1c8a850` (CPU), `c0779d3` (GPU) | CPU and GPU, at the defaults and with Performance and a 512 MiB floor: 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
 
 ### Reruns with exact own measurement
 
@@ -237,6 +237,33 @@ its measurement window.
 | Run 6, return after contention (Yield First, 4 CPUs, 13 tasks of 250 m, one-core contender for 30 s) | own work at the contended target in the interval the contender is first observed; after its last usage the target returns in 1 interval, held caps rise in one move 5.5 s later, and own work is at 98% of the uncontended target 7.5 s after the last usage (bound 3 s); no drain | SC-002 pass, return fail |
 | Run 7, loop with 129 tasks (run 3's 14-CPU Performance run) | observation interval p50 498 ms, p95 533 ms, maximum 609 ms; CedeGrid 104 m (0.74% of capacity); agent `loop_cost` per minute: sample 3.6 s, slots 1.08 s, policy 0.18 s, heartbeat 0.15 s | pass |
 | GPU (Part 5) | per-process utilization readable (`NVML_SUCCESS`); the one listed context is the greeter's graphics context, under a user ID at or above `uid_min`, so it is not background; GPU activity stays unknown and admission open | as specified |
+
+### Own-work ratios in the protection runs
+
+The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
+scope with `cpu.reserve_physical_cores = 1` (the default is 0), built to test reclaim and
+protection, not own-work efficiency. Their own-work ratios, 0.93–0.94 of the same probe
+without CedeGrid while idle and 0.71–0.80 under contention, come from that setup:
+
+- **Idle.** No CPU `managed_idle` case stepped (`yielded: false` in all 15). The managed probe
+  asked `draining()` before every unit, and the SDK then re-read and parsed the target file on
+  each call; the unmanaged probe asked nothing. A per-unit check of that cost ran a half-core
+  pbkdf2 loop at 0.893 of the same loop without it. The launch nice of 10 and the agent sharing
+  the scope's two cores may add to the loss.
+- **Under contention.** The reserve, not contention, set the budget. The decisions show
+  `capacity` 2000, `reserve` 1000, `external` 594 and `target_share` 406 against own usage of
+  424–524 m, so own work was capped while about 880 m stood idle. With the defaults, Neutral's
+  5% margin leaves a budget of about 1306 m, and the case would not step.
+- The probe and the protected load run on different physical cores, so the protected load's
+  p99 without CedeGrid is not same-core contention either.
+
+Since item 029 the SDKs re-read the target file only when its stat identity changes, both
+probes check for a drain every 50 ms (the unmanaged one through a no-op context), Neutral and
+Performance tasks launch at nice 0, and the `own-efficiency` profile keeps every default, with
+the coordinator and the harness outside the probe's scope and the placement in the report.
+Report 027's run 1 and run 3 rows above stand as recorded: run 1's 4-CPU estimate is the
+window's upper bound, and run 3's Neutral and Yield First fill stays below SC-014 on this host
+because admission's p95 charges exceed the share (`charge_shortfall`).
 
 ## Rules for validation runs
 

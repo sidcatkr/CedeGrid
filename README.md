@@ -4,7 +4,10 @@ CedeGrid source distribution. See [LICENSE](LICENSE), [release scope](docs/relea
 
 
 CedeGrid runs explicitly selected compute jobs on spare CPU, RAM, and NVIDIA GPU
-capacity. A standalone Rust coordinator and native node agents own scheduling,
+capacity, most usefully on a shared server where other people's processes already run, so
+that no capacity sits idle. Own work runs as fast as it can, and the contention mode says how
+much it gives back when others need capacity: Performance, the default, keeps everything
+others do not use minus a small margin; Neutral and Yield First give back more. A standalone Rust coordinator and native node agents own scheduling,
 leases, process supervision, checkpoints, artifacts, and result receipts. Python
 and TypeScript SDKs submit work and provide cooperative worker hooks. Any executable
 that meets the process contract can run; no application framework is required.
@@ -111,9 +114,9 @@ Client and coordinator files take `--endpoint`, `--listen`, `--state-dir`,
 written or unchanged, 2 for a missing or invalid choice, 3 for an unacknowledged caution
 option, 4 when the result does not load, and 130 when cancelled.
 
-`[caution]` marks an option that lets own work hold more capacity within the floors:
-Performance mode, a floor below twice its minimum, a margin below its default, and a detection
-setting beyond its default. In the interface it needs a separate confirmation, and with flags
+`[caution]` marks an option that lets own work hold more capacity within the floors: a floor
+below twice its minimum, a margin below its default, and a detection setting beyond its
+default. Performance is the default mode and no caution option. In the interface it needs a separate confirmation, and with flags
 `--acknowledge-caution` naming the option. The choice is recorded in
 `contention.acknowledge_caution`. See [guarantees](docs/guarantees.md) for what each mode,
 floor and caution option does, and `cedegrid setup --help` for every flag.

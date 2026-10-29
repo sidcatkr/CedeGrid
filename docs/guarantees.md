@@ -1,5 +1,12 @@
 # Guarantee boundaries
 
+CedeGrid lets own work use a shared server's spare CPU, RAM and GPU capacity, most usefully
+where other people's processes already run and it is unclear how much to take, so that no
+capacity sits idle. Own work runs as fast as it can, efficiently, and the contention mode says
+how much it gives back when others need capacity. Performance is the default; Yield First and
+Neutral give back more, and Yield First is one option among them. Each section below states
+what CedeGrid guarantees and where that ends.
+
 ## Replayable burst storage
 
 `storage_profile: burst_replay_delete_extra` is an explicit weaker local-storage
@@ -346,22 +353,49 @@ that takes a hint, a charge beyond the budget only blocks admission and never hi
 drains or terminates running work; GPU work without a hint channel is judged at its
 charge, since its growth cannot be bounded. A smaller setting is raised to the minimum
 with a load-time warning. `doctor` shows every floor as it applies on the host, and a
-raised floor carries the reason code `small_floor_raised`. Floors always come before the
-fair share. A breached floor blocks admission on that resource and releases
-opportunistic work holding it. Floor policy A, the only floor policy, then drains
-Guaranteed work that holds the memory, as the last step: after
+raised floor carries the reason code `small_floor_raised`. A breached floor blocks
+admission on that resource and releases opportunistic work holding it. Floor policy A, the
+only floor policy, then drains Guaranteed work that holds the memory, as the last step: after
 `contention.guaranteed_hint_deadline_s` (5 s) and, for RAM, after the breach has lasted
 `contention.ram.guaranteed_breach_window_s` (10 s). GPU memory breaches have no window.
 A Guaranteed allocation that is not hint-ready waits only for the window, and on the
-critical path the window is skipped. On Linux, every own process, Guaranteed included,
-marks itself as a preferred out-of-memory victim (`oom_score_adj` 1000) before it runs.
-Other platforms offer no unprivileged equivalent and claim none.
+critical path the window is skipped.
+
+Floors hold by mode. Own memory above its memory fair share (the max-min share beside the
+RAM principals, or beside the device's GPU memory principals) gives way at the floors in every
+mode, and in Yield First and Neutral all own memory does. In Performance and Aggressive a
+floor breach that others' growth caused steps own memory only down to its fair share: memory
+within it is not hinted, drained or sent TERM, on the critical path and for Guaranteed work
+too. Those in-share tasks get one save-progress request per breach episode instead: the
+target file's `save_progress_sequence` rises and both SDKs call `on_save_progress`, which is
+no drain and asks for no memory back. The kernel's out-of-memory killer may then take another
+workload's process, as it would without CedeGrid. This is the one memory exception, a rule of
+those modes and not an option; the operator envelope applies in every mode.
+
+Out-of-memory order follows fault. On Linux each own task's `oom_score_adj` at launch is its
+baseline, the same as every other process's, and is never set below it. While own RAM is above
+its fair share, the tasks that make up the excess, in the memory victim order, are raised to
+1000, every process of their family included, and return to their baseline once own RAM is
+back within its share; each change is evidence with the task, the old and new values, the
+cause, and own RAM beside its fair share. `ram.prefer_own_oom_victim = true` keeps every own
+task at 1000 from launch, a risk to own work only. Without privileges, in-share own work is
+protected only up to everyone else's baseline: the kernel can still take it as the largest
+process. Other platforms offer no unprivileged equivalent and claim none. A task the
+out-of-memory killer ended, shown by SIGKILL in an interval in which the host's
+`/proc/vmstat` `oom_kill` count rose, or in Full by its leaf's `memory.events` `oom_kill`, is
+requeued while own memory was within its fair share at the last observation, with cause
+`oom_not_own_fault`, no failure and no attempt counted; RAM admission stays closed until free
+memory is back above the floor. Above its share, or with the share or the count unknown, the
+kill is a normal failure.
 
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
-failed GPU allocation. The constitution allows one risk to other workloads, slower compute,
-and only under an unprotected Aggressive mode, which is not implemented: the modes are
-Yield First, Neutral and Performance, and no configuration key or job field can name
-Aggressive. The former floor policies `b` and `c` and Neutral memory policy
+failed GPU allocation; the in-share memory rule above belongs to Performance and Aggressive
+themselves. The constitution allows one risk to other workloads' compute, slower compute, and
+only under an unprotected Aggressive mode, which is not implemented: the modes are Yield
+First, Neutral and Performance, and no configuration key or job field can name Aggressive.
+In Performance a compute step never targets own work below its fair share: a cap that misses
+its target is applied again from the measured rate, and only a cap at the minimum duty with own
+usage still above the fair share pauses, for at most one monitor interval. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded
 or caution. Three options are marked *caution* because they let own work hold more
@@ -383,8 +417,9 @@ exceeds half of any GPU's floor. Settings that lengthen reclaim are bounded: mon
 intervals at most 10 s, kernel freshness at most 20 intervals, GPU sample age, drain
 timeout and termination grace at most 60 s. Decisions and node reports show, per
 resource, how much is held back and why. Without `contention.max_mode`, a job may
-request at most the node's most aggressive configured mode, so no job runs in
-Performance unless the operator chose it. Policy recordings without an allocation class
+request at most the node's most aggressive configured mode, so no job runs in a mode beyond
+what the node's configuration allows. A file that sets no mode runs Performance and gets one
+`default_mode_changed` notice; `default_mode = "neutral"` keeps the earlier default. Policy recordings without an allocation class
 retain the legacy opportunistic default; live observation copies the required class from
 the durable execution record.
 
@@ -526,6 +561,19 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 Trusted commands must remain inside the supervisor's lifecycle and must not create
 escaping daemons. Workloads requiring that behavior need an explicit adapter or
 a supported containment backend. The system is not a sandbox for hostile programs.
+
+Only Yield First tasks launch at `cpu.nice` (10); Neutral and Performance tasks launch at
+the default priority and leave yielding to their steps. A task that moves from Yield First
+to another mode keeps its launch nice, since an unprivileged process cannot lower it again,
+and its decisions say so (`launch_nice_kept`). Own priority is never raised.
+
+At start the agent raises its own soft `RLIMIT_NOFILE` to its hard limit, and the worker
+gate gives each task back the soft limit the agent started with before the user's command
+runs. The agent takes a launch only while its open descriptors, 8 for each launch in
+progress and 64 kept free fit under that limit; otherwise it advertises fewer launch slots
+and reports `launch_refused` with code `descriptor_limit`. Running out of descriptors
+(`EMFILE` or `ENFILE`) never ends the agent's loop: that interval decides nothing new and
+every step holds.
 
 A running supervisor waits for a control line, its leader's exit through the pidfd or a
 new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,
