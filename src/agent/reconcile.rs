@@ -238,6 +238,8 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         // A reattached family's mark is unknown until the next decision sends it.
         sent_oom: None,
         oom_context: None,
+        ram_view: None,
+        oom_verdict: None,
         seed: None,
         journal_seen: None,
     };

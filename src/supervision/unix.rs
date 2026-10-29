@@ -1236,6 +1236,7 @@ pub(super) fn supervise(
                 if let Some(logs) = capture.take() {
                     logs.finish()?;
                 }
+                let leaf_oom_kills = backend.oom_kills();
                 backend.confirm_release()?;
                 gpu_release.confirm(
                     actual.pid,
@@ -1258,6 +1259,7 @@ pub(super) fn supervise(
                     release_confirmed_ms: Some(
                         start.elapsed().as_millis().min(u64::MAX as u128) as u64
                     ),
+                    leaf_oom_kills,
                 });
             }
             let polled_at = start.elapsed().as_millis().min(u64::MAX as u128) as u64;

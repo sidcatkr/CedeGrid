@@ -218,6 +218,8 @@ struct AgentLoop<'a> {
     start: Instant,
     last_heartbeat: Instant,
     negotiated: NegotiatedFeatures,
+    /// The host's `oom_kill` count at the last three samples, oldest first (FR-076).
+    oom_kills: std::collections::VecDeque<Option<u64>>,
     stopping: Option<Instant>,
     last_spool_check: Instant,
     spool_full: bool,
@@ -685,6 +687,33 @@ impl AgentLoop<'_> {
                     if outcome.is_none() && !supervisor_exited {
                         continue;
                     }
+                    if let Some(outcome) = outcome.as_ref()
+                        && slot.oom_verdict.is_none()
+                    {
+                        let host: Vec<Option<u64>> = self.oom_kills.iter().copied().collect();
+                        let verdict = oom::classify(&oom::Ending {
+                            termination_signal: outcome.termination_signal,
+                            supervisor_terminated: outcome.termination_started_ms.is_some(),
+                            leaf_oom_kills: outcome.leaf_oom_kills,
+                            host_oom_kills: &host,
+                            view: slot.ram_view.as_ref(),
+                        });
+                        if let oom::OomVerdict::NotOwnFault(detail)
+                        | oom::OomVerdict::OwnFault(detail) = &verdict
+                        {
+                            emit(&serde_json::json!({
+                                "event": "oom_kill",
+                                "task_id": slot.assignment.request.task_id,
+                                "assignment_id": id,
+                                "own_fault": matches!(verdict, oom::OomVerdict::OwnFault(_)),
+                                "detail": detail,
+                            }))?;
+                        }
+                        if matches!(verdict, oom::OomVerdict::NotOwnFault(_)) {
+                            slot.drain_cause = Some(crate::contention::YieldCause::OomNotOwnFault);
+                        }
+                        slot.oom_verdict = Some(verdict);
+                    }
                     if outcome
                         .as_ref()
                         .is_none_or(|o| o.exit_code != Some(0) || o.yielded)
@@ -700,22 +729,36 @@ impl AgentLoop<'_> {
                                 continue;
                             }
                             sent += 1;
+                            let released = &record
+                                .as_ref()
+                                .expect("record was checked released above")
+                                .detail;
+                            let (not_own_fault, detail) = match &slot.oom_verdict {
+                                Some(oom::OomVerdict::NotOwnFault(why)) => {
+                                    (true, format!("{why}; {released}"))
+                                }
+                                Some(oom::OomVerdict::OwnFault(why)) => {
+                                    (false, format!("{why}; {released}"))
+                                }
+                                _ => (false, released.clone()),
+                            };
                             if matches!(
                                 self.client
                                     .request(&Request::Fail {
                                         assignment_id: id.clone(),
                                         generation: slot.assignment.generation,
-                                        detail: record
-                                            .as_ref()
-                                            .expect("record was checked released above")
-                                            .detail
-                                            .clone(),
-                                        failure_kind: if outcome.as_ref().is_some_and(|o| o.yielded)
+                                        detail,
+                                        failure_kind: if not_own_fault
+                                            || outcome.as_ref().is_some_and(|o| o.yielded)
                                         {
                                             FailureKind::Yielded
                                         } else {
                                             FailureKind::ExecutionFailure
-                                        }
+                                        },
+                                        yield_cause: (not_own_fault && self.negotiated.contention)
+                                            .then_some(
+                                                crate::contention::YieldCause::OomNotOwnFault
+                                            ),
                                     })
                                     .await,
                                 Ok(Response::Ok)
@@ -947,6 +990,10 @@ impl AgentLoop<'_> {
             .collector
             .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
         mark = self.cost.charge("sample", mark);
+        self.oom_kills.push_back(crate::telemetry::host_oom_kills());
+        if self.oom_kills.len() > 3 {
+            self.oom_kills.pop_front();
+        }
         self.note_cedegrid_cpu(&mut snapshot);
         mark = self.cost.charge("cedegrid_clocks", mark);
         restrict_gpu_scope(&mut snapshot, &agent.capacity);
@@ -997,7 +1044,44 @@ impl AgentLoop<'_> {
             ),
         );
         self.cost.charge("decision", mark);
+        self.note_ram_views(&snapshot, &allocations, &decision);
         Ok((snapshot, allocations, decision))
+    }
+
+    /// Each running task's view of RAM, kept for judging an OOM kill after it (FR-076).
+    fn note_ram_views(
+        &mut self,
+        snapshot: &crate::model::Snapshot,
+        allocations: &[crate::model::Allocation],
+        decision: &crate::model::Decision,
+    ) {
+        let own = decision
+            .resources
+            .get(&crate::contention::ResourceKey::Ram)
+            .and_then(|status| status.own)
+            .map(|(lower, _)| lower);
+        let view = own
+            .zip(decision.ram_fair_share_mib)
+            .map(|(own_mib, fair_share_mib)| oom::RamView {
+                own_mib,
+                fair_share_mib,
+                above: snapshot
+                    .principals
+                    .iter()
+                    .flatten()
+                    .filter(|p| !p.is_owner && p.ram_mib > fair_share_mib)
+                    .map(|p| (p.uid, p.ram_mib))
+                    .collect(),
+            });
+        for (id, slot) in self.slots.iter_mut() {
+            if !slot.exited
+                && allocations
+                    .iter()
+                    .any(|a| &a.id == id && a.observed.is_some())
+            {
+                slot.ram_view = view.clone();
+            }
+        }
     }
 
     /// Supervisors run no collector; send the GPU part of this observation to
@@ -1426,7 +1510,8 @@ impl AgentLoop<'_> {
                                     FailureKind::Yielded
                                 } else {
                                     FailureKind::ExecutionFailure
-                                }
+                                },
+                                yield_cause: None,
                             })
                             .await,
                         Ok(Response::Ok)
@@ -1770,6 +1855,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         start,
         last_heartbeat: start - Duration::from_millis(config.lifecycle.heartbeat_interval_ms),
         negotiated: NegotiatedFeatures::default(),
+        oom_kills: std::collections::VecDeque::new(),
         stopping: None,
         last_spool_check: Instant::now(),
         spool_full: false,

@@ -200,6 +200,9 @@ pub enum YieldCause {
     OperatorDrain,
     LeaseExpired,
     CoordinatorDrain,
+    /// The kernel's OOM killer ended a task while own memory was within its fair share
+    /// (FR-076); the task is requeued without an attempt.
+    OomNotOwnFault,
 }
 
 /// Every code the policy reports, each with one sentence (FR-039, T113). Codes
@@ -247,6 +250,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     (
         "lease_expired",
         "The allocation's lease expired before it was renewed.",
+    ),
+    (
+        "oom_not_own_fault",
+        "The out-of-memory killer ended own work within its fair share, so it is requeued without an attempt.",
     ),
     // Why a step was relaxed.
     (

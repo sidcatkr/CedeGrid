@@ -6731,6 +6731,35 @@ mod floors_by_mode {
         assert!(!gpu_actions(ContentionMode::Neutral).is_empty());
     }
 
+    /// While the floor is breached, RAM admission stays closed in every mode, so a task
+    /// requeued after an out-of-memory kill starts again only once free memory is back
+    /// above the floor (FR-076).
+    #[test]
+    fn ram_admission_stays_closed_through_the_breach() {
+        let jobs = [ram_job("a", AllocationClass::Opportunistic, 8_000)];
+        for mode in ContentionMode::ALL {
+            let mut snap = snapshot();
+            let input = PolicyInput {
+                allocations: jobs.to_vec(),
+                facts: hinted(&["a"]),
+                ..PolicyInput::default()
+            };
+            let mut engine = PolicyEngine::new();
+            for (now, available) in [(0, 500), (500, 0), (1_000, 500)] {
+                snap.available_ram_mib = Some(available);
+                let decision = engine
+                    .evaluate(&config_in(mode), &snap, &input, now)
+                    .unwrap();
+                assert_ne!(
+                    decision.resources[&ResourceKey::Ram].admission,
+                    Some(cedegrid::contention::Admission::Open),
+                    "{mode:?} at {now}"
+                );
+                assert_eq!(decision.admission_headroom.ram_mib, 0, "{mode:?} at {now}");
+            }
+        }
+    }
+
     /// What own work keeps of RAM after this interval's steps.
     fn kept(cfg: &Config, jobs: &[Allocation], available: u64) -> u64 {
         let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();

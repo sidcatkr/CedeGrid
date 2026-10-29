@@ -1069,7 +1069,9 @@ impl<'a> Interval<'a> {
             let code = match before.cause {
                 YieldCause::ExternalGrowth => "step_reversed_contention_ended",
                 YieldCause::OwnOverTarget => "step_reversed_own_usage_fell",
-                YieldCause::FloorBreach => "step_reversed_floor_restored",
+                YieldCause::FloorBreach | YieldCause::OomNotOwnFault => {
+                    "step_reversed_floor_restored"
+                }
                 YieldCause::UnknownMeasurement => "step_reversed_measurement_known",
                 YieldCause::EnvelopeBreach => "step_reversed_envelope_restored",
                 YieldCause::OperatorDrain

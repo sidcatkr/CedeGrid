@@ -1128,6 +1128,18 @@ impl LaunchBackend for CgroupBackend {
         }
     }
 
+    fn oom_kills(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let events = self.runtime.read_leaf("memory.events").ok()?;
+            crate::kernel::event_count(&events, "oom_kill")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     fn confirm_release(&mut self) -> Result<()> {
         #[cfg(target_os = "linux")]
         {

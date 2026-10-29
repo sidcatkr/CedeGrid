@@ -621,10 +621,12 @@ impl Coordinator {
                 )?;
                 let request: crate::execution_model::LaunchRequest =
                     serde_json::from_str(&request_json)?;
+                let counted =
+                    counted_attempts(&self.store.connection, &task_id, current.generation)?;
                 ensure!(
                     request
                         .max_attempts
-                        .is_none_or(|limit| current.generation < u64::from(limit)),
+                        .is_none_or(|limit| counted < u64::from(limit)),
                     "task's immutable attempt budget is exhausted; Retry cannot increase it"
                 );
                 let held:i64=self.store.connection.query_row("SELECT count(*) FROM reservations r JOIN assignments a USING(assignment_id) WHERE a.task_id=?1 AND r.phase!='released'",[&task_id],|r|r.get(0))?;
@@ -708,9 +710,17 @@ impl Coordinator {
                 generation,
                 detail,
                 failure_kind,
+                yield_cause,
             } => {
                 self.authorize_assignment(principal, &assignment_id, generation)?;
-                self.record_failure(&assignment_id, generation, &detail, failure_kind, now)?;
+                self.record_failure(
+                    &assignment_id,
+                    generation,
+                    &detail,
+                    failure_kind,
+                    yield_cause,
+                    now,
+                )?;
                 Ok(Response::Ok)
             }
             Request::BeginUpload {
@@ -1279,6 +1289,7 @@ impl Coordinator {
                         allocation.generation,
                         "release after authorization expiry",
                         FailureKind::Yielded,
+                        None,
                         now,
                     )?;
                 }
@@ -1487,9 +1498,8 @@ impl Coordinator {
             if !self.replay_request_allowed(&report.node_id, &request)? {
                 continue;
             }
-            if request
-                .max_attempts
-                .is_some_and(|limit| generation >= u64::from(limit))
+            if let Some(limit) = request.max_attempts
+                && counted_attempts(&tx, &task, generation)? >= u64::from(limit)
             {
                 tx.execute(
                     "UPDATE tasks SET status='needs_reconciliation' WHERE task_id=?1",
@@ -1622,6 +1632,7 @@ impl Coordinator {
         generation: u64,
         detail: &str,
         kind: FailureKind,
+        cause: Option<crate::contention::YieldCause>,
         now: u64,
     ) -> Result<()> {
         let tx =
@@ -1650,7 +1661,15 @@ impl Coordinator {
             [id],
             |r| r.get(0),
         )?;
-        let yielded = kind == FailureKind::Yielded || recorded || self.should_drain(id)?;
+        // An out-of-memory kill own work did not cause costs no failure and no attempt (FR-076).
+        let not_own_fault = cause == Some(crate::contention::YieldCause::OomNotOwnFault)
+            || tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM reservations WHERE assignment_id=?1 AND yield_cause='oom_not_own_fault')",
+                [id],
+                |r| r.get(0),
+            )?;
+        let yielded =
+            not_own_fault || kind == FailureKind::Yielded || recorded || self.should_drain(id)?;
         let previous: u32 = tx
             .query_row(
                 "SELECT failures FROM retry_state WHERE task_id=?1",
@@ -1699,9 +1718,12 @@ impl Coordinator {
             )
             .min(maximum);
         let request = self.assignment_request(id)?;
+        // This receipt is not written yet.
+        let counted =
+            counted_attempts(&tx, &task, generation)?.saturating_sub(u64::from(not_own_fault));
         let attempts_available = request
             .max_attempts
-            .is_none_or(|limit| generation < u64::from(limit));
+            .is_none_or(|limit| counted < u64::from(limit));
         let cancelled: bool = tx.query_row(
             "SELECT j.cancelled FROM task_specs s JOIN jobs j USING(job_id) WHERE s.task_id=?1",
             [&task],
@@ -1731,7 +1753,9 @@ impl Coordinator {
             "INSERT INTO failure_receipts(assignment_id,failure_kind) VALUES (?1,?2)",
             params![
                 id,
-                if yielded {
+                if not_own_fault {
+                    "oom_not_own_fault"
+                } else if yielded {
                     "yielded"
                 } else {
                     "execution_failure"
@@ -2490,6 +2514,17 @@ where
 fn db(value: u64) -> Result<i64> {
     i64::try_from(value).context("integer exceeds durable SQLite range")
 }
+/// Attempts that count against `max_attempts`: every generation but those an
+/// out-of-memory kill own work did not cause ended (FR-076).
+fn counted_attempts(connection: &rusqlite::Connection, task: &str, generation: u64) -> Result<u64> {
+    let uncounted = connection.query_row(
+        "SELECT COUNT(*) FROM failure_receipts f JOIN assignments a USING(assignment_id) WHERE a.task_id=?1 AND f.failure_kind='oom_not_own_fault'",
+        [task],
+        |r| row_u64(r, 0),
+    )?;
+    Ok(generation.saturating_sub(uncounted))
+}
+
 fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let n: i64 = row.get(index)?;
     u64::try_from(n).map_err(|e| {

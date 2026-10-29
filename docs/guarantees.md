@@ -444,6 +444,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `operator_drain` | The operator asked the node to drain. |
 | `coordinator_drain` | The coordinator asked for the allocation to drain. |
 | `lease_expired` | The allocation's lease expired before it was renewed. |
+| `oom_not_own_fault` | The out-of-memory killer ended own work within its fair share, so it is requeued without an attempt. |
 | `step_reversed_contention_ended` | A step taken for external growth was relaxed because external demand fell back. |
 | `step_reversed_own_usage_fell` | A step taken for own usage over its target was relaxed because own usage fell back. |
 | `step_reversed_floor_restored` | A step taken for a floor breach was relaxed because free memory is back above the floor. |

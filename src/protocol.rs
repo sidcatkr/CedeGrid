@@ -386,6 +386,10 @@ pub enum Request {
         detail: String,
         #[serde(default)]
         failure_kind: FailureKind,
+        /// Why the allocation yielded, as the node classified it. Sent only after
+        /// `contention/1` negotiation (FR-076).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yield_cause: Option<crate::contention::YieldCause>,
     },
     PublishCheckpoint {
         submission: ResultSubmission,

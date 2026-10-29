@@ -1109,6 +1109,72 @@
           }
         }
       }
+    },
+    {
+      "id": "NEG-03",
+      "description": "An out-of-memory kill own work did not cause: the release carries yield_cause oom_not_own_fault, so the coordinator requeues it without a failure or an attempt (FR-076).",
+      "request": {
+        "op": "heartbeat",
+        "report": {
+          "node_id": "node",
+          "boot_id": "boot",
+          "observed_at_unix_ms": 1,
+          "managed_budget": {
+            "cpu_millicores": 2000,
+            "ram_mib": 1000,
+            "gpu_memory_mib": {}
+          },
+          "expansion_allowed": true,
+          "gpu_expansion_allowed": false,
+          "gpu_guaranteed_allowed": true,
+          "launch_slots": 2,
+          "available_controls": [],
+          "allocations": [
+            {
+              "assignment_id": "a",
+              "generation": 1,
+              "phase": "released",
+              "observed": null,
+              "detail": "killed by an out-of-memory condition it did not cause",
+              "yield_cause": "oom_not_own_fault"
+            }
+          ],
+          "features": [
+            "api/1",
+            "contention/1"
+          ],
+          "contention": {
+            "resources": {
+              "cpu": {
+                "mode": "neutral",
+                "admission": {
+                  "state": "open"
+                },
+                "held_back": {
+                  "margin": 100,
+                  "ceiling": 25,
+                  "contention": 50
+                }
+              }
+            },
+            "exceptions": [],
+            "max_mode": "neutral",
+            "max_workers": 4
+          }
+        }
+      }
+    },
+    {
+      "id": "NEG-04",
+      "description": "The failure report of that kill names the same cause after negotiation (FR-076).",
+      "request": {
+        "op": "fail",
+        "assignment_id": "a",
+        "generation": 1,
+        "detail": "killed by an out-of-memory condition it did not cause",
+        "failure_kind": "yielded",
+        "yield_cause": "oom_not_own_fault"
+      }
     }
   ],
   "job_contention_cases": [

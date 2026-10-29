@@ -65,6 +65,9 @@ pub struct ExecutionOutcome {
     pub termination_deadline_ms: Option<u64>,
     pub process_exit_ms: u64,
     pub release_confirmed_ms: Option<u64>,
+    /// The leaf's `memory.events` `oom_kill` count at release, in Full (FR-076).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_oom_kills: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -955,6 +955,18 @@ fn own_process_verified(_identity: &crate::execution_model::ProcessIdentity) -> 
     false
 }
 
+/// The host's `oom_kill` count from `/proc/vmstat`, where the kernel provides one (FR-076).
+#[cfg(target_os = "linux")]
+pub fn host_oom_kills() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/vmstat").ok()?;
+    crate::kernel::event_count(&text, "oom_kill")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn host_oom_kills() -> Option<u64> {
+    None
+}
+
 /// Read-only capability discovery; never applies an available control.
 pub fn preflight() -> Result<BTreeMap<String, Capability>> {
     Ok(Collector::new("preflight")?.sample()?.capabilities)

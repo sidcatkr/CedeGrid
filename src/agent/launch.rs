@@ -439,6 +439,8 @@ pub(super) async fn start_assignment(
         // A new family launches at its baseline.
         sent_oom: Some(false),
         oom_context: None,
+        ram_view: None,
+        oom_verdict: None,
         seed: None,
         journal_seen: None,
     })

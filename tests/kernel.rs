@@ -609,3 +609,17 @@ fn native_external_cpu_pressure_is_read() {
         pressure.detail
     );
 }
+
+/// `oom_kill` counts from `/proc/vmstat` and a leaf's `memory.events` (FR-076); a
+/// missing or malformed count is unknown, never zero.
+#[test]
+fn oom_kill_counts_read_from_vmstat_and_memory_events() {
+    use cedegrid::kernel::event_count;
+    let vmstat = "pgfault 1000\noom_kill 3\npgmajfault 7\n";
+    assert_eq!(event_count(vmstat, "oom_kill"), Some(3));
+    let events = "low 0\nhigh 12\nmax 1\noom 1\noom_kill 1\noom_group_kill 0\n";
+    assert_eq!(event_count(events, "oom_kill"), Some(1));
+    assert_eq!(event_count(events, "oom"), Some(1));
+    assert_eq!(event_count("pgfault 1000\n", "oom_kill"), None);
+    assert_eq!(event_count("oom_kill x\n", "oom_kill"), None);
+}

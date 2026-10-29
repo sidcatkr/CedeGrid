@@ -699,6 +699,15 @@ pub fn cpu_pressure(roots: &ProbeRoots, own: Option<&Path>) -> CpuPressure {
     result
 }
 
+/// One `key value` count from a flat-keyed file such as `/proc/vmstat` or a cgroup's
+/// `memory.events`; a missing or malformed count is unknown.
+pub fn event_count(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(' ')?;
+        (name == key).then(|| value.trim().parse().ok())?
+    })
+}
+
 /// Bounded parser for Linux CPU-list syntax, including sparse SMT identities.
 pub fn parse_cpu_list(input: &str) -> Result<Vec<u32>, String> {
     let input = input.trim();

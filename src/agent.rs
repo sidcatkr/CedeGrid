@@ -28,6 +28,7 @@ use std::{
 
 mod client;
 mod launch;
+mod oom;
 mod publishing;
 mod reconcile;
 mod replay;
@@ -499,6 +500,10 @@ struct ChildSlot {
     sent_oom: Option<bool>,
     /// Why it was sent, with own RAM and its fair share, for the evidence line.
     oom_context: Option<serde_json::Value>,
+    /// RAM as the agent last saw it while the task ran, to judge an OOM kill (FR-076).
+    ram_view: Option<oom::RamView>,
+    /// What the outcome said about an OOM kill, once classified.
+    oom_verdict: Option<oom::OomVerdict>,
     /// Steps learned from a reattached supervisor, to seed the policy authority.
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
     /// What the slot pass last read from the journal for this slot.
@@ -1632,6 +1637,8 @@ mod drain_tests {
             sent_allowance: None,
             sent_oom: None,
             oom_context: None,
+            ram_view: None,
+            oom_verdict: None,
             seed: None,
             journal_seen: None,
         }

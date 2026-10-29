@@ -274,4 +274,9 @@ pub trait LaunchBackend {
     fn verify(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>>;
     /// Only clean a manager-owned empty leaf; error keeps capacity reserved.
     fn confirm_release(&mut self) -> Result<()>;
+    /// The allocation's own out-of-memory kill count, where the backend can read one
+    /// (FR-076). Read-only.
+    fn oom_kills(&self) -> Option<u64> {
+        None
+    }
 }

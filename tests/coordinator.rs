@@ -677,6 +677,7 @@ fn checkpoints_do_not_rewind_and_follow_retries() {
             generation: a.generation,
             detail: "retry from checkpoint".into(),
             failure_kind: FailureKind::Yielded,
+            yield_cause: None,
         },
         106,
     )
@@ -1026,6 +1027,7 @@ fn released_failure(c: &mut Coordinator, a: &Assignment, now: u64, kind: Failure
             generation: a.generation,
             detail: "owned workload ended".into(),
             failure_kind: kind,
+            yield_cause: None,
         },
         now,
     )
@@ -1050,6 +1052,7 @@ fn failures_back_off_and_stop_after_configured_budget_without_ack_double_count()
                 generation: a.generation,
                 detail: "lost ack retry".into(),
                 failure_kind: FailureKind::ExecutionFailure,
+                yield_cause: None,
             },
             now,
         )
@@ -1910,6 +1913,7 @@ fn immutable_attempt_cap_counts_yields_and_cannot_be_bypassed_by_retry_or_restar
             generation: 1,
             detail: "same yielded report after lost ACK".into(),
             failure_kind: FailureKind::Yielded,
+            yield_cause: None,
         },
         500,
     )
@@ -2586,6 +2590,7 @@ fn replay_sessions_require_owning_certificate_and_reject_all_stale_or_unwrapped_
             generation: 1,
             detail: "old".into(),
             failure_kind: FailureKind::Yielded,
+            yield_cause: None,
         },
         Request::BeginUpload {
             assignment_id: "old".into(),
@@ -3328,6 +3333,7 @@ fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
             generation: a.generation,
             detail: "coordinator revoked the offer".into(),
             failure_kind: FailureKind::ExecutionFailure,
+            yield_cause: None,
         },
         101,
     )
@@ -3353,6 +3359,7 @@ fn failures_are_classified_by_recorded_yield_cause_not_detail_text() {
             generation: b.generation,
             detail: "owned workload ended".into(),
             failure_kind: FailureKind::ExecutionFailure,
+            yield_cause: None,
         },
         102,
     )
@@ -4413,4 +4420,84 @@ mod lease_batches {
                 .is_err()
         );
     }
+}
+
+/// An out-of-memory kill own work did not cause is requeued without a failure or an
+/// attempt; a later own failure still ends the attempt budget (FR-076).
+#[test]
+fn an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt() {
+    use cedegrid::contention::YieldCause;
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    let mut t = task("oom");
+    t.max_attempts = Some(1);
+    c.handle_at(
+        &Principal::Operator,
+        Request::Submit {
+            job: JobSpec {
+                job_id: "oom-job".into(),
+                pool_id: "pool".into(),
+                priority: 0,
+                tasks: vec![t],
+            },
+        },
+        100,
+    )
+    .unwrap();
+    let first = offers(&mut c, 100).assignments.remove(0);
+    authorize(&mut c, &first, 100);
+    let mut r = report(101);
+    r.launch_slots = 0;
+    r.allocations.push(AllocationReport {
+        assignment_id: first.request.assignment_id.clone(),
+        generation: first.generation,
+        phase: RemotePhase::Released,
+        observed: None,
+        detail: "verified release".into(),
+        yield_cause: Some(YieldCause::OomNotOwnFault),
+        hint_ready: None,
+        observes_drain: None,
+    });
+    c.handle_at(&node(), Request::Heartbeat { report: r }, 101)
+        .unwrap();
+    c.handle_at(
+        &node(),
+        Request::Fail {
+            assignment_id: first.request.assignment_id.clone(),
+            generation: first.generation,
+            detail: "killed by an out-of-memory condition it did not cause".into(),
+            failure_kind: FailureKind::Yielded,
+            yield_cause: Some(YieldCause::OomNotOwnFault),
+        },
+        101,
+    )
+    .unwrap();
+    let Response::Status { tasks, .. } = c
+        .handle_at(&Principal::Operator, Request::Status { job_id: None }, 102)
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(tasks[0].status, cedegrid::state::TaskStatus::Queued);
+    // The one allowed attempt is still there: the task is offered again.
+    let second = offers(&mut c, 100_000).assignments.remove(0);
+    assert_eq!(second.generation, 2);
+    authorize(&mut c, &second, 100_000);
+    released_failure(&mut c, &second, 100_001, FailureKind::ExecutionFailure);
+    let Response::Status { tasks, .. } = c
+        .handle_at(
+            &Principal::Operator,
+            Request::Status { job_id: None },
+            100_002,
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        tasks[0].status,
+        cedegrid::state::TaskStatus::NeedsReconciliation
+    );
 }
