@@ -107,6 +107,7 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         release_confirm_timeout_ms: 10000,
         duty_period_ms: 500,
         hint_deadline_ms: 5_000,
+        prefer_own_oom_victim: false,
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
     };

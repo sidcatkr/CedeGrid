@@ -358,6 +358,7 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
         ram: RamConfig {
             reserve_mib: 0,
             reserve_percent: 0,
+            ..Default::default()
         },
         gpu: GpuConfig {
             scale_up_cooldown_ms: Some(0),

@@ -53,7 +53,10 @@ impl SupervisorControl for PipeControl {
                     self.observation = Some((*snapshot, Instant::now()));
                 }
                 // Nothing runs before authorization, so there is nothing to adjust.
-                Control::Adjust { .. } | Control::Query | Control::Allowance { .. } => {}
+                Control::Adjust { .. }
+                | Control::Query
+                | Control::Allowance { .. }
+                | Control::Oom { .. } => {}
                 Control::Authorize {
                     lease,
                     expires_monotonic_ms,
@@ -153,6 +156,15 @@ impl SupervisorControl for PipeControl {
             } => Event::Readiness {
                 hint_ready,
                 observes_drain,
+            },
+            supervision::SupervisorReport::Oom {
+                preferred,
+                changes,
+                detail,
+            } => Event::Oom {
+                preferred,
+                changes,
+                detail,
             },
         };
         self.send_event(&event)
@@ -271,6 +283,9 @@ impl PipeControl {
                 Ok(Incoming::Control(Control::Query)) => commands.push(SupervisorCommand::Query),
                 Ok(Incoming::Control(Control::Allowance { allowance })) => {
                     commands.push(SupervisorCommand::Allowance { allowance })
+                }
+                Ok(Incoming::Control(Control::Oom { preferred })) => {
+                    commands.push(SupervisorCommand::Oom { preferred })
                 }
                 Ok(Incoming::Control(Control::Authorize { .. })) => {}
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),
@@ -424,6 +439,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         release_confirm_timeout_ms: spec.config.execution.release_confirm_timeout_ms,
         duty_period_ms: spec.config.monitor.interval_ms,
         hint_deadline_ms: spec.config.contention.hint_deadline_ms(),
+        prefer_own_oom_victim: spec.config.ram.prefer_own_oom_victim,
         ram_noise_tolerance_mib: spec.config.ram_cap_check().0,
         ram_calm_window_ms: spec.config.ram_cap_check().1,
     };

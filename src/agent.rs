@@ -145,6 +145,13 @@ enum Event {
         hint_ready: bool,
         observes_drain: bool,
     },
+    /// The family's OOM preference changed (FR-023).
+    Oom {
+        preferred: bool,
+        changes: Vec<crate::supervision::OomChange>,
+        #[serde(default)]
+        detail: String,
+    },
 }
 /// One line from the agent. A line that does not parse is reported and ignored;
 /// only EOF or a read error is agent loss (supervisor-control contract).
@@ -183,6 +190,8 @@ enum Control {
     Allowance {
         allowance: crate::model::ResourceAmounts,
     },
+    /// Make the family preferred OOM victims, or return it to its baseline (FR-023).
+    Oom { preferred: bool },
     /// The agent's latest GPU observation. Supervisors run no collector of
     /// their own; GPU launch rechecks use this (research R1).
     Observation {
@@ -484,6 +493,10 @@ struct ChildSlot {
     sent_steps: BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>,
     /// The allowance last sent to the supervisor (FR-071).
     sent_allowance: Option<crate::model::ResourceAmounts>,
+    /// The OOM preference last sent, unknown for a reattached supervisor (FR-023).
+    sent_oom: Option<bool>,
+    /// Why it was sent, with own RAM and its fair share, for the evidence line.
+    oom_context: Option<serde_json::Value>,
     /// Steps learned from a reattached supervisor, to seed the policy authority.
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
     /// What the slot pass last read from the journal for this slot.
@@ -1615,6 +1628,8 @@ mod drain_tests {
             adjust_sequence: 0,
             sent_steps: BTreeMap::new(),
             sent_allowance: None,
+            sent_oom: None,
+            oom_context: None,
             seed: None,
             journal_seen: None,
         }

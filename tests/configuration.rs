@@ -840,6 +840,8 @@ fn every_configuration_key_is_classified() {
         ("lifecycle.drain_timeout_ms", KeyClass::Bounded),
         ("contention.ram.hint_deadline_s", KeyClass::Bounded),
         ("cpu.nice", KeyClass::Safe),
+        // A risk to own work only (FR-023).
+        ("ram.prefer_own_oom_victim", KeyClass::Safe),
     ] {
         assert_eq!(config::key_class(key), Some(class), "{key}");
     }

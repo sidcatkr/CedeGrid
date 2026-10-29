@@ -448,7 +448,8 @@ fn apply_control_commands(
             SupervisorCommand::AgentLost => lifecycle.agent_failed(elapsed),
             command @ (SupervisorCommand::Adjust { .. }
             | SupervisorCommand::Query
-            | SupervisorCommand::Allowance { .. }) => runtime.push(command),
+            | SupervisorCommand::Allowance { .. }
+            | SupervisorCommand::Oom { .. }) => runtime.push(command),
         }
     }
     runtime
@@ -751,6 +752,43 @@ fn apply_runtime_commands(
                     step_codes: step_codes(actuator, contention),
                 });
             }
+            SupervisorCommand::Oom { preferred } => {
+                // The launch value is the baseline; under the opt-in it already is 1000.
+                let baseline = record
+                    .evidence
+                    .iter()
+                    .find(|e| e.control == "memory.oom_score_adj")
+                    .and_then(|e| e.effective.as_deref()?.parse::<i32>().ok());
+                let target = if preferred {
+                    Some(OOM_PREFERRED)
+                } else {
+                    baseline
+                };
+                let (mut changes, mut details) = (Vec::new(), Vec::new());
+                match target {
+                    Some(target) => {
+                        for identity in family.identities() {
+                            match set_oom_score_adj(&identity, target) {
+                                Ok(from) => changes.push(crate::supervision::OomChange {
+                                    pid: identity.pid,
+                                    from,
+                                    to: target,
+                                }),
+                                Err(error) => details.push(format!(
+                                    "pid {} skipped as possibly misdirected: {error:#}",
+                                    identity.pid
+                                )),
+                            }
+                        }
+                    }
+                    None => details.push("no launch oom_score_adj baseline was recorded".into()),
+                }
+                let _ = control.report(SupervisorReport::Oom {
+                    preferred,
+                    changes,
+                    detail: details.join("; "),
+                });
+            }
             SupervisorCommand::Allowance { allowance } => {
                 if targets.set_allowance(allowance)
                     && let Err(error) = targets.publish_allowance(directories)
@@ -950,9 +988,9 @@ pub(super) fn supervise(
         {
             setup.nice = Some(options.nice);
         }
-        // Every own process is a preferred OOM victim where an unprivileged
-        // process can mark itself (FR-023).
-        if cfg!(target_os = "linux") {
+        // OOM order by fault keeps the launch value as the baseline; only the opt-in marks
+        // every own process at launch (FR-023).
+        if cfg!(target_os = "linux") && options.prefer_own_oom_victim {
             setup.oom_score_adj = Some(OOM_PREFERRED);
         }
         children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
@@ -1032,6 +1070,8 @@ pub(super) fn supervise(
                 requested,
                 &format!("direct_child:{}", actual.pid),
             )?);
+        } else if cfg!(target_os = "linux") {
+            record.evidence.push(oom_baseline_evidence(actual.pid)?);
         }
         if let Some(requested_nice) = gate.setup.nice {
             // SAFETY: a read-only query for the verified, unreaped owned gate.
@@ -1773,6 +1813,85 @@ fn join_cgroup(path: &Path) -> Result<()> {
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
     Ok(())
+}
+
+/// The gate's `oom_score_adj` before user code runs: the baseline OOM order by fault never
+/// writes below (FR-023).
+fn oom_baseline_evidence(pid: u32) -> Result<ControlEvidence> {
+    let baseline: i32 = fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+        .context("cannot read the gate oom_score_adj")?
+        .trim()
+        .parse()?;
+    Ok(ControlEvidence {
+        control: "memory.oom_score_adj".into(),
+        available: Some(true),
+        permitted: Some(true),
+        configured: true,
+        applied: false,
+        fallback: false,
+        scope: format!("direct_child:{pid}"),
+        requested: None,
+        effective: Some(baseline.to_string()),
+        detail: "Launch baseline; raised to 1000 only while this task is part of own memory above its fair share".into(),
+    })
+}
+
+/// Set a family member's `oom_score_adj` and return its value before. Members are this
+/// supervisor's unreaped direct children, so their PIDs cannot be reused; the start time
+/// read through the member's `/proc` directory before and after the write confirms it is
+/// the verified process (Principle I, FR-023).
+#[cfg(target_os = "linux")]
+fn set_oom_score_adj(identity: &ProcessIdentity, value: i32) -> Result<i32> {
+    use std::ffi::CString;
+    let path = CString::new(format!("/proc/{}", identity.pid))?;
+    // SAFETY: a NUL-terminated path; a successful open returns a new descriptor.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    ensure!(fd >= 0, "cannot open the member's /proc directory");
+    // SAFETY: successful open returns a new owned descriptor.
+    let dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    let open = |name: &std::ffi::CStr, flags: i32| -> Result<File> {
+        // SAFETY: relative open under the member's retained /proc directory.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
+        ensure!(fd >= 0, "{}", io::Error::last_os_error());
+        // SAFETY: successful openat returns a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    };
+    let start_time = || -> Result<u64> {
+        let mut stat = String::new();
+        io::Read::read_to_string(&mut open(c"stat", libc::O_RDONLY)?, &mut stat)?;
+        let after_name = stat
+            .rsplit_once(')')
+            .context("invalid /proc process stat")?
+            .1;
+        Ok(after_name
+            .split_whitespace()
+            .nth(19)
+            .context("missing process start ticks")?
+            .parse()?)
+    };
+    ensure!(
+        start_time()? == identity.start_time,
+        "the PID no longer names the verified process"
+    );
+    let mut before = String::new();
+    io::Read::read_to_string(&mut open(c"oom_score_adj", libc::O_RDONLY)?, &mut before)?;
+    let before: i32 = before.trim().parse()?;
+    open(c"oom_score_adj", libc::O_WRONLY)?.write_all(value.to_string().as_bytes())?;
+    ensure!(
+        start_time()? == identity.start_time,
+        "the PID no longer names the verified process after the write"
+    );
+    Ok(before)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_oom_score_adj(_identity: &ProcessIdentity, _value: i32) -> Result<i32> {
+    bail!("oom_score_adj is unavailable on this platform")
 }
 
 #[cfg(target_os = "linux")]

@@ -183,6 +183,7 @@ fn options() -> SupervisorOptions {
         release_confirm_timeout_ms: 2_000,
         duty_period_ms: 100,
         hint_deadline_ms: 5_000,
+        prefer_own_oom_victim: false,
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
     }
@@ -1133,6 +1134,78 @@ mod actuation {
         }
     }
 
+    /// OOM order by fault (FR-023): the launch value is the baseline and stays; an `oom`
+    /// line raises the family to 1000, a child started later inherits it, and clearing it
+    /// returns the family to the baseline, never below. The test process runs at 100, so
+    /// the baseline is 100, not 0 or 1000.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn oom_preference_raises_the_family_and_returns_to_the_launch_baseline() {
+        let before = fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+        fs::write("/proc/self/oom_score_adj", "100").unwrap();
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = AllocationClass::Opportunistic;
+        let body = "import os, subprocess, time\nend=time.monotonic()+60\nwhile time.monotonic()<end and not os.path.exists('stop'):\n    adj=open('/proc/self/oom_score_adj').read().strip()\n    open('adj.tmp','w').write(adj)\n    os.replace('adj.tmp','adj')\n    if adj=='1000' and not os.path.exists('child'):\n        out=subprocess.run(['cat','/proc/self/oom_score_adj'],capture_output=True,text=True).stdout.strip()\n        open('child.tmp','w').write(out)\n        os.replace('child.tmp','child')\n    time.sleep(0.02)\n";
+        req.argv = vec![python(), "-c".into(), body.into()];
+        let adj = temp.path().join("adj");
+        let child = temp.path().join("child");
+        let reads = |path: &Path, value: &'static str| {
+            let path = path.to_path_buf();
+            wait(move |_| fs::read_to_string(&path).is_ok_and(|s| s.trim() == value))
+        };
+        let mut script = Script::new(
+            temp.path(),
+            vec![
+                reads(&adj, "100"),
+                send(SupervisorCommand::Oom { preferred: true }),
+                reads(&adj, "1000"),
+                reads(&child, "1000"),
+                send(SupervisorCommand::Oom { preferred: false }),
+                reads(&adj, "100"),
+            ],
+        );
+        let journal = Journal::new();
+        let outcome = run_controlled(
+            &req,
+            &long_lease(),
+            &journal,
+            &mut Backend::new(),
+            &mut script,
+        );
+        fs::write("/proc/self/oom_score_adj", before.trim()).unwrap();
+        let outcome = outcome.unwrap();
+        script.check();
+        assert_eq!(outcome.exit_code, Some(0));
+        let records = journal.records.borrow();
+        let prepared = records
+            .iter()
+            .find(|r| r.phase == ExecutionPhase::Prepared)
+            .unwrap();
+        let baseline = prepared
+            .evidence
+            .iter()
+            .find(|e| e.control == "memory.oom_score_adj")
+            .unwrap();
+        assert_eq!(
+            (baseline.requested.as_deref(), baseline.effective.as_deref()),
+            (None, Some("100"))
+        );
+        let changes: Vec<(i32, i32)> = script
+            .seen
+            .reports
+            .iter()
+            .filter_map(|r| match r {
+                SupervisorReport::Oom { changes, .. } => {
+                    Some(changes.iter().map(|c| (c.from, c.to)).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(changes, [(100, 1000), (1000, 100)]);
+    }
+
     fn adjusted(
         reports: &[SupervisorReport],
         sequence: u64,
@@ -1159,6 +1232,7 @@ mod actuation {
             lease_ms: 30_000,
             duty_period_ms: 100,
             hint_deadline_ms: 5_000,
+            prefer_own_oom_victim: false,
             ram_noise_tolerance_mib: 256,
             ram_calm_window_ms: 1_500,
             ..options()
@@ -1402,15 +1476,18 @@ mod control_socket {
     }
 }
 
-/// Own work is marked as the preferred OOM victim before EXEC (FR-023), except
-/// Guaranteed work under floor policy C (FR-041).
+/// OOM order by fault (FR-023): own work launches at its baseline, recorded before EXEC;
+/// only `ram.prefer_own_oom_victim` marks every own process at 1000 at launch, Guaranteed
+/// work included.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec() {
-    // Every own process is a preferred victim; no option exempts Guaranteed work (FR-023).
-    for (class, expected) in [
-        (AllocationClass::Opportunistic, "1000"),
-        (AllocationClass::Guaranteed, "1000"),
+fn the_gate_keeps_the_oom_baseline_unless_every_own_task_is_preferred() {
+    let baseline = fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+    for (class, prefer, expected) in [
+        (AllocationClass::Opportunistic, false, baseline.trim()),
+        (AllocationClass::Guaranteed, false, baseline.trim()),
+        (AllocationClass::Opportunistic, true, "1000"),
+        (AllocationClass::Guaranteed, true, "1000"),
     ] {
         let dir = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
         let mut request = request(dir.path());
@@ -1420,19 +1497,25 @@ fn the_gate_marks_own_work_as_the_preferred_oom_victim_before_exec() {
             "-c".into(),
             "cat /proc/self/oom_score_adj > adj".into(),
         ];
-        let outcome = run(&request, &options(), &Journal::new(), &mut Backend::new()).unwrap();
+        let options = SupervisorOptions {
+            prefer_own_oom_victim: prefer,
+            ..options()
+        };
+        let outcome = run(&request, &options, &Journal::new(), &mut Backend::new()).unwrap();
         assert_eq!(outcome.exit_code, Some(0), "{class:?}");
         assert_eq!(
             fs::read_to_string(dir.path().join("adj")).unwrap().trim(),
             expected,
-            "{class:?}"
+            "{class:?} prefer {prefer}"
         );
-        let claimed = outcome
+        let evidence = outcome
             .record
             .evidence
             .iter()
-            .any(|e| e.control == "memory.oom_score_adj" && e.applied);
-        assert_eq!(claimed, expected == "1000", "{class:?}");
+            .find(|e| e.control == "memory.oom_score_adj")
+            .unwrap();
+        assert_eq!(evidence.applied, prefer, "{class:?}");
+        assert_eq!(evidence.effective.as_deref(), Some(expected), "{class:?}");
     }
 }
 

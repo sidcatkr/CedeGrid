@@ -235,6 +235,9 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
         sent_allowance: None,
+        // A reattached family's mark is unknown until the next decision sends it.
+        sent_oom: None,
+        oom_context: None,
         seed: None,
         journal_seen: None,
     };

@@ -181,6 +181,8 @@ pub struct PolicyEngine {
     /// Consecutive intervals in which every external CPU principal, the unattributed
     /// remainder included and background left out, stayed below `principal_min_percent`.
     cpu_quiet_intervals: u32,
+    /// The allocations marked as preferred OOM victims, held while RAM is unknown.
+    oom_preferred: BTreeSet<String>,
     last_now: Option<u64>,
     node_id: Option<String>,
     /// Collector-relative sample marker and the policy time it first arrived.
@@ -297,6 +299,7 @@ impl PolicyEngine {
         interval.observe_gpus();
         interval.safety();
         interval.plan_ladder();
+        interval.oom_order();
         interval.drains();
         interval.reclaim_episodes();
         interval.cooldowns();
@@ -406,6 +409,8 @@ struct Interval<'a> {
     peak_excess: BTreeMap<ResourceKey, u64>,
     headroom: Resources,
     allowances: BTreeMap<String, ResourceAmounts>,
+    /// Own work's RAM fair share beside the RAM principals, when RAM is known.
+    ram_fair_share: Option<u64>,
 }
 
 impl<'a> Interval<'a> {
@@ -486,6 +491,7 @@ impl<'a> Interval<'a> {
             peak_excess: BTreeMap::new(),
             headroom: Resources::default(),
             allowances: BTreeMap::new(),
+            ram_fair_share: None,
         }
     }
 
@@ -523,6 +529,8 @@ impl<'a> Interval<'a> {
             allocation_modes: self.allocation_modes,
             max_mode: Some(config.contention.max_mode()),
             allowances: self.allowances,
+            oom_preferred: self.next.oom_preferred.clone(),
+            ram_fair_share_mib: self.ram_fair_share,
             cpu_admission_credit_millicores: self
                 .cpu_credit
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX))

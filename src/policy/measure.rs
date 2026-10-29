@@ -861,6 +861,7 @@ impl<'a> Interval<'a> {
         self.mode_targets
             .insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
         self.budget.ram_mib = own_allowance(&view, &thresholds);
+        self.ram_fair_share = Some(crate::contention::neutral_share(&view, &thresholds));
     }
 
     /// The operator envelope bounds own work per resource (FR-057). Each floor,

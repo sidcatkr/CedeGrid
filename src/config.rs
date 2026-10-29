@@ -1198,6 +1198,8 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ("cpu.nice", Safe),
         ("cpu.reserve_physical_cores", Safe),
         ("ram.reserve_mib", Caution("small_floor")),
+        // Only own work's OOM order changes.
+        ("ram.prefer_own_oom_victim", Safe),
         ("ram.reserve_percent", Caution("small_floor")),
         // Legacy keys that are read once or not at all (FR-031).
         ("gpu.active_shrink_percent", Safe),
@@ -1443,12 +1445,17 @@ impl Default for CpuConfig {
 pub struct RamConfig {
     pub reserve_mib: u64,
     pub reserve_percent: u8,
+    /// Every own task a preferred OOM victim from launch, instead of OOM order by fault
+    /// (FR-023); a risk to own work only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prefer_own_oom_victim: bool,
 }
 impl Default for RamConfig {
     fn default() -> Self {
         Self {
             reserve_mib: 8192,
             reserve_percent: 5,
+            prefer_own_oom_victim: false,
         }
     }
 }

@@ -430,6 +430,13 @@ pub struct Decision {
     /// published (FR-071).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub allowances: BTreeMap<String, ResourceAmounts>,
+    /// Allocations whose processes are preferred OOM victims: those that make up own RAM
+    /// above its fair share, in the memory victim order, or all under the opt-in (FR-023).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub oom_preferred: std::collections::BTreeSet<String>,
+    /// Own work's RAM fair share beside the RAM principals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_fair_share_mib: Option<u64>,
     /// CPU that running opportunistic work is charged above its p95 usage, which
     /// the schedulable budget adds so request-based charges admit by usage
     /// (FR-034). Negative when recent usage exceeds max(request, observed).

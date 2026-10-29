@@ -25,6 +25,8 @@ pub struct SupervisorOptions {
     pub duty_period_ms: u64,
     /// How long a worker has to comply with a resource target (FR-037).
     pub hint_deadline_ms: u64,
+    /// Every own process a preferred OOM victim from launch (FR-023).
+    pub prefer_own_oom_victim: bool,
     /// RAM cap: the noise tolerance and the ineffective-cap calm window.
     pub ram_noise_tolerance_mib: u64,
     pub ram_calm_window_ms: u64,
@@ -38,6 +40,7 @@ impl Default for SupervisorOptions {
             lease_ms: 10_000,
             prepare_timeout_ms: 10_000,
             release_confirm_timeout_ms: 10_000,
+            prefer_own_oom_victim: false,
             duty_period_ms: 500,
             hint_deadline_ms: 5_000,
             ram_noise_tolerance_mib: 256,
@@ -386,6 +389,22 @@ pub enum SupervisorReport {
         hint_ready: bool,
         observes_drain: bool,
     },
+    /// The family's OOM preference changed (FR-023): each member's value before and
+    /// after, and why a member was skipped.
+    Oom {
+        preferred: bool,
+        changes: Vec<OomChange>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        detail: String,
+    },
+}
+
+/// One family member's `oom_score_adj` change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OomChange {
+    pub pid: u32,
+    pub from: i32,
+    pub to: i32,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -411,6 +430,11 @@ pub enum SupervisorCommand {
     /// Publish what own work may grow to now (FR-071).
     Allowance {
         allowance: crate::model::ResourceAmounts,
+    },
+    /// Make the family's processes preferred OOM victims, or return them to their launch
+    /// baseline (FR-023).
+    Oom {
+        preferred: bool,
     },
 }
 #[cfg(unix)]

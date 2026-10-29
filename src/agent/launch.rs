@@ -436,6 +436,9 @@ pub(super) async fn start_assignment(
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
         sent_allowance: None,
+        // A new family launches at its baseline.
+        sent_oom: Some(false),
+        oom_context: None,
         seed: None,
         journal_seen: None,
     })

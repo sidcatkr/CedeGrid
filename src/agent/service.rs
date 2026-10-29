@@ -357,6 +357,23 @@ impl AgentLoop<'_> {
                         hint_ready,
                         observes_drain,
                     }) => slot.note_readiness(hint_ready, observes_drain),
+                    // Each OOM preference change is evidence: task, from, to, cause, own
+                    // RAM and its fair share (FR-023).
+                    Ok(Event::Oom {
+                        preferred,
+                        changes,
+                        detail,
+                    }) => {
+                        emit(&serde_json::json!({
+                            "event": "oom_score_adj",
+                            "task_id": slot.assignment.request.task_id,
+                            "assignment_id": slot.assignment.request.assignment_id,
+                            "preferred": preferred,
+                            "changes": changes,
+                            "context": slot.oom_context.take(),
+                            "detail": detail,
+                        }))?;
+                    }
                     Ok(Event::Failed { detail }) | Err(detail) => {
                         emit(
                             &serde_json::json!({"event":"supervisor_error","assignment_id":slot.assignment.request.assignment_id,"detail":detail}),
@@ -1112,6 +1129,34 @@ impl AgentLoop<'_> {
             };
             if send(slot, &message).is_ok() {
                 slot.sent_allowance = Some(allowance.clone());
+            }
+        }
+        // OOM order by fault: a task's mark goes to its supervisor when it changes (FR-023).
+        let own_ram = decision
+            .resources
+            .get(&crate::contention::ResourceKey::Ram)
+            .and_then(|status| status.own)
+            .map(|(lower, _)| lower);
+        for (id, slot) in self.slots.iter_mut() {
+            if slot.exited || slot.sequence == 0 {
+                continue;
+            }
+            let preferred = decision.oom_preferred.contains(id.as_str());
+            if slot.sent_oom == Some(preferred) {
+                continue;
+            }
+            let cause = match (preferred, self.config.ram.prefer_own_oom_victim) {
+                (true, true) => "prefer_own_oom_victim",
+                (true, false) => "own_memory_above_fair_share",
+                (false, _) => "own_memory_within_fair_share",
+            };
+            if send(slot, &Control::Oom { preferred }).is_ok() {
+                slot.sent_oom = Some(preferred);
+                slot.oom_context = Some(serde_json::json!({
+                    "cause": cause,
+                    "own_ram_mib": own_ram,
+                    "ram_fair_share_mib": decision.ram_fair_share_mib,
+                }));
             }
         }
         Ok(())

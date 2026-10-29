@@ -1692,7 +1692,9 @@ pub fn probe_demand(
 /// unmanaged usage. Under saturation a principal above the contention floor
 /// wants without bound; external usage no visible principal accounts for, such
 /// as unreadable owners, is one more principal (research R12).
-fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+/// Own work's max-min fair share beside the contending principals' demands; on memory it
+/// is the memory fair share (FR-023).
+pub fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
     let floor = principal_floor(input, thresholds);
     // A principal whose demand is known to be satisfied wants that much.
     let demand = |uid: Option<u32>, usage: u64| {

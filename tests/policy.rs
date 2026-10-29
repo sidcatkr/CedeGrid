@@ -6478,3 +6478,72 @@ mod cedegrid_usage {
         );
     }
 }
+
+mod oom_order {
+    use super::*;
+
+    /// Two own tasks of 10 000 and 6 000 MiB beside external usage that leaves
+    /// `available` MiB free, on 32 000 MiB with a 1 000 MiB floor.
+    fn evaluate(engine: &mut PolicyEngine, cfg: &Config, available: u64, now: u64) -> Decision {
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(available);
+        engine
+            .evaluate(
+                cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![
+                        allocation(
+                            "a",
+                            AllocationPhase::Running,
+                            resources(100, 10_000, 0),
+                            Some(resources(100, 10_000, 0)),
+                        ),
+                        allocation(
+                            "b",
+                            AllocationPhase::Running,
+                            resources(100, 6_000, 0),
+                            Some(resources(100, 6_000, 0)),
+                        ),
+                    ],
+                    facts: rootless(&["a", "b"]),
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap()
+    }
+
+    /// OOM order by fault (FR-023): in-share own RAM marks nothing; own RAM above its fair
+    /// share marks exactly the tasks that make up the excess, in the memory victim order;
+    /// back within its share nothing stays marked.
+    #[test]
+    fn own_ram_above_its_fair_share_marks_the_excess_tasks_in_victim_order() {
+        let cfg = config();
+        let mut engine = PolicyEngine::new();
+        // 6 000 MiB external: own work's fair share is all but that, 25 000 MiB.
+        let calm = evaluate(&mut engine, &cfg, 10_000, 0);
+        assert!(calm.oom_preferred.is_empty(), "{:?}", calm.oom_preferred);
+        // 16 000 MiB external: the max-min share is 15 500 MiB, so 500 MiB is own excess and
+        // the best fit for it, the 6 000 MiB task, is marked.
+        let over = evaluate(&mut engine, &cfg, 0, 500);
+        assert_eq!(
+            over.oom_preferred,
+            std::collections::BTreeSet::from(["b".to_string()])
+        );
+        let back = evaluate(&mut engine, &cfg, 10_000, 1_000);
+        assert!(back.oom_preferred.is_empty(), "{:?}", back.oom_preferred);
+    }
+
+    /// `ram.prefer_own_oom_victim` marks every own task, within its share too (FR-023).
+    #[test]
+    fn the_opt_in_marks_every_own_task() {
+        let mut cfg = config();
+        cfg.ram.prefer_own_oom_victim = true;
+        let decision = evaluate(&mut PolicyEngine::new(), &cfg, 10_000, 0);
+        assert_eq!(
+            decision.oom_preferred,
+            std::collections::BTreeSet::from(["a".to_string(), "b".to_string()])
+        );
+    }
+}

@@ -6,6 +6,61 @@ impl<'a> Interval<'a> {
     /// The yield ladder. An operator drain stops all work; otherwise memory, CPU
     /// and GPU compute each step per allocation, every step that went down says
     /// why, and every step becomes an action.
+    /// OOM order by fault (FR-023): while own RAM is above its fair share, the allocations
+    /// that make up the excess, in the memory victim order, are preferred OOM victims; the
+    /// opt-in marks every own allocation. While RAM is unknown the marks hold.
+    pub(super) fn oom_order(&mut self) {
+        let (config, input) = (self.config, self.input);
+        let running = || {
+            input
+                .allocations
+                .iter()
+                .filter(|a| a.phase != AllocationPhase::Pending)
+        };
+        if config.ram.prefer_own_oom_victim {
+            self.next.oom_preferred = running().map(|a| a.id.clone()).collect();
+            return;
+        }
+        let Some(fair) = self.ram_fair_share else {
+            self.next.oom_preferred = self.prev.oom_preferred.clone();
+            return;
+        };
+        let key = ResourceKey::Ram;
+        let total = running()
+            .map(|a| judged(input, &self.charges, &key, a))
+            .fold(0u64, u64::saturating_add);
+        let excess = total.saturating_sub(fair);
+        self.next.oom_preferred.clear();
+        if excess == 0 {
+            return;
+        }
+        let mut victims: Vec<VictimFacts> = running()
+            .map(|a| {
+                let amount = judged(input, &self.charges, &key, a);
+                let facts = ladder_facts(input, &key, &a.id);
+                VictimFacts {
+                    id: a.id.clone(),
+                    controllable: !facts.uncontrollable,
+                    frees: amount > 0,
+                    pending: false,
+                    mode: self.allocation_modes[&a.id][&ResourceKind::Ram],
+                    guaranteed: is_guaranteed(a),
+                    progress_lost_ms: facts.progress_lost_ms,
+                    amount,
+                }
+            })
+            .collect();
+        victim_order(&mut victims, excess);
+        let mut covered = 0u64;
+        for victim in victims {
+            if covered >= excess {
+                break;
+            }
+            covered = covered.saturating_add(victim.amount);
+            self.next.oom_preferred.insert(victim.id);
+        }
+    }
+
     pub(super) fn plan_ladder(&mut self) {
         self.unknown_windows();
         if self.input.explicit_drain {

@@ -49,6 +49,7 @@ fn options() -> SupervisorOptions {
         release_confirm_timeout_ms: 1000,
         duty_period_ms: 100,
         hint_deadline_ms: 5_000,
+        prefer_own_oom_victim: false,
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
         nice: 10,
@@ -978,10 +979,14 @@ child=spawn_managed([sys.executable,'-c',"import pathlib;pathlib.Path(%r,'child-
 child.wait(timeout=6,poll_interval=.01)
 "#,
     );
+    // Under the opt-in every own process, managed children too, is preferred (FR-023).
     let outcome = supervision::supervise_controlled(
         &request,
         &request.resources,
-        &options(),
+        &SupervisorOptions {
+            prefer_own_oom_victim: true,
+            ..options()
+        },
         &store,
         &mut RootlessBackend::new(10),
         Path::new(env!("CARGO_BIN_EXE_cedegrid")),
