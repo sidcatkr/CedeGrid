@@ -364,14 +364,15 @@ Yield First, Neutral and Performance, and no configuration key or job field can 
 Aggressive. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded
-or caution. Four options are marked *caution* because they let own work hold more
-capacity within the floors: Performance mode, a floor below twice its minimum, a margin
-below its default, and a detection setting beyond its default (`saturation_percent`,
+or caution. Three options are marked *caution* because they let own work hold more
+capacity within the floors: a floor below twice its minimum, a margin below its default,
+and a detection setting beyond its default (`saturation_percent`,
 `principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min` or
 `contention.gpu_compute.attribution_tolerance_percent` above it, `memory_peak_window_s` or
-`quiet_window_intervals` below it). Performance needs
-`contention.acknowledge_caution = ["performance_mode"]` to load, a lower margin needs
-`"reduced_margin"` and a higher detection threshold needs `"relaxed_detection"`. A floor
+`quiet_window_intervals` below it). Performance is the default mode and needs no
+acknowledgement; a file that still lists `"performance_mode"` loads unchanged. A lower
+margin needs `contention.acknowledge_caution = ["reduced_margin"]` and a higher detection
+threshold needs `"relaxed_detection"`. A floor
 below twice its minimum without `"small_floor"` loads, so 0.2 files keep loading, but is
 raised to twice the minimum with a warning, given at load or, for a floor a percentage
 sets, when the agent first samples the host; it applies as configured only once
@@ -515,7 +516,6 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `held_back_cooldown` | Admission headroom withheld until the resource has cooled down. |
 | `held_back_backoff` | Admission headroom withheld by the reclaim backoff. |
 | `held_back_charge_shortfall` | Admission capacity held by charges above usage. |
-| `performance_mode` | Own work keeps all idle capacity minus a small margin and grows quickly. |
 | `small_floor` | A floor below twice its minimum keeps less headroom for other workloads' bursts. |
 | `reduced_margin` | A margin below its default leaves external demand less idle capacity to grow into. |
 | `relaxed_detection` | A detection setting beyond its default recognizes contention later or forgets it sooner. |

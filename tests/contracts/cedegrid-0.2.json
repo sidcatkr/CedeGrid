@@ -98,10 +98,10 @@
       "error": "ERR_CEDEGRID_CONFIG"
     },
     {
-      "id": "CFG-07-performance-unacknowledged",
+      "id": "CFG-07-performance-loads-without-acknowledgement",
       "kind": "node",
       "toml": "config_version = 1\n[contention]\ndefault_mode = \"performance\"\n",
-      "error": "ERR_CEDEGRID_CONFIG"
+      "expected": {"cpu_weight": {"kind": "integer", "decimal": "10"}}
     },
     {
       "id": "CFG-07-noise-tolerance-bound",

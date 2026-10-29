@@ -129,7 +129,7 @@ pub struct SetupArgs {
     /// RESOURCE.KEY=VALUE for a tuned threshold, e.g. gpu_memory.noise_tolerance_mib=512.
     #[arg(long = "set", value_name = "RESOURCE.KEY=VALUE")]
     pub sets: Vec<String>,
-    /// performance_mode, small_floor, reduced_margin or relaxed_detection.
+    /// small_floor, reduced_margin or relaxed_detection.
     #[arg(long = "acknowledge-caution", value_name = "OPTION")]
     pub acknowledge: Vec<String>,
     /// Client: the coordinator's HTTPS origin.
@@ -1545,9 +1545,6 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
 /// (FR-045).
 pub fn justification(option: &str) -> &'static str {
     match option {
-        "performance_mode" => {
-            "Own work keeps all idle capacity minus a small margin and grows quickly. Other workloads still get their fair share within the reclaim bounds, and floors still hold."
-        }
         "small_floor" => {
             "Less headroom is kept for other workloads' bursts. The enforced minimum and the out-of-memory preference still protect them."
         }
@@ -1659,37 +1656,24 @@ mod tests {
         (dir, target)
     }
 
-    /// The caution mapping (B3, FR-045): defaults and more yielding choices carry
-    /// no marker; Performance, small floors, reduced margins and relaxed detection
-    /// are caution.
+    /// The caution mapping (B3, FR-045): every mode, Performance the default included,
+    /// carries no marker; small floors, reduced margins and relaxed detection are
+    /// caution.
     #[test]
     fn caution_mapping_follows_fr_045() {
         let (_dir, plain) = target("config_version = 1\n");
         let host = host();
         let risk = |target: &Target, field, pick| risk(target, field, pick, Some(&host));
         for kind in ResourceKind::ALL {
-            for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            for mode in ContentionMode::ALL {
                 assert_eq!(risk(&plain, Field::Mode(kind), Pick::Mode(mode)), None);
             }
             assert_eq!(risk(&plain, Field::Mode(kind), Pick::Inherit), None);
-            assert_eq!(
-                risk(
-                    &plain,
-                    Field::Mode(kind),
-                    Pick::Mode(ContentionMode::Performance)
-                ),
-                Some("performance_mode")
-            );
         }
         for field in [Field::DefaultMode, Field::MaxMode] {
-            assert_eq!(
-                risk(&plain, field, Pick::Mode(ContentionMode::Neutral)),
-                None
-            );
-            assert_eq!(
-                risk(&plain, field, Pick::Mode(ContentionMode::Performance)),
-                Some("performance_mode")
-            );
+            for mode in ContentionMode::ALL {
+                assert_eq!(risk(&plain, field, Pick::Mode(mode)), None);
+            }
         }
         // Default floors carry no marker. With percentages, 5% of this host is
         // the floor whatever the fixed part says.
@@ -1802,14 +1786,14 @@ mod tests {
     }
 
     /// Every option the interface offers maps to a key the configuration accepts,
-    /// and Neutral is preselected on a new file.
+    /// and Performance, the default, is preselected on a new file.
     #[test]
     fn every_offered_option_loads() {
         let (_dir, plain) = target("config_version = 1\n");
         let (_, base) = node_base(&plain).unwrap();
         assert_eq!(
             Field::DefaultMode.current(&base),
-            Pick::Mode(ContentionMode::Neutral)
+            Pick::Mode(ContentionMode::Performance)
         );
         for field in node_fields() {
             for pick in field.options(&base, false) {

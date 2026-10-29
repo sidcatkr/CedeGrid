@@ -151,7 +151,7 @@ def performance_defaults(node):
     node['node_mode']='opportunistic'
     node['cpu']['reserve_physical_cores']=0
     node.get('gpu',{}).pop('scale_up_cooldown_ms',None)
-    node['contention']={'default_mode':'performance','acknowledge_caution':['performance_mode']}
+    node['contention']={'default_mode':'performance'}
     return node
 
 

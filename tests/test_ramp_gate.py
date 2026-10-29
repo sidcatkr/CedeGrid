@@ -110,7 +110,7 @@ class RampGateTests(unittest.TestCase):
         self.assertEqual(node['node_mode'],'opportunistic')
         self.assertEqual(node['cpu']['reserve_physical_cores'],0)
         self.assertEqual(node['gpu'],{'reserve_vram_mib':4096})
-        self.assertEqual(node['contention'],{'default_mode':'performance','acknowledge_caution':['performance_mode']})
+        self.assertEqual(node['contention'],{'default_mode':'performance'})
 
     def test_gpu_tasks_request_device_memory_and_spin_on_the_device(self):
         task=ramp_gate.gpu_task('t',Path('/usr/bin/python3'),40,Path.home(),{},'GPU-x')

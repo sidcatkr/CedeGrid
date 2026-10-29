@@ -555,10 +555,10 @@ fn contention_defaults_and_overrides_parse() {
     use cedegrid::config::{FloorPolicy, NeutralMemoryPolicy};
     use cedegrid::contention::{ContentionMode, ResourceKind};
     let defaults = Config::default().contention;
-    assert_eq!(defaults.default_mode, ContentionMode::Neutral);
+    assert_eq!(defaults.default_mode, ContentionMode::Performance);
     // Without a cap, jobs reach no further than the node's own most aggressive mode.
     assert_eq!(defaults.max_mode, None);
-    assert_eq!(defaults.max_mode(), ContentionMode::Neutral);
+    assert_eq!(defaults.max_mode(), ContentionMode::Performance);
     assert_eq!(defaults.floor_policy, FloorPolicy::A);
     assert_eq!(defaults.neutral_memory_policy, NeutralMemoryPolicy::A);
     assert_eq!(defaults.thresholds(ResourceKind::Cpu).reclaim_s, 5);
@@ -835,7 +835,7 @@ fn every_configuration_key_is_classified() {
             "contention.gpu_compute.attribution_tolerance_percent",
             KeyClass::Caution("relaxed_detection"),
         ),
-        ("contention.max_mode", KeyClass::Caution("performance_mode")),
+        ("contention.max_mode", KeyClass::Bounded),
         ("ram.reserve_mib", KeyClass::Caution("small_floor")),
         ("lifecycle.drain_timeout_ms", KeyClass::Bounded),
         ("contention.ram.hint_deadline_s", KeyClass::Bounded),
@@ -871,9 +871,11 @@ fn caution_details_list_the_keys_and_values_each_option_covers() {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     };
-    assert_eq!(
-        settings("performance_mode"),
-        pairs(&[("contention.cpu.mode", "performance")])
+    // Performance is no caution option, so it covers no settings.
+    assert!(
+        details
+            .iter()
+            .all(|detail| detail.name != "performance_mode")
     );
     assert_eq!(
         settings("reduced_margin"),
@@ -1147,7 +1149,7 @@ fn removed_floor_and_memory_policies_fail_naming_their_replacement() {
 }
 
 #[test]
-fn performance_needs_its_acknowledgement() {
+fn performance_needs_no_acknowledgement() {
     for (body, acknowledged) in [
         (
             "[contention]\ndefault_mode = \"performance\"",
@@ -1158,12 +1160,7 @@ fn performance_needs_its_acknowledgement() {
             "[contention]\nacknowledge_caution = [\"performance_mode\"]\n[contention.gpu_memory]\nmode = \"performance\"",
         ),
     ] {
-        let error = format!("{:#}", parse_node(body).unwrap_err());
-        assert!(
-            error.contains("ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED")
-                && error.contains("performance_mode"),
-            "{body}: {error}"
-        );
+        parse_node(body).unwrap();
         parse_node(acknowledged).unwrap();
     }
 }
@@ -1350,12 +1347,8 @@ fn negative_cpu_nice_warns_and_is_treated_as_zero() {
         &location,
     )
     .unwrap();
-    assert!(
-        loaded
-            .warnings
-            .iter()
-            .any(|w| w.contains("performance_mode") && w.contains("caution"))
-    );
+    // Performance is no caution option; an old acknowledgement still loads quietly.
+    assert!(!loaded.warnings.iter().any(|w| w.contains("caution")));
 }
 
 /// Legacy `gpu.execution_mode` values are interpreted with a warning naming the
@@ -1460,9 +1453,9 @@ fn the_supervisor_writes_the_target_files_the_sdks_read() {
 }
 
 /// The shipped node example and the 0.2 node example load unchanged, and without
-/// mode settings every resource runs Neutral (FR-031).
+/// mode settings every resource runs Performance, the default (FR-031).
 #[test]
-fn the_shipped_and_0_2_node_configs_load_unchanged_in_neutral() {
+fn the_shipped_and_0_2_node_configs_load_unchanged_in_performance() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in [
@@ -1473,12 +1466,12 @@ fn the_shipped_and_0_2_node_configs_load_unchanged_in_neutral() {
         for kind in ResourceKind::ALL {
             assert_eq!(
                 config.contention.mode(kind),
-                ContentionMode::Neutral,
+                ContentionMode::Performance,
                 "{}",
                 path.display()
             );
         }
-        assert_eq!(config.contention.max_mode(), ContentionMode::Neutral);
+        assert_eq!(config.contention.max_mode(), ContentionMode::Performance);
     }
 }
 
@@ -1648,5 +1641,58 @@ fn memory_has_no_neutral_or_performance_margin() {
             .thresholds(cedegrid::contention::ResourceKind::Ram)
             .yield_first_margin_percent,
         3
+    );
+}
+
+/// Performance is the default on every resource and no caution option (FR-030, FR-031,
+/// FR-051): a file selecting it needs no acknowledgement, an existing `performance_mode`
+/// entry still loads, and a file without `default_mode` gets one `default_mode_changed`
+/// notice; the example configuration shows the default.
+#[test]
+fn performance_is_the_default_and_needs_no_acknowledgement() {
+    use cedegrid::contention::{ContentionMode::*, ResourceKind};
+    let config = Config::default();
+    for kind in ResourceKind::ALL {
+        assert_eq!(config.contention.mode(kind), Performance, "{kind:?}");
+    }
+    assert_eq!(config.contention.max_mode(), Performance);
+    assert!(
+        config
+            .caution_options()
+            .iter()
+            .all(|option| option.name != "performance_mode")
+    );
+    let (_root, location) = node_location();
+    let parse = |body: &str| {
+        Config::parse_reporting(&format!("config_version = 1\n{body}\n"), &location).unwrap()
+    };
+    let notices = |loaded: &cedegrid::config::LoadedConfig| {
+        loaded
+            .warnings
+            .iter()
+            .filter(|w| w.contains("default_mode_changed"))
+            .count()
+    };
+    let chosen = parse("[contention]\ndefault_mode = \"performance\"");
+    assert_eq!(notices(&chosen), 0);
+    assert!(!chosen.warnings.iter().any(|w| w.contains("caution")));
+    let acknowledged = parse(
+        "[contention]\ndefault_mode = \"performance\"\nacknowledge_caution = [\"performance_mode\"]",
+    );
+    assert_eq!(
+        acknowledged.config.contention.mode(ResourceKind::Cpu),
+        Performance
+    );
+    let unset = parse("[cpu]\nnice = 10");
+    assert_eq!(notices(&unset), 1);
+    assert_eq!(unset.config.contention.mode(ResourceKind::Ram), Performance);
+    assert_eq!(
+        notices(&parse("[contention]\ndefault_mode = \"neutral\"")),
+        0
+    );
+    assert!(
+        cedegrid::config::example(cedegrid::config::RuntimeConfigKind::Node)
+            .unwrap()
+            .contains("default_mode = \"performance\"")
     );
 }

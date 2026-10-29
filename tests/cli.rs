@@ -106,11 +106,14 @@ fn observe_and_doctor_show_each_resource() {
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let path = setup(dir.path());
     let mut config = Config::load(&path).unwrap();
+    // Neutral below a Performance cap, with a reduced margin as the caution option.
+    config.contention.default_mode = cedegrid::contention::ContentionMode::Neutral;
     config.contention.max_mode = Some(cedegrid::contention::ContentionMode::Performance);
+    config.contention.cpu.neutral_margin_percent = Some(3);
     config
         .contention
         .acknowledge_caution
-        .insert("performance_mode".into());
+        .insert("reduced_margin".into());
     fs::write(
         &path,
         serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
@@ -134,7 +137,7 @@ fn observe_and_doctor_show_each_resource() {
         assert!(decision["actions"].is_array());
         assert_eq!(
             decision["exceptions"],
-            serde_json::json!([{"name": "performance_mode", "marker": "caution"}])
+            serde_json::json!([{"name": "reduced_margin", "marker": "caution"}])
         );
     }
     let doctor = success_json(run(&path, &["doctor"]));
@@ -145,11 +148,11 @@ fn observe_and_doctor_show_each_resource() {
     assert!(cpu["held_back"]["capacity"].as_u64().unwrap() > 0);
     assert!(cpu["held_back"]["percent"].is_object());
     assert_eq!(doctor["max_mode"], "performance");
-    assert_eq!(doctor["caution_options"][0]["name"], "performance_mode");
+    assert_eq!(doctor["caution_options"][0]["name"], "reduced_margin");
     assert_eq!(doctor["caution_options"][0]["marker"], "caution");
     assert_eq!(
         doctor["caution_options"][0]["settings"][0]["key"],
-        "contention.max_mode"
+        "contention.cpu.neutral_margin_percent"
     );
     assert!(
         doctor["available_steps"]["cpu"]
@@ -172,13 +175,56 @@ fn observe_and_doctor_show_each_resource() {
         "Floors",
         "RAM floor",
         "Caution options",
-        "[caution] performance_mode: contention.max_mode = performance",
+        "[caution] reduced_margin: contention.cpu.neutral_margin_percent = 3",
         "Available steps",
         "Legacy GPU keys",
     ] {
         assert!(text.contains(expected), "{expected} in:\n{text}");
     }
     assert!(!dir.path().join("state").exists());
+}
+
+/// A file without `default_mode` now runs in Performance, and `doctor` says so once
+/// (T253, FR-030).
+#[test]
+fn doctor_reports_the_new_default_mode_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = setup(dir.path());
+    let text = fs::read_to_string(&path).unwrap();
+    let unset: String = text
+        .lines()
+        .filter(|line| !line.starts_with("default_mode"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(&path, unset).unwrap();
+    let doctor = success_json(run(&path, &["doctor"]));
+    assert_eq!(doctor["resources"]["cpu"]["mode"], "performance");
+    let notices: Vec<&Value> = doctor["config_warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|w| w.starts_with("default_mode_changed"))
+        })
+        .collect();
+    assert_eq!(notices.len(), 1, "{doctor}");
+    let mut config = Config::load(&path).unwrap();
+    config.contention.default_mode = cedegrid::contention::ContentionMode::Neutral;
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let explicit = success_json(run(&path, &["doctor"]));
+    assert_eq!(explicit["resources"]["cpu"]["mode"], "neutral");
+    assert!(
+        !explicit["config_warnings"]
+            .to_string()
+            .contains("default_mode_changed"),
+        "{explicit}"
+    );
 }
 
 #[test]
@@ -571,6 +617,36 @@ mod setup_non_interactive {
     use super::*;
     use std::process::Stdio;
 
+    /// Setup preselects Performance, the default, and writes it without an
+    /// acknowledgement (FR-030, FR-051).
+    #[test]
+    fn setup_preselects_performance_without_an_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let output = setup_cmd(
+            &path,
+            &[
+                "--non-interactive",
+                "--json",
+                "--role",
+                "node",
+                "--default-mode",
+                "performance",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let fresh = dir.path().join("fresh.toml");
+        let output = setup_cmd(&fresh, &["--non-interactive", "--json", "--role", "node"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let config = cedegrid::config::Config::load(&fresh).unwrap();
+        assert_eq!(
+            config
+                .contention
+                .mode(cedegrid::contention::ResourceKind::Cpu),
+            cedegrid::contention::ContentionMode::Performance
+        );
+    }
+
     fn setup_cmd(config: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_cedegrid"))
             .arg("--config")
@@ -614,8 +690,8 @@ mod setup_non_interactive {
                 "--json",
                 "--role",
                 "node",
-                "--default-mode",
-                "performance",
+                "--ram-floor-mib",
+                "600",
             ],
         );
         assert_eq!(output.status.code(), Some(3));
@@ -624,7 +700,7 @@ mod setup_non_interactive {
             json(&output)["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("--acknowledge-caution performance_mode")
+                .contains("--acknowledge-caution small_floor")
         );
         assert!(!path.exists());
         // 4: a result that fails validation, here Neutral's margin below Performance's.
@@ -653,9 +729,11 @@ mod setup_non_interactive {
                 "--role",
                 "node",
                 "--default-mode",
-                "performance",
+                "neutral",
+                "--ram-floor-mib",
+                "600",
                 "--acknowledge-caution",
-                "performance_mode",
+                "small_floor",
             ],
         );
         assert_eq!(
@@ -667,17 +745,12 @@ mod setup_non_interactive {
         let config = Config::load(&path).unwrap();
         assert_eq!(
             config.contention.default_mode,
-            cedegrid::contention::ContentionMode::Performance
+            cedegrid::contention::ContentionMode::Neutral
         );
         // The same choices again change nothing.
         let output = setup_cmd(
             &path,
-            &[
-                "--non-interactive",
-                "--json",
-                "--default-mode",
-                "performance",
-            ],
+            &["--non-interactive", "--json", "--default-mode", "neutral"],
         );
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(json(&output)["written"], false);
@@ -753,8 +826,10 @@ mod setup_non_interactive {
                 "node",
                 "--max-mode",
                 "performance",
+                "--ram-floor-mib",
+                "600",
                 "--acknowledge-caution",
-                "performance_mode",
+                "small_floor",
             ],
         );
         let result = json(&output);
@@ -764,9 +839,10 @@ mod setup_non_interactive {
             path.canonicalize().unwrap()
         );
         assert_eq!(result["choices"]["contention.max_mode"], "performance");
+        // Performance is no caution option; the small floor is.
         assert_eq!(
             result["exceptions"],
-            json!([{"name": "performance_mode", "marker": "caution"}])
+            json!([{"name": "small_floor", "marker": "caution"}])
         );
     }
 
@@ -1000,7 +1076,6 @@ mod setup_terminal {
     // Interface rows (src/setup.rs `node_fields`): Up from the top wraps to
     // Cancel, then Review and write.
     const DEFAULT_MODE: usize = 1;
-    const CPU_MODE: usize = 2;
     const MAX_MODE: usize = 6;
     const RAM_FLOOR: usize = 7;
     const CPU_NEUTRAL_MARGIN: usize = 10;
@@ -1193,8 +1268,8 @@ mod setup_terminal {
         let mut pty = interface(&path, &[]);
         open(&mut pty, DEFAULT_MODE);
         pty.wait_for("holds the fair share");
-        // Options: Yield First, Neutral (current), Performance.
-        pty.key(UP);
+        // Options: Yield First, Neutral, Performance (current, the default).
+        pty.keys(UP, 2);
         pty.key(b" ");
         pty.key(b"\r");
         write_from(&mut pty, DEFAULT_MODE);
@@ -1211,46 +1286,41 @@ mod setup_terminal {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
-        // Options: same as default (current), Yield First, Neutral, Performance.
-        open(&mut pty, CPU_MODE);
-        pty.keys(DOWN, 3);
+        // Ascending options; 768 MiB, near the minimum, is four above the current 8192.
+        open(&mut pty, RAM_FLOOR);
+        pty.keys(UP, 4);
         pty.key(b" ");
         pty.key(b"\r");
         pty.wait_for("Confirm a caution option");
-        pty.wait_for("follows what external work takes");
+        pty.wait_for("Less headroom is kept");
         // Declining keeps the previous value.
         pty.key(b"\r");
         pty.wait_for("Review and write");
         let text = pty.text();
-        let row = text[text.rfind("CPU mode").unwrap()..]
+        let row = text[text.rfind("RAM floor").unwrap()..]
             .lines()
             .next()
             .unwrap();
-        assert!(row.contains("same as default (Neutral)"), "{row}");
+        assert!(row.contains("8192"), "{row}");
         assert!(!row.contains("[caution]"), "{row}");
         pty.key(b"\r");
-        pty.keys(DOWN, 3);
+        pty.keys(UP, 4);
         pty.key(b" ");
         pty.key(b"\r");
         pty.wait_for("Confirm a caution option");
         pty.key(DOWN);
         pty.key(b" ");
         pty.key(b"\r");
-        write_from(&mut pty, CPU_MODE);
+        write_from(&mut pty, RAM_FLOOR);
         let (status, text, _) = pty.finish();
         assert!(status.success(), "{text}");
         let config = Config::load(&path).unwrap();
-        assert_eq!(
-            config
-                .contention
-                .mode(cedegrid::contention::ResourceKind::Cpu),
-            cedegrid::contention::ContentionMode::Performance
-        );
+        assert_eq!(config.ram.reserve_mib, 768);
         assert!(
             config
                 .contention
                 .acknowledge_caution
-                .contains("performance_mode")
+                .contains("small_floor")
         );
     }
 
@@ -1301,8 +1371,9 @@ mod setup_terminal {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[("NO_COLOR", "1")]);
-        open(&mut pty, CPU_MODE);
-        pty.wait_for("Performance [caution]");
+        // A floor near its minimum is marked; Performance, the default, is not.
+        open(&mut pty, RAM_FLOOR);
+        pty.wait_for("[caution]");
         pty.key(b"q");
         let (_, text, _) = pty.finish();
         assert!(!text.contains('\x1b'), "{text:?}");
@@ -1319,7 +1390,7 @@ mod setup_terminal {
         }
         // With color the marker is yellow.
         let mut pty = interface(&path, &[]);
-        open(&mut pty, CPU_MODE);
+        open(&mut pty, RAM_FLOOR);
         pty.wait_for("\x1b[33m[caution]\x1b[0m");
         pty.key(b"q");
         pty.finish();
@@ -1331,28 +1402,20 @@ mod setup_terminal {
         let start = "# Operator notes stay.\nconfig_version = 1\nnode_id = \"node-a\"\n\n[ram]\nreserve_mib = 8192 # fixed part\n";
         type Steps = fn(&mut Pty);
         let cases: [(&str, Option<&str>, Steps, &[&str]); 4] = [
-            ("neutral default", None, |pty| write_from(pty, 0), &[]),
+            ("defaults", None, |pty| write_from(pty, 0), &[]),
             (
                 "performance cap",
                 Some(start),
                 |pty| {
-                    // Options: no explicit cap (current), Neutral, Performance.
+                    // Options: no explicit cap (current), Neutral, Performance; Performance
+                    // needs no confirmation.
                     open(pty, MAX_MODE);
                     pty.keys(DOWN, 2);
                     pty.key(b" ");
                     pty.key(b"\r");
-                    pty.wait_for("Confirm a caution option");
-                    pty.key(DOWN);
-                    pty.key(b" ");
-                    pty.key(b"\r");
                     write_from(pty, MAX_MODE);
                 },
-                &[
-                    "--max-mode",
-                    "performance",
-                    "--acknowledge-caution",
-                    "performance_mode",
-                ],
+                &["--max-mode", "performance"],
             ),
             (
                 "floor change",
@@ -1420,13 +1483,17 @@ mod setup_terminal {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = Pty::spawn(&path, &["setup", "--role", "node"], &[("TERM", "dumb")]);
-        pty.wait_for("Default mode: Neutral");
-        // Default mode: 3) Performance, a caution option.
-        pty.key(b"3\r");
-        pty.wait_for("Type yes to record performance_mode");
+        pty.wait_for("Default mode: Performance");
+        // Keep the modes and the cap, then choose 2) 768 MiB, a floor near its minimum.
+        for _ in 0..6 {
+            pty.key(b"\r");
+        }
+        pty.wait_for("RAM floor");
+        pty.key(b"2\r");
+        pty.wait_for("Type yes to record small_floor");
         pty.key(b"yes\r");
         // Keep every other value.
-        for _ in 0..18 {
+        for _ in 0..12 {
             pty.key(b"\r");
         }
         pty.wait_for("Write this configuration? [y/N]");
@@ -1434,12 +1501,13 @@ mod setup_terminal {
         let (status, text, _) = pty.finish();
         assert!(status.success(), "{text}");
         assert!(!text.contains('\x1b'), "{text:?}");
-        assert!(text.contains("Performance [caution]"));
+        assert!(text.contains("[caution]"));
         let config = Config::load(&path).unwrap();
         assert_eq!(
             config.contention.default_mode,
             cedegrid::contention::ContentionMode::Performance
         );
+        assert_eq!(config.ram.reserve_mib, 768);
     }
 
     #[test]

@@ -549,7 +549,7 @@ pub struct ContentionConfig {
 impl Default for ContentionConfig {
     fn default() -> Self {
         Self {
-            default_mode: crate::contention::ContentionMode::Neutral,
+            default_mode: crate::contention::ContentionMode::Performance,
             max_mode: None,
             floor_policy: FloorPolicy::A,
             neutral_memory_policy: NeutralMemoryPolicy::A,
@@ -569,7 +569,21 @@ impl Default for ContentionConfig {
     }
 }
 
-/// Caution options a file acknowledges by name (FR-051, FR-054).
+/// A file that sets no `contention.default_mode` now runs Performance where it sets no
+/// mode; say so once (FR-031).
+fn default_mode_notice(contents: &str) -> Option<String> {
+    let value: toml::Value = toml::from_str(contents).ok()?;
+    let set = value
+        .get("contention")
+        .and_then(|contention| contention.get("default_mode"))
+        .is_some();
+    (!set).then(|| {
+        "default_mode_changed: contention.default_mode is not set, so every resource without a mode runs in Performance, the default (it was Neutral); set default_mode = \"neutral\" to keep Neutral".into()
+    })
+}
+
+/// Caution options a file acknowledges by name (FR-051, FR-054). `performance_mode` still
+/// loads, though Performance is the default and needs no confirmation.
 pub const ACKNOWLEDGEMENTS: [&str; 4] = [
     "performance_mode",
     "small_floor",
@@ -754,10 +768,6 @@ impl ContentionConfig {
         })
     }
 
-    fn performance_chosen(&self) -> bool {
-        self.max_mode() == crate::contention::ContentionMode::Performance
-    }
-
     /// GPU quiet window in monitor intervals. An unset window is raised from its
     /// default until it spans longer than the GPU sample age, so a fast monitor
     /// never declares Quiet from evidence a stale sample could still explain.
@@ -809,10 +819,6 @@ impl ContentionConfig {
         ensure!(
             self.default_mode <= self.max_mode(),
             "contention.default_mode cannot be more aggressive than contention.max_mode"
-        );
-        ensure!(
-            !self.performance_chosen() || self.acknowledge_caution.contains("performance_mode"),
-            "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED: Performance mode requires acknowledge_caution = [\"performance_mode\"]"
         );
         ensure!(
             (1..=30).contains(&self.guaranteed_hint_deadline_s),
@@ -1123,27 +1129,6 @@ impl ContentionConfig {
         result
     }
 
-    /// Explicit Performance settings, as key and value.
-    fn performance_settings(&self) -> Vec<(String, String)> {
-        use crate::contention::{ContentionMode::Performance, ResourceKind};
-        let mut result = Vec::new();
-        if self.default_mode == Performance {
-            result.push(("contention.default_mode".into(), "performance".into()));
-        }
-        if self.max_mode == Some(Performance) {
-            result.push(("contention.max_mode".into(), "performance".into()));
-        }
-        for kind in ResourceKind::ALL {
-            if self.resource(kind).mode == Some(Performance) {
-                result.push((
-                    format!("contention.{}.mode", kind.name()),
-                    "performance".into(),
-                ));
-            }
-        }
-        result
-    }
-
     /// Settings, as `contention.resource.key` and value, beyond the default;
     /// `values` orders each so that larger lets own work hold more, and reports
     /// the magnitude.
@@ -1237,17 +1222,17 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ("contention.acknowledge_caution", Safe),
         ("contention.critical_floor_percent", Bounded),
         ("contention.critical_hint_deadline_s", Bounded),
-        ("contention.default_mode", Caution("performance_mode")),
+        ("contention.default_mode", Bounded),
         ("contention.floor_policy", Safe),
         ("contention.guaranteed_hint_deadline_s", Bounded),
-        ("contention.max_mode", Caution("performance_mode")),
+        ("contention.max_mode", Bounded),
         ("contention.neutral_memory_policy", Safe),
         ("contention.never_share_occupied_gpus", Safe),
         ("contention.principal_leave_s", Bounded),
         // Users not joined yet count toward the unattributed principal, which contends.
         ("contention.principal_window_intervals", Safe),
         ("contention.uid_min", Caution("relaxed_detection")),
-        ("contention.*.mode", Caution("performance_mode")),
+        ("contention.*.mode", Bounded),
         (
             "contention.*.yield_first_margin_percent",
             Caution("reduced_margin"),
@@ -1545,7 +1530,8 @@ impl Config {
     /// Load and apply compatibility rules, returning operator warnings.
     pub fn load_reporting(path: &Path) -> Result<LoadedConfig> {
         let mut config: Config = load_runtime(path, RuntimeConfigKind::Node)?;
-        let warnings = config.apply_compatibility();
+        let mut warnings = config.apply_compatibility();
+        warnings.extend(default_mode_notice(&std::fs::read_to_string(path)?));
         Ok(LoadedConfig { config, warnings })
     }
 
@@ -1553,7 +1539,8 @@ impl Config {
     pub fn parse_reporting(contents: &str, canonical_config_path: &Path) -> Result<LoadedConfig> {
         let mut config: Config =
             parse_runtime(contents, canonical_config_path, RuntimeConfigKind::Node)?;
-        let warnings = config.apply_compatibility();
+        let mut warnings = config.apply_compatibility();
+        warnings.extend(default_mode_notice(contents));
         Ok(LoadedConfig { config, warnings })
     }
 
@@ -1774,12 +1761,6 @@ impl Config {
     pub fn caution_options(&self) -> Vec<crate::model::ExceptionNotice> {
         use crate::model::{ExceptionNotice, RiskMarker};
         let mut result = Vec::new();
-        if self.contention.performance_chosen() {
-            result.push(ExceptionNotice {
-                name: "performance_mode".into(),
-                marker: RiskMarker::Caution,
-            });
-        }
         if self.small_floor() && self.contention.acknowledge_caution.contains("small_floor") {
             result.push(ExceptionNotice {
                 name: "small_floor".into(),
@@ -1849,7 +1830,6 @@ impl Config {
             ]));
         }
         [
-            ("performance_mode", self.contention.performance_settings()),
             ("small_floor", small_floor),
             ("reduced_margin", self.contention.reduced_margins()),
             ("relaxed_detection", self.contention.relaxed_detection()),

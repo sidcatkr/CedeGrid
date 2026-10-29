@@ -538,10 +538,6 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     // Caution options.
     (
-        "performance_mode",
-        "Own work keeps all idle capacity minus a small margin and grows quickly.",
-    ),
-    (
         "small_floor",
         "A floor below twice its minimum keeps less headroom for other workloads' bursts.",
     ),

@@ -655,7 +655,6 @@ fn the_catalog_has_one_sentence_per_stable_code() {
         "admission_cooling_down",
         "admission_reclaim_backoff",
         "admission_envelope_exceeded",
-        "performance_mode",
         "small_floor",
         "reduced_margin",
         "relaxed_detection",

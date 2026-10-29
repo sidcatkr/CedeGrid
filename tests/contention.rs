@@ -3080,7 +3080,9 @@ mod ram_cap {
     /// backoff, and the step returns to none.
     #[test]
     fn ram_cap_reversal_waits_for_room_the_calm_window_and_backoff() {
-        let config = config();
+        // Neutral's scale-up interval bounds the reversal below.
+        let mut config = config();
+        config.contention.ram.mode = Some(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
         let mut held = 8000;
         let mut reversed = None;

@@ -35,6 +35,10 @@ enabled = true
 psi = true
 freshness_intervals = 3
 
+[contention]
+# Performance is the default mode: own work keeps all idle capacity minus a small margin.
+default_mode = "performance"
+
 [execution]
 enabled = false
 prepare_timeout_ms = 10000
