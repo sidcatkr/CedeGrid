@@ -1,5 +1,13 @@
 # CedeGrid Constitution
 
+## Purpose
+
+CedeGrid distributes a shared server's resources efficiently, so that no capacity sits idle. It
+is most useful where other people's processes already run and it is unclear how much to take.
+Its core purpose is that own work runs at the highest possible performance, efficiently, with
+nothing left idle on the server. The modes set how much own work gives back to others:
+Performance, the default, carries this purpose, and Yield First is one option among them.
+
 ## Core Principles
 
 ### I. External Processes Are Untouchable (NON-NEGOTIABLE)
@@ -52,22 +60,41 @@ never let CedeGrid act on a process it does not own.
 - CedeGrid MUST NOT drive another workload into OOM kills, swap thrash, failed GPU allocations
   or loss of capacity that workload is already using. Every mode keeps explicit floors, such as
   minimum available host RAM and per-device VRAM headroom, each with an enforced minimum.
-- The only exception to the two rules above is unprotected Aggressive, below, and it covers CPU
-  and GPU compute time only.
-- Own processes MUST be the preferred OOM victims. Where the platform allows an unprivileged
-  process to mark itself, this happens before user code runs, for every own process.
+- **Floors and the memory fair share.** Own memory above its fair share MUST give way at the
+  floors in every mode. In Yield First and Neutral, own memory within its fair share gives way
+  at the floors too. In Performance and Aggressive, own memory within its fair share is not
+  given up for a floor breach that others' growth caused, so the kernel MAY then OOM-kill
+  another workload's process, as it would without CedeGrid. This is the one memory exception to
+  the two rules above.
+- The one compute exception to the two rules above is unprotected Aggressive, below, and it
+  covers CPU and GPU compute time only.
+- **OOM order by fault.** Own work within its memory fair share MUST stay at the OOM score
+  adjustment it launched with, the same baseline as every other process, and MUST NOT be set
+  below it. The own tasks that make up own memory above its fair share MUST be marked as
+  preferred OOM victims, in the ladder's victim order and for every process in each task's
+  family, until own memory is back within its share, and then return to their baseline. So an
+  OOM that own work causes takes own excess first. Without privileges, in-share own work is
+  protected only up to everyone else's baseline: the kernel can still take it when it is the
+  largest process. An explicit opt-in MAY mark every own process as a preferred victim; that
+  risk falls only on own work.
 - Own priority MUST NOT be raised above the default: no negative nice values and no real-time
   scheduling classes. No exception relaxes this rule.
-- **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive. Aggressive
-  is a *caution* option with a red label, stronger than Performance's yellow. Its default form,
-  protected Aggressive, keeps every rule of this principle. Any other active principal that is
-  below the lesser of its demand and its fair share gets that CPU and GPU compute back no slower
-  than Performance would give it back, and protected Aggressive never holds less than
-  Performance would in the same observation.
-- **Unprotected Aggressive, the one named exception.** It MAY decline to give back CPU and GPU
+- **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive.
+  Performance is the default mode. Aggressive is a *caution* option with a red label. Its
+  default form, protected Aggressive, keeps every rule of this principle. Any other active
+  principal that is below the lesser of its demand and its fair share gets that CPU and GPU
+  compute back no slower than Performance would give it back, and protected Aggressive never
+  holds less than Performance would in the same observation.
+- **Loss by mode.** Yield First and Neutral MAY cost own work compared with running it without
+  CedeGrid. Performance and Aggressive MUST NOT cost own work anything beyond what keeps every
+  other principal at the lesser of its demand and its fair share, plus the documented idle
+  margin (Performance 2%, Aggressive 0%) and CedeGrid's measured own overhead. The
+  work-conserving rule below holds in every mode.
+- **Unprotected Aggressive, the one compute exception.** It MAY decline to give back CPU and GPU
   compute time, as an exception to "Own work MUST be the first to give capacity back" and to
   "loss of capacity that workload is already using". It covers compute time only:
-  - the floors, Principle I, the OOM-victim rule and the no-priority-raise rule hold in full;
+  - the floors (as above), Principle I, the OOM order and the no-priority-raise rule hold in
+    full;
   - CedeGrid only declines to give compute back. It MUST NOT raise priority, inflate thread
     counts or do anything else to win share; the split is whatever the kernel and the GPU
     driver decide;
@@ -77,12 +104,13 @@ never let CedeGrid act on a process it does not own.
     the two-step confirmation the feature specification defines;
   - while active it MUST be reported in `ps`, `top`, logs and JSON output.
 - **Who carries the risk.** An option whose risk falls only on own work, such as a shorter hint
-  deadline or draining Guaranteed work sooner, MAY be offered. An option whose risk is OOM kills,
+  deadline or draining Guaranteed work sooner, MAY be offered. Apart from the floors rule for
+  in-share own memory in Performance and Aggressive, above, an option whose risk is OOM kills,
   swap thrash, failed GPU allocations or any other failure of external workloads MUST NOT exist,
   not even as an opt-in. The only risk to other workloads that any option may carry is slower
   compute, and only under unprotected Aggressive.
 - Options that let own work hold more capacity within the floors and the reclaim bounds, such as
-  Performance mode, protected Aggressive or a floor near its minimum, are marked *caution*. Each
+  protected Aggressive or a floor near its minimum, are marked *caution*. Each
   such option MUST:
   - be off by default and never enabled implicitly, including by upgrades, migrations or
     non-interactive defaults;
@@ -95,9 +123,13 @@ never let CedeGrid act on a process it does not own.
   small idle margins, and RAM and GPU memory keep the floors. A more yielding mode the operator
   chooses MAY keep more idle, since that cost falls only on own work.
 
-Rationale: CedeGrid runs only on spare capacity, so running it must never make another workload
-fail. An operator may trade away their own work's progress, but never another workload's
-safety. Capacity held back without a reclaim reason protects no workload. Some operators accept
+Rationale: running CedeGrid must never make another workload fail through own work beyond its
+fair share. Within its fair share own work is protected as much as others' work: dying first
+because of someone else's growth is a design error, so in Performance and Aggressive in-share
+own memory is kept and the kernel decides, as it would without CedeGrid. An operator may trade
+away their own work's progress in a more yielding mode, but CedeGrid never takes more than the
+fair share at another workload's expense. Capacity held back without a reclaim reason protects
+no workload. Some operators accept
 slowing other workloads' compute to meet a deadline; that choice stays explicit, rare, visible
 and limited to compute time, and it never threatens another workload's safety.
 
@@ -236,4 +268,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 6.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-26
+**Version**: 7.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-10-29
