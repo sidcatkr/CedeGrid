@@ -748,6 +748,45 @@ Measurement only: the policy rules and the decision snapshot do not change.
   - VII: every new field is optional; the batch is a negotiated feature with a single-request
     fallback, and the contract fixture adds a case.
 
+### Item 027 decisions on report 027-1 (2026-10-29)
+
+- **D3 A and D4 A** (FR-011, FR-016, FR-021, SC-002, Session 2026-10-29): the amendments record
+  what the code already does. Running CPU yields tier by tier; within a tier held caps and own
+  usage over its target are lowered at one level and a lowered cap counts what it frees
+  (`src/policy/ladder.rs`), and new victims follow the cost order. Under saturation, a satisfied
+  principal using less than its recorded demand by more than the contention floor counts at that
+  demand (`expected_external` in `src/contention.rs`). Work: tests that pin both rules, and the
+  guarantees text already written for item 027.
+- **Sampling cost, no change to what the agent decides** (D2 A, SC-014):
+  - Own tasks: the managed collector keeps the pidfd it opened when it first verified an
+    allocation's process identity. Each interval it re-verifies through that pidfd (alive means
+    the PID still names the verified process) instead of re-reading `/proc` identity, and the
+    process clock is read under the held pidfd. A dead pidfd, a changed identity or a new
+    allocation goes through the full identity check once; released allocations drop their
+    handle. Linux only; other platforms keep today's path.
+  - Principals: on Linux a process table reads each `/proc/<pid>/stat` once per interval for CPU
+    ticks, start time and resident pages, and a process's real UID once from `status`, cached by
+    PID and start time. Per-process CPU is computed as sysinfo computes it (ticks over the global
+    `/proc/stat` ticks per CPU, at most the CPU count, zero on first sight). It replaces sysinfo's
+    full refresh, which also lists every thread as a process (research R26), for the principals
+    and for the external processes whose memory peaks are tracked. Other platforms keep sysinfo.
+  - The Docker cost test reports the sample stage before (3.86 s per 60.6 s, 64 m, at `abbcd63`)
+    and after.
+- **Test fix**: `a_hint_carries_the_deadline_the_policy_enforces` raced the harness's `stop`
+  marker, written one 5 ms supervisor pass after the hint is reported, against the worker's 5 ms
+  poll. The test control writes `stop` only after the worker has written a `seen` marker, bounded
+  by 5 s, so the assertion is unchanged.
+- **Constitution**:
+  - I: the held pidfd is the verified process's own handle; a PID is never trusted once its pidfd
+    is gone. The process table only reads `/proc`; it acts on nothing.
+  - II: unchanged; principals now count each process once, so external demand is not inflated by
+    its thread count and the owner's unmanaged usage no longer includes own tasks' threads.
+  - III: an unreadable `stat` or `status` leaves that process out, as an unlisted process was
+    before; a dead handle falls back to the full check, never to an assumed identity.
+  - IV: telemetry stays read-only; the policy is unchanged.
+  - V, VII: no new privilege, field or dependency.
+  - VI: tests first for the handle cache, the process table and the test fix.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

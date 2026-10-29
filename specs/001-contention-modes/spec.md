@@ -219,6 +219,21 @@ thresholds.
   2026-10-27). The interval still applies while a principal is active, and on memory. SC-009 and
   SC-002 are unchanged.
 
+### Session 2026-10-29
+
+- Q: How do caps already held, and own usage over its target, give up a CPU excess? → A: Running
+  CPU work yields tier by tier in FR-016's order. Within a tier, caps already held are lowered at
+  one level, the highest first, as held caps rise equally under FR-013, and own usage over its
+  target is shared the same way, so no single cap falls to the minimum duty and escalates. A
+  lowered cap counts what it frees, so held caps give an increase once between them rather than
+  each the whole increase. New victims, with no cap held yet, are still chosen in FR-016's cost
+  order, each capped by the whole excess left (reviewer decision D3 A on report 027-1).
+- Q: How does a satisfied principal count while the resource is saturated? → A: A principal whose
+  demand is on record as satisfied but who uses less than that demand by more than the contention
+  floor counts at the recorded demand in own work's allowance, so a recorded contender that comes
+  back gets its demand within SC-002's 2 intervals. When the resource is not saturated, its usage
+  counts as it is (reviewer decision D4 A on report 027-1).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -693,6 +708,11 @@ node reports with the expected per-resource values at each step.
     scale-up interval does not restart for it once enforcement holds. A budget that fell, because
     external usage rose or contention lowered the target, keeps the steps and bounds above
     (SC-002).
+  - Running CPU work MUST yield an excess tier by tier in FR-016's order. Within a tier, caps
+    already held MUST be lowered at one level, the highest first, as held caps rise equally
+    (FR-013), and own usage over its target MUST be shared the same way, so no single cap falls
+    to the minimum duty and escalates. A lowered cap MUST count what it frees, so held caps give
+    an increase once between them, not each the whole increase.
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
@@ -724,8 +744,10 @@ node reports with the expected per-resource values at each step.
   4. least progress lost since the last checkpoint
   5. best fit to the amount that must be freed
 
-  Remaining ties MUST break deterministically. Once jobs carry their own modes (FR-030), the
-  owner's aggregate share comes from the node mode and cap, and allocations yield in mode tiers
+  Remaining ties MUST break deterministically. This order chooses new victims, each capped by the
+  whole excess left; within a tier, caps already held yield first, at one level (FR-011). Once
+  jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
+  cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
   Class rules still win across tiers: every opportunistic allocation is drained before any
   Guaranteed one (FR-024), and a Guaranteed allocation keeps its CPU request in every tier.
@@ -769,7 +791,11 @@ node reports with the expected per-resource values at each step.
     fair share at once, and is then watched for one response window from the interval after: if the host has capacity to
     spare at its end and the principal's usage stayed within its baseline plus the contention
     floor, it is recorded as satisfied the same way, else it keeps its share. A satisfied
-    principal that leaves keeps its record and rejoins at once when it returns. Records do not
+    principal that leaves keeps its record and rejoins at once when it returns. While the
+    resource is saturated, a satisfied principal that uses less than its recorded demand by more
+    than the contention floor counts at that demand in own work's allowance, so it gets the
+    demand back within SC-002's bound; when the resource is not saturated, its usage counts as it
+    is. Records do not
     expire, but at most 64 are kept per resource: past that, the record whose principal was seen
     longest ago is dropped. Activity of unknown amount is never recorded;
   - let external demand reclaim anything above fair share;
@@ -1199,9 +1225,10 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   capacity, so it reaches the fair share within ⌈(own usage − fair share) ÷ margin⌉ intervals
   (24 intervals, 12 s, from 98% with the 2% margin), and never goes below it. With demand that
   fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
-  when CPU is the only contended resource. These bounds are for other principals' demand:
-  unmanaged processes of the account that runs CedeGrid share that account's fair share with own
-  work, so they are served as own work's margin frees capacity.
+  when CPU is the only contended resource. A principal whose demand is on record as satisfied
+  gets that demand back within the same bound when it returns. These bounds are for other
+  principals' demand: unmanaged processes of the account that runs CedeGrid share that account's
+  fair share with own work, so they are served as own work's margin frees capacity.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share
   within the Neutral convergence time. The fair share is 50% here; the defaults are a tolerance
   of ±15 percentage points and a convergence time of 60 s.

@@ -569,3 +569,21 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   and bounds (SC-002).
 - **Alternatives**: rerun only (rejected by the reviewer); longer hysteresis for every cause
   (rejected: slows the response to real external growth).
+
+## R26. Principals counted threads as processes (item 027, decisions on report 027-1)
+
+- **Decision**: on Linux, principals come from a process table that reads each
+  `/proc/<pid>/stat` once per interval and a process's real UID once from `status`, cached by PID
+  and start time; CPU is computed as sysinfo computes it. Own tasks are re-verified through the
+  pidfd held since their first verification.
+- **Finding**: sysinfo 0.38's `ProcessRefreshKind::nothing()` keeps `tasks` on, so a refresh of
+  all processes also enumerates `/proc/<pid>/task/*` and adds every thread as its own process
+  entry. The principal sums iterated those entries, so a process's CPU was counted once for the
+  process and again for each thread, its resident memory once per thread, and own tasks' threads
+  (not in the managed PID set) as the owner's unmanaged usage. The process table counts each
+  process once.
+- **Rationale**: one file per process per interval instead of a process and thread walk with
+  several files each; the per-process values stay those sysinfo computed for the process entry.
+- **Alternatives**: sysinfo with `without_tasks()` (rejected: still reads several files per
+  process and re-reads names); principals sampled less often (rejected: changes FR-059's windows).
+
