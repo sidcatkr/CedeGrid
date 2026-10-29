@@ -145,6 +145,7 @@ class ResourceSignals:
         self.target_file = Path(target_file) if target_file else None
         self._hooks, self._notified, self._acked = [], None, None
         self._allowance_hooks, self._allowance_notified = [], None
+        self._identity, self._cached = (), (None, None)
 
     @classmethod
     def from_env(cls):
@@ -152,7 +153,19 @@ class ResourceSignals:
                    os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE") or None)
 
     def _read(self):
-        targets, allowance = _read_signals(self.target_file) if self.target_file else (None, None)
+        """Parse the file only when its stat identity changed: the supervisor replaces it
+        by rename, so a new target always has a new inode."""
+        if self.target_file is None:
+            return None, None
+        try:
+            stat = self.target_file.stat()
+            identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            identity = None
+        if identity != self._identity:
+            self._identity = identity
+            self._cached = _read_signals(self.target_file) if identity else (None, None)
+        targets, allowance = self._cached
         self._acknowledge(targets.sequence if targets else 0)
         return targets, allowance
 

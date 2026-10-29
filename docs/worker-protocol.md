@@ -121,6 +121,11 @@ children can use it. The TypeScript names are `resourceTargets()`,
 `onResourceTarget()`, `resourceAllowance()`, `onResourceAllowance()` and
 `ResourceSignals.fromEnv()`.
 
+Call `safe_point()` or `draining()` at natural safe points, such as once per batch or
+per step. A call re-reads the target file only when its stat identity changed, so while
+nothing changes it costs a stat of the target file and of the drain file; calling in a
+tight loop works but is not needed.
+
 Drain is unchanged: the drain file's existence means drain, whatever a target says.
 After a drain request, publish a checkpoint at a safe boundary and exit; work that
 does not exit is terminated after the drain timeout. Workers that do not read

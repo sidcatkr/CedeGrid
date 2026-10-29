@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkerContext, ResourceSignals } from 'cedegrid';
 import type { RpcReply, SupervisorTransport, ResourceTargets } from 'cedegrid';
+import nodeFs = require('node:fs');
 
 const transport: SupervisorTransport = { async request(): Promise<RpcReply> { throw new Error('unused'); } };
 
@@ -202,4 +203,48 @@ test('worker context cases', () => {
         assert.equal(worker.context.resource_target_file ?? null, c.resource_target_file, c.id);
         assert.deepEqual(worker.context.capabilities ?? [], c.capabilities, c.id);
     }
+});
+
+/** Write a target the way the supervisor does: a new file renamed over the old one. */
+function replaceTarget(root: string, targetFile: string, sequence: number, targets: Record<string, unknown>, mtime?: Date) {
+    const temporary = join(root, '.resource-target.json.tmp');
+    writeFileSync(temporary, JSON.stringify({ version: 1, sequence, deadline_unix_ms: 1793000000000, step: 'hint', targets }));
+    if (mtime)
+        nodeFs.utimesSync(temporary, mtime, mtime);
+    nodeFs.renameSync(temporary, targetFile);
+}
+
+test('an unchanged target file is not read again', (t) => {
+    const f = fixture();
+    try {
+        replaceTarget(f.root, f.targetFile, 1, { ram_mib: 100 });
+        const signals = new ResourceSignals(undefined, f.targetFile);
+        const reads = t.mock.method(nodeFs, 'readFileSync');
+        const targetReads = () => reads.mock.calls.filter((call) => call.arguments[0] === f.targetFile).length;
+        for (let i = 0; i < 50; i++) { signals.poll(); signals.draining(); }
+        assert.equal(targetReads(), 1);
+        replaceTarget(f.root, f.targetFile, 2, { ram_mib: 50 });
+        assert.equal(signals.poll()!.sequence, 2n);
+        assert.equal(targetReads(), 2);
+    }
+    finally { f.done(); }
+});
+
+test('a same-size target renamed within one mtime tick is seen', () => {
+    const f = fixture();
+    try {
+        // A whole second, so both files carry exactly the same modification time.
+        const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+        replaceTarget(f.root, f.targetFile, 1, { ram_mib: 100 }, stamp);
+        const signals = new ResourceSignals(undefined, f.targetFile);
+        const seen: Array<[bigint, bigint | undefined]> = [];
+        signals.onResourceTarget((targets: ResourceTargets) => seen.push([targets.sequence, targets.ramMib]));
+        const before = nodeFs.statSync(f.targetFile, { bigint: true });
+        replaceTarget(f.root, f.targetFile, 2, { ram_mib: 200 }, stamp);
+        const after = nodeFs.statSync(f.targetFile, { bigint: true });
+        assert.deepEqual([after.size, after.mtimeNs], [before.size, before.mtimeNs]);
+        signals.poll(); signals.poll();
+        assert.deepEqual(seen, [[1n, 100n], [2n, 200n]]);
+    }
+    finally { f.done(); }
 });

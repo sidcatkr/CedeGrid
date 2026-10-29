@@ -1,5 +1,5 @@
 import { createConnection } from 'node:net';
-import { readFileSync, existsSync, writeFileSync, renameSync, promises as fs } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, renameSync, statSync, promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -231,12 +231,29 @@ export class ResourceSignals {
     private notified?: bigint;
     private allowanceNotified?: bigint;
     private acked?: bigint;
+    private identity?: string | null;
+    private cached: [ResourceTargets | null, ResourceAllowance | null] = [null, null];
     constructor(readonly drainFile?: string, readonly targetFile?: string) { }
     static fromEnv(): ResourceSignals { return new ResourceSignals(process.env.CEDEGRID_DRAIN_FILE || undefined, process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined); }
+    /** Parse the file only when its stat identity changed: the supervisor replaces it by
+     * rename, so a new target always has a new inode. */
     private read(): [ResourceTargets | null, ResourceAllowance | null] {
-        const signals = this.targetFile ? readSignals(this.targetFile) : [null, null] as [null, null];
-        this.acknowledge(signals[0] ? signals[0].sequence : 0n);
-        return signals;
+        if (!this.targetFile)
+            return [null, null];
+        let identity: string | null = null;
+        try {
+            const stat = statSync(this.targetFile, { bigint: true, throwIfNoEntry: false });
+            identity = stat ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}` : null;
+        }
+        catch {
+            identity = null;
+        }
+        if (identity !== this.identity) {
+            this.identity = identity;
+            this.cached = identity ? readSignals(this.targetFile) : [null, null];
+        }
+        this.acknowledge(this.cached[0] ? this.cached[0].sequence : 0n);
+        return this.cached;
     }
     resourceTargets(): ResourceTargets | null { return this.read()[0]; }
     resourceAllowance(): ResourceAllowance | null { return this.read()[1]; }

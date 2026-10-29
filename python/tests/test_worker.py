@@ -225,6 +225,54 @@ class ResourceTargetTests(unittest.TestCase):
         self.context.on_resource_allowance(lambda a: late.append(a.sequence))
         self.assertEqual(late, [2])
         self.assertEqual(self.context.resource_allowance().ram_mib, 16384)
+    def replace(self, sequence, mtime_ns=None, **targets):
+        """Write a target the way the supervisor does: a new file renamed over the old one."""
+        import json, os
+        temporary = self.root/'.resource-target.json.tmp'
+        temporary.write_text(json.dumps({'version':1,'sequence':sequence,'deadline_unix_ms':1793000000000,
+                                         'step':'hint','targets':targets}))
+        if mtime_ns is not None:
+            os.utime(temporary, ns=(mtime_ns, mtime_ns))
+        os.replace(temporary, self.target_file)
+    def test_an_unchanged_target_file_is_not_read_again(self):
+        from unittest.mock import patch
+        from cedegrid import ResourceSignals, worker
+        self.replace(1, ram_mib=100)
+        signals = ResourceSignals(None, self.target_file)
+        with patch.object(worker, '_read_signals', wraps=worker._read_signals) as read:
+            for _ in range(50):
+                signals.poll(); signals.draining()
+            self.assertEqual(read.call_count, 1)
+            self.replace(2, ram_mib=50)
+            self.assertEqual(signals.poll().sequence, 2)
+            self.assertEqual(read.call_count, 2)
+    def test_a_same_size_target_renamed_within_one_mtime_tick_is_seen(self):
+        from cedegrid import ResourceSignals
+        self.replace(1, ram_mib=100)
+        stamp = self.target_file.stat().st_mtime_ns
+        signals = ResourceSignals(None, self.target_file)
+        seen = []
+        signals.on_resource_target(lambda targets: seen.append((targets.sequence, targets.ram_mib)))
+        size = self.target_file.stat().st_size
+        self.replace(2, mtime_ns=stamp, ram_mib=200)
+        self.assertEqual((self.target_file.stat().st_size, self.target_file.stat().st_mtime_ns), (size, stamp))
+        signals.poll(); signals.poll()
+        self.assertEqual(seen, [(1, 100), (2, 200)])
+    @unittest.skipUnless(__import__('os').environ.get('CEDEGRID_SDK_BENCH') == '1', 'opt-in microbenchmark')
+    def test_poll_and_draining_cost_when_unchanged(self):
+        import time
+        from cedegrid import ResourceSignals, worker
+        self.replace(1, ram_mib=100)
+        signals = ResourceSignals(self.root/'drain', self.target_file)
+        def per_call(call, rounds=20000):
+            start = time.perf_counter()
+            for _ in range(rounds):
+                call()
+            return (time.perf_counter() - start) / rounds * 1e6
+        before = per_call(lambda: worker._read_signals(self.target_file))
+        poll, draining = per_call(signals.poll), per_call(signals.draining)
+        print(f'\nsdk bench: parse per call {before:.2f} us, poll {poll:.2f} us, draining {draining:.2f} us')
+        self.assertGreaterEqual(before / poll, 10)
     def test_target_file_interop_cases(self):
         import json
         from cedegrid import ResourceSignals
