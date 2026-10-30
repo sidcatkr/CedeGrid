@@ -339,7 +339,68 @@ impl Drop for DrainDirectory {
 }
 
 struct OutputCapture {
-    readers: Vec<std::thread::JoinHandle<io::Result<()>>>,
+    readers: Vec<std::thread::JoinHandle<CaptureEnd>>,
+}
+
+/// How a capture of the workload's output ended: what it kept, what it reserved in the
+/// spool ledger, what it dropped past the cap or after an error, and the first error.
+#[derive(Debug, Default)]
+struct CaptureEnd {
+    retained: u64,
+    reserved: u64,
+    dropped: u64,
+    error: Option<String>,
+}
+
+/// Read the workload's pipe to its end whatever happens to the log: the read side never
+/// closes early, so a workload never gets SIGPIPE or blocks because of log retention.
+/// Up to 4 MiB is kept, reserved in 1 MiB chunks; after a reserve or write error the rest
+/// is read and dropped (030, SUP-2).
+fn drain_pipe(
+    reader: &mut dyn Read,
+    file: &mut dyn Write,
+    mut reserve: impl FnMut(u64) -> Result<()>,
+) -> CaptureEnd {
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    const CHUNK: u64 = 1024 * 1024;
+    let mut end = CaptureEnd::default();
+    let mut buffer = [0; 16384];
+    loop {
+        let n = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n as u64,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                end.error
+                    .get_or_insert_with(|| format!("reading output: {error}"));
+                break;
+            }
+        };
+        let mut keep = n.min(LIMIT.saturating_sub(end.retained));
+        if end.error.is_some() {
+            keep = 0;
+        }
+        if keep > 0 && end.retained + keep > end.reserved {
+            let chunk = CHUNK.max(keep).min(LIMIT - end.reserved);
+            match reserve(chunk) {
+                Ok(()) => end.reserved += chunk,
+                Err(error) => {
+                    end.error = Some(format!("{error:#}"));
+                    keep = 0;
+                }
+            }
+        }
+        if keep > 0 {
+            if let Err(error) = file.write_all(&buffer[..keep as usize]) {
+                end.error = Some(format!("writing output log: {error}"));
+                keep = 0;
+            } else {
+                end.retained += keep;
+            }
+        }
+        end.dropped += n - keep;
+    }
+    end
 }
 impl OutputCapture {
     fn start(
@@ -370,27 +431,24 @@ impl OutputCapture {
                 .transpose()?;
             Ok(std::thread::Builder::new()
                 .name("cedegrid-log-drain".into())
-                .spawn(move || -> io::Result<()> {
+                .spawn(move || -> CaptureEnd {
                     let _guard = guard;
-                    const LIMIT: usize = 4 * 1024 * 1024;
-                    let mut retained = 0;
-                    let mut buffer = [0; 16384];
-                    loop {
-                        let n = reader.read(&mut buffer)?;
-                        if n == 0 {
-                            break;
-                        }
-                        let keep = n.min(LIMIT.saturating_sub(retained));
-                        if keep > 0 {
-                            if let Some(charge) = &charge {
-                                charge.reserve(keep as u64).map_err(io::Error::other)?;
-                            }
-                            file.write_all(&buffer[..keep])?;
-                            retained += keep;
-                        }
-                        // Continue draining after the cap; workload pipes never block on log retention.
+                    let mut end = drain_pipe(&mut reader, &mut file, |bytes| {
+                        charge
+                            .as_ref()
+                            .map_or(Ok(()), |charge| charge.reserve(bytes))
+                    });
+                    let settled = match &charge {
+                        Some(charge) if end.reserved > end.retained => charge.settle(end.retained),
+                        _ => Ok(()),
+                    };
+                    let synced = file.sync_all().map_err(anyhow::Error::from);
+                    if let Err(error) = settled.and(synced)
+                        && end.error.is_none()
+                    {
+                        end.error = Some(format!("{error:#}"));
                     }
-                    file.sync_all()
+                    end
                 })?)
         };
         Ok(Self {
@@ -400,18 +458,21 @@ impl OutputCapture {
             ],
         })
     }
-    fn finish(self) -> Result<()> {
-        let mut failure = None;
+    /// Wait for both readers; their ends combined. Only a reader that panicked is an error.
+    fn finish(self) -> Result<CaptureEnd> {
+        let mut total = CaptureEnd::default();
         for reader in self.readers {
-            let result = reader
+            let end = reader
                 .join()
-                .map_err(|_| anyhow::anyhow!("log drain thread panicked"))
-                .and_then(|result| result.map_err(anyhow::Error::from));
-            if failure.is_none() {
-                failure = result.err();
+                .map_err(|_| anyhow::anyhow!("log drain thread panicked"))?;
+            total.retained += end.retained;
+            total.reserved += end.reserved;
+            total.dropped += end.dropped;
+            if total.error.is_none() {
+                total.error = end.error;
             }
         }
-        failure.map_or(Ok(()), Err)
+        Ok(total)
     }
 }
 include!("../child_supervision.rs");
@@ -1256,8 +1317,12 @@ pub(super) fn supervise(
             if let Some(status) = leader_status
                 && children.as_ref().is_none_or(ChildServer::all_released)
             {
-                if let Some(logs) = capture.take() {
-                    logs.finish()?;
+                let logs = match capture.take() {
+                    Some(logs) => logs.finish()?,
+                    None => CaptureEnd::default(),
+                };
+                if let Some(error) = &logs.error {
+                    report("log_capture_failed", &request.assignment_id, error.clone());
                 }
                 let leaf_oom_kills = backend.oom_kills();
                 backend.confirm_release()?;
@@ -1283,6 +1348,8 @@ pub(super) fn supervise(
                         start.elapsed().as_millis().min(u64::MAX as u128) as u64
                     ),
                     leaf_oom_kills,
+                    log_bytes_dropped: logs.dropped,
+                    log_capture_error: logs.error,
                 });
             }
             let polled_at = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -2101,6 +2168,72 @@ pub(super) fn identity(pid: u32, assignment: &str, generation: u64) -> Result<Pr
 fn identity(_pid: u32, _assignment: &str, _generation: u64) -> Result<ProcessIdentity> {
     bail!("native process identity is unavailable on this platform")
 }
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    /// Yields `chunks` reads of 16 KiB, then EOF, and counts what was read.
+    struct Source {
+        chunks: usize,
+        read: usize,
+    }
+    impl Read for Source {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.chunks == 0 {
+                return Ok(0);
+            }
+            self.chunks -= 1;
+            let n = buffer.len().min(16384);
+            self.read += n;
+            Ok(n)
+        }
+    }
+    struct FailingSink;
+    impl Write for FailingSink {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A capture error never ends the read side early: the workload's writes keep draining,
+    /// and what was not kept is counted (030, SUP-2).
+    #[test]
+    fn a_capture_error_keeps_draining_and_counts_what_it_drops() {
+        let mut source = Source { chunks: 8, read: 0 };
+        let mut kept = Vec::new();
+        let end = drain_pipe(&mut source, &mut kept, |_| anyhow::bail!("quota full"));
+        assert_eq!(source.read, 8 * 16384, "read to the end");
+        assert!(kept.is_empty());
+        assert_eq!(end.dropped, 8 * 16384);
+        assert!(end.error.unwrap().contains("quota full"));
+
+        let mut source = Source { chunks: 8, read: 0 };
+        let end = drain_pipe(&mut source, &mut FailingSink, |_| Ok(()));
+        assert_eq!(source.read, 8 * 16384);
+        assert!(end.error.unwrap().contains("disk full"));
+
+        // Reservations come in chunks of 1 MiB, not one per read; the caller settles the
+        // charge to what was kept.
+        let mut source = Source {
+            chunks: 70,
+            read: 0,
+        };
+        let mut reservations = Vec::new();
+        let mut kept = Vec::new();
+        let end = drain_pipe(&mut source, &mut kept, |bytes| {
+            reservations.push(bytes);
+            Ok(())
+        });
+        assert_eq!(kept.len(), 70 * 16384);
+        assert!(end.error.is_none() && end.dropped == 0);
+        assert_eq!(reservations, [1024 * 1024, 1024 * 1024]);
+        assert_eq!((end.retained, end.reserved), (70 * 16384, 2 * 1024 * 1024));
+    }
+}
+
 #[cfg(test)]
 mod handle_tests {
     use super::*;

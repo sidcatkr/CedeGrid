@@ -635,8 +635,10 @@ impl MediatedChild {
                 );
                 return Ok(());
             }
-            if let Some(logs) = self.capture.take() {
-                logs.finish()?;
+            if let Some(logs) = self.capture.take()
+                && let Some(error) = logs.finish()?.error
+            {
+                report("log_capture_failed", &self.id, error);
             }
             journal.transition_managed_child(
                 &self.id,

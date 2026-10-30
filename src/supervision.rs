@@ -71,6 +71,16 @@ pub struct ExecutionOutcome {
     /// The leaf's `memory.events` `oom_kill` count at release, in Full (FR-076).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf_oom_kills: Option<u64>,
+    /// Output bytes not kept, past the retention cap or after a capture error (030, SUP-2).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub log_bytes_dropped: u64,
+    /// Why output capture stopped keeping bytes, if it did; the run's result is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_capture_error: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

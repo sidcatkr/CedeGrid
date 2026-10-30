@@ -887,6 +887,17 @@ impl CaptureCharge {
             assignment: settings.assignment_id.clone(),
         })
     }
+    /// Set this file's charge to the bytes it kept, after reservations taken ahead in chunks.
+    pub fn settle(&self, bytes: u64) -> Result<()> {
+        self.store.connection.execute(
+            "UPDATE local_spool_entries SET bytes=?2 WHERE path=?1",
+            params![
+                self.path.to_str().context("non-UTF8 capture path")?,
+                db(bytes)?
+            ],
+        )?;
+        Ok(())
+    }
     pub fn reserve(&self, bytes: u64) -> Result<()> {
         let tx =
             Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
