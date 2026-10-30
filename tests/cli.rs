@@ -523,6 +523,84 @@ fn enabled_supervision_commits_exit_receipt_and_releases_capacity() {
     assert_eq!(records[0]["phase"], "released");
 }
 
+/// Standalone `supervise` drains its run on SIGINT, as an agent's supervisor does: the
+/// workload, in a session of its own, no longer gets the terminal's Ctrl-C, so the supervisor
+/// passes it on as a drain instead of leaving the run behind (FR-078, R41).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn standalone_supervise_drains_its_run_on_sigint() {
+    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let (config_path, job_path) = execution_setup(dir.path());
+    let mut config: Config = cedegrid::config::parse_runtime(
+        &fs::read_to_string(&config_path).unwrap(),
+        &config_path,
+        RuntimeConfigKind::Node,
+    )
+    .unwrap();
+    config.lifecycle.drain_timeout_ms = 200;
+    config.lifecycle.term_grace_ms = 2_000;
+    fs::write(
+        &config_path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let mut job: Value = serde_json::from_slice(&fs::read(&job_path).unwrap()).unwrap();
+    job["argv"] = serde_json::json!([
+        "/bin/sh",
+        "-c",
+        "trap 'echo drained > got-term; exit 0' TERM; echo $$ > workload; while :; do sleep 0.05; done"
+    ]);
+    fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+        .arg("--config")
+        .arg(&config_path)
+        .args(["supervise", job_path.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let workload = dir.path().join("workload");
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !workload.exists() {
+        assert!(
+            std::time::Instant::now() < end,
+            "the workload never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // SAFETY: this test's own child, the CLI it just spawned.
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > end {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let pid: i32 = fs::read_to_string(&workload)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: a probe of the workload this test's run started.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if alive {
+        // SAFETY: test cleanup of the workload this test's run started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    let outcome: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["yielded"], true, "{outcome}");
+    assert!(dir.path().join("got-term").exists());
+    assert!(!alive, "the workload outlived its supervisor");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn npm_launcher_identity_does_not_reach_internal_gate_or_supervisor() {

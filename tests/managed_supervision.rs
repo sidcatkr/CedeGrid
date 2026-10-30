@@ -1175,6 +1175,44 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
     assert!(audit.outside.is_empty(), "{:?}", audit.outside);
 }
 
+/// The workload and each SDK child lead a session of their own, so no exit of a supervisor
+/// can orphan their process group into SIGHUP (FR-078, R41).
+#[test]
+fn the_workload_and_its_sdk_children_lead_their_own_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let request = request(
+        dir.path(),
+        r#"
+import os, sys
+from pathlib import Path
+from cedegrid import spawn_managed
+d = Path.cwd()
+Path('leader-session').write_text(str(os.getsid(0) == os.getpid() == os.getpgrp()))
+child = spawn_managed([sys.executable, '-c', "import os, pathlib; pathlib.Path(%r, 'child-session').write_text(str(os.getsid(0) == os.getpid() == os.getpgrp()))" % str(d)], single_process=True, no_escape=True)
+child.wait(timeout=6, poll_interval=.01)
+"#,
+    );
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut ChangingChildPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    for file in ["leader-session", "child-session"] {
+        assert_eq!(
+            fs::read_to_string(dir.path().join(file)).unwrap(),
+            "True",
+            "{file}"
+        );
+    }
+}
+
 /// A managed child carries the same OOM preference as its parent (FR-023).
 #[cfg(target_os = "linux")]
 #[test]

@@ -2142,6 +2142,15 @@ pub(super) fn worker_gate() -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         bail!("the parent-death signal is unavailable on this platform");
     }
+    // A session of its own: sharing the supervisor's process group, the workload's group was
+    // orphaned when a supervisor died with members stopped, and the kernel sent them SIGHUP and
+    // SIGCONT (FR-078, R41). A forked gate is never a group leader, so this cannot fail on that.
+    // SAFETY: setsid only changes this gate's own session and process group.
+    ensure!(
+        unsafe { libc::setsid() } >= 0,
+        "gate session failed: {}",
+        io::Error::last_os_error()
+    );
     if let Some(path) = &gate.setup.cgroup_path {
         #[cfg(target_os = "linux")]
         {

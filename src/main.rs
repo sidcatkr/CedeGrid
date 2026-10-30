@@ -761,6 +761,9 @@ async fn shutdown_signal() -> Result<()> {
 }
 
 fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
+    // The workload leads a session of its own, so a terminal's Ctrl-C reaches only this
+    // supervisor, which drains the run as an agent's supervisor does (FR-078).
+    supervision::install_stop_handlers()?;
     ensure!(
         !config.storage_profile.is_replayable(),
         "replayable storage requires an authenticated coordinator agent session"
