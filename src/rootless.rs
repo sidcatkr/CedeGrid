@@ -15,15 +15,23 @@ impl RootlessBackend {
         }
     }
 }
+/// The rootless launch contract. On Linux a run's descendants join its verified family, so
+/// multi-process work needs no contract; elsewhere a run is one process or has 1 to 8 SDK
+/// children (FR-084). SDK children always need a multi-process request.
+pub fn contract_holds(request: &LaunchRequest) -> bool {
+    let sdk = !request.single_process && (1..=8).contains(&request.managed_child_limit);
+    let alone =
+        request.managed_child_limit == 0 && (request.single_process || cfg!(target_os = "linux"));
+    request.no_escape && (alone || sdk)
+}
+
 impl LaunchBackend for RootlessBackend {
     fn name(&self) -> &str {
         "rootless"
     }
     fn prepare(&mut self, request: &LaunchRequest) -> Result<GateSetup> {
         ensure!(
-            request.no_escape
-                && ((request.single_process && request.managed_child_limit == 0)
-                    || (!request.single_process && (1..=8).contains(&request.managed_child_limit))),
+            contract_holds(request),
             "rootless execution requires single-process or bounded supervisor-mediated children with no-escape contract"
         );
         // The supervisor applies the launch nice, which depends on the task's mode.

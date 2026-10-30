@@ -712,3 +712,17 @@ fn decision_snapshot() {
         ),
     );
 }
+
+/// `doctor` says how a run's descendants are found, and names the scan of `/proc` that stands
+/// in on a kernel without children lists (FR-083, FR-084).
+#[test]
+fn doctor_names_how_descendants_are_found() {
+    use cedegrid::explain::descendants_text;
+    assert!(descendants_text(Some(true)).contains("children lists"));
+    assert!(descendants_text(Some(false)).contains("scan of /proc"));
+    assert!(descendants_text(None).contains("single-process contract"));
+    assert_eq!(
+        cedegrid::supervision::descendant_lists().is_some(),
+        cfg!(target_os = "linux")
+    );
+}

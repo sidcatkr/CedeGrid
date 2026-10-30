@@ -1618,6 +1618,8 @@ fn read_pid(path: &Path) -> Option<u32> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+/// A restarted agent's steps reach the verified family, the leader's own fork included on
+/// Linux, and never a process outside it (FR-083, Constitution I).
 #[test]
 fn a_reconnected_controller_still_reaches_only_the_verified_family() {
     let dir = directory();
@@ -1708,10 +1710,14 @@ loose.kill();loose.wait()
     foreign.wait().unwrap();
     assert!(status.success());
     assert!(paused[0].contains('T'), "{paused:?}");
-    assert!(
-        !paused[1].contains('T') && !paused[2].contains('T'),
+    // On Linux the leader's loose fork is a verified descendant and is stopped with it
+    // (FR-083); the test's own process never is.
+    assert_eq!(
+        paused[1].contains('T'),
+        cfg!(target_os = "linux"),
         "{paused:?}"
     );
+    assert!(!paused[2].contains('T'), "{paused:?}");
     assert!(
         resumed.iter().all(|state| !state.contains('T')),
         "{resumed:?}"

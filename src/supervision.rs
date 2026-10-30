@@ -82,6 +82,47 @@ pub struct ExecutionOutcome {
     /// The most processes found outside the verified family at once, none acted on (FR-082).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub single_process_violated: u64,
+    /// Members still alive when the run ended, ended by SIGTERM or SIGKILL (FR-087).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub members_ended: u64,
+}
+
+/// Why a process is outside a run's verified family (FR-082).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutsideReason {
+    IdsDiffer,
+    ChainUnconfirmed,
+    OverBound,
+    /// Reserved: no platform emits it while non-Linux launches refuse multi-process work.
+    UntrackedPlatform,
+}
+
+impl OutsideReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::IdsDiffer => "ids_differ",
+            Self::ChainUnconfirmed => "chain_unconfirmed",
+            Self::OverBound => "over_bound",
+            Self::UntrackedPlatform => "untracked_platform",
+        }
+    }
+}
+
+/// A verified descendant as the supervisor reports it (FR-083).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FamilyMember {
+    pub pid: u32,
+    pub start_time: u64,
+}
+
+/// A run's family: its counts and its verified descendants (FR-082, FR-083).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyReport {
+    pub leader: u64,
+    pub sdk_children: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descendants: Vec<FamilyMember>,
 }
 
 /// The PIDs a `/proc/<pid>/task/<tid>/children` list names.
@@ -91,6 +132,9 @@ pub fn parse_children(text: &str) -> std::collections::BTreeSet<u32> {
         .collect()
 }
 
+#[cfg(unix)]
+mod family;
+
 /// How many of the processes found are outside the verified family (FR-082).
 pub fn outside_family(
     found: &std::collections::BTreeSet<u32>,
@@ -99,21 +143,25 @@ pub fn outside_family(
     found.difference(family).count() as u64
 }
 
-/// The leader's direct children, from each of its threads' `children` list, read-only; `None`
-/// where the list cannot be read (FR-082).
-pub(crate) fn leader_children(leader: u32) -> Option<std::collections::BTreeSet<u32>> {
+/// The most frequent reason among processes outside the family; the first in order on a tie.
+pub fn dominant(reasons: &[OutsideReason]) -> Option<OutsideReason> {
+    let mut counts = std::collections::BTreeMap::new();
+    for reason in reasons {
+        *counts.entry(*reason).or_insert(0u64) += 1;
+    }
+    let most = *counts.values().max()?;
+    counts.into_iter().find(|(_, n)| *n == most).map(|(r, _)| r)
+}
+
+/// Whether this host can discover a run's descendants from `children` lists; `None` where
+/// descendants are not tracked (FR-083, FR-084).
+pub fn descendant_lists() -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
-        let mut children = std::collections::BTreeSet::new();
-        for task in std::fs::read_dir(format!("/proc/{leader}/task")).ok()? {
-            let path = task.ok()?.path().join("children");
-            children.extend(parse_children(&std::fs::read_to_string(path).ok()?));
-        }
-        Some(children)
+        Some(family::children_lists())
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = leader;
         None
     }
 }
@@ -453,10 +501,22 @@ pub enum SupervisorReport {
         /// The most processes found outside the verified family so far (FR-082).
         #[serde(default, skip_serializing_if = "is_zero")]
         outside_family: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outside_reason: Option<OutsideReason>,
+        /// The family, for an agent that re-adopts this supervisor (FR-083).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<FamilyReport>,
     },
-    /// More processes than before were found outside the verified family: the leader's
-    /// children in Tracked, leaf members in Full. None of them is acted on (FR-082).
-    OutsideFamily { count: u64 },
+    /// More processes than before were found outside the verified family: descendants that
+    /// failed verification or are past the bound, and leaf members in Full. None of them is
+    /// acted on (FR-082).
+    OutsideFamily {
+        count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<OutsideReason>,
+    },
+    /// The family changed (FR-083).
+    Family { family: FamilyReport },
     /// Readiness changed: the worker acked its target file or used the
     /// supervisor socket (FR-062).
     Readiness {

@@ -605,8 +605,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                 PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
             if text {
                 print!(
-                    "{}",
-                    cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings)
+                    "{}{}",
+                    cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
+                    cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
                 );
             } else {
                 emit(&json!({
@@ -637,7 +638,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "actions": decision.actions,
                 "exceptions": decision.exceptions,
                 "reason_codes": decision.reason_codes,
-                "available_steps": cedegrid::explain::available_steps(&config)
+                "available_steps": cedegrid::explain::available_steps(&config),
+                "descendant_lists": cedegrid::supervision::descendant_lists()
                 }))?;
             }
             ensure!(

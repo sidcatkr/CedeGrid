@@ -276,6 +276,8 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         seed: None,
         journal_seen: None,
         outside_family: 0,
+        outside_reason: None,
+        family: None,
     };
     send(&mut slot, &Control::Query)?;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -290,8 +292,13 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
                 lease_sequence,
                 sequence,
                 causes,
+                outside_family,
+                outside_reason,
+                family,
                 ..
             })) => {
+                slot.note_outside(outside_family, outside_reason);
+                slot.family = family;
                 // Continue above the supervisor's sequences and renew its lease. Only authorized
                 // runs are re-adopted, and an initial authorization is sequence 1, which the
                 // supervisor does not count until a renewal; 0 would ask to authorize again.

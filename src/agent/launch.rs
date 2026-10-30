@@ -454,5 +454,7 @@ pub(super) async fn start_assignment(
         seed: None,
         journal_seen: None,
         outside_family: 0,
+        outside_reason: None,
+        family: None,
     })
 }

@@ -352,12 +352,11 @@ fn failed_release_is_reconciliation_and_retains_evidence() {
 }
 
 #[test]
-fn rootless_descendants_and_gpu_work_require_future_verified_support() {
-    for unsupported in ["descendants", "escape", "gpu"] {
+fn rootless_escape_and_gpu_work_require_future_verified_support() {
+    for unsupported in ["escape", "gpu"] {
         let temp = TempDir::new().unwrap();
         let mut req = request(temp.path());
         match unsupported {
-            "descendants" => req.single_process = false,
             "escape" => req.no_escape = false,
             "gpu" => {
                 req.resources.gpu_memory_mib.insert("GPU-fixture".into(), 1);
@@ -371,10 +370,42 @@ fn rootless_descendants_and_gpu_work_require_future_verified_support() {
     }
 }
 
-/// A process the run forks without SDK mediation is outside the verified set, so
-/// termination of the run never reaches it (Principle I).
+/// On Linux, where descendants join the verified family, the rootless launch accepts
+/// multi-process work whatever `single_process` says; elsewhere the single-process or
+/// bounded SDK-children contract stays required (FR-084).
 #[test]
-fn termination_never_reaches_a_forked_descendant() {
+fn rootless_multi_process_work_needs_tracked_descendants() {
+    use cedegrid::rootless::RootlessBackend;
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.single_process = false;
+    req.managed_child_limit = 0;
+    assert_eq!(
+        RootlessBackend::new(0).prepare(&req).is_ok(),
+        cfg!(target_os = "linux")
+    );
+    let journal = Journal::new();
+    let result = run(&req, &options(), &journal, &mut Backend::new());
+    if cfg!(target_os = "linux") {
+        result.unwrap();
+    } else {
+        assert!(result.is_err());
+        assert!(journal.records.borrow().is_empty());
+    }
+    // SDK children still need a multi-process request with a bound of 1 to 8.
+    req.single_process = true;
+    req.managed_child_limit = 2;
+    assert!(RootlessBackend::new(0).prepare(&req).is_err());
+    req.single_process = false;
+    req.managed_child_limit = 9;
+    assert!(RootlessBackend::new(0).prepare(&req).is_err());
+}
+
+/// A process the run forks without SDK mediation joins the verified family on Linux and is
+/// ended with the run; where descendants are not tracked it is outside the verified set, so
+/// termination never reaches it (FR-083, FR-087, Principle I).
+#[test]
+fn termination_reaches_a_forked_descendant_only_where_it_is_tracked() {
     let temp = TempDir::new().unwrap();
     let mut req = request(temp.path());
     req.class = AllocationClass::Opportunistic;
@@ -400,7 +431,8 @@ fn termination_never_reaches_a_forked_descendant() {
         // SAFETY: test cleanup of the process this test's run forked moments ago.
         unsafe { libc::kill(forked, libc::SIGKILL) };
     }
-    assert!(survived, "the forked descendant was signaled");
+    assert_eq!(survived, !cfg!(target_os = "linux"));
+    assert_eq!(outcome.members_ended, u64::from(cfg!(target_os = "linux")));
 }
 
 #[test]

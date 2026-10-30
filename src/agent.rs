@@ -151,10 +151,21 @@ enum Event {
         /// Processes found outside the verified family; an older supervisor reports none.
         #[serde(default)]
         outside_family: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outside_reason: Option<crate::supervision::OutsideReason>,
+        /// The run's family, so a re-adopting agent learns one that no longer changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<crate::supervision::FamilyReport>,
     },
     /// More processes were found outside the verified family (FR-082).
     OutsideFamily {
         count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::supervision::OutsideReason>,
+    },
+    /// The run's family changed (FR-083).
+    Family {
+        family: crate::supervision::FamilyReport,
     },
     Readiness {
         hint_ready: bool,
@@ -629,8 +640,11 @@ struct ChildSlot {
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
     /// What the slot pass last read from the journal for this slot.
     journal_seen: Option<JournalSeen>,
-    /// The most processes the supervisor found outside the verified family (FR-082).
+    /// The most processes the supervisor found outside the verified family (FR-082), and why.
     outside_family: u64,
+    outside_reason: Option<crate::supervision::OutsideReason>,
+    /// The run's family as its supervisor last reported it (FR-083).
+    family: Option<crate::supervision::FamilyReport>,
 }
 
 /// What the slot pass last read from the journal for a slot, at which change key; while the
@@ -665,6 +679,14 @@ fn rekey_journal_cache(
 }
 
 impl ChildSlot {
+    /// Keep the most processes found outside the family at once, and why (FR-082).
+    fn note_outside(&mut self, count: u64, reason: Option<crate::supervision::OutsideReason>) {
+        if count > self.outside_family || (count == self.outside_family && reason.is_some()) {
+            self.outside_family = count;
+            self.outside_reason = reason.or(self.outside_reason);
+        }
+    }
+
     /// Readiness only turns true: an ack or a served request cannot be undone.
     fn note_readiness(&mut self, hint_ready: bool, observes_drain: bool) {
         self.hint_ready |= hint_ready;
@@ -2083,6 +2105,8 @@ mod drain_tests {
             seed: None,
             journal_seen: None,
             outside_family: 0,
+            outside_reason: None,
+            family: None,
         }
     }
 

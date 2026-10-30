@@ -154,6 +154,15 @@ impl ChildServer {
         }
         result
     }
+    /// Every SDK child gate this server spawned and has not reaped, running or not: none of
+    /// them is an orphan of the run (FR-083).
+    fn gate_pids(&self) -> std::collections::BTreeSet<u32> {
+        self.children
+            .values()
+            .filter(|c| !c.owned.reaped)
+            .map(|c| c.owned.child.id())
+            .collect()
+    }
     fn all_released(&self) -> bool {
         self.children
             .values()

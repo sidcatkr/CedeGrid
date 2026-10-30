@@ -1974,6 +1974,34 @@ mod tests {
             ..FakeIo::default()
         }
     }
+    /// A leaf of the leader and its forked workers is stepped once the workers are verified
+    /// family members; a leaf that also holds a process outside the family is refused (FR-086,
+    /// FR-078, Constitution I).
+    #[test]
+    fn a_leaf_of_family_members_is_stepped_and_an_outsider_refuses_it() {
+        struct Leaf(&'static str);
+        impl LeafIo for Leaf {
+            fn same_leaf(&self) -> Result<bool> {
+                Ok(true)
+            }
+            fn read(&self, control: &str) -> Result<String> {
+                ensure!(control == "cgroup.procs", "unexpected read");
+                Ok(self.0.into())
+            }
+            fn write(&self, _: &str, _: &str) -> Result<()> {
+                bail!("no writes here")
+            }
+        }
+        let family = BTreeSet::from([10, 11, 12, 13, 14]);
+        let workers = Leaf("10\n11\n12\n13\n14\n");
+        for control in ["cpu.max", "cgroup.freeze"] {
+            verify_runtime_target(&workers, &family, control).unwrap();
+        }
+        assert!(verify_runtime_target(&workers, &BTreeSet::from([10]), "cgroup.freeze").is_err());
+        let outsider = Leaf("10\n11\n12\n13\n14\n99\n");
+        assert!(verify_runtime_target(&outsider, &family, "cgroup.freeze").is_err());
+    }
+
     #[test]
     fn partial_permission_failure_preserves_applied_evidence() {
         let io = FakeIo {

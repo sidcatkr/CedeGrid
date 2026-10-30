@@ -517,13 +517,56 @@ fn apply_control_commands(
     runtime
 }
 
-/// The owned family seen by an actuator: the leader through its owned
-/// handle and running mediated children through theirs.
+type HostDescendants = super::family::Descendants<super::family::HostSource>;
+
+/// The owned family seen by an actuator: the leader through its owned handle, running
+/// mediated children through theirs, and verified descendants through their pidfds.
 struct OwnedFamily<'a> {
     leader: &'a mut OwnedChild,
     identity: &'a ProcessIdentity,
     children: Option<&'a mut ChildServer>,
+    descendants: &'a mut HostDescendants,
     meter: &'a mut crate::actuation::CpuMeter,
+}
+impl OwnedFamily<'_> {
+    /// The verified members whose children are this run's descendants.
+    fn roots(&self) -> Vec<u32> {
+        let mut roots = Vec::new();
+        if !self.leader.reaped {
+            roots.push(self.identity.pid);
+        }
+        if let Some(children) = &self.children {
+            roots.extend(children.running_identities().iter().map(|id| id.pid));
+        }
+        roots
+    }
+    /// Every gate the supervisor spawned and has not reaped: never an orphan.
+    fn gates(&self) -> std::collections::BTreeSet<u32> {
+        let mut gates = self
+            .children
+            .as_ref()
+            .map(|children| children.gate_pids())
+            .unwrap_or_default();
+        if !self.leader.reaped {
+            gates.insert(self.leader.child.id());
+        }
+        gates
+    }
+    /// Find and verify new descendants, reap exited orphans by PID, and return the family
+    /// as reported (FR-083).
+    fn discover(&mut self) -> Result<FamilyReport> {
+        let (roots, gates) = (self.roots(), self.gates());
+        self.descendants.discover(&roots, &gates)?;
+        self.descendants.reap_orphans(&gates)?;
+        Ok(FamilyReport {
+            leader: u64::from(!self.leader.reaped),
+            sdk_children: self
+                .children
+                .as_ref()
+                .map_or(0, |children| children.running_identities().len() as u64),
+            descendants: self.descendants.reported(),
+        })
+    }
 }
 impl Family for OwnedFamily<'_> {
     fn identities(&self) -> Vec<ProcessIdentity> {
@@ -534,6 +577,13 @@ impl Family for OwnedFamily<'_> {
         if let Some(children) = &self.children {
             identities.extend(children.running_identities());
         }
+        identities.extend(self.descendants.members().map(|member| ProcessIdentity {
+            pid: member.pid,
+            boot_id: self.identity.boot_id.clone(),
+            start_time: member.start_time,
+            assignment_id: self.identity.assignment_id.clone(),
+            generation: self.identity.generation,
+        }));
         identities
     }
     fn signal(&mut self, signal: i32) -> Result<()> {
@@ -547,7 +597,14 @@ impl Family for OwnedFamily<'_> {
             Some(children) => children.signal_running(signal),
             None => Ok(()),
         };
-        leader.and(children)
+        // A stop also finds members forked meanwhile; its discovery errors hold (FR-086).
+        let descendants = if signal == libc::SIGSTOP {
+            let (roots, gates) = (self.roots(), self.gates());
+            self.descendants.stop(&roots, &gates)
+        } else {
+            self.descendants.signal(signal)
+        };
+        leader.and(children).and(descendants)
     }
     fn cpu_time(&mut self) -> Option<Duration> {
         let pids: Vec<u32> = self.identities().iter().map(|id| id.pid).collect();
@@ -615,7 +672,8 @@ fn apply_runtime_commands(
     lifecycle: &mut Lifecycle,
     elapsed: u64,
     actuator: &mut dyn Actuator,
-    family: &mut dyn Family,
+    family: &mut OwnedFamily<'_>,
+    oom: &mut OomMarks,
     contention: &mut crate::contention::AllocationContention,
     targets: &mut crate::actuation::TargetChannel,
     directories: &[PathBuf],
@@ -623,7 +681,7 @@ fn apply_runtime_commands(
     control: &mut dyn SupervisorControl,
     (hint_ready, observes_drain): (bool, bool),
     leader_exited: bool,
-    outside_family: u64,
+    (outside_family, outside_reason, family_report): (u64, Option<OutsideReason>, &FamilyReport),
 ) {
     use crate::contention::{ResourceKind, StepRequest, YieldCause, YieldStep};
     for command in commands {
@@ -830,35 +888,45 @@ fn apply_runtime_commands(
                 });
             }
             SupervisorCommand::Oom { preferred } => {
-                // The launch value is the baseline; under the opt-in it already is 1000.
-                let baseline = record
+                // The launch value is the leader's baseline; under the opt-in it already is
+                // 1000. Every other member returns to its own (FR-023, R7).
+                let leader = record
                     .evidence
                     .iter()
                     .find(|e| e.control == "memory.oom_score_adj")
                     .and_then(|e| e.effective.as_deref()?.parse::<i32>().ok());
-                let target = if preferred {
-                    Some(OOM_PREFERRED)
-                } else {
-                    baseline
-                };
-                let (mut changes, mut details) = (Vec::new(), Vec::new());
-                match target {
-                    Some(target) => {
-                        for identity in family.identities() {
-                            match set_oom_score_adj(&identity, target) {
-                                Ok(from) => changes.push(crate::supervision::OomChange {
-                                    pid: identity.pid,
-                                    from,
-                                    to: target,
-                                }),
-                                Err(error) => details.push(format!(
-                                    "pid {} skipped as possibly misdirected: {error:#}",
-                                    identity.pid
-                                )),
-                            }
-                        }
+                oom.mark(preferred, spell_ticks(preferred));
+                let (mut changes, mut details) = settle_oom(family, oom, leader);
+                for identity in family.identities() {
+                    let member = (identity.pid, identity.start_time);
+                    let leads = identity.pid == family.identity.pid
+                        && identity.start_time == family.identity.start_time;
+                    if preferred && !leads {
+                        // Marked by the settle above, or skipped there with its reason.
+                        continue;
                     }
-                    None => details.push("no launch oom_score_adj baseline was recorded".into()),
+                    let target = if preferred {
+                        Some(OOM_PREFERRED)
+                    } else if leads {
+                        leader
+                    } else {
+                        oom.baselines.get(&member).copied()
+                    };
+                    let Some(target) = target else {
+                        details.push(format!("pid {} has no recorded baseline", identity.pid));
+                        continue;
+                    };
+                    match set_oom_score_adj(&identity, target) {
+                        Ok(from) => changes.push(crate::supervision::OomChange {
+                            pid: identity.pid,
+                            from,
+                            to: target,
+                        }),
+                        Err(error) => details.push(format!(
+                            "pid {} skipped as possibly misdirected: {error:#}",
+                            identity.pid
+                        )),
+                    }
                 }
                 let _ = control.report(SupervisorReport::Oom {
                     preferred,
@@ -911,6 +979,8 @@ fn apply_runtime_commands(
                     hint_ready,
                     observes_drain,
                     outside_family,
+                    outside_reason,
+                    family: Some(family_report.clone()),
                     causes: contention
                         .applied
                         .iter()
@@ -1037,9 +1107,7 @@ pub(super) fn supervise(
         "execution requires acknowledgement of the no-escape workload contract"
     );
     ensure!(
-        backend.name() != "rootless"
-            || (request.single_process && request.managed_child_limit == 0)
-            || (!request.single_process && (1..=8).contains(&request.managed_child_limit)),
+        backend.name() != "rootless" || crate::rootless::contract_holds(request),
         "rootless execution requires single-process or explicitly bounded supervisor-mediated child contract"
     );
     ensure!(
@@ -1063,6 +1131,20 @@ pub(super) fn supervise(
     let mut exec_sent = false;
     let mut actuator: Option<Box<dyn Actuator>> = None;
     let mut meter = crate::actuation::CpuMeter::default();
+    // The supervisor is its run's child subreaper before it forks the gate, so orphans of the
+    // run come to it; the previous setting returns when supervision ends (FR-083).
+    #[cfg(target_os = "linux")]
+    let _subreaper = Subreaper::set()?;
+    #[cfg(target_os = "linux")]
+    let run_ids = super::family::run_ids();
+    #[cfg(not(target_os = "linux"))]
+    let run_ids = (0, 0);
+    let mut descendants =
+        HostDescendants::new(super::family::HostSource, std::process::id(), run_ids, 0);
+    // The family as last reported, and the most processes found outside it at once, and why.
+    let mut family_report = FamilyReport::default();
+    let mut oom = OomMarks::default();
+    let mut outside_reason: Option<OutsideReason> = None;
     // (hint_ready, observes_drain), reported when either changes (FR-062).
     let mut readiness = (false, false);
     let mut readiness_checked_at: Option<Instant> = None;
@@ -1256,6 +1338,16 @@ pub(super) fn supervise(
             "Durable authorization committed before sending EXEC to the blocked gate".into();
         journal.transition(&record)?;
         exec_sent = true;
+        // Every descendant starts after this, and no child the supervisor has now is one.
+        #[cfg(target_os = "linux")]
+        {
+            let mut gates = children
+                .as_ref()
+                .map(|server| server.gate_pids())
+                .unwrap_or_default();
+            gates.insert(owned.child.id());
+            descendants.begin(super::family::boot_ticks()?, &gates)?;
+        }
         write_deadline(&mut input, b"EXEC\n", deadline)?;
         drop(input);
         let start = Instant::now();
@@ -1307,7 +1399,8 @@ pub(super) fn supervise(
         let mut control_failing = false;
         // An error in the supervisor's own bookkeeping holds the run and is retried, reported
         // once per failing spell of each source; it is not a reason to drain (030, R3).
-        let (mut leader_spell, mut children_spell) = (Spell::default(), Spell::default());
+        let (mut leader_spell, mut children_spell, mut family_spell) =
+            (Spell::default(), Spell::default(), Spell::default());
         let hold = |result: Result<()>, spell: &mut Spell| {
             let started = spell.starts(result.is_err());
             if let Err(error) = result
@@ -1324,6 +1417,10 @@ pub(super) fn supervise(
         let mut kill_at = None;
         let mut leader_status = None;
         let mut leader_exit_ms = None;
+        // Members still alive when the run ends: when they were sent SIGTERM and SIGKILL, and
+        // every member ended (FR-087).
+        let (mut leftovers_termed, mut members_killed) = (None::<Instant>, None::<Instant>);
+        let mut ended = std::collections::BTreeSet::new();
         loop {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
             let waited = if leader_status.is_none() {
@@ -1345,6 +1442,7 @@ pub(super) fn supervise(
                     leader: &mut *owned,
                     identity: &leader_identity,
                     children: children.as_mut(),
+                    descendants: &mut descendants,
                     meter: &mut meter,
                 };
                 if let Err(error) = actuator.release(&mut family) {
@@ -1357,9 +1455,45 @@ pub(super) fn supervise(
                 if let Some(server) = &mut children {
                     server.request_stop();
                 }
+                leftovers_termed = Some(Instant::now());
+            }
+            // The run ends with its leader: members still alive get SIGTERM once, and SIGKILL
+            // after the grace or at the drain's deadline, whichever comes first (FR-087).
+            if leftovers_termed.is_some() {
+                let mut family = OwnedFamily {
+                    leader: &mut *owned,
+                    identity: &leader_identity,
+                    children: children.as_mut(),
+                    descendants: &mut descendants,
+                    meter: &mut meter,
+                };
+                hold(family.discover().map(|_| ()), &mut family_spell);
+                let grace = Duration::from_millis(options.term_grace_ms);
+                if members_killed.is_none()
+                    && leftovers_termed.is_some_and(|termed| termed.elapsed() >= grace)
+                {
+                    members_killed = Some(Instant::now());
+                }
+                let signal = if members_killed.is_some() {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                };
+                if let Err(error) = family.descendants.end(signal, &mut ended) {
+                    hold(Err(error), &mut family_spell);
+                }
+                if let Some(killed_at) = members_killed {
+                    ensure!(
+                        killed_at.elapsed()
+                            < Duration::from_millis(options.release_confirm_timeout_ms)
+                            || family.descendants.members().next().is_none(),
+                        "members remain after SIGKILL at the end of the run"
+                    );
+                }
             }
             if let Some(status) = leader_status
                 && children.as_ref().is_none_or(ChildServer::all_released)
+                && descendants.members().next().is_none()
             {
                 let logs = match capture.take() {
                     Some(logs) => logs.finish()?,
@@ -1395,6 +1529,7 @@ pub(super) fn supervise(
                     log_bytes_dropped: logs.dropped,
                     log_capture_error: logs.error,
                     single_process_violated: outside_family,
+                    members_ended: ended.len() as u64,
                 });
             }
             let polled_at = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -1506,6 +1641,7 @@ pub(super) fn supervise(
                     leader: &mut *owned,
                     identity: &leader_identity,
                     children: children.as_mut(),
+                    descendants: &mut descendants,
                     meter: &mut meter,
                 };
                 if !runtime.is_empty() {
@@ -1517,6 +1653,7 @@ pub(super) fn supervise(
                         elapsed,
                         actuator.as_mut(),
                         &mut family,
+                        &mut oom,
                         &mut contention,
                         &mut targets,
                         &directories,
@@ -1524,34 +1661,83 @@ pub(super) fn supervise(
                         control,
                         readiness,
                         leader_status.is_some(),
-                        outside_family,
+                        (outside_family, outside_reason, &family_report),
                     );
                     ram_code = actuator.step_code(crate::contention::ResourceKind::Ram);
                 }
-                // Processes outside the verified family are counted once per duty period and
-                // reported when more are found; none of them is acted on (FR-082).
-                if leader_status.is_none()
-                    && outside_checked_at.is_none_or(|at: Instant| at.elapsed() >= duty_period)
-                {
+                // Once per duty period the family is discovered, exited orphans are reaped, and
+                // processes outside the family are counted; none of those is acted on. An
+                // error holds the family as it is and is reported once (FR-082, FR-083).
+                if outside_checked_at.is_none_or(|at: Instant| at.elapsed() >= duty_period) {
                     outside_checked_at = Some(Instant::now());
+                    if let Some(error) = family.descendants.take_error() {
+                        hold(Err(error), &mut family_spell);
+                    }
+                    match family.discover() {
+                        Ok(report) => {
+                            hold(Ok(()), &mut family_spell);
+                            // A member that joins while its run is marked is marked too.
+                            if cfg!(target_os = "linux") {
+                                let leader = record
+                                    .evidence
+                                    .iter()
+                                    .find(|e| e.control == "memory.oom_score_adj")
+                                    .and_then(|e| e.effective.as_deref()?.parse::<i32>().ok());
+                                let (changes, details) = settle_oom(&family, &mut oom, leader);
+                                if !changes.is_empty() {
+                                    let _ = control.report(SupervisorReport::Oom {
+                                        preferred: true,
+                                        changes,
+                                        detail: details.join("; "),
+                                    });
+                                }
+                            }
+                            // The agent knows the leader and SDK children from their records;
+                            // the report follows the descendants.
+                            let changed = report.descendants != family_report.descendants;
+                            family_report = report;
+                            if changed {
+                                let _ = control.report(SupervisorReport::Family {
+                                    family: family_report.clone(),
+                                });
+                            }
+                        }
+                        Err(error) => hold(Err(error), &mut family_spell),
+                    }
                     let verified: std::collections::BTreeSet<u32> =
                         family.identities().iter().map(|id| id.pid).collect();
-                    let found = actuator
-                        .members()
-                        .or_else(|| crate::supervision::leader_children(leader_identity.pid));
-                    let count = found.map_or(0, |found| {
-                        crate::supervision::outside_family(&found, &verified)
-                    });
+                    // In Full the leaf's members outside the family; elsewhere the descendants
+                    // that failed verification or are past the bound.
+                    let reasons: Vec<OutsideReason> = match actuator.members() {
+                        Some(leaf) => leaf
+                            .difference(&verified)
+                            .map(|pid| {
+                                family
+                                    .descendants
+                                    .outside
+                                    .get(pid)
+                                    .copied()
+                                    .unwrap_or(OutsideReason::ChainUnconfirmed)
+                            })
+                            .collect(),
+                        None => family.descendants.outside.values().copied().collect(),
+                    };
+                    let count = reasons.len() as u64;
                     if count > outside_family {
                         outside_family = count;
+                        outside_reason = crate::supervision::dominant(&reasons);
                         report(
                             "single_process_violated",
                             &request.assignment_id,
                             format!(
-                                "{count} processes outside the verified family; none is measured as own work or stepped"
+                                "{count} processes outside the verified family ({}); none is measured as own work or stepped",
+                                outside_reason.map_or("unknown", OutsideReason::code)
                             ),
                         );
-                        let _ = control.report(SupervisorReport::OutsideFamily { count });
+                        let _ = control.report(SupervisorReport::OutsideFamily {
+                            count,
+                            reason: outside_reason,
+                        });
                     }
                 }
                 if lifecycle.phase == LifecyclePhase::Running
@@ -1627,6 +1813,7 @@ pub(super) fn supervise(
                     leader: &mut *owned,
                     identity: &leader_identity,
                     children: children.as_mut(),
+                    descendants: &mut descendants,
                     meter: &mut meter,
                 };
                 if let Err(error) = actuator.release(&mut family) {
@@ -1691,6 +1878,12 @@ pub(super) fn supervise(
                 if leader_status.is_none() {
                     owned.signal(libc::SIGKILL)?;
                 }
+                // A drain signals the leader first; members still alive now get SIGKILL, and
+                // a leader that exited during the drain gets no second grace (FR-087).
+                if let Err(error) = descendants.end(libc::SIGKILL, &mut ended) {
+                    hold(Err(error), &mut family_spell);
+                }
+                members_killed.get_or_insert_with(Instant::now);
                 killed = true;
                 kill_at = Some(Instant::now());
             }
@@ -1704,6 +1897,7 @@ pub(super) fn supervise(
             // next deadline; a source without an event keeps the short pass.
             let mut fds = Vec::new();
             let mut busy = control_failing
+                || (leftovers_termed.is_some() && descendants.members().next().is_some())
                 || (drain_started_ms.is_some() && !drain_notified)
                 || children.as_ref().is_some_and(|server| !server.idle());
             match control.wake() {
@@ -1771,6 +1965,7 @@ pub(super) fn supervise(
                     leader: owned,
                     identity,
                     children: children.as_mut(),
+                    descendants: &mut descendants,
                     meter: &mut meter,
                 };
                 if let Err(release_error) = actuator.release(&mut family) {
@@ -1793,6 +1988,19 @@ pub(super) fn supervise(
                     .kill_and_confirm(Duration::from_millis(options.release_confirm_timeout_ms)),
                 None => Ok(()),
             };
+            // The run's members go the way of its leader, never Guaranteed work's (FR-087).
+            let members_release = if exec_sent && !guaranteed_running {
+                let mut gates = children
+                    .as_ref()
+                    .map(|server| server.gate_pids())
+                    .unwrap_or_default();
+                if let Some(owned) = child.as_ref().filter(|owned| !owned.reaped) {
+                    gates.insert(owned.child.id());
+                }
+                end_descendants(&mut descendants, &gates, options)
+            } else {
+                Ok(())
+            };
             let family_release = if guaranteed_running {
                 Ok(())
             } else {
@@ -1801,6 +2009,7 @@ pub(super) fn supervise(
                 })
             };
             let release = child_release
+                .and(members_release)
                 .and(family_release)
                 .and_then(|()| backend.confirm_release())
                 .and_then(|()| {
@@ -1830,6 +2039,36 @@ pub(super) fn supervise(
             }
             Err(error.context(record.detail))
         }
+    }
+}
+
+/// After an error, a run's members follow its leader: SIGTERM, the grace, then SIGKILL,
+/// confirmed within the release timeout (FR-087).
+fn end_descendants(
+    descendants: &mut HostDescendants,
+    gates: &std::collections::BTreeSet<u32>,
+    options: &SupervisorOptions,
+) -> Result<()> {
+    let mut ended = std::collections::BTreeSet::new();
+    let started = Instant::now();
+    let grace = Duration::from_millis(options.term_grace_ms);
+    loop {
+        descendants.discover(&[], gates)?;
+        descendants.reap_orphans(gates)?;
+        if descendants.members().next().is_none() {
+            return Ok(());
+        }
+        let signal = if started.elapsed() >= grace {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        descendants.end(signal, &mut ended)?;
+        ensure!(
+            started.elapsed() < grace + Duration::from_millis(options.release_confirm_timeout_ms),
+            "members remain after SIGKILL after a supervisor error"
+        );
+        std::thread::sleep(PASS);
     }
 }
 
@@ -2103,12 +2342,23 @@ fn oom_baseline_evidence(pid: u32) -> Result<ControlEvidence> {
     })
 }
 
-/// Set a family member's `oom_score_adj` and return its value before. Members are this
-/// supervisor's unreaped direct children, so their PIDs cannot be reused; the start time
-/// read through the member's `/proc` directory before and after the write confirms it is
-/// the verified process (Principle I, FR-023).
+/// Set a family member's `oom_score_adj` and return its value before. The member's `/proc`
+/// directory is opened once and checked against its start time before and after the write;
+/// that descriptor stops working if the process exits, so a reused PID is never written
+/// (Principle I, FR-023).
 #[cfg(target_os = "linux")]
 fn set_oom_score_adj(identity: &ProcessIdentity, value: i32) -> Result<i32> {
+    oom_score_adj(identity, Some(value))
+}
+
+/// A family member's `oom_score_adj`, read the same way and never written.
+#[cfg(target_os = "linux")]
+fn read_oom_score_adj(identity: &ProcessIdentity) -> Result<i32> {
+    oom_score_adj(identity, None)
+}
+
+#[cfg(target_os = "linux")]
+fn oom_score_adj(identity: &ProcessIdentity, value: Option<i32>) -> Result<i32> {
     use std::ffi::CString;
     let path = CString::new(format!("/proc/{}", identity.pid))?;
     // SAFETY: a NUL-terminated path; a successful open returns a new descriptor.
@@ -2148,6 +2398,13 @@ fn set_oom_score_adj(identity: &ProcessIdentity, value: i32) -> Result<i32> {
     let mut before = String::new();
     io::Read::read_to_string(&mut open(c"oom_score_adj", libc::O_RDONLY)?, &mut before)?;
     let before: i32 = before.trim().parse()?;
+    let Some(value) = value else {
+        ensure!(
+            start_time()? == identity.start_time,
+            "the PID no longer names the verified process after the read"
+        );
+        return Ok(before);
+    };
     open(c"oom_score_adj", libc::O_WRONLY)?.write_all(value.to_string().as_bytes())?;
     ensure!(
         start_time()? == identity.start_time,
@@ -2159,6 +2416,132 @@ fn set_oom_score_adj(identity: &ProcessIdentity, value: i32) -> Result<i32> {
 #[cfg(not(target_os = "linux"))]
 fn set_oom_score_adj(_identity: &ProcessIdentity, _value: i32) -> Result<i32> {
     bail!("oom_score_adj is unavailable on this platform")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_oom_score_adj(_identity: &ProcessIdentity) -> Result<i32> {
+    bail!("oom_score_adj is unavailable on this platform")
+}
+
+/// The run's OOM preference over time and each member's own baseline (FR-023).
+#[derive(Default)]
+struct OomMarks {
+    preferred: bool,
+    /// Marked spells in boot-time ticks, the last 16: `oom_score_adj` is inherited across
+    /// fork, so a member that started in one carries CedeGrid's mark, not its own value.
+    spells: std::collections::VecDeque<(u64, Option<u64>)>,
+    /// Each member's own baseline but the leader's, which its launch evidence holds.
+    baselines: BTreeMap<(u32, u64), i32>,
+    /// Members marked in this spell.
+    marked: std::collections::BTreeSet<(u32, u64)>,
+}
+impl OomMarks {
+    fn mark(&mut self, preferred: bool, now: u64) {
+        match (self.preferred, preferred) {
+            (false, true) => {
+                self.spells.push_back((now, None));
+                if self.spells.len() > 16 {
+                    self.spells.pop_front();
+                }
+            }
+            (true, false) => {
+                if let Some(spell) = self.spells.back_mut() {
+                    spell.1 = Some(now);
+                }
+                self.marked.clear();
+            }
+            _ => {}
+        }
+        self.preferred = preferred;
+    }
+    fn during(&self, start: u64) -> bool {
+        self.spells
+            .iter()
+            .any(|(from, to)| start >= *from && to.is_none_or(|to| start <= to))
+    }
+}
+
+/// Boot-time ticks for marked spells; an unreadable clock counts every member as started in
+/// the spell, so it takes its parent's baseline rather than a possible mark.
+fn spell_ticks(start: bool) -> u64 {
+    #[cfg(target_os = "linux")]
+    if let Ok(ticks) = super::family::boot_ticks() {
+        return ticks;
+    }
+    if start { 0 } else { u64::MAX }
+}
+
+/// Record each new member's own baseline, and mark it while its run is marked (FR-023). A
+/// member that started in a marked spell takes its parent member's baseline; an orphan, whose
+/// parent is gone, the leader's.
+fn settle_oom(
+    family: &OwnedFamily<'_>,
+    oom: &mut OomMarks,
+    leader: Option<i32>,
+) -> (Vec<crate::supervision::OomChange>, Vec<String>) {
+    let (mut changes, mut details) = (Vec::new(), Vec::new());
+    let identities = family.identities();
+    let key = |id: &ProcessIdentity| (id.pid, id.start_time);
+    let leader_key = key(family.identity);
+    oom.baselines
+        .retain(|k, _| identities.iter().any(|id| key(id) == *k));
+    oom.marked
+        .retain(|k| identities.iter().any(|id| key(id) == *k));
+    for identity in &identities {
+        let member = key(identity);
+        if member != leader_key && !oom.baselines.contains_key(&member) {
+            let inherited = family
+                .descendants
+                .members()
+                .find(|m| m.pid == identity.pid && m.start_time == identity.start_time)
+                .filter(|m| oom.during(m.start_time))
+                .map(|m| {
+                    identities
+                        .iter()
+                        .find(|id| id.pid == m.parent)
+                        .and_then(|parent| {
+                            if key(parent) == leader_key {
+                                leader
+                            } else {
+                                oom.baselines.get(&key(parent)).copied()
+                            }
+                        })
+                        .or(leader)
+                });
+            match inherited {
+                Some(Some(baseline)) => {
+                    oom.baselines.insert(member, baseline);
+                }
+                Some(None) => details.push(format!("pid {} has no known baseline", identity.pid)),
+                None => match read_oom_score_adj(identity) {
+                    Ok(baseline) => {
+                        oom.baselines.insert(member, baseline);
+                    }
+                    Err(error) => details.push(format!(
+                        "pid {} skipped as possibly misdirected: {error:#}",
+                        identity.pid
+                    )),
+                },
+            }
+        }
+        if oom.preferred && member != leader_key && oom.marked.insert(member) {
+            match set_oom_score_adj(identity, OOM_PREFERRED) {
+                Ok(from) => changes.push(crate::supervision::OomChange {
+                    pid: identity.pid,
+                    from,
+                    to: OOM_PREFERRED,
+                }),
+                Err(error) => {
+                    oom.marked.remove(&member);
+                    details.push(format!(
+                        "pid {} skipped as possibly misdirected: {error:#}",
+                        identity.pid
+                    ));
+                }
+            }
+        }
+    }
+    (changes, details)
 }
 
 #[cfg(target_os = "linux")]
@@ -2243,6 +2626,32 @@ fn identity(_pid: u32, _assignment: &str, _generation: u64) -> Result<ProcessIde
 }
 /// One bookkeeping source's failing spell: its failure is reported when a spell starts, and
 /// a success ends it, apart from every other source's (030, R3).
+/// The supervisor as its run's child subreaper; the previous setting returns on drop, so an
+/// in-process supervisor leaves its process as it found it (FR-083).
+#[cfg(target_os = "linux")]
+struct Subreaper(libc::c_int);
+#[cfg(target_os = "linux")]
+impl Subreaper {
+    fn set() -> Result<Self> {
+        let mut previous: libc::c_int = 0;
+        // SAFETY: PR_GET_CHILD_SUBREAPER writes one int; PR_SET_CHILD_SUBREAPER takes a flag.
+        ensure!(
+            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut previous) } == 0
+                && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } == 0,
+            "cannot become the run's child subreaper: {}",
+            io::Error::last_os_error()
+        );
+        Ok(Self(previous))
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for Subreaper {
+    fn drop(&mut self) {
+        // SAFETY: restores a flag this process set; failure leaves it a subreaper.
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, self.0) };
+    }
+}
+
 #[derive(Default)]
 struct Spell(bool);
 impl Spell {

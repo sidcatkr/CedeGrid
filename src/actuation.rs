@@ -232,6 +232,8 @@ impl Actuator for RootlessActuator {
         self.cap = None;
         self.duty = 1.0;
         self.gpu_duty = 1.0;
+        // The flag is set before any stop and covers a member stopped as it joined, so the
+        // continue reaches every member the family holds (R2, FR-086).
         if self.stopped {
             family.signal(signal::CONT)?;
             self.stopped = false;

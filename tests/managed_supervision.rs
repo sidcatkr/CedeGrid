@@ -69,34 +69,43 @@ impl supervision::SupervisorControl for Reports {
     }
 }
 
-/// A leader that forks a helper outside the SDK is reported once as outside its verified
-/// family, with the count, in the reports and the outcome; nothing is done to the helper,
-/// which exits on its own (FR-082, Constitution I).
+/// The largest family a run reported, its descendants' PIDs, and the outside reports.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_fork_outside_the_sdk_is_reported_and_left_alone() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-    let store = StateStore::open(&dir.path().join("state")).unwrap();
-    let mut request = request(
-        dir.path(),
-        r#"
-import os, sys, time
-from pathlib import Path
-pid = os.fork()
-if pid == 0:
-    time.sleep(1.5)
-    Path('helper-done').write_text('1')
-    os._exit(0)
-_, status = os.waitpid(pid, 0)
-sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 7)
-"#,
-    );
-    // A single-process command that forks anyway: the breach FR-082 reports.
-    request.single_process = true;
-    request.managed_child_limit = 0;
+#[derive(Default)]
+struct Seen {
+    largest: u64,
+    pids: std::collections::BTreeSet<u32>,
+    outside: Vec<(u64, Option<supervision::OutsideReason>)>,
+}
+#[cfg(target_os = "linux")]
+fn family_seen(reports: &Reports) -> Seen {
+    let mut seen = Seen::default();
+    for report in &reports.0 {
+        match report {
+            supervision::SupervisorReport::Family { family } => {
+                assert_eq!(family.leader, 1, "{family:?}");
+                seen.largest = seen.largest.max(family.descendants.len() as u64);
+                seen.pids
+                    .extend(family.descendants.iter().map(|member| member.pid));
+            }
+            supervision::SupervisorReport::OutsideFamily { count, reason } => {
+                seen.outside.push((*count, *reason));
+            }
+            _ => {}
+        }
+    }
+    seen
+}
+
+#[cfg(target_os = "linux")]
+fn supervise_family(
+    request: &LaunchRequest,
+    dir: &Path,
+) -> (supervision::ExecutionOutcome, Reports) {
+    let store = StateStore::open(&dir.join("state")).unwrap();
     let mut reports = Reports::default();
     let outcome = supervision::supervise_controlled(
-        &request,
+        request,
         &request.resources,
         &options(),
         &store,
@@ -105,18 +114,132 @@ sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 7)
         &mut reports,
     )
     .unwrap();
-    assert_eq!(outcome.exit_code, Some(0), "the helper ran undisturbed");
-    assert!(dir.path().join("helper-done").exists());
-    assert_eq!(outcome.single_process_violated, 1, "{outcome:?}");
-    let found: Vec<u64> = reports
-        .0
-        .iter()
-        .filter_map(|report| match report {
-            supervision::SupervisorReport::OutsideFamily { count } => Some(*count),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(found, [1]);
+    (outcome, reports)
+}
+
+/// A request for a leader that forks its own workers; until the rootless launch accepts
+/// multi-process work on Linux it says single-process, as the fork test of 030 did.
+#[cfg(target_os = "linux")]
+fn forking(dir: &Path, code: &str) -> LaunchRequest {
+    let mut request = request(dir, code);
+    request.single_process = true;
+    request.managed_child_limit = 0;
+    request
+}
+
+/// A leader that forks 4 busy workers, plainly or through `multiprocessing`, reports a family
+/// of the leader and 4 descendants, all verified, and nothing outside it (FR-083).
+#[cfg(target_os = "linux")]
+#[test]
+fn forked_workers_join_the_verified_family() {
+    for code in [
+        r#"
+import os, sys, time
+pids = []
+for _ in range(4):
+    pid = os.fork()
+    if pid == 0:
+        end = time.time() + 1.2
+        while time.time() < end:
+            pass
+        os._exit(0)
+    pids.append(pid)
+sys.exit(sum(os.WEXITSTATUS(os.waitpid(pid, 0)[1]) for pid in pids))
+"#,
+        r#"
+import multiprocessing, sys, time
+def work():
+    end = time.time() + 1.2
+    while time.time() < end:
+        pass
+if __name__ == '__main__':
+    ctx = multiprocessing.get_context('fork')
+    workers = [ctx.Process(target=work) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    sys.exit(sum(worker.exitcode for worker in workers))
+"#,
+    ] {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let (outcome, reports) = supervise_family(&forking(dir.path(), code), dir.path());
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        let seen = family_seen(&reports);
+        assert_eq!(seen.largest, 4, "{:?}", reports.0);
+        assert!(seen.outside.is_empty(), "{:?}", seen.outside);
+        assert_eq!(outcome.single_process_violated, 0);
+    }
+}
+
+/// A helper whose parent exits first is reparented to the supervisor, verified with the
+/// supervisor as its chain's root, kept in the family, and reaped by its own PID: no zombie
+/// stays, and the leader's exit status is the leader's (FR-083, R34, R36).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_orphan_joins_and_is_reaped_by_its_pid() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let code = r#"
+import os, sys, time
+from pathlib import Path
+child = os.fork()
+if child == 0:
+    grandchild = os.fork()
+    if grandchild == 0:
+        time.sleep(1.0)
+        os._exit(0)
+    Path('grandchild').write_text(str(grandchild))
+    os._exit(0)
+os.waitpid(child, 0)
+time.sleep(2.0)
+sys.exit(3)
+"#;
+    let (outcome, reports) = supervise_family(&forking(dir.path(), code), dir.path());
+    assert_eq!(outcome.exit_code, Some(3), "the leader's own status");
+    let grandchild: u32 = fs::read_to_string(dir.path().join("grandchild"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let seen = family_seen(&reports);
+    assert!(seen.pids.contains(&grandchild), "{:?}", reports.0);
+    assert!(seen.outside.is_empty(), "{:?}", seen.outside);
+    let mut status = 0;
+    // SAFETY: a wait for the one PID this test's run left, which must already be reaped.
+    let rc = unsafe { libc::waitpid(grandchild as i32, &mut status, libc::WNOHANG) };
+    assert_eq!(rc, -1, "a zombie was left under the supervisor");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
+/// A run tracks at most 256 members, the leader included; the rest are reported over the
+/// bound and left alone, and no descriptor runs out (FR-083, R39).
+#[cfg(target_os = "linux")]
+#[test]
+fn descendants_past_the_bound_are_reported_not_tracked() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let code = r#"
+import os, sys, time
+pids = []
+for _ in range(300):
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(2.5)
+        os._exit(0)
+    pids.append(pid)
+sys.exit(max(os.WEXITSTATUS(os.waitpid(pid, 0)[1]) for pid in pids))
+"#;
+    let (outcome, reports) = supervise_family(&forking(dir.path(), code), dir.path());
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    let seen = family_seen(&reports);
+    assert_eq!(seen.largest, 255, "{:?}", seen.outside);
+    assert_eq!(
+        seen.outside.last(),
+        Some(&(45, Some(supervision::OutsideReason::OverBound)))
+    );
+    assert_eq!(outcome.single_process_violated, 45);
 }
 
 #[derive(Default)]
@@ -955,19 +1078,22 @@ impl supervision::SupervisorControl for ActuationAudit {
     fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
         match report {
             supervision::SupervisorReport::Readiness { .. } => {}
-            supervision::SupervisorReport::OutsideFamily { count } => self.outside.push(count),
+            supervision::SupervisorReport::OutsideFamily { count, .. } => self.outside.push(count),
+            supervision::SupervisorReport::Family { .. } => {}
             report => self.reports.push(report),
         }
         Ok(())
     }
 }
 
+/// A step reaches the leader, its SDK child and, on Linux, the fork the leader made outside
+/// the SDK, which joins the verified family; a process the test started before the run is
+/// outside the family and no step reaches it (FR-083, FR-086, Constitution I).
 #[test]
 fn runtime_steps_reach_only_the_verified_family() {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
-    // A test-owned process outside the family, and an unmanaged fork inside the
-    // job, are never verified, so no step may reach either of them.
+    // A test-owned process outside the family is never verified, so no step may reach it.
     let mut foreign = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -1027,22 +1153,26 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
         .collect();
     use cedegrid::contention::YieldStep;
     assert_eq!(applied, [YieldStep::Pause, YieldStep::None]);
-    for name in ["leader", "child"] {
-        assert!(audit.paused[name].contains('T'), "{:?}", audit.paused);
-        assert!(!audit.resumed[name].contains('T'), "{:?}", audit.resumed);
+    // Only Linux tracks the leader's own forks.
+    let (members, outside): (&[&str], &[&str]) = if cfg!(target_os = "linux") {
+        (&["leader", "child", "loose"], &["foreign"])
+    } else {
+        (&["leader", "child"], &["loose", "foreign"])
+    };
+    for name in members {
+        assert!(audit.paused[*name].contains('T'), "{:?}", audit.paused);
+        assert!(!audit.resumed[*name].contains('T'), "{:?}", audit.resumed);
     }
-    for name in ["loose", "foreign"] {
-        assert!(!audit.paused[name].contains('T'), "{:?}", audit.paused);
-        assert!(!audit.resumed[name].contains('T'), "{:?}", audit.resumed);
+    for name in outside {
+        assert!(!audit.paused[*name].contains('T'), "{:?}", audit.paused);
+        assert!(!audit.resumed[*name].contains('T'), "{:?}", audit.resumed);
     }
     assert!(
         foreign_alive && !foreign_after.contains('T'),
         "{foreign_after}"
     );
-    // The loose fork is the leader's child outside the family; the mediated child is the
-    // supervisor's. Only Linux lists a process's children (FR-082).
-    let expected: &[u64] = if cfg!(target_os = "linux") { &[1] } else { &[] };
-    assert_eq!(audit.outside, expected);
+    // The foreign process started before EXEC, so it is not counted as the run's either.
+    assert!(audit.outside.is_empty(), "{:?}", audit.outside);
 }
 
 /// A managed child carries the same OOM preference as its parent (FR-023).
@@ -2335,4 +2465,393 @@ Path('leader-done').write_text('1')
         ManagedChildPhase::Released,
         "the release transition went through on a retry"
     );
+}
+
+/// A control driven by a closure over the reports so far, for the family tests (item 031).
+#[cfg(target_os = "linux")]
+struct Driven<F: FnMut(&[supervision::SupervisorReport]) -> Vec<supervision::SupervisorCommand>> {
+    reports: Vec<supervision::SupervisorReport>,
+    step: F,
+}
+#[cfg(target_os = "linux")]
+impl<F: FnMut(&[supervision::SupervisorReport]) -> Vec<supervision::SupervisorCommand>>
+    supervision::SupervisorControl for Driven<F>
+{
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        Ok((self.step)(&self.reports))
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        self.reports.push(report);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pids_in(dir: &Path, prefix: &str) -> Vec<u32> {
+    fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().ok()?;
+            name.strip_prefix(prefix)?.parse().ok()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn oom_of(pid: u32) -> i32 {
+    fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A Pause reaches the whole family, members the leader keeps forking during the stop
+/// included, and the continue reaches them all again; a process the test started before
+/// the run is never stopped (FR-086, R38, Constitution I).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_pause_reaches_members_forked_during_the_stop() {
+    use cedegrid::contention::YieldStep;
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let mut foreign = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let mut request = forking(
+        dir.path(),
+        r#"
+import os, signal, time
+from pathlib import Path
+kids = []
+Path('leader-' + str(os.getpid())).touch()
+while not Path('stop').exists():
+    pid = os.fork()
+    if pid == 0:
+        Path('kid-' + str(os.getpid())).touch()
+        time.sleep(30)
+        os._exit(0)
+    kids.append(pid)
+    time.sleep(0.03)
+for pid in kids:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+"#,
+    );
+    request.class = AllocationClass::Opportunistic;
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let path = dir.path().to_owned();
+    let (mut stage, mut at) = (0, std::time::Instant::now());
+    let (mut paused, mut resumed) = (Vec::new(), Vec::new());
+    let mut control = Driven {
+        reports: vec![],
+        step: |reports: &[supervision::SupervisorReport]| {
+            let adjusted = reports
+                .iter()
+                .filter(|r| matches!(r, supervision::SupervisorReport::Adjusted { .. }))
+                .count();
+            let states = || -> Vec<(u32, String)> {
+                pids_in(&path, "leader-")
+                    .into_iter()
+                    .chain(pids_in(&path, "kid-"))
+                    .map(|pid| (pid, run_state(pid)))
+                    .filter(|(_, state)| !state.is_empty() && !state.starts_with('Z'))
+                    .collect()
+            };
+            match stage {
+                0 if pids_in(&path, "kid-").len() >= 3 => {
+                    stage = 1;
+                    return vec![cpu_step(1, YieldStep::Pause)];
+                }
+                1 if adjusted == 1 => {
+                    (stage, at) = (2, std::time::Instant::now());
+                }
+                // A member forked as the stop began is stopped by the pass loop or by the
+                // next interval's discovery at the latest.
+                2 if at.elapsed() >= std::time::Duration::from_millis(400) => {
+                    paused = states();
+                    stage = 3;
+                    return vec![cpu_step(2, YieldStep::None)];
+                }
+                3 if adjusted == 2 => {
+                    (stage, at) = (4, std::time::Instant::now());
+                }
+                4 if at.elapsed() >= std::time::Duration::from_millis(200) => {
+                    resumed = states();
+                    stage = 5;
+                    fs::write(path.join("stop"), "").unwrap();
+                }
+                _ => {}
+            }
+            vec![]
+        },
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut control,
+    )
+    .unwrap();
+    drop(control);
+    let foreign_state = run_state(foreign.id());
+    foreign.kill().unwrap();
+    foreign.wait().unwrap();
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    assert!(paused.len() >= 4, "{paused:?}");
+    assert!(
+        paused.iter().all(|(_, state)| state.contains('T')),
+        "{paused:?}"
+    );
+    assert!(
+        resumed.iter().all(|(_, state)| !state.contains('T')),
+        "{resumed:?}"
+    );
+    assert!(!foreign_state.contains('T'), "{foreign_state}");
+}
+
+/// Each member returns to its own `oom_score_adj` baseline: a worker forked while its run is
+/// marked inherits the mark, is marked as a member when it joins, and returns to its parent's
+/// baseline, not to the inherited mark; a process outside the family is never changed
+/// (FR-023, FR-086, spec Q9, Constitution I).
+#[cfg(target_os = "linux")]
+#[test]
+fn members_return_to_their_own_oom_baseline() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let mut foreign = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let request = forking(
+        dir.path(),
+        r#"
+import os, signal, time
+from pathlib import Path
+def worker(name):
+    pid = os.fork()
+    if pid == 0:
+        if name == 'early':
+            Path('/proc/self/oom_score_adj').write_text('500')
+        Path(name + '-' + str(os.getpid())).touch()
+        time.sleep(30)
+        os._exit(0)
+    return pid
+Path('leader-' + str(os.getpid())).touch()
+kids = [worker('early')]
+while not Path('marked').exists():
+    time.sleep(0.01)
+kids.append(worker('late'))
+while not Path('stop').exists():
+    time.sleep(0.01)
+for pid in kids:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+"#,
+    );
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let path = dir.path().to_owned();
+    let foreign_before = oom_of(foreign.id());
+    let (mut stage, mut at) = (0, std::time::Instant::now());
+    let mut baseline = None;
+    let mut seen: Vec<(&'static str, i32)> = Vec::new();
+    let mut control = Driven {
+        reports: vec![],
+        step: |_: &[supervision::SupervisorReport]| {
+            let one = |prefix: &str| pids_in(&path, prefix).first().copied();
+            match stage {
+                0 if one("early-").is_some() => (stage, at) = (1, std::time::Instant::now()),
+                1 if at.elapsed() >= std::time::Duration::from_millis(300) => {
+                    baseline = Some(oom_of(one("leader-").unwrap()));
+                    stage = 2;
+                    return vec![supervision::SupervisorCommand::Oom { preferred: true }];
+                }
+                2 if oom_of(one("early-").unwrap()) == 1000 => {
+                    seen.push(("leader marked", oom_of(one("leader-").unwrap())));
+                    fs::write(path.join("marked"), "").unwrap();
+                    stage = 3;
+                }
+                3 if one("late-").is_some() => (stage, at) = (4, std::time::Instant::now()),
+                4 if at.elapsed() >= std::time::Duration::from_millis(400) => {
+                    seen.push(("late marked", oom_of(one("late-").unwrap())));
+                    stage = 5;
+                    return vec![supervision::SupervisorCommand::Oom { preferred: false }];
+                }
+                5 if oom_of(one("leader-").unwrap()) == baseline.unwrap() => {
+                    (stage, at) = (6, std::time::Instant::now());
+                }
+                6 if at.elapsed() >= std::time::Duration::from_millis(200) => {
+                    for (name, prefix) in [
+                        ("leader", "leader-"),
+                        ("early", "early-"),
+                        ("late", "late-"),
+                    ] {
+                        seen.push((name, oom_of(one(prefix).unwrap())));
+                    }
+                    stage = 7;
+                    fs::write(path.join("stop"), "").unwrap();
+                }
+                _ => {}
+            }
+            vec![]
+        },
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut control,
+    )
+    .unwrap();
+    drop(control);
+    let foreign_after = oom_of(foreign.id());
+    foreign.kill().unwrap();
+    foreign.wait().unwrap();
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    let baseline = baseline.unwrap();
+    assert_eq!(
+        seen,
+        [
+            ("leader marked", 1000),
+            ("late marked", 1000),
+            ("leader", baseline),
+            ("early", 500),
+            ("late", baseline)
+        ]
+    );
+    assert_eq!(foreign_after, foreign_before);
+}
+
+#[cfg(target_os = "linux")]
+fn gone_and_reaped(pid: u32) -> bool {
+    let mut status = 0;
+    // SAFETY: a probe and a non-blocking wait for one PID this test's run started.
+    let reaped = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+    // SAFETY: signal zero only probes whether the process still exists.
+    reaped && unsafe { libc::kill(pid as i32, 0) } != 0
+}
+
+/// When the leader exits, its members still alive get SIGTERM, then SIGKILL after the grace,
+/// in both classes; the outcome counts them, none is left as a zombie, and a process outside
+/// the family is not ended (FR-087, Constitution I).
+#[cfg(target_os = "linux")]
+#[test]
+fn leftover_members_are_ended_when_the_leader_exits() {
+    for class in [AllocationClass::Guaranteed, AllocationClass::Opportunistic] {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut foreign = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut request = forking(
+            dir.path(),
+            r#"
+import os, signal, time
+from pathlib import Path
+for name in ['polite', 'stubborn']:
+    if os.fork() == 0:
+        if name == 'stubborn':
+            signal.signal(signal.SIGTERM, lambda *_: Path('stubborn-term').touch())
+        Path(name + '-' + str(os.getpid())).touch()
+        while True:
+            time.sleep(1)
+while len(list(Path('.').glob('polite-*')) + list(Path('.').glob('stubborn-*'))) < 2:
+    time.sleep(0.01)
+"#,
+        );
+        request.class = class;
+        let (outcome, _) = supervise_family(&request, dir.path());
+        let foreign_alive = foreign.try_wait().unwrap().is_none();
+        foreign.kill().unwrap();
+        foreign.wait().unwrap();
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert_eq!(outcome.members_ended, 2, "{class:?}: {outcome:?}");
+        assert!(dir.path().join("stubborn-term").exists(), "TERM came first");
+        for pid in pids_in(dir.path(), "polite-")
+            .into_iter()
+            .chain(pids_in(dir.path(), "stubborn-"))
+        {
+            assert!(gone_and_reaped(pid), "{class:?}: member {pid} left");
+        }
+        assert!(foreign_alive);
+    }
+}
+
+/// A drain signals the leader first, so the workload can stop its own workers; members still
+/// alive after the grace get SIGKILL. A leader that exits during the drain leaves its members
+/// TERMed at once and KILLed by the drain's deadline (FR-087, item 031 D.2).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_drain_signals_the_leader_first_then_kills_members() {
+    for leader_exits in [false, true] {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut request = forking(
+            dir.path(),
+            &format!(
+                r#"
+import os, signal, sys, time
+from pathlib import Path
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, lambda *_: Path('worker-term').touch())
+    Path('worker-' + str(os.getpid())).touch()
+    while True:
+        time.sleep(1)
+def term(*_):
+    Path('leader-term').touch()
+    if {leader_exits}:
+        sys.exit(0)
+signal.signal(signal.SIGTERM, term)
+Path('ready').touch()
+while True:
+    time.sleep(1)
+"#,
+                leader_exits = if leader_exits { "True" } else { "False" }
+            ),
+        );
+        request.class = AllocationClass::Opportunistic;
+        let store = StateStore::open(&dir.path().join("state")).unwrap();
+        let path = dir.path().to_owned();
+        let mut sent = None;
+        let mut control = Driven {
+            reports: vec![],
+            step: |_: &[supervision::SupervisorReport]| {
+                if sent.is_none()
+                    && path.join("ready").exists()
+                    && !pids_in(&path, "worker-").is_empty()
+                {
+                    sent = Some(std::time::Instant::now());
+                    return vec![supervision::SupervisorCommand::Drain];
+                }
+                vec![]
+            },
+        };
+        let outcome = supervision::supervise_controlled(
+            &request,
+            &request.resources,
+            &options(),
+            &store,
+            &mut RootlessBackend::new(10),
+            Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+            &mut control,
+        )
+        .unwrap();
+        drop(control);
+        let took = sent.unwrap().elapsed();
+        assert!(outcome.yielded, "{outcome:?}");
+        assert!(dir.path().join("leader-term").exists());
+        assert_eq!(outcome.members_ended, 1, "{outcome:?}");
+        let worker = pids_in(dir.path(), "worker-")[0];
+        assert!(gone_and_reaped(worker));
+        // The drain's TERM went to the leader alone; the worker was TERMed only once the
+        // leader had exited, and is ended within the drain's deadlines either way.
+        assert_eq!(dir.path().join("worker-term").exists(), leader_exits);
+        let deadline = options().drain_timeout_ms + 2 * options().term_grace_ms + 1_000;
+        assert!(took.as_millis() < u128::from(deadline), "{took:?}");
+    }
 }

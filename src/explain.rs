@@ -118,6 +118,19 @@ fn psi_line(config: &Config, snapshot: &Snapshot) -> Option<String> {
     })
 }
 
+/// How this host finds a run's descendants, for `doctor` (FR-083, FR-084): `lists` is
+/// whether the kernel keeps `children` lists, `None` where descendants are not tracked.
+pub fn descendants_text(lists: Option<bool>) -> String {
+    let line = match lists {
+        Some(true) => "tracked from /proc children lists",
+        Some(false) => {
+            "tracked by a scan of /proc each interval: this kernel keeps no children lists (CONFIG_PROC_CHILDREN)"
+        }
+        None => "not tracked on this platform: rootless runs need the single-process contract",
+    };
+    format!("\nDescendants\n  {line}\n")
+}
+
 /// The doctor text: per resource its mode, usage, demand, target share, steps,
 /// reasons and what is held back, then floors, caution options, legacy GPU keys
 /// and the steps the backend offers.

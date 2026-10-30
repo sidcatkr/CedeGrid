@@ -423,16 +423,20 @@ impl AgentLoop<'_> {
                         hint_ready,
                         observes_drain,
                         outside_family,
+                        outside_reason,
+                        family,
                         ..
                     }) => {
                         slot.applied = applied;
                         slot.applied_targets = targets;
                         slot.note_readiness(hint_ready, observes_drain);
-                        slot.outside_family = slot.outside_family.max(outside_family);
+                        slot.note_outside(outside_family, outside_reason);
+                        if family.is_some() {
+                            slot.family = family;
+                        }
                     }
-                    Ok(Event::OutsideFamily { count }) => {
-                        slot.outside_family = slot.outside_family.max(count);
-                    }
+                    Ok(Event::OutsideFamily { count, reason }) => slot.note_outside(count, reason),
+                    Ok(Event::Family { family }) => slot.family = Some(family),
                     Ok(Event::Readiness {
                         hint_ready,
                         observes_drain,
