@@ -2,7 +2,8 @@
 
 A task names an argv array, an absolute POSIX working-directory path on the
 execution host, resource requests, and explicit single-process/no-escape or
-managed-family acknowledgement. Submission validates their syntax before opening
+managed-family acknowledgement. On Linux a rootless run's forked descendants join its
+verified family whatever `single_process` says; elsewhere that contract is required. Submission validates their syntax before opening
 transport or consulting worker environment. It does not require the remote cwd to
 exist on the submitting computer. Arbitrary executable files need no SDK runtime.
 

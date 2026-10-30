@@ -595,23 +595,39 @@ exclusively owned, unreaped direct child, with weaker guarantees explicitly reco
 It refuses a required stable handle if unavailable. This fallback depends on no
 competing reaper or SIGCHLD changes. Restart does not trust a stored numeric PID:
 there is no automatic adoption/signaling path. A leader pidfd does not identify or
-contain descendants. Rootless execution supports single-process commands and opt-in
-SDK-mediated direct children. Each mediated child has its own durable identity,
+contain descendants. On Linux the supervisor is the run's child subreaper, set before it
+forks the gate, and the run's family is the leader, its SDK children and its verified
+descendants, at most 256 members. Discovery runs every interval and in every stop, over the
+`children` list of every thread of every member and of the supervisor, or a scan of `/proc`
+where the kernel keeps no such lists, which `doctor` names. The supervisor forks nothing but
+its gates, so a child of the supervisor that is not one of them, and was not there at EXEC,
+is an orphan of this run. Orphans are reaped by their own PID, never by a wait for any child.
+Elsewhere rootless execution supports single-process commands and opt-in SDK-mediated
+direct children. Each mediated child has its own durable identity,
 verified handle and launch barrier. The shared parent resource envelope covers the
 whole family, with each live usage counted once. Uncertainty in any registered child
 prevents family release.
 
-Arbitrary forked descendants are unsupported by the rootless backends, and no
-actuator reaches one: signals go only through the leader's or a mediated child's own
-verified handle. Every interval the supervisor counts, read-only, the processes outside the
-run's verified family: the leaf's members in Full, the leader's direct children from its
-`/proc` task lists in Tracked. When it finds more than before it reports
-`single_process_violated` with the count in its status, `explain` and the run's outcome,
-once per new count. Those processes are not measured as own work and never stepped, so
-their CPU counts as the owner's unmanaged use beside the run (FR-082). A descendant is acted on only when it is verified: its pidfd is
-opened before its parent chain to the launched process is read, it is confirmed
-alive through that pidfd afterwards, its user and group IDs match the run's, and it
-is acted on only through that pidfd, so a reused PID is never acted on. A descendant
+No actuator reaches a process outside the verified family: signals go only through the
+leader's, a mediated child's or a verified descendant's own handle. Every interval the
+supervisor counts, read-only, the processes outside the run's verified family: the leaf's
+members in Full, and in Tracked the descendants that failed a check or are past the bound.
+When it finds more than before it reports `single_process_violated` with the count and the
+reason (`ids_differ`, `chain_unconfirmed`, `over_bound`) in its status, `explain` and the
+run's outcome. Those processes are not measured as own work and never stepped (FR-082). A
+descendant is acted on only when it is verified: its pidfd is opened before its parent chain
+is read; the chain leads to a member, or to the supervisor for an orphan; it is confirmed
+alive through that pidfd afterwards; and its real, effective and saved user and group IDs
+match the run's. It is acted on only through that pidfd, or for `oom_score_adj` through its
+`/proc` directory checked against its start time, so a reused PID is never acted on. A
+verified family is measured as own work: CPU summed over its members (a member that exits
+counts up to its last sample), memory by the members' summed proportional set size, and GPU
+memory and compute per process, so none of it is the owner's unmanaged use (FR-085). In
+Tracked a stop reaches every member and repeats discovery until a pass finds no new member,
+at most three passes; a member that joins while the family is stopped is stopped at once,
+and continue reaches every member past one that fails. Each member's `oom_score_adj`
+baseline is its own value when it joins, or its parent member's when it started while the
+run was marked (FR-086, FR-023). A descendant
 that leaves the tree, changes its user or group IDs (for example by running a setuid
 program) or cannot be confirmed is never acted on. A call that accepts only a thread ID,
 such as CPU affinity, is allowed on a verified member's thread only when the member's pidfd
@@ -684,8 +700,17 @@ exec: SIGKILL for Opportunistic work, so no copy runs uncontrolled beside a repl
 and SIGCONT for Guaranteed work, so it is never left stopped. The supervisor handles
 SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining, and a supervisor
 that reattaches under the cgroup backend thaws a leaf whose journal records no pause,
-after verifying the leaf's membership (FR-078). Any uncertain surviving allocation
-remains reserved until verified reconciliation, even if its task is replay-safe.
+after verifying the leaf's membership against the family (FR-078). The parent-death signal
+reaches only the leader and SDK children: in Full the other members stay in the leaf, kept
+for reconciliation; in Tracked they cannot be found again, and a member an off phase had
+stopped stays stopped. Any uncertain surviving allocation remains reserved until verified
+reconciliation, even if its task is replay-safe.
+
+A run ends when its leader exits: members still alive get SIGTERM, then SIGKILL after
+`term_grace_ms`, in both classes, and the outcome counts them as `members_ended`. A drain
+signals the leader first and SIGKILLs members still alive after the grace; a leader that
+exits during a drain leaves its members to the drain's deadline, with no second grace
+(FR-087). Processes outside the family outlive the run, and in Full keep its leaf nonempty.
 
 SIGTERM, SIGINT and a restart stop the agent and leave its supervisors running; the next
 agent re-adopts them, retrying on later intervals while a supervisor lives, in replay

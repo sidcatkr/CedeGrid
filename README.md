@@ -220,16 +220,30 @@ cedegrid --config /path/to/test-node.toml supervise /path/to/job.json
 cedegrid --config /path/to/test-node.toml executions
 ```
 
-Rootless v1 supports a single-process command with `single_process: true` and
-`no_escape: true`, or explicitly mediated children created through the Python or TypeScript SDK's
-`spawn_managed` with a configured `managed_child_limit`. Arbitrary forks, background
-children and daemonization are outside the contract. The common case is PyTorch's
-`DataLoader` with `num_workers` above 0, whose worker processes are forks: CedeGrid does not
-measure them as own work or step them, so under contention the leader is held back for its
-workers' CPU while they run on. The supervisor reports such processes as
-`single_process_violated` with their count, and acts on none of them. Use `num_workers=0`,
-or start helpers through `spawn_managed`. Every mediated child has its
-own verified handle and durable launch barrier; a leader handle is not containment.
+On Linux a rootless run is its command and every process it forks that stays in its family.
+The supervisor is the run's child subreaper, and a forked descendant whose parent chain,
+liveness and user and group IDs check out joins the run's verified family. The family is
+measured as own work (CPU summed over its members, memory by their summed proportional set
+size, GPU per process) and stepped together: a stop reaches every member, those forked during
+it included. PyTorch's `DataLoader` with `num_workers` above 0 and Python `multiprocessing`
+work this way. A descendant that fails a check, for example after running a setuid program,
+or that is past the bound of 256 members, is reported as `single_process_violated` with its
+count and reason and is never acted on. Elsewhere a run is a single process
+(`single_process: true`) or has children created through the Python or TypeScript SDK's
+`spawn_managed` with a configured `managed_child_limit`; forks there are outside the
+contract and reported the same way. Every mediated child has its own verified handle and
+durable launch barrier; a leader handle is not containment.
+
+A run ends when its leader exits. Members still alive then get SIGTERM, then SIGKILL after
+`term_grace_ms`, in both classes, and the outcome counts them as `members_ended`. So a job
+script that starts a server in the background (`server & ...`) ends it with the script, and
+a script that starts work in the background must end with `wait`, or it exits at once and
+its work is ended with it. A process meant to outlive its run is started as its own run. A
+drain signals the leader first, so the workload can stop its own workers; members still
+alive after the grace get SIGKILL. Processes outside the family outlive the run, and in Full
+they keep its cgroup leaf nonempty. In Tracked, a helper that starts and exits between two
+discoveries is not counted as own CPU. Under the subreaper an orphan's `getppid()` is the
+supervisor, not 1.
 Agent-managed stdout/stderr retain bounded 4 MiB prefixes per stream while excess
 output is drained. Standalone `supervise` retains its original stream behavior.
 GPU execution requires fresh NVML attribution and post-exit release confirmation;
@@ -241,7 +255,12 @@ expiry. Agent-managed supervisors receive fenced authority updates and independe
 enforce authorized deadlines. Guaranteed commands retain their configured continuity
 contract on coordinator disconnection. A dead supervisor cannot enforce its own
 deadlines: surviving or uncertain reservations remain charged until verified
-reconciliation, without adopting or signaling a persisted numeric PID.
+reconciliation, without adopting or signaling a persisted numeric PID. Its parent-death
+signal (SIGKILL for Opportunistic work, SIGCONT for Guaranteed work) reaches only the leader
+and SDK children. In Full the run's other members stay in its leaf, kept for
+reconciliation. In Tracked they cannot be found again, since acting on them needs the
+supervisor's verified chain, and a member that an off phase had stopped stays stopped.
+PyTorch `DataLoader` workers exit on their own when their parent dies.
 
 Cgroup settings require an existing explicitly delegated subtree and authorized
 control names. Missing required controls fail before user execution. Nonempty cgroups
