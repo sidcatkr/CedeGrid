@@ -1193,6 +1193,26 @@ mod tests {
         );
     }
 
+    /// Own RAM counts shared memory: `Pss_Anon` and `Pss_Shmem` from `smaps_rollup`, and a
+    /// leaf's `anon` and `shmem` from `memory.stat`, without its page cache (TEL-2).
+    #[test]
+    fn own_ram_counts_shared_memory() {
+        let rollup = "Rss:  9000 kB\nPss:  8000 kB\nPss_Anon:  2048 kB\nPss_File:  4096 kB\nPss_Shmem:  3072 kB\n";
+        assert_eq!(own_memory_from_rollup(rollup), Some(5));
+        // An older kernel lists no Pss_Shmem.
+        assert_eq!(own_memory_from_rollup("Pss_Anon:  2048 kB\n"), Some(2));
+        assert_eq!(own_memory_from_rollup("Pss_Shmem:  3072 kB\n"), None);
+        let leaf = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::write(
+            leaf.path().join("memory.stat"),
+            "anon 5242880\nfile 104857600\nkernel 1048576\nshmem 2097152\nanon_thp 0\n",
+        )
+        .unwrap();
+        assert_eq!(leaf_memory_mib(leaf.path()), Some(7));
+        std::fs::write(leaf.path().join("memory.stat"), "file 104857600\n").unwrap();
+        assert_eq!(leaf_memory_mib(leaf.path()), None);
+    }
+
     fn gpu_sample(pid: u32, timestamp: u64, sm_util: u32) -> ProcessUtilizationSample {
         ProcessUtilizationSample {
             pid,

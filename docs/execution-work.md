@@ -30,7 +30,7 @@ Published model inputs use a node-local SHA cache and read-only hardlinks into p
 
 Managed stdout/stderr each retain at most 4 MiB while independent readers continue draining excess bytes. Each mediated child has separate bounded logs. No workload output is mixed with launch identity or agent control messages.
 
-GPU execution requires complete NVML compute/graphics process APIs, one explicitly admitted GPU UUID and verified context absence after process exit. GPU memory budgets remain admission policies, never hard partitions or a zero-interference promise. Managed memory subtraction uses anonymous PSS on Linux; other platforms subtract a conservative zero lower bound without claiming zero actual use.
+GPU execution requires complete NVML compute/graphics process APIs, one explicitly admitted GPU UUID and verified context absence after process exit. GPU memory budgets remain admission policies, never hard partitions or a zero-interference promise. Managed memory subtraction uses anonymous and shared-memory PSS on Linux, or under the cgroup backend the leaf's anonymous and shared memory from `memory.stat`; other platforms subtract a conservative zero lower bound without claiming zero actual use.
 
 ## Validation and remaining native evidence
 

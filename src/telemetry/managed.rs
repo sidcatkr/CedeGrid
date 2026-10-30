@@ -671,7 +671,20 @@ impl ManagedCollector {
                     quantization,
                     old.first,
                 )?;
-                let ram_mib = anonymous_memory_mib(id.pid)?;
+                // Own RAM: the leaf's anonymous and shared memory where the leaf was read with only
+                // own members, children it holds included, else the process's anonymous and shared
+                // pages; a child the leaf already counts adds none (TEL-2).
+                let leaf_read = end_reads
+                    .get(&record.assignment_id)
+                    .is_some_and(|end| end.1.is_some());
+                let ram_mib = if leaf_counted {
+                    0
+                } else {
+                    match leaf_path(record).filter(|_| leaf_read) {
+                        Some(leaf) => leaf_memory_mib(leaf)?,
+                        None => own_memory_mib(id.pid)?,
+                    }
+                };
                 let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources)?;
                 // Upper bounds: the rate over the process's own interval plus
                 // quantization, and resident memory including shared pages.
@@ -1366,23 +1379,47 @@ pub(super) fn cpu_counter_quantization_ms() -> Option<u64> {
     }
 }
 
+/// A process's own memory from its `smaps_rollup`: its proportional share of anonymous and
+/// shared memory pages (shared memory, tmpfs and `/dev/shm` mappings), in MiB rounded down so
+/// the subtracted managed usage never exceeds the evidence (TEL-2).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn own_memory_from_rollup(text: &str) -> Option<u64> {
+    let field = |name: &str| -> Option<u64> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next())?
+            .parse::<u64>()
+            .ok()
+    };
+    // Kernels before 5.7 list no Pss_Shmem; their shared pages are unattributed.
+    let kib = field("Pss_Anon:")?.checked_add(field("Pss_Shmem:").unwrap_or(0))?;
+    Some(kib / 1024)
+}
+
+/// A leaf's own memory from its `memory.stat`: anonymous and shared memory (`anon`, `shmem`), in
+/// MiB rounded down. Unlike `memory.current` it leaves out reclaimable page cache, which host
+/// used memory leaves out too (TEL-2).
+pub(super) fn leaf_memory_mib(leaf: &std::path::Path) -> Option<u64> {
+    let stat = std::fs::read_to_string(leaf.join("memory.stat")).ok()?;
+    let field = |name: &str| -> Option<u64> {
+        stat.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    };
+    Some(field("anon")?.checked_add(field("shmem")?)? / MIB)
+}
+
 #[cfg(target_os = "linux")]
-fn anonymous_memory_mib(pid: u32) -> Option<u64> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
-    let anon = text
-        .lines()
-        .find_map(|l| l.strip_prefix("Pss_Anon:"))
-        .and_then(|v| v.split_whitespace().next())?
-        .parse::<u64>()
-        .ok()?;
-    // Floor ensures the subtracted managed usage does not exceed the evidence.
-    Some(anon / 1024)
+fn own_memory_mib(pid: u32) -> Option<u64> {
+    own_memory_from_rollup(&std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn anonymous_memory_mib(_pid: u32) -> Option<u64> {
-    // No matching anonymous attribution on this backend. Zero is a known safe
-    // lower bound for subtraction, not a claim that the process uses no RAM.
+fn own_memory_mib(_pid: u32) -> Option<u64> {
+    // No matching attribution on this backend. Zero is a known safe lower bound
+    // for subtraction, not a claim that the process uses no RAM.
     Some(0)
 }
 
