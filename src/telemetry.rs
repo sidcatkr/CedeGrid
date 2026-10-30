@@ -418,18 +418,13 @@ impl Collector {
         self.managed_pids = identities.keys().copied().collect();
         self.managed_identities = identities;
     }
+    /// A process's GPU memory per device. A device whose accounting is unknown has no entry,
+    /// so only that reading is unknown and CPU and RAM keep theirs (TEL-5).
     pub fn gpu_usage(
         &self,
         pid: u32,
         requested: &crate::model::Resources,
-    ) -> Option<BTreeMap<String, u64>> {
-        if requested
-            .gpu_memory_mib
-            .keys()
-            .any(|id| !self.gpu_accounting_known.contains(id))
-        {
-            return None;
-        }
+    ) -> BTreeMap<String, u64> {
         // Include detected undeclared contexts so the agent can reject envelope
         // violations. CUDA visibility remains an advisory execution setting.
         let mut usage = self
@@ -440,7 +435,8 @@ impl Collector {
         for id in requested.gpu_memory_mib.keys() {
             usage.entry(id.clone()).or_default();
         }
-        Some(usage)
+        usage.retain(|id, _| self.gpu_accounting_known.contains(id));
+        usage
     }
 
     /// Read a snapshot without sleeping. Calls faster than the OS sampling
@@ -2224,19 +2220,25 @@ mod tests {
             gpu_memory_mib: BTreeMap::from([("GPU-bad".into(), 200)]),
             ..Default::default()
         };
-        assert_eq!(collector.gpu_usage(42, &good).unwrap()["GPU-good"], 123);
-        assert!(collector.gpu_usage(42, &bad).is_none());
+        assert_eq!(collector.gpu_usage(42, &good)["GPU-good"], 123);
+        // A device of unknown accounting has no entry; only that reading is unknown (TEL-5).
+        assert!(!collector.gpu_usage(42, &bad).contains_key("GPU-bad"));
+        let both = crate::model::Resources {
+            gpu_memory_mib: BTreeMap::from([("GPU-good".into(), 200), ("GPU-bad".into(), 200)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            collector.gpu_usage(42, &both),
+            BTreeMap::from([("GPU-good".into(), 123)])
+        );
         assert!(
             collector
                 .gpu_usage(7, &crate::model::Resources::default())
-                .unwrap()
                 .is_empty()
         );
         // Known but undeclared contexts still reach the envelope checker.
         assert_eq!(
-            collector
-                .gpu_usage(42, &crate::model::Resources::default())
-                .unwrap()["GPU-good"],
+            collector.gpu_usage(42, &crate::model::Resources::default())["GPU-good"],
             123
         );
     }

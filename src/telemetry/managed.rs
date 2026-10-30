@@ -685,7 +685,7 @@ impl ManagedCollector {
                         None => own_memory_mib(id.pid)?,
                     }
                 };
-                let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources)?;
+                let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources);
                 // Upper bounds: the rate over the process's own interval plus
                 // quantization, and resident memory including shared pages.
                 let upper_cpu = cpu_usage_upper_bound(

@@ -83,9 +83,32 @@ impl<'a> Interval<'a> {
                         self.first_observed_gpus
                             .extend(charge.gpu_memory_mib.keys().cloned());
                     }
-                    self.next
-                        .last_observed
-                        .insert(allocation.id.clone(), observed.clone());
+                    // A requested device missing from the observation has unknown attribution:
+                    // it is charged at max(request, last known) as unknown own usage, while CPU
+                    // and RAM keep their readings (TEL-5).
+                    let mut kept = observed.clone();
+                    for (uuid, requested) in &allocation.requested.gpu_memory_mib {
+                        if observed.gpu_memory_mib.contains_key(uuid) {
+                            continue;
+                        }
+                        let last = prev
+                            .last_observed
+                            .get(&allocation.id)
+                            .and_then(|last| last.gpu_memory_mib.get(uuid))
+                            .copied();
+                        let held = last.unwrap_or(0).max(*requested);
+                        charge.gpu_memory_mib.insert(uuid.clone(), held);
+                        let unknown = self
+                            .unknown_charge
+                            .gpu_memory_mib
+                            .entry(uuid.clone())
+                            .or_default();
+                        *unknown = unknown.saturating_add(held);
+                        if let Some(last) = last {
+                            kept.gpu_memory_mib.insert(uuid.clone(), last);
+                        }
+                    }
+                    self.next.last_observed.insert(allocation.id.clone(), kept);
                 } else {
                     let last = prev.last_observed.get(&allocation.id);
                     charge = Resources::charge(&charge, last);

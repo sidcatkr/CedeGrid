@@ -1866,16 +1866,66 @@ fn codes(decision: &Decision, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// GPU attribution unknown for one allocation, its device's entry missing from the
+/// observation, keeps its CPU and RAM readings: neither holds for it, while the device's
+/// memory charges it at max(request, last known) as unknown own usage, so its external usage
+/// is not inflated and GPU admission holds (FR-008, TEL-5).
+#[test]
+fn unknown_gpu_attribution_keeps_the_cpu_and_ram_readings() {
+    use cedegrid::contention::ResourceKey;
+    let mut job = allocation(
+        "job",
+        AllocationPhase::Running,
+        resources(1000, 1000, 2000),
+        Some(resources(1000, 1000, 3000)),
+    );
+    let input = |job: &Allocation| PolicyInput {
+        allocations: vec![job.clone()],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let snap = gpu_snapshot();
+    let mut engine = PolicyEngine::new();
+    engine.evaluate(&config(), &snap, &input(&job), 0).unwrap();
+    job.observed.as_mut().unwrap().gpu_memory_mib.clear();
+    let decision = engine
+        .evaluate(&config(), &snap, &input(&job), 500)
+        .unwrap();
+    for key in ["cpu", "ram"] {
+        assert!(
+            !codes(&decision, key).contains(&"allocation_unknown_hold".to_string()),
+            "{key}: {:?}",
+            codes(&decision, key)
+        );
+    }
+    let gpu = &decision.resources[&ResourceKey::GpuMemory("GPU-test".into())];
+    // 6000 MiB used on the device, the job's last known 3000 MiB of it own.
+    assert_eq!(gpu.external, Some(3000), "{gpu:?}");
+    assert!(
+        decision.resources[&ResourceKey::GpuCompute("GPU-test".into())]
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission.code() == Some("gpu_observation_unknown")),
+        "{:?}",
+        decision.resources[&ResourceKey::GpuCompute("GPU-test".into())].admission
+    );
+}
+
 #[test]
 fn d1_first_observation_is_a_baseline_not_external_growth() {
     // A fresh engine sees 300 MiB of driver/context memory on an otherwise empty
     // device before its own task has allocated anything.
+    // A known device with nothing allocated reads 0 MiB; a missing entry would be unknown.
+    let none_yet = || Resources {
+        gpu_memory_mib: BTreeMap::from([("GPU-test".into(), 0)]),
+        ..resources(0, 0, 0)
+    };
     let mut input = PolicyInput {
         allocations: vec![allocation(
             "mine",
             AllocationPhase::Running,
             resources(0, 0, 4000),
-            Some(resources(0, 0, 0)),
+            Some(none_yet()),
         )],
         ..Default::default()
     };
@@ -1893,7 +1943,7 @@ fn d1_first_observation_is_a_baseline_not_external_growth() {
         "second",
         AllocationPhase::Running,
         resources(0, 0, 4000),
-        Some(resources(0, 0, 0)),
+        Some(none_yet()),
     ));
     let second = engine
         .evaluate(&config(), &large_gpu_snapshot(600, vec![]), &input, 1000)
