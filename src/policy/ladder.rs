@@ -83,6 +83,7 @@ impl<'a> Interval<'a> {
         for (uuid, budget) in &budgets {
             self.plan_gpu_compute(uuid, budget);
         }
+        self.hold_unbudgeted_gpu_compute(&budgets);
         self.gpu_compute_budget = budgets;
         self.note_reversals();
         self.collect_actions();
@@ -108,6 +109,22 @@ impl<'a> Interval<'a> {
                 .copied()
                 .unwrap_or(now);
             self.next.allocation_unknown_since.insert(id.clone(), start);
+        }
+    }
+
+    /// A device without a compute budget this interval, its telemetry unknown or the device
+    /// missing, keeps each GPU compute step as it was while the allocation is there (FR-008).
+    fn hold_unbudgeted_gpu_compute(&mut self, budgets: &BTreeMap<String, GpuComputeBudget>) {
+        let (input, prev) = (self.input, self.prev);
+        for ((id, key), state) in &prev.ladder {
+            let ResourceKey::GpuCompute(uuid) = key else {
+                continue;
+            };
+            if !budgets.contains_key(uuid) && input.allocations.iter().any(|a| &a.id == id) {
+                self.next
+                    .ladder
+                    .insert((id.clone(), key.clone()), state.clone());
+            }
         }
     }
 

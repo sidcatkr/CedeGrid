@@ -3922,6 +3922,45 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
     assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
 }
 
+/// While device telemetry is unknown (here a missing process list), GPU compute caps and
+/// pauses hold rather than being lifted (FR-008, GPU-3).
+#[test]
+fn gpu_compute_steps_hold_while_device_telemetry_is_unknown() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    for (mode, expected) in [(Neutral, YieldStep::Cap), (YieldFirst, YieldStep::Pause)] {
+        let (cfg, mut known) = us5_device(mode, Active, Some(vec![987]), Some(8000), false);
+        known.gpus[0].compute_sample_id = Some(1);
+        let mut unknown = known.clone();
+        unknown.gpus[0].external_process_ids = None;
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(100, 100, 2000),
+                Some(resources(100, 100, 2000)),
+            )],
+            facts: rootless(&["job"]),
+            ..PolicyInput::default()
+        };
+        let step = |decision: &Decision| {
+            decision
+                .actions
+                .iter()
+                .find(|a| a.resource == key)
+                .map(|a| (a.step, a.target))
+        };
+        let mut engine = PolicyEngine::new();
+        let first = step(&engine.evaluate(&cfg, &known, &input, 0).unwrap());
+        assert_eq!(first.map(|s| s.0), Some(expected), "{mode:?}");
+        for i in 1..6u64 {
+            let held = engine.evaluate(&cfg, &unknown, &input, i * 500).unwrap();
+            assert_eq!(step(&held), first, "{mode:?} at {}", i * 500);
+        }
+    }
+}
+
 /// Takes the measured GPU compute path from the first measured interval, for tests
 /// of that path; the quiet window's hysteresis has its own test.
 fn measured_at_once(cfg: &mut Config) {
