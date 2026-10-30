@@ -85,6 +85,13 @@ def profile_settings(profile,node,agent,mode,ram_floor_mib,cpus,host_cpus,probe_
     return node,agent,placement
 
 
+def agent_argv(binary,output,cpus):
+    """The agent starts on its scope's CPUs wherever the harness runs: it pins itself to its
+    configured affinity and refuses one outside the set it starts with."""
+    return ['taskset','-c',','.join(map(str,cpus)),str(binary),'--config',str(output/'node.toml'),
+        'agent','--deployment',str(output/'agent.toml')]
+
+
 def step_timing(history,assignments,onset_unix,ended_unix=None):
     """Per resource, from `cedegrid history` rows: seconds from the demand onset to
     the first step on own work and to own usage at or below the target share, and
@@ -293,7 +300,7 @@ def run(args):
             except Exception:
                 if time.monotonic()>deadline:raise
                 time.sleep(.1)
-        services['agent']=OwnedProcess([str(binary),'--config',str(output/'node.toml'),'agent','--deployment',str(output/'agent.toml')],manager,output/'agent.log',env)
+        services['agent']=OwnedProcess(agent_argv(binary,output,cpus),manager,output/'agent.log',env)
         deadline=time.monotonic()+30
         while not latest or not latest.get('nodes'):
             if time.monotonic()>deadline:raise TimeoutError('agent did not register')

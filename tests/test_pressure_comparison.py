@@ -202,6 +202,11 @@ class GateRunnerTests(unittest.TestCase):
         self.assertEqual(placement['coordinator_and_harness_cpus'],[2,3])
         self.assertEqual(node['contention'],{'default_mode':'neutral'},'the input stays unchanged')
 
+    def test_the_agent_starts_on_its_scope_wherever_the_harness_runs(self):
+        argv=comparison.agent_argv(Path('/opt/cedegrid'),Path('/run'),[2,3])
+        self.assertEqual(argv[:3],['taskset','-c','2,3'])
+        self.assertEqual(argv[3:],['/opt/cedegrid','--config','/run/node.toml','agent','--deployment','/run/agent.toml'])
+
     @staticmethod
     def fake_host(root,nice=0,scope='protected.scope'):
         proc=root/'proc';cgroup=root/'cgroup';leaf=cgroup/'user.slice'/scope
