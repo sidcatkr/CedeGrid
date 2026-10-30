@@ -1067,8 +1067,10 @@ impl<'a> Interval<'a> {
                     external: frame.external,
                     measurement_known: frame.measurement_known,
                     cause: frame.cause,
-                    // Measured, or credited at the applied duties, as the frame holds it.
-                    usage: Some(frame.share),
+                    // Measured, or under activity of unknown amount credited at the applied
+                    // duties, as the frame holds it.
+                    usage: (budget.own.is_some() || frame.cause == YieldCause::UnknownMeasurement)
+                        .then_some(frame.share),
                     compute_floor: (governing(config, kind) >= ContentionMode::Performance
                         && victim.mode >= ContentionMode::Performance)
                         .then(|| budget.targets.get(&ContentionMode::Neutral))
