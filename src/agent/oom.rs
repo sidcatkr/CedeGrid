@@ -37,8 +37,9 @@ pub(crate) struct Ending<'a> {
 const SIGKILL: i32 = 9;
 
 /// Whether the OOM killer ended the task, and who caused it. A KILL counts as the OOM
-/// killer's only when the leaf's count shows a kill or the host's count rose over the
-/// last samples; a missing count leaves it unclassified (Principle III).
+/// killer's only when the leaf's count shows a kill or, without a leaf count, the host's
+/// count rose over the last samples; a known leaf count decides alone, since any process
+/// can raise the host's (AGT-12). A missing count leaves it unclassified (Principle III).
 pub(crate) fn classify(ending: &Ending) -> OomVerdict {
     if ending.termination_signal != Some(SIGKILL) || ending.supervisor_terminated {
         return OomVerdict::None;
@@ -47,7 +48,7 @@ pub(crate) fn classify(ending: &Ending) -> OomVerdict {
         [first, .., last] => first.zip(*last).is_some_and(|(first, last)| last > first),
         _ => false,
     };
-    if !(host_rose || ending.leaf_oom_kills.is_some_and(|kills| kills > 0)) {
+    if !ending.leaf_oom_kills.map_or(host_rose, |kills| kills > 0) {
         return OomVerdict::None;
     }
     let Some(view) = ending.view else {
@@ -154,10 +155,12 @@ mod tests {
     #[test]
     fn other_endings_are_no_oom_kill() {
         let within = view(14_000);
-        // No rise, another signal, or a missing count: unclassified, a normal outcome.
+        // No rise, another signal, or a missing count: unclassified, a normal outcome. A known
+        // leaf count of 0 overrides a rise of the host's, which any process can cause (AGT-12).
         for (signal, host, leaf) in [
             (KILL, vec![Some(5), Some(5), Some(5)], None),
             (KILL, vec![Some(5), Some(5), Some(5)], Some(0)),
+            (KILL, vec![Some(5), Some(6), Some(6)], Some(0)),
             (15, vec![Some(5), Some(6), Some(6)], None),
             (KILL, vec![None, Some(6), Some(6)], None),
             (KILL, vec![Some(5)], None),

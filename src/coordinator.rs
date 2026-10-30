@@ -1729,9 +1729,16 @@ impl Coordinator {
             )
             .min(maximum);
         let request = self.assignment_request(id)?;
+        // Kills own work did not cause go uncounted up to 3 × max_attempts times, then count as
+        // attempts, so others' growth cannot requeue a task forever (R6).
+        let before = uncounted_attempts(&tx, &task)?;
+        let uncounted = not_own_fault
+            && request
+                .max_attempts
+                .is_none_or(|limit| before < 3 * u64::from(limit));
         // This receipt is not written yet.
         let counted =
-            counted_attempts(&tx, &task, generation)?.saturating_sub(u64::from(not_own_fault));
+            counted_attempts(&tx, &task, generation)?.saturating_sub(u64::from(uncounted));
         let attempts_available = request
             .max_attempts
             .is_none_or(|limit| counted < u64::from(limit));
@@ -1764,7 +1771,7 @@ impl Coordinator {
             "INSERT INTO failure_receipts(assignment_id,failure_kind) VALUES (?1,?2)",
             params![
                 id,
-                if not_own_fault {
+                if uncounted {
                     "oom_not_own_fault"
                 } else if yielded {
                     "yielded"
@@ -2535,12 +2542,16 @@ fn db(value: u64) -> Result<i64> {
 /// Attempts that count against `max_attempts`: every generation but those an
 /// out-of-memory kill own work did not cause ended (FR-076).
 fn counted_attempts(connection: &rusqlite::Connection, task: &str, generation: u64) -> Result<u64> {
-    let uncounted = connection.query_row(
+    Ok(generation.saturating_sub(uncounted_attempts(connection, task)?))
+}
+
+/// The task's generations that an out-of-memory kill own work did not cause ended, uncounted.
+fn uncounted_attempts(connection: &rusqlite::Connection, task: &str) -> Result<u64> {
+    Ok(connection.query_row(
         "SELECT COUNT(*) FROM failure_receipts f JOIN assignments a USING(assignment_id) WHERE a.task_id=?1 AND f.failure_kind='oom_not_own_fault'",
         [task],
         |r| row_u64(r, 0),
-    )?;
-    Ok(generation.saturating_sub(uncounted))
+    )?)
 }
 
 fn row_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {

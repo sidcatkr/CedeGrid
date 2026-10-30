@@ -4503,6 +4503,78 @@ fn an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt() {
     );
 }
 
+/// Kills own work did not cause requeue without an attempt up to 3 × `max_attempts` times;
+/// the next counts as an attempt, so others' growth cannot requeue a task forever (FR-076, R6).
+#[test]
+fn uncounted_oom_requeues_stop_at_three_times_max_attempts() {
+    use cedegrid::contention::YieldCause;
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    let mut t = task("oom");
+    t.max_attempts = Some(1);
+    c.handle_at(
+        &Principal::Operator,
+        Request::Submit {
+            job: JobSpec {
+                job_id: "oom-job".into(),
+                pool_id: "pool".into(),
+                priority: 0,
+                tasks: vec![t],
+            },
+        },
+        100,
+    )
+    .unwrap();
+    let mut now = 100;
+    let mut statuses = Vec::new();
+    for _ in 0..4 {
+        now += 1_000_000;
+        let a = offers(&mut c, now).assignments.remove(0);
+        authorize(&mut c, &a, now);
+        let mut r = report(now + 1);
+        r.launch_slots = 0;
+        r.allocations.push(AllocationReport {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            phase: RemotePhase::Released,
+            observed: None,
+            detail: "verified release".into(),
+            yield_cause: Some(YieldCause::OomNotOwnFault),
+            hint_ready: None,
+            observes_drain: None,
+        });
+        c.handle_at(&node(), Request::Heartbeat { report: r }, now + 1)
+            .unwrap();
+        c.handle_at(
+            &node(),
+            Request::Fail {
+                assignment_id: a.request.assignment_id.clone(),
+                generation: a.generation,
+                detail: "killed by an out-of-memory condition it did not cause".into(),
+                failure_kind: FailureKind::Yielded,
+                yield_cause: Some(YieldCause::OomNotOwnFault),
+            },
+            now + 1,
+        )
+        .unwrap();
+        let Response::Status { tasks, .. } = c
+            .handle_at(
+                &Principal::Operator,
+                Request::Status { job_id: None },
+                now + 2,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        statuses.push(tasks[0].status);
+    }
+    use cedegrid::state::TaskStatus::*;
+    assert_eq!(statuses, [Queued, Queued, Queued, NeedsReconciliation]);
+}
+
 /// A stale node report stops renewals and new offers for that node but never drains it;
 /// leases expire as usual. Freshness is the agent's monotonic age of its sample when the
 /// report carries one, so wall clocks seconds apart do not matter (FR-079).
