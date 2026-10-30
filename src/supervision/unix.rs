@@ -1285,15 +1285,39 @@ pub(super) fn supervise(
         let mut term_sent_at: Option<Instant> = None;
         let mut term_unavailable = false;
         let mut control_failing = false;
+        // An error in the supervisor's own bookkeeping holds the run and is retried, reported
+        // once per failing spell; it is not a reason to drain (030, R3).
+        let mut bookkeeping_failing = false;
+        let hold = |result: Result<()>, failing: &mut bool| match result {
+            Ok(()) => *failing = false,
+            Err(error) => {
+                if !std::mem::replace(failing, true) {
+                    report(
+                        "supervision_held",
+                        &request.assignment_id,
+                        format!("{error:#}"),
+                    );
+                }
+            }
+        };
         let mut killed = false;
         let mut kill_at = None;
         let mut leader_status = None;
         let mut leader_exit_ms = None;
         loop {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            if leader_status.is_none()
-                && let Some(status) = owned.try_wait()?
-            {
+            let waited = if leader_status.is_none() {
+                match owned.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        hold(Err(error), &mut bookkeeping_failing);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(status) = waited {
                 leader_status = Some(status);
                 leader_exit_ms = Some(elapsed);
                 // Continue any stopped mediated child so it can stop cleanly.
@@ -1416,7 +1440,7 @@ pub(super) fn supervise(
                     );
                     Ok(())
                 };
-                server.poll(
+                let polled = server.poll(
                     &actual,
                     accepting,
                     journal,
@@ -1425,7 +1449,8 @@ pub(super) fn supervise(
                     options,
                     &gpu_release,
                     &mut authorize_child,
-                )?;
+                );
+                hold(polled, &mut bookkeeping_failing);
             }
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
             {

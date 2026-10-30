@@ -496,6 +496,37 @@ impl ChildServer {
         gpu: &crate::telemetry::GpuReleaseGuard,
     ) -> Result<()> {
         let mut failures = vec![];
+        // Children get their drain file, then TERM, before KILL, as on the normal path
+        // (research R3): a supervisor error is no reason to skip a cooperative stop.
+        let live = |c: &&mut MediatedChild| c.phase != ChildPhase::Released && !c.owned.reaped;
+        for child in self.children.values_mut().filter(live) {
+            if let Err(error) = child.drain.notify() {
+                failures.push(format!("{error:#}"));
+            }
+        }
+        for (wait, signal) in [
+            (options.drain_timeout_ms, Some(libc::SIGTERM)),
+            (options.term_grace_ms, None),
+        ] {
+            let until = Instant::now() + Duration::from_millis(wait);
+            while Instant::now() < until {
+                let mut running = false;
+                for child in self.children.values_mut().filter(live) {
+                    running |= !matches!(child.owned.try_wait(), Ok(Some(_)));
+                }
+                if !running {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if let Some(signal) = signal {
+                for child in self.children.values_mut().filter(live) {
+                    if let Err(error) = child.owned.signal(signal) {
+                        failures.push(format!("{error:#}"));
+                    }
+                }
+            }
+        }
         let deadline = Instant::now() + Duration::from_millis(options.release_confirm_timeout_ms);
         for child in self
             .children

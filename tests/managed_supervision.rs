@@ -568,6 +568,11 @@ struct InjectJournal {
     stage: u8,
     pause: Option<std::path::PathBuf>,
 }
+
+thread_local! {
+    /// Stage 4: how many child release transitions still fail.
+    static RELEASE_FAILURES: std::cell::Cell<u8> = const { std::cell::Cell::new(2) };
+}
 impl ExecutionJournal for InjectJournal {
     fn reserve(&self, r: &LaunchRequest, c: &Resources) -> anyhow::Result<ExecutionRecord> {
         self.store.reserve(r, c)
@@ -633,6 +638,13 @@ impl ExecutionJournal for InjectJournal {
             !(self.stage == 2 && p == ManagedChildPhase::Authorized),
             "injected child authorization persistence failure"
         );
+        if self.stage == 4 && p == ManagedChildPhase::Released {
+            let left = RELEASE_FAILURES.with(|left| left.get());
+            if left > 0 {
+                RELEASE_FAILURES.with(|failures| failures.set(left - 1));
+                anyhow::bail!("injected transient child release persistence failure");
+            }
+        }
         self.store.transition_managed_child(c, p, e, s, d)
     }
 }
@@ -2207,5 +2219,49 @@ while not (d/'child.pid').exists():
     assert!(
         dir.path().join("drained").exists(),
         "the child drained on its own"
+    );
+}
+
+/// A failure in the supervisor's own bookkeeping, here a child's journal transition, holds the
+/// run and is retried; it never drains the leader (030, R3).
+#[test]
+fn a_bookkeeping_failure_holds_and_retries_instead_of_draining() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let journal = InjectJournal {
+        store: StateStore::open(&dir.path().join("state")).unwrap(),
+        stage: 4,
+        pause: None,
+    };
+    let mut request = request(
+        dir.path(),
+        r#"
+import sys,time
+from pathlib import Path
+from cedegrid import spawn_managed
+child=spawn_managed([sys.executable,'-c','pass'],single_process=True,no_escape=True)
+child.wait(timeout=10,poll_interval=.01)
+time.sleep(0.3)
+Path('leader-done').write_text('1')
+"#,
+    );
+    request.class = AllocationClass::Opportunistic;
+    let outcome = supervision::supervise(
+        &request,
+        &request.resources,
+        &options(),
+        &journal,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+    )
+    .unwrap();
+    assert_eq!((outcome.exit_code, outcome.yielded), (Some(0), false));
+    assert!(
+        dir.path().join("leader-done").exists(),
+        "the leader ran to its end"
+    );
+    assert_eq!(
+        journal.store.managed_children("family-attempt").unwrap()[0].phase,
+        ManagedChildPhase::Released,
+        "the release transition went through on a retry"
     );
 }

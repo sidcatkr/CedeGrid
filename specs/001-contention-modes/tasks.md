@@ -1323,8 +1323,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 - [X] T294 [P] Write a failing test: a log-capture quota or write error does not close the workload's pipe; the workload keeps writing, and the outcome counts dropped bytes; the spool reservation is taken in chunks, per Constitution II (SUP-2) (contradicts)
 - [X] T295 Read and discard after a capture error and reserve in chunks in `src/supervision/unix.rs` and `src/publication.rs`, until T294 passes (SUP-2) (contradicts)
-- [ ] T296 [P] Write failing tests: a child server `accept` error, a `try_wait` error and a failed child journal transition hold the step and report; `logs.finish` failing after a clean exit leaves the run completed with the error in the outcome; the error path drains managed children before SIGKILL, per research R3 (R3, SUP-7) (contradicts)
-- [ ] T297 Hold and report bookkeeping errors and drain children on the error path in `src/supervision/unix.rs` and `src/child_supervision.rs`, until T296 passes (R3, SUP-7) (contradicts)
+- [X] T296 [P] Write failing tests: a child server `accept` error, a `try_wait` error and a failed child journal transition hold the step and report; `logs.finish` failing after a clean exit leaves the run completed with the error in the outcome; the error path drains managed children before SIGKILL, per research R3 (R3, SUP-7) (contradicts)
+- [X] T297 Hold and report bookkeeping errors and drain children on the error path in `src/supervision/unix.rs` and `src/child_supervision.rs`, until T296 passes (R3, SUP-7) (contradicts)
 - [ ] T298 [P] Write a failing test: with the supervisor's stderr closed, a failing Allowance, SaveProgress or Query reply does not panic the supervisor (AGT-9) (contradicts)
 - [ ] T299 Route every supervisor message through the `report` helper in `src/supervision/unix.rs`, until T298 passes (AGT-9) (contradicts)
 
