@@ -2546,6 +2546,27 @@ mod tests {
         );
     }
 
+    /// Full before item 031: a worker the leader forked outside the SDK is in the leaf but
+    /// not in the verified family, so the leaf reading is refused and the worker's CPU is
+    /// left to the owner's unmanaged use, while the leaf's limits still cover it.
+    #[test]
+    fn a_forked_worker_in_the_leaf_refuses_the_leaf_reading() {
+        let stat = "usage_usec 500000\n";
+        let (leader, worker) = ("10\n20\n", "20\n10\n");
+        let family = BTreeSet::from([10]);
+        assert!(
+            leaf_reading_with(
+                leaf_files(vec![leader, worker], stat),
+                10,
+                &family,
+                4,
+                MS,
+                |_| Some(1)
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn a_family_member_inside_the_leaf_is_counted_once_by_the_leaf() {
         let parents = BTreeMap::from([
