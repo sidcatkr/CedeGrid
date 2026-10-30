@@ -85,11 +85,15 @@ def profile_settings(profile,node,agent,mode,ram_floor_mib,cpus,host_cpus,probe_
     return node,agent,placement
 
 
+def on_scope(argv,cpus):
+    """A process that runs on the scope starts there wherever the harness runs: the agent pins
+    itself to its configured affinity, and the protected load and the probe to their CPUs, and
+    each refuses CPUs outside the set it starts with."""
+    return ['taskset','-c',','.join(map(str,cpus)),*argv]
+
+
 def agent_argv(binary,output,cpus):
-    """The agent starts on its scope's CPUs wherever the harness runs: it pins itself to its
-    configured affinity and refuses one outside the set it starts with."""
-    return ['taskset','-c',','.join(map(str,cpus)),str(binary),'--config',str(output/'node.toml'),
-        'agent','--deployment',str(output/'agent.toml')]
+    return on_scope([str(binary),'--config',str(output/'node.toml'),'agent','--deployment',str(output/'agent.toml')],cpus)
 
 
 def step_timing(history,assignments,onset_unix,ended_unix=None):
@@ -321,7 +325,7 @@ def run(args):
                     if managed:
                         task=probe_task(task_id,argv,manager,worker_env,args.mode,args.gpu_uuid)
                         client.submit(task_id,run_id,[task]);case['task_id']=task_id
-                    else:children['probe']=OwnedProcess(argv,manager,folder/'probe.log',env)
+                    else:children['probe']=OwnedProcess(on_scope(argv,cpus),manager,folder/'probe.log',env)
                     deadline=time.monotonic()+60
                     while not (probe/'ready.json').exists():
                         if time.monotonic()>deadline:raise TimeoutError('probe readiness was not achieved')
@@ -339,7 +343,7 @@ def run(args):
                         'limits':{'min_ram_free_bytes':16*1024**3,'min_disk_free_bytes':16*1024**3,'max_output_bytes':256*1024**2}}
                     atomic_json(folder/'pressure.json',pressure)
                     case['pressure_started_unix']=time.time();case['pressure_started_monotonic']=time.monotonic()
-                    children['protected']=OwnedProcess([str(python),str(manager/'tools/pressure.py'),'--config',str(folder/'pressure.json'),'--execute'],manager,folder/'pressure.log',env)
+                    children['protected']=OwnedProcess(on_scope([str(python),str(manager/'tools/pressure.py'),'--config',str(folder/'pressure.json'),'--execute'],cpus),manager,folder/'pressure.log',env)
                     case['protected_identity']=children['protected'].identity
                     case['protected_snapshots']={'before':protected_snapshot(children['protected'].child.pid)}
                 deadline=time.monotonic()+65

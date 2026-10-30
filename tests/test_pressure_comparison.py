@@ -206,6 +206,8 @@ class GateRunnerTests(unittest.TestCase):
         argv=comparison.agent_argv(Path('/opt/cedegrid'),Path('/run'),[2,3])
         self.assertEqual(argv[:3],['taskset','-c','2,3'])
         self.assertEqual(argv[3:],['/opt/cedegrid','--config','/run/node.toml','agent','--deployment','/run/agent.toml'])
+        # The protected load and the unmanaged probe start there too.
+        self.assertEqual(comparison.on_scope(['python','probe.py'],[2,3]),['taskset','-c','2,3','python','probe.py'])
 
     @staticmethod
     def fake_host(root,nice=0,scope='protected.scope'):
