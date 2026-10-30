@@ -1420,3 +1420,44 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T366 Add the new reason codes to the catalog in `src/contention.rs` and `docs/guarantees.md` (`single_process_violated`, `config_reloaded`, `config_reload_refused`, `report_stale`, `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`) (missing)
 - [X] T367 Compare the decision snapshots before and after Phase 24 and record each class of change (missing)
 - [ ] T368 Run 5 again on the test host beside the light and saturating GPU users, in Performance and Neutral, after the GPU fixes, with the commands in `native-gates.md`. *Deferred: needs the user's typed approval in this session.* Per FR-021 and SC-005 (missing)
+
+## Phase 25: Convergence (item 031)
+
+Multi-process families (spec Session 2026-10-31; plan "Item 031"), in item 031's order. Each part: a failing test first, then the code, one commit per group; Linux tests get their red and green runs in the Docker Linux check, batched per group. T228, T339 and T368 stay as they are.
+
+**Group A: membership (FR-083, FR-084)**
+
+- [ ] T369 [P] Write failing Linux tests: the supervisor is its run's child subreaper; a leader that forks 4 CPU-busy children (plain `fork` and `multiprocessing`) reports a family of 5 through the new `family` report, all verified in Principle I's order (pidfd, chain, alive, real/effective/saved IDs); a child that forks a grandchild and exits leaves an orphan that joins with the supervisor as its chain root and is reaped by its own PID with no zombie left; a descendant of an SDK child joins that child's family; the leader's exit status is never taken by the orphan reaper; with 300 descendants 256 are tracked and the rest reported `over_bound` with no fd exhaustion, per FR-083 (missing)
+- [ ] T370 [P] Write failing unit tests with a fake identity source: a descendant whose IDs differ is never signalled and is reported `ids_differ`; an unconfirmed chain is reported `chain_unconfirmed`; a discovery read error holds and is reported once, never drains; the ppid scan stands in when no `children` file exists, per FR-083 (missing)
+- [ ] T371 Build the family in `src/supervision/unix.rs` and `src/supervision.rs` (subreaper, discovery each duty period and in every stop, verification, orphans, reaping by PID, the 256 bound, SDK children's descendants, the `family` report, the module comment), until T369 and T370 pass, per FR-083 and R34–R36, R39 (missing)
+- [ ] T372 [P] Write failing tests: on Linux the rootless launch accepts a multi-process command with any `single_process` value; on other platforms the single-process or bounded-SDK-children contract is still required, per FR-084 (missing)
+- [ ] T373 Relax the Linux launch contract in `src/rootless.rs` and `src/supervision/unix.rs`, until T372 passes, per FR-084 (missing)
+
+**Group B: measurement (FR-085)**
+
+- [ ] T374 [P] Write failing tests: in Full the leaf reading is used with forked workers once they are family members (the pin `a_forked_worker_in_the_leaf_refuses_the_leaf_reading` turned around); in Tracked the family's CPU is the sum of its members' deltas; workers sharing a large copy-on-write buffer with the leader read about one buffer by summed PSS; verified descendants' GPU memory and compute count as own and are not the owner's unmanaged use, so a 4-worker family in Performance lands at the target beside a synthetic external principal and the leader is not held at the minimum duty, per FR-085 (missing)
+- [ ] T375 Measure families as own work in `src/telemetry/managed.rs`, `src/telemetry.rs` and `src/agent/service.rs` from the reported members, until T374 passes, per FR-085 and R37 (missing)
+
+**Group C: actuation in Tracked (FR-086)**
+
+- [ ] T376 [P] Write failing Linux tests: a stop reaches every member and a member forked during a stop is stopped by the pass loop or at the latest the next interval; continue reaches every member when one member's signal fails, which is reported; a member that exits is dropped without error; each member's `oom_score_adj` baseline is restored and the preferred-victim value reaches new members, per FR-086 and FR-023 (missing)
+- [ ] T377 Stop, continue and set `oom_score_adj` on the whole family in `src/actuation.rs` and `src/supervision/unix.rs`, until T376 passes, per FR-086 and R38 (missing)
+
+**Group D: run end and drains (FR-087, FR-078)**
+
+- [ ] T378 [P] Write failing Linux tests: the leader exits while 2 workers run on, and both get SIGTERM, then SIGKILL after the grace, the outcome counts them in `members_ended`, and the run ends; a drain signals the leader first and SIGKILLs members still alive after the grace, per FR-087 (missing)
+- [ ] T379 End leftover members at leader exit and after a drain's grace in `src/supervision/unix.rs` and `src/supervision.rs`, until T378 passes, per FR-087 (missing)
+
+**Group E: reporting (FR-082)**
+
+- [ ] T380 [P] Write failing tests: status and `explain` show the family size (leader, SDK children, descendants) through the `family_members` note; `outside_family` carries its reason, per FR-082 (missing)
+- [ ] T381 Carry the family into `AllocationFacts`, note `family_members`, and add `outside_family`'s reason in `src/agent.rs`, `src/agent/service.rs`, `src/policy/admission.rs`, `src/contention.rs` and `docs/guarantees.md`, until T380 passes, per FR-082 (missing)
+
+**Docs, snapshots, cost and the native gate**
+
+- [ ] T382 Update `docs/guarantees.md` and `README.md` for families: descendants measured and stepped on Linux, leftovers ended at leader exit (a job script's background server, a closing `wait`), a dead supervisor's members (Full keeps the leaf, Tracked cannot find them again, DataLoader workers exit with their parent), and the single-process contract elsewhere; `docs/worker-protocol.md` where it names that contract, per FR-078, FR-084 and FR-087 (missing)
+- [ ] T383 Compare the decision snapshots with those at `dca282c` and record each class of change (missing)
+- [ ] T384 Record the held-back table with a 4-worker family against a single process of the same total demand in Performance; own throughput should match, per plan "Item 031" 6 (missing)
+- [ ] T385 Rerun the own-efficiency gate (029) locally with a family of 16 members of about 50 threads each, and report the cost of discovery and of PSS reads per interval; apply R35's fallback order if over budget, per plan "Item 031" 7 (missing)
+- [ ] T386 Add exact commands to `specs/001-contention-modes/native-gates.md` for the test host, in Tracked and Full: a `multiprocessing` stand-in with a shared buffer, and a `DataLoader(num_workers=4)` loop where PyTorch is present, per plan "Item 031" 7 (missing)
+- [ ] T387 Run T386's native gate on the test host. *Deferred: needs the user's typed approval in this session, asked together with T368.* (missing)
