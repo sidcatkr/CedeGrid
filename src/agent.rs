@@ -27,6 +27,7 @@ use std::{
 };
 
 mod client;
+mod history;
 mod launch;
 mod oom;
 mod publishing;

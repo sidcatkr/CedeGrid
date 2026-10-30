@@ -237,6 +237,8 @@ struct AgentLoop<'a> {
     host_checked: bool,
     /// Bounds the launch preparations that run at once.
     launch_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Which journal records each iteration reads (FR-081).
+    history: super::history::HistoryScope,
 }
 
 impl AgentLoop<'_> {
@@ -869,7 +871,10 @@ impl AgentLoop<'_> {
             {
                 continue;
             }
-            if upgrade_attempt_held(&self.store, &record.assignment_id)? {
+            if self
+                .history
+                .upgrade_held(&self.store, &record.assignment_id)?
+            {
                 continue;
             }
             if let Ok(bytes) = crate::publication::read_bounded(
@@ -1308,7 +1313,6 @@ impl AgentLoop<'_> {
     /// refusals and start newly offered assignments.
     async fn heartbeat(
         &mut self,
-        records: &[ExecutionRecord],
         snapshot: &crate::model::Snapshot,
         allocations: &[crate::model::Allocation],
         decision: &crate::model::Decision,
@@ -1550,13 +1554,13 @@ impl AgentLoop<'_> {
                 for id in acknowledged {
                     self.refusals.remove(&id);
                 }
-                let journaled = self.store.executions()?;
                 for assignment in reply.assignments {
                     let id = assignment.request.assignment_id.clone();
+                    let journaled = self.store.execution_record(&id)?.is_some();
                     if remote_drains.contains(&id)
                         && !self.slots.contains_key(&id)
                         && !self.preparations.contains_key(&id)
-                        && !journaled.iter().any(|r| r.assignment_id == id)
+                        && !journaled
                     {
                         ensure!(
                             !config.storage_profile.is_replayable(),
@@ -1573,7 +1577,7 @@ impl AgentLoop<'_> {
                     if self.slots.contains_key(&id)
                         || self.preparations.contains_key(&id)
                         || self.refusals.contains_key(&id)
-                        || records.iter().any(|r| r.assignment_id == id)
+                        || journaled
                     {
                         continue;
                     }
@@ -1834,7 +1838,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         .iter()
         .map(|slot| slot.assignment.request.assignment_id.clone())
         .collect();
-    let _ = reconcile_guarded(config, &attached_ids, namespace_guard.clone())?;
+    let _ = reconcile_guarded(config, &attached_ids, namespace_guard.clone(), false)?;
     let mut client = NodeClient::new(
         agent,
         &config.state_dir,
@@ -1870,6 +1874,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     let observation_interval = Duration::from_millis(config.monitor.interval_ms);
     let mut next_observation = start;
     let mut stop_signal = Box::pin(shutdown_signal());
+    let history = super::history::HistoryScope::new(&store, &config.state_dir)?;
     let mut state = AgentLoop {
         config,
         agent,
@@ -1901,6 +1906,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         floor_warnings: BTreeSet::new(),
         host_checked: false,
         launch_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(LAUNCH_CONCURRENCY)),
+        history,
     };
     for slot in attached {
         state
@@ -1923,10 +1929,20 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             mark = state.cost.charge("collect", mark);
             state.service_slots().await?;
             mark = state.cost.charge("slots", mark);
-            let records = state.store.executions()?;
-            collect_released_spool(config, &state.store, &records, &state.publishing)?;
+            let records = state.history.records(
+                &state.store,
+                state.slots.keys().chain(state.preparations.keys()),
+            )?;
+            collect_released_spool(
+                config,
+                &state.store,
+                &state.history,
+                &records,
+                &state.publishing,
+            )?;
             state.retire_slots(&records)?;
             state.recover_outbox(&records)?;
+            state.history.settle(&config.state_dir);
             state.cost.charge("records", mark);
             // Observation charges its own stages.
             let (snapshot, allocations, mut decision) = state.observe(&records).await?;
@@ -1936,9 +1952,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             mark = state.cost.charge("actuate", mark);
             state.store.append_observation(&snapshot, &decision)?;
             mark = state.cost.charge("store", mark);
-            state
-                .heartbeat(&records, &snapshot, &allocations, &decision)
-                .await?;
+            state.heartbeat(&snapshot, &allocations, &decision).await?;
             state.cost.charge("heartbeat", mark);
             state.cost.iteration();
             if let Some(report) = state.cost.take_report(Instant::now()) {
@@ -2060,21 +2074,10 @@ async fn shutdown_signal() {
     }
 }
 
-fn upgrade_attempt_held(store: &StateStore, assignment: &str) -> Result<bool> {
-    let exists: bool = store.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='upgrade_attempt_holds')", [], |r| r.get(0))?;
-    if !exists {
-        return Ok(false);
-    }
-    Ok(store.connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM upgrade_attempt_holds WHERE assignment_id=?1)",
-        [assignment],
-        |r| r.get(0),
-    )?)
-}
-
 fn collect_released_spool(
     config: &Config,
     store: &StateStore,
+    history: &super::history::HistoryScope,
     records: &[ExecutionRecord],
     publishing: &BTreeSet<(String, bool)>,
 ) -> Result<()> {
@@ -2082,7 +2085,7 @@ fn collect_released_spool(
         .iter()
         .filter(|r| r.phase == ExecutionPhase::Released)
     {
-        if upgrade_attempt_held(store, &record.assignment_id)?
+        if history.upgrade_held(store, &record.assignment_id)?
             || publishing.iter().any(|(id, _)| id == &record.assignment_id)
         {
             continue;

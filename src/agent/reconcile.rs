@@ -303,7 +303,7 @@ pub(super) fn reattached_steps(
 
 fn reconcile_unlocked(config: &Config, exclude: &BTreeSet<String>) -> Result<Vec<ExecutionRecord>> {
     let guard = Namespace::new(&config.state_dir)?.acquire(None, Duration::from_secs(30))?;
-    reconcile_guarded(config, exclude, guard)
+    reconcile_guarded(config, exclude, guard, true)
 }
 
 pub(super) fn reconcile_agent_owned<'a>(
@@ -316,18 +316,19 @@ pub(super) fn reconcile_agent_owned<'a>(
     // Retain that ownership until the JoinHandle is harvested, including when a
     // completed preparation is waiting for the next service-loop iteration.
     let owned = running.chain(preparing).cloned().collect();
-    reconcile_guarded(config, &owned, guard)
+    reconcile_guarded(config, &owned, guard, false)
 }
 
 pub(super) fn reconcile_guarded(
     config: &Config,
     exclude: &BTreeSet<String>,
     guard: NamespaceGuard,
+    history: bool,
 ) -> Result<Vec<ExecutionRecord>> {
     crate::backup::ensure_runnable_state(&config.state_dir)?;
     let store = open_existing_node_store_guarded(config, guard)?;
-    for mut record in store.executions()? {
-        if record.phase == ExecutionPhase::Released || exclude.contains(&record.assignment_id) {
+    for mut record in store.active_executions()? {
+        if exclude.contains(&record.assignment_id) {
             continue;
         }
         // A verifiably live supervisor owns its journal; rewriting it would turn its
@@ -400,5 +401,10 @@ pub(super) fn reconcile_guarded(
         };
         store.transition(&record)?;
     }
-    store.executions()
+    // The node's own callers need only unreleased work; the operator command gets it all.
+    if history {
+        store.executions()
+    } else {
+        store.active_executions()
+    }
 }
