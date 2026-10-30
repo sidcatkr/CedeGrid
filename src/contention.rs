@@ -458,6 +458,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "CPU busy time is unavailable, so CPU admission is blocked.",
     ),
     (
+        "cpu_unknown_fair_share_hold",
+        "CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view.",
+    ),
+    (
         "ram_usage_unknown",
         "Available RAM is unknown, so RAM admission is blocked.",
     ),

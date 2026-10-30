@@ -193,9 +193,10 @@ impl<'a> Interval<'a> {
         let (config, input, now) = (self.config, self.input, self.now);
         let kind = key.kind();
         let held = self.next.unknown_since.contains_key(&key);
-        let measurement_known =
-            !held
-                || self.next.unknown_since.get(&key).is_some_and(|start| {
+        // Unknown CPU with no view to hold to never escalates (FR-022).
+        let measurement_known = !held
+            || !(kind == ResourceKind::Cpu && self.cpu_unviewed)
+                && self.next.unknown_since.get(&key).is_some_and(|start| {
                     now.saturating_sub(*start) >= unknown_window(config, kind)
                 });
         let gpu_unknown = matches!(&key, ResourceKey::GpuMemory(uuid) if self.blocked_gpus.contains(uuid))

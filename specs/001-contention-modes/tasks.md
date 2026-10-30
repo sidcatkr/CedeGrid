@@ -1354,8 +1354,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 6: policy (FR-008, FR-022)**
 
-- [ ] T318 [P] Write failing policy tests: CPU unknown in Performance holds own CPU at Neutral's fair share of the last known view with one more principal (`cpu_unknown_fair_share_hold`); with no view yet no new step is taken; Yield First and Neutral keep budget 0, per FR-008 and FR-022 (POL-1) (contradicts)
-- [ ] T319 Keep the last known CPU view and apply the unknown hold in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T318 passes, per FR-022 (POL-1) (contradicts)
+- [X] T318 [P] Write failing policy tests: CPU unknown in Performance holds own CPU at Neutral's fair share of the last known view with one more principal (`cpu_unknown_fair_share_hold`); with no view yet no new step is taken; Yield First and Neutral keep budget 0, per FR-008 and FR-022 (POL-1) (contradicts)
+- [X] T319 Keep the last known CPU view and apply the unknown hold in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T318 passes, per FR-022 (POL-1) (contradicts)
 - [ ] T320 [P] Write failing tests: Performance pauses only a cap the supervisor reports at the minimum duty (`cap_at_minimum_duty`), with own usage above the fair share, per FR-022 (POL-2) (contradicts)
 - [ ] T321 Report the minimum duty from `src/actuation.rs` through the supervisor events and use it in `src/contention.rs` `plan_step`, until T320 passes, per FR-022 (POL-2) (contradicts)
 - [ ] T322 [P] Write failing tests: while RAM is held, the last memory fair share keeps in-share own memory protected at a breach others caused, and the save-progress request goes out when protection applies, per FR-023 and FR-075 (POL-3) (contradicts)

@@ -2534,6 +2534,99 @@ fn lost_cpu_telemetry_holds_for_the_unknown_window_then_escalates() {
     assert!(after.would_drain.is_empty());
 }
 
+/// While CPU telemetry is unknown, Performance holds own CPU at Neutral's fair share of the
+/// last known view with the unknown as one more principal, and never steps below it; with no
+/// view yet it takes no new step. Yield First and Neutral keep a CPU budget of 0 (FR-008,
+/// FR-022).
+#[test]
+fn unknown_cpu_in_performance_holds_the_fair_share_of_the_last_view() {
+    use cedegrid::contention::{ContentionMode, YieldCause, YieldStep};
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "a",
+            AllocationPhase::Running,
+            resources(5000, 0, 0),
+            Some(resources(5000, 0, 0)),
+        )],
+        facts: rootless(&["a"]),
+        ..Default::default()
+    };
+    let mode = |mode: ContentionMode| {
+        let mut cfg = config();
+        cfg.cpu.reserve_physical_cores = 0;
+        cfg.contention.default_mode = mode;
+        cfg
+    };
+    let cfg = mode(ContentionMode::Performance);
+    let interval = cfg.monitor.interval_ms;
+    let window = u64::from(
+        cfg.contention
+            .thresholds(cedegrid::contention::ResourceKind::Cpu)
+            .unknown_window_intervals,
+    ) * interval;
+    // Own 5000m beside 2000m external, unsaturated: the view the hold comes from.
+    let mut known = snapshot();
+    known.cpu_busy_millicores = Some(7000);
+    let mut lost = known.clone();
+    lost.cpu_busy_millicores = None;
+    let held = |decision: &cedegrid::model::Decision| {
+        decision
+            .reason_codes
+            .iter()
+            .any(|r| r.code == "cpu_unknown_fair_share_hold")
+    };
+
+    let mut engine = PolicyEngine::new();
+    let first = engine.evaluate(&cfg, &known, &input, 0).unwrap();
+    assert!(first.actions.is_empty() && !held(&first));
+    // 8000m between own work, the 2000m external demand and the unknown: 3000m each beside it.
+    let mut now = interval;
+    while now <= window {
+        let decision = engine.evaluate(&cfg, &lost, &input, now).unwrap();
+        assert_eq!(decision.managed_budget.cpu_millicores, 3000, "t={now}");
+        assert!(held(&decision), "t={now}");
+        assert!(decision.actions.is_empty(), "t={now}: steps hold");
+        now += interval;
+    }
+    let mut capped = false;
+    for _ in 0..20 {
+        let decision = engine.evaluate(&cfg, &lost, &input, now).unwrap();
+        assert_eq!(decision.managed_budget.cpu_millicores, 3000, "t={now}");
+        for action in &decision.actions {
+            assert_eq!(
+                (action.step, action.cause),
+                (YieldStep::Cap, YieldCause::UnknownMeasurement),
+                "t={now}"
+            );
+            assert!(action.target >= Some(3000), "t={now}: {action:?}");
+            capped = true;
+        }
+        assert!(decision.would_drain.is_empty());
+        now += interval;
+    }
+    assert!(capped, "own work above the hold is capped to it");
+
+    // No view yet: no new step, however long CPU stays unknown.
+    let mut engine = PolicyEngine::new();
+    for step in 0..3 * window / interval {
+        let decision = engine
+            .evaluate(&cfg, &lost, &input, step * interval)
+            .unwrap();
+        assert_eq!(decision.managed_budget.cpu_millicores, 0);
+        assert!(decision.actions.is_empty(), "t={}", step * interval);
+    }
+
+    // Yield First and Neutral keep a budget of 0 while CPU is unknown.
+    for chosen in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+        let cfg = mode(chosen);
+        let mut engine = PolicyEngine::new();
+        engine.evaluate(&cfg, &known, &input, 0).unwrap();
+        let decision = engine.evaluate(&cfg, &lost, &input, interval).unwrap();
+        assert_eq!(decision.managed_budget.cpu_millicores, 0, "{chosen:?}");
+        assert!(!held(&decision), "{chosen:?}");
+    }
+}
+
 /// One CPU principal for the snapshot.
 fn cpu_principal(uid: u32, is_owner: bool, cpu_millicores: u64) -> PrincipalUsage {
     PrincipalUsage {
