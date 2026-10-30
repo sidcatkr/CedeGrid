@@ -306,6 +306,51 @@ back more.
   unknown for that interval, and while launching refuses that launch (reviewer decision A on
   report 027, run 2).
 
+### Session 2026-10-30
+
+- Q: What happens to a run's work when its supervisor dies? → A: Before exec the worker gate sets
+  a parent-death signal: SIGKILL for Opportunistic work, which without its supervisor can be
+  neither controlled nor drained and whose expired lease would let a second copy start beside
+  it, and SIGCONT for Guaranteed work. The supervisor handles SIGTERM, SIGINT and SIGHUP by
+  releasing its runtime steps and draining first. Under the cgroup backend a reattaching
+  supervisor thaws a leaf whose journal records no Pause, after verifying membership (reviewer
+  decision 1 on report 030-1, with 028 Decision 1).
+- Q: What does the coordinator do with a stale node report? → A: It grants no renewals and offers
+  no new work for that node, and drains happen only when leases expire. Freshness is the agent's
+  own monotonic age of the sample when it sends the report, not a comparison of two wall clocks
+  (reviewer decision 2 on report 030-1).
+- Q: What happens to running work when the agent stops or restarts? → A: SIGTERM, SIGINT and
+  restarts leave supervisors running for re-adoption, and an explicit operator drain still drains
+  everything. A configuration reload applies a mode change without a restart. Re-adoption is
+  retried on later iterations while a supervisor lives, and replay mode re-adopts too. Keeping
+  leases through a longer outage is out of scope (reviewer decision 3 on report 030-1).
+- Q: How does Performance treat own CPU while CPU telemetry is unknown? → A: In Performance and
+  Aggressive own CPU is held at Neutral's fair share, counting the unknown as one active
+  principal, as for GPU activity of unknown amount; with no fair share known yet, no new step is
+  taken. Yield First and Neutral keep a CPU budget of 0 (reviewer decision 4 on report 030-1).
+- Q: How much node history does the agent keep and report? → A: Fixed constants: a heartbeat
+  reports unreleased executions plus the last 256 released ones; observations keep the last
+  24 h, with a row cap; an attempt's directory is removed after its outcome receipt and
+  publication garbage collection; per-iteration work loads only unreleased and not-yet-reclaimed
+  records (reviewer decision 5 on report 030-1).
+- Q: How is a run that forks outside the SDK detected? → A: Every interval the supervisor checks
+  for processes outside the run's verified family: leaf members in Full, the leader's children in
+  Tracked. It reports `single_process_violated` in the status, `explain` and the outcome, and the
+  README states the limit, naming PyTorch DataLoader workers as the common case. Whether CedeGrid
+  measures and steps verified descendants is a separate decision (item 030, R1).
+- Q: How does a stop that drains keep the loop's pace? → A: The agent spreads the stop's drains
+  over iterations so that no iteration exceeds the 1 s cadence, and leases and heartbeats keep
+  their pace; the burst test's bound covers the whole run, stop included (reviewer decision A on
+  report 029, Decision 1).
+- Q: How do held CPU caps return once contention has ended? → A: Once the quiet count says
+  contention has ended, held CPU caps are raised straight to the mode's target in one move, as the
+  allowance already is; own usage, not only the target, returns within 3 s of the contender
+  stopping, in Yield First and Performance (reviewer decision A on report 029, Decision 2).
+- Q: How is GPU compute measured beside another GPU user? → A: Each process counts at its share of
+  the whole interval, so time it was stopped counts as idle; a remainder within the rounding, one
+  point per listed process, is not a principal; a disagreement beyond the tolerance still reads
+  unknown (reviewer decision A on report 029, Decision 4).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -659,7 +704,15 @@ node reports with the expected per-resource values at each step.
   the unknown policy. Other devices are unaffected.
 - **The per-node authority restarts while supervisors keep running.** Supervisors hold their
   current step. Steps are re-established once the authority returns, and no allocation is
-  terminated only because the authority restarted.
+  terminated only because the authority restarted. SIGTERM, SIGINT and a configuration reload
+  leave supervisors running too; only an explicit operator drain drains everything (FR-080).
+- **A run's supervisor dies.** Opportunistic work ends with it, through the parent-death signal;
+  Guaranteed work continues (FR-078).
+- **A rootless single-process run forks helpers outside the SDK** (for example PyTorch
+  DataLoader workers). The run is reported as `single_process_violated`; the helpers are not in
+  the verified family and are never acted on (FR-082).
+- **A node report arrives stale.** The coordinator grants and offers nothing for that node until
+  a fresh report, and drains nothing because of it; leases expire as usual (FR-079).
 - **The coordinator is unreachable.** The existing lease rules apply. Local graduated yielding
   continues.
 - **A worker ignores hints.** After the bounded wait, the ladder escalates to drain, then to
@@ -756,7 +809,8 @@ node reports with the expected per-resource values at each step.
   allocation's or resource's admission and steps. In every mode it MUST first hold the current
   step and block expansion. It MAY escalate only after a bounded, configurable unknown window,
   and MUST NOT by itself drain unrelated work. In Performance and Aggressive, compute escalation
-  stops at FR-022's fair-share limit.
+  stops at FR-022's fair-share limit, and unknown CPU telemetry holds own CPU at Neutral's fair
+  share (FR-022); Yield First and Neutral keep a CPU budget of 0 while CPU is unknown.
 - **FR-009**: GPU memory headroom MUST account for memory the device reserves for itself.
 - **FR-010**: Each external GPU context MUST be classified as quiet, active or unknown. Quiet
   requires positive evidence over a sustained, configurable window of healthy observation.
@@ -907,13 +961,15 @@ node reports with the expected per-resource values at each step.
   memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
   the granularity, is documented. External GPU compute MUST be measured, in thousandths of
-  device time, from each external process's average fresh per-process utilization, capped at
+  device time, from each external process's fresh per-process utilization over the whole
+  interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%, when the summed per-process utilization of all processes is within
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
   utilization over the same interval. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
-  the part nobody accounts for being one unattributed principal; with own processes only, the
-  remainder is own work. External GPU compute MUST be measured as zero, without fresh samples,
+  the part nobody accounts for being one unattributed principal, except a remainder within the
+  rounding (one point per listed process), which is not a principal; with own processes only,
+  the remainder is own work. External GPU compute MUST be measured as zero, without fresh samples,
   for an interval in which the compute and the graphics process queries both succeed, at least
   one PID is listed and every listed PID is an own verified PID (checked through its pidfd, with
   no PID 0 or unresolvable entry), no MPS control daemon or server is present, device utilization
@@ -950,7 +1006,9 @@ node reports with the expected per-resource values at each step.
     with own usage still above the fair share may pause, for at most one monitor interval, before
     returning to the cap;
   - while external activity of unknown amount exists, hold own work to Neutral's fair share,
-    counting that activity as one active principal.
+    counting that activity as one active principal;
+  - while CPU telemetry is unknown, hold own CPU at Neutral's fair share, counting the unknown as
+    one active principal, and with no fair share known yet take no new step.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
   Yield First ≤ Neutral ≤ Performance. Configuration enforces it by construction: the margins
   are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance,
@@ -1098,9 +1156,11 @@ node reports with the expected per-resource values at each step.
   the allowance, up to 32 new assignments; in the other modes the agent adds one worker per CPU
   and RAM cooldown. Launches and lease requests MUST NOT hold the node's observation, heartbeat or
   telemetry past the monitor interval; lease requests go as one batch per iteration (FR-074).
-  On CPU in Yield First and Neutral, once every contending external principal (background does
-  not count) has stayed below `principal_min_percent` for `principal_window_intervals`, the next
-  scale-up is one move to the uncontended target, without waiting for the mode's interval.
+  On CPU in every mode, once every contending external principal (background does not count)
+  has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
+  one move to the uncontended target, without waiting for the mode's interval, for the allowance
+  and for held caps alike, so own usage, not only the target, returns within 3 s of the
+  contender stopping.
   Quiet intervals count each principal's usage and this interval's unattributed external
   estimate, not the window's, against the larger of `principal_min_percent` of capacity and the
   scope's per-interval measurement band. The
@@ -1133,6 +1193,30 @@ node reports with the expected per-resource values at each step.
   descriptors do not fit under the limit with headroom MUST be refused with a reason. `EMFILE` or
   `ENFILE` MUST NOT end the agent's loop: a failed open while sampling reads as unknown for that
   interval, and a failed open while launching refuses that launch.
+- **FR-078**: Before exec, the worker gate MUST set a parent-death signal: SIGKILL for
+  Opportunistic work and SIGCONT for Guaranteed work, so no own work stays stopped or frozen, and
+  no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
+  supervisor MUST handle SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining
+  first. Under the cgroup backend, a reattaching supervisor MUST thaw a leaf whose journal records
+  no Pause, after verifying the leaf's membership.
+- **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
+  For a report older than the telemetry freshness limit, the coordinator MUST grant no renewals
+  and offer no new work for that node; it MUST NOT drain on that report, and drains happen only
+  when leases expire.
+- **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
+  re-adoption; only an explicit operator drain drains every allocation. The agent MUST reload its
+  configuration on request and apply a mode change without a restart. It MUST retry re-adoption
+  on later iterations while a supervisor lives, in replay mode too. A stop that drains MUST
+  spread its drains over iterations so that no iteration exceeds the 1 s cadence, and leases and
+  heartbeats keep their pace.
+- **FR-081**: Node history MUST be bounded by fixed constants: a heartbeat reports unreleased
+  executions plus the last 256 released ones; observations keep the last 24 h, with a row cap;
+  an attempt's directory is removed after its outcome receipt and publication garbage
+  collection. Per-iteration work MUST load only unreleased and not-yet-reclaimed records.
+- **FR-082**: Every interval, the supervisor MUST check for processes outside the run's verified
+  family: leaf members in Full, the leader's children in Tracked. It MUST report
+  `single_process_violated` in the status, `explain` and the outcome, and act on no process
+  outside the family.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
