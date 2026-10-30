@@ -427,6 +427,38 @@ fn fixture_probe_records_ancestor_limits_effective_sets_and_hierarchy_without_wr
     assert_eq!(fs::read_to_string(leaf.join("cgroup.procs")).unwrap(), "");
 }
 
+/// A CPU the task may run on but that is offline has no `/proc/stat` counter: it is left out
+/// of the CPU set, so CPU telemetry stays known (TEL-4).
+#[test]
+fn an_allowed_but_offline_cpu_is_left_out_of_the_cpu_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let (proc, sys) = (base.join("proc"), base.join("sys"));
+    write(
+        &proc.join("self"),
+        "status",
+        "Name:\tfixture\nCpus_allowed_list:\t0-3\n",
+    );
+    write(&proc.join("sys/kernel"), "osrelease", "6.6.fixture");
+    write(&sys.join("devices/system/cpu"), "online", "0-2\n");
+    let mut collector = KernelCollector::inspect_at(
+        KernelConfig::default(),
+        ProbeRoots {
+            proc: proc.clone(),
+            sys: sys.clone(),
+        },
+    );
+    let snapshot = collector.sample();
+    assert_eq!(snapshot.cpu.allowed_cpu_ids, Some(vec![0, 1, 2, 3]));
+    assert_eq!(snapshot.cpu.effective_cpu_ids, Some(vec![0, 1, 2]));
+    assert_eq!(snapshot.cpu.effective_cpu_capacity_millicores, Some(3000));
+    // Without the online list every allowed CPU stays.
+    fs::remove_file(sys.join("devices/system/cpu/online")).unwrap();
+    let snapshot =
+        KernelCollector::inspect_at(KernelConfig::default(), ProbeRoots { proc, sys }).sample();
+    assert_eq!(snapshot.cpu.effective_cpu_ids, Some(vec![0, 1, 2, 3]));
+}
+
 #[test]
 fn control_metadata_does_not_claim_write_permission_or_enforcement() {
     let temp = tempfile::tempdir().unwrap();

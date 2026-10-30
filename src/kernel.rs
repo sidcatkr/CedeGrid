@@ -1633,17 +1633,23 @@ fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTo
     let effective_cgroup_cpu_ids = hierarchy
         .and_then(|hierarchy| hierarchy.ancestors.first())
         .and_then(|level| level.cpuset_effective.clone());
-    let effective_cpu_ids =
-        allowed_cpu_ids
-            .as_ref()
-            .map(|allowed| match &effective_cgroup_cpu_ids {
-                Some(effective) => allowed
-                    .iter()
-                    .filter(|cpu| effective.contains(cpu))
-                    .copied()
-                    .collect(),
-                None => allowed.clone(),
-            });
+    // A CPU allowed but offline has no /proc/stat counter; without the online list every
+    // allowed CPU stays (TEL-4).
+    let online = read_text(&roots.sys.join("devices/system/cpu/online"))
+        .ok()
+        .and_then(|value| parse_cpu_list(&value).ok());
+    let effective_cpu_ids = allowed_cpu_ids.as_ref().map(|allowed| {
+        allowed
+            .iter()
+            .filter(|cpu| {
+                effective_cgroup_cpu_ids
+                    .as_ref()
+                    .is_none_or(|effective| effective.contains(cpu))
+                    && online.as_ref().is_none_or(|online| online.contains(cpu))
+            })
+            .copied()
+            .collect::<Vec<u32>>()
+    });
     let effective_cpu_capacity_millicores = effective_cpu_ids
         .as_ref()
         .map(|values: &Vec<u32>| (values.len() as u64).saturating_mul(1000));
