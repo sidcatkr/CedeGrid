@@ -170,6 +170,18 @@ pub(super) fn withhold_authorized_pending(
 
 /// Whether one more lease request goes out this iteration: the longest-waiting one always
 /// does, the rest while the budget lasts.
+/// A coordinator request bounded by the loop's budget: a hung or slow coordinator never
+/// holds sampling and local yielding, and a request cut short is sent again next iteration
+/// (lease items, heartbeats and failures are all idempotent) (030, AGT-4).
+async fn bounded<T>(
+    budget: Duration,
+    request: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(budget, request)
+        .await
+        .context("coordinator request exceeded the loop's budget; retried next iteration")?
+}
+
 pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bool {
     sent == 0 || elapsed < budget
 }
@@ -245,6 +257,8 @@ struct AgentLoop<'a> {
     observations_since_prune: u32,
     /// When this iteration's sample was taken.
     sampled_at: Instant,
+    /// How long one coordinator request may hold the loop (030, AGT-4).
+    rpc_budget: Duration,
 }
 
 impl AgentLoop<'_> {
@@ -504,7 +518,12 @@ impl AgentLoop<'_> {
                     }
                 }
                 let requested = Instant::now();
-                match self.client.request_leases(&batch, &dues, interval).await {
+                match bounded(
+                    self.rpc_budget,
+                    self.client.request_leases(&batch, &dues, interval),
+                )
+                .await
+                {
                     Ok(Response::Leases { results }) if results.len() == batch.len() => {
                         for (item, result) in batch.iter().zip(results) {
                             let Some(slot) = self.slots.get_mut(item.assignment_id()) else {
@@ -559,22 +578,23 @@ impl AgentLoop<'_> {
                         continue;
                     };
                     let requested = Instant::now();
-                    let result = self
-                        .client
-                        .request(&Request::Prepared {
+                    let result = bounded(
+                        self.rpc_budget,
+                        self.client.request(&Request::Prepared {
                             assignment_id: record.assignment_id.clone(),
                             generation: record.generation,
                             coordinator_epoch: slot.assignment.coordinator_epoch,
                             record: record.clone(),
-                        })
-                        .await;
+                        }),
+                    )
+                    .await;
                     authorization_reply(slot, requested, result)?;
                 } else {
                     let requested = Instant::now();
                     let due = next_control_due(&mut slot.last_renew, interval);
-                    let result = self
-                        .client
-                        .request_control(
+                    let result = bounded(
+                        self.rpc_budget,
+                        self.client.request_control(
                             &Request::Renew {
                                 assignment_id: slot.assignment.request.assignment_id.clone(),
                                 generation: slot.assignment.generation,
@@ -583,8 +603,9 @@ impl AgentLoop<'_> {
                             },
                             due,
                             interval,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                     renewal_reply(slot, requested, result)?;
                 }
             }
@@ -755,8 +776,9 @@ impl AgentLoop<'_> {
                                 _ => (false, released.clone()),
                             };
                             if matches!(
-                                self.client
-                                    .request(&Request::Fail {
+                                bounded(
+                                    self.rpc_budget,
+                                    self.client.request(&Request::Fail {
                                         assignment_id: id.clone(),
                                         generation: slot.assignment.generation,
                                         detail,
@@ -772,7 +794,8 @@ impl AgentLoop<'_> {
                                                 crate::contention::YieldCause::OomNotOwnFault
                                             ),
                                     })
-                                    .await,
+                                )
+                                .await,
                                 Ok(Response::Ok)
                             ) {
                                 let receipt = slot.output_dir.join("failure.receipt.json");
@@ -1494,10 +1517,12 @@ impl AgentLoop<'_> {
         // Report preparation can cross a scheduled slot. Advance at actual
         // enqueue so the next due time agrees with recorded lateness.
         let due = next_control_due(&mut self.last_heartbeat, interval);
-        match self
-            .client
-            .request_control(&Request::Heartbeat { report }, due, interval)
-            .await
+        match bounded(
+            self.rpc_budget,
+            self.client
+                .request_control(&Request::Heartbeat { report }, due, interval),
+        )
+        .await
         {
             Ok(Response::Heartbeat { reply }) => {
                 self.negotiated.learn(&reply);
@@ -1533,8 +1558,9 @@ impl AgentLoop<'_> {
                     .and_then(|b| serde_json::from_slice::<ExecutionOutcome>(&b).ok())
                     .is_some_and(|o| o.yielded);
                     if matches!(
-                        self.client
-                            .request(&Request::Fail {
+                        bounded(
+                            self.rpc_budget,
+                            self.client.request(&Request::Fail {
                                 assignment_id: id.clone(),
                                 generation: assignment.generation,
                                 detail: detail.clone(),
@@ -1547,7 +1573,8 @@ impl AgentLoop<'_> {
                                 },
                                 yield_cause: None,
                             })
-                            .await,
+                        )
+                        .await,
                         Ok(Response::Ok)
                     ) {
                         let receipt = config
@@ -1922,6 +1949,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         // Prune on the first iteration, then every `OBSERVATIONS_PER_PRUNE`.
         observations_since_prune: OBSERVATIONS_PER_PRUNE - 1,
         sampled_at: start,
+        rpc_budget: observation_interval.max(Duration::from_millis(250)),
     };
     for slot in attached {
         state

@@ -2118,3 +2118,48 @@ mod operator_limits {
         );
     }
 }
+
+/// A coordinator that accepts connections and never answers does not stop the agent's
+/// loop: it keeps sampling (and so yielding) about once per monitor interval, retrying its
+/// requests each iteration (030, AGT-4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hung_coordinator_does_not_stall_sampling() {
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec!["/bin/true".into()],
+        |_| {},
+    )
+    .await;
+    // A listener that takes connections and says nothing, in place of the coordinator.
+    let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = hung.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in hung.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    let deployment = fs::read_to_string(&service.deployment_file).unwrap();
+    let start = deployment.find("https://").unwrap();
+    let end = start + deployment[start..].find('"').unwrap();
+    fs::write(
+        &service.deployment_file,
+        format!(
+            "{}https://{address}{}",
+            &deployment[..start],
+            &deployment[end..]
+        ),
+    )
+    .unwrap();
+    let mut agent = service.agent("hung");
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let _ = agent.kill();
+    let _ = agent.wait();
+    let observations = StateStore::open_read_only(&service.local.config.state_dir)
+        .unwrap()
+        .observations(100)
+        .unwrap()
+        .len();
+    // 400 ms intervals over 6 s: about 15; a loop stalled on one request records one.
+    assert!(observations >= 8, "{observations} observations in 6 s");
+}
