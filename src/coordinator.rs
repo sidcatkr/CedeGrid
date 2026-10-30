@@ -1902,7 +1902,7 @@ impl Coordinator {
         // While the node's last report was stale, nothing is renewed; leases run out (FR-079).
         ensure!(
             seq == 0 || drain || report.fresh_at(received, ttl),
-            "node report is stale; renewals resume with a fresh report"
+            "report_stale: the node's last report is stale; renewals resume with a fresh one"
         );
         if seq == 0 && !drain {
             ensure!(

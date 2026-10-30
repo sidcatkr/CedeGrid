@@ -223,7 +223,12 @@ cedegrid --config /path/to/test-node.toml executions
 Rootless v1 supports a single-process command with `single_process: true` and
 `no_escape: true`, or explicitly mediated children created through the Python or TypeScript SDK's
 `spawn_managed` with a configured `managed_child_limit`. Arbitrary forks, background
-children and daemonization are outside the contract. Every mediated child has its
+children and daemonization are outside the contract. The common case is PyTorch's
+`DataLoader` with `num_workers` above 0, whose worker processes are forks: CedeGrid does not
+measure them as own work or step them, so under contention the leader is held back for its
+workers' CPU while they run on. The supervisor reports such processes as
+`single_process_violated` with their count, and acts on none of them. Use `num_workers=0`,
+or start helpers through `spawn_managed`. Every mediated child has its
 own verified handle and durable launch barrier; a leader handle is not containment.
 Agent-managed stdout/stderr retain bounded 4 MiB prefixes per stream while excess
 output is drained. Standalone `supervise` retains its original stream behavior.

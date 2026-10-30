@@ -458,6 +458,18 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "CPU busy time is unavailable, so CPU admission is blocked.",
     ),
     (
+        "config_reloaded",
+        "The agent applied a reloaded configuration's contention settings from the next interval.",
+    ),
+    (
+        "config_reload_refused",
+        "The agent kept its configuration because the reloaded one needs a restart or could not be read.",
+    ),
+    (
+        "report_stale",
+        "The coordinator renews no lease and offers no work while the node's last report is stale.",
+    ),
+    (
         "single_process_violated",
         "Processes outside the run's verified family were found; they are not measured as own work or stepped.",
     ),

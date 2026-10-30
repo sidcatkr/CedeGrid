@@ -262,6 +262,18 @@ beyond its 2% margin and the agent's measured CPU counts.
 | 7, report 027's run 5, T178 pinned with the other user's contender | `ramp_seconds` 2.668; the contender at its core 0.51 s after it started; `foreign_actions` 0 | pass |
 | 7, report 027's run 6, the return after a 30 s one-core contender, 4 CPUs | Yield First: own work at the contended target in 1 interval; after the contender's last usage the target is back in 1.5 s and own usage at 98% of its usage before in 4.0 s; 273 pause samples, no drain. Performance: the same interval, the target back in 1.0 s, own usage in 6.0 s; 7 pause samples, no drain | SC-002 pass; the target within 3 s, own usage not |
 
+Known limit from run 4: in Performance, own work gains 24% over a fixed half-scope allocation
+and the other user's median stays within 0.02 ms (0.347 ms against 0.325 ms), but their p99
+grows from 0.356 ms to 3.33 ms while capped own tasks share their CPUs: rootless (Tracked)
+caps are duty cycles that stop and resume own work within each period, with 188 CPU step
+changes in 300 s. The loss rule protects the other user's demand and fair share, not their
+tail latency. Keeping own threads off a contended CPU (affinity or `cpu.weight` before a duty
+cycle) and the step churn are left to a later item.
+
+Item 030 changed what rows 5 and 7 measured: GPU compute now counts each process over the
+whole interval with rounding not a principal, and a draining stop spreads its drains over
+intervals (a signal stop no longer drains). Those rows stand as recorded until they run again.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU

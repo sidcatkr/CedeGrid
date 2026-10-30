@@ -530,6 +530,9 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `cpu_capacity_unknown` | The CPU capacity is unknown, so the CPU budget is zero. |
 | `ram_capacity_unknown` | The RAM capacity is unknown, so the RAM budget is zero. |
 | `cpu_usage_unknown` | CPU busy time is unavailable, so CPU admission is blocked. |
+| `config_reloaded` | The agent applied a reloaded configuration's contention settings from the next interval. |
+| `config_reload_refused` | The agent kept its configuration because the reloaded one needs a restart or could not be read. |
+| `report_stale` | The coordinator renews no lease and offers no work while the node's last report is stale. |
 | `single_process_violated` | Processes outside the run's verified family were found; they are not measured as own work or stepped. |
 | `cap_at_minimum_duty` | The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval. |
 | `cpu_unknown_fair_share_hold` | CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view. |
@@ -599,7 +602,12 @@ prevents family release.
 
 Arbitrary forked descendants are unsupported by the rootless backends, and no
 actuator reaches one: signals go only through the leader's or a mediated child's own
-verified handle. A descendant is acted on only when it is verified: its pidfd is
+verified handle. Every interval the supervisor counts, read-only, the processes outside the
+run's verified family: the leaf's members in Full, the leader's direct children from its
+`/proc` task lists in Tracked. When it finds more than before it reports
+`single_process_violated` with the count in its status, `explain` and the run's outcome,
+once per new count. Those processes are not measured as own work and never stepped, so
+their CPU counts as the owner's unmanaged use beside the run (FR-082). A descendant is acted on only when it is verified: its pidfd is
 opened before its parent chain to the launched process is read, it is confirmed
 alive through that pidfd afterwards, its user and group IDs match the run's, and it
 is acted on only through that pidfd, so a reused PID is never acted on. A descendant
@@ -670,8 +678,26 @@ CLI currently combines the caller and supervisor, and has no remote channel. The
 lifecycle reducer distinguishes coordinator disconnection (existing lease unchanged),
 agent failure (opportunistic drain), and supervisor failure (needs reconciliation).
 A dead supervisor cannot enforce deadlines after its own death; no external reaper
-is claimed. Any uncertain surviving allocation remains reserved until verified
-reconciliation, even if its task is replay-safe.
+is claimed. On Linux the worker gate sets a parent-death signal on its own process before
+exec: SIGKILL for Opportunistic work, so no copy runs uncontrolled beside a replacement,
+and SIGCONT for Guaranteed work, so it is never left stopped. The supervisor handles
+SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining, and a supervisor
+that reattaches under the cgroup backend thaws a leaf whose journal records no pause,
+after verifying the leaf's membership (FR-078). Any uncertain surviving allocation
+remains reserved until verified reconciliation, even if its task is replay-safe.
+
+SIGTERM, SIGINT and a restart stop the agent and leave its supervisors running; the next
+agent re-adopts them, retrying on later intervals while a supervisor lives, in replay
+mode too. An explicit operator drain and the end of `max_runtime_seconds` drain every
+allocation, spread over intervals so each one's journal writes fit in 250 ms and leases
+and heartbeats keep their pace. SIGHUP reloads the configuration: contention settings,
+modes included, apply from the next interval (`config_reloaded`); a change to a setting
+that needs a restart keeps the running configuration (`config_reload_refused`) (FR-080).
+
+A node report carries the agent's monotonic age of its sample. While the last report is
+older than `telemetry_ttl_ms`, the coordinator renews no lease and offers no work to that
+node (`report_stale`); it drains nothing on that report, and only lease expiry drains
+(FR-079).
 An agent heartbeat alone cannot renew a coordinator-issued remote lease. Lease
 renewals carry assignment generation and fresh coordinator authorization; receiving
 stale messages cannot extend them. Enforce local durations with monotonic clocks,
@@ -682,6 +708,16 @@ when authorization expires. This distinction is an explicit allocation contract,
 not inferred from a node's name or network location.
 
 ## Results, retries, and storage
+
+Node history is bounded by fixed constants: a heartbeat reports unreleased executions and the
+newest 256 released ones; observations are kept for 24 hours and at most 200,000 rows; an
+attempt's directory is removed once its outcome is receipted and its spool reclaimed, outside
+the reported window. Each interval reads only unreleased and not yet settled runs (FR-081).
+
+A task killed by an out-of-memory condition it did not cause is requeued without an attempt
+up to three times `max_attempts`; later such kills count as attempts. A known leaf
+`oom_kill` count decides whether a kill was the OOM killer's, whatever the host count shows
+(FR-076).
 
 Execution may happen more than once. Only one final result per task is accepted.
 An exact retransmission of an accepted attempt/receipt returns the same successful

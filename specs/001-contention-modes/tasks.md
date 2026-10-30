@@ -1415,8 +1415,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Docs, snapshots and the native gate**
 
-- [ ] T364 Update `docs/guarantees.md` for FR-078 to FR-082 (supervisor death, stale reports, agent stop and reload, retention, `single_process_violated`), `docs/worker-protocol.md` for the SDK changes, and `README.md` for the single-process limit, naming PyTorch DataLoader workers, per FR-082 (missing)
-- [ ] T365 Record report 029 Decision 3 in `docs/validation.md` as a known limit, with run 4's numbers (the other user's p99 beside Tracked duty cycles), per report 029 Decision 3 B (missing)
-- [ ] T366 Add the new reason codes to the catalog in `src/contention.rs` and `docs/guarantees.md` (`single_process_violated`, `config_reloaded`, `config_reload_refused`, `report_stale`, `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`) (missing)
+- [X] T364 Update `docs/guarantees.md` for FR-078 to FR-082 (supervisor death, stale reports, agent stop and reload, retention, `single_process_violated`), `docs/worker-protocol.md` for the SDK changes, and `README.md` for the single-process limit, naming PyTorch DataLoader workers, per FR-082 (missing)
+- [X] T365 Record report 029 Decision 3 in `docs/validation.md` as a known limit, with run 4's numbers (the other user's p99 beside Tracked duty cycles), per report 029 Decision 3 B (missing)
+- [X] T366 Add the new reason codes to the catalog in `src/contention.rs` and `docs/guarantees.md` (`single_process_violated`, `config_reloaded`, `config_reload_refused`, `report_stale`, `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`) (missing)
 - [ ] T367 Compare the decision snapshots before and after Phase 24 and record each class of change (missing)
 - [ ] T368 Run 5 again on the test host beside the light and saturating GPU users, in Performance and Neutral, after the GPU fixes, with the commands in `native-gates.md`. *Deferred: needs the user's typed approval in this session.* Per FR-021 and SC-005 (missing)
