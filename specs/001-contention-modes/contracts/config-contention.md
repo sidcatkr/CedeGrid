@@ -102,6 +102,10 @@ Every key has a class, `safe`, `bounded` or `caution(entry)`, in `config::KEY_CL
 - **Bounds.** `monitor.interval_ms` and `kernel.monitor_interval_ms` above 10000,
   `kernel.freshness_intervals` above 20, `gpu.process_sample_max_age_ms` above 60000, and
   `lifecycle.drain_timeout_ms` or `lifecycle.term_grace_ms` above 60000 fail to load.
+- **The GPU sample age.** Unset, `gpu.process_sample_max_age_ms` is max(2000, 2 ×
+  `monitor.interval_ms`); `doctor` and `validate` show the value with `derived`. Set at or
+  below `monitor.interval_ms`, loading fails on every host with
+  `gpu.process_sample_max_age_ms (<value>) must be above monitor.interval_ms (<interval>); set it to at least <interval + 1> or leave it unset`.
 - **Floors.** `gpu.reserve_vram_percent` (default 5) makes each GPU floor at least that share of
   the device. A floor below its minimum (512 MiB of RAM, 512 MiB per GPU) is raised to it with a
   warning. A floor below twice its minimum without `small_floor` loads, but is raised to twice

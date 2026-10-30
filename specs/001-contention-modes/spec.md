@@ -406,6 +406,13 @@ back more.
   baseline, which excludes CedeGrid's write: a member whose start time falls in one of its run's
   marked spells takes its parent member's baseline; any other member's value when it joins is its
   baseline (item 031, C.4; Principle II's in-share rule).
+- Q: A config that never sets `gpu.process_sample_max_age_ms` stops loading today when
+  `monitor.interval_ms` is 2000 or more, even on a host without GPUs. What value applies when it
+  is not set, and what happens to an explicit value at or below the interval? → A: Unset, it is
+  derived as max(2000, 2 × `monitor.interval_ms`), and `doctor` and `validate` show the derived
+  value and say it was derived. An explicit value at or below `monitor.interval_ms` is refused on
+  every host, as now; the error names both keys and the smallest value that would load.
+  `config_migration` is unchanged (item 032, report 030's Decision 4).
 
 ## Terms
 
@@ -1500,7 +1507,10 @@ node reports with the expected per-resource values at each step.
   Settings that lengthen reclaim or let stale telemetry pass are bounded: `monitor.interval_ms`
   and `kernel.monitor_interval_ms` at most 10 s, `kernel.freshness_intervals` at most 20,
   `gpu.process_sample_max_age_ms` at most 60 s, `lifecycle.drain_timeout_ms` and
-  `lifecycle.term_grace_ms` at most 60 s.
+  `lifecycle.term_grace_ms` at most 60 s. `gpu.process_sample_max_age_ms` MUST be above
+  `monitor.interval_ms`: when it is not set it is max(2000, 2 × `monitor.interval_ms`), which
+  `doctor` and `validate` show as derived; an explicit value at or below the interval MUST be
+  refused on every host, with an error naming both keys and the smallest value that loads.
 - **FR-071**: The resource-target file MUST carry an optional `allowance` per resource (CPU,
   RAM, each GPU's memory): what the allocation may grow to now without causing a step, with its
   own `allowance_sequence`. If every running allocation grows to its allowance at once, the
