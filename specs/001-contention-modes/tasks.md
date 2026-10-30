@@ -1399,8 +1399,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T351 Mark only the GPU reading unknown in `src/telemetry/managed.rs`, until T350 passes (TEL-5) (contradicts)
 - [X] T352 [P] Write a failing service test: an iteration with no journal change reuses the cached execution records and checkpoint heads (EFF-2) (contradicts)
 - [X] T353 Take the cache key again after the agent's own observation insert in `src/agent/service.rs`, until T352 passes (EFF-2) (contradicts)
-- [ ] T354 [P] Write a failing test: a message to a supervisor is written in one write call (EFF-4) (contradicts)
-- [ ] T355 Serialize supervisor messages to a buffer before writing in `src/agent.rs`, until T354 passes (EFF-4) (contradicts)
+- [X] T354 [P] Write a failing test: a message to a supervisor is written in one write call (EFF-4) (contradicts)
+- [X] T355 Serialize supervisor messages to a buffer before writing in `src/agent.rs`, until T354 passes (EFF-4) (contradicts)
 - [ ] T356 [P] Write failing tests: a known leaf `oom_kill` count of 0 overrides a host rise; uncounted OOM requeues stop at 3 × `max_attempts`, per FR-076 (AGT-12, R6) (contradicts)
 - [ ] T357 Trust the leaf count and bound uncounted requeues in `src/agent/oom.rs` and `src/coordinator.rs`, until T356 passes (AGT-12, R6) (contradicts)
 

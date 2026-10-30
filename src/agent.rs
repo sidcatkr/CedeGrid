@@ -705,8 +705,10 @@ fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
         .input
         .as_mut()
         .context("supervisor control pipe closed")?;
-    serde_json::to_writer(&mut *input, message)?;
-    input.write_all(b"\n")?;
+    // One write for the whole line: the pipe is unbuffered (EFF-4).
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    input.write_all(&line)?;
     input.flush()?;
     Ok(())
 }
@@ -1975,6 +1977,40 @@ mod drain_tests {
             slots["b"].journal_seen.as_ref().unwrap().key,
             (before.0, before.1 - 1)
         );
+    }
+
+    /// A message to a supervisor goes out in one write call, not one per JSON token (EFF-4).
+    #[test]
+    fn a_supervisor_message_is_one_write() {
+        struct Counter(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+        impl Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().push(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut slot = slot_with(child, input);
+        let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        slot.input = Some(Box::new(Counter(writes.clone())));
+        send(
+            &mut slot,
+            &Control::Drain {
+                cause: Some(crate::contention::YieldCause::FloorBreach),
+            },
+        )
+        .unwrap();
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
     }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
