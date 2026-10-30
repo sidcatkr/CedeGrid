@@ -853,6 +853,8 @@ pub struct LadderTiming {
     /// The mode's scale-up rate: the least time between two reversals.
     pub scale_up_ms: u64,
     pub pause_bound_ms: u64,
+    /// Performance compute: a pause returns to the cap at its bound (FR-022).
+    pub pause_returns_to_cap: bool,
     /// How long a hint waits for compliance before the next step (FR-037).
     pub hint_deadline_ms: u64,
     pub hysteresis_percent: u8,
@@ -865,6 +867,7 @@ pub struct LadderTiming {
 impl LadderTiming {
     pub fn new(thresholds: &ResourceThresholds, mode: ContentionMode, interval_ms: u64) -> Self {
         let interval_ms = interval_ms.max(1);
+        let performance_compute = thresholds.compute && mode >= ContentionMode::Performance;
         let response_ms = match mode {
             ContentionMode::YieldFirst => {
                 u64::from(thresholds.yield_first_response_intervals).saturating_mul(interval_ms)
@@ -878,7 +881,7 @@ impl LadderTiming {
             dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
             scale_up_ms: thresholds.scale_up_interval_ms(mode, interval_ms),
             // Performance compute pauses for at most one interval (FR-022).
-            pause_bound_ms: if thresholds.compute && mode >= ContentionMode::Performance {
+            pause_bound_ms: if performance_compute {
                 thresholds
                     .pause_bound_s
                     .saturating_mul(1000)
@@ -886,6 +889,7 @@ impl LadderTiming {
             } else {
                 thresholds.pause_bound_s.saturating_mul(1000)
             },
+            pause_returns_to_cap: performance_compute,
             hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,
             reversal_room_min: thresholds.noise_tolerance_mib,
@@ -1017,9 +1021,9 @@ pub fn plan_step(
         Some(decision)
     };
     // In Performance compute a pause lasts at most its bound, one interval, and then
-    // the cap returns; it never moves on to a later step (FR-022).
+    // the cap returns; it never moves on to a later step, fair share known or not (FR-022).
     if current == YieldStep::Pause
-        && input.compute_floor.is_some()
+        && (timing.pause_returns_to_cap || input.compute_floor.is_some())
         && since_change >= timing.pause_bound_ms
         && input.applies(YieldStep::Cap)
         && !input.unavailable.contains(&YieldStep::Cap)

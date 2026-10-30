@@ -270,6 +270,39 @@ mod ladder {
         );
     }
 
+    /// A Performance compute pause returns to the cap at its one-interval bound even
+    /// where no fair share is known, and never moves on to the hint (FR-022, FR-014).
+    #[test]
+    fn a_performance_compute_pause_without_a_fair_share_returns_to_the_cap() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let performance = timing(kind, ContentionMode::Performance);
+            let paused = StepState {
+                to_free: None,
+                step: YieldStep::Pause,
+                entered_at_ms: 0,
+                cause: YieldCause::ExternalGrowth,
+                target: None,
+                trigger_external: 4000,
+                calm_since_ms: None,
+                contended_since_ms: Some(0),
+                after_pause: false,
+                pending: false,
+                recomputed: false,
+            };
+            for excess in [0, 500] {
+                let after = plan_step(
+                    Some(&paused),
+                    &input(kind, excess, 4000),
+                    &performance,
+                    performance.pause_bound_ms,
+                );
+                let capped = after.state.unwrap();
+                assert_eq!(capped.step, YieldStep::Cap, "{kind:?} {excess}");
+                assert!(capped.after_pause, "{kind:?} {excess}");
+            }
+        }
+    }
+
     #[test]
     fn steps_escalate_in_order_and_memory_starts_at_a_ram_cap_or_the_hint() {
         let cpu = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
@@ -517,7 +550,12 @@ mod ladder {
                 input(ResourceKind::Cpu, excess, external)
             });
             for pair in changes.windows(2) {
-                prop_assert!(pair[1].0 - pair[0].0 >= cpu.dwell_ms, "{changes:?}");
+                // Only a pause's return to the cap comes sooner, at its one-interval
+                // bound; nothing else follows a pause in Performance (FR-022, FR-014).
+                let returned = pair[0].1 == YieldStep::Pause && pair[1].1 == YieldStep::Cap;
+                prop_assert!(pair[0].1 != YieldStep::Pause || returned, "{changes:?}");
+                let least = if returned { cpu.pause_bound_ms } else { cpu.dwell_ms };
+                prop_assert!(pair[1].0 - pair[0].0 >= least, "{changes:?}");
             }
         }
 
