@@ -59,8 +59,9 @@ impl RootlessActuator {
 
     fn stop(&mut self, family: &mut dyn Family) -> Result<()> {
         if !self.stopped {
-            family.signal(signal::STOP)?;
+            // Marked first: a stop that reached only part of the family is still continued.
             self.stopped = true;
+            family.signal(signal::STOP)?;
         }
         Ok(())
     }
@@ -628,5 +629,56 @@ mod tests {
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
             .unwrap();
         assert_eq!(fresh.duty(), 0.4);
+    }
+
+    /// Three members, the second of which refuses STOP; a family signal goes on past a
+    /// failing member and returns its error, as the supervisor's family does.
+    struct PartlyStoppable {
+        stopped: [bool; 3],
+    }
+    impl Family for PartlyStoppable {
+        fn identities(&self) -> Vec<ProcessIdentity> {
+            Vec::new()
+        }
+        fn signal(&mut self, signal: i32) -> Result<()> {
+            let mut failed = false;
+            for (member, stopped) in self.stopped.iter_mut().enumerate() {
+                match signal {
+                    signal::STOP if member == 1 => failed = true,
+                    signal::STOP => *stopped = true,
+                    signal::CONT => *stopped = false,
+                    _ => {}
+                }
+            }
+            if failed {
+                bail!("member 1 refused STOP");
+            }
+            Ok(())
+        }
+        fn cpu_time(&mut self) -> Option<Duration> {
+            None
+        }
+    }
+
+    /// A stop that reached only part of the family still counts as a stop: release continues
+    /// every member, so none stays stopped (030, SUP-5 and R2).
+    #[test]
+    fn a_partial_stop_is_continued_on_release() {
+        let mut family = PartlyStoppable {
+            stopped: [false; 3],
+        };
+        let mut actuator = actuator(AllocationClass::Opportunistic);
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+                .is_err()
+        );
+        assert_eq!(
+            family.stopped,
+            [true, false, true],
+            "the failing member is passed over"
+        );
+        actuator.release(&mut family).unwrap();
+        assert_eq!(family.stopped, [false; 3], "every member is continued");
     }
 }

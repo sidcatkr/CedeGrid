@@ -138,15 +138,21 @@ impl ChildServer {
     }
     /// Signal running mediated children through their owned handles only.
     fn signal_running(&mut self, signal: i32) -> Result<()> {
+        let mut result = Ok(());
         for child in self.children.values_mut().filter(|c| {
             matches!(c.phase, ChildPhase::Running | ChildPhase::Draining)
                 && c.exit.is_none()
                 && !c.owned.reaped
                 && c.identity.is_some()
         }) {
-            child.owned.signal(signal)?;
+            // A failing child does not keep the signal from the rest.
+            if let Err(error) = child.owned.signal(signal)
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
         }
-        Ok(())
+        result
     }
     fn all_released(&self) -> bool {
         self.children

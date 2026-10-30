@@ -476,13 +476,17 @@ impl Family for OwnedFamily<'_> {
         identities
     }
     fn signal(&mut self, signal: i32) -> Result<()> {
-        if !self.leader.reaped {
-            self.leader.signal(signal)?;
-        }
-        if let Some(children) = self.children.as_mut() {
-            children.signal_running(signal)?;
-        }
-        Ok(())
+        // Every member gets the signal; the first failure is returned after the rest.
+        let leader = if self.leader.reaped {
+            Ok(())
+        } else {
+            self.leader.signal(signal)
+        };
+        let children = match self.children.as_mut() {
+            Some(children) => children.signal_running(signal),
+            None => Ok(()),
+        };
+        leader.and(children)
     }
     fn cpu_time(&mut self) -> Option<Duration> {
         let pids: Vec<u32> = self.identities().iter().map(|id| id.pid).collect();
