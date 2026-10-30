@@ -869,18 +869,30 @@ fn apply_runtime_commands(
                 if targets.set_allowance(allowance)
                     && let Err(error) = targets.publish_allowance(directories)
                 {
-                    eprintln!("resource allowance unavailable: {error:#}");
+                    report(
+                        "allowance_unavailable",
+                        &request.assignment_id,
+                        format!("resource allowance unavailable: {error:#}"),
+                    );
                 }
             }
             SupervisorCommand::SaveProgress => {
                 if let Err(error) = targets.publish_save_progress(directories) {
-                    eprintln!("save-progress request unavailable: {error:#}");
+                    report(
+                        "save_progress_unavailable",
+                        &request.assignment_id,
+                        format!("save-progress request unavailable: {error:#}"),
+                    );
                 }
             }
             SupervisorCommand::Query => {
                 // A new agent: no limit stays on own work without a recorded step.
                 if let Err(error) = actuator.reconcile(family, &contention.applied) {
-                    eprintln!("step reconcile failed: {error:#}");
+                    report(
+                        "step_reconcile_failed",
+                        &request.assignment_id,
+                        format!("step reconcile failed: {error:#}"),
+                    );
                 }
                 let _ = control.report(SupervisorReport::State {
                     applied: contention

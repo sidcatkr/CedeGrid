@@ -1571,3 +1571,28 @@ fn no_oom_preference_is_claimed_where_the_platform_cannot_apply_it() {
             .any(|e| e.control == "memory.oom_score_adj")
     );
 }
+
+/// Once the agent has died, a supervisor's stderr is a pipe nobody reads; `eprintln!` panics
+/// on it, which would leave the workload unsupervised. Supervisor code reports through its
+/// non-panicking `report` helper instead (030, AGT-9).
+#[test]
+fn supervisor_runtime_code_never_uses_eprintln() {
+    for file in [
+        "src/supervision/unix.rs",
+        "src/child_supervision.rs",
+        "src/actuation.rs",
+        "src/cgroup.rs",
+        "src/agent/supervisor.rs",
+    ] {
+        let source =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
+        let runtime = source.split("#[cfg(test)]").next().unwrap();
+        let uses: Vec<_> = runtime
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("eprintln!"))
+            .map(|(number, _)| number + 1)
+            .collect();
+        assert!(uses.is_empty(), "{file}: eprintln! on lines {uses:?}");
+    }
+}

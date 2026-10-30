@@ -1325,8 +1325,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T295 Read and discard after a capture error and reserve in chunks in `src/supervision/unix.rs` and `src/publication.rs`, until T294 passes (SUP-2) (contradicts)
 - [X] T296 [P] Write failing tests: a child server `accept` error, a `try_wait` error and a failed child journal transition hold the step and report; `logs.finish` failing after a clean exit leaves the run completed with the error in the outcome; the error path drains managed children before SIGKILL, per research R3 (R3, SUP-7) (contradicts)
 - [X] T297 Hold and report bookkeeping errors and drain children on the error path in `src/supervision/unix.rs` and `src/child_supervision.rs`, until T296 passes (R3, SUP-7) (contradicts)
-- [ ] T298 [P] Write a failing test: with the supervisor's stderr closed, a failing Allowance, SaveProgress or Query reply does not panic the supervisor (AGT-9) (contradicts)
-- [ ] T299 Route every supervisor message through the `report` helper in `src/supervision/unix.rs`, until T298 passes (AGT-9) (contradicts)
+- [X] T298 [P] Write a failing test: with the supervisor's stderr closed, a failing Allowance, SaveProgress or Query reply does not panic the supervisor (AGT-9) (contradicts)
+- [X] T299 Route every supervisor message through the `report` helper in `src/supervision/unix.rs`, until T298 passes (AGT-9) (contradicts)
 
 **Group 4: heartbeat freshness and loop health (FR-079)**
 
