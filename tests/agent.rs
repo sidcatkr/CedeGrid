@@ -2312,3 +2312,76 @@ async fn sighup_applies_a_mode_change_and_refuses_a_path_change() {
     let _ = agent.kill();
     let _ = agent.wait();
 }
+
+/// A live supervisor that does not answer the new agent's first query is re-adopted on a
+/// later iteration once it answers, so its job completes unyielded (FR-080, 030 AGT-8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_supervisor_that_misses_the_first_query_is_readopted_later() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(12)".into()],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 20_000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("first");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    agent.kill().unwrap();
+    agent.wait().unwrap();
+    let record = service.record().unwrap();
+    let identity: ProcessIdentity = serde_json::from_slice(
+        &fs::read(
+            service
+                .local
+                .config
+                .state_dir
+                .join("attempts")
+                .join(&record.assignment_id)
+                .join("supervisor-identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // The supervisor is stopped through the restart, so the first query times out.
+    // SAFETY: the test's own supervisor tree, checked live just above through its identity.
+    assert_eq!(
+        cedegrid::supervision::process_identity(
+            identity.pid,
+            &identity.assignment_id,
+            identity.generation
+        )
+        .unwrap(),
+        identity
+    );
+    unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGSTOP) };
+    let mut restarted = service.agent("second");
+    let log = || fs::read_to_string(service.dir.path().join("second.log")).unwrap_or_default();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !log().contains("supervisor_not_reattached") {
+        assert!(Instant::now() < end, "{}", log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGCONT) };
+    let end = Instant::now() + Duration::from_secs(10);
+    while !log().contains("supervisor_reattached") {
+        assert!(Instant::now() < end, "never re-adopted: {}", log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let completed = service.result(300).await;
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    service.server.abort();
+    assert!(completed.is_some(), "the job completed: {}", log());
+    let outcome = service.outcome(&record.assignment_id);
+    assert!(!outcome.yielded, "{outcome:?}");
+}

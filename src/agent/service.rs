@@ -21,6 +21,9 @@ pub const LAUNCHES_PER_HEARTBEAT: usize = 32;
 
 /// Launch preparations that run at once on the blocking pool; each makes synced writes.
 const LAUNCH_CONCURRENCY: usize = 4;
+/// The first retry of a missed re-adoption, doubled after each miss up to the maximum.
+const READOPT_FIRST: Duration = Duration::from_secs(1);
+const READOPT_MAX: Duration = Duration::from_secs(30);
 /// Iterations between prunes of `observations` and settled attempt directories (FR-081).
 const OBSERVATIONS_PER_PRUNE: u32 = 600;
 
@@ -268,6 +271,8 @@ struct AgentLoop<'a> {
     rpc_budget: Duration,
     /// A signal stopped the agent: supervisors keep running for re-adoption (FR-080).
     leave_supervisors: bool,
+    /// Live supervisors that did not answer re-adoption, with the next try and its backoff.
+    readopt: Vec<(ExecutionRecord, Instant, Duration)>,
 }
 
 impl AgentLoop<'_> {
@@ -1724,6 +1729,35 @@ impl AgentLoop<'_> {
         Ok(())
     }
 
+    /// Try missed re-adoptions that are due again (FR-080).
+    fn readopt_supervisors(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        for (record, next, backoff) in std::mem::take(&mut self.readopt) {
+            let id = record.assignment_id.clone();
+            if self.slots.contains_key(&id) {
+                continue;
+            }
+            if Instant::now() < next {
+                self.readopt.push((record, next, backoff));
+                continue;
+            }
+            match super::reconcile::reattach_again(self.config.as_ref(), &record) {
+                Ok(Some(slot)) => {
+                    self.slots.insert(id, slot);
+                }
+                Ok(None) => {
+                    let backoff = (backoff * 2).min(READOPT_MAX);
+                    self.readopt
+                        .push((record, Instant::now() + backoff, backoff));
+                }
+                Err(error) => emit(
+                    &serde_json::json!({"event":"supervisor_not_reattached","assignment_id":id,"detail":format!("{error:#}")}),
+                )?,
+            }
+        }
+        Ok(())
+    }
+
     /// Reload the configuration file on SIGHUP: a change to `[contention]` applies from the
     /// next iteration; any other change is refused and the running settings stay (FR-080).
     fn reload_config(&mut self) -> Result<()> {
@@ -1947,14 +1981,11 @@ pub async fn run(
             .open(config.state_dir.join("agent.lock"))?,
         "another agent already owns this node state",
     )?;
+    // Replay mode re-adopts too: re-adoption checks each supervisor's identity and token.
     #[cfg(unix)]
-    let attached = if replay.is_none() {
-        reattach_supervisors(config, &store)?
-    } else {
-        Vec::new()
-    };
+    let (attached, missed) = reattach_supervisors(config, &store)?;
     #[cfg(not(unix))]
-    let attached: Vec<ChildSlot> = Vec::new();
+    let (attached, missed): (Vec<ChildSlot>, Vec<ExecutionRecord>) = (Vec::new(), Vec::new());
     let attached_ids: BTreeSet<String> = attached
         .iter()
         .map(|slot| slot.assignment.request.assignment_id.clone())
@@ -2036,6 +2067,10 @@ pub async fn run(
         sampled_at: start,
         rpc_budget: observation_interval.max(Duration::from_millis(250)),
         leave_supervisors: false,
+        readopt: missed
+            .into_iter()
+            .map(|record| (record, Instant::now() + READOPT_FIRST, READOPT_FIRST))
+            .collect(),
     };
     for slot in attached {
         state
@@ -2056,6 +2091,7 @@ pub async fn run(
             state.collect_preparations().await?;
             state.collect_publications().await?;
             mark = state.cost.charge("collect", mark);
+            state.readopt_supervisors()?;
             state.service_slots().await?;
             mark = state.cost.charge("slots", mark);
             let records = state.history.records(

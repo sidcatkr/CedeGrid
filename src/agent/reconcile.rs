@@ -143,8 +143,14 @@ fn live_supervisor(config: &Config, record: &ExecutionRecord) -> Option<ProcessI
 /// verified by identity and authenticated by the token from its spec, and reports
 /// its applied steps, lease sequence and adjust sequence.
 #[cfg(unix)]
-pub(super) fn reattach_supervisors(config: &Config, store: &StateStore) -> Result<Vec<ChildSlot>> {
+/// Re-adopt every live supervisor of an authorized run. Returns the slots, and the records
+/// whose supervisor is live but did not answer, for the loop to try again (FR-080).
+pub(super) fn reattach_supervisors(
+    config: &Config,
+    store: &StateStore,
+) -> Result<(Vec<ChildSlot>, Vec<ExecutionRecord>)> {
     let mut slots = Vec::new();
+    let mut missed = Vec::new();
     for record in store.executions()?.into_iter().filter(|r| {
         matches!(
             r.phase,
@@ -159,11 +165,36 @@ pub(super) fn reattach_supervisors(config: &Config, store: &StateStore) -> Resul
                 )?;
                 slots.push(slot);
             }
-            Err(error) => emit(&serde_json::json!({"event":"supervisor_not_reattached",
-                "assignment_id":record.assignment_id,"detail":format!("{error:#}")}))?,
+            Err(error) => {
+                emit(&serde_json::json!({"event":"supervisor_not_reattached",
+                "assignment_id":record.assignment_id,"detail":format!("{error:#}")}))?;
+                if live_supervisor(config, &record).is_some() {
+                    missed.push(record);
+                }
+            }
         }
     }
-    Ok(slots)
+    Ok((slots, missed))
+}
+
+/// Try a missed re-adoption again: the slot once the supervisor answers, `None` while it is
+/// live and silent, and an error once it is gone.
+#[cfg(unix)]
+pub(super) fn reattach_again(
+    config: &Config,
+    record: &ExecutionRecord,
+) -> Result<Option<ChildSlot>> {
+    match reattach_supervisor(config, record) {
+        Ok(slot) => {
+            emit(
+                &serde_json::json!({"event":"supervisor_reattached","assignment_id":record.assignment_id,
+                "lease_sequence":slot.sequence,"applied":slot.applied,"retried":true}),
+            )?;
+            Ok(Some(slot))
+        }
+        Err(_) if live_supervisor(config, record).is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
