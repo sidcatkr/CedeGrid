@@ -1466,9 +1466,9 @@ Multi-process families (spec Session 2026-10-31; plan "Item 031"), in item 031's
 
 The derived GPU sample age (spec Session 2026-10-31 Q10; plan "Item 032") and report 030's Decision 3 local part. `/speckit-tasks` would regenerate this file, so the tasks are appended here. T228, T339, T368 and T387 stay as they are.
 
-- [ ] T388 [P] Write failing tests: an interval of 3000 with no `gpu.process_sample_max_age_ms` loads and its sample age is 6000; the defaults give 2000; the GPU sample cursor and the quiet-window validation use the same value, per FR-070 and R40 (contradicts)
-- [ ] T389 Make `GpuConfig::process_sample_max_age_ms` optional and add `Config::gpu_sample_max_age_ms()` in `src/config.rs`, used by every reader (`src/telemetry.rs`, `src/policy/measure.rs`, the quiet-window validation), until T388 passes, per FR-070 (contradicts)
-- [ ] T390 [P] Write failing tests: an explicit sample age of 2000 with an interval of 3000 is refused on any host, and the error names both keys and 3001, per FR-070 and contracts/config-contention.md (partial)
+- [ ] T388 [P] Write failing tests, named with `sample_age`: an interval of 3000 with no `gpu.process_sample_max_age_ms` loads and its sample age is 6000; the defaults give 2000; the GPU sample cursor and the quiet-window validation use the same value, per FR-070 and R40 (contradicts)
+- [ ] T389 Make `GpuConfig::process_sample_max_age_ms` optional and add `Config::gpu_sample_max_age_ms()` in `src/config.rs`, used by every reader (`src/telemetry.rs`, `src/policy/measure.rs`, the quiet-window validation, whose error says when the sample age is derived), until T388 passes, per FR-070 (contradicts)
+- [ ] T390 [P] Write failing tests, named with `sample_age`: an explicit sample age of 2000 with an interval of 3000 is refused on any host, and the error names both keys and 3001, per FR-070 and contracts/config-contention.md (partial)
 - [ ] T391 Name both keys and the smallest value that loads in the refusal in `src/config.rs`, until T390 passes, per FR-070 (partial)
 - [ ] T392 [P] Write failing tests: `validate` prints `derived."gpu.process_sample_max_age_ms"` with its value and rule when the key is unset and nothing when it is set, and `doctor` lists it under "Derived settings" and in its JSON, per FR-070 and plan "Item 032" 2 (missing)
 - [ ] T393 Show derived settings in `src/config.rs`, `src/explain.rs` and `src/main.rs`, until T392 passes, per FR-070 (missing)
