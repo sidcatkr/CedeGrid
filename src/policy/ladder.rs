@@ -728,6 +728,7 @@ impl<'a> Interval<'a> {
                 } else {
                     None
                 },
+                at_minimum_duty: at_minimum_duty(input, key, &victim.id),
                 // What the allocation may use: while contended, a cap
                 // or hint target; while calm, its usage plus its share
                 // of the spare, toward which a held cap rises; never
@@ -885,6 +886,7 @@ impl<'a> Interval<'a> {
                     } else {
                         None
                     },
+                    at_minimum_duty: at_minimum_duty(input, key, id),
                 },
                 &frame.timing_for(config, self.allocation_modes[&allocation.id][&kind]),
                 now,
@@ -1046,6 +1048,7 @@ impl<'a> Interval<'a> {
                             fair_share: *fair_share,
                             own_usage: frame.share.saturating_mul(frame.running.len() as u64),
                         }),
+                    at_minimum_duty: at_minimum_duty(input, key, &victim.id),
                     target: Some(
                         if contended_victim {
                             frame.share.saturating_sub(excess)
@@ -1121,6 +1124,7 @@ impl<'a> Interval<'a> {
                     target: None,
                     usage: None,
                     compute_floor: None,
+                    at_minimum_duty: at_minimum_duty(input, &frame.key, id),
                 },
                 &LadderTiming::new(
                     &config.contention.thresholds(kind),
@@ -1319,6 +1323,16 @@ fn ladder_facts(input: &PolicyInput, key: &ResourceKey, id: &str) -> AllocationF
             .insert(YieldStep::Cap);
     }
     facts
+}
+
+/// The supervisor reported the allocation's cap on the resource at the minimum duty.
+fn at_minimum_duty(input: &PolicyInput, key: &ResourceKey, id: &str) -> bool {
+    input.facts.get(id).is_some_and(|facts| {
+        facts
+            .step_codes
+            .get(key)
+            .is_some_and(|code| code == "cap_at_minimum_duty")
+    })
 }
 
 /// What running memory work holds as yielding judges it: its usage. On GPU

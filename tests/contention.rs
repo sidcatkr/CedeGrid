@@ -105,6 +105,7 @@ mod ladder {
             target: None,
             usage: None,
             compute_floor: None,
+            at_minimum_duty: false,
         }
     }
 
@@ -249,6 +250,7 @@ mod ladder {
                     fair_share: 4000,
                     own_usage: 6000,
                 }),
+                at_minimum_duty: true,
                 ..input(kind, 2000, 4000)
             });
             let steps: Vec<_> = changes.iter().map(|(_, step)| *step).collect();
@@ -268,6 +270,36 @@ mod ladder {
             timing(ResourceKind::Cpu, ContentionMode::Neutral).pause_bound_ms,
             ResourceThresholds::defaults(ResourceKind::Cpu).pause_bound_s * 1000
         );
+    }
+
+    /// A recomputed Performance cap that still misses, with own usage above the fair share,
+    /// pauses only once the supervisor reports it at the minimum duty (FR-022).
+    #[test]
+    fn a_performance_cap_pauses_only_at_the_reported_minimum_duty() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            let performance = timing(kind, ContentionMode::Performance);
+            let at = |at_minimum_duty: bool| {
+                move |_: u64| LadderInput {
+                    unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+                    target: Some(4000),
+                    usage: Some(6000),
+                    compute_floor: Some(ComputeFloor {
+                        fair_share: 4000,
+                        own_usage: 6000,
+                    }),
+                    at_minimum_duty,
+                    ..input(kind, 2000, 4000)
+                }
+            };
+            let (state, changes) = run(None, &performance, 0..120, at(false));
+            assert_eq!(changes, [(0, YieldStep::Cap)], "{kind:?}");
+            assert!(state.unwrap().recomputed, "{kind:?}");
+            let (_, changes) = run(None, &performance, 0..120, at(true));
+            assert!(
+                changes.iter().any(|(_, step)| *step == YieldStep::Pause),
+                "{kind:?}: {changes:?}"
+            );
+        }
     }
 
     /// A Performance compute pause returns to the cap at its one-interval bound even

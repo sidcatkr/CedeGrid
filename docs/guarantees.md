@@ -530,6 +530,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `cpu_capacity_unknown` | The CPU capacity is unknown, so the CPU budget is zero. |
 | `ram_capacity_unknown` | The RAM capacity is unknown, so the RAM budget is zero. |
 | `cpu_usage_unknown` | CPU busy time is unavailable, so CPU admission is blocked. |
+| `cap_at_minimum_duty` | The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval. |
 | `cpu_unknown_fair_share_hold` | CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view. |
 | `ram_usage_unknown` | Available RAM is unknown, so RAM admission is blocked. |
 | `kernel_cpu_stale` | The kernel CPU snapshot is stale, and repeated readings do not refresh it. |

@@ -913,7 +913,13 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                     .filter(|cap| cap.growth_stop)
                     .map(|_| "ram_cap_growth_stop")
             }),
-            _ => None,
+            // A `cpu.max` quota holds its target; only a duty cycle reaches the minimum duty.
+            ResourceKind::GpuCompute if self.gpu_duty.is_some() => self
+                .gpu_duty
+                .as_ref()
+                .filter(|duty| duty.duty <= crate::actuation::MIN_DUTY)
+                .map(|_| "cap_at_minimum_duty"),
+            _ => self.fallback.step_code(kind),
         }
     }
 

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 /// The smallest share of each period a capped family may run.
-const MIN_DUTY: f64 = 0.05;
+pub(crate) const MIN_DUTY: f64 = 0.05;
 
 /// The share of each period a GPU compute cap lets own work run: its target in
 /// thousandths of the device's time, at least the minimum duty.
@@ -204,6 +204,15 @@ impl Actuator for RootlessActuator {
             self.phase_started = Instant::now();
         }
         Ok(())
+    }
+
+    fn step_code(&self, kind: ResourceKind) -> Option<&'static str> {
+        let at_minimum = match kind {
+            ResourceKind::Cpu => self.cap.is_some() && self.duty <= MIN_DUTY,
+            ResourceKind::GpuCompute => self.gpu_duty <= MIN_DUTY,
+            ResourceKind::Ram | ResourceKind::GpuMemory => false,
+        };
+        at_minimum.then_some("cap_at_minimum_duty")
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -570,6 +579,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(actuator.duty(), MIN_DUTY);
+    }
+
+    /// A CPU or GPU compute cap at the minimum duty is reported as such, so Performance
+    /// may pause it (FR-022); a cap above the minimum, or none, is not.
+    #[test]
+    fn a_cap_at_the_minimum_duty_reports_it() {
+        let mut family = Recorder::default();
+        let mut actuator = actuator(AllocationClass::Opportunistic);
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            assert_eq!(actuator.step_code(kind), None, "{kind:?}");
+        }
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(1))
+            .unwrap();
+        assert_eq!(actuator.duty(), MIN_DUTY);
+        assert_eq!(
+            actuator.step_code(ResourceKind::Cpu),
+            Some("cap_at_minimum_duty")
+        );
+        assert_eq!(actuator.step_code(ResourceKind::GpuCompute), None);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(750))
+            .unwrap();
+        assert_eq!(actuator.step_code(ResourceKind::Cpu), None);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(0),
+            )
+            .unwrap();
+        assert_eq!(
+            actuator.step_code(ResourceKind::GpuCompute),
+            Some("cap_at_minimum_duty")
+        );
+        assert_eq!(actuator.step_code(ResourceKind::Cpu), None);
     }
 
     /// Guaranteed work takes neither a GPU compute cap nor a pause (FR-024).

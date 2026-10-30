@@ -458,6 +458,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "CPU busy time is unavailable, so CPU admission is blocked.",
     ),
     (
+        "cap_at_minimum_duty",
+        "The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval.",
+    ),
+    (
         "cpu_unknown_fair_share_hold",
         "CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view.",
     ),
@@ -846,6 +850,9 @@ pub struct LadderInput {
     pub room: Option<u64>,
     /// Performance and Aggressive compute: no pause below the fair share (FR-022).
     pub compute_floor: Option<ComputeFloor>,
+    /// The supervisor reported the cap on this resource at the minimum duty
+    /// (`cap_at_minimum_duty`).
+    pub at_minimum_duty: bool,
 }
 
 /// Mode-dependent ladder timing in milliseconds.
@@ -1077,14 +1084,16 @@ pub fn plan_step(
             || input.unavailable.contains(&current)
             || cap_to_zero;
         // In Performance compute a cap that missed its target is recomputed and applied
-        // again; only one that still misses, at the minimum duty, with own usage above the
-        // fair share goes on to a pause (FR-022).
+        // again; only one that still misses, that its supervisor reports at the minimum duty,
+        // with own usage above the fair share goes on to a pause (FR-022).
         if due
             && !after_pause
             && current == YieldStep::Cap
             && !input.unavailable.contains(&current)
             && let Some(floor) = input.compute_floor
-            && !(state.is_some_and(|s| s.recomputed) && floor.own_usage > floor.fair_share)
+            && !(state.is_some_and(|s| s.recomputed)
+                && input.at_minimum_duty
+                && floor.own_usage > floor.fair_share)
         {
             let mut decision = enter(YieldStep::Cap, Vec::new());
             if let Some(capped) = decision.state.as_mut() {
