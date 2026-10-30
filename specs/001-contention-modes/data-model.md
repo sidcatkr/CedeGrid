@@ -427,3 +427,18 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   windows across held intervals.
 - Reason codes: `single_process_violated`, `config_reloaded`, `config_reload_refused`,
   `report_stale` (coordinator), `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`.
+
+## Item 031 additions
+
+- **Family** (supervisor, `src/supervision/unix.rs`): the leader, the SDK children and up to 256
+  verified descendants. Each member: PID, start time, pidfd, parent (a member, or the supervisor
+  for an orphan), `oom_score_adj` baseline, joined at. Members leave when their pidfd shows exit
+  or a signal returns `ESRCH`.
+- Supervisor report `family` (new): `leader`, `sdk_children`, `descendants` counts and the
+  members' `(pid, start_time)` list, sent when it changes; `state` carries the same.
+- `outside_family` report gains `reason`: `ids_differ`, `chain_unconfirmed`, `over_bound`,
+  `untracked_platform`.
+- `ExecutionOutcome` gains `members_ended` (count of members ended by TERM or KILL at run end).
+- `AllocationFacts` gains `family` (`leader`, `sdk_children`, `descendants`); reason code
+  `family_members` (a note on CPU and RAM while a run has more than its leader).
+

@@ -1107,6 +1107,119 @@ macOS. No NEEDS CLARIFICATION remains.
   Pass.
 No violation; no Complexity Tracking entry.
 
+## Item 031: multi-process families (2026-10-31)
+
+Spec Session 2026-10-31's eight answers (new FR-083 to FR-087; amended FR-023's OOM order,
+FR-078 and FR-082) and item 031's parts in order. Workloads that fork their own helpers, PyTorch
+`DataLoader(num_workers>0)` most of all, are measured and stepped as one family on Linux, in both
+backends. Item 030's detection (FR-082) turns into membership: a descendant that passes
+Principle I's checks joins the family, and only those that fail stay reported outside it. The
+three small fixes from the review of 030's commits and the Full pin (a forked worker refuses the
+leaf reading today) are committed before this section (`fe3ef3f`, `93c4db5`).
+
+**Technical Context**: Rust 1.88, no new dependency. `libc::prctl(PR_SET_CHILD_SUBREAPER)` on
+the supervisor before it forks the leader; `pidfd_open` through `libc::syscall` as the existing
+`OwnedChild` does; reaping by `waitpid(pid, WNOHANG)` for one listed PID, or `waitid(P_PIDFD)`
+where the kernel has it; `/proc/<pid>/task/*/children`, `/proc/<pid>/status` (`Uid:`, `Gid:`,
+`PPid:`), `/proc/<pid>/stat` (start time) and `smaps_rollup`. Linux only: other platforms keep
+the single-process contract, and their tests pin that. The Linux parts get their red and green
+runs in the Docker Linux check, batched per group. No NEEDS CLARIFICATION remains.
+
+1. **Membership (FR-083, FR-084; A.1 to A.8)**:
+   - The supervisor sets `PR_SET_CHILD_SUBREAPER` on itself before it forks the gate; the
+     attribute is not inherited across fork, so the workload is unchanged.
+   - A `Family` in the supervisor holds the leader, the SDK children and up to 256 verified
+     descendants (a constant), each with its pidfd, start time, parent and `oom_score_adj`
+     baseline. Discovery runs once per duty period and inside every stop: each member's
+     `/proc/<pid>/task/*/children` over all threads, plus the supervisor's own children, which
+     are the leader, the SDK child gates and orphans reparented to it. Without a `children` file
+     it falls back to a ppid scan of `/proc` and `doctor` names the fallback.
+   - A candidate joins in Principle I's order: `pidfd_open`; then the parent chain from
+     `/proc/<pid>/status` `PPid:` up to a member, or to the supervisor for an orphan; then the
+     pidfd shows it alive; then real, effective and saved UIDs and GIDs equal the run's. A
+     candidate that fails one check is counted outside the family with its reason and never
+     acted on; one past the bound is counted `over_bound`.
+   - Orphans: a child of the supervisor that is neither the gate nor an SDK child gate can only
+     descend from this run, so the supervisor is the chain's root for it (R34).
+   - Reaping: the supervisor reaps an orphan on the loop thread that reaps the leader, by its own
+     PID and only when it is listed in the supervisor's `children` and is neither the leader nor
+     an SDK child; never `waitpid(-1)`. The module comment in `supervision.rs` says so (R36).
+   - Descendants of an SDK child join that child's family, found from the child's pidfd.
+   - A discovery error (an fd or `/proc` read) holds the run's steps and is reported once per
+     spell, as item 030's bookkeeping errors are; it never drains.
+   - Launch contract: on Linux `RootlessBackend::prepare` and the supervisor's own check accept
+     any `single_process` value (the field stays accepted); elsewhere the single-process or
+     bounded-SDK-children contract stays required.
+2. **Measurement (FR-085; B)**:
+   - Own CPU: in Full `leaf_reading_with` takes the family as its verified set, so a leaf of
+     family members is read again; in Tracked each member's CPU delta is read as the leader's is
+     and summed, a member that exits counting up to its last sample.
+   - Own memory: the family's summed `Pss_Anon` + `Pss_Shmem` (item 030's per-process reading),
+     never RSS, so pages shared copy-on-write count once. A family of one keeps today's reading;
+     Full keeps its leaf reading while usable. If `smaps_rollup` reads are over the efficiency
+     budget, PSS is read every N intervals and held between (R37).
+   - GPU: the agent's managed PID set includes verified descendants, so their per-process GPU
+     memory and compute samples count as own, including in R33's interval shares.
+   - Principals: the managed set includes descendants, so they leave the owner's unmanaged use.
+   - The supervisor reports the family's members (PIDs and start times) to the agent through the
+     `family` report (contract below), which the telemetry uses as the verified set.
+3. **Actuation in Tracked (FR-086; C)**:
+   - A stop (duty off phase, Pause, GPU duty off phase) discovers, stops every member through its
+     pidfd, discovers again and stops new members, at most 3 passes (R38); a member that appears
+     during an off phase is stopped when found. Continue sends SIGCONT to every member, continues
+     past a failing one and reports it. `ESRCH`, or a pidfd that reads as exited, drops the
+     member silently.
+   - `oom_score_adj`: each member's baseline is recorded when it joins and restored at release;
+     the preferred-victim value applies to new members (R7 comes in here).
+   - Full: no change to `cpu.max` or `cgroup.freeze`; the reattach thaw checks membership against
+     the family.
+4. **Run end, drains and supervisor loss (FR-087, FR-078; D)**:
+   - When the leader exits, members still alive get SIGTERM through their pidfds, then SIGKILL
+     after `term_grace_ms`; the outcome records `members_ended`. A drain signals the leader
+     first, as today, then SIGKILLs members still alive after the grace.
+   - The parent-death signal still reaches only the leader and SDK children: in Full a dead
+     supervisor's other members stay in the leaf for reconciliation; in Tracked they cannot be
+     found again. `docs/guarantees.md` and the README say so, with PyTorch DataLoader workers
+     exiting when their parent dies, a job script's background server, and its closing `wait`.
+5. **Reporting (FR-082; E)**:
+   - `outside_family` keeps its name and gains a `reason`: `ids_differ`, `chain_unconfirmed`,
+     `over_bound` or `untracked_platform`.
+   - Status and `explain` show the family size (leader, SDK children, descendants) through a
+     policy note, `family_members`, from the facts the agent passes on.
+6. **Tests (item 031 F)**: counting with plain `fork` and `multiprocessing` workers (and a
+   synthetic external principal in Performance: the family's total at the target, the leader not
+   at the minimum duty); shared copy-on-write memory read as about one buffer; an orphan
+   verified, stopped, continued and ended with no zombie left; a fork during a stop; differing IDs
+   through a fake identity source; leftovers at exit ended and counted; the reaping race with the
+   leader; a partial signal failure; 300 descendants with 256 tracked; Full's leaf reading used
+   with forked workers (the pin turned around); and the held-back table comparing a 4-worker
+   family with one process of the same demand in Performance.
+7. **Afterwards**: the own-efficiency gate (029) with a family of 16 members of about 50 threads
+   each, reporting the cost of discovery and of PSS reads per interval; if discovery is over
+   budget, the leaf in Full and, in Tracked, a full thread walk every K intervals with a
+   main-thread walk between (stops always walk fully) (R35). `native-gates.md` gains exact
+   commands for the test host in Tracked and Full: a `multiprocessing` stand-in with a shared
+   buffer, and a `DataLoader(num_workers=4)` loop where PyTorch is present. Running them needs
+   the user's typed approval, asked together with T368.
+
+**Constitution Check (7.0.0)**:
+- I: a descendant joins only through Principle I's checks, in its order, with the supervisor as
+  child subreaper; it is acted on only through its pidfd (or the start-time-checked `/proc` path
+  for `oom_score_adj`). An orphan's chain ends at the supervisor, which Principle I names as the
+  subreaper and Principle V's "the run's subreaper tree" covers; nothing is reaped by a wait for
+  any child. Processes that fail a check, or exceed the bound, are never acted on. Pass.
+- II: helpers count as own work instead of the owner's unmanaged use, so the fair share no
+  longer subtracts own work's own workers and the leader is not held to the minimum duty while
+  they run; PSS keeps shared pages from tripping a floor breach. No priority is raised. Pass.
+- III: a discovery error holds the step and is reported, never drains; members past the bound
+  keep today's counting. Pass.
+- V: rootless Tracked supports descendants that stay in the run's subreaper tree, as the
+  principle says; work started outside the tree is not tracked and not presented as contained;
+  non-Linux platforms keep the single-process contract. Pass.
+- IV, VI, VII: the policy stays pure (the family size is a fact); tests first; the new supervisor
+  report and outcome fields are additive within one binary. Pass.
+No violation; no Complexity Tracking entry.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

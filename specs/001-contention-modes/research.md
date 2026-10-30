@@ -693,3 +693,63 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   meaningful.
 - **Alternatives**: crediting own processes at their applied duty (only covers own work);
   raising the principal floor (hides small real users).
+
+## R34. Subreaper and orphans (item 031)
+
+- **Decision**: the supervisor sets `PR_SET_CHILD_SUBREAPER` on itself before forking the gate.
+  A child of the supervisor that is neither the gate nor an SDK child gate is an orphan of this
+  run, verified with the supervisor as its chain's root.
+- **Rationale**: the kernel reparents an orphan to its nearest living subreaper ancestor; the
+  supervisor runs one run and forks only its gate and SDK child gates, so no other process can
+  become its child. Principle I's subreaper clause and Principle V's "the run's subreaper tree"
+  describe exactly this. The attribute is per process and not inherited across fork.
+- **Alternatives**: leaving orphans outside the family (a DataLoader whose intermediate process
+  exits would escape every step); PID-namespace containment (needs privileges).
+
+## R35. Discovery cost and its fallback order (item 031)
+
+- **Decision**: every duty period, read each member's `task/*/children` over all threads; in
+  every stop, the same walk inside the pass loop. If the efficiency gate shows it over budget:
+  the leaf in Full, and in Tracked a full thread walk every K intervals with a main-thread walk
+  between; stops always walk fully.
+- **Rationale**: a forked worker's parent is the thread that forked it, which may be any thread;
+  the main-thread file alone misses children of worker threads.
+- **Alternatives**: a ppid scan of `/proc` every interval (it reads every process on the host;
+  kept only as the fallback without `children` files).
+
+## R36. Reaping safety (item 031)
+
+- **Decision**: orphans are reaped by their own PID (`waitpid(pid, WNOHANG)`, or `waitid` with
+  `P_PIDFD`), only for PIDs listed in the supervisor's `children` that are neither the leader nor
+  an SDK child, on the loop thread that reaps the leader.
+- **Rationale**: `waitpid(-1)` could take the leader's status, freeing its PID while the code
+  still treats it as an unreaped child, which breaks Principle I's identity guarantee. A member's
+  pidfd keeps naming the same process after it is reaped, so a reused PID is never acted on.
+- **Alternatives**: a SIGCHLD handler (changes the process-wide disposition the reaping policy
+  check forbids).
+
+## R37. PSS over RSS for a family (item 031)
+
+- **Decision**: a family's memory is the sum of each member's `Pss_Anon` + `Pss_Shmem`.
+- **Rationale**: forked workers share copy-on-write pages with the leader; RSS counts a shared
+  dataset once per worker, so own memory would read several times its size and could trip
+  FR-023's floor path in Performance, a loss the rule does not allow. PSS divides each shared
+  page among the processes mapping it, so the sum counts it once.
+- **Alternatives**: RSS (overcounts); `memory.current` in Tracked (no leaf there).
+
+## R38. The stop's pass loop (item 031)
+
+- **Decision**: a stop discovers and stops every member, then discovers again, at most 3 passes.
+- **Rationale**: a stopped process cannot fork, so each pass can find only children forked
+  before their parent was stopped; three passes cover a fork racing the first pass and its child
+  racing the second. Anything later is found by the next interval's discovery and stopped then.
+- **Alternatives**: one pass (misses a fork in flight); an unbounded loop (no bound on a stop).
+
+## R39. The member bound (item 031)
+
+- **Decision**: at most 256 tracked members per run, a constant.
+- **Rationale**: every member holds a pidfd; the bound keeps a run's descriptors well under the
+  agent's and supervisor's limits (FR-077) and bounds discovery. Members past it keep today's
+  counting and are reported `over_bound`.
+- **Alternatives**: a config key (a tuning knob with no workload that needs it yet).
+

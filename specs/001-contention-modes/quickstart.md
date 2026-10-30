@@ -178,3 +178,14 @@ cargo test --locked --test coordinator mixed_version -- --test-threads=1
   a phantom principal.
 - On the test host, after the user's typed approval: run 5 again beside the light and saturating
   GPU users, in Performance and Neutral (`native-gates.md`).
+
+## 10. Item 031 families (Linux for discovery, signals and PSS; any OS for the contract pins)
+
+1. `cargo test --locked --test managed_supervision` in the Docker Linux check: a leader with
+   forked and `multiprocessing` workers reports a family of 5 and no process outside it; an
+   orphan joins, is stopped and continued with the family, and is reaped by its PID; leftovers at
+   leader exit get TERM, then KILL, and `members_ended` counts them.
+2. `cargo test --locked --test policy -- family`: a family's CPU counts as own, so in Performance
+   its total lands at the target beside a synthetic external principal.
+3. On macOS the rootless launch still refuses a multi-process command without SDK children.
+

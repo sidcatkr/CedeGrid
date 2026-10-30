@@ -75,3 +75,11 @@ These are new:
   count of processes found outside the verified family this interval (leaf members in Full, the
   leader's children in Tracked), and `min_duty`, the resources whose cap runs at the minimum
   duty. Nothing is done to processes outside the family.
+- **Families (item 031, FR-083 to FR-087).** On Linux the supervisor is its run's child
+  subreaper. `family` reports the family's counts (`leader`, `sdk_children`, `descendants`) and
+  members (`pid`, `start_time`) whenever they change, and `state` carries them for a reattached
+  agent. `outside_family` carries `count` and `reason` (`ids_differ`, `chain_unconfirmed`,
+  `over_bound`, `untracked_platform`). The outcome's `members_ended` counts members ended at run
+  end. Steps reach every member through its pidfd; nothing is done to a process outside the
+  family.
+
