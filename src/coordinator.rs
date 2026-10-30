@@ -1252,6 +1252,14 @@ impl Coordinator {
             }
             // A release report is a node assertion backed by its local journal, never a timeout inference.
             tx.execute("UPDATE reservations SET phase=?2,observed_json=?3,detail=?4,yield_cause=COALESCE(?5,yield_cause) WHERE assignment_id=?1",params![allocation.assignment_id,phase,allocation.observed.as_ref().map(serde_json::to_string).transpose()?,allocation.detail,reported_cause])?;
+            // A fresh report of an offer still being prepared keeps it alive, so a long
+            // download or launch queue is not fenced; an unreported offer still expires.
+            if fresh && matches!(phase, "offered" | "prepared") {
+                tx.execute(
+                    "UPDATE reservations SET lease_deadline_ms=MAX(lease_deadline_ms,?2) WHERE assignment_id=?1 AND lease_sequence=0 AND phase IN ('offered','prepared')",
+                    params![allocation.assignment_id, db(now.saturating_add(self.config.lease_ms))?],
+                )?;
+            }
         }
         let mut outstanding=tx.prepare("SELECT assignment_id FROM reservations WHERE node_id=?1 AND phase!='released' AND (?2 OR lease_sequence>0 OR phase='prepared')")?;
         let missing = outstanding

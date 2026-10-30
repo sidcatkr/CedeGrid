@@ -1347,8 +1347,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T311 Implement the SIGHUP reload in `src/agent/service.rs` and `src/config.rs`, until T310 passes, per FR-080 (missing)
 - [X] T312 [P] Write failing tests: a live supervisor whose first Query timed out is re-adopted on a later iteration; replay mode re-adopts, per FR-080 (AGT-8) (missing)
 - [X] T313 Retry re-adoption with backoff and re-adopt in replay mode in `src/agent/reconcile.rs` and `src/agent/service.rs`, until T312 passes (AGT-8) (missing)
-- [ ] T314 [P] Write a failing coordinator test: an Opportunistic offer the agent reports preparing for 15 s does not expire, per FR-074 (AGT-10) (contradicts)
-- [ ] T315 Extend a preparing offer's deadline in `src/coordinator.rs`, until T314 passes (AGT-10) (contradicts)
+- [X] T314 [P] Write a failing coordinator test: an Opportunistic offer the agent reports preparing for 15 s does not expire, per FR-074 (AGT-10) (contradicts)
+- [X] T315 Extend a preparing offer's deadline in `src/coordinator.rs`, until T314 passes (AGT-10) (contradicts)
 - [ ] T316 [P] Write a failing test: a re-adopted run keeps its start and last checkpoint times, so victim order ranks it by its real progress, per FR-016 (AGT-11) (contradicts)
 - [ ] T317 Keep start and checkpoint times in the journal and restore them on re-adoption in `src/execution_state.rs` and `src/agent/reconcile.rs`, until T316 passes (AGT-11) (contradicts)
 

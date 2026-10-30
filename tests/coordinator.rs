@@ -4584,3 +4584,48 @@ fn a_stale_report_stops_grants_and_offers_but_never_drains() {
     assert!(reply.drain.is_empty());
     assert!(renew(&mut c, 2, 7400).is_err());
 }
+
+/// An Opportunistic offer the node reports preparing (downloading inputs, waiting for a
+/// launch slot) keeps its deadline while the reports keep coming, so a preparation longer
+/// than one lease is not fenced; an offer nobody reports still expires (030, AGT-10).
+#[test]
+fn a_preparing_offer_does_not_expire_while_its_node_reports_it() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["slow", "unclaimed"], 100);
+    let offered = offers(&mut c, 100).assignments;
+    let (a, other) = (offered[0].clone(), offered[1].clone());
+    for now in [4000, 8000, 12000, 15000] {
+        let mut r = report(now);
+        r.allocations = vec![AllocationReport {
+            assignment_id: a.request.assignment_id.clone(),
+            generation: a.generation,
+            phase: RemotePhase::Offered,
+            observed: None,
+            detail: "downloading inputs".into(),
+            yield_cause: None,
+            hint_ready: None,
+            observes_drain: None,
+        }];
+        report_reply(&mut c, &r, now);
+    }
+    assert_eq!(
+        authorize(&mut c, &a, 15100).sequence,
+        1,
+        "the long preparation still authorizes"
+    );
+    let unclaimed = c.handle_at(
+        &node(),
+        Request::Prepared {
+            assignment_id: other.request.assignment_id.clone(),
+            generation: other.generation,
+            coordinator_epoch: other.coordinator_epoch,
+            record: prepared(&other),
+        },
+        15100,
+    );
+    assert!(
+        unclaimed.is_err(),
+        "an offer no report mentioned expired as before"
+    );
+}
