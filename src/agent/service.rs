@@ -285,6 +285,11 @@ struct AgentLoop<'a> {
     rpc_budget: Duration,
     /// A signal stopped the agent: supervisors keep running for re-adoption (FR-080).
     leave_supervisors: bool,
+    /// The wall time of the last observation write, the cost of one synced journal write,
+    /// which sizes a draining stop's share of drains per iteration (FR-080).
+    store_write: Duration,
+    /// What is left of this iteration's share of new drains.
+    drain_quota: usize,
     /// Live supervisors that did not answer re-adoption, with the next try and its backoff.
     readopt: Vec<(ExecutionRecord, Instant, Duration)>,
 }
@@ -1206,40 +1211,15 @@ impl AgentLoop<'_> {
     ) -> Result<()> {
         let agent = self.agent;
         block_admission_beyond_envelope(decision, allocations, &agent.capacity)?;
-        let causes: BTreeMap<&str, crate::contention::YieldCause> = decision
-            .actions
-            .iter()
-            .filter(|a| a.step >= crate::contention::YieldStep::Drain)
-            .map(|a| (a.allocation_id.as_str(), a.cause))
-            .collect();
-        // The critical floor path terminates workers that do not poll the drain file.
-        let terminations: BTreeMap<&str, crate::contention::ResourceKey> = decision
-            .actions
-            .iter()
-            .filter(|a| a.step == crate::contention::YieldStep::Terminate)
-            .map(|a| (a.allocation_id.as_str(), a.resource.clone()))
-            .collect();
-        for id in &decision.would_drain {
-            // Guaranteed work drains only for a breach the policy permits.
-            if let Some(slot) = self.slots.get_mut(id)
-                && slot.drain_sent_at.is_none()
-                && ((self.stopping.is_some() && !self.leave_supervisors)
-                    || slot.assignment.request.class == AllocationClass::Opportunistic
-                    || matches!(
-                        causes.get(id.as_str()),
-                        Some(
-                            crate::contention::YieldCause::FloorBreach
-                                | crate::contention::YieldCause::EnvelopeBreach
-                        )
-                    ))
-            {
-                let cause = causes.get(id.as_str()).copied();
-                match terminations.get(id.as_str()) {
-                    Some(key) => terminate(slot, key.clone(), cause),
-                    None => drain(slot, cause),
-                }
-            }
-        }
+        let draining_stop = self.stopping.is_some() && !self.leave_supervisors;
+        self.drain_quota = stop_drain_quota(self.store_write);
+        dispatch_drains(
+            &mut self.slots,
+            &decision.would_drain,
+            &decision.actions,
+            draining_stop,
+            &mut self.drain_quota,
+        );
         // Runtime steps go to the supervisors, which apply them to their own
         // family only; a resource whose step ended returns to none.
         let mut wanted: BTreeMap<
@@ -1587,14 +1567,12 @@ impl AgentLoop<'_> {
                     slot.assignment.coordinator_epoch = reply.coordinator_epoch;
                 }
                 let remote_drains: BTreeSet<_> = reply.drain.iter().cloned().collect();
-                for id in reply.drain {
-                    if let Some((_, _, revoked)) = self.preparations.get_mut(&id) {
+                for id in &reply.drain {
+                    if let Some((_, _, revoked)) = self.preparations.get_mut(id) {
                         *revoked = true;
                     }
-                    if let Some(slot) = self.slots.get_mut(&id) {
-                        drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain));
-                    }
                 }
+                apply_coordinator_drains(&mut self.slots, &reply.drain, &mut self.drain_quota);
                 let mut acknowledged = vec![];
                 // Refusal reports share half the monitor interval, like lease requests; the
                 // rest are reported at the next heartbeat (research R19).
@@ -1831,7 +1809,13 @@ impl AgentLoop<'_> {
                 + config.lifecycle.term_grace_ms
                 + config.execution.release_confirm_timeout_ms
                 + config.execution.prepare_timeout_ms;
-            if stop.elapsed() >= Duration::from_millis(limit) {
+            // A spread stop counts its deadline from the last drain it sent.
+            let last_drain = self
+                .slots
+                .values()
+                .filter_map(|slot| slot.drain_sent_at)
+                .fold(stop, Instant::max);
+            if last_drain.elapsed() >= Duration::from_millis(limit) {
                 emit(
                     &serde_json::json!({"event":"stop_uncertain","detail":"release deadline elapsed; retained allocations require reconciliation"}),
                 )?;
@@ -2082,6 +2066,8 @@ pub async fn run(
         sampled_at: start,
         rpc_budget: observation_interval.max(Duration::from_millis(250)),
         leave_supervisors: false,
+        store_write: Duration::ZERO,
+        drain_quota: 0,
         readopt: missed
             .into_iter()
             .map(|record| (record, Instant::now() + READOPT_FIRST, READOPT_FIRST))
@@ -2130,7 +2116,9 @@ pub async fn run(
             state.share_observation(&snapshot);
             state.actuate(&mut decision, &allocations)?;
             mark = state.cost.charge("actuate", mark);
+            let written = Instant::now();
             state.store.append_observation(&snapshot, &decision)?;
+            state.store_write = written.elapsed();
             state.observations_since_prune += 1;
             if state.observations_since_prune >= OBSERVATIONS_PER_PRUNE {
                 state.observations_since_prune = 0;

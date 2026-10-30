@@ -1378,8 +1378,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 8: report 029 Decisions 1 and 2 (FR-080, FR-034)**
 
-- [ ] T336 [P] Write a failing service test: a draining stop of 150 tasks keeps every iteration within 1 s, with renewals and heartbeats first; the burst test's bound covers the whole run, stop included, per FR-080 (029 Decision 1) (contradicts)
-- [ ] T337 Spread a stop's Drain lines over iterations within a 250 ms budget in `src/agent/service.rs` and `src/agent.rs`, until T336 passes (029 Decision 1) (contradicts)
+- [X] T336 [P] Write a failing service test: a draining stop of 150 tasks keeps every iteration within 1 s, with renewals and heartbeats first; the burst test's bound covers the whole run, stop included, per FR-080 (029 Decision 1) (contradicts)
+- [X] T337 Spread a stop's Drain lines over iterations within a 250 ms budget in `src/agent/service.rs` and `src/agent.rs`, until T336 passes (029 Decision 1) (contradicts)
 - [ ] T338 [P] Write failing tests on run 7's trace shape: once the quiet count says contention has ended, held CPU caps move to the target in one move, and own usage returns within 3 s of the contender stopping, in Yield First and Performance, per FR-034 (029 Decision 2) (contradicts)
 - [ ] T339 Raise held CPU caps to the mode's target in one move at the quiet count in `src/policy/ladder.rs` and `src/contention.rs`, until T338 passes, per FR-034 (029 Decision 2) (contradicts)
 

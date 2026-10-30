@@ -53,7 +53,7 @@ impl Service {
                 .unwrap(),
         )
     }
-    /// TERM lets the agent drain and release what it launched.
+    /// TERM stops the agent; it leaves running supervisors to the next agent (FR-080).
     fn stop(&mut self, within: Duration) {
         if self.0.try_wait().unwrap().is_none() {
             // SAFETY: the PID is this test's own child, which has not been reaped.
@@ -306,10 +306,24 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // Two more heartbeats after the last launch, then stop.
+    // Two more heartbeats after the last launch, then a draining stop: an operator drain of
+    // the node, whose drains the agent spreads over iterations (FR-080), then TERM, which
+    // leaves no supervisor once every run is released.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let ran = running(&state);
     let expired = lease_expiries(&root.join("coordinator"));
+    client
+        .request(&Request::DrainNode {
+            node_id: "burst".into(),
+            drain: true,
+        })
+        .await
+        .unwrap();
+    let drained = Instant::now() + Duration::from_secs(60);
+    while running(&state) > 0 && Instant::now() < drained {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let left = running(&state);
     agent_service.stop(Duration::from_secs(30));
     coordinator_service.stop(Duration::from_secs(5));
     let log = fs::read_to_string(root.join("agent.stdout.log")).unwrap();
@@ -333,7 +347,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .unwrap_or(0);
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
-        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
+        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {left} left running after the drain, {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
         if all_running.is_some() {
             "all ran"
         } else {
@@ -344,6 +358,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         stale, 0,
         "initial authorizations were refused for stale evidence"
     );
+    assert_eq!(left, 0, "the operator drain released every run");
     assert!(
         longest <= GAP_BOUND_MS,
         "longest gap between observations {longest} ms exceeds {GAP_BOUND_MS} ms"

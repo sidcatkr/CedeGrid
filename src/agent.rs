@@ -689,6 +689,96 @@ fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
     input.flush()?;
     Ok(())
 }
+/// The wall time one iteration's share of a draining stop may cost the supervisors' journal
+/// writes, so the stop's iterations stay within the 1 s cadence (FR-080).
+const STOP_DRAIN_BUDGET: Duration = Duration::from_millis(250);
+
+/// How many of a draining stop's Drain lines one iteration sends: as many as fit in
+/// `STOP_DRAIN_BUDGET` at the agent's last synced journal write each, and at least one.
+fn stop_drain_quota(write: Duration) -> usize {
+    let each = write.max(Duration::from_millis(1)).as_micros();
+    usize::try_from((STOP_DRAIN_BUDGET.as_micros() / each).max(1)).unwrap_or(usize::MAX)
+}
+
+/// Send the drains a decision asks for; Guaranteed work drains only in a draining stop or
+/// for a breach the policy permits. Every drain sent takes one of the iteration's `quota`;
+/// the stop's own drains wait for a later iteration once it is used up, while a drain the
+/// policy decides for a breach or for contention goes out at once. Returns how many were
+/// sent.
+fn dispatch_drains(
+    slots: &mut BTreeMap<String, ChildSlot>,
+    would_drain: &[String],
+    actions: &[crate::model::YieldAction],
+    draining_stop: bool,
+    quota: &mut usize,
+) -> usize {
+    use crate::contention::{YieldCause, YieldStep};
+    let causes: BTreeMap<&str, YieldCause> = actions
+        .iter()
+        .filter(|a| a.step >= YieldStep::Drain)
+        .map(|a| (a.allocation_id.as_str(), a.cause))
+        .collect();
+    // The critical floor path terminates workers that do not poll the drain file.
+    let terminations: BTreeMap<&str, crate::contention::ResourceKey> = actions
+        .iter()
+        .filter(|a| a.step == YieldStep::Terminate)
+        .map(|a| (a.allocation_id.as_str(), a.resource.clone()))
+        .collect();
+    let mut sent = 0;
+    for id in would_drain {
+        let cause = causes.get(id.as_str()).copied();
+        let Some(slot) = slots.get_mut(id) else {
+            continue;
+        };
+        if slot.drain_sent_at.is_some()
+            || !(draining_stop
+                || slot.assignment.request.class == AllocationClass::Opportunistic
+                || matches!(
+                    cause,
+                    Some(YieldCause::FloorBreach | YieldCause::EnvelopeBreach)
+                ))
+        {
+            continue;
+        }
+        let stop_only = cause.is_none_or(|cause| cause == YieldCause::OperatorDrain);
+        if draining_stop && stop_only && *quota == 0 {
+            continue;
+        }
+        *quota = quota.saturating_sub(1);
+        match terminations.get(id.as_str()) {
+            Some(key) => terminate(slot, key.clone(), cause),
+            None => drain(slot, cause),
+        }
+        sent += 1;
+    }
+    sent
+}
+
+/// Apply the coordinator's drains. One not sent before takes one of the iteration's `quota`
+/// and waits for a later heartbeat, which asks again, once it is used up (FR-080). Returns
+/// how many were sent for the first time.
+fn apply_coordinator_drains(
+    slots: &mut BTreeMap<String, ChildSlot>,
+    ids: &[String],
+    quota: &mut usize,
+) -> usize {
+    let mut sent = 0;
+    for id in ids {
+        let Some(slot) = slots.get_mut(id) else {
+            continue;
+        };
+        if slot.drain_sent_at.is_none() {
+            if *quota == 0 {
+                continue;
+            }
+            *quota -= 1;
+            sent += 1;
+        }
+        drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain));
+    }
+    sent
+}
+
 /// Send Drain and record it for the admission back-off.
 fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) {
     slot.drain_sent_at.get_or_insert_with(Instant::now);
@@ -1740,6 +1830,76 @@ mod drain_tests {
         slot.note_readiness(false, false);
         let facts = slot.facts();
         assert!(facts.hint_ready && facts.observes_drain);
+    }
+
+    /// A draining stop sends its drains a share per iteration, sized so the supervisors'
+    /// journal writes fit in 250 ms at the host's synced-write cost (run 7: about 28 ms, so 8
+    /// of 150 per iteration); a drain the policy decides for a breach goes out at once
+    /// (FR-080, report 029 Decision 1).
+    #[test]
+    fn a_draining_stop_spreads_its_drains_over_iterations() {
+        use crate::contention::{ResourceKey, YieldCause, YieldStep};
+        assert_eq!(stop_drain_quota(Duration::from_millis(28)), 8);
+        assert_eq!(stop_drain_quota(Duration::ZERO), 250);
+        assert_eq!(stop_drain_quota(Duration::from_secs(1)), 1);
+        let mut slots = BTreeMap::new();
+        let mut children = Vec::new();
+        for i in 0..20 {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("cat >/dev/null")
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = child.stdin.take().unwrap();
+            let mut slot = slot_with(child, input);
+            slot.sequence = 1;
+            slot.assignment.request.class = AllocationClass::Opportunistic;
+            children.push(format!("s{i:02}"));
+            slots.insert(format!("s{i:02}"), slot);
+        }
+        let stop = |id: &str| crate::model::YieldAction {
+            allocation_id: id.into(),
+            resource: ResourceKey::Cpu,
+            step: YieldStep::Drain,
+            target: None,
+            cause: YieldCause::OperatorDrain,
+            code: "yield_step_drain".into(),
+            deadline_ms: None,
+        };
+        let mut actions: Vec<crate::model::YieldAction> =
+            children.iter().map(|id| stop(id)).collect();
+        // A breach drain for the last slot is not held back by the stop's share.
+        actions[19].cause = YieldCause::FloorBreach;
+        actions[19].resource = ResourceKey::Ram;
+        let sent: Vec<usize> = (0..4)
+            .map(|_| dispatch_drains(&mut slots, &children, &actions, true, &mut 8))
+            .collect();
+        assert_eq!(sent, [9, 8, 3, 0]);
+        assert!(slots["s19"].drain_sent_at.is_some());
+        assert!(slots.values().all(|slot| slot.drain_sent_at.is_some()));
+        // Outside a stop nothing is held back.
+        let reset = |slots: &mut BTreeMap<String, ChildSlot>| {
+            for slot in slots.values_mut() {
+                slot.drain_sent_at = None;
+            }
+        };
+        reset(&mut slots);
+        assert_eq!(
+            dispatch_drains(&mut slots, &children, &actions, false, &mut 0),
+            20
+        );
+        // An operator drain through the coordinator is spread the same way, sharing the
+        // iteration's quota with the stop's own drains.
+        reset(&mut slots);
+        let sent: Vec<usize> = (0..4)
+            .map(|_| {
+                let mut quota = 8;
+                dispatch_drains(&mut slots, &children[..2], &actions, true, &mut quota)
+                    + apply_coordinator_drains(&mut slots, &children, &mut quota)
+            })
+            .collect();
+        assert_eq!(sent, [8, 8, 4, 0]);
     }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
