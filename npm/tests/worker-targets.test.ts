@@ -254,15 +254,56 @@ function replaceTarget(root: string, targetFile: string, sequence: number, targe
 test('an unchanged target file is not read again', (t) => {
     const f = fixture();
     try {
-        replaceTarget(f.root, f.targetFile, 1, { ram_mib: 100 });
+        // Older than 50 ms: a recent file is parsed again (R5).
+        const old = () => new Date(Date.now() - 1000);
+        replaceTarget(f.root, f.targetFile, 1, { ram_mib: 100 }, old());
         const signals = new ResourceSignals(undefined, f.targetFile);
         const reads = t.mock.method(nodeFs, 'readFileSync');
         const targetReads = () => reads.mock.calls.filter((call) => call.arguments[0] === f.targetFile).length;
         for (let i = 0; i < 50; i++) { signals.poll(); signals.draining(); }
         assert.equal(targetReads(), 1);
-        replaceTarget(f.root, f.targetFile, 2, { ram_mib: 50 });
+        replaceTarget(f.root, f.targetFile, 2, { ram_mib: 50 }, old());
         assert.equal(signals.poll()!.sequence, 2n);
         assert.equal(targetReads(), 2);
+    }
+    finally { f.done(); }
+});
+
+test('a failed read is not cached', () => {
+    const f = fixture();
+    try {
+        replaceTarget(f.root, f.targetFile, 1, { ram_mib: 100 }, new Date(Date.now() - 1000));
+        const signals = new ResourceSignals(undefined, f.targetFile);
+        nodeFs.chmodSync(f.targetFile, 0);
+        let unreadable;
+        try { unreadable = signals.poll(); }
+        finally { nodeFs.chmodSync(f.targetFile, 0o600); }
+        if (unreadable === null) {
+            // The stat identity is unchanged; the next call reads again (SDK-1).
+            assert.equal(signals.poll()!.sequence, 1n);
+        }
+    }
+    finally { f.done(); }
+});
+
+test('a rewrite with a reused inode is seen while recent', () => {
+    const f = fixture();
+    try {
+        // Two writes in place keep the inode; equal size and one mtime keep the whole identity.
+        const stamp = new Date(Math.floor(Date.now() / 1000) * 1000 + 30_000);
+        const rewrite = (sequence: number, ramMib: number) => {
+            writeFileSync(f.targetFile, JSON.stringify({ version: 1, sequence, deadline_unix_ms: 1793000000000, step: 'hint', targets: { ram_mib: ramMib } }));
+            nodeFs.utimesSync(f.targetFile, stamp, stamp);
+        };
+        rewrite(1, 100);
+        const signals = new ResourceSignals(undefined, f.targetFile);
+        assert.equal(signals.poll()!.sequence, 1n);
+        const before = nodeFs.statSync(f.targetFile, { bigint: true });
+        rewrite(2, 200);
+        const after = nodeFs.statSync(f.targetFile, { bigint: true });
+        assert.deepEqual([after.ino, after.size, after.mtimeNs], [before.ino, before.size, before.mtimeNs]);
+        const seen = signals.poll()!;
+        assert.deepEqual([seen.sequence, seen.ramMib], [2n, 200n]);
     }
     finally { f.done(); }
 });

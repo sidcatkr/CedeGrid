@@ -262,17 +262,51 @@ class ResourceTargetTests(unittest.TestCase):
             os.utime(temporary, ns=(mtime_ns, mtime_ns))
         os.replace(temporary, self.target_file)
     def test_an_unchanged_target_file_is_not_read_again(self):
+        import time
         from unittest.mock import patch
         from cedegrid import ResourceSignals, worker
-        self.replace(1, ram_mib=100)
+        # Older than 50 ms: a recent file is parsed again (R5).
+        self.replace(1, mtime_ns=time.time_ns() - 10**9, ram_mib=100)
         signals = ResourceSignals(None, self.target_file)
         with patch.object(worker, '_read_signals', wraps=worker._read_signals) as read:
             for _ in range(50):
                 signals.poll(); signals.draining()
             self.assertEqual(read.call_count, 1)
-            self.replace(2, ram_mib=50)
+            self.replace(2, mtime_ns=time.time_ns() - 10**9, ram_mib=50)
             self.assertEqual(signals.poll().sequence, 2)
             self.assertEqual(read.call_count, 2)
+    def test_a_failed_read_is_not_cached(self):
+        import os, time
+        from cedegrid import ResourceSignals
+        self.replace(1, mtime_ns=time.time_ns() - 10**9, ram_mib=100)
+        signals = ResourceSignals(None, self.target_file)
+        os.chmod(self.target_file, 0)
+        try:
+            unreadable = signals.poll()
+        finally:
+            os.chmod(self.target_file, 0o600)
+        if os.access(self.target_file, os.R_OK) and unreadable is not None:
+            self.skipTest('mode 0 does not stop reads here')
+        self.assertIsNone(unreadable)
+        # The stat identity is unchanged; the next call reads again (SDK-1).
+        self.assertEqual(signals.poll().sequence, 1)
+    def test_a_rewrite_with_a_reused_inode_is_seen_while_recent(self):
+        import json, os, time
+        from cedegrid import ResourceSignals
+        # Two writes in place keep the inode; equal size and one mtime keep the whole identity.
+        stamp = time.time_ns() + 30 * 10**9
+        def rewrite(sequence, ram_mib):
+            self.target_file.write_text(json.dumps({'version':1,'sequence':sequence,'deadline_unix_ms':1793000000000,
+                                                    'step':'hint','targets':{'ram_mib':ram_mib}}))
+            os.utime(self.target_file, ns=(stamp, stamp))
+        rewrite(1, 100)
+        signals = ResourceSignals(None, self.target_file)
+        self.assertEqual(signals.poll().sequence, 1)
+        before = self.target_file.stat()
+        rewrite(2, 200)
+        after = self.target_file.stat()
+        self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns), (after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertEqual((signals.poll().sequence, signals.poll().ram_mib), (2, 200))
     def test_a_same_size_target_renamed_within_one_mtime_tick_is_seen(self):
         from cedegrid import ResourceSignals
         self.replace(1, ram_mib=100)

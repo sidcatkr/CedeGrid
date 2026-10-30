@@ -200,14 +200,23 @@ function amounts(value: any): { cpu?: bigint; ram?: bigint; gpu: Record<string, 
     return { cpu, ram, gpu: { ...gpu } };
 }
 type Signals = [ResourceTargets | null, ResourceAllowance | null, bigint];
-/** Parse a target file into targets, allowance and the save-progress sequence. A missing,
- * invalid or newer-version file is none of them; sequence 0 means no target was published
- * yet, and an invalid allowance or save-progress sequence is ignored without losing the
- * target. */
-function readSignals(path: string): Signals {
+/** A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5). */
+const RECENT_NS = 50_000_000n;
+/** Parse a target file into targets, allowance and the save-progress sequence, or null when it
+ * could not be read, so the caller reads it again. An invalid or newer-version file is none of
+ * them; sequence 0 means no target was published yet, and an invalid allowance or
+ * save-progress sequence is ignored without losing the target. */
+function readSignals(path: string): Signals | null {
+    let text: string;
+    try {
+        text = readFileSync(path, 'utf8');
+    }
+    catch {
+        return null;
+    }
     let value: any;
     try {
-        value = parseJson(readFileSync(path, 'utf8'));
+        value = parseJson(text);
     }
     catch {
         return [null, null, 0n];
@@ -241,22 +250,37 @@ export class ResourceSignals {
     private cached: Signals = [null, null, 0n];
     constructor(readonly drainFile?: string, readonly targetFile?: string) { }
     static fromEnv(): ResourceSignals { return new ResourceSignals(process.env.CEDEGRID_DRAIN_FILE || undefined, process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined); }
-    /** Parse the file only when its stat identity changed: the supervisor replaces it by
-     * rename, so a new target always has a new inode. */
+    /** Parse the file again when its stat identity changed or its mtime is within 50 ms of
+     * now: the supervisor replaces it by rename, but two writes within one mtime tick can keep
+     * the size and a reused inode (R5). The identity is kept only after a read that succeeded,
+     * so a failed read is tried again (SDK-1). */
     private read(): Signals {
         if (!this.targetFile)
             return [null, null, 0n];
         let identity: string | null = null;
+        let recent = false;
         try {
             const stat = statSync(this.targetFile, { bigint: true, throwIfNoEntry: false });
             identity = stat ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}` : null;
+            recent = stat ? stat.mtimeNs > BigInt(Date.now()) * 1_000_000n - RECENT_NS : false;
         }
         catch {
             identity = null;
         }
-        if (identity !== this.identity) {
-            this.identity = identity;
-            this.cached = identity ? readSignals(this.targetFile) : [null, null, 0n];
+        if (identity === null) {
+            this.identity = null;
+            this.cached = [null, null, 0n];
+        }
+        else if (identity !== this.identity || recent) {
+            const read = readSignals(this.targetFile);
+            if (read) {
+                this.identity = identity;
+                this.cached = read;
+            }
+            else if (identity !== this.identity) {
+                this.identity = undefined;
+                this.cached = [null, null, 0n];
+            }
         }
         this.acknowledge(this.cached[0] ? this.cached[0].sequence : 0n);
         return this.cached;

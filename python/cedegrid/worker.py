@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import stat
+import time
 import uuid
 
 
@@ -115,15 +116,25 @@ def _amounts(value):
     return cpu, ram, dict(gpu)
 
 
+# A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5).
+_RECENT_NS = 50_000_000
+
+
 def _read_signals(path: Path):
-    """Parse a target file into (targets, allowance, save-progress sequence). A missing,
-    invalid or newer-version file is none of them; sequence 0 means no target was
-    published yet, and an invalid allowance or save-progress sequence is ignored without
-    losing the target."""
+    """Parse a target file into (targets, allowance, save-progress sequence), or None when
+    it could not be read, so the caller reads it again. An invalid or newer-version file is
+    none of them; sequence 0 means no target was published yet, and an invalid allowance
+    or save-progress sequence is ignored without losing the target."""
     from .codec import parse_json
     try:
-        value = parse_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None, None, 0
+    except OSError:
+        return None
+    try:
+        value = parse_json(text)
+    except ValueError:
         return None, None, 0
     if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
         return None, None, 0
@@ -157,8 +168,10 @@ class ResourceSignals:
                    os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE") or None)
 
     def _read(self):
-        """Parse the file only when its stat identity changed: the supervisor replaces it
-        by rename, so a new target always has a new inode."""
+        """Parse the file again when its stat identity changed or its mtime is within 50 ms
+        of now: the supervisor replaces it by rename, but two writes within one mtime tick can
+        keep the size and a reused inode (R5). The identity is kept only after a read that
+        succeeded, so a failed read is tried again (SDK-1)."""
         if self.target_file is None:
             return None, None, 0
         try:
@@ -166,9 +179,14 @@ class ResourceSignals:
             identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
         except OSError:
             identity = None
-        if identity != self._identity:
-            self._identity = identity
-            self._cached = _read_signals(self.target_file) if identity else (None, None, 0)
+        if identity is None:
+            self._identity, self._cached = None, (None, None, 0)
+        elif identity != self._identity or stat.st_mtime_ns > time.time_ns() - _RECENT_NS:
+            read = _read_signals(self.target_file)
+            if read is not None:
+                self._identity, self._cached = identity, read
+            elif identity != self._identity:
+                self._identity, self._cached = (), (None, None, 0)
         self._acknowledge(self._cached[0].sequence if self._cached[0] else 0)
         return self._cached
 
