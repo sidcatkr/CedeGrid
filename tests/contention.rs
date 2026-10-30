@@ -4536,12 +4536,25 @@ mod contention_ended {
         demand: impl Fn(u64) -> u64,
         tweak: impl Fn(u64, &mut Snapshot),
     ) -> Vec<Tick> {
+        run_shaped(mode, ticks, TASKS, 100, demand, tweak)
+    }
+
+    /// `run_with` for `tasks` tasks, each capped below its demand running at `undershoot`
+    /// percent of its cap, as a duty cycle that loses part of each period does.
+    fn run_shaped(
+        mode: ContentionMode,
+        ticks: u64,
+        tasks: usize,
+        undershoot: u64,
+        demand: impl Fn(u64) -> u64,
+        tweak: impl Fn(u64, &mut Snapshot),
+    ) -> Vec<Tick> {
         let mut config = config();
         config.cpu.reserve_physical_cores = 0;
         config.contention.default_mode = mode;
         let mut engine = PolicyEngine::new();
-        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); TASKS];
-        let ids: Vec<String> = (0..TASKS).map(|i| format!("t{i}")).collect();
+        let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); tasks];
+        let ids: Vec<String> = (0..tasks).map(|i| format!("t{i}")).collect();
         let mut out = Vec::new();
         for tick in 0..ticks {
             let now = tick * INTERVAL;
@@ -4549,14 +4562,17 @@ mod contention_ended {
                 .iter()
                 .map(|(step, target)| match step {
                     YieldStep::Pause => 0,
-                    YieldStep::Cap => target.unwrap_or(TASK).min(TASK),
+                    YieldStep::Cap if target.is_some_and(|target| target < TASK) => {
+                        target.unwrap_or(TASK) * undershoot / 100
+                    }
+                    YieldStep::Cap => TASK,
                     _ => TASK,
                 })
                 .collect();
             demands.push(demand(now));
             let usage = schedule(&demands);
-            let contender = usage[TASKS];
-            let own: u64 = usage[..TASKS].iter().sum();
+            let contender = usage[tasks];
+            let own: u64 = usage[..tasks].iter().sum();
             let mut snap = snapshot(own + contender);
             snap.cpu_capacity_millicores = CAPACITY;
             snap.physical_cores = Some(4);
@@ -4669,6 +4685,49 @@ mod contention_ended {
             assert!(
                 after.is_some_and(|ms| ms <= 2000 + 2 * INTERVAL),
                 "{mode:?}: {after:?} to reach {target}m"
+            );
+        }
+    }
+
+    /// Report 029 run 7's return (FR-034, Decision 2): 13 steady 250 m tasks in Yield First
+    /// and 15 in Performance beside a one-core contender for 30 s, each capped task running at
+    /// 85% of a binding cap. Once the quiet count says contention has ended, own usage comes
+    /// back to its level before in one move, within 3 s of the contender stopping.
+    #[test]
+    fn run_7s_return_brings_own_usage_back_in_one_move_within_three_seconds() {
+        for (mode, tasks) in [
+            (ContentionMode::YieldFirst, 13),
+            (ContentionMode::Performance, 15),
+        ] {
+            let run = run_shaped(
+                mode,
+                140,
+                tasks,
+                85,
+                |now| match now {
+                    10_000..40_000 => 1000,
+                    _ => 0,
+                },
+                |_, _| {},
+            );
+            let before = run.iter().find(|tick| tick.now == 9_500).unwrap().own;
+            let after: Vec<u64> = run
+                .iter()
+                .filter(|tick| tick.now >= 40_000)
+                .map(|tick| tick.own)
+                .collect();
+            let back = after.iter().position(|own| own * 100 >= before * 98);
+            assert!(
+                back.is_some_and(|i| i as u64 * INTERVAL <= 3000),
+                "{mode:?}: {before}m before, {:?}",
+                &after[..12]
+            );
+            // One move: once own usage rises, it stays where it rose to.
+            let rose = after.iter().position(|own| *own > after[0]).unwrap();
+            assert!(
+                after[rose..].iter().all(|own| *own == after[rose]),
+                "{mode:?}: {:?}",
+                &after[..12]
             );
         }
     }
