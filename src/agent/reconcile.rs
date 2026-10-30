@@ -359,14 +359,7 @@ pub(super) fn reconcile_guarded(
         {
             let absent = identity_absent(id);
             if absent && recovery_allows_release(&record) {
-                released = crate::telemetry::GpuReleaseGuard::prepare(&record.resources)
-                    .and_then(|g| {
-                        g.confirm(
-                            id.pid,
-                            Duration::from_millis(config.execution.release_confirm_timeout_ms),
-                        )
-                    })
-                    .is_ok();
+                released = gpu_released_now(&record.resources, id.pid);
             }
         }
         for child in store.managed_children(&record.assignment_id)? {
@@ -375,30 +368,32 @@ pub(super) fn reconcile_guarded(
                 continue;
             }
             let gone = child.identity.as_ref().is_some_and(|id| {
-                identity_absent(id)
-                    && crate::telemetry::GpuReleaseGuard::prepare(&record.resources)
-                        .and_then(|g| {
-                            g.confirm(
-                                id.pid,
-                                Duration::from_millis(config.execution.release_confirm_timeout_ms),
-                            )
-                        })
-                        .is_ok()
+                identity_absent(id) && gpu_released_now(&record.resources, id.pid)
             });
+            if !gone && child.phase == ManagedChildPhase::NeedsReconciliation {
+                released = false;
+                continue;
+            }
             store.transition_managed_child(&child.child_id,if gone {ManagedChildPhase::Released}else{ManagedChildPhase::NeedsReconciliation},None,None,
                 if gone {"Read-only reconciliation verified original child absent and GPU context released"}else{"Supervisor handle lost; child identity/release unconfirmed; family reservation retained"})?;
             released &= gone;
         }
+        let was_uncertain = record.phase == ExecutionPhase::NeedsReconciliation;
         record.phase = if released {
             ExecutionPhase::Released
         } else {
             ExecutionPhase::NeedsReconciliation
         };
-        record.detail = if released {
-            "read-only reconciliation proved original rootless leader and all registered mediated children absent, with GPU contexts released".into()
+        let detail = if released {
+            "read-only reconciliation proved original rootless leader and all registered mediated children absent, with GPU contexts released"
         } else {
-            "supervisor ownership unavailable; allocation retained until identity/backend release is proven".into()
+            "supervisor ownership unavailable; allocation retained until identity/backend release is proven"
         };
+        // An uncertain record that stays so is not journaled again each heartbeat.
+        if was_uncertain && !released && record.detail == detail {
+            continue;
+        }
+        record.detail = detail.into();
         store.transition(&record)?;
     }
     // The node's own callers need only unreleased work; the operator command gets it all.
@@ -407,4 +402,12 @@ pub(super) fn reconcile_guarded(
     } else {
         store.active_executions()
     }
+}
+
+/// One look at whether a GPU context of `pid` is gone; never a wait, since this runs on the
+/// agent's loop every heartbeat (030, AGT-3). An unreadable device counts as not released.
+fn gpu_released_now(resources: &crate::model::Resources, pid: u32) -> bool {
+    crate::telemetry::GpuReleaseGuard::prepare(resources)
+        .and_then(|guard| guard.is_released(pid))
+        .unwrap_or(false)
 }

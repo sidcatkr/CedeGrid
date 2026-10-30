@@ -968,6 +968,45 @@ mod agent_transport_tests {
         );
         preparing.phase = ExecutionPhase::Prepared;
         store.transition(&preparing).unwrap();
+        // Each heartbeat reconciles again; a record that stays uncertain is not rewritten, so
+        // the journal's events do not grow with every heartbeat (030, AGT-3).
+        let events = || -> i64 {
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM execution_events WHERE assignment_id='orphan'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = events();
+        for _ in 0..3 {
+            reconcile_agent_owned(
+                &config,
+                std::iter::empty(),
+                pending.iter(),
+                store.namespace_guard().clone(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            events(),
+            before,
+            "an unchanged uncertain record is not journaled again"
+        );
+    }
+
+    /// The reconcile path checks a GPU context's release once per heartbeat; it never waits
+    /// for it, which blocked the agent's loop up to the release-confirm timeout per record
+    /// (030, AGT-3).
+    #[test]
+    fn reconciliation_never_waits_for_a_gpu_release() {
+        let source = include_str!("agent/reconcile.rs");
+        assert!(
+            !source.contains(".confirm("),
+            "reconcile.rs waits on GpuReleaseGuard::confirm"
+        );
     }
     #[test]
     fn observation_cadence_does_not_accumulate_control_processing_time() {

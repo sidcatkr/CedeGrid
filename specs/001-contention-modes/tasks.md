@@ -1332,8 +1332,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 - [X] T300 [P] Write failing tests: a report with `sample_age_ms` over the freshness limit gets no renewals and no offers and causes no drain; a fresh one restores grants; wall clocks 5 s apart do not make a fresh report stale; an older agent keeps the wall-clock check, per FR-079 and contracts/wire-negotiation `report_age/1` (AGT-2) (contradicts)
 - [X] T301 Add `NodeReport.sample_age_ms` behind `report_age/1` in `src/protocol.rs`, the agent's sample age in `src/agent/service.rs`, and the stale node rule in `src/coordinator.rs`, until T300 passes, per FR-079 and research R30 (AGT-2) (contradicts)
-- [ ] T302 [P] Write a failing test: a NeedsReconciliation GPU record whose PID stays in NVML costs one NVML read per heartbeat, no sleep, backing off after 3 checks (AGT-3) (contradicts)
-- [ ] T303 Replace the release-confirm sleep loop on the reconcile path in `src/agent/reconcile.rs` and `src/telemetry/gpu.rs`, until T302 passes (AGT-3) (contradicts)
+- [X] T302 [P] Write a failing test: a NeedsReconciliation GPU record whose PID stays in NVML costs one NVML read per heartbeat, no sleep, backing off after 3 checks (AGT-3) (contradicts)
+- [X] T303 Replace the release-confirm sleep loop on the reconcile path in `src/agent/reconcile.rs` and `src/telemetry/gpu.rs`, until T302 passes (AGT-3) (contradicts)
 - [ ] T304 [P] Write a failing service test: with a coordinator that never answers, each iteration still samples and yields within the monitor interval, and the requests are retried, per FR-034 (AGT-4) (contradicts)
 - [ ] T305 Bound each coordinator RPC in the loop by half the monitor interval in `src/agent/service.rs` and `src/agent/client.rs`, until T304 passes (AGT-4) (contradicts)
 - [ ] T306 [P] Write failing tests: `EPIPE` on stdout, `NotFound` while walking the spool, a panicked preparation task and `ENOSPC` on a refusal proof skip the interval and keep the agent running (AGT-6) (contradicts)
