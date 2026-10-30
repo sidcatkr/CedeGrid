@@ -1290,3 +1290,133 @@ Constitution 7.0.0 (Principle II redefined, maintainer approval of 2026-10-29). 
 - [X] T273 Compare the decision snapshots with those at `b63b59a` and record each class of change, per plan "Item 029" (missing)
 - [X] T274 Write item 029's Part 3 native gate commands into `native-gates.md` (runs 1–7 and the reruns of report 027's failed runs), per plan "Item 029" (missing)
 - [X] T275 Native gates for item 029 (Part 3) on the authorized test host. *Deferred: needs the maintainer's typed approval after report 029-2.* Per FR-011, FR-022, FR-023, FR-076, FR-077 and SC-014 (missing)
+
+## Phase 24: Convergence (item 030)
+
+The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 030"), in the addendum's order. Each finding: a failing test first, then the fix, one commit per finding; a medium finding no test reproduces moves to the report's appendix instead. The 32 low findings are deferred to a follow-up item. T368 waits for the user's typed approval in this session.
+
+**Group 1: retention and history loading (FR-081)**
+
+- [ ] T276 [P] Write a failing agent test: with 2100 Released executions in the journal, a heartbeat is accepted and reports the active executions plus the last 256 Released ones, per FR-081 (AGT-1) (contradicts)
+- [ ] T277 Report active executions plus the last 256 Released in `src/agent/service.rs` (heartbeat) and `src/agent/reconcile.rs`, until T276 passes, per FR-081 (AGT-1) (contradicts)
+- [ ] T278 [P] Write failing tests that the loop's per-iteration passes (slot service, outbox recovery, `allocation_facts`, sampling, released-spool collection) read only active records, with Released rows scanned once at start and on release, and the holds-table schema check once per start, per FR-081 (EFF-3, R4) (missing)
+- [ ] T279 Add `ExecutionJournal::active_executions()` in `src/execution_state.rs` and use it in `src/agent/service.rs` and `src/telemetry/managed.rs`; reclaim a Released record's spool once, until T278 passes, per FR-081 (EFF-3, R4) (missing)
+- [ ] T280 [P] Write a failing state test: `observations` keeps 24 h and at most 200,000 rows, pruned every 600 iterations, per FR-081 (EFF-1) (missing)
+- [ ] T281 Prune `observations` in `src/state.rs` and `src/agent/service.rs`, until T280 passes, per FR-081 (EFF-1) (missing)
+- [ ] T282 [P] Write failing tests: an attempt's directory is removed once its outcome receipt is written and publication GC has emptied it, and the spool size is kept without walking `attempts/`, per FR-081 (EFF-5) (missing)
+- [ ] T283 Remove finished attempt directories and keep the spool total incrementally in `src/agent.rs`, `src/agent/service.rs` and `src/publication_gc.rs`, until T282 passes, per FR-081 (EFF-5) (missing)
+
+**Group 2: supervisor death and stop state (FR-078)**
+
+- [ ] T284 [P] Write failing Linux tests: a supervisor killed by SIGKILL in a duty off phase leaves no Opportunistic workload (killed through the parent-death signal) and a running Guaranteed one; SIGTERM, SIGINT and SIGHUP to a supervisor release its steps and drain; supervisors run in their own process group, per FR-078 (SUP-1) (missing)
+- [ ] T285 Set `PR_SET_PDEATHSIG` with the `getppid()` check in the worker gate (`src/supervision/unix.rs`, `src/main.rs`), add the supervisor's signal handling, and start supervisors in their own process group (`src/agent/launch.rs`), until T284 passes, per FR-078 and research R29 (SUP-1) (missing)
+- [ ] T286 [P] Write failing cgroup tests: a duty interrupted in its off phase, then a reattaching agent's Query, ends with the leaf thawed; a recorded Pause stays frozen; membership is verified first, per FR-078 (028 Decision 1) (missing)
+- [ ] T287 Thaw a leaf frozen without a recorded Pause in `CgroupActuator::reconcile` (`src/cgroup.rs`), until T286 passes, per FR-078 (028 Decision 1) (missing)
+- [ ] T288 [P] Write a failing actuator test: a family whose second member's STOP fails, then release, ends with every member continued, per Constitution II (SUP-5, R2) (contradicts)
+- [ ] T289 Set `stopped` before signalling, send CONT to every member on resume and release, and signal past a failing member in `src/actuation.rs`, `src/supervision/unix.rs` and `src/child_supervision.rs`, until T288 passes (SUP-5, R2) (contradicts)
+- [ ] T290 [P] Write a failing test: a refused thaw after a tick error is reported (`step_release_failed`) and retried each tick while the freeze is recorded, per CLAUDE.md's error rule (SUP-4) (contradicts)
+- [ ] T291 Report release failures and retry the thaw in `src/supervision/unix.rs` and `src/cgroup.rs`, until T290 passes (SUP-4) (contradicts)
+- [ ] T292 [P] Write a failing test: after the leader exits with managed children draining, a CPU cap keeps cycling and a pause is released when the children's drain starts, per FR-014 (SUP-6) (contradicts)
+- [ ] T293 Keep ticking while children run and release at the children's drain start in `src/supervision/unix.rs`, until T292 passes (SUP-6) (contradicts)
+
+**Group 3: log capture and supervisor errors**
+
+- [ ] T294 [P] Write a failing test: a log-capture quota or write error does not close the workload's pipe; the workload keeps writing, and the outcome counts dropped bytes; the spool reservation is taken in chunks, per Constitution II (SUP-2) (contradicts)
+- [ ] T295 Read and discard after a capture error and reserve in chunks in `src/supervision/unix.rs` and `src/publication.rs`, until T294 passes (SUP-2) (contradicts)
+- [ ] T296 [P] Write failing tests: a child server `accept` error, a `try_wait` error and a failed child journal transition hold the step and report; `logs.finish` failing after a clean exit leaves the run completed with the error in the outcome; the error path drains managed children before SIGKILL, per research R3 (R3, SUP-7) (contradicts)
+- [ ] T297 Hold and report bookkeeping errors and drain children on the error path in `src/supervision/unix.rs` and `src/child_supervision.rs`, until T296 passes (R3, SUP-7) (contradicts)
+- [ ] T298 [P] Write a failing test: with the supervisor's stderr closed, a failing Allowance, SaveProgress or Query reply does not panic the supervisor (AGT-9) (contradicts)
+- [ ] T299 Route every supervisor message through the `report` helper in `src/supervision/unix.rs`, until T298 passes (AGT-9) (contradicts)
+
+**Group 4: heartbeat freshness and loop health (FR-079)**
+
+- [ ] T300 [P] Write failing tests: a report with `sample_age_ms` over the freshness limit gets no renewals and no offers and causes no drain; a fresh one restores grants; wall clocks 5 s apart do not make a fresh report stale; an older agent keeps the wall-clock check, per FR-079 and contracts/wire-negotiation `report_age/1` (AGT-2) (contradicts)
+- [ ] T301 Add `NodeReport.sample_age_ms` behind `report_age/1` in `src/protocol.rs`, the agent's sample age in `src/agent/service.rs`, and the stale node rule in `src/coordinator.rs`, until T300 passes, per FR-079 and research R30 (AGT-2) (contradicts)
+- [ ] T302 [P] Write a failing test: a NeedsReconciliation GPU record whose PID stays in NVML costs one NVML read per heartbeat, no sleep, backing off after 3 checks (AGT-3) (contradicts)
+- [ ] T303 Replace the release-confirm sleep loop on the reconcile path in `src/agent/reconcile.rs` and `src/telemetry/gpu.rs`, until T302 passes (AGT-3) (contradicts)
+- [ ] T304 [P] Write a failing service test: with a coordinator that never answers, each iteration still samples and yields within the monitor interval, and the requests are retried, per FR-034 (AGT-4) (contradicts)
+- [ ] T305 Bound each coordinator RPC in the loop by half the monitor interval in `src/agent/service.rs` and `src/agent/client.rs`, until T304 passes (AGT-4) (contradicts)
+- [ ] T306 [P] Write failing tests: `EPIPE` on stdout, `NotFound` while walking the spool, a panicked preparation task and `ENOSPC` on a refusal proof skip the interval and keep the agent running (AGT-6) (contradicts)
+- [ ] T307 Classify transient iteration errors in `src/agent/service.rs` and `src/agent.rs`, until T306 passes (AGT-6) (contradicts)
+
+**Group 5: agent stop, reload and re-adoption (FR-080)**
+
+- [ ] T308 [P] Write failing agent tests: SIGTERM and SIGINT end the agent without draining, its supervisors keep running, and a new agent re-adopts them; an explicit operator drain and `max_runtime_seconds` still drain everything, per FR-080 (AGT-5, AGT-7) (contradicts)
+- [ ] T309 Stop without draining on SIGTERM and SIGINT in `src/agent/service.rs` and `src/policy/ladder.rs` (`drain_all` only for an operator drain), until T308 passes, per FR-080 (AGT-5, AGT-7) (contradicts)
+- [ ] T310 [P] Write failing tests: SIGHUP applies a `[contention]` mode change from the next iteration (`config_reloaded`) and refuses a change to any other section (`config_reload_refused`), per FR-080 and research R31 (missing)
+- [ ] T311 Implement the SIGHUP reload in `src/agent/service.rs` and `src/config.rs`, until T310 passes, per FR-080 (missing)
+- [ ] T312 [P] Write failing tests: a live supervisor whose first Query timed out is re-adopted on a later iteration; replay mode re-adopts, per FR-080 (AGT-8) (missing)
+- [ ] T313 Retry re-adoption with backoff and re-adopt in replay mode in `src/agent/reconcile.rs` and `src/agent/service.rs`, until T312 passes (AGT-8) (missing)
+- [ ] T314 [P] Write a failing coordinator test: an Opportunistic offer the agent reports preparing for 15 s does not expire, per FR-074 (AGT-10) (contradicts)
+- [ ] T315 Extend a preparing offer's deadline in `src/coordinator.rs`, until T314 passes (AGT-10) (contradicts)
+- [ ] T316 [P] Write a failing test: a re-adopted run keeps its start and last checkpoint times, so victim order ranks it by its real progress, per FR-016 (AGT-11) (contradicts)
+- [ ] T317 Keep start and checkpoint times in the journal and restore them on re-adoption in `src/execution_state.rs` and `src/agent/reconcile.rs`, until T316 passes (AGT-11) (contradicts)
+
+**Group 6: policy (FR-008, FR-022)**
+
+- [ ] T318 [P] Write failing policy tests: CPU unknown in Performance holds own CPU at Neutral's fair share of the last known view with one more principal (`cpu_unknown_fair_share_hold`); with no view yet no new step is taken; Yield First and Neutral keep budget 0, per FR-008 and FR-022 (POL-1) (contradicts)
+- [ ] T319 Keep the last known CPU view and apply the unknown hold in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T318 passes, per FR-022 (POL-1) (contradicts)
+- [ ] T320 [P] Write failing tests: Performance pauses only a cap the supervisor reports at the minimum duty (`cap_at_minimum_duty`), with own usage above the fair share, per FR-022 (POL-2) (contradicts)
+- [ ] T321 Report the minimum duty from `src/actuation.rs` through the supervisor events and use it in `src/contention.rs` `plan_step`, until T320 passes, per FR-022 (POL-2) (contradicts)
+- [ ] T322 [P] Write failing tests: while RAM is held, the last memory fair share keeps in-share own memory protected at a breach others caused, and the save-progress request goes out when protection applies, per FR-023 and FR-075 (POL-3) (contradicts)
+- [ ] T323 Keep the last memory fair share through held intervals in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T322 passes (POL-3) (contradicts)
+- [ ] T324 [P] Write failing tests: one unknown RAM interval keeps the 300 s external peaks, a held CPU interval keeps satisfied records, probes and the quiet count, and one missing observation keeps an allocation's p95 window, per FR-060 and FR-021 (POL-4) (contradicts)
+- [ ] T325 Carry that state across held and unknown intervals in `src/policy.rs`, `src/policy/measure.rs` and `src/policy/admission.rs`, until T324 passes (POL-4) (contradicts)
+- [ ] T326 [P] Write a test of a satisfied record above current usage under own-caused saturation in Performance; if the target cycles, it fails and T327 follows, else POL-5 moves to the report's appendix (POL-5) (partial)
+- [ ] T327 Judge CPU saturation with own work at its Neutral share in `src/policy/measure.rs`, until T326 passes, only if T326 reproduces the cycling (POL-5) (partial)
+
+**Group 7: GPU (FR-021, FR-008)**
+
+- [ ] T328 [P] Write failing telemetry tests from report 029 run 5's two shapes: a duty-capped own process beside a light user whose samples lag the device reads measured, not unknown; a saturating user whose truncated means leave 1% unattributed creates no third principal; a disagreement beyond the tolerance still reads unknown, per FR-021 and research R33 (GPU-1, GPU-2) (contradicts)
+- [ ] T329 Measure device utilization from `Device::samples` over the interval and each PID's share over the whole interval, rounded, with the rounding remainder not a principal, in `src/telemetry/gpu.rs` and `src/telemetry.rs`, until T328 passes (GPU-1, GPU-2) (contradicts)
+- [ ] T330 [P] Write a failing policy test: while device telemetry is unknown, GPU compute caps and pauses hold, per FR-008 (GPU-3) (contradicts)
+- [ ] T331 Hold GPU compute ladder entries while device telemetry is unknown in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T330 passes (GPU-3) (contradicts)
+- [ ] T332 [P] Write a failing policy test: under GPU activity of unknown amount a 500 cap is credited at its applied duty and does not escalate to a pause, per FR-022 (GPU-4) (contradicts)
+- [ ] T333 Credit applied duties under unknown activity in `src/policy/ladder.rs`, until T332 passes (GPU-4) (contradicts)
+- [ ] T334 [P] Write a failing policy test: a one-interval NVML gap in GPU memory accounting holds steps through RAM's unknown window and does not drain, per FR-008 (GPU-5) (contradicts)
+- [ ] T335 Add GPU memory to `unknown_windows` in `src/policy/ladder.rs` and `src/policy/measure.rs`, until T334 passes (GPU-5) (contradicts)
+
+**Group 8: report 029 Decisions 1 and 2 (FR-080, FR-034)**
+
+- [ ] T336 [P] Write a failing service test: a draining stop of 150 tasks keeps every iteration within 1 s, with renewals and heartbeats first; the burst test's bound covers the whole run, stop included, per FR-080 (029 Decision 1) (contradicts)
+- [ ] T337 Spread a stop's Drain lines over iterations within a 250 ms budget in `src/agent/service.rs` and `src/agent.rs`, until T336 passes (029 Decision 1) (contradicts)
+- [ ] T338 [P] Write failing tests on run 7's trace shape: once the quiet count says contention has ended, held CPU caps move to the target in one move, and own usage returns within 3 s of the contender stopping, in Yield First and Performance, per FR-034 (029 Decision 2) (contradicts)
+- [ ] T339 Raise held CPU caps to the mode's target in one move at the quiet count in `src/policy/ladder.rs` and `src/contention.rs`, until T338 passes, per FR-034 (029 Decision 2) (contradicts)
+
+**Group 9: cgroup, telemetry and cost**
+
+- [ ] T340 [P] Write a failing cgroup test: an SDK-managed child starts under the cgroup backend, verified against its own identity, with the leaf's expected membership the leader plus verified children (SUP-3) (contradicts)
+- [ ] T341 Verify children by their own identity and the leaf as leader plus children in `src/cgroup.rs` and `src/child_supervision.rs`, until T340 passes (SUP-3) (contradicts)
+- [ ] T342 [P] Write a failing kernel test: iowait on idle CPUs is not booked as external CPU, per FR-073 (TEL-1) (contradicts)
+- [ ] T343 Count iowait as idle in the busy upper bound in `src/kernel.rs`, until T342 passes (TEL-1) (contradicts)
+- [ ] T344 [P] Write failing tests: own shared memory counts as own RAM, through the leaf's `memory.current` in Full and `Pss_Shmem` on the rootless path (TEL-2) (contradicts)
+- [ ] T345 Count own shared memory in `src/telemetry/managed.rs`, until T344 passes (TEL-2) (contradicts)
+- [ ] T346 [P] Write failing tests: validation refuses `monitor.interval_ms` at or above `gpu.process_sample_max_age_ms`; the GPU sample cursor's age refreshes on an unchanged timestamp (TEL-3) (contradicts)
+- [ ] T347 Add the validation in `src/config.rs` and the cursor refresh in `src/telemetry.rs`, until T346 passes (TEL-3) (contradicts)
+- [ ] T348 [P] Write a failing kernel test: a CPU allowed but offline is left out of the CPU set, so CPU telemetry stays known (TEL-4) (contradicts)
+- [ ] T349 Intersect the CPU set with `/sys/devices/system/cpu/online` in `src/kernel.rs`, until T348 passes (TEL-4) (contradicts)
+- [ ] T350 [P] Write a failing test: GPU attribution unknown for an allocation keeps its CPU and RAM readings, per FR-008 (TEL-5) (contradicts)
+- [ ] T351 Mark only the GPU reading unknown in `src/telemetry/managed.rs`, until T350 passes (TEL-5) (contradicts)
+- [ ] T352 [P] Write a failing service test: an iteration with no journal change reuses the cached execution records and checkpoint heads (EFF-2) (contradicts)
+- [ ] T353 Take the cache key again after the agent's own observation insert in `src/agent/service.rs`, until T352 passes (EFF-2) (contradicts)
+- [ ] T354 [P] Write a failing test: a message to a supervisor is written in one write call (EFF-4) (contradicts)
+- [ ] T355 Serialize supervisor messages to a buffer before writing in `src/agent.rs`, until T354 passes (EFF-4) (contradicts)
+- [ ] T356 [P] Write failing tests: a known leaf `oom_kill` count of 0 overrides a host rise; uncounted OOM requeues stop at 3 × `max_attempts`, per FR-076 (AGT-12, R6) (contradicts)
+- [ ] T357 Trust the leaf count and bound uncounted requeues in `src/agent/oom.rs` and `src/coordinator.rs`, until T356 passes (AGT-12, R6) (contradicts)
+
+**Group 10: forks outside the SDK and SDK reads (FR-082)**
+
+- [ ] T358 [P] Write failing tests: a run whose leader forks a child outside the SDK is reported `single_process_violated` (status, `explain`, outcome) once, with the count, in Tracked (`/proc/<leader>/task/*/children`) and Full (leaf members); nothing is done to the child, per FR-082 and Constitution I (R1) (missing)
+- [ ] T359 Detect processes outside the family each interval in `src/supervision/unix.rs`, `src/cgroup.rs` and `src/telemetry/managed.rs`, carry `outside_family` in the supervisor events and report it in `src/explain.rs`, until T358 passes, per FR-082 (R1) (missing)
+- [ ] T360 [P] Write failing Python and TypeScript tests: a failed read is not cached, and a target rewritten within one mtime tick with an equal length and a reused inode is seen while the mtime is within 50 ms of now, per contracts/resource-target-file (SDK-1, R5) (contradicts)
+- [ ] T361 Store the stat identity only after a successful read and re-parse a recent file in `python/cedegrid/worker.py` and `npm/src/worker.ts`, until T360 passes (SDK-1, R5) (contradicts)
+- [ ] T362 [P] Write failing Python and TypeScript tests: a raising `on_drain` hook is isolated, later hooks run, and `DrainRequested` is raised (SDK-2) (contradicts)
+- [ ] T363 Isolate drain hooks in `python/cedegrid/worker.py` and `npm/src/worker.ts`, until T362 passes (SDK-2) (contradicts)
+
+**Docs, snapshots and the native gate**
+
+- [ ] T364 Update `docs/guarantees.md` for FR-078 to FR-082 (supervisor death, stale reports, agent stop and reload, retention, `single_process_violated`), `docs/worker-protocol.md` for the SDK changes, and `README.md` for the single-process limit, naming PyTorch DataLoader workers, per FR-082 (missing)
+- [ ] T365 Record report 029 Decision 3 in `docs/validation.md` as a known limit, with run 4's numbers (the other user's p99 beside Tracked duty cycles), per report 029 Decision 3 B (missing)
+- [ ] T366 Add the new reason codes to the catalog in `src/contention.rs` and `docs/guarantees.md` (`single_process_violated`, `config_reloaded`, `config_reload_refused`, `report_stale`, `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`) (missing)
+- [ ] T367 Compare the decision snapshots before and after Phase 24 and record each class of change (missing)
+- [ ] T368 Run 5 again on the test host beside the light and saturating GPU users, in Performance and Neutral, after the GPU fixes, with the commands in `native-gates.md`. *Deferred: needs the user's typed approval in this session.* Per FR-021 and SC-005 (missing)
