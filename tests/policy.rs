@@ -1900,6 +1900,72 @@ fn processes_outside_the_family_are_noted() {
     assert!(decision.actions.is_empty() && decision.would_drain.is_empty());
 }
 
+/// A run with more than its leader is noted as `family_members` with its size, the leader,
+/// SDK children and descendants, on CPU and RAM; processes outside it carry their reason
+/// (FR-082).
+#[test]
+fn a_family_is_noted_with_its_size_and_outsiders_with_their_reason() {
+    let mut facts = rootless(&["job"]);
+    let job = facts.get_mut("job").unwrap();
+    job.family = Some(cedegrid::model::FamilySize {
+        leader: 1,
+        sdk_children: 1,
+        descendants: 4,
+    });
+    job.outside_family = 3;
+    job.outside_reason = Some("over_bound".into());
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(1000, 1000, 0),
+            Some(resources(1000, 1000, 0)),
+        )],
+        facts,
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snapshot(), &input, 0)
+        .unwrap();
+    for key in ["cpu", "ram"] {
+        let notes = &decision.resources[&key.parse().unwrap()].reasons;
+        let family = notes
+            .iter()
+            .find(|r| r.code == "family_members")
+            .unwrap_or_else(|| panic!("{key}: {notes:?}"));
+        assert!(
+            family.text.contains("job") && family.text.contains("6 processes"),
+            "{family:?}"
+        );
+        assert!(family.text.contains("4 descendants"), "{family:?}");
+        let outside = notes
+            .iter()
+            .find(|r| r.code == "single_process_violated")
+            .unwrap();
+        assert!(outside.text.contains("over_bound"), "{outside:?}");
+    }
+    // A run that is its leader alone gets no note.
+    let mut facts = rootless(&["job"]);
+    facts.get_mut("job").unwrap().family = Some(cedegrid::model::FamilySize {
+        leader: 1,
+        ..Default::default()
+    });
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(1000, 1000, 0),
+            Some(resources(1000, 1000, 0)),
+        )],
+        facts,
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snapshot(), &input, 0)
+        .unwrap();
+    assert!(!codes(&decision, "cpu").contains(&"family_members".to_string()));
+}
+
 /// GPU attribution unknown for one allocation, its device's entry missing from the
 /// observation, keeps its CPU and RAM readings: neither holds for it, while the device's
 /// memory charges it at max(request, last known) as unknown own usage, so its external usage

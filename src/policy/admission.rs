@@ -548,14 +548,37 @@ impl Interval<'_> {
             };
             // Processes outside the verified family are neither own work nor stepped (FR-082).
             if facts.outside_family > 0 {
+                let reason = facts
+                    .outside_reason
+                    .as_deref()
+                    .map_or(String::new(), |reason| format!(" ({reason})"));
                 for key in [ResourceKey::Cpu, ResourceKey::Ram] {
                     note(
                         &mut self.statuses,
                         key,
                         "single_process_violated",
                         format!(
-                            "allocation {}: {} processes outside its verified family are not measured as own work or stepped",
+                            "allocation {}: {} processes outside its verified family{reason} are not measured as own work or stepped",
                             allocation.id, facts.outside_family
+                        ),
+                    );
+                }
+            }
+            // A family of more than its leader is measured and stepped as one (FR-082).
+            if let Some(family) = facts.family
+                && family.sdk_children + family.descendants > 0
+            {
+                for key in [ResourceKey::Cpu, ResourceKey::Ram] {
+                    note(
+                        &mut self.statuses,
+                        key,
+                        "family_members",
+                        format!(
+                            "allocation {}: {} processes, the leader, {} SDK children and {} descendants, are measured and stepped as own work",
+                            allocation.id,
+                            family.leader + family.sdk_children + family.descendants,
+                            family.sdk_children,
+                            family.descendants
                         ),
                     );
                 }

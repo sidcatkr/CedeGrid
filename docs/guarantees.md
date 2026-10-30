@@ -534,6 +534,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `config_reload_refused` | The agent kept its configuration because the reloaded one needs a restart or could not be read. |
 | `report_stale` | The coordinator renews no lease and offers no work while the node's last report is stale. |
 | `single_process_violated` | Processes outside the run's verified family were found; they are not measured as own work or stepped. |
+| `family_members` | The run has more processes than its leader; its verified family is measured and stepped as own work. |
 | `cap_at_minimum_duty` | The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval. |
 | `cpu_unknown_fair_share_hold` | CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view. |
 | `ram_usage_unknown` | Available RAM is unknown, so RAM admission is blocked. |

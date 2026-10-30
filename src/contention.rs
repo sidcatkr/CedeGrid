@@ -474,6 +474,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Processes outside the run's verified family were found; they are not measured as own work or stepped.",
     ),
     (
+        "family_members",
+        "The run has more processes than its leader; its verified family is measured and stepped as own work.",
+    ),
+    (
         "cap_at_minimum_duty",
         "The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval.",
     ),

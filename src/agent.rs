@@ -742,6 +742,12 @@ impl ChildSlot {
             ram_cap: false,
             step_codes: self.step_codes.clone(),
             outside_family: self.outside_family,
+            outside_reason: self.outside_reason.map(|reason| reason.code().into()),
+            family: self.family.as_ref().map(|family| crate::model::FamilySize {
+                leader: family.leader,
+                sdk_children: family.sdk_children,
+                descendants: family.descendants.len() as u64,
+            }),
         }
     }
 }
@@ -2219,6 +2225,28 @@ mod drain_tests {
     }
 
     /// A reattached supervisor reports each step's cause, so a restarted agent reseeds an
+    /// A reattached agent learns the run's family and why processes are outside it from
+    /// `state`, since a family that no longer changes sends no `family` report (FR-083).
+    #[test]
+    fn a_reattached_agent_learns_the_family_from_state() {
+        let line = r#"{"event":"state","applied":{},"targets":{},"lease_sequence":3,"sequence":2,"authority":"connected","outside_family":2,"outside_reason":"ids_differ","family":{"leader":1,"sdk_children":0,"descendants":[{"pid":41,"start_time":7},{"pid":42,"start_time":8}]}}"#;
+        let Event::State {
+            family,
+            outside_reason,
+            outside_family,
+            ..
+        } = serde_json::from_str(line).unwrap()
+        else {
+            panic!("not a state event");
+        };
+        assert_eq!(family.unwrap().descendants.len(), 2);
+        assert_eq!(
+            outside_reason,
+            Some(crate::supervision::OutsideReason::IdsDiffer)
+        );
+        assert_eq!(outside_family, 2);
+    }
+
     /// `own_over_target` step with its own cause; an older supervisor reports none, and its
     /// steps count as external growth (FR-018).
     #[test]

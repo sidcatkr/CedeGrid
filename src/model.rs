@@ -390,6 +390,21 @@ pub struct AllocationFacts {
     /// Processes the supervisor found outside the verified family, at the most (FR-082).
     #[serde(skip_serializing_if = "is_zero")]
     pub outside_family: u64,
+    /// Why they are outside it, as a catalog code: `ids_differ`, `chain_unconfirmed`,
+    /// `over_bound` or `untracked_platform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outside_reason: Option<String>,
+    /// The run's family, once its supervisor reported one (FR-082, FR-083).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<FamilySize>,
+}
+
+/// How many processes make up a run's verified family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilySize {
+    pub leader: u64,
+    pub sdk_children: u64,
+    pub descendants: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
