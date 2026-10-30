@@ -4091,12 +4091,12 @@ fn a_gpu_memory_gap_holds_through_the_unknown_window() {
     }
 }
 
-/// Takes the measured GPU compute path from the first measured interval, for tests
-/// of that path; the quiet window's hysteresis has its own test.
+/// Takes the measured GPU compute path after two measured intervals, for tests of that
+/// path; the quiet window's hysteresis has its own test.
 fn measured_at_once(cfg: &mut Config) {
-    // One interval must still span longer than the GPU sample age.
-    cfg.gpu.process_sample_max_age_ms = 400;
-    cfg.contention.gpu_compute.quiet_window_intervals = Some(1);
+    // Two intervals span longer than the GPU sample age, which stays above one interval (TEL-3).
+    cfg.gpu.process_sample_max_age_ms = 600;
+    cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
     cfg.contention
         .acknowledge_caution
         .insert("relaxed_detection".into());
@@ -4130,23 +4130,28 @@ fn gpu_compute_target(
         snap.gpus[0].compute_amount_unknown =
             Some("summed per-process utilization differs from the device".into());
     }
-    let decision = PolicyEngine::new()
-        .evaluate(
-            &cfg,
-            &snap,
-            &PolicyInput {
-                allocations: vec![allocation(
-                    "job",
-                    AllocationPhase::Running,
-                    resources(100, 100, 2000),
-                    Some(resources(100, 100, 2000)),
-                )],
-                facts: rootless(&["job"]),
-                ..PolicyInput::default()
-            },
-            0,
-        )
-        .unwrap();
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    // The measured path applies from the quiet window's second interval: a first measured one
+    // with no external context and own work at half the device, within every mode's target.
+    let mut warm = snap.clone();
+    warm.gpus[0].external_compute = ComputeActivity::Idle;
+    warm.gpus[0].external_process_ids = Some(vec![]);
+    warm.gpus[0].external_compute_milli = Some(0);
+    warm.gpus[0].own_compute_milli = Some(500);
+    warm.gpus[0].compute_amount_unknown = None;
+    let mut engine = PolicyEngine::new();
+    engine.evaluate(&cfg, &warm, &input, 0).unwrap();
+    snap.gpus[0].compute_sample_id = Some(2);
+    let decision = engine.evaluate(&cfg, &snap, &input, 500).unwrap();
     let action = decision.actions.iter().find(|a| a.resource == key);
     (
         action.map(|a| a.step),
@@ -6140,8 +6145,8 @@ mod reclaim_admission {
     fn a_holding_gpu_compute_cap_does_not_block_admission() {
         let key = ResourceKey::GpuCompute("GPU-test".into());
         let mut cfg = cfg(ContentionMode::Neutral);
-        cfg.gpu.process_sample_max_age_ms = 400;
-        cfg.contention.gpu_compute.quiet_window_intervals = Some(1);
+        cfg.gpu.process_sample_max_age_ms = 600;
+        cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
         cfg.contention
             .acknowledge_caution
             .insert("relaxed_detection".into());

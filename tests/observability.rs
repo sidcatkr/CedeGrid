@@ -209,10 +209,10 @@ fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
     out
 }
 
-/// GPU tests take the measured path from the first measured interval.
+/// GPU tests take the measured path after two measured intervals.
 fn measured(cfg: &mut Config) {
-    cfg.gpu.process_sample_max_age_ms = 400;
-    cfg.contention.gpu_compute.quiet_window_intervals = Some(1);
+    cfg.gpu.process_sample_max_age_ms = 600;
+    cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
     cfg.contention
         .acknowledge_caution
         .insert("relaxed_detection".into());

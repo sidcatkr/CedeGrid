@@ -998,13 +998,31 @@ fn settings_that_lengthen_reclaim_are_bounded() {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }
     for good in [
-        "[monitor]\ninterval_ms = 10000",
+        // The interval stays below the GPU sample age (TEL-3).
+        "[monitor]\ninterval_ms = 10000\n[gpu]\nprocess_sample_max_age_ms = 10001",
         "[lifecycle]\ndrain_timeout_ms = 60000\nterm_grace_ms = 60000",
         "[kernel]\nmonitor_interval_ms = 10000\nfreshness_intervals = 20",
         "[gpu]\nprocess_sample_max_age_ms = 60000",
     ] {
         assert!(parse_node(good).is_ok(), "rejected: {good}");
     }
+}
+
+/// A monitor interval at or above the GPU sample age would let the per-process cursor expire
+/// at every tick, so GPU compute would read unknown on every interval (TEL-3).
+#[test]
+fn the_monitor_interval_stays_below_the_gpu_sample_age() {
+    for bad in [
+        "[monitor]\ninterval_ms = 2000",
+        "[monitor]\ninterval_ms = 500\n[gpu]\nprocess_sample_max_age_ms = 400",
+    ] {
+        let error = parse_node(bad).expect_err(bad);
+        assert!(
+            format!("{error:#}").contains("gpu.process_sample_max_age_ms"),
+            "{error:#}"
+        );
+    }
+    assert!(parse_node("[monitor]\ninterval_ms = 1999").is_ok());
 }
 
 /// Settings that let own work hold more capacity than their defaults are caution

@@ -2016,6 +2016,11 @@ impl Config {
             (1..=60_000).contains(&self.gpu.process_sample_max_age_ms),
             "gpu.process_sample_max_age_ms must be between 1 and 60000"
         );
+        // A cursor older than one interval at every read would leave GPU compute unknown.
+        ensure!(
+            self.monitor.interval_ms < self.gpu.process_sample_max_age_ms,
+            "monitor.interval_ms must be below gpu.process_sample_max_age_ms"
+        );
         ensure!(
             self.gpu.execution_mode != GpuExecutionMode::BestEffortOccupied
                 || !self.gpu.best_effort_external_processes.is_empty(),

@@ -870,8 +870,12 @@ impl Collector {
                     .insert(uuid.clone(), compute_by_pid);
             }
             if let Some(cursor) = next_cursor {
-                // An unchanged timestamp never refreshes the age of the baseline.
-                if previous.is_none() || baseline.is_none_or(|(old, _)| cursor > old) {
+                // A successful query refreshes the cursor's age even with no newer sample; an
+                // unchanged timestamp after a failed one does not (TEL-3).
+                let queried = matches!(&samples, Ok(_) | Err(NvmlError::NotFound));
+                if previous.is_none()
+                    || refreshes_cursor(baseline.map(|(old, _)| old), cursor, queried)
+                {
                     self.gpu_cursors
                         .insert(uuid.clone(), (cursor, Instant::now()));
                 }
@@ -1211,6 +1215,16 @@ mod tests {
         assert_eq!(leaf_memory_mib(leaf.path()), Some(7));
         std::fs::write(leaf.path().join("memory.stat"), "file 104857600\n").unwrap();
         assert_eq!(leaf_memory_mib(leaf.path()), None);
+    }
+
+    /// A per-process sample cursor's age restarts on a newer timestamp and on a successful query
+    /// with nothing newer, never on a failed one (TEL-3).
+    #[test]
+    fn a_successful_query_without_new_samples_refreshes_the_cursor() {
+        assert!(refreshes_cursor(None, 100, false));
+        assert!(refreshes_cursor(Some(100), 120, true));
+        assert!(refreshes_cursor(Some(100), 100, true));
+        assert!(!refreshes_cursor(Some(100), 100, false));
     }
 
     fn gpu_sample(pid: u32, timestamp: u64, sm_util: u32) -> ProcessUtilizationSample {
