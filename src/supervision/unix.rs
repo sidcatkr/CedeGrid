@@ -1414,7 +1414,14 @@ pub(super) fn supervise(
                         &request.assignment_id,
                         format!("{error:#}"),
                     );
-                    let _ = actuator.release(&mut family);
+                    // A refused restore stays with the actuator, which retries it each tick.
+                    if let Err(error) = actuator.release(&mut family) {
+                        report(
+                            "step_release_failed",
+                            &request.assignment_id,
+                            format!("{error:#}"),
+                        );
+                    }
                     contention.applied.clear();
                 }
                 // A RAM cap the actuator raised to current usage is reported at

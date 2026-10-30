@@ -1314,8 +1314,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T287 Thaw a leaf frozen without a recorded Pause in `CgroupActuator::reconcile` (`src/cgroup.rs`), until T286 passes, per FR-078 (028 Decision 1) (missing)
 - [X] T288 [P] Write a failing actuator test: a family whose second member's STOP fails, then release, ends with every member continued, per Constitution II (SUP-5, R2) (contradicts)
 - [X] T289 Set `stopped` before signalling, send CONT to every member on resume and release, and signal past a failing member in `src/actuation.rs`, `src/supervision/unix.rs` and `src/child_supervision.rs`, until T288 passes (SUP-5, R2) (contradicts)
-- [ ] T290 [P] Write a failing test: a refused thaw after a tick error is reported (`step_release_failed`) and retried each tick while the freeze is recorded, per CLAUDE.md's error rule (SUP-4) (contradicts)
-- [ ] T291 Report release failures and retry the thaw in `src/supervision/unix.rs` and `src/cgroup.rs`, until T290 passes (SUP-4) (contradicts)
+- [X] T290 [P] Write a failing test: a refused thaw after a tick error is reported (`step_release_failed`) and retried each tick while the freeze is recorded, per CLAUDE.md's error rule (SUP-4) (contradicts)
+- [X] T291 Report release failures and retry the thaw in `src/supervision/unix.rs` and `src/cgroup.rs`, until T290 passes (SUP-4) (contradicts)
 - [ ] T292 [P] Write a failing test: after the leader exits with managed children draining, a CPU cap keeps cycling and a pause is released when the children's drain starts, per FR-014 (SUP-6) (contradicts)
 - [ ] T293 Keep ticking while children run and release at the children's drain start in `src/supervision/unix.rs`, until T292 passes (SUP-6) (contradicts)
 

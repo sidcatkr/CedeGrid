@@ -466,6 +466,8 @@ pub struct CgroupActuator<L: LeafIo> {
     ram_refused: Option<&'static str>,
     /// The GPU compute share, while it runs as a freeze duty.
     gpu_duty: Option<FreezeDuty>,
+    /// Resources a release could not restore, retried each tick (030, SUP-4).
+    retry_restore: BTreeSet<ResourceKind>,
 }
 
 impl<L: LeafIo> CgroupActuator<L> {
@@ -498,6 +500,7 @@ impl<L: LeafIo> CgroupActuator<L> {
             ram_cap: None,
             ram_refused: None,
             gpu_duty: None,
+            retry_restore: BTreeSet::new(),
         }
     }
 
@@ -799,6 +802,7 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
             "step {step:?} is not a runtime step for {kind:?} here"
         );
         // One step per resource: undo the previous one before applying the next.
+        self.retry_restore.remove(&kind);
         self.restore(family, kind)?;
         if kind == ResourceKind::GpuCompute {
             self.gpu_duty = None;
@@ -856,6 +860,13 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     }
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
+        // A refused restore, such as a thaw while another process was in the leaf, goes again
+        // until it lands; the release already reported the refusal.
+        for kind in std::mem::take(&mut self.retry_restore) {
+            if self.restore(family, kind).is_err() {
+                self.retry_restore.insert(kind);
+            }
+        }
         self.fallback.tick(family)?;
         self.tick_gpu_duty(family)?;
         self.check_ram_cap(family)
@@ -961,6 +972,7 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         let mut result = Ok(());
         for kind in kinds {
             if let Err(error) = self.restore(family, kind) {
+                self.retry_restore.insert(kind);
                 result = Err(error);
             }
         }

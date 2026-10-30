@@ -1547,6 +1547,44 @@ mod runtime_steps {
         );
     }
 
+    /// A thaw refused at release, while a foreign process was in the leaf, is retried on the
+    /// next tick once the leaf holds only the family again (030, SUP-4).
+    #[test]
+    fn a_refused_thaw_is_retried_on_later_ticks() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "41\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config(&["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![41],
+            signals: vec![],
+        };
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "1");
+        fs::write(dir.join("cgroup.procs"), "41\n77\n").unwrap();
+        assert!(
+            actuator.release(&mut family).is_err(),
+            "the thaw is refused"
+        );
+        assert_eq!(read(&dir, "cgroup.freeze"), "1");
+        actuator.tick(&mut family).unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "1", "still refused, quietly");
+        fs::write(dir.join("cgroup.procs"), "41\n").unwrap();
+        actuator.tick(&mut family).unwrap();
+        assert_eq!(
+            read(&dir, "cgroup.freeze"),
+            "0",
+            "retried once the leaf is the family's"
+        );
+    }
+
     /// A leaf left frozen by a duty's off phase is thawed when an agent reattaches and the
     /// applied steps record no Pause; a recorded Pause stays frozen; a foreign member refuses
     /// the write (FR-078, 028 Decision 1).
