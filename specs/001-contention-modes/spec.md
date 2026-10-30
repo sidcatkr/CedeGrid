@@ -351,6 +351,57 @@ back more.
   point per listed process, is not a principal; a disagreement beyond the tolerance still reads
   unknown (reviewer decision A on report 029, Decision 4).
 
+### Session 2026-10-31
+
+- Q: Which descendants of a run join its verified family, and how? → A: On Linux, in both
+  backends, the supervisor sets itself as child subreaper before it forks the leader. Every
+  interval and in every stop it walks every family member's `/proc/<pid>/task/*/children` and
+  its own children, which finds orphans reparented to it; without a `children` file it falls back
+  to a ppid scan of `/proc` and `doctor` says so. A process joins in Principle I's order: pidfd
+  first, then the parent chain up to a family member (or the supervisor, for an orphan), then
+  alive through the pidfd, then real, effective and saved user and group IDs equal to the run's;
+  its start time is recorded and it is acted on only through its pidfd. An orphan is in the
+  family, since only this run's descendants can be reparented to its supervisor. Descendants of
+  an SDK child join that child's family (item 031, A.1 to A.4 and A.7).
+- Q: How does the supervisor reap the orphans it inherits as subreaper? → A: On the thread that
+  reaps the leader, only by specific PID (or a pidfd), and only PIDs its own `children` list
+  shows that are neither the leader nor an SDK child; never a wait for any child (item 031, A.5).
+- Q: How many descendants does a run track, and what happens on errors? → A: At most 256 tracked
+  members per run, a fixed constant; members past it are reported, never acted on, and keep
+  today's counting. An fd or `/proc` error during discovery holds the step and is reported; it
+  never drains own work (item 031, A.6).
+- Q: Does rootless execution still require the single-process contract? → A: Not on Linux:
+  descendants are tracked whatever `single_process` says, and the field stays accepted. On
+  platforms with no subreaper or `/proc` the single-process contract stays required (item 031,
+  A.8).
+- Q: How is a family's usage measured? → A: Own CPU: in Full the leaf reading, now usable since
+  the leaf holds only family members; in Tracked the sum of the members' CPU deltas, a member that
+  exits counting up to its last sample. Own memory: the family's summed PSS, never RSS; a family
+  of one, and Full while its leaf reading is usable, keep today's reading; if `smaps_rollup` is
+  over the efficiency budget it is read every N intervals and held between. Verified descendants'
+  GPU memory and compute count as own, and they are not the owner's unmanaged use (item 031, B).
+- Q: How does a step reach a whole family in Tracked? → A: A stop (the duty's off phase, a Pause,
+  the GPU duty's off phase) discovers, stops every member through its pidfd, and repeats until a
+  pass finds no new member, at most 3 passes; a member that appears during an off phase is stopped
+  at once, and the family is always stopped and continued together. Continue sends SIGCONT to
+  every member whatever the state flags say, past a failing member, which is reported. A member
+  that has exited is dropped, not an error. Each member's `oom_score_adj` baseline is recorded
+  when it joins and restored, and the preferred-victim setting applies to new members as to the
+  leader. Full is unchanged; its thaw on reattach checks membership against the family (item
+  031, C).
+- Q: What happens to a family's other members when the run ends, drains or loses its
+  supervisor? → A: The run ends when the leader exits; members still alive then get SIGTERM, then
+  SIGKILL after `term_grace_ms`, the outcome counts them, in both classes, with no opt-out. A
+  drain signals the leader first and then SIGKILLs members still alive after the grace. On
+  supervisor death the parent-death signal reaches only the leader and SDK children: in Full
+  leftovers stay in the leaf, kept for reconciliation; in Tracked they cannot be found again. The
+  README and guarantees say so, with a job script's background server and its closing `wait` as
+  examples (item 031, D).
+- Q: How is a family reported? → A: Status and `explain` show its size (leader, SDK children,
+  descendants). Processes outside it are reported as `outside_family` with a count and a reason:
+  IDs differ, chain unconfirmed, over the bound, or a platform without tracking. Nothing is done
+  to them (item 031, E).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -708,9 +759,16 @@ node reports with the expected per-resource values at each step.
   leave supervisors running too; an explicit operator drain drains everything (FR-080).
 - **A run's supervisor dies.** Opportunistic work ends with it, through the parent-death signal;
   Guaranteed work continues (FR-078).
-- **A rootless single-process run forks helpers outside the SDK** (for example PyTorch
-  DataLoader workers). The run is reported as `single_process_violated`; the helpers are not in
-  the verified family and are never acted on (FR-082).
+- **A run forks helpers outside the SDK** (for example PyTorch DataLoader workers or Python
+  `multiprocessing`). On Linux each verified helper joins the run's family and is measured and
+  stepped with it; a helper that fails verification, or is past the 256-member bound, is reported
+  as outside the family and never acted on (FR-082, FR-083). Elsewhere the single-process
+  contract is required (FR-084).
+- **A helper's parent exits first.** The orphan is reparented to the run's supervisor, verified
+  with the supervisor as its chain's root, kept in the family, and reaped by its own PID
+  (FR-083).
+- **The leader exits while its workers run on.** The run ends: the workers get SIGTERM, then
+  SIGKILL after the grace, and the outcome counts them (FR-087).
 - **A node report arrives stale.** The coordinator grants and offers nothing for that node until
   a fresh report, and drains nothing because of it; leases expire as usual (FR-079).
 - **The coordinator is unreachable.** The existing lease rules apply. Local graduated yielding
@@ -1019,7 +1077,8 @@ node reports with the expected per-resource values at each step.
   - a minimum available host RAM;
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
   - out-of-memory order by fault, where the platform lets an unprivileged process set its
-    `oom_score_adj`: each own task's value at launch is its baseline, never written below. Own
+    `oom_score_adj`: each own task's value at launch, and each family member's when it joins, is
+    its baseline, never written below. Own
     work within its memory fair share stays at its baseline. While own memory is above its fair
     share, the own tasks that make up the excess, in the ladder's memory victim order, are at
     1000 for every process of their family, children started later included, and return to
@@ -1198,7 +1257,9 @@ node reports with the expected per-resource values at each step.
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
   supervisor MUST handle SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining
   first. Under the cgroup backend, a reattaching supervisor MUST thaw a leaf whose journal records
-  no Pause, after verifying the leaf's membership.
+  no Pause, after verifying the leaf's membership against the family. The parent-death signal
+  reaches only the leader and SDK children: in Full a dead supervisor's other members stay in the
+  leaf, kept for reconciliation; in Tracked they cannot be found again, and the docs say so.
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
   For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
   grant no renewals and offer no new work for that node; it MUST NOT drain on that report, and
@@ -1215,9 +1276,53 @@ node reports with the expected per-resource values at each step.
   an attempt's directory is removed after its outcome receipt and publication garbage
   collection. Per-iteration work MUST load only unreleased and not-yet-reclaimed records.
 - **FR-082**: Every interval, the supervisor MUST check for processes outside the run's verified
-  family: leaf members in Full, the leader's children in Tracked. It MUST report
-  `single_process_violated` in the status, `explain` and the outcome, and act on no process
-  outside the family.
+  family: leaf members in Full, discovered descendants that fail verification or are past the
+  bound in Tracked (FR-083). It MUST report them as `single_process_violated` in the status,
+  `explain` and the outcome as `outside_family`, with a count and a reason (IDs differ, chain
+  unconfirmed, over the bound, platform without tracking), and act on no process outside the
+  family. Status and `explain` MUST show the family's size: leader, SDK children, descendants.
+- **FR-083**: On Linux, in both backends, a run's family MUST include its verified descendants.
+  - The supervisor MUST set itself as child subreaper before it forks the leader.
+  - Discovery MUST run every interval and in every stop: each member's
+    `/proc/<pid>/task/*/children`, all threads, and the supervisor's own children for orphans;
+    without a `children` file, a ppid scan of `/proc`, reported in `doctor`.
+  - A descendant joins only in Principle I's order: pidfd first; the parent chain up to a family
+    member, or to the supervisor for an orphan; alive through the pidfd; real, effective and saved
+    user and group IDs equal to the run's. Its start time is recorded, and it is acted on only
+    through its pidfd, or the `/proc` directory path with start-time checks for `oom_score_adj`.
+  - Descendants of an SDK child join that child's family.
+  - The supervisor MUST reap inherited orphans on the leader's reaping thread, only by specific PID
+    or pidfd, only PIDs its own `children` list shows that are neither the leader nor an SDK child,
+    and never by a wait for any child.
+  - At most 256 members per run are tracked; members past it are reported and never acted on. An
+    fd or `/proc` error during discovery MUST hold the step and be reported, never drain own work.
+- **FR-084**: On Linux the rootless launch MUST NOT require `single_process`, which stays accepted
+  for compatibility. On platforms without a subreaper or `/proc` the single-process contract MUST
+  stay required, and the docs say so.
+- **FR-085**: A family's usage MUST be measured as own work.
+  - CPU: in Full the leaf reading, usable while the leaf holds only family members; in Tracked the
+    sum of the members' CPU deltas, a member that exits counting up to its last sample.
+  - Memory: the family's summed PSS, never RSS. A family of one, and Full while its leaf reading is
+    usable, keep the existing reading. If `smaps_rollup` is over the efficiency budget it MAY be
+    read every N intervals, the last value held between.
+  - GPU: verified descendants' per-process GPU memory and compute count as own, including in
+    FR-021's interval shares.
+  - Verified descendants are in the managed set, so they are not the owner's unmanaged use and the
+    fair share does not subtract them.
+- **FR-086**: In Tracked, a step MUST reach the whole family.
+  - A stop (a duty's off phase, a Pause, a GPU duty's off phase) MUST discover, stop every member
+    through its pidfd, and repeat until a pass finds no new member, at most 3 passes. A member that
+    appears during an off phase is stopped at once; the family is stopped and continued together.
+  - Continue MUST send SIGCONT to every member whatever the state flags say, continue past a
+    failing member, and report it. A member that has exited is dropped, not an error.
+  - Each member's `oom_score_adj` baseline is recorded when it joins and restored; the
+    preferred-victim setting applies to new members as to the leader (FR-023).
+  - Full keeps `cpu.max` and `cgroup.freeze` unchanged.
+- **FR-087**: A run MUST end when its leader exits. Members still alive then get SIGTERM, then
+  SIGKILL after `term_grace_ms`, and the outcome counts them, in both classes and with no opt-out.
+  A drain MUST signal the leader first and SIGKILL members still alive after the grace. The README
+  MUST say that a job script which starts work in the background ends it with `wait`, and that a
+  process meant to outlive its run is started as its own run.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
