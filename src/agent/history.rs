@@ -5,7 +5,7 @@ use crate::{
     execution_model::{ExecutionPhase, ExecutionRecord},
     state::StateStore,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::{collections::BTreeSet, path::Path};
 
 pub(super) struct HistoryScope {
@@ -77,6 +77,42 @@ impl HistoryScope {
             |row| row.get(0),
         )?)
     }
+}
+
+/// Remove the attempt directories of settled released runs outside the newest
+/// `REPORTED_RELEASED`, the window heartbeats report (FR-081). A directory without a journal
+/// row, an unreleased run's, or one not yet settled stays. Returns how many went.
+pub(super) fn prune_attempts(store: &StateStore, state_dir: &Path) -> Result<usize> {
+    let keep: BTreeSet<String> = store
+        .heartbeat_executions()?
+        .into_iter()
+        .map(|r| r.assignment_id)
+        .collect();
+    let attempts = state_dir.join("attempts");
+    let entries = match std::fs::read_dir(&attempts) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if id.starts_with('.') || keep.contains(&id) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let released = store
+            .execution_record(&id)?
+            .is_some_and(|record| record.phase == ExecutionPhase::Released);
+        if released && settled(state_dir, &id) {
+            std::fs::remove_dir_all(entry.path())
+                .with_context(|| format!("removing attempt directory {id}"))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Nothing is left to reclaim or deliver: the attempt's directory is gone, or its spool was
@@ -193,6 +229,49 @@ mod tests {
         // A restart does not pick a settled run up again.
         let mut restarted = HistoryScope::new(&store, dir.path()).unwrap();
         assert!(restarted.records(&store, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settled_attempt_directories_beyond_the_newest_256_are_removed() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let store = StateStore::open(dir.path()).unwrap();
+        let attempts = dir.path().join("attempts");
+        for i in 0..300 {
+            let id = format!("r{i:03}");
+            let record = store
+                .reserve(&request(&format!("t{i}"), &id), &capacity())
+                .unwrap();
+            release(&store, record);
+            let output = attempts.join(&id);
+            std::fs::create_dir_all(&output).unwrap();
+            std::fs::write(output.join("spool-reclaimed.json"), "{}").unwrap();
+            std::fs::write(output.join("result.receipt.json"), "{}").unwrap();
+            std::fs::write(output.join("stdout.log"), "log").unwrap();
+        }
+        // Released but not yet reclaimed, an active run, and a directory with no journal row.
+        let unsettled = store
+            .reserve(&request("u", "unsettled"), &capacity())
+            .unwrap();
+        release(&store, unsettled);
+        std::fs::create_dir_all(attempts.join("unsettled")).unwrap();
+        store
+            .reserve(&request("live", "live"), &capacity())
+            .unwrap();
+        std::fs::create_dir_all(attempts.join("live")).unwrap();
+        std::fs::create_dir_all(attempts.join("stray")).unwrap();
+        std::fs::create_dir_all(attempts.join(".input-cache")).unwrap();
+        assert_eq!(prune_attempts(&store, dir.path()).unwrap(), 45);
+        assert!(!attempts.join("r000").exists());
+        assert!(!attempts.join("r044").exists());
+        assert!(
+            attempts.join("r045").exists(),
+            "the newest 256 released stay, with the unsettled one"
+        );
+        assert!(attempts.join("r299").exists());
+        for kept in ["unsettled", "live", "stray", ".input-cache"] {
+            assert!(attempts.join(kept).exists(), "{kept}");
+        }
+        assert_eq!(prune_attempts(&store, dir.path()).unwrap(), 0);
     }
 
     #[test]

@@ -1303,8 +1303,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T279 Add `ExecutionJournal::active_executions()` in `src/execution_state.rs` and use it in `src/agent/service.rs` and `src/telemetry/managed.rs`; reclaim a Released record's spool once, until T278 passes, per FR-081 (EFF-3, R4) (missing)
 - [X] T280 [P] Write a failing state test: `observations` keeps 24 h and at most 200,000 rows, pruned every 600 iterations, per FR-081 (EFF-1) (missing)
 - [X] T281 Prune `observations` in `src/state.rs` and `src/agent/service.rs`, until T280 passes, per FR-081 (EFF-1) (missing)
-- [ ] T282 [P] Write failing tests: an attempt's directory is removed once its outcome receipt is written and publication GC has emptied it, and the spool size is kept without walking `attempts/`, per FR-081 (EFF-5) (missing)
-- [ ] T283 Remove finished attempt directories and keep the spool total incrementally in `src/agent.rs`, `src/agent/service.rs` and `src/publication_gc.rs`, until T282 passes, per FR-081 (EFF-5) (missing)
+- [X] T282 [P] Write failing tests: an attempt's directory is removed once its outcome receipt is written and publication GC has emptied it, and the spool size is kept without walking `attempts/`, per FR-081 (EFF-5) (missing)
+- [X] T283 Remove finished attempt directories and keep the spool total incrementally in `src/agent.rs`, `src/agent/service.rs` and `src/publication_gc.rs`, until T282 passes, per FR-081 (EFF-5) (missing)
 
 **Group 2: supervisor death and stop state (FR-078)**
 

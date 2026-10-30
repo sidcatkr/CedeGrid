@@ -21,7 +21,7 @@ pub const LAUNCHES_PER_HEARTBEAT: usize = 32;
 
 /// Launch preparations that run at once on the blocking pool; each makes synced writes.
 const LAUNCH_CONCURRENCY: usize = 4;
-/// Iterations between prunes of the `observations` table (FR-081).
+/// Iterations between prunes of `observations` and settled attempt directories (FR-081).
 const OBSERVATIONS_PER_PRUNE: u32 = 600;
 
 /// How many new assignments one heartbeat may take. Parallelism grows by one
@@ -1965,6 +1965,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                     crate::state::OBSERVATION_RETENTION_MS,
                     crate::state::OBSERVATION_ROWS,
                 )?;
+                super::history::prune_attempts(&state.store, &config.state_dir)?;
             }
             mark = state.cost.charge("store", mark);
             state.heartbeat(&snapshot, &allocations, &decision).await?;
