@@ -586,3 +586,77 @@ fn applied_steps_are_journaled_for_the_running_attempt_only() {
             .is_err()
     );
 }
+
+/// A heartbeat reports unreleased work plus the last 256 released runs, so a node with a long
+/// history stays within the coordinator's 2048-entry bound (FR-081).
+#[test]
+fn a_heartbeat_reports_active_work_and_the_last_256_released_runs() {
+    let (dir, store) = store();
+    let mut row = store
+        .reserve(&request("seed", "seed1"), &resources(1000))
+        .unwrap();
+    row.phase = ExecutionPhase::Released;
+    store.transition(&row).unwrap();
+    // 2100 released runs, cloned from the seed in one transaction: one commit each would take
+    // minutes on a synced journal.
+    {
+        let mut db = rusqlite::Connection::open(dir.path().join(DATABASE_FILENAME)).unwrap();
+        let tx = db.transaction().unwrap();
+        let (request_json, record_json): (String, String) = tx
+            .query_row(
+                "SELECT request_json, record_json FROM executions WHERE assignment_id='seed1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        for i in 0..2100 {
+            let (task, assignment) = (format!("t{i}"), format!("a{i}"));
+            tx.execute(
+                "INSERT INTO tasks(task_id,replay_safe,status,generation,assignment_id) SELECT ?1,replay_safe,'assigned',1,?2 FROM tasks WHERE task_id='seed'",
+                rusqlite::params![task, assignment],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO assignments(assignment_id,task_id,generation) VALUES (?1,?2,1)",
+                rusqlite::params![assignment, task],
+            )
+            .unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&record_json).unwrap();
+            record["assignment_id"] = assignment.clone().into();
+            record["task_id"] = task.clone().into();
+            let mut request: serde_json::Value = serde_json::from_str(&request_json).unwrap();
+            request["assignment_id"] = assignment.clone().into();
+            request["task_id"] = task.into();
+            tx.execute(
+                "INSERT INTO executions(assignment_id,request_json,record_json) VALUES (?1,?2,?3)",
+                rusqlite::params![assignment, request.to_string(), record.to_string()],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO execution_events(assignment_id,record_json) VALUES (?1,?2)",
+                rusqlite::params![assignment, record.to_string()],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let running = store
+        .reserve(&request("live", "live1"), &resources(1000))
+        .unwrap();
+    let reported = store.heartbeat_executions().unwrap();
+    assert_eq!(
+        reported.len(),
+        1 + 256,
+        "the active run and the last 256 released"
+    );
+    assert!(
+        reported
+            .iter()
+            .any(|r| r.assignment_id == running.assignment_id)
+    );
+    // The newest released runs are the ones kept: a2099 back to a1844.
+    assert!(reported.iter().any(|r| r.assignment_id == "a2099"));
+    assert!(reported.iter().any(|r| r.assignment_id == "a1844"));
+    assert!(!reported.iter().any(|r| r.assignment_id == "a1843"));
+    assert!(reported.len() <= 2048);
+}

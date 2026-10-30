@@ -7,6 +7,9 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+/// Released runs a heartbeat reports beside the unreleased ones (FR-081).
+pub const REPORTED_RELEASED: usize = 256;
+
 impl StateStore {
     /// A key that moves whenever the journal may have changed: another connection's commit,
     /// as a supervisor's, moves `data_version`, and this connection's writes move
@@ -42,6 +45,24 @@ impl StateStore {
         )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// What a heartbeat reports: every unreleased run and the last `REPORTED_RELEASED`
+    /// released ones, newest release first, so a long history stays within the
+    /// coordinator's bound (FR-081). Release order is read from the newest events only.
+    pub fn heartbeat_executions(&self) -> Result<Vec<ExecutionRecord>> {
+        let mut records = self.active_executions()?;
+        let mut statement = self.connection.prepare(
+            "SELECT e.record_json FROM executions e JOIN (SELECT assignment_id, MAX(id) AS last FROM (SELECT assignment_id, id FROM execution_events ORDER BY id DESC LIMIT ?1) GROUP BY assignment_id) r USING(assignment_id) WHERE json_extract(e.record_json,'$.phase')='released' ORDER BY r.last DESC LIMIT ?2",
+        )?;
+        let released = REPORTED_RELEASED as i64;
+        let rows = statement.query_map(rusqlite::params![released * 16, released], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            records.push(serde_json::from_str(&row?)?);
+        }
+        Ok(records)
     }
 
     /// Steps the supervisor journaled for an attempt, if any.

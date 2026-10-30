@@ -1297,8 +1297,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 1: retention and history loading (FR-081)**
 
-- [ ] T276 [P] Write a failing agent test: with 2100 Released executions in the journal, a heartbeat is accepted and reports the active executions plus the last 256 Released ones, per FR-081 (AGT-1) (contradicts)
-- [ ] T277 Report active executions plus the last 256 Released in `src/agent/service.rs` (heartbeat) and `src/agent/reconcile.rs`, until T276 passes, per FR-081 (AGT-1) (contradicts)
+- [X] T276 [P] Write a failing agent test: with 2100 Released executions in the journal, a heartbeat is accepted and reports the active executions plus the last 256 Released ones, per FR-081 (AGT-1) (contradicts)
+- [X] T277 Report active executions plus the last 256 Released in `src/agent/service.rs` (heartbeat) and `src/agent/reconcile.rs`, until T276 passes, per FR-081 (AGT-1) (contradicts)
 - [ ] T278 [P] Write failing tests that the loop's per-iteration passes (slot service, outbox recovery, `allocation_facts`, sampling, released-spool collection) read only active records, with Released rows scanned once at start and on release, and the holds-table schema check once per start, per FR-081 (EFF-3, R4) (missing)
 - [ ] T279 Add `ExecutionJournal::active_executions()` in `src/execution_state.rs` and use it in `src/agent/service.rs` and `src/telemetry/managed.rs`; reclaim a Released record's spool once, until T278 passes, per FR-081 (EFF-3, R4) (missing)
 - [ ] T280 [P] Write a failing state test: `observations` keeps 24 h and at most 200,000 rows, pruned every 600 iterations, per FR-081 (EFF-1) (missing)

@@ -1333,7 +1333,7 @@ impl AgentLoop<'_> {
             self.namespace_guard.clone(),
         )?;
         let boot_id = supervision::process_identity(std::process::id(), "agent", 0)?.boot_id;
-        let reconciled_records = self.store.executions()?;
+        let reconciled_records = self.store.heartbeat_executions()?;
         let mut reports: Vec<AllocationReport> = reconciled_records
             .iter()
             .map(|r| AllocationReport {
