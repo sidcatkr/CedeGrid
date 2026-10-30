@@ -206,11 +206,15 @@ enum Control {
     },
 }
 fn emit(value: &impl Serialize) -> Result<()> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
     let mut out = std::io::stdout().lock();
-    serde_json::to_writer(&mut out, value)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(())
+    match out.write_all(&line).and_then(|()| out.flush()) {
+        // Events are diagnostics: once their reader is gone they are dropped, and the agent
+        // goes on (030, AGT-6).
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => Ok(result?),
+    }
 }
 fn private_dir(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -429,6 +433,16 @@ fn descriptor_exhausted(error: &anyhow::Error) -> bool {
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::raw_os_error)
             .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+    })
+}
+
+/// Whether an error came from a full disk or quota: transient, so the interval is skipped.
+fn storage_exhausted(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(|code| code == libc::ENOSPC || code == libc::EDQUOT)
     })
 }
 
@@ -827,7 +841,13 @@ fn spool_size(path: &Path) -> Result<u64> {
     let mut inodes = BTreeSet::new();
     let mut directories = vec![path.to_path_buf()];
     while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory)? {
+        // A subdirectory removed during the walk, as when an attempt is pruned, holds nothing.
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && directory != path => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
             let entry = entry?;
             let metadata = match fs::symlink_metadata(entry.path()) {
                 Ok(m) => m,
@@ -2125,5 +2145,18 @@ mod descriptor_tests {
         let other = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ENOENT));
         assert!(!descriptor_exhausted(&other));
         assert!(!descriptor_exhausted(&anyhow::anyhow!("no descriptors")));
+    }
+
+    /// A full disk or quota skips the interval like descriptor exhaustion; a missing file,
+    /// which can mean a lost namespace, still ends the loop (030, AGT-6).
+    #[test]
+    fn a_full_disk_skips_the_interval_and_a_missing_file_does_not() {
+        for code in [libc::ENOSPC, libc::EDQUOT] {
+            let error = anyhow::Error::from(std::io::Error::from_raw_os_error(code))
+                .context("write refusal proof");
+            assert!(storage_exhausted(&error), "{code}");
+        }
+        let missing = anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ENOENT));
+        assert!(!storage_exhausted(&missing));
     }
 }

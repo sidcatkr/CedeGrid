@@ -2163,3 +2163,48 @@ async fn a_hung_coordinator_does_not_stall_sampling() {
     // 400 ms intervals over 6 s: about 15; a loop stalled on one request records one.
     assert!(observations >= 8, "{observations} observations in 6 s");
 }
+
+/// An agent whose stdout reader went away keeps working and stops normally: its event lines
+/// are diagnostics, and a broken pipe there is no reason to fail (030, AGT-6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_stdout_does_not_end_the_agent() {
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec!["/bin/true".into()],
+        |_| {},
+    )
+    .await;
+    // A short run, so the agent's stop event is written to the closed pipe.
+    let deployment = fs::read_to_string(&service.deployment_file).unwrap();
+    assert!(deployment.contains("max_runtime_seconds = 90"));
+    fs::write(
+        &service.deployment_file,
+        deployment.replace("max_runtime_seconds = 90", "max_runtime_seconds = 2"),
+    )
+    .unwrap();
+    let mut agent = Owned(
+        Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+            .arg("--config")
+            .arg(&service.config_file)
+            .arg("agent")
+            .arg("--deployment")
+            .arg(&service.deployment_file)
+            .env("TMPDIR", service.dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    drop(agent.stdout.take());
+    let status = wait(&mut agent);
+    assert!(
+        status.success(),
+        "the agent failed on a closed stdout: {status}"
+    );
+    let observations = StateStore::open_read_only(&service.local.config.state_dir)
+        .unwrap()
+        .observations(100)
+        .unwrap()
+        .len();
+    assert!(observations >= 3, "{observations} observations in 2 s");
+}

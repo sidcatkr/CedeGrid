@@ -206,7 +206,12 @@ pub(super) fn needs_pin(
     }
 }
 
-type Publication = tokio::task::JoinHandle<(String, bool, String, Result<()>)>;
+/// A publication task with its assignment and kind, so one that panicked is retried.
+type Publication = (
+    String,
+    bool,
+    tokio::task::JoinHandle<(String, bool, String, Result<()>)>,
+);
 
 type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool);
 
@@ -274,7 +279,11 @@ impl AgentLoop<'_> {
         for id in ready {
             let (assignment, handle, revoked) =
                 self.preparations.remove(&id).expect("listed preparation");
-            match handle.await.context("assignment preparation task failed")? {
+            // A preparation task that panicked refuses its launch, as a failed one does.
+            let prepared = handle
+                .await
+                .unwrap_or_else(|join| Err(anyhow::anyhow!("preparation task failed: {join}")));
+            match prepared {
                 Ok(mut slot) => {
                     if revoked || self.stopping.is_some() {
                         drain(&mut slot, None);
@@ -302,9 +311,16 @@ impl AgentLoop<'_> {
 
     async fn collect_publications(&mut self) -> Result<()> {
         for handle_index in (0..self.publications.len()).rev() {
-            if self.publications[handle_index].is_finished() {
-                let (id, checkpoint, hash, result) =
-                    self.publications.swap_remove(handle_index).await?;
+            if self.publications[handle_index].2.is_finished() {
+                let (id, checkpoint, handle) = self.publications.swap_remove(handle_index);
+                let (id, checkpoint, hash, result) = handle.await.unwrap_or_else(|join| {
+                    (
+                        id,
+                        checkpoint,
+                        String::new(),
+                        Err(anyhow::anyhow!("publication task failed: {join}")),
+                    )
+                });
                 self.publishing.remove(&(id.clone(), checkpoint));
                 match result {
                     Ok(()) => {
@@ -815,18 +831,23 @@ impl AgentLoop<'_> {
                 let assignment = slot.assignment.clone();
                 let output = slot.output_dir.clone();
                 self.publishing.insert((id.clone(), checkpoint));
-                self.publications.push(tokio::spawn(async move {
-                    let _pin = publication_pin;
-                    let result = publish(
-                        &task_client,
-                        &assignment,
-                        &output,
-                        checkpoint,
-                        descriptor_bytes,
-                    )
-                    .await;
-                    (id, checkpoint, hash, result)
-                }));
+                let key = id.clone();
+                self.publications.push((
+                    key,
+                    checkpoint,
+                    tokio::spawn(async move {
+                        let _pin = publication_pin;
+                        let result = publish(
+                            &task_client,
+                            &assignment,
+                            &output,
+                            checkpoint,
+                            descriptor_bytes,
+                        )
+                        .await;
+                        (id, checkpoint, hash, result)
+                    }),
+                ));
             }
             if let Some(status) = slot.child.exited()?
                 && let Some(mut record) = self
@@ -940,18 +961,23 @@ impl AgentLoop<'_> {
                     let task_client = self.client.clone();
                     let id = record.assignment_id.clone();
                     self.publishing.insert((id.clone(), false));
-                    self.publications.push(tokio::spawn(async move {
-                        let _pin = publication_pin;
-                        let result = publish(
-                            &task_client,
-                            &spec.assignment,
-                            &output,
-                            false,
-                            descriptor_bytes,
-                        )
-                        .await;
-                        (id, false, String::new(), result)
-                    }));
+                    let key = id.clone();
+                    self.publications.push((
+                        key,
+                        false,
+                        tokio::spawn(async move {
+                            let _pin = publication_pin;
+                            let result = publish(
+                                &task_client,
+                                &spec.assignment,
+                                &output,
+                                false,
+                                descriptor_bytes,
+                            )
+                            .await;
+                            (id, false, String::new(), result)
+                        }),
+                    ));
                 } else {
                     // Confirmed released failure after an agent crash still needs
                     // its idempotent Fail acknowledgement, never result publication.
@@ -2024,6 +2050,13 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
                 emit(&serde_json::json!({
                     "event": "descriptors_exhausted",
                     "code": "descriptor_limit",
+                    "detail": format!("{error:#}"),
+                }))?;
+            }
+            // A full disk or quota is transient too: the interval is skipped (030, AGT-6).
+            Err(error) if storage_exhausted(&error) => {
+                emit(&serde_json::json!({
+                    "event": "storage_exhausted",
                     "detail": format!("{error:#}"),
                 }))?;
             }

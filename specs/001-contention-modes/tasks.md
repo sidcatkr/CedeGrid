@@ -1336,8 +1336,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T303 Replace the release-confirm sleep loop on the reconcile path in `src/agent/reconcile.rs` and `src/telemetry/gpu.rs`, until T302 passes (AGT-3) (contradicts)
 - [X] T304 [P] Write a failing service test: with a coordinator that never answers, each iteration still samples and yields within the monitor interval, and the requests are retried, per FR-034 (AGT-4) (contradicts)
 - [X] T305 Bound each coordinator RPC in the loop by half the monitor interval in `src/agent/service.rs` and `src/agent/client.rs`, until T304 passes (AGT-4) (contradicts)
-- [ ] T306 [P] Write failing tests: `EPIPE` on stdout, `NotFound` while walking the spool, a panicked preparation task and `ENOSPC` on a refusal proof skip the interval and keep the agent running (AGT-6) (contradicts)
-- [ ] T307 Classify transient iteration errors in `src/agent/service.rs` and `src/agent.rs`, until T306 passes (AGT-6) (contradicts)
+- [X] T306 [P] Write failing tests: `EPIPE` on stdout, `NotFound` while walking the spool, a panicked preparation task and `ENOSPC` on a refusal proof skip the interval and keep the agent running (AGT-6) (contradicts)
+- [X] T307 Classify transient iteration errors in `src/agent/service.rs` and `src/agent.rs`, until T306 passes (AGT-6) (contradicts)
 
 **Group 5: agent stop, reload and re-adoption (FR-080)**
 
