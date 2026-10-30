@@ -30,11 +30,12 @@ fn cpu_monotonic_idle_complement_covers_observed_missing_busy_ticks() {
 }
 
 #[test]
-fn cpu_idle_complement_preserves_busy_tick_and_iowait_protection() {
+fn cpu_idle_complement_preserves_busy_ticks_and_needs_an_interval() {
     let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
     tracker.observe(Ok("cpu0 100 0 0 100 0 0 0 0\n"), Some(&[0]), 0, 1500);
+    // Iowait is idle (TEL-1): 25 busy ticks of 50 with one tick of rounding.
     let observed = tracker.observe(Ok("cpu0 125 0 0 100 25 0 0 0\n"), Some(&[0]), 500, 1500);
-    assert_eq!(observed.busy_millicores, Some(1000));
+    assert_eq!(observed.busy_millicores, Some(520));
     assert_eq!(
         tracker
             .observe(Ok("cpu0 125 0 0 100 25 0 0 0\n"), Some(&[0]), 600, 1500)
@@ -44,20 +45,32 @@ fn cpu_idle_complement_preserves_busy_tick_and_iowait_protection() {
 }
 
 #[test]
-fn cpu_busy_bounds_round_by_one_tick_and_count_iowait_only_in_the_upper_bound() {
+fn cpu_busy_bounds_round_by_one_tick_and_count_iowait_as_idle() {
     let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
     tracker.observe(Ok("cpu0 100 0 0 100 0 0 0 0\n"), Some(&[0]), 0, 1500);
     // 25 busy and 25 idle ticks in 500 ms: one tick of rounding either way.
     let plain = tracker.observe(Ok("cpu0 125 0 0 125 0 0 0 0\n"), Some(&[0]), 500, 1500);
     assert_eq!(plain.busy_millicores, Some(520));
     assert_eq!(plain.busy_lower_millicores, Some(480));
-    // 25 user and 25 iowait ticks: iowait is occupied only in the upper bound.
+    // 25 user and 25 iowait ticks: iowait is idle in both bounds (TEL-1).
     let iowait = tracker.observe(Ok("cpu0 150 0 0 125 25 0 0 0\n"), Some(&[0]), 1000, 1500);
-    assert_eq!(iowait.busy_millicores, Some(1000));
+    assert_eq!(iowait.busy_millicores, Some(520));
     assert_eq!(iowait.busy_lower_millicores, Some(480));
     // Unknown usage has no bounds either.
     let repeated = tracker.observe(Ok("cpu0 150 0 0 125 25 0 0 0\n"), Some(&[0]), 1000, 1500);
     assert_eq!(repeated.busy_lower_millicores, None);
+}
+
+/// Iowait on a CPU is idle time another task may run in: the busy upper bound does not count
+/// it, so own threads blocked on disk are not booked as external CPU (FR-073, TEL-1).
+#[test]
+fn iowait_is_idle_in_both_busy_bounds() {
+    let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
+    tracker.observe(Ok("cpu0 100 0 0 100 0 0 0 0\n"), Some(&[0]), 0, 1500);
+    // 25 user and 25 iowait ticks in 500 ms read as the plain 25 busy and 25 idle ticks do.
+    let iowait = tracker.observe(Ok("cpu0 125 0 0 100 25 0 0 0\n"), Some(&[0]), 500, 1500);
+    assert_eq!(iowait.busy_millicores, Some(520));
+    assert_eq!(iowait.busy_lower_millicores, Some(480));
 }
 
 fn psi(some: u64, full: u64) -> String {

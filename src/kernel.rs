@@ -88,9 +88,9 @@ pub struct CpuTopology {
     /// Count of effective logical CPUs, independent of a cgroup bandwidth quota.
     pub effective_cpu_capacity_millicores: Option<u64>,
     /// Busy time on exactly effective_cpu_ids; never whole-host usage. This is
-    /// the upper bound: rounding allowance and iowait count as busy.
+    /// the upper bound: the rounding allowance counts as busy, iowait as idle.
     pub busy_millicores: Option<u64>,
-    /// Lower bound of the same busy time, without iowait or rounding allowance.
+    /// Lower bound of the same busy time, without the rounding allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_lower_millicores: Option<u64>,
     pub busy_status: CpuUsageStatus,
@@ -276,14 +276,9 @@ fn busy_bounds(
         // endpoint rounding, over the longer of ticks and elapsed time.
         let mut lower_denominator = u128::from(total) * 1000;
         if let Some(hz) = clock_tick_hz {
-            let idle_only = current
-                .idle_only
-                .checked_sub(old.idle_only)
-                .ok_or(CpuUsageStatus::CounterReset)?;
-            // One counter tick bounds endpoint rounding. Treat
-            // iowait as occupied in this upper estimate; it is
-            // not reliable evidence of schedulable spare CPU.
-            let idle_lower = u128::from(idle_only.saturating_sub(1)) * 1000;
+            // One counter tick bounds endpoint rounding. Iowait is idle here too: the CPU
+            // was free for another task, and own CPU time never includes it (TEL-1).
+            let idle_lower = u128::from(idle.saturating_sub(1)) * 1000;
             let elapsed_ticks = u128::from(interval_ms) * u128::from(hz);
             if idle_lower > elapsed_ticks {
                 return Err(CpuUsageStatus::Unknown);
@@ -383,7 +378,7 @@ impl CpuUsageTracker {
                             result.busy_lower_millicores = Some(busy_lower);
                             self.max_interval_ticks = Some(max_interval_ticks);
                             result.detail = if self.clock_tick_hz.is_some() {
-                                "Per-effective-CPU conservative busy estimate: maximum of busy-tick ratio and monotonic non-idle fraction with one USER_HZ tick of idle rounding allowance. Missing busy ticks never manufacture spare capacity; iowait is occupied in the non-idle bound. Guest is not double counted. This is advisory observation, not a hard CPU limit."
+                                "Per-effective-CPU conservative busy estimate: maximum of busy-tick ratio and monotonic non-idle fraction with one USER_HZ tick of idle rounding allowance. Missing busy ticks never manufacture spare capacity; iowait is idle in both bounds. Guest is not double counted. This is advisory observation, not a hard CPU limit."
                             } else {
                                 "Per-effective-CPU tick ratio only; monotonic idle timebase unavailable. Guest is not double counted. Usage and hardware capacity share one CPU set; bandwidth quota is separate."
                             }.into();

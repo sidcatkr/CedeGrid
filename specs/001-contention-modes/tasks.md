@@ -1387,8 +1387,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 - [X] T340 [P] Write a failing cgroup test: an SDK-managed child starts under the cgroup backend, verified against its own identity, with the leaf's expected membership the leader plus verified children (SUP-3) (contradicts)
 - [X] T341 Verify children by their own identity and the leaf as leader plus children in `src/cgroup.rs` and `src/child_supervision.rs`, until T340 passes (SUP-3) (contradicts)
-- [ ] T342 [P] Write a failing kernel test: iowait on idle CPUs is not booked as external CPU, per FR-073 (TEL-1) (contradicts)
-- [ ] T343 Count iowait as idle in the busy upper bound in `src/kernel.rs`, until T342 passes (TEL-1) (contradicts)
+- [X] T342 [P] Write a failing kernel test: iowait on idle CPUs is not booked as external CPU, per FR-073 (TEL-1) (contradicts)
+- [X] T343 Count iowait as idle in the busy upper bound in `src/kernel.rs`, until T342 passes (TEL-1) (contradicts)
 - [ ] T344 [P] Write failing tests: own shared memory counts as own RAM, through the leaf's `memory.current` in Full and `Pss_Shmem` on the rootless path (TEL-2) (contradicts)
 - [ ] T345 Count own shared memory in `src/telemetry/managed.rs`, until T344 passes (TEL-2) (contradicts)
 - [ ] T346 [P] Write failing tests: validation refuses `monitor.interval_ms` at or above `gpu.process_sample_max_age_ms`; the GPU sample cursor's age refreshes on an unchanged timestamp (TEL-3) (contradicts)
