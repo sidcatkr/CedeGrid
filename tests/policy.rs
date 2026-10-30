@@ -3961,6 +3961,71 @@ fn gpu_compute_steps_hold_while_device_telemetry_is_unknown() {
     }
 }
 
+/// Under GPU activity of unknown amount, a cap at the fair share that its supervisor reports
+/// applied is credited at its duty, so it holds and never escalates to a pause (FR-022,
+/// GPU-4).
+#[test]
+fn an_applied_gpu_cap_under_unknown_activity_is_credited_at_its_duty() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    for mode in [Neutral, Performance] {
+        let (cfg, mut snap) = us5_device(mode, Unknown, Some(vec![987]), Some(8000), false);
+        let mut engine = PolicyEngine::new();
+        let mut facts = rootless(&["job"]);
+        let mut steps = Vec::new();
+        for i in 0..60u64 {
+            snap.gpus[0].compute_sample_id = Some(i + 1);
+            let decision = engine
+                .evaluate(
+                    &cfg,
+                    &snap,
+                    &PolicyInput {
+                        allocations: vec![allocation(
+                            "job",
+                            AllocationPhase::Running,
+                            resources(100, 100, 2000),
+                            Some(resources(100, 100, 2000)),
+                        )],
+                        facts: facts.clone(),
+                        ..PolicyInput::default()
+                    },
+                    i * 500,
+                )
+                .unwrap();
+            let action = decision.actions.iter().find(|a| a.resource == key);
+            steps.push(action.map(|a| (a.step, a.target)));
+            // The supervisor applies each step at once and reports it.
+            let job = facts.get_mut("job").unwrap();
+            match action {
+                Some(action) => {
+                    job.applied.insert(key.clone(), action.step);
+                    if let Some(target) = action.target {
+                        job.applied_targets.insert(key.clone(), target);
+                    }
+                }
+                None => {
+                    job.applied.remove(&key);
+                    job.applied_targets.remove(&key);
+                }
+            }
+        }
+        // Steps hold through the unknown window, then the cap applies and stays.
+        let first = steps.iter().position(Option::is_some).expect("a step");
+        let capped = &steps[first..];
+        assert_eq!(capped[0], Some((YieldStep::Cap, Some(500))), "{mode:?}");
+        assert!(
+            capped.iter().all(|step| *step == capped[0]),
+            "{mode:?}: {:?}",
+            capped
+                .iter()
+                .filter(|step| **step != capped[0])
+                .take(3)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 /// Takes the measured GPU compute path from the first measured interval, for tests
 /// of that path; the quiet window's hysteresis has its own test.
 fn measured_at_once(cfg: &mut Config) {

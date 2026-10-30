@@ -950,12 +950,12 @@ impl<'a> Interval<'a> {
         let unknown = budget.own.is_none() && self.gpu_activity_unknown.contains(uuid);
         // Own work on a device shares what it holds equally: its measured
         // usage, else the whole device, but at most a duty its supervisor
-        // reports applied, since the duty cycle is own actuation. Unknown
-        // activity and unreported duties keep the whole device (FR-008).
+        // reports applied, since the duty cycle is own actuation, under activity of
+        // unknown amount too. Unreported duties keep the whole device (FR-008).
         let assumed = GPU_COMPUTE_CAPACITY / running.len() as u64;
         let duties: Vec<u64> = running
             .iter()
-            .map(|a| applied_duty(prev, input, &key, unknown, assumed, a))
+            .map(|a| applied_duty(prev, input, &key, assumed, a))
             .collect();
         let held = budget.own.unwrap_or_else(|| duties.iter().sum());
         if budget.own.is_none() {
@@ -1059,7 +1059,8 @@ impl<'a> Interval<'a> {
                     external: frame.external,
                     measurement_known: frame.measurement_known,
                     cause: frame.cause,
-                    usage: budget.own.map(|_| frame.share),
+                    // Measured, or credited at the applied duties, as the frame holds it.
+                    usage: Some(frame.share),
                     compute_floor: (governing(config, kind) >= ContentionMode::Performance
                         && victim.mode >= ContentionMode::Performance)
                         .then(|| budget.targets.get(&ContentionMode::Neutral))
@@ -1401,15 +1402,14 @@ fn applied_duty(
     prev: &PolicyEngine,
     input: &PolicyInput,
     key: &ResourceKey,
-    unknown: bool,
     assumed: u64,
     allocation: &Allocation,
 ) -> u64 {
     let state = prev.ladder.get(&(allocation.id.clone(), key.clone()));
     let facts = input.facts.get(&allocation.id);
     let applied = facts.and_then(|facts| facts.applied.get(key));
-    match (unknown, state, applied) {
-        (false, Some(state), Some(step)) if *step == state.step => match state.step {
+    match (state, applied) {
+        (Some(state), Some(step)) if *step == state.step => match state.step {
             YieldStep::Cap => {
                 let current = state.target.unwrap_or(assumed);
                 let ran = facts
