@@ -705,9 +705,18 @@ SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining, and a su
 that reattaches under the cgroup backend thaws a leaf whose journal records no pause,
 after verifying the leaf's membership against the family (FR-078). The parent-death signal
 reaches only the leader and SDK children: in Full the other members stay in the leaf, kept
-for reconciliation; in Tracked they cannot be found again, and a member an off phase had
-stopped stays stopped. Any uncertain surviving allocation remains reserved until verified
-reconciliation, even if its task is replay-safe.
+for reconciliation. In Tracked the agent recovers them, when it sees the supervisor gone or
+at its next start, from the family it recorded in the run's attempt directory: for each
+process a pidfd first, then its start time and real, effective and saved IDs through `/proc`
+equal to the record and its boot unchanged, then alive through the pidfd, then SIGCONT for
+Guaranteed work or SIGKILL for Opportunistic work through that pidfd. A process that fails a
+check is never signalled; the counts go to the run's recovery record and an event (FR-088).
+A member the supervisor found and stopped in the instant it died can be missed, and stays
+stopped until an agent runs. The workload leads a session of its own, so no exit orphans its
+process group into SIGHUP, and standalone `supervise` drains its run on SIGINT. Any
+uncertain surviving allocation remains reserved until verified reconciliation, even if its
+task is replay-safe; a dead Tracked run is released only once its recorded descendants are
+gone too.
 
 A run ends when its leader exits: members still alive get SIGTERM, then SIGKILL after
 `term_grace_ms`, in both classes, and the outcome counts them as `members_ended`. A drain

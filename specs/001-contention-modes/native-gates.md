@@ -450,6 +450,26 @@ usage stayed behind its target, and the report proposes the fix without changing
 does not, `docs/validation.md` records that and T339 closes. The evidence copy redacts host
 names, user names, GPU UUIDs, IPs and home paths, as every evidence copy does.
 
+## Item 033: supervisor loss in Tracked with the batch (T406)
+
+Runs in the same batch as T368, T387 and T396, under the same typed approval and host rules,
+with light, test-owned loads only. The agent runs as on the test host (in its own session under
+the user's service manager). A family of a leader and 2 CPU workers runs in Tracked, held in an
+off phase by a cap beside a test-owned light load, and the run's own supervisor is then killed,
+once per class.
+
+```sh
+$py $H/family-031.py --repo $repo --root $root --output <dir> --backend tracked \
+    --workload supervisor-loss --workers 2 --class <guaranteed|opportunistic>
+# The agent's events for the run, before its state is removed:
+grep family_recovered <the agent's log> > <dir>/recovery.json
+```
+
+Gate, per class: which signals each member received (the workload logs SIGHUP and SIGCONT),
+whether any was still stopped 2 s after the kill, and how it ended. Guaranteed: no SIGHUP,
+every member running again within one reconciliation interval, the workload's output complete.
+Opportunistic: every member ended, none left stopped. `family_recovered` counts match.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

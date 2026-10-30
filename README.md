@@ -258,9 +258,13 @@ deadlines: surviving or uncertain reservations remain charged until verified
 reconciliation, without adopting or signaling a persisted numeric PID. Its parent-death
 signal (SIGKILL for Opportunistic work, SIGCONT for Guaranteed work) reaches only the leader
 and SDK children. In Full the run's other members stay in its leaf, kept for
-reconciliation. In Tracked they cannot be found again, since acting on them needs the
-supervisor's verified chain, and a member that an off phase had stopped stays stopped.
-PyTorch `DataLoader` workers exit on their own when their parent dies.
+reconciliation. In Tracked the agent recovers them from the family it recorded: as soon as
+it sees the supervisor gone, or when it next starts, it re-opens each recorded process by
+its identity and continues Guaranteed members or ends Opportunistic ones. A process whose
+start time or IDs no longer match the record is never signalled. A member the supervisor
+found and stopped in the instant it died can be missed and stays stopped until an agent
+runs. The workload runs in a session of its own, so a supervisor's death never hangs it up,
+and `supervise` at a terminal drains its run on Ctrl-C.
 
 Cgroup settings require an existing explicitly delegated subtree and authorized
 control names. Missing required controls fail before user execution. Nonempty cgroups
