@@ -238,6 +238,29 @@ its measurement window.
 | Run 7, loop with 129 tasks (run 3's 14-CPU Performance run) | observation interval p50 498 ms, p95 533 ms, maximum 609 ms; CedeGrid 104 m (0.74% of capacity); agent `loop_cost` per minute: sample 3.6 s, slots 1.08 s, policy 0.18 s, heartbeat 0.15 s | pass |
 | GPU (Part 5) | per-process utilization readable (`NVML_SUCCESS`); the one listed context is the greeter's graphics context, under a user ID at or above `uid_min`, so it is not background; GPU activity stays unknown and admission open | as specified |
 
+### Item 029 runs
+
+Run on 2026-10-30 on the same test host with the commands under "Item 029 native gates" in
+`specs/001-contention-modes/native-gates.md`: the launch burst at `fc5e330`, the rest at
+`1c6ca7e`, whose Rust code is the same. Own throughput is with CedeGrid against the same probe
+without it. Runs 1 and 5 use the `own-efficiency` profile: every default but the mode, the
+coordinator and the harness on CPUs outside the scope, and the agent on the scope's CPUs, since
+its scope is its own affinity. Loads of the other user ran as a second unprivileged account,
+which started and stopped them; CedeGrid took no action on them. For Performance, only loss
+beyond its 2% margin and the agent's measured CPU counts.
+
+| Run | Values | Result |
+|---|---|---|
+| 1, idle, 2 CPUs, the half-core probe checking for a drain every 50 ms | Performance 0.995 (0.995, 0.995, 0.996), Neutral 0.999, Yield First 0.995; the agent 9 m (0.43% of the scope), so no Performance loss counts | pass |
+| 2, a light other user on the probe's core (100 requests a second) | no step in any mode; own throughput 0.998 in Performance, 1.010 in Neutral, 0.998 in Yield First; the other user's p99 0.68 ms alone and 0.66–0.69 ms beside own work, with or without CedeGrid; the agent 8 m | pass |
+| 3, a saturating other user on the probe's core | Performance: no step, own throughput 0.998, target 1370 m against capacity minus their 570 m minus the 40 m margin (1390 m). Neutral: no step, 0.996, target 861 m (the fair share). Yield First: caps, hints and pauses, 0.174. The other user's p99 0.33 ms alone and 0.66 ms beside the probe, with or without CedeGrid, in every mode | as specified |
+| 4, a fixed allocation against CedeGrid in Performance, 4 CPUs, the other user saturating two of them 30 s on and 30 s off for 300 s | own work with CedeGrid 1.24 times that of the probes pinned with taskset to the other two CPUs; the other user's p50 while on 0.325 ms beside the fixed allocation and 0.347 ms beside CedeGrid, p99 0.356 ms and 3.33 ms; 188 CPU step changes in 300 s; the agent 9 m | own work pass; the other user's p99 is the cost |
+| 5, GPU idle, 3 CPUs | Performance 1.002, Neutral 1.000; Yield First 1.001 and 1.005 in two repetitions, then its probe waited over 60 s with `gpu_yield_first_activity_unknown`: the device lists another account's idle graphics context, so GPU activity reads unknown and Yield First holds admission; the agent 16 m (0.53%). A light or saturating other GPU user was not run: the second account has no GPU runtime | Performance and Neutral pass |
+| 6, a GPU job whose three loader threads want more CPU than its fair share, beside a saturating other user on its two CPUs | Tracked: units 1.01 and CPU 1.00 of the job without CedeGrid, GPU 69% against 70%, with caps. Full: units 0.95, CPU 0.93, GPU 69% against 71%, with a lower share. In neither does GPU throughput fall more than the CPU share explains | as specified |
+| 7, report 027's run 2, 150 tasks at once | no agent exit, all 150 ran, no lease expired, no refusal and no supervisor error; the agent's soft descriptor limit raised to 524288, 1079 open at the peak; longest observation gap while launching 839 ms (p95 799 ms); after SIGTERM, the iteration that drains all 150 at once took 4236 ms, and the stop iterations after it about 1 s | launching pass; stop fail |
+| 7, report 027's run 5, T178 pinned with the other user's contender | `ramp_seconds` 2.668; the contender at its core 0.51 s after it started; `foreign_actions` 0 | pass |
+| 7, report 027's run 6, the return after a 30 s one-core contender, 4 CPUs | Yield First: own work at the contended target in 1 interval; after the contender's last usage the target is back in 1.5 s and own usage at 98% of its usage before in 4.0 s; 273 pause samples, no drain. Performance: the same interval, the target back in 1.0 s, own usage in 6.0 s; 7 pause samples, no drain | SC-002 pass; the target within 3 s, own usage not |
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
