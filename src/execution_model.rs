@@ -279,6 +279,11 @@ pub trait LaunchBackend {
         Vec::new()
     }
     fn verify(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>>;
+    /// Verify a managed child the supervisor launched, by its own identity; a backend with a
+    /// leaf also checks the leaf holds only the leader and verified children (SUP-3).
+    fn verify_child(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {
+        self.verify(identity)
+    }
     /// Only clean a manager-owned empty leaf; error keeps capacity reserved.
     fn confirm_release(&mut self) -> Result<()>;
     /// The allocation's own out-of-memory kill count, where the backend can read one

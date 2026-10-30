@@ -334,6 +334,26 @@ pub fn runtime_write(
     write_checked(io, control, value)
 }
 
+/// A managed child about to run is in a leaf that holds nothing beyond the leader, the
+/// children verified before it, and itself (SUP-3).
+pub fn check_child_membership(
+    members: &BTreeSet<u32>,
+    family: &BTreeSet<u32>,
+    child: u32,
+) -> Result<()> {
+    ensure!(
+        members.contains(&child),
+        "managed child is not in the workload leaf"
+    );
+    ensure!(
+        members
+            .iter()
+            .all(|pid| *pid == child || family.contains(pid)),
+        "unfamiliar members in the workload leaf; refuse child launch"
+    );
+    Ok(())
+}
+
 fn verify_runtime_target(io: &dyn LeafIo, verified: &BTreeSet<u32>, control: &str) -> Result<()> {
     ensure!(
         RUNTIME_CONTROLS.contains(&control),
@@ -1003,6 +1023,8 @@ pub struct CgroupBackend {
     evidence: Vec<ControlEvidence>,
     assignment: Option<String>,
     identity: Option<ProcessIdentity>,
+    /// Managed children verified in the leaf, beside the leader.
+    children: BTreeSet<u32>,
     #[cfg(target_os = "linux")]
     runtime: linux::Runtime,
 }
@@ -1025,6 +1047,7 @@ impl CgroupBackend {
                 evidence: vec![],
                 assignment: None,
                 identity: None,
+                children: BTreeSet::new(),
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -1155,6 +1178,47 @@ impl LaunchBackend for CgroupBackend {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            bail!("cgroup v2 execution requires Linux")
+        }
+    }
+
+    fn verify_child(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {
+        ensure!(
+            self.assignment.as_deref() == Some(&identity.assignment_id),
+            "cgroup assignment identity mismatch"
+        );
+        let leader = self
+            .identity
+            .as_ref()
+            .context("a managed child before the leader was verified")?;
+        let mut family = self.children.clone();
+        family.insert(leader.pid);
+        #[cfg(target_os = "linux")]
+        {
+            self.runtime.verify_child_membership(identity, &family)?;
+            self.children.insert(identity.pid);
+            let scope = self.runtime.leaf_path()?.display().to_string();
+            Ok(vec![ControlEvidence {
+                control: "cgroup.procs".into(),
+                available: Some(true),
+                permitted: Some(true),
+                configured: true,
+                applied: true,
+                fallback: false,
+                scope,
+                requested: Some("child gate in the workload leaf before user exec".into()),
+                effective: Some(format!(
+                    "child pid {} in the workload leaf with the leader and verified children",
+                    identity.pid
+                )),
+                detail:
+                    "Boot/start identity of the child verified; the leaf holds no other process."
+                        .into(),
+            }])
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = family;
             bail!("cgroup v2 execution requires Linux")
         }
     }
@@ -1590,6 +1654,27 @@ mod linux {
         }
 
         pub(super) fn verify_membership(&self, identity: &ProcessIdentity) -> Result<()> {
+            let pids = self.verified_in_leaf(identity)?;
+            ensure!(
+                pids == BTreeSet::from([identity.pid]),
+                "unfamiliar members in pre-execution cgroup; refuse launch"
+            );
+            Ok(())
+        }
+
+        /// A managed child in the leaf beside the leader and the children verified before it.
+        pub(super) fn verify_child_membership(
+            &self,
+            identity: &ProcessIdentity,
+            family: &BTreeSet<u32>,
+        ) -> Result<()> {
+            let pids = self.verified_in_leaf(identity)?;
+            super::check_child_membership(&pids, family, identity.pid)
+        }
+
+        /// The process's boot and start identity and its place in the exact prepared leaf;
+        /// returns the leaf's members.
+        fn verified_in_leaf(&self, identity: &ProcessIdentity) -> Result<BTreeSet<u32>> {
             self.verify_paths()?;
             let leaf = self.leaf.as_ref().context("no prepared cgroup")?;
             ensure!(
@@ -1620,17 +1705,12 @@ mod linux {
                 paths.len() == 1 && Path::new(paths[0]) == leaf.membership,
                 "gate is not in the exact prepared cgroup"
             );
-            let pids = leaf
+            Ok(leaf
                 .directory
                 .read("cgroup.procs")?
                 .split_whitespace()
                 .map(str::parse::<u32>)
-                .collect::<std::result::Result<BTreeSet<_>, _>>()?;
-            ensure!(
-                pids == BTreeSet::from([identity.pid]),
-                "unfamiliar members in pre-execution cgroup; refuse launch"
-            );
-            Ok(())
+                .collect::<std::result::Result<BTreeSet<_>, _>>()?)
         }
 
         pub(super) fn remove_empty_leaf(&mut self) -> Result<()> {

@@ -724,7 +724,7 @@ impl MediatedChild {
                 self.generation,
             )?;
             ensure!(claimed == actual, "mediated child identity mismatch");
-            let mut evidence = backend.verify(&actual)?;
+            let mut evidence = backend.verify_child(&actual)?;
             evidence.push(ControlEvidence{control:"process_handle".into(),available:Some(true),permitted:Some(true),configured:true,applied:true,fallback:self.owned.pidfd.is_none(),scope:format!("mediated_child:{}",actual.pid),requested:Some("stable owned handle".into()),effective:Some(self.owned.handle_detail.clone()),detail:"Supervisor-created direct child with exclusive reaping; no arbitrary descendant adoption".into()});
             if let Some(cpus) = self.request.env.get("CEDEGRID_CPU_AFFINITY") {
                 #[cfg(target_os = "linux")]

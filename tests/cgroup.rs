@@ -475,6 +475,19 @@ mod runtime_steps {
             .to_owned()
     }
 
+    /// A managed child joins the leaf beside the leader and the children verified before it,
+    /// and nothing else (SUP-3).
+    #[test]
+    fn a_managed_child_is_verified_beside_the_leader_and_verified_children() {
+        use cedegrid::cgroup::check_child_membership;
+        let family = BTreeSet::from([11, 12]);
+        assert!(check_child_membership(&BTreeSet::from([11, 12, 13]), &family, 13).is_ok());
+        // Children that have left the leaf need not be in it.
+        assert!(check_child_membership(&BTreeSet::from([11, 13]), &family, 13).is_ok());
+        assert!(check_child_membership(&BTreeSet::from([11, 12, 13, 14]), &family, 13).is_err());
+        assert!(check_child_membership(&BTreeSet::from([11, 12]), &family, 13).is_err());
+    }
+
     #[test]
     fn limits_round_trip() {
         assert_eq!("max".parse::<Limit>().unwrap(), Limit::Max);
