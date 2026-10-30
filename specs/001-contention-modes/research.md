@@ -754,3 +754,15 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   counting and are reported `over_bound`.
 - **Alternatives**: a config key (a tuning knob with no workload that needs it yet).
 
+## R40. The derived GPU sample age (item 032)
+
+- **Decision**: unset, `gpu.process_sample_max_age_ms` is max(2000, 2 × `monitor.interval_ms`);
+  an explicit value must be above the interval.
+- **Rationale**: the sample cursor is read once per interval, so an age limit at or below the
+  interval would leave GPU compute unknown at every read. Twice the interval tolerates one late
+  read, and 2000 keeps the default unchanged at the default 500 ms interval. A config that never
+  mentions GPUs, on a host without them, has nothing to refuse.
+- **Alternatives**: refuse long intervals everywhere (030's rule: a GPU key blocks a CPU-only
+  host); migrate files to write a value (an unset key needs nothing); refuse only on GPU hosts
+  (a config would load on one host and not another).
+

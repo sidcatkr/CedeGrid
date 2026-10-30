@@ -77,7 +77,7 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99; dwell 1–10 |
 | `pause_bound_s` | cpu, gpu_compute | 10 | 1–60 |
 | `noise_tolerance_mib` | gpu_memory | 256 | 0–1024, and at agent start at most half of each device's floor; above 256 needs `relaxed_detection` |
-| `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than `gpu.process_sample_max_age_ms`; below 20 needs `relaxed_detection` |
+| `quiet_window_intervals` | gpu_compute | 20 | ≥ 1, and the window is longer than the GPU sample age (`gpu.process_sample_max_age_ms`, or unset max(2000, 2 × `monitor.interval_ms`)); below 20 needs `relaxed_detection` |
 | `attribution_tolerance_percent` | gpu_compute | 15 | 1–30; summed per-process utilization within this many points of device utilization makes the external amount measured (FR-021); above 15 needs `relaxed_detection`; provisional until T088 |
 | `scale_up_cooldown_ms` | cpu, ram, gpu_memory | the mode's scale-up interval: 30000 (Yield First), 10000 (Neutral); in Performance the monitor interval (500) on CPU and 2000 on RAM and GPU memory | How long the resource must stay stable before own work is admitted to it, counted from that resource's own stable time (FR-034). On GPU memory a set legacy `gpu.scale_up_cooldown_ms` applies when this key is unset. Not to be confused with `scale_up_step_interval_s`, the ladder's reversal rate |
 | `reclaim_backoff_ms`, `reclaim_backoff_max_ms` | ram, gpu_memory | 1000, 30000 | backoff ≥ 1, max ≥ backoff; extra cooldown per repeated reclaim episode (FR-061) |

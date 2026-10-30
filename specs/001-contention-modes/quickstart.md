@@ -189,3 +189,12 @@ cargo test --locked --test coordinator mixed_version -- --test-threads=1
    its total lands at the target beside a synthetic external principal.
 3. On macOS the rootless launch still refuses a multi-process command without SDK children.
 
+## 11. Item 032, the derived GPU sample age (any OS)
+
+1. `cargo test --locked --test configuration -- sample_age`: an interval of 3000 with no sample
+   age loads and derives 6000; an explicit 2000 at interval 3000 is refused and names both keys
+   and 3001; the defaults derive 2000.
+2. `cedegrid --config <file with monitor.interval_ms = 3000> validate` prints
+   `derived."gpu.process_sample_max_age_ms".value` 6000, and `doctor --text` lists it under
+   "Derived settings".
+

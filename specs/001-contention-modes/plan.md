@@ -1238,6 +1238,43 @@ runs in the Docker Linux check, batched per group. No NEEDS CLARIFICATION remain
   report and outcome fields are additive within one binary. Pass.
 No violation; no Complexity Tracking entry.
 
+## Item 032: the derived GPU sample age (2026-10-31)
+
+Spec Session 2026-10-31 Q10 (FR-070; contracts/config-contention.md "The GPU sample age"),
+report 030's Decision 4, and Decision 3's local part. A config that never mentions GPUs keeps
+loading at any interval the bounds allow.
+
+**Technical Context**: Rust 1.88, no new dependency. `GpuConfig::process_sample_max_age_ms`
+becomes `Option<u64>`, unset in TOML and in the default. One accessor,
+`Config::gpu_sample_max_age_ms()`, returns the explicit value or max(2000, 2 ×
+`monitor.interval_ms`); every reader uses it (telemetry's sample cursor, the policy's GPU quiet
+window, the quiet-window validation). No wire, journal or SDK change; `config_migration` is
+unchanged, since an unset key needs nothing written. No NEEDS CLARIFICATION remains.
+
+1. **Validation (FR-070)**: an explicit value outside 1 to 60000 fails as now; an explicit value
+   at or below `monitor.interval_ms` fails on every host with
+   `gpu.process_sample_max_age_ms (<value>) must be above monitor.interval_ms (<interval>); set it to at least <interval + 1> or leave it unset`.
+   The derived value is at most 20000 at the 10000 ms interval bound, so it always loads.
+2. **Showing it**: `validate` prints a `derived` map beside the config,
+   `{"gpu.process_sample_max_age_ms": {"value": N, "rule": "max(2000, 2 × monitor.interval_ms)"}}`;
+   `doctor` prints a "Derived settings" section with the same line and carries the map in its
+   JSON. An explicit value is not listed there.
+3. **Decision 3, A (local part)**: run 7's return joins the test-host batch with T368 and T387 in
+   `native-gates.md`, keeping the agent's decision records for that run in the evidence copy
+   (redacted) so the lag between the quiet count and own usage coming back can be located. The
+   run itself waits for the user's typed approval of the batch; T339 stays open until then.
+4. **Tests**: an interval of 3000 with no sample age loads and derives 6000; an explicit 2000 at
+   interval 3000 is refused and the error names both keys and 3001; the defaults derive 2000;
+   `validate` and `doctor` show the derived value.
+
+**Constitution Check (7.0.0)**:
+- III: the GPU sample cursor still goes stale only after more than one interval, since the
+  derived value is at least twice the interval; unknown readings keep their handling. Pass.
+- VII: an explicit value keeps loading or failing as before; a config without the key that
+  failed at an interval of 2000 or more now loads; the defaults are unchanged. Pass.
+- I, II, IV, V, VI: no process, policy or launch change; tests first. Pass.
+No violation; no Complexity Tracking entry.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
