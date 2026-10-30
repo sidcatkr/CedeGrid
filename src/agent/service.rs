@@ -436,7 +436,21 @@ impl AgentLoop<'_> {
                         }
                     }
                     Ok(Event::OutsideFamily { count, reason }) => slot.note_outside(count, reason),
-                    Ok(Event::Family { family }) => slot.family = Some(family),
+                    Ok(Event::Family { family }) => {
+                        let known = slot.descendants();
+                        slot.family = Some(family);
+                        // New members get a baseline now, so their run's next interval is
+                        // measured rather than unknown.
+                        let joined: Vec<_> = slot
+                            .descendants()
+                            .into_iter()
+                            .filter(|member| !known.contains(member))
+                            .collect();
+                        if let Some(record) = &slot.prepared {
+                            self.collector
+                                .prime_descendants(std::slice::from_ref(record), &joined);
+                        }
+                    }
                     Ok(Event::Readiness {
                         hint_ready,
                         observes_drain,
@@ -1093,9 +1107,16 @@ impl AgentLoop<'_> {
         ))
         .await;
         let mut mark = LoopCost::thread_ns();
-        let (mut snapshot, allocations) = self
-            .collector
-            .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
+        let descendants: Vec<_> = self
+            .slots
+            .values()
+            .flat_map(ChildSlot::descendants)
+            .collect();
+        let (mut snapshot, allocations) = self.collector.sample_with_descendants(
+            records,
+            &self.store.all_unreleased_managed_children()?,
+            &descendants,
+        )?;
         self.sampled_at = Instant::now();
         mark = self.cost.charge("sample", mark);
         self.oom_kills.push_back(crate::telemetry::host_oom_kills());

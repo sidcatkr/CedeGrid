@@ -679,6 +679,33 @@ fn rekey_journal_cache(
 }
 
 impl ChildSlot {
+    /// The run's verified descendants as identities its leader's record anchors, for
+    /// measurement only: telemetry checks each start time and never acts on one (FR-085).
+    fn descendants(&self) -> Vec<(String, crate::execution_model::ProcessIdentity)> {
+        let (Some(family), Some(leader)) = (
+            self.family.as_ref(),
+            self.prepared.as_ref().and_then(|r| r.identity.as_ref()),
+        ) else {
+            return Vec::new();
+        };
+        family
+            .descendants
+            .iter()
+            .map(|member| {
+                (
+                    leader.assignment_id.clone(),
+                    crate::execution_model::ProcessIdentity {
+                        pid: member.pid,
+                        boot_id: leader.boot_id.clone(),
+                        start_time: member.start_time,
+                        assignment_id: leader.assignment_id.clone(),
+                        generation: leader.generation,
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Keep the most processes found outside the family at once, and why (FR-082).
     fn note_outside(&mut self, count: u64, reason: Option<crate::supervision::OutsideReason>) {
         if count > self.outside_family || (count == self.outside_family && reason.is_some()) {

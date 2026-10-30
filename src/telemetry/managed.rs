@@ -407,12 +407,70 @@ impl ManagedCollector {
             }
         }
     }
+    /// Records for a run's verified descendants, each keyed apart and mapped to its run, so
+    /// they are measured as the run's own work (FR-085).
+    fn descendant_records(
+        records: &[crate::execution_model::ExecutionRecord],
+        descendants: &[(String, crate::execution_model::ProcessIdentity)],
+    ) -> Vec<(crate::execution_model::ExecutionRecord, String)> {
+        use crate::execution_model::{ExecutionPhase, ExecutionRecord};
+        descendants
+            .iter()
+            .filter_map(|(assignment, identity)| {
+                let run = records.iter().find(|r| {
+                    r.assignment_id == *assignment && r.phase != ExecutionPhase::Released
+                })?;
+                Some((
+                    ExecutionRecord {
+                        task_id: run.task_id.clone(),
+                        assignment_id: format!(
+                            "descendant:{assignment}:{}:{}",
+                            identity.pid, identity.start_time
+                        ),
+                        generation: run.generation,
+                        class: run.class,
+                        phase: ExecutionPhase::Running,
+                        resources: crate::model::Resources::default(),
+                        identity: Some(identity.clone()),
+                        backend: "descendant".into(),
+                        evidence: vec![],
+                        detail: String::new(),
+                        modes: Default::default(),
+                    },
+                    assignment.clone(),
+                ))
+            })
+            .collect()
+    }
+    /// Take launch baselines for descendants that just joined, so their first interval has a
+    /// delta instead of leaving their run's usage unknown.
+    pub fn prime_descendants(
+        &mut self,
+        records: &[crate::execution_model::ExecutionRecord],
+        descendants: &[(String, crate::execution_model::ProcessIdentity)],
+    ) {
+        let augmented: Vec<_> = Self::descendant_records(records, descendants)
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect();
+        self.prime(&augmented);
+    }
     /// Aggregate explicitly registered family members into exactly one allocation.
     /// A pending/uncertain child makes family usage unknown, preserving reservation.
     pub fn sample_with_children(
         &mut self,
         records: &[crate::execution_model::ExecutionRecord],
         children: &[crate::managed_children::ManagedChildRecord],
+    ) -> Result<(Snapshot, Vec<crate::model::Allocation>)> {
+        self.sample_with_descendants(records, children, &[])
+    }
+    /// As `sample_with_children`, with each run's verified descendants counted as its own
+    /// work: CPU summed over members, memory by their summed PSS, GPU per process (FR-085).
+    pub fn sample_with_descendants(
+        &mut self,
+        records: &[crate::execution_model::ExecutionRecord],
+        children: &[crate::managed_children::ManagedChildRecord],
+        descendants: &[(String, crate::execution_model::ProcessIdentity)],
     ) -> Result<(Snapshot, Vec<crate::model::Allocation>)> {
         use crate::{
             execution_model::{ExecutionPhase, ExecutionRecord},
@@ -421,6 +479,10 @@ impl ManagedCollector {
         };
         let mut augmented = records.to_vec();
         let mut parents = BTreeMap::new();
+        for (record, run) in Self::descendant_records(records, descendants) {
+            parents.insert(record.assignment_id.clone(), run);
+            augmented.push(record);
+        }
         for child in children
             .iter()
             .filter(|c| c.phase != ManagedChildPhase::Released)
@@ -465,7 +527,13 @@ impl ManagedCollector {
             (Some(mut total), Some(usage)) => total.add_checked(&usage).ok().map(|()| total),
             _ => None,
         };
-        for child in child_allocations {
+        for mut child in child_allocations {
+            // A descendant that exited since its last sample, or joined too late for a
+            // baseline, adds nothing: own usage stays a lower bound and others read no less.
+            if child.id.starts_with("descendant:") && child.observed.is_none() {
+                child.observed = Some(Resources::default());
+                child.observed_upper = None;
+            }
             if let Some(parent) = allocations.iter_mut().find(|a| a.id == parents[&child.id]) {
                 parent.observed_upper = add(parent.observed_upper.take(), child.observed_upper);
                 parent.observed = match (parent.observed.take(), child.observed) {

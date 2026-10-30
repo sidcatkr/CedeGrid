@@ -2546,25 +2546,104 @@ mod tests {
         );
     }
 
-    /// Full before item 031: a worker the leader forked outside the SDK is in the leaf but
-    /// not in the verified family, so the leaf reading is refused and the worker's CPU is
-    /// left to the owner's unmanaged use, while the leaf's limits still cover it.
+    /// Full with item 031: a worker the leader forked joins the verified family, so a leaf of
+    /// family members is read again; a worker outside the family, whose IDs differ, still
+    /// refuses the leaf reading and is left to its owner (FR-085).
     #[test]
-    fn a_forked_worker_in_the_leaf_refuses_the_leaf_reading() {
+    fn a_forked_worker_in_the_family_keeps_the_leaf_reading() {
         let stat = "usage_usec 500000\n";
         let (leader, worker) = ("10\n20\n", "20\n10\n");
-        let family = BTreeSet::from([10]);
-        assert!(
+        let read = |family: &BTreeSet<u32>| {
             leaf_reading_with(
                 leaf_files(vec![leader, worker], stat),
                 10,
-                &family,
+                family,
                 4,
                 MS,
-                |_| Some(1)
+                |_| Some(1),
             )
-            .is_none()
+        };
+        let (_, members) = read(&BTreeSet::from([10, 20])).expect("a leaf of family members");
+        assert_eq!(members, BTreeSet::from([10, 20]));
+        assert!(read(&BTreeSet::from([10])).is_none());
+    }
+
+    /// A family's CPU and memory count as own work: 4 forked workers reading a buffer they
+    /// share copy-on-write with the leader add their CPU to the allocation and read as about
+    /// one buffer by summed PSS, and none of it is the owner's unmanaged use (FR-085, R37).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_forked_family_is_measured_as_own_work() {
+        use crate::execution_model::{AllocationClass, ExecutionPhase, ExecutionRecord};
+        use std::io::BufRead;
+        let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let script = "import os, sys, time\n\
+            buf = bytearray(b'x') * (192 << 20)\n\
+            pids = []\n\
+            for _ in range(4):\n    pid = os.fork()\n    if pid == 0:\n        \
+            end = time.time() + 6\n        i = 0\n        \
+            while time.time() < end:\n            i = (i + buf[i] + 4093) % len(buf)\n        \
+            os._exit(0)\n    pids.append(pid)\n\
+            print(' '.join(map(str, pids)), flush=True)\n\
+            for pid in pids:\n    os.waitpid(pid, 0)\n";
+        let mut leader = std::process::Command::new(python)
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let identity = |pid: u32| crate::supervision::process_identity(pid, "family", 1).unwrap();
+        let record = ExecutionRecord {
+            task_id: "family".into(),
+            assignment_id: "family".into(),
+            generation: 1,
+            class: AllocationClass::Opportunistic,
+            phase: ExecutionPhase::Running,
+            resources: crate::model::Resources::default(),
+            identity: Some(identity(leader.id())),
+            backend: "rootless".into(),
+            evidence: vec![],
+            detail: String::new(),
+            modes: Default::default(),
+        };
+        let workers: Vec<_> = line
+            .split_whitespace()
+            .map(|pid| ("family".to_owned(), identity(pid.parse().unwrap())))
+            .collect();
+        assert_eq!(workers.len(), 4);
+        let mut collector = ManagedCollector::new(&crate::config::Config::default()).unwrap();
+        let sample = |collector: &mut ManagedCollector| {
+            std::thread::sleep(
+                collector
+                    .next_cpu_sample_at()
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(800)),
+            );
+            collector
+                .sample_with_descendants(std::slice::from_ref(&record), &[], &workers)
+                .unwrap()
+        };
+        sample(&mut collector);
+        let (snapshot, allocations) = sample(&mut collector);
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        let observed = allocations[0].observed.clone().expect("a measured family");
+        assert!(observed.cpu_millicores >= 2500, "{observed:?}");
+        assert!(
+            (150..=400).contains(&observed.ram_mib),
+            "a shared 192 MiB buffer read as {} MiB",
+            observed.ram_mib
         );
+        let owner = snapshot
+            .principals
+            .iter()
+            .flatten()
+            .find(|principal| principal.is_owner)
+            .map_or(0, |principal| principal.cpu_millicores);
+        assert!(owner < 1500, "the owner's unmanaged use holds {owner} m");
     }
 
     #[test]
