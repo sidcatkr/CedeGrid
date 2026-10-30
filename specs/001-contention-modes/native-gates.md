@@ -398,6 +398,37 @@ observation gap within 1 s and the agent's open descriptors at the peak, run 5 w
 contender's median, own work against its target and cap changes per minute, and run 6 back at
 the uncontended target within 3 s in both modes.
 
+## Item 031 native gates (T387)
+
+Runs only on the authorized test host, with the user's typed approval in the session, asked
+together with T368, under the host rules of items 021, 026, 027 and 029. `$repo`, `$root`,
+`$py` and the `gate` function are as above, from a `git archive` of the final commit. The
+harness `family-031.py` is written for the run and kept with the evidence in `$H`; it launches
+one job through the agent, reads the supervisor's `family` reports, `status` and `explain`,
+and samples each member's state, CPU, `smaps_rollup` and `oom_score_adj` every 100 ms.
+
+```sh
+# 1. A multiprocessing stand-in: a leader that fills a 1 GiB buffer, then 4 forked workers
+#    that read it and spin for 120 s, in Performance, Tracked (forced) and Full, idle and
+#    beside the second account saturating the same CPUs.
+$py $H/family-031.py --repo $repo --root $root --output <dir> --backend <tracked|full> \
+    --workload multiprocessing --workers 4 --buffer-mib 1024 --seconds 120 --load <none|saturating>
+ssh <second account>@<test host> 'T=<epoch> CPUS=<probe cpus> S=120 LOAD=saturating sh -s' < $H/peer-contender-027.sh
+# 2. Where PyTorch is installed: a DataLoader(num_workers=4) loop over a synthetic dataset,
+#    the same way.
+$py $H/family-031.py --repo $repo --root $root --output <dir> --backend <tracked|full> \
+    --workload dataloader --workers 4 --seconds 120 --load <none|saturating>
+# 3. Leftovers: the leader exits while its 4 workers run on, in each class.
+$py $H/family-031.py --repo $repo --root $root --output <dir> --backend <tracked|full> \
+    --workload leftovers --workers 4 --class <guaranteed|opportunistic>
+```
+
+Gates: runs 1 and 2, a family of 5 in `status` and `explain` (`family_members`), nothing outside
+it, own CPU at the mode's target beside the load with the leader not held at the minimum duty,
+own memory within 10% of one buffer plus the workers' private pages, every member stopped
+and continued with the family under a step, and the agent's own cost per interval against the
+029 budget; run 3, `members_ended` 4, no member or zombie left, in both classes.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
