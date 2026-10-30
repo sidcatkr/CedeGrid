@@ -91,6 +91,8 @@ _, status = os.waitpid(pid, 0)
 sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 7)
 "#,
     );
+    // A single-process command that forks anyway: the breach FR-082 reports.
+    request.single_process = true;
     request.managed_child_limit = 0;
     let mut reports = Reports::default();
     let outcome = supervision::supervise_controlled(
@@ -880,6 +882,8 @@ struct ActuationAudit {
     foreign: u32,
     stage: u8,
     reports: Vec<supervision::SupervisorReport>,
+    /// Counts of processes outside the verified family, as reported (FR-082).
+    outside: Vec<u64>,
     paused: BTreeMap<&'static str, String>,
     resumed: BTreeMap<&'static str, String>,
 }
@@ -949,8 +953,10 @@ impl supervision::SupervisorControl for ActuationAudit {
         })
     }
     fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
-        if !matches!(report, supervision::SupervisorReport::Readiness { .. }) {
-            self.reports.push(report);
+        match report {
+            supervision::SupervisorReport::Readiness { .. } => {}
+            supervision::SupervisorReport::OutsideFamily { count } => self.outside.push(count),
+            report => self.reports.push(report),
         }
         Ok(())
     }
@@ -989,6 +995,7 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
         foreign: foreign.id(),
         stage: 0,
         reports: vec![],
+        outside: vec![],
         paused: BTreeMap::new(),
         resumed: BTreeMap::new(),
     };
@@ -1032,6 +1039,10 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
         foreign_alive && !foreign_after.contains('T'),
         "{foreign_after}"
     );
+    // The loose fork is the leader's child outside the family; the mediated child is the
+    // supervisor's. Only Linux lists a process's children (FR-082).
+    let expected: &[u64] = if cfg!(target_os = "linux") { &[1] } else { &[] };
+    assert_eq!(audit.outside, expected);
 }
 
 /// A managed child carries the same OOM preference as its parent (FR-023).
