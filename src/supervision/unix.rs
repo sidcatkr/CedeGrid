@@ -1000,6 +1000,14 @@ pub(super) fn supervise(
             setup.oom_score_adj = Some(OOM_PREFERRED);
         }
         setup.nofile_soft = options.nofile_soft;
+        // Without its supervisor an Opportunistic run can be neither yielded nor drained,
+        // and a replacement would start beside it; Guaranteed work goes on (FR-078).
+        if cfg!(target_os = "linux") {
+            setup.parent_death_signal = Some(match request.class {
+                AllocationClass::Opportunistic => libc::SIGKILL,
+                AllocationClass::Guaranteed => libc::SIGCONT,
+            });
+        }
         children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
         if let Some(server) = children.as_mut() {
             server.leader_directory = Some(drain.path.clone());
@@ -1284,6 +1292,16 @@ pub(super) fn supervise(
             };
             let mut runtime = apply_control_commands(commands, &mut lifecycle, start, polled_at);
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            if STOP_SIGNALLED.load(std::sync::atomic::Ordering::SeqCst)
+                && lifecycle.phase == LifecyclePhase::Running
+            {
+                report(
+                    "supervisor_signalled",
+                    &request.assignment_id,
+                    "a stop signal releases the run's steps and drains it".into(),
+                );
+                lifecycle.request_drain(elapsed);
+            }
             let phase = lifecycle.tick(elapsed);
             if let Some(server) = &mut children {
                 let accepting = phase == LifecyclePhase::Running && leader_status.is_none();
@@ -1653,7 +1671,39 @@ pub(super) fn supervise(
     }
 }
 
+/// Set by SIGTERM, SIGINT or SIGHUP to a supervisor: release the run's steps and drain it
+/// (FR-078).
+static STOP_SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn note_stop_signal(_: libc::c_int) {
+    STOP_SIGNALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Turn SIGTERM, SIGINT and SIGHUP into a drain. Only a supervisor's own process installs
+/// it; the gate's exec resets it for the workload.
+pub fn install_stop_handlers() -> Result<()> {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = note_stop_signal as extern "C" fn(libc::c_int) as usize;
+        action.sa_flags = libc::SA_RESTART;
+        let rc = unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut())
+        };
+        ensure!(
+            rc == 0,
+            "supervisor signal handler failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn worker_gate() -> Result<()> {
+    // The supervisor that started this gate, before anything can outlive it.
+    #[cfg(target_os = "linux")]
+    let supervisor = unsafe { libc::getppid() };
     let input = io::stdin();
     let mut input = input.lock();
     let mut line = String::new();
@@ -1667,6 +1717,30 @@ pub(super) fn worker_gate() -> Result<()> {
     );
     let gate: GateRequest = serde_json::from_str(&line)?;
     ensure!(!gate.request.argv.is_empty(), "missing workload argv");
+    if let Some(signal) = gate.setup.parent_death_signal {
+        ensure!(
+            signal == libc::SIGKILL || signal == libc::SIGCONT,
+            "invalid parent-death signal"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: sets this gate's own parent-death signal; it survives the exec below.
+            let rc =
+                unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal as libc::c_ulong, 0, 0, 0) };
+            ensure!(
+                rc == 0,
+                "gate parent-death signal failed: {}",
+                io::Error::last_os_error()
+            );
+            // A supervisor that died before the call left no one to signal this gate.
+            ensure!(
+                unsafe { libc::getppid() } == supervisor,
+                "supervisor exited before the parent-death signal was set"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        bail!("the parent-death signal is unavailable on this platform");
+    }
     if let Some(path) = &gate.setup.cgroup_path {
         #[cfg(target_os = "linux")]
         {

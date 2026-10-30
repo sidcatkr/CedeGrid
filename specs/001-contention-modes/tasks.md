@@ -1308,8 +1308,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 2: supervisor death and stop state (FR-078)**
 
-- [ ] T284 [P] Write failing Linux tests: a supervisor killed by SIGKILL in a duty off phase leaves no Opportunistic workload (killed through the parent-death signal) and a running Guaranteed one; SIGTERM, SIGINT and SIGHUP to a supervisor release its steps and drain; supervisors run in their own process group, per FR-078 (SUP-1) (missing)
-- [ ] T285 Set `PR_SET_PDEATHSIG` with the `getppid()` check in the worker gate (`src/supervision/unix.rs`, `src/main.rs`), add the supervisor's signal handling, and start supervisors in their own process group (`src/agent/launch.rs`), until T284 passes, per FR-078 and research R29 (SUP-1) (missing)
+- [X] T284 [P] Write failing Linux tests: a supervisor killed by SIGKILL in a duty off phase leaves no Opportunistic workload (killed through the parent-death signal) and a running Guaranteed one; SIGTERM, SIGINT and SIGHUP to a supervisor release its steps and drain; supervisors run in their own process group, per FR-078 (SUP-1) (missing)
+- [X] T285 Set `PR_SET_PDEATHSIG` with the `getppid()` check in the worker gate (`src/supervision/unix.rs`, `src/main.rs`), add the supervisor's signal handling, and start supervisors in their own process group (`src/agent/launch.rs`), until T284 passes, per FR-078 and research R29 (SUP-1) (missing)
 - [ ] T286 [P] Write failing cgroup tests: a duty interrupted in its off phase, then a reattaching agent's Query, ends with the leaf thawed; a recorded Pause stays frozen; membership is verified first, per FR-078 (028 Decision 1) (missing)
 - [ ] T287 Thaw a leaf frozen without a recorded Pause in `CgroupActuator::reconcile` (`src/cgroup.rs`), until T286 passes, per FR-078 (028 Decision 1) (missing)
 - [ ] T288 [P] Write a failing actuator test: a family whose second member's STOP fails, then release, ends with every member continued, per Constitution II (SUP-5, R2) (contradicts)

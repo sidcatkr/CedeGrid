@@ -337,6 +337,7 @@ fn validate_lease(lease: &Lease, assignment: &Assignment) -> Result<()> {
 /// the main thread remains the exclusive child reaper throughout pidfd acquisition.
 pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
     let lifecycle_started = Instant::now();
+    crate::supervision::install_stop_handlers()?;
     let state_root = PathBuf::from(
         std::env::var_os("CEDEGRID_SUPERVISOR_STATE_ROOT")
             .context("native supervisor namespace bootstrap missing")?,

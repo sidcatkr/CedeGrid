@@ -127,6 +127,10 @@ pub struct GateSetup {
     /// The soft descriptor limit restored before user execution (FR-077).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile_soft: Option<u64>,
+    /// The signal the gate asks the kernel to send it when its supervisor dies: SIGKILL for
+    /// Opportunistic work, SIGCONT for Guaranteed work (FR-078). Linux only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_death_signal: Option<i32>,
 }
 
 pub trait ExecutionJournal {

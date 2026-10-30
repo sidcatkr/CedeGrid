@@ -255,6 +255,19 @@ struct GateRequest {
     resource_target_file: Option<std::path::PathBuf>,
 }
 
+/// Turn SIGTERM, SIGINT and SIGHUP to this supervisor process into a release of its run's
+/// steps and a drain (FR-078). Only the supervisor's own process installs it.
+pub fn install_stop_handlers() -> Result<()> {
+    #[cfg(unix)]
+    {
+        unix::install_stop_handlers()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
 /// Entry point for the exact hidden `__worker-gate` command, before Tokio or
 /// other threads initialize. The protocol is private; user stdout is /dev/null,
 /// stderr is inherited, and user stdin is /dev/null. EOF before EXEC exits.

@@ -1900,3 +1900,219 @@ while not (d/'stop').exists():
     // Release undid the cap before the run ended.
     assert_eq!(state.cap, None);
 }
+
+/// Stops the leader once it is up, writes `paused`, then waits to be killed or signalled:
+/// Opportunistic work by a pause, Guaranteed work, which is never paused, by a CPU cap at its
+/// request that its spinning leader runs above.
+#[cfg(target_os = "linux")]
+struct PauseThenWait {
+    dir: std::path::PathBuf,
+    paused: bool,
+    guaranteed: bool,
+}
+#[cfg(target_os = "linux")]
+impl supervision::SupervisorControl for PauseThenWait {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+        if !self.paused && self.dir.join("leader.pid").exists() {
+            self.paused = true;
+            if !self.guaranteed {
+                return Ok(vec![cpu_step(1, YieldStep::Pause)]);
+            }
+            return Ok(vec![supervision::SupervisorCommand::Adjust {
+                sequence: 1,
+                resources: BTreeMap::from([(
+                    ResourceKey::Cpu,
+                    StepRequest {
+                        step: YieldStep::Cap,
+                        target: Some(1),
+                        cause: YieldCause::ExternalGrowth,
+                        deadline_ms: None,
+                    },
+                )]),
+            }]);
+        }
+        Ok(vec![])
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        if matches!(report, supervision::SupervisorReport::Adjusted { .. }) {
+            fs::write(self.dir.join("paused"), "").unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "launched only by the supervisor-death tests"]
+fn paused_supervisor_fixture() {
+    let dir = std::path::PathBuf::from(std::env::var("CEDEGRID_DEATH_FIXTURE_DIR").unwrap());
+    if std::env::var_os("CEDEGRID_DEATH_FIXTURE_HANDLERS").is_some() {
+        supervision::install_stop_handlers().unwrap();
+    }
+    let store = StateStore::open(&dir.join("state")).unwrap();
+    let guaranteed =
+        std::env::var("CEDEGRID_DEATH_FIXTURE_CLASS").as_deref() != Ok("opportunistic");
+    let mut request = request(
+        &dir,
+        r#"
+import os
+from pathlib import Path
+Path('leader.pid').write_text(str(os.getpid()))
+while True:
+    pass
+"#,
+    );
+    if guaranteed {
+        request.resources.cpu_millicores = 200;
+    } else {
+        request.class = AllocationClass::Opportunistic;
+    }
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut PauseThenWait {
+            dir: dir.clone(),
+            paused: false,
+            guaranteed,
+        },
+    );
+    fs::write(
+        dir.join("outcome"),
+        format!("{:?}", outcome.map(|o| o.record.phase)),
+    )
+    .unwrap();
+}
+
+/// A pidfd for a fixture's leader, for observing it without its numeric PID and for cleanup.
+#[cfg(target_os = "linux")]
+struct Watched(std::os::fd::OwnedFd);
+#[cfg(target_os = "linux")]
+impl Watched {
+    fn open(pid: u32) -> Self {
+        use std::os::fd::FromRawFd;
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+        assert!(raw >= 0, "pidfd_open");
+        Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as i32) })
+    }
+    fn exited_within(&self, wait: std::time::Duration) -> bool {
+        use std::os::fd::AsRawFd;
+        let mut poll = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        (unsafe { libc::poll(&mut poll, 1, wait.as_millis() as i32) }) > 0
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for Watched {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0u32,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn start_paused_fixture(
+    dir: &Path,
+    class: &str,
+    handlers: bool,
+) -> (std::process::Child, u32, Watched) {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--ignored", "--exact", "paused_supervisor_fixture"])
+        .env("CEDEGRID_DEATH_FIXTURE_DIR", dir)
+        .env("CEDEGRID_DEATH_FIXTURE_CLASS", class)
+        .stdout(std::process::Stdio::null());
+    if handlers {
+        command.env("CEDEGRID_DEATH_FIXTURE_HANDLERS", "1");
+    }
+    let mut fixture = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dir.join("paused").exists() {
+        if std::time::Instant::now() > deadline {
+            let _ = fixture.kill();
+            panic!("the fixture never paused its leader");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid: u32 = fs::read_to_string(dir.join("leader.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let watched = Watched::open(pid);
+    // A pause stops it at once; a cap stops it in each off phase.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !run_state(pid).contains('T') {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the leader is never stopped"
+        );
+    }
+    (fixture, pid, watched)
+}
+
+/// A supervisor that dies while its run is paused takes Opportunistic work with it and lets
+/// Guaranteed work continue, through the gate's parent-death signal (FR-078).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_supervisor_that_dies_kills_opportunistic_work_and_resumes_guaranteed_work() {
+    for class in ["opportunistic", "guaranteed"] {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let (mut fixture, pid, watched) = start_paused_fixture(dir.path(), class, false);
+        fixture.kill().unwrap();
+        fixture.wait().unwrap();
+        if class == "opportunistic" {
+            assert!(
+                watched.exited_within(std::time::Duration::from_secs(5)),
+                "an Opportunistic leader without its supervisor is killed"
+            );
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!watched.exited_within(std::time::Duration::ZERO));
+            assert!(
+                !run_state(pid).contains('T'),
+                "a Guaranteed leader is continued"
+            );
+        }
+    }
+}
+
+/// SIGTERM, SIGINT or SIGHUP to a supervisor releases its steps and drains its run (FR-078).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_signalled_supervisor_releases_its_steps_and_drains() {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let (mut fixture, _pid, watched) = start_paused_fixture(dir.path(), "opportunistic", true);
+        unsafe { libc::kill(fixture.id() as i32, signal) };
+        assert!(
+            watched.exited_within(std::time::Duration::from_secs(10)),
+            "signal {signal}: the drained leader exits"
+        );
+        let status = fixture.wait().unwrap();
+        assert!(
+            status.success(),
+            "signal {signal}: the supervisor ends normally"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("outcome")).unwrap(),
+            "Ok(Released)",
+            "signal {signal}"
+        );
+    }
+}

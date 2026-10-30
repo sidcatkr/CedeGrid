@@ -112,6 +112,7 @@ impl LaunchBackend for Backend {
             nice: if self.bad_setup { Some(-1) } else { None },
             oom_score_adj: None,
             nofile_soft: None,
+            parent_death_signal: None,
         })
     }
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {

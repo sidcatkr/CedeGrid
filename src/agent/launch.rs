@@ -349,7 +349,8 @@ pub(super) async fn start_assignment(
     };
     let path = output.join("supervisor-spec.json");
     client.write_json_new(&path, &spec)?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("__assignment-supervisor")
         .arg(path)
         .env("TMPDIR", workspace.join("tmp"))
@@ -360,8 +361,15 @@ pub(super) async fn start_assignment(
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // A terminal's SIGINT or SIGHUP to the agent's group must not reach supervisors, which
+    // outlive an agent stop for re-adoption (FR-080).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
     let stderr = child.stderr.take().context("supervisor stderr absent")?;
     let stderr_path = output.join("supervisor.stderr");
     let capture_guard = client.namespace_guard.clone();
