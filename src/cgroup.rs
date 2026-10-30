@@ -911,6 +911,17 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         family: &mut dyn Family,
         applied: &BTreeMap<ResourceKey, StepRequest>,
     ) -> Result<()> {
+        // A leaf left frozen by an interrupted duty's off phase thaws when no step records a
+        // pause; a recorded Pause keeps it frozen (FR-078).
+        if self.authorized("cgroup.freeze")
+            && self.gpu_duty.is_none()
+            && self.leaf.read("cgroup.freeze")?.trim() == "1"
+            && !applied.values().any(|step| step.step == YieldStep::Pause)
+        {
+            let verified = family.identities().iter().map(|id| id.pid).collect();
+            verify_runtime_target(&self.leaf, &verified, "cgroup.freeze")?;
+            write_checked(&self.leaf, "cgroup.freeze", "0")?;
+        }
         if !self.authorized("memory.high") || self.ram_cap.is_some() {
             return Ok(());
         }

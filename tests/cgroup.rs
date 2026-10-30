@@ -1546,4 +1546,51 @@ mod runtime_steps {
                 .contains(&YieldStep::Cap)
         );
     }
+
+    /// A leaf left frozen by a duty's off phase is thawed when an agent reattaches and the
+    /// applied steps record no Pause; a recorded Pause stays frozen; a foreign member refuses
+    /// the write (FR-078, 028 Decision 1).
+    #[test]
+    fn a_reattach_thaws_a_leaf_frozen_without_a_recorded_pause() {
+        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};
+        use std::collections::BTreeMap;
+        let pause = BTreeMap::from([(
+            ResourceKey::Cpu,
+            StepRequest {
+                step: YieldStep::Pause,
+                target: None,
+                cause: YieldCause::ExternalGrowth,
+                deadline_ms: None,
+            },
+        )]);
+        for (applied, members, thawed) in [
+            (BTreeMap::new(), "31\n", true),
+            (pause, "31\n", false),
+            (BTreeMap::new(), "31\n99\n", false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_owned();
+            leaf(&dir, members);
+            fs::write(dir.join("cgroup.freeze"), "1\n").unwrap();
+            fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+            let mut actuator = CgroupActuator::new(
+                DirectoryLeaf::open(&dir).unwrap(),
+                &config(&["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]),
+                &settings(AllocationClass::Opportunistic),
+            );
+            let mut family = Recorder {
+                pids: vec![31],
+                signals: vec![],
+            };
+            let result = actuator.reconcile(&mut family, &applied);
+            assert_eq!(
+                read(&dir, "cgroup.freeze"),
+                if thawed { "0" } else { "1" },
+                "{applied:?} {members:?}"
+            );
+            if members.contains("99") {
+                assert!(result.is_err(), "a foreign member refuses the thaw");
+            }
+        }
+    }
 }
