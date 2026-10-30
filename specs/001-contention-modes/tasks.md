@@ -1473,5 +1473,5 @@ The derived GPU sample age (spec Session 2026-10-31 Q10; plan "Item 032") and re
 - [X] T392 [P] Write failing tests: `validate` prints `derived."gpu.process_sample_max_age_ms"` with its value and rule when the key is unset and nothing when it is set, and `doctor` lists it under "Derived settings" and in its JSON, per FR-070 and plan "Item 032" 2 (missing)
 - [X] T393 Show derived settings in `src/config.rs`, `src/explain.rs` and `src/main.rs`, until T392 passes, per FR-070 (missing)
 - [X] T394 Document the derived default beside the bounds in `docs/guarantees.md`, per FR-070 and R40 (partial)
-- [ ] T395 Add run 7's return to the test-host batch of T368 and T387 in `specs/001-contention-modes/native-gates.md`, keeping the agent's decision records for that run in the evidence copy, redacted, per plan "Item 032" 3 (missing)
+- [X] T395 Add run 7's return to the test-host batch of T368 and T387 in `specs/001-contention-modes/native-gates.md`, keeping the agent's decision records for that run in the evidence copy, redacted, per plan "Item 032" 3 (missing)
 - [ ] T396 Run T395's addition with that batch on the test host and report where the return's lag comes from, or record in `docs/validation.md` that it does not reproduce and close T339. *Deferred: needs the user's typed approval of the batch in this session.* (missing)

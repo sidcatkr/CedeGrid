@@ -429,6 +429,27 @@ own memory within 10% of one buffer plus the workers' private pages, every membe
 and continued with the family under a step, and the agent's own cost per interval against the
 029 budget; run 3, `members_ended` 4, no member or zombie left, in both classes.
 
+## Item 032: run 7's return with the batch (T396)
+
+Runs in the same batch as T368 and T387, under the same typed approval, and the same host
+rules. Report 029's run 7 return after contention (029 Decision 2, T339) again, on 4 CPUs in
+Yield First and in Performance, as item 029's run 7 runs it, keeping the agent's decision records
+for the run so the lag between the quiet count and own usage coming back can be located.
+
+```sh
+$py $H/return_027.py --repo $repo --root $root --output <dir> --contender-uid <uid> --mode <yield_first|performance>
+ssh <second account>@<test host> 'T=<epoch> CPUS=<cpu> S=30 sh -s' < $H/peer-contender-027.sh
+# Before the run's state is removed: the agent's observation and decision records.
+$repo/target/release/cedegrid --config <the run's node config> history --limit 10000 > <dir>/decisions.json
+```
+
+Gate: from the contender's end, per interval, the quiet count, each held cap and its target,
+and own usage, with the interval at which own usage is back at the uncontended target (within
+3 s in both modes). If the lag reproduces, the records name the interval and the step where own
+usage stayed behind its target, and the report proposes the fix without changing policy. If it
+does not, `docs/validation.md` records that and T339 closes. The evidence copy redacts host
+names, user names, GPU UUIDs, IPs and home paths, as every evidence copy does.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
