@@ -730,6 +730,7 @@ impl<'a> Interval<'a> {
             ),
             _ => {}
         }
+        self.psi_saturated = psi_saturated;
         utilization_saturated || psi_saturated
     }
 
@@ -789,6 +790,25 @@ impl<'a> Interval<'a> {
                 .unwrap_or_default(),
             probe: None,
         };
+        // In Performance and Aggressive own work above its Neutral share can saturate the CPU
+        // itself, which is no evidence of hidden external demand: utilization is judged with
+        // own work at that share, so a satisfied record does not make the target cycle.
+        if view.saturated && !self.psi_saturated && view.mode >= ContentionMode::Performance {
+            let share = crate::contention::neutral_share(
+                &ModeInput {
+                    saturated: true,
+                    ..view.clone()
+                },
+                &thresholds,
+            );
+            let judged = self
+                .cpu_busy
+                .unwrap_or(0)
+                .saturating_sub(view.own.saturating_sub(share));
+            let total = self.cpu_capacity.min(self.cpu_ceiling);
+            view.saturated = judged.saturating_mul(100)
+                >= total.saturating_mul(u64::from(thresholds.saturation_percent));
+        }
         self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
         self.next.cpu_view = Some(CpuView {

@@ -394,6 +394,8 @@ struct Interval<'a> {
     cpu_reserve: u64,
     ram_reserve: u64,
     psi_only: bool,
+    /// External CPU pressure is above its threshold this interval.
+    psi_saturated: bool,
     /// Each mode's target per resource, which bounds the jobs in that mode.
     mode_targets: BTreeMap<ResourceKey, BTreeMap<ContentionMode, u64>>,
     /// What own work may hold before the mode's target applies: for memory, what
@@ -495,6 +497,7 @@ impl<'a> Interval<'a> {
             cpu_reserve: 0,
             ram_reserve: 0,
             psi_only: false,
+            psi_saturated: false,
             mode_targets: BTreeMap::new(),
             floor_available: BTreeMap::new(),
             critical_keys: BTreeSet::new(),

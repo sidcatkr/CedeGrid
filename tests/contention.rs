@@ -3657,6 +3657,39 @@ mod psi_saturation {
         }
     }
 
+    /// A principal recorded as satisfied that now uses clearly less, beside own work at its
+    /// Performance target: the saturation own work causes does not make the target cycle
+    /// (POL-5).
+    #[test]
+    fn own_caused_saturation_beside_a_lower_satisfied_principal_keeps_the_target_steady() {
+        let mut host = Host::new(ContentionMode::Performance).wanting(5000);
+        let learned = host.run(200, 2000, available(40.0));
+        assert!(
+            codes(learned.last().unwrap()).contains(&"satisfied_demand".to_string()),
+            "{:?}",
+            codes(learned.last().unwrap())
+        );
+        // Own work now wants all the external user leaves.
+        host.wants = 7500;
+        let calm = Some(pressure(CpuPressureStatus::Available, Some(0.0), 0.0));
+        let ticks: Vec<(Option<u64>, u64, Vec<String>)> = (200..400u64)
+            .map(|i| {
+                let decision = host.tick(i * 500, 500, calm.clone());
+                (
+                    decision.resources[&ResourceKey::Cpu].target_share,
+                    host.own(),
+                    codes(&decision),
+                )
+            })
+            .collect();
+        let late = &ticks[100..];
+        let changes = late
+            .windows(2)
+            .filter(|pair| pair[0].0 != pair[1].0)
+            .count();
+        assert!(changes <= 1, "{:?}", &late[..late.len().min(12)]);
+    }
+
     /// One interval in which own usage is unknown holds CPU but keeps the satisfied record:
     /// on return nothing probes again and the target stays the uncontended one (FR-021,
     /// POL-4).
