@@ -1140,8 +1140,13 @@ fn applied(
 
 #[test]
 fn hint_targets_are_written_atomically_with_increasing_sequences() {
-    use cedegrid::contention::YieldStep;
-    let (dir, script) = run_targets(
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    // Each step waits until the reader has seen the one before, and the stop until it has
+    // seen the last, so a slow reader cannot miss a target between two polls.
+    let (dir, script) = run_targets_with(
+        ResourceKey::Ram,
+        None,
+        Some("seen3"),
         r#"
 import json,time
 from pathlib import Path
@@ -1152,13 +1157,14 @@ signals.draining()
 while not (d/'stop').exists():
     t=signals.resource_targets()
     seen.append(None if t is None else [t.sequence,t.step,t.ram_mib])
+    if t is not None: (d/f'seen{t.sequence}').write_text('1')
     time.sleep(0.005)
 (d/'seen').write_text(json.dumps(seen))
 "#,
         vec![
             ("ready", YieldStep::Hint, Some(100)),
-            ("ready", YieldStep::Hint, Some(50)),
-            ("ready", YieldStep::None, None),
+            ("seen1", YieldStep::Hint, Some(50)),
+            ("seen2", YieldStep::None, None),
         ],
     );
     let applied: Vec<_> = script.reports.iter().map(applied).collect();
@@ -1273,8 +1279,11 @@ while not (d/'stop').exists():
 #[test]
 fn a_guaranteed_cpu_target_never_goes_below_the_request() {
     use cedegrid::contention::{ResourceKey, YieldStep};
-    let (dir, _script) = run_targets_on(
+    // The stop waits until the reader has seen the target.
+    let (dir, _script) = run_targets_with(
         ResourceKey::Cpu,
+        None,
+        Some("seen1"),
         r#"
 import time
 from pathlib import Path
@@ -1284,7 +1293,7 @@ signals.draining()
 (d/'ready').write_text('1')
 while not (d/'stop').exists():
     t=signals.resource_targets()
-    if t is not None: seen=t.cpu_millicores
+    if t is not None: seen=t.cpu_millicores;(d/f'seen{t.sequence}').write_text('1')
     time.sleep(0.005)
 (d/'seen').write_text(str(seen))
 "#,
