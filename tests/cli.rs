@@ -52,6 +52,58 @@ fn validation_resolves_paths_against_config_without_creating_state() {
     assert!(!dir.path().join("state").exists());
 }
 
+/// `validate` and `doctor` show a GPU sample age derived from the interval, and say so; an
+/// explicit value is shown as configured and listed nowhere as derived (FR-070).
+#[test]
+fn validate_and_doctor_show_a_derived_sample_age() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    let mut config = Config {
+        node_id: "test-node".into(),
+        state_dir: "state".into(),
+        ..Config::default()
+    };
+    config.monitor.interval_ms = 3000;
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let result = success_json(run(&path, &["validate"]));
+    let derived = &result["derived"]["gpu.process_sample_max_age_ms"];
+    assert_eq!(derived["value"], 6000, "{result}");
+    assert!(
+        derived["rule"]
+            .as_str()
+            .unwrap()
+            .contains("2 × monitor.interval_ms")
+    );
+    let doctor = success_json(run(&path, &["doctor"]));
+    assert_eq!(
+        doctor["derived"]["gpu.process_sample_max_age_ms"]["value"],
+        6000
+    );
+    let text = String::from_utf8(run(&path, &["doctor", "--text"]).stdout).unwrap();
+    assert!(
+        text.contains("Derived settings") && text.contains("gpu.process_sample_max_age_ms = 6000"),
+        "{text}"
+    );
+    config.gpu.process_sample_max_age_ms = Some(7000);
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let result = success_json(run(&path, &["validate"]));
+    assert_eq!(result["config"]["gpu"]["process_sample_max_age_ms"], 7000);
+    assert!(
+        result["derived"]
+            .as_object()
+            .is_none_or(|map| map.is_empty()),
+        "{result}"
+    );
+}
+
 #[test]
 fn invalid_config_and_missing_history_never_initialize_database() {
     let dir = tempfile::tempdir().unwrap();

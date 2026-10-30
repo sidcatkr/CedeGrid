@@ -261,7 +261,7 @@ impl Collector {
             gpu: GpuCollector::Uninitialized,
             gpu_cursors: BTreeMap::new(),
             gpu_sample_max_age: Duration::from_millis(
-                crate::config::GpuConfig::default().process_sample_max_age_ms,
+                crate::config::Config::default().gpu_sample_max_age_ms(),
             ),
             gpu_config: crate::config::GpuConfig::default(),
             platform_capabilities: platform_capabilities(),
@@ -375,16 +375,15 @@ impl Collector {
 
     pub fn for_config(config: &crate::config::Config) -> Result<Self> {
         let mut collector = Self::with_kernel(&config.node_id, config.kernel.clone())?;
-        collector.gpu_sample_max_age = Duration::from_millis(config.gpu.process_sample_max_age_ms);
+        collector.gpu_sample_max_age = Duration::from_millis(config.gpu_sample_max_age_ms());
         collector.gpu_config = config.gpu.clone();
         collector.gpu_memory_tolerance_mib = config
             .contention
             .thresholds(crate::contention::ResourceKind::GpuMemory)
             .noise_tolerance_mib;
-        collector.quiet_window_intervals = config.contention.quiet_window_intervals(
-            config.monitor.interval_ms,
-            config.gpu.process_sample_max_age_ms,
-        );
+        collector.quiet_window_intervals = config
+            .contention
+            .quiet_window_intervals(config.monitor.interval_ms, config.gpu_sample_max_age_ms());
         collector.attribution_tolerance_percent = config
             .contention
             .thresholds(crate::contention::ResourceKind::GpuCompute)

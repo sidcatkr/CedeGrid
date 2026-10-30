@@ -1324,10 +1324,9 @@ impl<'a> Interval<'a> {
         } else {
             0
         };
-        let measured_window = config.contention.quiet_window_intervals(
-            config.monitor.interval_ms,
-            config.gpu.process_sample_max_age_ms,
-        );
+        let measured_window = config
+            .contention
+            .quiet_window_intervals(config.monitor.interval_ms, config.gpu_sample_max_age_ms());
         // An own-only interval knows external compute is zero without waiting.
         let settled = measured_streak >= measured_window || gpu.own_only;
         let measured = gpu

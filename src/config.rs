@@ -845,7 +845,12 @@ impl ContentionConfig {
             .unwrap_or(5000)
     }
 
-    fn validate(&self, monitor_interval_ms: u64, gpu_sample_max_age_ms: u64) -> Result<()> {
+    fn validate(
+        &self,
+        monitor_interval_ms: u64,
+        gpu_sample_max_age_ms: u64,
+        sample_age_derived: bool,
+    ) -> Result<()> {
         use crate::contention::ResourceKind::{self, *};
         if let Some(removed) = match self.floor_policy {
             FloorPolicy::A => None,
@@ -1112,7 +1117,12 @@ impl ContentionConfig {
             if let Some(window) = set.quiet_window_intervals {
                 ensure!(
                     u64::from(window).saturating_mul(monitor_interval_ms) > gpu_sample_max_age_ms,
-                    "contention.gpu_compute.quiet_window_intervals must span longer than gpu.process_sample_max_age_ms"
+                    "contention.gpu_compute.quiet_window_intervals must span longer than gpu.process_sample_max_age_ms ({gpu_sample_max_age_ms}{})",
+                    if sample_age_derived {
+                        ", derived as max(2000, 2 × monitor.interval_ms)"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -1506,6 +1516,16 @@ pub enum GpuExecutionMode {
     BestEffortOccupied,
 }
 
+/// The smallest derived GPU sample age, the default at the default 500 ms interval.
+const DERIVED_SAMPLE_AGE_FLOOR_MS: u64 = 2000;
+
+/// A setting derived from others because it was not set, as `validate` and `doctor` show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DerivedSetting {
+    pub value: u64,
+    pub rule: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GpuConfig {
@@ -1519,7 +1539,9 @@ pub struct GpuConfig {
         std::collections::BTreeMap<String, Vec<crate::model::ExternalGpuProcessIdentity>>,
     /// Maximum interval since a successful driver timestamp baseline. A longer
     /// gap discards buffered history before process activity can be trusted again.
-    pub process_sample_max_age_ms: u64,
+    /// Unset, `Config::gpu_sample_max_age_ms` derives it from the monitor interval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_sample_max_age_ms: Option<u64>,
     /// Fixed part of each GPU floor. The default, twice the minimum, keeps a
     /// default floor from ever being a near-minimum caution floor.
     pub reserve_vram_mib: u64,
@@ -1539,7 +1561,7 @@ impl Default for GpuConfig {
         Self {
             execution_mode: GpuExecutionMode::Auto,
             best_effort_external_processes: std::collections::BTreeMap::new(),
-            process_sample_max_age_ms: 2000,
+            process_sample_max_age_ms: None,
             reserve_vram_mib: 2 * MIN_VRAM_FLOOR_MIB,
             reserve_vram_percent: 5,
             scale_up_cooldown_ms: None,
@@ -1657,6 +1679,30 @@ impl Config {
 
     /// How the legacy `gpu.execution_mode` and `gpu.best_effort_external_processes`
     /// are read (FR-031); `doctor` shows it.
+    /// The GPU per-process sample age: the configured value, else max(2000, 2 × the monitor
+    /// interval), so the cursor outlives one late read (FR-070, R40).
+    pub fn gpu_sample_max_age_ms(&self) -> u64 {
+        self.gpu
+            .process_sample_max_age_ms
+            .unwrap_or_else(|| DERIVED_SAMPLE_AGE_FLOOR_MS.max(self.monitor.interval_ms * 2))
+    }
+
+    /// Settings derived from others because they were not set, with their values and rules,
+    /// for `validate` and `doctor` (FR-070).
+    pub fn derived_settings(&self) -> std::collections::BTreeMap<&'static str, DerivedSetting> {
+        let mut derived = std::collections::BTreeMap::new();
+        if self.gpu.process_sample_max_age_ms.is_none() {
+            derived.insert(
+                "gpu.process_sample_max_age_ms",
+                DerivedSetting {
+                    value: self.gpu_sample_max_age_ms(),
+                    rule: "max(2000, 2 × monitor.interval_ms)",
+                },
+            );
+        }
+        derived
+    }
+
     pub fn legacy_gpu(&self) -> LegacyGpu {
         let mut warnings = Vec::new();
         let interpretation = match self.gpu.execution_mode {
@@ -2013,14 +2059,21 @@ impl Config {
             "gpu.reserve_vram_percent must be between 0 and 100"
         );
         ensure!(
-            (1..=60_000).contains(&self.gpu.process_sample_max_age_ms),
+            self.gpu
+                .process_sample_max_age_ms
+                .is_none_or(|age| (1..=60_000).contains(&age)),
             "gpu.process_sample_max_age_ms must be between 1 and 60000"
         );
-        // A cursor older than one interval at every read would leave GPU compute unknown.
-        ensure!(
-            self.monitor.interval_ms < self.gpu.process_sample_max_age_ms,
-            "monitor.interval_ms must be below gpu.process_sample_max_age_ms"
-        );
+        // A cursor older than one interval at every read would leave GPU compute unknown. The
+        // derived value is at least twice the interval, so only an explicit one can fail.
+        if let Some(age) = self.gpu.process_sample_max_age_ms {
+            ensure!(
+                age > self.monitor.interval_ms,
+                "gpu.process_sample_max_age_ms ({age}) must be above monitor.interval_ms ({}); set it to at least {} or leave it unset",
+                self.monitor.interval_ms,
+                self.monitor.interval_ms + 1
+            );
+        }
         ensure!(
             self.gpu.execution_mode != GpuExecutionMode::BestEffortOccupied
                 || !self.gpu.best_effort_external_processes.is_empty(),
@@ -2072,8 +2125,11 @@ impl Config {
             .checked_add(self.lifecycle.term_grace_ms)
             .and_then(|v| v.checked_add(self.lifecycle.allocation_lease_ms))
             .context("lifecycle deadline sum overflows milliseconds")?;
-        self.contention
-            .validate(self.monitor.interval_ms, self.gpu.process_sample_max_age_ms)?;
+        self.contention.validate(
+            self.monitor.interval_ms,
+            self.gpu_sample_max_age_ms(),
+            self.gpu.process_sample_max_age_ms.is_none(),
+        )?;
         Ok(())
     }
 }

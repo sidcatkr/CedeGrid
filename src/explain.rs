@@ -118,6 +118,24 @@ fn psi_line(config: &Config, snapshot: &Snapshot) -> Option<String> {
     })
 }
 
+/// Settings derived from others because they were not set, for `doctor` (FR-070); empty when
+/// every one is set.
+pub fn derived_text(config: &Config) -> String {
+    let derived = config.derived_settings();
+    if derived.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nDerived settings\n");
+    for (key, setting) in derived {
+        let _ = writeln!(
+            out,
+            "  {key} = {} (derived: {})",
+            setting.value, setting.rule
+        );
+    }
+    out
+}
+
 /// How this host finds a run's descendants, for `doctor` (FR-083, FR-084): `lists` is
 /// whether the kernel keeps `children` lists, `None` where descendants are not tracked.
 pub fn descendants_text(lists: Option<bool>) -> String {

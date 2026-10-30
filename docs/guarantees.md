@@ -415,7 +415,10 @@ options, and `doctor` lists the keys and values each covers.
 `noise_tolerance_mib` is at most 1024 MiB, and the agent refuses to start when it
 exceeds half of any GPU's floor. Settings that lengthen reclaim are bounded: monitor
 intervals at most 10 s, kernel freshness at most 20 intervals, GPU sample age, drain
-timeout and termination grace at most 60 s. Decisions and node reports show, per
+timeout and termination grace at most 60 s. The GPU sample age must exceed the monitor
+interval: unset, it is max(2000 ms, twice the interval), which `doctor` and `validate` show as
+derived; set at or below the interval, the configuration is refused on every host, with an
+error that names both keys and the smallest value that loads. Decisions and node reports show, per
 resource, how much is held back and why. Without `contention.max_mode`, a job may
 request at most the node's most aggressive configured mode, so no job runs in a mode beyond
 what the node's configuration allows. A file that sets no mode runs Performance and gets one

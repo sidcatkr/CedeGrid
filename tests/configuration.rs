@@ -1008,21 +1008,48 @@ fn settings_that_lengthen_reclaim_are_bounded() {
     }
 }
 
-/// A monitor interval at or above the GPU sample age would let the per-process cursor expire
-/// at every tick, so GPU compute would read unknown on every interval (TEL-3).
+/// Unset, the GPU sample age is max(2000, 2 × monitor.interval_ms), so a config that never
+/// mentions GPUs loads at any interval the bounds allow; the defaults keep 2000, and the GPU
+/// quiet window is judged against the same value (FR-070, R40).
 #[test]
-fn the_monitor_interval_stays_below_the_gpu_sample_age() {
-    for bad in [
-        "[monitor]\ninterval_ms = 2000",
-        "[monitor]\ninterval_ms = 500\n[gpu]\nprocess_sample_max_age_ms = 400",
-    ] {
-        let error = parse_node(bad).expect_err(bad);
+fn an_unset_sample_age_is_derived_from_the_interval() {
+    let config = parse_node("[monitor]\ninterval_ms = 3000").unwrap();
+    assert_eq!(config.gpu.process_sample_max_age_ms, None);
+    assert_eq!(config.gpu_sample_max_age_ms(), 6000);
+    assert_eq!(parse_node("").unwrap().gpu_sample_max_age_ms(), 2000);
+    assert_eq!(Config::default().gpu_sample_max_age_ms(), 2000);
+    let longest = parse_node("[monitor]\ninterval_ms = 10000").unwrap();
+    assert_eq!(longest.gpu_sample_max_age_ms(), 20_000);
+    // Two intervals of quiet window do not span a derived age of two intervals.
+    let error = parse_node(
+        "[monitor]\ninterval_ms = 3000\n[contention]\nacknowledge_caution = [\"relaxed_detection\"]\n[contention.gpu_compute]\nquiet_window_intervals = 2",
+    )
+    .expect_err("a window of two intervals");
+    assert!(format!("{error:#}").contains("derived"), "{error:#}");
+}
+
+/// An explicit sample age at or below the monitor interval would let the per-process cursor
+/// expire at every read, so it is refused on every host; the error names both keys and the
+/// smallest value that loads (FR-070, TEL-3).
+#[test]
+fn an_explicit_sample_age_at_or_below_the_interval_is_refused() {
+    for (interval, age) in [(3000, 2000), (3000, 3000), (500, 400)] {
+        let error = parse_node(&format!(
+            "[monitor]\ninterval_ms = {interval}\n[gpu]\nprocess_sample_max_age_ms = {age}"
+        ))
+        .expect_err("at or below the interval");
+        let text = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("gpu.process_sample_max_age_ms"),
-            "{error:#}"
+            text.contains("gpu.process_sample_max_age_ms")
+                && text.contains("monitor.interval_ms")
+                && text.contains(&(interval + 1).to_string()),
+            "{text}"
         );
     }
-    assert!(parse_node("[monitor]\ninterval_ms = 1999").is_ok());
+    let config =
+        parse_node("[monitor]\ninterval_ms = 3000\n[gpu]\nprocess_sample_max_age_ms = 3001")
+            .unwrap();
+    assert_eq!(config.gpu_sample_max_age_ms(), 3001);
 }
 
 /// Settings that let own work hold more capacity than their defaults are caution

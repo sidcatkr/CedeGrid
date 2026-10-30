@@ -2815,7 +2815,7 @@ mod ramp {
     #[test]
     fn performance_reaches_ninety_percent_of_gpu_compute_within_ten_seconds() {
         let mut config = mode_config(ContentionMode::Performance);
-        config.gpu.process_sample_max_age_ms = 600;
+        config.gpu.process_sample_max_age_ms = Some(600);
         config.contention.gpu_compute.quiet_window_intervals = Some(2);
         config
             .contention

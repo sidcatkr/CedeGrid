@@ -1741,7 +1741,7 @@ fn legacy_gpu_record_and_config_readers_remain_compatible() {
     assert!(old.gpus[0].observation.is_none());
     let cfg: cedegrid::config::GpuConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(cfg.execution_mode, cedegrid::config::GpuExecutionMode::Auto);
-    assert!(cfg.process_sample_max_age_ms > 0);
+    assert!(cfg.process_sample_max_age_ms.is_none());
 }
 
 #[test]
@@ -4245,7 +4245,7 @@ fn a_gpu_memory_gap_holds_through_the_unknown_window() {
 /// path; the quiet window's hysteresis has its own test.
 fn measured_at_once(cfg: &mut Config) {
     // Two intervals span longer than the GPU sample age, which stays above one interval (TEL-3).
-    cfg.gpu.process_sample_max_age_ms = 600;
+    cfg.gpu.process_sample_max_age_ms = Some(600);
     cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
     cfg.contention
         .acknowledge_caution
@@ -6295,7 +6295,7 @@ mod reclaim_admission {
     fn a_holding_gpu_compute_cap_does_not_block_admission() {
         let key = ResourceKey::GpuCompute("GPU-test".into());
         let mut cfg = cfg(ContentionMode::Neutral);
-        cfg.gpu.process_sample_max_age_ms = 600;
+        cfg.gpu.process_sample_max_age_ms = Some(600);
         cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
         cfg.contention
             .acknowledge_caution

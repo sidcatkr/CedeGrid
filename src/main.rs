@@ -592,7 +592,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::ConfigExample { .. } | Command::Config { .. } | Command::State { .. } => {
             unreachable!()
         }
-        Command::Validate => emit(&json!({"valid": true, "config": config})),
+        Command::Validate => {
+            emit(&json!({"valid": true, "config": config, "derived": config.derived_settings()}))
+        }
         Command::Doctor { role, text } => {
             let storage = state::preflight(&config.state_dir)?;
             let role_admitted = storage.admitted_by(config.storage_profile)
@@ -605,8 +607,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                 PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
             if text {
                 print!(
-                    "{}{}",
+                    "{}{}{}",
                     cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
+                    cedegrid::explain::derived_text(&config),
                     cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
                 );
             } else {
@@ -639,7 +642,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "exceptions": decision.exceptions,
                 "reason_codes": decision.reason_codes,
                 "available_steps": cedegrid::explain::available_steps(&config),
-                "descendant_lists": cedegrid::supervision::descendant_lists()
+                "descendant_lists": cedegrid::supervision::descendant_lists(),
+                "derived": config.derived_settings()
                 }))?;
             }
             ensure!(
