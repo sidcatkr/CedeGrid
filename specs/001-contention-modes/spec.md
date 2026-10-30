@@ -1201,13 +1201,12 @@ node reports with the expected per-resource values at each step.
   no Pause, after verifying the leaf's membership.
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
   For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
-  grant no renewals
-  and offer no new work for that node; it MUST NOT drain on that report, and drains happen only
-  when leases expire.
+  grant no renewals and offer no new work for that node; it MUST NOT drain on that report, and
+  drains happen only when leases expire.
 - **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
   re-adoption; an explicit operator drain, and the end of `max_runtime_seconds`, drain every
-  allocation. The agent MUST reload its
-  configuration on request and apply a mode change without a restart. It MUST retry re-adoption
+  allocation. The agent MUST reload its configuration on request and apply a mode change without
+  a restart. It MUST retry re-adoption
   on later iterations while a supervisor lives, in replay mode too. A stop that drains MUST
   spread its drains over iterations so that no iteration exceeds the 1 s cadence, and leases and
   heartbeats keep their pace.
