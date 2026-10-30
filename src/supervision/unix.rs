@@ -561,6 +561,7 @@ fn apply_runtime_commands(
     journal: &dyn ExecutionJournal,
     control: &mut dyn SupervisorControl,
     (hint_ready, observes_drain): (bool, bool),
+    leader_exited: bool,
 ) {
     use crate::contention::{ResourceKind, StepRequest, YieldCause, YieldStep};
     for command in commands {
@@ -640,6 +641,15 @@ fn apply_runtime_commands(
                     if lifecycle.phase != LifecyclePhase::Running {
                         details.push(format!(
                             "{key}: drain in progress; runtime steps are released"
+                        ));
+                        applied.insert(key, current);
+                        continue;
+                    }
+                    // The leader's exit started the children's drain and released the steps;
+                    // a new step could stop a child that must see its drain file.
+                    if leader_exited {
+                        details.push(format!(
+                            "{key}: the leader has exited; its children are draining"
                         ));
                         applied.insert(key, current);
                         continue;
@@ -1400,6 +1410,7 @@ pub(super) fn supervise(
                         journal,
                         control,
                         readiness,
+                        leader_status.is_some(),
                     );
                     ram_code = actuator.step_code(crate::contention::ResourceKind::Ram);
                 }

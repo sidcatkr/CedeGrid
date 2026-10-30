@@ -2116,3 +2116,96 @@ fn a_signalled_supervisor_releases_its_steps_and_drains() {
         );
     }
 }
+
+/// Sends a CPU pause once the leader has exited and been reaped, then records the next adjust
+/// report.
+struct PauseAfterLeaderExit {
+    dir: std::path::PathBuf,
+    sent: bool,
+    applied: Option<cedegrid::contention::YieldStep>,
+    child_state: Option<String>,
+}
+impl supervision::SupervisorControl for PauseAfterLeaderExit {
+    fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
+        let reaped = self.dir.join("leader-exited").exists()
+            && fs::read_to_string(self.dir.join("leader.pid"))
+                .is_ok_and(|pid| run_state(pid.trim().parse().unwrap()).is_empty());
+        if !self.sent && reaped {
+            self.sent = true;
+            return Ok(vec![cpu_step(1, cedegrid::contention::YieldStep::Pause)]);
+        }
+        Ok(vec![])
+    }
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        if let supervision::SupervisorReport::Adjusted { applied, .. } = report {
+            self.applied = Some(applied[&cedegrid::contention::ResourceKey::Cpu]);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let pid = fs::read_to_string(self.dir.join("child.pid")).unwrap();
+            self.child_state = Some(run_state(pid.trim().parse().unwrap()));
+        }
+        Ok(())
+    }
+}
+
+/// Once the leader has exited, its draining children take no new runtime step, so a pause
+/// cannot stop a child that must see its drain file (030, SUP-6).
+#[test]
+fn no_runtime_step_reaches_children_draining_after_the_leader_exit() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let mut request = request(
+        dir.path(),
+        r#"
+import os,sys,time
+from pathlib import Path
+from cedegrid import spawn_managed
+d=Path.cwd()
+child=spawn_managed([sys.executable,'-c',"""
+import os,time,pathlib
+d=pathlib.Path(%r)
+(d/'child.pid').write_text(str(os.getpid()))
+drain=pathlib.Path(os.environ['CEDEGRID_DRAIN_FILE'])
+while not drain.exists():
+    time.sleep(0.02)
+time.sleep(0.5)
+(d/'drained').write_text('1')
+""" % str(d)],single_process=True,no_escape=True)
+while not (d/'child.pid').exists():
+    time.sleep(0.02)
+(d/'leader.pid').write_text(str(os.getpid()))
+(d/'leader-exited').write_text('1')
+"#,
+    );
+    request.class = AllocationClass::Opportunistic;
+    let mut control = PauseAfterLeaderExit {
+        dir: dir.path().to_owned(),
+        sent: false,
+        applied: None,
+        child_state: None,
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &SupervisorOptions {
+            drain_timeout_ms: 3_000,
+            term_grace_ms: 1_000,
+            ..options()
+        },
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(outcome.record.phase, ExecutionPhase::Released);
+    assert_eq!(control.applied, Some(cedegrid::contention::YieldStep::None));
+    assert!(
+        !control.child_state.clone().unwrap().contains('T'),
+        "{:?}",
+        control.child_state
+    );
+    assert!(
+        dir.path().join("drained").exists(),
+        "the child drained on its own"
+    );
+}
