@@ -445,3 +445,11 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - `AllocationFacts` gains `family` (`leader`, `sdk_children`, `descendants`); reason code
   `family_members` (a note on CPU and RAM while a run has more than its leader).
 
+## Item 033 additions
+
+- `FamilyReport` gains `uid` and `gid`, the run's IDs.
+- `attempts/<assignment>/family.json` (agent): `class`, `boot_id`, `uid`, `gid`, `descendants`
+  (`pid`, `start_time`); the leader's and SDK children's identities stay in the store.
+- `attempts/<assignment>/family-recovery.json` (agent): `continued`, `ended`, `mismatched`,
+  `gone`, `failed`, and when it ran; also the record's detail and a `family_recovered` event.
+

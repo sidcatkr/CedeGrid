@@ -1275,6 +1275,63 @@ unchanged, since an unset key needs nothing written. No NEEDS CLARIFICATION rema
 - I, II, IV, V, VI: no process, policy or launch change; tests first. Pass.
 No violation; no Complexity Tracking entry.
 
+## Item 033: supervisor loss in Tracked (2026-10-31)
+
+Spec Session 2026-10-31 Q11 to Q13 (FR-078, FR-083, new FR-088), report 031's Decision 3 (B,
+built now), and item 033's pin. The pin (Docker Linux, the agent in a session of its own, a
+Tracked supervisor killed with its family stopped) showed the kernel's orphaned-process-group
+rule: members that handle SIGHUP received SIGHUP and SIGCONT; with the agent stopped first, the
+workers stayed stopped for good.
+
+**Technical Context**: Rust 1.88, no new dependency; Linux only for the new behaviour. `setsid`
+through `libc`; recovery with `pidfd_open`, `pidfd_send_signal` and the `/proc/<pid>` directory as
+the supervisor's `oom_score_adj` path reads it. The agent keeps a run's descendants, boot ID and
+IDs in `attempts/<assignment>/family.json`, written atomically, beside the per-run files it already
+keeps there (`supervisor-spec.json`, `control-socket.json`); the leader's and SDK children's
+identities are already in the store. No schema, wire or SDK change beyond additive report fields.
+
+1. **The workload's session (B)**: the worker gate calls `setsid()` right after
+   `PR_SET_PDEATHSIG` and before exec, for the leader and SDK children. The supervisor keeps its
+   own process group. Since the workload no longer shares a terminal session, the standalone
+   `cedegrid supervise` installs the supervisor's stop handlers too, so Ctrl-C at its terminal
+   drains the run, as FR-078 asks of a supervisor, instead of leaving a Guaranteed workload to its
+   parent-death SIGCONT. Full is unaffected.
+2. **Recording (C.1)**: `FamilyReport` gains the run's `uid` and `gid`. The supervisor reports the
+   family right after a stop pass that found a new member, besides each interval it changes; the
+   pipe write does not wait for an answer. The agent writes `family.json` on every `family` report
+   and on `state` (re-adoption).
+3. **Recovery (C.2 to C.4)**: `agent::recovery` runs once per run (a `family-recovery.json`
+   marker), from the slot pass when its supervisor exits and from `reconcile_guarded` for a run
+   with no live supervisor (agent start and each heartbeat), only for `rootless` runs. Members:
+   the leader and SDK children from the store, descendants from `family.json`. Per member: pidfd;
+   `/proc/<pid>` start time and real, effective and saved IDs equal to the record, with the boot
+   ID equal to this boot; alive through the pidfd; then SIGCONT (Guaranteed) or SIGKILL
+   (Opportunistic) through the pidfd. Counts: continued, ended, identity mismatch, already gone,
+   failed. They go to `family-recovery.json`, the record's detail and a `family_recovered` event.
+   The Guaranteed run stays NeedsReconciliation with its reservation charged, as a dead supervisor
+   leaves it today.
+4. **Tests (D)**: Linux service tests kill a Tracked supervisor with its family stopped, the agent
+   in a session of its own: Guaranteed (family, family with handlers, single process) receives no
+   SIGHUP and finishes with its output; Opportunistic ends with no stopped process left; with the
+   agent stopped first, the next agent does the same at its start. Unit tests with a fake source:
+   a reused PID (another start time) and changed IDs are never signalled and are counted; one
+   member's failed signal leaves the others handled; a Full run is never touched.
+5. **Docs and the native check (E)**: `docs/guarantees.md` and the README name what remains (a
+   member found and stopped in the instant its supervisor dies stays stopped until an agent runs);
+   `native-gates.md` adds the supervisor-loss check to the test-host batch.
+
+**Constitution Check (7.0.0)**:
+- I: the agent acts only on processes whose identity a supervisor verified while alive, through a
+  pidfd it binds to that recorded identity: boot ID, start time, assignment and generation (from
+  the record) and the run's IDs, then alive. That is Principle I's verified handle; it is never by
+  a persisted PID alone, as the restart rule forbids. The chain is not re-read, since its root is
+  gone; its result is the recorded identity. The supervisor's own re-adoption already reopens a
+  persisted identity this way. A reviewer reading "only through that pidfd" as the supervisor's own
+  descriptor would need the `SCM_RIGHTS` alternative; the report says so. Pass.
+- II: Guaranteed members are never ended for CedeGrid's failure; Opportunistic members end as
+  their leader's parent-death signal ends it. Pass.
+- III, IV, V, VI, VII: no policy change; tests first; additive fields. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

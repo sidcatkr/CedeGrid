@@ -766,3 +766,25 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   host); migrate files to write a value (an unset key needs nothing); refuse only on GPU hosts
   (a config would load on one host and not another).
 
+## R41. The workload's own session (item 033)
+
+- **Decision**: the worker gate calls `setsid()` before exec.
+- **Rationale**: the gate shared its supervisor's process group, so when a Tracked supervisor died
+  with members stopped, its exit orphaned that group and the kernel sent every member SIGHUP and
+  SIGCONT (pinned in Docker). A session of its own leaves the workload's group orphaned from the
+  start, so no later exit can trigger the rule, and a stopped member stays stopped for the agent.
+- **Alternatives**: `setpgid` alone (the group would still be orphaned by the supervisor's exit,
+  since its parent stays in the same session); leaving it (Guaranteed work that handles SIGHUP is
+  told to hang up, and members are continued by the kernel rather than by CedeGrid).
+
+## R42. Recovery by recorded identity (item 033)
+
+- **Decision**: the agent re-opens each recorded member by identity (pidfd, then start time and
+  IDs through `/proc`, then alive) and signals through that pidfd, from `family.json` and the store.
+- **Rationale**: it covers an agent that was down when the supervisor died, holds no descriptors
+  across agent restarts (FR-080 makes those routine) and adds none to the agent's fd budget. A
+  reused PID has another start time and is never signalled.
+- **Alternatives**: the supervisor passes pidfds to the agent with `SCM_RIGHTS` (up to 256 fds per
+  run, lost on every agent restart, nothing to act with if the agent is down); a watchdog process
+  per run (one more process to supervise).
+
