@@ -173,6 +173,20 @@ pub(super) fn withhold_authorized_pending(
 
 /// Whether one more lease request goes out this iteration: the longest-waiting one always
 /// does, the rest while the budget lasts.
+/// Record a published checkpoint's time and hash for a later agent that re-adopts the run.
+fn record_checkpoint(output: &Path, hash: &str) -> Result<()> {
+    let path = output.join(super::reconcile::CHECKPOINT_PUBLISHED);
+    let temporary = output.join(".checkpoint-published.json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(
+            &serde_json::json!({"unix_ms": super::reconcile::now_unix_ms(), "hash": hash}),
+        )?,
+    )?;
+    fs::rename(&temporary, &path)?;
+    Ok(())
+}
+
 /// A coordinator request bounded by the loop's budget: a hung or slow coordinator never
 /// holds sampling and local yielding, and a request cut short is sent again next iteration
 /// (lease items, heartbeats and failures are all idempotent) (030, AGT-4).
@@ -336,6 +350,7 @@ impl AgentLoop<'_> {
                     Ok(()) => {
                         if let Some(slot) = self.slots.get_mut(&id) {
                             if checkpoint {
+                                record_checkpoint(&slot.output_dir, &hash)?;
                                 slot.checkpoint_hash = Some(hash);
                                 slot.last_checkpoint_at = Some(Instant::now());
                             } else {

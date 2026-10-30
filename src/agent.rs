@@ -99,6 +99,9 @@ pub struct SupervisorSpec {
     /// The soft descriptor limit the agent started with, restored for the task (FR-077).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile_soft: Option<u64>,
+    /// When the agent launched it, so a re-adopted run keeps its start (030, AGT-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_at_unix_ms: Option<u64>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

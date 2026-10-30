@@ -212,6 +212,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
             && spec.assignment.generation == record.generation,
         "supervisor spec identity mismatch"
     );
+    let (started_at, checkpoint) = restored_times(spec.launched_at_unix_ms, &output);
     let token = spec
         .control_token
         .clone()
@@ -249,7 +250,8 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         last_renew: Instant::now(),
         prepared: None,
         reported: false,
-        checkpoint_hash: None,
+        // The checkpoint already published is not published again.
+        checkpoint_hash: checkpoint.as_ref().map(|(_, hash)| hash.clone()),
         exited: false,
         capture_threads: vec![events_thread],
         unavailable: BTreeMap::new(),
@@ -261,8 +263,8 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         observes_drain: false,
         drain_sent_at: None,
         drain_cause: None,
-        started_at: Instant::now(),
-        last_checkpoint_at: None,
+        started_at,
+        last_checkpoint_at: checkpoint.as_ref().map(|(at, _)| *at),
         adjust_sequence: 0,
         sent_steps: BTreeMap::new(),
         sent_allowance: None,
@@ -443,4 +445,69 @@ fn gpu_released_now(resources: &crate::model::Resources, pid: u32) -> bool {
     crate::telemetry::GpuReleaseGuard::prepare(resources)
         .and_then(|guard| guard.is_released(pid))
         .unwrap_or(false)
+}
+
+/// The agent's record of the last checkpoint it published for an attempt.
+pub(super) const CHECKPOINT_PUBLISHED: &str = "checkpoint-published.json";
+
+pub(super) fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis().min(u64::MAX as u128) as u64)
+}
+
+/// An instant `unix_ms` ago by the wall clock, or now when it cannot be represented.
+fn instant_at(unix_ms: u64) -> Instant {
+    Instant::now()
+        .checked_sub(Duration::from_millis(now_unix_ms().saturating_sub(unix_ms)))
+        .unwrap_or_else(Instant::now)
+}
+
+/// A re-adopted run's start and last published checkpoint, from its spec's launch time and
+/// the agent's checkpoint record, so a restart does not reset the progress victim order
+/// weighs (FR-016, 030 AGT-11). Missing ones start now.
+pub(super) fn restored_times(
+    launched_at_unix_ms: Option<u64>,
+    output: &Path,
+) -> (Instant, Option<(Instant, String)>) {
+    let started = launched_at_unix_ms.map_or_else(Instant::now, instant_at);
+    let checkpoint = std::fs::read(output.join(CHECKPOINT_PUBLISHED))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|record| {
+            Some((
+                instant_at(record["unix_ms"].as_u64()?),
+                record["hash"].as_str()?.to_owned(),
+            ))
+        });
+    (started, checkpoint)
+}
+
+#[cfg(test)]
+mod restored_time_tests {
+    use super::*;
+
+    /// A re-adopted run keeps the start and the last published checkpoint it had, so victim
+    /// order sees the progress a restart would lose (FR-016, 030 AGT-11).
+    #[test]
+    fn a_readopted_run_keeps_its_start_and_checkpoint_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix_ms();
+        std::fs::write(
+            dir.path().join(CHECKPOINT_PUBLISHED),
+            serde_json::to_vec(&serde_json::json!({"unix_ms": now - 30_000, "hash": "abc"}))
+                .unwrap(),
+        )
+        .unwrap();
+        let (started, checkpoint) = restored_times(Some(now - 60_000), dir.path());
+        let age = |at: Instant| Instant::now().duration_since(at).as_secs();
+        assert!((59..=61).contains(&age(started)), "{}", age(started));
+        let (at, hash) = checkpoint.unwrap();
+        assert!((29..=31).contains(&age(at)));
+        assert_eq!(hash, "abc");
+        // An older spec without a launch time, and no checkpoint, start the clock now.
+        let empty = tempfile::tempdir().unwrap();
+        let (started, checkpoint) = restored_times(None, empty.path());
+        assert!(age(started) == 0 && checkpoint.is_none());
+    }
 }

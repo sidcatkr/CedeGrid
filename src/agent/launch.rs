@@ -346,6 +346,7 @@ pub(super) async fn start_assignment(
         output_dir: output.clone(),
         control_token: new_control_token()?,
         nofile_soft: STARTING_DESCRIPTOR_LIMIT.get().copied(),
+        launched_at_unix_ms: Some(super::reconcile::now_unix_ms()),
     };
     let path = output.join("supervisor-spec.json");
     client.write_json_new(&path, &spec)?;
