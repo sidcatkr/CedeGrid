@@ -219,15 +219,18 @@ impl<'a> Interval<'a> {
             .map(|a| judged(input, &self.charges, &key, a))
             .fold(0u64, u64::saturating_add);
         let (floor_breach, envelope_breach) = self.breaches(&key, judged_total);
-        // A breach episode that starts with own memory within its fair share is others'
-        // growth: its in-share tasks are asked once to save their progress (FR-075).
+        // A breach episode in which own memory is within its fair share when that share is
+        // first known is others' growth: its in-share tasks are asked once to save their
+        // progress (FR-075).
+        let decided = self.prev.save_progress_decided.contains(&key);
+        let fair = self.memory_fair_share.get(&key).copied();
+        if kind.is_memory() && floor_breach && (decided || fair.is_some()) {
+            self.next.save_progress_decided.insert(key.clone());
+        }
         if kind.is_memory()
             && floor_breach
-            && !self.prev.floor_breach_since.contains_key(&key)
-            && self
-                .memory_fair_share
-                .get(&key)
-                .is_some_and(|fair| judged_total <= *fair)
+            && !decided
+            && fair.is_some_and(|fair| judged_total <= fair)
         {
             self.save_progress.extend(
                 input
@@ -270,9 +273,9 @@ impl<'a> Interval<'a> {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
         // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes only own
-        // memory above its fair share; in-share memory of work in those modes stays. The
-        // envelope still applies in full.
-        if cause == YieldCause::FloorBreach
+        // memory above its fair share, while a measurement is held too; in-share memory of work
+        // in those modes stays. The envelope still applies in full.
+        if floor_breach
             && governing(config, kind) >= ContentionMode::Performance
             && let Some(fair) = self.memory_fair_share.get(&key).copied()
         {

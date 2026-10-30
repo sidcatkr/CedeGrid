@@ -184,6 +184,11 @@ pub struct PolicyEngine {
     /// The last known CPU view, carried through unknown and held intervals, for the hold
     /// while CPU is unknown (FR-022).
     cpu_view: Option<CpuView>,
+    /// The last known RAM fair share, carried through unknown and held intervals and in
+    /// force while RAM is held (FR-023).
+    ram_fair_share: Option<u64>,
+    /// Memory resources whose breach episode has had its save-progress decision (FR-075).
+    save_progress_decided: BTreeSet<ResourceKey>,
     /// The allocations marked as preferred OOM victims, held while RAM is unknown.
     oom_preferred: BTreeSet<String>,
     last_now: Option<u64>,

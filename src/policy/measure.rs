@@ -893,6 +893,14 @@ impl<'a> Interval<'a> {
     /// RAM: the mode's target beside the contending principals.
     pub(super) fn ram_target(&mut self) {
         if self.ram_unknown || self.ram_held {
+            self.next.ram_fair_share = self.prev.ram_fair_share;
+            // While RAM is held its availability is still known, so a floor breach is real
+            // and in-share own memory keeps its protection at the last fair share (FR-023).
+            if !self.ram_unknown
+                && let Some(fair) = self.prev.ram_fair_share
+            {
+                self.memory_fair_share.insert(ResourceKey::Ram, fair);
+            }
             return;
         }
         let (config, snapshot) = (self.config, self.snapshot);
@@ -919,10 +927,9 @@ impl<'a> Interval<'a> {
         self.mode_targets
             .insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
         self.budget.ram_mib = own_allowance(&view, &thresholds);
-        self.memory_fair_share.insert(
-            ResourceKey::Ram,
-            crate::contention::neutral_share(&view, &thresholds),
-        );
+        let fair = crate::contention::neutral_share(&view, &thresholds);
+        self.memory_fair_share.insert(ResourceKey::Ram, fair);
+        self.next.ram_fair_share = Some(fair);
     }
 
     /// The operator envelope bounds own work per resource (FR-057). Each floor,

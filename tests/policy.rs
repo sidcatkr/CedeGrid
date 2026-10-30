@@ -6783,6 +6783,73 @@ mod floors_by_mode {
         }
     }
 
+    /// RAM is held while one allocation has no observation, and external growth then breaches
+    /// the floor: the last known fair share stays in force, so in Performance in-share own
+    /// memory is neither hinted nor drained, and the in-share tasks are asked once to save
+    /// their progress in every mode (FR-023, FR-075).
+    #[test]
+    fn a_held_interval_keeps_the_last_fair_share_for_a_breach_others_caused() {
+        use std::collections::BTreeSet;
+        let observed = [
+            ram_job("a", AllocationClass::Opportunistic, 8_000),
+            ram_job("b", AllocationClass::Opportunistic, 6_000),
+            ram_job("c", AllocationClass::Opportunistic, 100),
+        ];
+        let mut unobserved = observed.clone();
+        unobserved[2].observed = None;
+        let run = |mode: ContentionMode, available: u64| {
+            let cfg = config_in(mode);
+            let mut engine = PolicyEngine::new();
+            let input = |jobs: &[Allocation]| PolicyInput {
+                allocations: jobs.to_vec(),
+                facts: hinted(&["a", "b", "c"]),
+                ..PolicyInput::default()
+            };
+            let mut snap = snapshot();
+            snap.available_ram_mib = Some(10_000);
+            let first = engine.evaluate(&cfg, &snap, &input(&observed), 0).unwrap();
+            assert!(first.save_progress.is_empty());
+            snap.available_ram_mib = Some(available);
+            let held = input(&unobserved);
+            let mut actions = Vec::new();
+            let mut asked = Vec::new();
+            for now in (500..=30_000).step_by(500) {
+                let decision = engine.evaluate(&cfg, &snap, &held, now).unwrap();
+                assert!(
+                    codes(&decision, "ram").contains(&"allocation_unknown_hold".to_string()),
+                    "at {now}"
+                );
+                actions.extend(
+                    decision
+                        .actions
+                        .into_iter()
+                        .filter(|a| a.resource == ResourceKey::Ram)
+                        .map(|a| (now, a)),
+                );
+                if !decision.save_progress.is_empty() {
+                    asked.push((now, decision.save_progress));
+                }
+            }
+            (actions, asked)
+        };
+        let all = BTreeSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        for available in [500, 0] {
+            let (kept, asked) = run(ContentionMode::Performance, available);
+            assert!(
+                kept.is_empty(),
+                "at {available}: {:?}",
+                &kept[..kept.len().min(3)]
+            );
+            assert_eq!(asked, [(500, all.clone())], "at {available}");
+            let (stepped, asked) = run(ContentionMode::Neutral, available);
+            assert!(
+                !stepped.is_empty(),
+                "Neutral at {available} steps own memory"
+            );
+            assert_eq!(asked, [(500, all.clone())], "Neutral at {available}");
+        }
+    }
+
     /// Own work holds 15 800 MiB beside 15 600 MiB external, 300 MiB above its 15 500 MiB fair
     /// share, and the floor needs 400 MiB. Performance hints the 300 MiB and no more; Neutral
     /// hints all 400 MiB.
