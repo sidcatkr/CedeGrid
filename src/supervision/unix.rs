@@ -1093,7 +1093,10 @@ pub(super) fn supervise(
         }
         setup.nofile_soft = options.nofile_soft;
         // Without its supervisor an Opportunistic run can be neither yielded nor drained,
-        // and a replacement would start beside it; Guaranteed work goes on (FR-078).
+        // and a replacement would start beside it; Guaranteed work goes on (FR-078). The
+        // kernel sends it when the thread that spawned the gate exits, not the process: the
+        // gate and SDK children are spawned on this supervision thread, which lives as long as
+        // the run, so moving either spawn to another thread would end Opportunistic work early.
         if cfg!(target_os = "linux") {
             setup.parent_death_signal = Some(match request.class {
                 AllocationClass::Opportunistic => libc::SIGKILL,
@@ -1303,18 +1306,18 @@ pub(super) fn supervise(
         let mut term_unavailable = false;
         let mut control_failing = false;
         // An error in the supervisor's own bookkeeping holds the run and is retried, reported
-        // once per failing spell; it is not a reason to drain (030, R3).
-        let mut bookkeeping_failing = false;
-        let hold = |result: Result<()>, failing: &mut bool| match result {
-            Ok(()) => *failing = false,
-            Err(error) => {
-                if !std::mem::replace(failing, true) {
-                    report(
-                        "supervision_held",
-                        &request.assignment_id,
-                        format!("{error:#}"),
-                    );
-                }
+        // once per failing spell of each source; it is not a reason to drain (030, R3).
+        let (mut leader_spell, mut children_spell) = (Spell::default(), Spell::default());
+        let hold = |result: Result<()>, spell: &mut Spell| {
+            let started = spell.starts(result.is_err());
+            if let Err(error) = result
+                && started
+            {
+                report(
+                    "supervision_held",
+                    &request.assignment_id,
+                    format!("{error:#}"),
+                );
             }
         };
         let mut killed = false;
@@ -1327,7 +1330,7 @@ pub(super) fn supervise(
                 match owned.try_wait() {
                     Ok(status) => status,
                     Err(error) => {
-                        hold(Err(error), &mut bookkeeping_failing);
+                        hold(Err(error), &mut leader_spell);
                         None
                     }
                 }
@@ -1468,7 +1471,7 @@ pub(super) fn supervise(
                     &gpu_release,
                     &mut authorize_child,
                 );
-                hold(polled, &mut bookkeeping_failing);
+                hold(polled, &mut children_spell);
             }
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
             {
@@ -2238,6 +2241,39 @@ pub(super) fn identity(pid: u32, assignment: &str, generation: u64) -> Result<Pr
 fn identity(_pid: u32, _assignment: &str, _generation: u64) -> Result<ProcessIdentity> {
     bail!("native process identity is unavailable on this platform")
 }
+/// One bookkeeping source's failing spell: its failure is reported when a spell starts, and
+/// a success ends it, apart from every other source's (030, R3).
+#[derive(Default)]
+struct Spell(bool);
+impl Spell {
+    /// Records this turn's result; true when it starts a failing spell.
+    fn starts(&mut self, failed: bool) -> bool {
+        !std::mem::replace(&mut self.0, failed) && failed
+    }
+}
+
+#[cfg(test)]
+mod spell_tests {
+    use super::Spell;
+
+    /// The leader's wait failing every turn while the child server's poll succeeds is
+    /// reported once, not on every turn.
+    #[test]
+    fn each_source_reports_its_own_failing_spell_once() {
+        let (mut leader, mut children) = (Spell::default(), Spell::default());
+        let reported = (0..5)
+            .filter(|_| {
+                let failed = leader.starts(true);
+                children.starts(false);
+                failed
+            })
+            .count();
+        assert_eq!(reported, 1);
+        assert!(!leader.starts(false), "a success ends the spell");
+        assert!(leader.starts(true), "a new spell is reported again");
+    }
+}
+
 #[cfg(test)]
 mod capture_tests {
     use super::*;

@@ -1,7 +1,9 @@
 //! Local process supervision with a fail-closed, persisted launch barrier.
 //!
 //! The supervisor owns and reaps its direct child on one thread. Callers must not
-//! install another child reaper or change SIGCHLD while it runs. A leader handle
+//! install another child reaper or change SIGCHLD while it runs. That thread also spawns
+//! the gate and SDK children, whose parent-death signal fires when it exits, so neither
+//! spawn may move to another thread. A leader handle
 //! is not descendant containment. Rootless execution currently requires the
 //! explicit single-process contract; a delegated backend may contain descendants.
 //! Loss of this supervisor is NOT self-healing: persisted capacity stays charged

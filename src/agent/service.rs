@@ -1864,7 +1864,7 @@ impl AgentLoop<'_> {
             let _ = slot.child.exited()?;
         }
         let retained: Vec<_>=self.slots.iter().map(|(id,slot)|serde_json::json!({"assignment_id":id,"exited":slot.exited,"reported":slot.reported,"publishing":self.publishing.iter().filter(|(publishing_id,_)|publishing_id==id).collect::<Vec<_>>(),"result_receipt":slot.output_dir.join("result.receipt.json").is_file(),"failure_receipt":slot.output_dir.join("failure.receipt.json").is_file()})).collect();
-        let status = serde_json::json!({"event":"agent_stopped","node_id":config.node_id,"elapsed_ms":self.start.elapsed().as_millis(),"retained_slots":self.slots.len(),"retained_slot_details":retained,"supervisors_left_running":self.leave_supervisors,"executions":self.store.executions()?});
+        let status = serde_json::json!({"event":"agent_stopped","node_id":config.node_id,"elapsed_ms":self.start.elapsed().as_millis(),"retained_slots":self.slots.len(),"retained_slot_details":retained,"supervisors_left_running":self.leave_supervisors,"executions":self.store.heartbeat_executions()?});
         emit(&status)?;
         Ok(())
     }
