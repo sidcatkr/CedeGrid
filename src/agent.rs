@@ -634,6 +634,27 @@ struct JournalSeen {
     head: Option<Option<Option<String>>>,
 }
 
+/// Move cached journal reads past the agent's own observation writes: entries read at
+/// `before` stand at `after` too when no other connection committed in between, since this
+/// connection wrote only observations (EFF-2).
+fn rekey_journal_cache(
+    slots: &mut BTreeMap<String, ChildSlot>,
+    before: (i64, i64),
+    after: (i64, i64),
+) {
+    if before.0 != after.0 {
+        return;
+    }
+    for seen in slots
+        .values_mut()
+        .filter_map(|slot| slot.journal_seen.as_mut())
+    {
+        if seen.key == before {
+            seen.key = after;
+        }
+    }
+}
+
 impl ChildSlot {
     /// Readiness only turns true: an ack or a served request cannot be undone.
     fn note_readiness(&mut self, hint_ready: bool, observes_drain: bool) {
@@ -1900,6 +1921,60 @@ mod drain_tests {
             })
             .collect();
         assert_eq!(sent, [8, 8, 4, 0]);
+    }
+
+    /// The agent's own observation write moves `total_changes()` but not `data_version`, so a
+    /// cache entry read before it is moved past it and the next iteration reuses it; another
+    /// connection's commit, or an entry read at another key, is not moved (EFF-2).
+    #[test]
+    fn own_observation_writes_keep_the_journal_cache() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let store = crate::state::StateStore::open(dir.path()).unwrap();
+        let before = store.change_key().unwrap();
+        let snapshot: crate::model::Snapshot = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "node_id": crate::config::Config::default().node_id, "observed_at_unix_ms": 1,
+            "cpu_capacity_millicores": 1000, "physical_cores": 1, "cpu_busy_millicores": 0,
+            "total_ram_mib": 1000, "available_ram_mib": 1000, "gpu_inventory": "unsupported",
+            "gpus": [], "capabilities": {}
+        }))
+        .unwrap();
+        let decision = crate::policy::PolicyEngine::new()
+            .evaluate(
+                &crate::config::Config::default(),
+                &snapshot,
+                &crate::model::PolicyInput::default(),
+                0,
+            )
+            .unwrap();
+        store.append_observation(&snapshot, &decision).unwrap();
+        let after = store.change_key().unwrap();
+        assert_eq!(before.0, after.0, "no other connection committed");
+        assert_ne!(before.1, after.1, "the observation moved total_changes");
+        let mut slots = BTreeMap::new();
+        for (id, key) in [("a", before), ("b", (before.0, before.1 - 1))] {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("cat >/dev/null")
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = child.stdin.take().unwrap();
+            let mut slot = slot_with(child, input);
+            slot.journal_seen = Some(JournalSeen {
+                key,
+                record: None,
+                head: Some(Some(None)),
+            });
+            slots.insert(id.to_string(), slot);
+        }
+        rekey_journal_cache(&mut slots, before, (before.0 + 1, after.1));
+        assert_eq!(slots["a"].journal_seen.as_ref().unwrap().key, before);
+        rekey_journal_cache(&mut slots, before, after);
+        assert_eq!(slots["a"].journal_seen.as_ref().unwrap().key, after);
+        assert_eq!(
+            slots["b"].journal_seen.as_ref().unwrap().key,
+            (before.0, before.1 - 1)
+        );
     }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {

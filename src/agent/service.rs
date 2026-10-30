@@ -2116,6 +2116,7 @@ pub async fn run(
             state.share_observation(&snapshot);
             state.actuate(&mut decision, &allocations)?;
             mark = state.cost.charge("actuate", mark);
+            let before = state.store.change_key()?;
             let written = Instant::now();
             state.store.append_observation(&snapshot, &decision)?;
             state.store_write = written.elapsed();
@@ -2129,6 +2130,7 @@ pub async fn run(
                 )?;
                 super::history::prune_attempts(&state.store, &config.state_dir)?;
             }
+            rekey_journal_cache(&mut state.slots, before, state.store.change_key()?);
             mark = state.cost.charge("store", mark);
             state.heartbeat(&snapshot, &allocations, &decision).await?;
             state.cost.charge("heartbeat", mark);
