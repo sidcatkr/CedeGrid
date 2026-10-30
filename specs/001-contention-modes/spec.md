@@ -705,7 +705,7 @@ node reports with the expected per-resource values at each step.
 - **The per-node authority restarts while supervisors keep running.** Supervisors hold their
   current step. Steps are re-established once the authority returns, and no allocation is
   terminated only because the authority restarted. SIGTERM, SIGINT and a configuration reload
-  leave supervisors running too; only an explicit operator drain drains everything (FR-080).
+  leave supervisors running too; an explicit operator drain drains everything (FR-080).
 - **A run's supervisor dies.** Opportunistic work ends with it, through the parent-death signal;
   Guaranteed work continues (FR-078).
 - **A rootless single-process run forks helpers outside the SDK** (for example PyTorch
@@ -1200,11 +1200,13 @@ node reports with the expected per-resource values at each step.
   first. Under the cgroup backend, a reattaching supervisor MUST thaw a leaf whose journal records
   no Pause, after verifying the leaf's membership.
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
-  For a report older than the telemetry freshness limit, the coordinator MUST grant no renewals
+  For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
+  grant no renewals
   and offer no new work for that node; it MUST NOT drain on that report, and drains happen only
   when leases expire.
 - **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
-  re-adoption; only an explicit operator drain drains every allocation. The agent MUST reload its
+  re-adoption; an explicit operator drain, and the end of `max_runtime_seconds`, drain every
+  allocation. The agent MUST reload its
   configuration on request and apply a mode change without a restart. It MUST retry re-adoption
   on later iterations while a supervisor lives, in replay mode too. A stop that drains MUST
   spread its drains over iterations so that no iteration exceeds the 1 s cadence, and leases and
