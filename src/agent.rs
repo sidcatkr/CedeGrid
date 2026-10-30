@@ -1553,6 +1553,7 @@ mod negotiation_tests {
             }],
             features: vec![],
             contention: None,
+            sample_age_ms: None,
         }
     }
 
@@ -1574,7 +1575,7 @@ mod negotiation_tests {
         negotiated.learn(&reply(&[FEATURE_API, FEATURE_CONTENTION]));
         assert!(!negotiated.lease_batch);
         negotiated.learn(&reply(&COORDINATOR_FEATURES));
-        assert!(negotiated.lease_batch && negotiated.contention);
+        assert!(negotiated.lease_batch && negotiated.contention && negotiated.report_age);
         negotiated.forget_lease_batch();
         assert!(!negotiated.lease_batch && negotiated.contention);
         negotiated.learn(&reply(&COORDINATOR_FEATURES));

@@ -87,6 +87,7 @@ fn report(now: u64) -> NodeReport {
         allocations: vec![],
         features: Vec::new(),
         contention: None,
+        sample_age_ms: None,
     }
 }
 fn node() -> Principal {
@@ -3250,7 +3251,7 @@ fn heartbeat_reply_advertises_contention_features() {
     setup(&mut c, &["task"], 100);
     assert_eq!(
         offers(&mut c, 100).features,
-        ["api/1", "contention/1", "lease_batch/1"]
+        ["api/1", "contention/1", "lease_batch/1", "report_age/1"]
     );
 }
 
@@ -4500,4 +4501,86 @@ fn an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt() {
         tasks[0].status,
         cedegrid::state::TaskStatus::NeedsReconciliation
     );
+}
+
+/// A stale node report stops renewals and new offers for that node but never drains it;
+/// leases expire as usual. Freshness is the agent's monotonic age of its sample when the
+/// report carries one, so wall clocks seconds apart do not matter (FR-079).
+#[test]
+fn a_stale_report_stops_grants_and_offers_but_never_drains() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    setup(&mut c, &["running"], 100);
+    let a = offers(&mut c, 100).assignments.remove(0);
+    assert_eq!(authorize(&mut c, &a, 100).sequence, 1);
+    c.handle_at(
+        &Principal::Operator,
+        Request::Submit {
+            job: JobSpec {
+                job_id: "later-job".into(),
+                pool_id: "pool".into(),
+                priority: 0,
+                tasks: vec![task("later")],
+            },
+        },
+        200,
+    )
+    .unwrap();
+    let renew = |c: &mut Coordinator, previous: u64, now: u64| {
+        c.handle_at(
+            &node(),
+            Request::Renew {
+                assignment_id: a.request.assignment_id.clone(),
+                generation: a.generation,
+                coordinator_epoch: a.coordinator_epoch,
+                previous_sequence: previous,
+            },
+            now,
+        )
+    };
+    let running = |phase| AllocationReport {
+        assignment_id: a.request.assignment_id.clone(),
+        generation: a.generation,
+        phase,
+        observed: Some(Resources::default()),
+        detail: String::new(),
+        yield_cause: None,
+        hint_ready: None,
+        observes_drain: None,
+    };
+    // An older agent's report, judged by wall clock: 4 s old is stale.
+    let mut legacy = report(1000);
+    legacy.allocations = vec![running(RemotePhase::Running)];
+    let reply = report_reply(&mut c, &legacy, 5000);
+    assert!(
+        reply.drain.is_empty(),
+        "a stale report drains nothing: {reply:?}"
+    );
+    assert!(reply.assignments.is_empty(), "and offers nothing");
+    assert!(
+        renew(&mut c, 1, 5100).is_err(),
+        "no renewal while the node is stale"
+    );
+    // A report carrying its sample's age: the agent's clock 5 s ahead does not matter.
+    let mut fresh = report(5200 + 5000);
+    fresh.features = vec!["report_age/1".into()];
+    fresh.sample_age_ms = Some(40);
+    fresh.allocations = vec![running(RemotePhase::Running)];
+    let reply = report_reply(&mut c, &fresh, 5200);
+    assert!(reply.drain.is_empty());
+    assert_eq!(
+        reply.assignments.len(),
+        1,
+        "a fresh report gets offers again"
+    );
+    let Response::Lease { lease } = renew(&mut c, 1, 5300).unwrap() else {
+        panic!()
+    };
+    assert_eq!(lease.sequence, 2, "and renewals");
+    let mut late = fresh.clone();
+    late.observed_at_unix_ms += 2000;
+    late.sample_age_ms = Some(3500);
+    let reply = report_reply(&mut c, &late, 7300);
+    assert!(reply.drain.is_empty());
+    assert!(renew(&mut c, 2, 7400).is_err());
 }

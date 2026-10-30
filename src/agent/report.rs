@@ -31,18 +31,22 @@ pub(super) struct NegotiatedFeatures {
     pub(super) contention: bool,
     /// Lease requests go as one batch per iteration (FR-074).
     pub(super) lease_batch: bool,
+    /// Reports carry their sample's monotonic age (FR-079).
+    pub(super) report_age: bool,
 }
 
 impl NegotiatedFeatures {
     pub(super) fn learn(&mut self, reply: &HeartbeatReply) {
         self.contention = reply.features.iter().any(|f| f == FEATURE_CONTENTION);
         self.lease_batch = reply.features.iter().any(|f| f == FEATURE_LEASE_BATCH);
+        self.report_age = reply.features.iter().any(|f| f == FEATURE_REPORT_AGE);
     }
 
     /// A rejected or failed heartbeat may come from a restarted older coordinator.
     pub(super) fn forget(&mut self) {
         self.contention = false;
         self.lease_batch = false;
+        self.report_age = false;
     }
 
     /// A refused batch may come from a restarted older coordinator: single requests until the

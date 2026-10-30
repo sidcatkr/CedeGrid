@@ -243,6 +243,8 @@ struct AgentLoop<'a> {
     history: super::history::HistoryScope,
     /// Observations written since `observations` was last pruned.
     observations_since_prune: u32,
+    /// When this iteration's sample was taken.
+    sampled_at: Instant,
 }
 
 impl AgentLoop<'_> {
@@ -1002,6 +1004,7 @@ impl AgentLoop<'_> {
         let (mut snapshot, allocations) = self
             .collector
             .sample_with_children(records, &self.store.all_unreleased_managed_children()?)?;
+        self.sampled_at = Instant::now();
         mark = self.cost.charge("sample", mark);
         self.oom_kills.push_back(crate::telemetry::host_oom_kills());
         if self.oom_kills.len() > 3 {
@@ -1479,6 +1482,11 @@ impl AgentLoop<'_> {
             allocations: reports,
             features: Vec::new(),
             contention: None,
+            // The age of this iteration's sample on this host's monotonic clock (FR-079).
+            sample_age_ms: self
+                .negotiated
+                .report_age
+                .then(|| self.sampled_at.elapsed().as_millis().min(u64::MAX as u128) as u64),
         };
         self.negotiated.apply(&mut report, || {
             node_contention_report(config, decision, agent.max_workers)
@@ -1913,6 +1921,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         history,
         // Prune on the first iteration, then every `OBSERVATIONS_PER_PRUNE`.
         observations_since_prune: OBSERVATIONS_PER_PRUNE - 1,
+        sampled_at: start,
     };
     for slot in attached {
         state

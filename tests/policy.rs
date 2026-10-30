@@ -5640,6 +5640,7 @@ mod reclaim_admission {
             contention: Some(cedegrid::agent::node_contention_report(
                 &sim.cfg, decision, 8,
             )),
+            sample_age_ms: None,
         };
         let Response::Heartbeat { reply } = coordinator
             .handle_at(

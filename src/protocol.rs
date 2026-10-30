@@ -12,8 +12,15 @@ pub const FEATURE_API: &str = "api/1";
 pub const FEATURE_CONTENTION: &str = "contention/1";
 /// `Request::Leases` and `Response::Leases` (FR-074).
 pub const FEATURE_LEASE_BATCH: &str = "lease_batch/1";
+/// `NodeReport.sample_age_ms`: freshness from the agent's own monotonic clock (FR-079).
+pub const FEATURE_REPORT_AGE: &str = "report_age/1";
 /// Features this coordinator advertises in every heartbeat reply.
-pub const COORDINATOR_FEATURES: [&str; 3] = [FEATURE_API, FEATURE_CONTENTION, FEATURE_LEASE_BATCH];
+pub const COORDINATOR_FEATURES: [&str; 4] = [
+    FEATURE_API,
+    FEATURE_CONTENTION,
+    FEATURE_LEASE_BATCH,
+    FEATURE_REPORT_AGE,
+];
 /// The most items, and serialized bytes of items, one lease batch carries (FR-074).
 pub const MAX_LEASE_BATCH_ITEMS: usize = 128;
 pub const MAX_LEASE_BATCH_BYTES: usize = 1024 * 1024;
@@ -159,6 +166,21 @@ pub struct NodeReport {
     pub features: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contention: Option<NodeContentionReport>,
+    /// Milliseconds from the sample to the send, on the agent's monotonic clock, behind
+    /// `report_age/1`; freshness is judged by it rather than by two hosts' wall clocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_age_ms: Option<u64>,
+}
+
+impl NodeReport {
+    /// Whether the report was fresh when it arrived at `received_ms` (FR-079): by the
+    /// agent's sample age when it carries one, else by the wall clocks as before.
+    pub fn fresh_at(&self, received_ms: u64, ttl_ms: u64) -> bool {
+        match self.sample_age_ms {
+            Some(age) => age <= ttl_ms,
+            None => received_ms.saturating_sub(self.observed_at_unix_ms) <= ttl_ms,
+        }
+    }
 }
 /// Per-resource admission and mode summary (`contention/1`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

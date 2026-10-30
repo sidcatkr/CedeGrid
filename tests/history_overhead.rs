@@ -118,6 +118,7 @@ fn four_thousand_released_records_component_cost() {
                 allocations,
                 features: Vec::new(),
                 contention: None,
+                sample_age_ms: None,
             };
             wire_bytes = serde_json::to_vec(&Request::Heartbeat { report })
                 .unwrap()

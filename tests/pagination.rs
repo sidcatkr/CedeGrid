@@ -188,6 +188,7 @@ fn report_overflow_and_invalid_controls_fail_without_dropping_inventory() {
         allocations: vec![],
         features: Vec::new(),
         contention: None,
+        sample_age_ms: None,
     };
     report.allocations = (0..2049)
         .map(|n| AllocationReport {

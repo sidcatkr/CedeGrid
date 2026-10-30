@@ -1102,11 +1102,13 @@ impl Coordinator {
         report.validate_bounds()?;
         valid_id(&report.node_id)?;
         ensure!(!report.boot_id.is_empty(), "node boot identity absent");
+        // A sample age makes the agent's wall clock informational only.
         ensure!(
-            report.observed_at_unix_ms <= now.saturating_add(self.config.telemetry_ttl_ms),
+            report.sample_age_ms.is_some()
+                || report.observed_at_unix_ms <= now.saturating_add(self.config.telemetry_ttl_ms),
             "node observation is in the future"
         );
-        let fresh = now.saturating_sub(report.observed_at_unix_ms) <= self.config.telemetry_ttl_ms;
+        let fresh = report.fresh_at(now, self.config.telemetry_ttl_ms);
         let observed_live = report.allocations.iter().all(|a| {
             !matches!(
                 a.phase,
@@ -1320,8 +1322,9 @@ impl Coordinator {
                     params![id, cause],
                 )?;
             }
+            // A stale report withholds grants and offers; leases, not the report, drain (FR-079).
             let should_drain = cause.is_some()
-                || ((!fresh || phase == "uncertain")
+                || (phase == "uncertain"
                     && self.assignment_request(&id)?.class == AllocationClass::Opportunistic);
             if should_drain {
                 drain.push(id.clone());
@@ -1875,16 +1878,23 @@ impl Coordinator {
             self.replay_node_can_admit(&owner)? && self.replay_request_allowed(&owner, &request)?,
             "replay node authorization requires completed recovery and replay-safe opportunistic work without durable-local requirements"
         );
+        let (received, report_json): (u64, String) = self.store.connection.query_row(
+            "SELECT n.received_ms,n.report_json FROM reservations r JOIN nodes n ON n.node_id=r.node_id WHERE r.assignment_id=?1",
+            [id], |r| Ok((row_u64(r, 0)?, r.get(1)?)),
+        )?;
+        let report: NodeReport = serde_json::from_str(&report_json)?;
+        let ttl = self.config.telemetry_ttl_ms;
+        // While the node's last report was stale, nothing is renewed; leases run out (FR-079).
+        ensure!(
+            seq == 0 || drain || report.fresh_at(received, ttl),
+            "node report is stale; renewals resume with a fresh report"
+        );
         if seq == 0 && !drain {
-            let (received, report_json): (u64, String) = self.store.connection.query_row(
-                "SELECT n.received_ms,n.report_json FROM reservations r JOIN nodes n ON n.node_id=r.node_id WHERE r.assignment_id=?1",
-                [id], |r| Ok((row_u64(r, 0)?, r.get(1)?)),
-            )?;
-            let report: NodeReport = serde_json::from_str(&report_json)?;
             ensure!(
-                now.saturating_sub(received) <= self.config.telemetry_ttl_ms
-                    && now.saturating_sub(report.observed_at_unix_ms)
-                        <= self.config.telemetry_ttl_ms,
+                now.saturating_sub(received) <= ttl
+                    && report.fresh_at(received, ttl)
+                    && (report.sample_age_ms.is_some()
+                        || now.saturating_sub(report.observed_at_unix_ms) <= ttl),
                 "initial execution authorization requires fresh capacity evidence"
             );
             // This request is already reserved. Never add it twice and never drop

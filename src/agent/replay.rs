@@ -176,6 +176,7 @@ pub(super) async fn start_replay_session(
         a
     }));
     let report = NodeReport {
+        sample_age_ms: None,
         node_id: config.node_id.clone(),
         boot_id,
         observed_at_unix_ms: std::time::SystemTime::now()
