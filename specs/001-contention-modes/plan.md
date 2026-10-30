@@ -1309,7 +1309,11 @@ identities are already in the store. No schema, wire or SDK change beyond additi
    (Opportunistic) through the pidfd. Counts: continued, ended, identity mismatch, already gone,
    failed. They go to `family-recovery.json`, the record's detail and a `family_recovered` event.
    The Guaranteed run stays NeedsReconciliation with its reservation charged, as a dead supervisor
-   leaves it today.
+   leaves it today. Recovery runs from the slot pass only when the supervisor exits without having
+   released the run. The marker is written after the signals; a repeat after a crash in between
+   is harmless, since SIGCONT and SIGKILL are idempotent. `reconcile_guarded` releases a dead
+   rootless run only when its recorded descendants are verifiably absent too, besides the leader
+   and SDK children, so no reservation is released while a member of the run lives.
 4. **Tests (D)**: Linux service tests kill a Tracked supervisor with its family stopped, the agent
    in a session of its own: Guaranteed (family, family with handlers, single process) receives no
    SIGHUP and finishes with its output; Opportunistic ends with no stopped process left; with the
