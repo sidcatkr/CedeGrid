@@ -2208,3 +2208,59 @@ async fn a_closed_stdout_does_not_end_the_agent() {
         .len();
     assert!(observations >= 3, "{observations} observations in 2 s");
 }
+
+/// SIGTERM or SIGINT ends the agent without draining: its supervisors keep running, and a
+/// restarted agent re-adopts them and renews their leases, so the job completes unyielded
+/// (FR-080).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signalled_agent_leaves_its_supervisors_for_a_restarted_one() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let service = Service::start(
+            AllocationClass::Opportunistic,
+            vec![python, "-c".into(), "import time; time.sleep(8)".into()],
+            |local| {
+                local.config.lifecycle.allocation_lease_ms = 3000;
+            },
+        )
+        .await;
+        let mut agent = service.agent("first");
+        let end = Instant::now() + Duration::from_secs(20);
+        while !service
+            .record()
+            .is_some_and(|r| r.phase == ExecutionPhase::Running)
+        {
+            assert!(Instant::now() < end, "job never started");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // SAFETY: the test's own unreaped child.
+        assert_eq!(unsafe { libc::kill(agent.id() as libc::pid_t, signal) }, 0);
+        let status = wait(&mut agent);
+        assert!(status.success(), "signal {signal}: {status}");
+        let mut restarted = service.agent("second");
+        let mut completed = None;
+        for _ in 0..200 {
+            completed = service.result(1).await;
+            if completed.is_some() {
+                break;
+            }
+        }
+        let _ = restarted.kill();
+        let _ = restarted.wait();
+        service.server.abort();
+        let second = fs::read_to_string(service.dir.path().join("second.log")).unwrap();
+        assert!(
+            second.contains("supervisor_reattached"),
+            "signal {signal}: {second}"
+        );
+        assert!(
+            completed.is_some(),
+            "signal {signal}: the job completed after the restart"
+        );
+        let assignment = service.record().unwrap().assignment_id;
+        let outcome = service.outcome(&assignment);
+        assert!(!outcome.yielded, "signal {signal}: not drained: {second}");
+        assert_eq!(outcome.exit_code, Some(0));
+    }
+}

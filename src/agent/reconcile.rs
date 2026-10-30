@@ -258,8 +258,10 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
                 causes,
                 ..
             })) => {
-                // Continue above the supervisor's sequences and renew its lease.
-                slot.sequence = lease_sequence;
+                // Continue above the supervisor's sequences and renew its lease. Only authorized
+                // runs are re-adopted, and an initial authorization is sequence 1, which the
+                // supervisor does not count until a renewal; 0 would ask to authorize again.
+                slot.sequence = lease_sequence.max(1);
                 slot.adjust_sequence = sequence;
                 let steps = reattached_steps(&applied, &targets, &causes);
                 slot.sent_steps = steps.clone();

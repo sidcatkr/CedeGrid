@@ -264,6 +264,8 @@ struct AgentLoop<'a> {
     sampled_at: Instant,
     /// How long one coordinator request may hold the loop (030, AGT-4).
     rpc_budget: Duration,
+    /// A signal stopped the agent: supervisors keep running for re-adoption (FR-080).
+    leave_supervisors: bool,
 }
 
 impl AgentLoop<'_> {
@@ -1091,7 +1093,8 @@ impl AgentLoop<'_> {
             &snapshot,
             &PolicyInput {
                 allocations: allocations.clone(),
-                explicit_drain: self.stopping.is_some(),
+                // A signal stop leaves running work to the next agent (FR-080).
+                explicit_drain: self.stopping.is_some() && !self.leave_supervisors,
                 facts: self.allocation_facts(records, &allocations),
                 envelope: Some(agent.capacity.clone()),
                 spool_full: self.spool_full,
@@ -1193,7 +1196,7 @@ impl AgentLoop<'_> {
             // Guaranteed work drains only for a breach the policy permits.
             if let Some(slot) = self.slots.get_mut(id)
                 && slot.drain_sent_at.is_none()
-                && (self.stopping.is_some()
+                && ((self.stopping.is_some() && !self.leave_supervisors)
                     || slot.assignment.request.class == AllocationClass::Opportunistic
                     || matches!(
                         causes.get(id.as_str()),
@@ -1731,6 +1734,15 @@ impl AgentLoop<'_> {
             {
                 return Ok(true);
             }
+            // A signal stop ends once finished runs are reported and only live supervisors,
+            // left to the next agent, remain (FR-080).
+            if self.leave_supervisors
+                && self.publications.is_empty()
+                && self.preparations.is_empty()
+                && self.slots.values().all(|slot| !slot.exited)
+            {
+                return Ok(true);
+            }
             let limit = config.lifecycle.drain_timeout_ms
                 + config.lifecycle.term_grace_ms
                 + config.execution.release_confirm_timeout_ms
@@ -1769,13 +1781,16 @@ impl AgentLoop<'_> {
             }
         }
         // Closing pipes is agent failure for any remaining opportunistic supervisor.
-        // We deliberately never signal an uncertain supervisor/workload by PID.
+        // We deliberately never signal an uncertain supervisor/workload by PID. A signal
+        // stop leaves supervisors to the next agent (FR-080); other stops drain.
         for slot in self.slots.values_mut() {
-            drain(slot, None);
+            if !self.leave_supervisors {
+                drain(slot, None);
+            }
             let _ = slot.child.exited()?;
         }
         let retained: Vec<_>=self.slots.iter().map(|(id,slot)|serde_json::json!({"assignment_id":id,"exited":slot.exited,"reported":slot.reported,"publishing":self.publishing.iter().filter(|(publishing_id,_)|publishing_id==id).collect::<Vec<_>>(),"result_receipt":slot.output_dir.join("result.receipt.json").is_file(),"failure_receipt":slot.output_dir.join("failure.receipt.json").is_file()})).collect();
-        let status = serde_json::json!({"event":"agent_stopped","node_id":config.node_id,"elapsed_ms":self.start.elapsed().as_millis(),"retained_slots":self.slots.len(),"retained_slot_details":retained,"executions":self.store.executions()?});
+        let status = serde_json::json!({"event":"agent_stopped","node_id":config.node_id,"elapsed_ms":self.start.elapsed().as_millis(),"retained_slots":self.slots.len(),"retained_slot_details":retained,"supervisors_left_running":self.leave_supervisors,"executions":self.store.executions()?});
         emit(&status)?;
         Ok(())
     }
@@ -1976,6 +1991,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         observations_since_prune: OBSERVATIONS_PER_PRUNE - 1,
         sampled_at: start,
         rpc_budget: observation_interval.max(Duration::from_millis(250)),
+        leave_supervisors: false,
     };
     for slot in attached {
         state
@@ -2062,7 +2078,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             }
             Err(error) => return Err(error),
         }
-        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now());}}
+        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now()); state.leave_supervisors=true;}}
     }
     state.shutdown().await?;
     drop(lock);

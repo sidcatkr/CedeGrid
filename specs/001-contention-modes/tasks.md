@@ -1341,8 +1341,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 5: agent stop, reload and re-adoption (FR-080)**
 
-- [ ] T308 [P] Write failing agent tests: SIGTERM and SIGINT end the agent without draining, its supervisors keep running, and a new agent re-adopts them; an explicit operator drain and `max_runtime_seconds` still drain everything, per FR-080 (AGT-5, AGT-7) (contradicts)
-- [ ] T309 Stop without draining on SIGTERM and SIGINT in `src/agent/service.rs` and `src/policy/ladder.rs` (`drain_all` only for an operator drain), until T308 passes, per FR-080 (AGT-5, AGT-7) (contradicts)
+- [X] T308 [P] Write failing agent tests: SIGTERM and SIGINT end the agent without draining, its supervisors keep running, and a new agent re-adopts them; an explicit operator drain and `max_runtime_seconds` still drain everything, per FR-080 (AGT-5, AGT-7) (contradicts)
+- [X] T309 Stop without draining on SIGTERM and SIGINT in `src/agent/service.rs` and `src/policy/ladder.rs` (`drain_all` only for an operator drain), until T308 passes, per FR-080 (AGT-5, AGT-7) (contradicts)
 - [ ] T310 [P] Write failing tests: SIGHUP applies a `[contention]` mode change from the next iteration (`config_reloaded`) and refuses a change to any other section (`config_reload_refused`), per FR-080 and research R31 (missing)
 - [ ] T311 Implement the SIGHUP reload in `src/agent/service.rs` and `src/config.rs`, until T310 passes, per FR-080 (missing)
 - [ ] T312 [P] Write failing tests: a live supervisor whose first Query timed out is re-adopted on a later iteration; replay mode re-adopts, per FR-080 (AGT-8) (missing)
