@@ -1128,19 +1128,22 @@ runs in the Docker Linux check, batched per group. No NEEDS CLARIFICATION remain
 1. **Membership (FR-083, FR-084; A.1 to A.8)**:
    - The supervisor sets `PR_SET_CHILD_SUBREAPER` on itself before it forks the gate; the
      attribute is not inherited across fork, so the workload is unchanged.
-   - A `Family` in the supervisor holds the leader, the SDK children and up to 256 verified
-     descendants (a constant), each with its pidfd, start time, parent and `oom_score_adj`
-     baseline. Discovery runs once per duty period and inside every stop: each member's
-     `/proc/<pid>/task/*/children` over all threads, plus the supervisor's own children, which
-     are the leader, the SDK child gates and orphans reparented to it. Without a `children` file
-     it falls back to a ppid scan of `/proc` and `doctor` names the fallback.
+   - A `Family` in the supervisor holds at most 256 members (a constant), the leader and SDK
+     children included, each with its pidfd, start time, parent and `oom_score_adj` baseline.
+     Discovery runs once per duty period (the monitor interval) and inside every stop: each
+     member's `/proc/<pid>/task/*/children` over all threads, plus the supervisor's own children
+     over all its threads (the kernel reparents an orphan to a live thread of the subreaper),
+     which are the leader, the SDK child gates and orphans. Without a `children` file it falls
+     back to a ppid scan of `/proc`, and `doctor` names the fallback.
    - A candidate joins in Principle I's order: `pidfd_open`; then the parent chain from
      `/proc/<pid>/status` `PPid:` up to a member, or to the supervisor for an orphan; then the
      pidfd shows it alive; then real, effective and saved UIDs and GIDs equal the run's. A
      candidate that fails one check is counted outside the family with its reason and never
      acted on; one past the bound is counted `over_bound`.
    - Orphans: a child of the supervisor that is neither the gate nor an SDK child gate can only
-     descend from this run, so the supervisor is the chain's root for it (R34).
+     descend from this run, so the supervisor is the chain's root for it (R34). This holds
+     because the supervisor forks nothing else; the module comment says so, so a later spawn
+     in the supervisor process is not taken into the family.
    - Reaping: the supervisor reaps an orphan on the loop thread that reaps the leader, by its own
      PID and only when it is listed in the supervisor's `children` and is neither the leader nor
      an SDK child; never `waitpid(-1)`. The module comment in `supervision.rs` says so (R36).
@@ -1170,22 +1173,37 @@ runs in the Docker Linux check, batched per group. No NEEDS CLARIFICATION remain
      past a failing one and reports it. `ESRCH`, or a pidfd that reads as exited, drops the
      member silently.
    - `oom_score_adj`: each member's baseline is recorded when it joins and restored at release;
-     the preferred-victim value applies to new members (R7 comes in here).
-   - Full: no change to `cpu.max` or `cgroup.freeze`; the reattach thaw checks membership against
-     the family.
+     the preferred-victim value applies to new members (R7 comes in here). The value is inherited
+     across fork, so a member whose start time falls in one of the run's marked spells takes its
+     parent member's baseline (spec Q9); the supervisor keeps the run's spells in boot-time
+     ticks, the clock of `/proc/<pid>/stat` start times.
+   - Full: no change to `cpu.max` or `cgroup.freeze`. Every leaf write, the reattach thaw
+     included, already requires the leaf's membership to equal `Family::identities()`
+     (`verify_runtime_target`); once that includes descendants a leaf of family members is
+     stepped again, and a leaf holding a process outside the family still refuses.
 4. **Run end, drains and supervisor loss (FR-087, FR-078; D)**:
    - When the leader exits, members still alive get SIGTERM through their pidfds, then SIGKILL
      after `term_grace_ms`; the outcome records `members_ended`. A drain signals the leader
-     first, as today, then SIGKILLs members still alive after the grace.
+     first, as today, then SIGKILLs members still alive after the grace. If the leader exits
+     during a drain's grace, the members get SIGTERM at once and SIGKILL at the drain's deadline,
+     which no second grace extends (item 031 D.2).
    - The parent-death signal still reaches only the leader and SDK children: in Full a dead
      supervisor's other members stay in the leaf for reconciliation; in Tracked they cannot be
-     found again. `docs/guarantees.md` and the README say so, with PyTorch DataLoader workers
-     exiting when their parent dies, a job script's background server, and its closing `wait`.
+     found again, and a member stopped by an off phase when the supervisor died stays stopped
+     (analysis H1, a decision in the report). `docs/guarantees.md` and the README say so, with
+     PyTorch DataLoader workers exiting when their parent dies, a job script's background server,
+     and its closing `wait`. They also name the known limits: processes outside the family
+     outlive the run (in Full they keep the leaf nonempty), helpers that start and exit between
+     two discoveries are not counted as own CPU in Tracked, and an orphan's `getppid()` is the
+     supervisor, not 1.
 5. **Reporting (FR-082; E)**:
    - `outside_family` keeps its name and gains a `reason`: `ids_differ`, `chain_unconfirmed`,
      `over_bound` or `untracked_platform`.
    - Status and `explain` show the family size (leader, SDK children, descendants) through a
-     policy note, `family_members`, from the facts the agent passes on.
+     policy note, `family_members`, from the facts the agent passes on. `state` carries the
+     family too, so an agent that re-adopts a supervisor learns a family that no longer
+     changes. `untracked_platform` is reserved: no platform emits it while non-Linux launches
+     refuse multi-process work.
 6. **Tests (item 031 F)**: counting with plain `fork` and `multiprocessing` workers (and a
    synthetic external principal in Performance: the family's total at the target, the leader not
    at the minimum duty); shared copy-on-write memory read as about one buffer; an orphan

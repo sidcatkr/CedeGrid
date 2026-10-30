@@ -430,14 +430,17 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 
 ## Item 031 additions
 
-- **Family** (supervisor, `src/supervision/unix.rs`): the leader, the SDK children and up to 256
-  verified descendants. Each member: PID, start time, pidfd, parent (a member, or the supervisor
-  for an orphan), `oom_score_adj` baseline, joined at. Members leave when their pidfd shows exit
+- **Family** (supervisor, `src/supervision/unix.rs`): at most 256 members, the leader and SDK
+  children included, the rest verified descendants. Each member: PID, start time, pidfd, parent
+  (a member, or the supervisor for an orphan), `oom_score_adj` baseline (the parent member's when
+  it started during one of the run's marked spells), joined at. The run's marked spells are kept
+  in boot-time ticks. Members leave when their pidfd shows exit
   or a signal returns `ESRCH`.
 - Supervisor report `family` (new): `leader`, `sdk_children`, `descendants` counts and the
   members' `(pid, start_time)` list, sent when it changes; `state` carries the same.
 - `outside_family` report gains `reason`: `ids_differ`, `chain_unconfirmed`, `over_bound`,
-  `untracked_platform`.
+  `untracked_platform` (reserved: no platform emits it while non-Linux launches refuse
+  multi-process work).
 - `ExecutionOutcome` gains `members_ended` (count of members ended by TERM or KILL at run end).
 - `AllocationFacts` gains `family` (`leader`, `sdk_children`, `descendants`); reason code
   `family_members` (a note on CPU and RAM while a run has more than its leader).

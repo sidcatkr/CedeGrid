@@ -401,6 +401,11 @@ back more.
   descendants). Processes outside it are reported as `outside_family` with a count and a reason:
   IDs differ, chain unconfirmed, over the bound, or a platform without tracking. Nothing is done
   to them (item 031, E).
+- Q: `oom_score_adj` is inherited across fork, so a member forked while its run is marked a
+  preferred victim joins carrying CedeGrid's mark. What is that member's baseline? → A: Its own
+  baseline, which excludes CedeGrid's write: a member whose start time falls in one of its run's
+  marked spells takes its parent member's baseline; any other member's value when it joins is its
+  baseline (item 031, C.4; Principle II's in-share rule).
 
 ## Terms
 
@@ -1078,7 +1083,8 @@ node reports with the expected per-resource values at each step.
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
   - out-of-memory order by fault, where the platform lets an unprivileged process set its
     `oom_score_adj`: each own task's value at launch, and each family member's when it joins, is
-    its baseline, never written below. Own
+    its baseline, never written below; a member that started while its run was marked takes its
+    parent member's baseline instead, since its value then is CedeGrid's mark. Own
     work within its memory fair share stays at its baseline. While own memory is above its fair
     share, the own tasks that make up the excess, in the ladder's memory victim order, are at
     1000 for every process of their family, children started later included, and return to
@@ -1315,8 +1321,9 @@ node reports with the expected per-resource values at each step.
     appears during an off phase is stopped at once; the family is stopped and continued together.
   - Continue MUST send SIGCONT to every member whatever the state flags say, continue past a
     failing member, and report it. A member that has exited is dropped, not an error.
-  - Each member's `oom_score_adj` baseline is recorded when it joins and restored; the
-    preferred-victim setting applies to new members as to the leader (FR-023).
+  - Each member's `oom_score_adj` baseline is recorded when it joins (its parent member's
+    baseline if it started while the run was marked) and restored; the preferred-victim setting
+    applies to new members as to the leader (FR-023).
   - Full keeps `cpu.max` and `cgroup.freeze` unchanged.
 - **FR-087**: A run MUST end when its leader exits. Members still alive then get SIGTERM, then
   SIGKILL after `term_grace_ms`, and the outcome counts them, in both classes and with no opt-out.

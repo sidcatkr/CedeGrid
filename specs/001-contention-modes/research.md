@@ -701,7 +701,8 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   run, verified with the supervisor as its chain's root.
 - **Rationale**: the kernel reparents an orphan to its nearest living subreaper ancestor; the
   supervisor runs one run and forks only its gate and SDK child gates, so no other process can
-  become its child. Principle I's subreaper clause and Principle V's "the run's subreaper tree"
+  become its child. The kernel gives an orphan to a live thread of the subreaper, so the
+  supervisor reads every one of its threads' `children` files. Principle I's subreaper clause and Principle V's "the run's subreaper tree"
   describe exactly this. The attribute is per process and not inherited across fork.
 - **Alternatives**: leaving orphans outside the family (a DataLoader whose intermediate process
   exits would escape every step); PID-namespace containment (needs privileges).
