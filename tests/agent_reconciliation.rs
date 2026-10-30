@@ -54,6 +54,89 @@ fn reconciliation_preserves_a_live_identity_and_never_signals_it() {
         record.identity.unwrap()
     );
 }
+/// A dead rootless run is released only once its recorded descendants are gone too: one that
+/// still runs keeps the reservation, and nothing is recovered without proof that the
+/// supervisor is gone (FR-088).
+#[test]
+fn a_run_with_a_living_recorded_descendant_is_not_released() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let config = Config {
+        state_dir: dir.path().join("state"),
+        ..Config::default()
+    };
+    let store = StateStore::open(&config.state_dir).unwrap();
+    let (_, _, _, template) = setup();
+    let request = LaunchRequest {
+        assignment_id: "gone-leader".into(),
+        task_id: "gone-task".into(),
+        cwd: dir.path().to_path_buf(),
+        ..store_request(&template)
+    };
+    let mut record = store.reserve(&request, &request.resources).unwrap();
+    record.backend = "rootless".into();
+    // A leader that has exited: a short-lived child's identity, read while it ran.
+    let mut child = std::process::Command::new("sleep")
+        .arg("0.2")
+        .spawn()
+        .unwrap();
+    record.identity =
+        Some(supervision::process_identity(child.id(), "gone-leader", record.generation).unwrap());
+    child.wait().unwrap();
+    record.phase = ExecutionPhase::Prepared;
+    store.transition(&record).unwrap();
+    let alive = supervision::process_identity(std::process::id(), "gone-leader", 1).unwrap();
+    let attempt = config.state_dir.join("attempts").join("gone-leader");
+    std::fs::create_dir_all(&attempt).unwrap();
+    let family = serde_json::json!({
+        "class": "guaranteed",
+        "boot_id": alive.boot_id,
+        // SAFETY: getuid and getgid cannot fail.
+        "uid": unsafe { libc::getuid() },
+        "gid": unsafe { libc::getgid() },
+        "descendants": [{"pid": alive.pid, "start_time": alive.start_time}],
+    });
+    std::fs::write(attempt.join("family.json"), family.to_string()).unwrap();
+    let phase = |records: Vec<ExecutionRecord>| {
+        records
+            .into_iter()
+            .find(|r| r.assignment_id == "gone-leader")
+            .map(|r| r.phase)
+    };
+    assert_eq!(
+        phase(agent::reconcile(&config).unwrap()),
+        Some(ExecutionPhase::NeedsReconciliation)
+    );
+    // No proof that the supervisor is gone, so nothing was recovered or signalled.
+    assert!(!attempt.join("family-recovery.json").exists());
+    std::fs::remove_file(attempt.join("family.json")).unwrap();
+    assert_eq!(
+        phase(agent::reconcile(&config).unwrap()),
+        Some(ExecutionPhase::Released)
+    );
+}
+
+/// The request the shared setup reserved, for a test that reserves its own record.
+fn store_request(record: &ExecutionRecord) -> LaunchRequest {
+    LaunchRequest {
+        task_id: record.task_id.clone(),
+        assignment_id: record.assignment_id.clone(),
+        argv: vec!["unused".into()],
+        cwd: std::env::current_dir().unwrap(),
+        env: BTreeMap::new(),
+        resources: record.resources.clone(),
+        replay_safe: true,
+        class: record.class,
+        no_escape: true,
+        single_process: true,
+        managed_child_limit: 0,
+        max_attempts: None,
+        input_artifacts: vec![],
+        required_controls: vec![],
+        allow_fallback: true,
+        contention: None,
+    }
+}
+
 #[test]
 fn reconciliation_refuses_live_agent_lock() {
     let (_dir, config, _store, _record) = setup();

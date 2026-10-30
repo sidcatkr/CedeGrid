@@ -2893,3 +2893,75 @@ while True:
         assert!(took.as_millis() < u128::from(deadline), "{took:?}");
     }
 }
+
+/// A member found in a stop pass is reported at once, not at the next interval, and the
+/// family report carries the run's user and group IDs, so an agent can recover the member if
+/// the supervisor dies then (FR-083, FR-088).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_member_found_in_a_stop_is_reported_at_once() {
+    use cedegrid::contention::YieldStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = forking(
+        dir.path(),
+        r#"
+import os, time
+from pathlib import Path
+time.sleep(0.3)
+if os.fork() == 0:
+    Path('child-%d' % os.getpid()).touch()
+    time.sleep(3)
+    os._exit(0)
+time.sleep(3)
+"#,
+    );
+    request.class = AllocationClass::Opportunistic;
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let path = dir.path().to_owned();
+    let (mut paused_at, mut reported) = (None, None);
+    let mut control = Driven {
+        reports: vec![],
+        step: |reports: &[supervision::SupervisorReport]| {
+            let child: Option<u32> = pids_in(&path, "child-").first().copied();
+            if paused_at.is_none() && child.is_some() {
+                paused_at = Some(std::time::Instant::now());
+                return vec![cpu_step(1, YieldStep::Pause)];
+            }
+            if let (Some(at), Some(child), None) = (paused_at, child, reported.as_ref()) {
+                let family = reports.iter().rev().find_map(|r| match r {
+                    supervision::SupervisorReport::Family { family } => Some(family.clone()),
+                    _ => None,
+                });
+                if let Some(family) =
+                    family.filter(|f| f.descendants.iter().any(|m| m.pid == child))
+                {
+                    reported = Some((at.elapsed(), family));
+                    return vec![cpu_step(2, YieldStep::None)];
+                }
+            }
+            vec![]
+        },
+    };
+    let options = SupervisorOptions {
+        duty_period_ms: 2_000,
+        ..options()
+    };
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options,
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut control,
+    )
+    .unwrap();
+    drop(control);
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    let (after, family) = reported.expect("the stopped member was reported");
+    assert!(after < std::time::Duration::from_millis(1_000), "{after:?}");
+    // SAFETY: getuid and getgid cannot fail.
+    assert_eq!((family.uid, family.gid), unsafe {
+        (libc::getuid(), libc::getgid())
+    });
+}

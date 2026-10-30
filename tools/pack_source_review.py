@@ -103,6 +103,7 @@ ALLOWLIST = (
     'src/agent/oom.rs',
     'src/agent/publishing.rs',
     'src/agent/reconcile.rs',
+    'src/agent/recovery.rs',
     'src/agent/replay.rs',
     'src/agent/report.rs',
     'src/agent/service.rs',

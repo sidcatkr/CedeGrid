@@ -123,6 +123,11 @@ pub struct FamilyReport {
     pub sdk_children: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub descendants: Vec<FamilyMember>,
+    /// The run's user and group IDs, which recovery requires of every member (FR-088).
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: u32,
 }
 
 /// The PIDs a `/proc/<pid>/task/<tid>/children` list names.

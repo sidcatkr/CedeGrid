@@ -2392,3 +2392,325 @@ async fn a_supervisor_that_misses_the_first_query_is_readopted_later() {
     let outcome = service.outcome(&record.assignment_id);
     assert!(!outcome.yielded, "{outcome:?}");
 }
+
+/// Item 033's workload: a leader, with 2 forked workers unless `PIN_FAMILY=0`, each doing
+/// 1.5 s of CPU work, so a stopped member only finishes once it is continued. With
+/// `PIN_HANDLERS=1` each logs SIGHUP and SIGCONT and keeps running; otherwise they keep the
+/// default disposition. The leader writes `done` once its workers finished cleanly.
+#[cfg(target_os = "linux")]
+const SUPERVISOR_LOSS_WORKLOAD: &str = r#"
+import os, signal, sys, time
+from pathlib import Path
+d = Path.cwd()
+def arm(role):
+    if os.environ.get('PIN_HANDLERS') == '1':
+        def log(sig, _):
+            with open(d / 'signals.log', 'a') as f:
+                f.write('%s %s\n' % (role, signal.Signals(sig).name))
+        for s in (signal.SIGHUP, signal.SIGCONT):
+            signal.signal(s, log)
+    (d / ('%s-%d' % (role, os.getpid()))).touch()
+def work(role):
+    arm(role)
+    while time.process_time() < 1.5:
+        pass
+workers = []
+if os.environ.get('PIN_FAMILY') == '1':
+    for n in range(2):
+        pid = os.fork()
+        if pid == 0:
+            work('worker%d' % n)
+            os._exit(0)
+        workers.append(pid)
+work('leader')
+codes = [os.waitpid(pid, 0)[1] for pid in workers]
+(d / 'done').write_text('ok' if all(c == 0 for c in codes) else 'failed %s' % codes)
+"#;
+
+/// What happened to each member of a run whose supervisor was killed in an off phase.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct SupervisorLoss {
+    /// Each member's role, signals logged, and whether it was stopped or gone 2 s later.
+    members: Vec<(String, Vec<String>, bool, bool)>,
+    /// Whether the workload wrote `done` with `ok` within 15 s, and every member is gone.
+    finished: bool,
+    /// Whether every member is gone by then, and whether any is still stopped.
+    ended: bool,
+    stopped_left: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn proc_state(pid: u32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+#[cfg(target_os = "linux")]
+impl Service {
+    /// The agent as a service manager or `setsid` starts it: in a session of its own, so the
+    /// run's reaper, here the container's first process, is outside that session.
+    fn agent_in_session(&self, log: &str) -> Owned {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cedegrid"));
+        command
+            .arg("--config")
+            .arg(&self.config_file)
+            .arg("agent")
+            .arg("--deployment")
+            .arg(&self.deployment_file)
+            .env("TMPDIR", self.dir.path())
+            .stdout(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.log"))).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                fs::File::create(self.dir.path().join(format!("{log}.err"))).unwrap(),
+            ));
+        // SAFETY: setsid is async-signal-safe and only changes the new process's session.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Owned(command.spawn().unwrap())
+    }
+}
+
+/// Kill a Tracked run's supervisor while its family is stopped, with the agent alive or
+/// down at that moment, and record what each member received and how the run ended (033).
+#[cfg(target_os = "linux")]
+async fn supervisor_loss(
+    class: AllocationClass,
+    family: bool,
+    handlers: bool,
+    agent_down: bool,
+) -> SupervisorLoss {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        class,
+        vec![python, "-c".into(), SUPERVISOR_LOSS_WORKLOAD.into()],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 60_000;
+            local.assignment.request.resources.cpu_millicores = 100;
+            let env = &mut local.assignment.request.env;
+            env.insert("PIN_FAMILY".into(), if family { "1" } else { "0" }.into());
+            env.insert(
+                "PIN_HANDLERS".into(),
+                if handlers { "1" } else { "0" }.into(),
+            );
+        },
+    )
+    .await;
+    let mut agent = service.agent_in_session("first");
+    let end = Instant::now() + Duration::from_secs(20);
+    let record = loop {
+        if let Some(record) = service
+            .record()
+            .filter(|r| r.phase == ExecutionPhase::Running)
+        {
+            break record;
+        }
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let attempt = service
+        .local
+        .config
+        .state_dir
+        .join("attempts")
+        .join(&record.assignment_id);
+    let workdir = PathBuf::from(&service.local.assignment.request.cwd);
+    let roles = if family { 3 } else { 1 };
+    let members = || -> Vec<(String, u32)> {
+        fs::read_dir(&workdir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                let (role, pid) = name.rsplit_once('-')?;
+                Some((role.to_owned(), pid.parse().ok()?))
+            })
+            .collect()
+    };
+    while members().len() < roles {
+        assert!(Instant::now() < end, "members never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The agent has recorded the family before the supervisor dies, as for any run that has
+    // run a while; a member found and stopped in the instant its supervisor dies is the
+    // documented limit, which this test does not race.
+    {
+        while serde_json::from_slice::<serde_json::Value>(
+            &fs::read(attempt.join("family.json")).unwrap_or_default(),
+        )
+        .ok()
+        .and_then(|family| family["descendants"].as_array().map(Vec::len))
+        .unwrap_or(0)
+            < roles - 1
+        {
+            assert!(Instant::now() < end, "the family was never recorded");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    if agent_down {
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+    }
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(attempt.join("supervisor-spec.json")).unwrap()).unwrap();
+    let socket: serde_json::Value =
+        serde_json::from_slice(&fs::read(attempt.join("control-socket.json")).unwrap()).unwrap();
+    let mut stream = cedegrid::supervision::control_socket::connect(
+        Path::new(socket["path"].as_str().unwrap()),
+        spec["control_token"].as_str().unwrap(),
+    )
+    .unwrap();
+    // A step the agent's own sequence never overtakes: a pause, or for Guaranteed work, which
+    // is never paused, a cap at the minimum duty.
+    let step = if class == AllocationClass::Guaranteed {
+        serde_json::json!({"step":"cap","target":0,"cause":"external_growth"})
+    } else {
+        serde_json::json!({"step":"pause","cause":"external_growth"})
+    };
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({"kind":"adjust","sequence":1_000_000,"resources":{"cpu":step}})
+    )
+    .unwrap();
+    let leader = members().iter().find(|(r, _)| r == "leader").unwrap().1;
+    let supervisor: u32 = fs::read_to_string(format!("/proc/{leader}/stat"))
+        .unwrap()
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Kill it in an off phase: every member stopped at once.
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        if members()
+            .iter()
+            .all(|(_, pid)| proc_state(*pid) == Some('T'))
+        {
+            // SAFETY: the test's own run's supervisor, the leader's parent read just above.
+            unsafe { libc::kill(supervisor as i32, libc::SIGKILL) };
+            break;
+        }
+        assert!(Instant::now() < end, "the family never stopped together");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    drop(stream);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let signals = fs::read_to_string(workdir.join("signals.log")).unwrap_or_default();
+    let observed: Vec<(String, Vec<String>, bool, bool)> = members()
+        .into_iter()
+        .map(|(role, pid)| {
+            let received = signals
+                .lines()
+                .filter_map(|l| l.strip_prefix(&format!("{role} ")))
+                .map(str::to_owned)
+                .collect();
+            let state = proc_state(pid);
+            (
+                role,
+                received,
+                state == Some('T'),
+                state.is_none_or(|s| s == 'Z'),
+            )
+        })
+        .collect();
+    if agent_down {
+        agent = service.agent_in_session("second");
+    }
+    let end = Instant::now() + Duration::from_secs(15);
+    let gone = || {
+        members()
+            .iter()
+            .all(|(_, pid)| proc_state(*pid).is_none_or(|s| s == 'Z'))
+    };
+    let finished = loop {
+        let done = fs::read_to_string(workdir.join("done")).ok();
+        if done.as_deref() == Some("ok") && gone() {
+            break true;
+        }
+        if Instant::now() > end || (class == AllocationClass::Opportunistic && gone()) {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let ended = gone();
+    let stopped_left = members()
+        .iter()
+        .any(|(_, pid)| proc_state(*pid) == Some('T'));
+    // Test cleanup of this run's own processes, whatever state they were left in.
+    for (_, pid) in members() {
+        // SAFETY: processes this test's run started, read from its own marker files.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
+    let _ = agent.kill();
+    let _ = agent.wait();
+    let loss = SupervisorLoss {
+        members: observed,
+        finished,
+        ended,
+        stopped_left,
+    };
+    println!(
+        "PIN033 {class:?} family={family} handlers={handlers} agent_down={agent_down}: {loss:?}"
+    );
+    loss
+}
+
+/// Guaranteed work whose supervisor dies in an off phase is never sent SIGHUP and runs again,
+/// family or single process, with the agent alive or started later: the workload finishes with
+/// its output (033 D.1, D.3).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guaranteed_work_survives_its_supervisors_death() {
+    let mut losses = Vec::new();
+    for (family, handlers, agent_down) in [
+        (true, true, false),
+        (true, false, false),
+        (false, false, false),
+        (true, false, true),
+    ] {
+        losses
+            .push(supervisor_loss(AllocationClass::Guaranteed, family, handlers, agent_down).await);
+    }
+    for loss in &losses {
+        for (role, signals, _, _) in &loss.members {
+            assert!(
+                !signals.iter().any(|s| s == "SIGHUP"),
+                "{role}: {losses:#?}"
+            );
+        }
+        assert!(loss.finished, "{losses:#?}");
+    }
+}
+
+/// Opportunistic work whose supervisor dies in an off phase ends, every member, and leaves no
+/// stopped process, with the agent alive or started later (033 D.2, D.3).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opportunistic_work_ends_with_its_supervisor() {
+    let mut losses = Vec::new();
+    for (family, handlers, agent_down) in [
+        (true, true, false),
+        (true, false, false),
+        (false, false, false),
+        (true, false, true),
+    ] {
+        losses.push(
+            supervisor_loss(AllocationClass::Opportunistic, family, handlers, agent_down).await,
+        );
+    }
+    for loss in &losses {
+        assert!(loss.ended && !loss.stopped_left, "{losses:#?}");
+    }
+}

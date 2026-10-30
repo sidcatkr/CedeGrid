@@ -139,6 +139,19 @@ fn live_supervisor(config: &Config, record: &ExecutionRecord) -> Option<ProcessI
     .then_some(identity)
 }
 
+/// Whether the attempt's supervisor is verifiably gone: its recorded identity no longer names a
+/// live process. A missing record proves nothing, so nothing is recovered on it (FR-088).
+fn supervisor_gone(config: &Config, record: &ExecutionRecord) -> bool {
+    let output = config
+        .state_dir
+        .join("attempts")
+        .join(&record.assignment_id);
+    crate::publication::read_bounded(&output.join("supervisor-identity.json"), 64 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProcessIdentity>(&bytes).ok())
+        .is_some_and(|identity| identity_absent(&identity))
+}
+
 /// Reconnect to live supervisors after an agent restart (research R2). Each one is
 /// verified by identity and authenticated by the token from its spec, and reports
 /// its applied steps, lease sequence and adjust sequence.
@@ -299,6 +312,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
             })) => {
                 slot.note_outside(outside_family, outside_reason);
                 slot.family = family;
+                slot.keep_family(&config.state_dir);
                 // Continue above the supervisor's sequences and renew its lease. Only authorized
                 // runs are re-adopted, and an initial authorization is sequence 1, which the
                 // supervisor does not count until a renewal; 0 would ask to authorize again.
@@ -394,13 +408,41 @@ pub(super) fn reconcile_guarded(
                 detail: "Replayable child registry may have rolled back; without a live owning supervisor, same-boot family absence is unverified".into(),
             });
         }
+        // A Tracked run whose supervisor is verifiably gone has its members recovered by
+        // identity first (FR-088).
+        if supervisor_gone(config, &record)
+            && let Err(error) = super::recovery::recover(&config.state_dir, &store, &record)
+        {
+            let _ = emit(&serde_json::json!({
+                "event": "family_recovery_failed",
+                "assignment_id": record.assignment_id,
+                "detail": format!("{error:#}"),
+            }));
+        }
         let mut released = false;
-        if (request.single_process
-            || (request.no_escape && (1..=8).contains(&request.managed_child_limit)))
+        if crate::rootless::contract_holds(&request)
             && record.backend == "rootless"
             && let Some(id) = &record.identity
         {
-            let absent = identity_absent(id);
+            // The run's recorded descendants must be gone too, so no reservation is released
+            // while one of its members lives.
+            let attempt = config
+                .state_dir
+                .join("attempts")
+                .join(&record.assignment_id);
+            let descendants_absent =
+                super::recovery::recorded_family(&attempt).is_none_or(|family| {
+                    family.descendants.iter().all(|member| {
+                        identity_absent(&ProcessIdentity {
+                            pid: member.pid,
+                            boot_id: id.boot_id.clone(),
+                            start_time: member.start_time,
+                            assignment_id: record.assignment_id.clone(),
+                            generation: record.generation,
+                        })
+                    })
+                });
+            let absent = identity_absent(id) && descendants_absent;
             if absent && recovery_allows_release(&record) {
                 released = gpu_released_now(&record.resources, id.pid);
             }

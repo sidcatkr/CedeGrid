@@ -81,6 +81,8 @@ pub(crate) struct Descendants<S: Source> {
     pub outside: BTreeMap<u32, OutsideReason>,
     /// A discovery error inside a stop, for the loop to report.
     error: Option<anyhow::Error>,
+    /// A stop pass found a member, which the loop reports at once (FR-083).
+    joined_in_stop: bool,
 }
 
 impl<S: Source> Descendants<S> {
@@ -97,6 +99,7 @@ impl<S: Source> Descendants<S> {
             fallback: false,
             outside: BTreeMap::new(),
             error: None,
+            joined_in_stop: false,
         }
     }
 
@@ -150,6 +153,16 @@ impl<S: Source> Descendants<S> {
 
     pub fn take_error(&mut self) -> Option<anyhow::Error> {
         self.error.take()
+    }
+
+    /// Whether a stop pass found a member since the last call.
+    pub fn take_joined_in_stop(&mut self) -> bool {
+        std::mem::take(&mut self.joined_in_stop)
+    }
+
+    /// The run's user and group IDs.
+    pub fn ids(&self) -> (u32, u32) {
+        self.ids
     }
 
     /// Find and verify new descendants of `roots` (the leader and running SDK children) and
@@ -367,7 +380,7 @@ impl<S: Source> Descendants<S> {
         for _ in 0..STOP_PASSES {
             match self.discover(roots, excluded) {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(_) => self.joined_in_stop = true,
                 Err(error) => {
                     self.error = Some(error);
                     break;

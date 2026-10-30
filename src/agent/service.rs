@@ -433,12 +433,14 @@ impl AgentLoop<'_> {
                         slot.note_outside(outside_family, outside_reason);
                         if family.is_some() {
                             slot.family = family;
+                            slot.keep_family(&self.config.state_dir);
                         }
                     }
                     Ok(Event::OutsideFamily { count, reason }) => slot.note_outside(count, reason),
                     Ok(Event::Family { family }) => {
                         let known = slot.descendants();
                         slot.family = Some(family);
+                        slot.keep_family(&self.config.state_dir);
                         // New members get a baseline now, so their run's next interval is
                         // measured rather than unknown.
                         let joined: Vec<_> = slot
@@ -910,10 +912,24 @@ impl AgentLoop<'_> {
                 && record.phase != ExecutionPhase::Released
             {
                 // Reaping synchronizes with the supervisor's last durable write.
-                // The earlier loop snapshot may predate its Released commit.
+                // The earlier loop snapshot may predate its Released commit. A Tracked run's
+                // members are recovered by identity: Guaranteed continued, Opportunistic
+                // ended (FR-088).
+                let recovered =
+                    super::recovery::recover(&self.config.state_dir, &self.store, &record)
+                        .unwrap_or_else(|error| {
+                            let _ = emit(&serde_json::json!({
+                                "event": "family_recovery_failed",
+                                "assignment_id": record.assignment_id,
+                                "detail": format!("{error:#}"),
+                            }));
+                            None
+                        });
                 record.phase = ExecutionPhase::NeedsReconciliation;
-                record.detail =
-                    format!("supervisor exited {status}; existing allocation remains charged");
+                record.detail = format!(
+                    "supervisor exited {status}; existing allocation remains charged{}",
+                    recovered.map_or(String::new(), |r| format!("; members: {}", r.summary()))
+                );
                 self.store.transition(&record)?;
             }
         }

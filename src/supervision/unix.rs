@@ -565,7 +565,22 @@ impl OwnedFamily<'_> {
                 .as_ref()
                 .map_or(0, |children| children.running_identities().len() as u64),
             descendants: self.descendants.reported(),
+            uid: self.descendants.ids().0,
+            gid: self.descendants.ids().1,
         })
+    }
+    /// The family as it stands, without discovery, for a report right after a stop pass.
+    fn report(&self) -> FamilyReport {
+        FamilyReport {
+            leader: u64::from(!self.leader.reaped),
+            sdk_children: self
+                .children
+                .as_ref()
+                .map_or(0, |children| children.running_identities().len() as u64),
+            descendants: self.descendants.reported(),
+            uid: self.descendants.ids().0,
+            gid: self.descendants.ids().1,
+        }
     }
 }
 impl Family for OwnedFamily<'_> {
@@ -1760,6 +1775,14 @@ pub(super) fn supervise(
                         );
                     }
                     contention.applied.clear();
+                }
+                // A member a stop pass found is reported at once, so an agent can recover it if
+                // this supervisor dies before the next interval (FR-083, FR-088).
+                if family.descendants.take_joined_in_stop() {
+                    family_report = family.report();
+                    let _ = control.report(SupervisorReport::Family {
+                        family: family_report.clone(),
+                    });
                 }
                 // A RAM cap the actuator raised to current usage is reported at
                 // once, so the policy goes on to the hint.

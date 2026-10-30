@@ -32,6 +32,7 @@ mod launch;
 mod oom;
 mod publishing;
 mod reconcile;
+mod recovery;
 mod replay;
 mod report;
 mod service;
@@ -704,6 +705,22 @@ impl ChildSlot {
                 )
             })
             .collect()
+    }
+
+    /// Keep the run's last family in its attempt directory, so an agent started after its
+    /// supervisor died can still recover the members (FR-088).
+    fn keep_family(&self, state_dir: &Path) {
+        let (Some(family), Some(record)) = (&self.family, &self.prepared) else {
+            return;
+        };
+        let attempt = state_dir.join("attempts").join(&record.assignment_id);
+        if let Err(error) = recovery::record_family(&attempt, record, family) {
+            let _ = emit(&serde_json::json!({
+                "event": "family_record_failed",
+                "assignment_id": record.assignment_id,
+                "detail": format!("{error:#}"),
+            }));
+        }
     }
 
     /// Keep the most processes found outside the family at once, and why (FR-082).
