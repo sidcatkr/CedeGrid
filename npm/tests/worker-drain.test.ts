@@ -53,6 +53,26 @@ async function withSupervisor(replies: Array<RpcReply | null>, body: (requests: 
     }
 }
 
+test('a raising drain hook is isolated', (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
+    try {
+        const warn = t.mock.method(console, 'warn', () => { });
+        const context = new WorkerContext({ ...descriptor, drain_file: join(root, 'drain') }, new FakeTransport([]));
+        const calls: number[] = [];
+        context.onDrain(() => { throw new Error('drain hook failed'); });
+        context.onDrain(() => calls.push(2));
+        writeFileSync(join(root, 'drain'), '');
+        assert.throws(() => context.safePoint(), DrainRequested);
+        assert.deepEqual(calls, [2]);
+        assert.equal(warn.mock.callCount(), 1);
+        assert.throws(() => context.safePoint(), DrainRequested);
+        assert.deepEqual(calls, [2]);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('drain hooks run once', () => {
     const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
     try {

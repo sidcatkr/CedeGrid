@@ -86,6 +86,16 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.context.draining());(self.root/'drain').touch()
         with self.assertRaises(DrainRequested):self.context.safe_point()
         self.assertTrue(self.context.draining());self.assertEqual(calls,[1])
+    def test_a_raising_drain_hook_is_isolated(self):
+        calls=[]
+        def broken(_): raise RuntimeError('drain hook failed')
+        self.context.on_drain(broken);self.context.on_drain(lambda _:calls.append(2))
+        (self.root/'drain').touch()
+        with self.assertLogs('cedegrid', level='WARNING'):
+            with self.assertRaises(DrainRequested):self.context.safe_point()
+        self.assertEqual(calls,[2])
+        with self.assertRaises(DrainRequested):self.context.safe_point()
+        self.assertEqual(calls,[2])
     def test_a_drain_only_worker_behaves_as_under_0_2(self):
         """A worker that only watches the drain file keeps its 0.2 drain behavior beside
         a target file the supervisor rewrites, with either context shape (FR-036)."""

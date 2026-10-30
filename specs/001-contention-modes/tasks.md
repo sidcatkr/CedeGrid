@@ -1410,8 +1410,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T359 Detect processes outside the family each interval in `src/supervision/unix.rs`, `src/cgroup.rs` and `src/telemetry/managed.rs`, carry `outside_family` in the supervisor events and report it in `src/explain.rs`, until T358 passes, per FR-082 (R1) (missing)
 - [X] T360 [P] Write failing Python and TypeScript tests: a failed read is not cached, and a target rewritten within one mtime tick with an equal length and a reused inode is seen while the mtime is within 50 ms of now, per contracts/resource-target-file (SDK-1, R5) (contradicts)
 - [X] T361 Store the stat identity only after a successful read and re-parse a recent file in `python/cedegrid/worker.py` and `npm/src/worker.ts`, until T360 passes (SDK-1, R5) (contradicts)
-- [ ] T362 [P] Write failing Python and TypeScript tests: a raising `on_drain` hook is isolated, later hooks run, and `DrainRequested` is raised (SDK-2) (contradicts)
-- [ ] T363 Isolate drain hooks in `python/cedegrid/worker.py` and `npm/src/worker.ts`, until T362 passes (SDK-2) (contradicts)
+- [X] T362 [P] Write failing Python and TypeScript tests: a raising `on_drain` hook is isolated, later hooks run, and `DrainRequested` is raised (SDK-2) (contradicts)
+- [X] T363 Isolate drain hooks in `python/cedegrid/worker.py` and `npm/src/worker.ts`, until T362 passes (SDK-2) (contradicts)
 
 **Docs, snapshots and the native gate**
 

@@ -403,8 +403,15 @@ export class WorkerContext {
     onSaveProgress(callback: (sequence: bigint) => void): void { this.signals.onSaveProgress(callback); }
     draining(): boolean { this.signals.poll(); const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
         this.drainNotified = true;
-        for (const callback of this.drainHooks)
-            callback(this);
+        // A failing hook is logged like a resource hook; the rest run and the drain stands.
+        for (const callback of [...this.drainHooks]) {
+            try {
+                callback(this);
+            }
+            catch (error) {
+                console.warn('drain hook failed', error);
+            }
+        }
     } return requested; }
     safePoint(): void { if (this.draining())
         throw new DrainRequested(); }

@@ -353,7 +353,12 @@ class WorkerContext:
         requested = self.drain_file is not None and self.drain_file.exists()
         if requested and not self._drain_notified:
             self._drain_notified = True
-            for callback in self._drain_hooks: callback(self)
+            # A failing hook is logged like a resource hook; the rest run and the drain stands.
+            for callback in list(self._drain_hooks):
+                try:
+                    callback(self)
+                except Exception:
+                    _log.warning("drain hook failed", exc_info=True)
         return requested
 
     def safe_point(self):
