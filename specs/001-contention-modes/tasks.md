@@ -1373,8 +1373,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T331 Hold GPU compute ladder entries while device telemetry is unknown in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T330 passes (GPU-3) (contradicts)
 - [X] T332 [P] Write a failing policy test: under GPU activity of unknown amount a 500 cap is credited at its applied duty and does not escalate to a pause, per FR-022 (GPU-4) (contradicts)
 - [X] T333 Credit applied duties under unknown activity in `src/policy/ladder.rs`, until T332 passes (GPU-4) (contradicts)
-- [ ] T334 [P] Write a failing policy test: a one-interval NVML gap in GPU memory accounting holds steps through RAM's unknown window and does not drain, per FR-008 (GPU-5) (contradicts)
-- [ ] T335 Add GPU memory to `unknown_windows` in `src/policy/ladder.rs` and `src/policy/measure.rs`, until T334 passes (GPU-5) (contradicts)
+- [X] T334 [P] Write a failing policy test: a one-interval NVML gap in GPU memory accounting holds steps through RAM's unknown window and does not drain, per FR-008 (GPU-5) (contradicts)
+- [X] T335 Add GPU memory to `unknown_windows` in `src/policy/ladder.rs` and `src/policy/measure.rs`, until T334 passes (GPU-5) (contradicts)
 
 **Group 8: report 029 Decisions 1 and 2 (FR-080, FR-034)**
 

@@ -441,6 +441,7 @@ fn gpu_yield_keeps_guaranteed_charges_and_selects_the_opportunistic_victim() {
         // Retained uncertain executions are Running with unknown observations.
         (AllocationPhase::Running, None),
     ] {
+        let unobserved = observed.is_none();
         let mut guaranteed = allocation("a-guaranteed", phase, resources(0, 0, 1000), observed);
         guaranteed.class = AllocationClass::Guaranteed;
         let input = PolicyInput {
@@ -466,9 +467,14 @@ fn gpu_yield_keeps_guaranteed_charges_and_selects_the_opportunistic_victim() {
         let mut snap = gpu_snapshot();
         snap.gpus[0].used_memory_mib = Some(13_500 + own);
         snap.gpus[0].external_compute = ComputeActivity::Unknown;
-        let decision = PolicyEngine::new()
-            .evaluate(&config(), &snap, &input, 0)
-            .unwrap();
+        // An own observation unknown leaves the device's memory unknown: its steps hold
+        // through the unknown window first (FR-008).
+        let mut engine = PolicyEngine::new();
+        let mut decision = engine.evaluate(&config(), &snap, &input, 0).unwrap();
+        if unobserved && phase == AllocationPhase::Running {
+            assert!(decision.would_drain.is_empty(), "held at first");
+            decision = engine.evaluate(&config(), &snap, &input, 1500).unwrap();
+        }
         assert_eq!(decision.managed_budget.gpu_memory_mib["GPU-test"], 1500);
         // With the Guaranteed reservation pending, 1500 MiB stay free above the
         // 1000 MiB floor: a charge-only shortfall that steps nothing.
@@ -1059,8 +1065,13 @@ fn lost_gpu_inventory_yields_existing_gpu_allocations() {
         )],
         ..PolicyInput::default()
     };
-    let decision = PolicyEngine::new()
-        .evaluate(&config(), &snapshot(), &input, 0)
+    // Lost GPU telemetry first holds for the unknown window, then yields (FR-008).
+    let mut engine = PolicyEngine::new();
+    let held = engine.evaluate(&config(), &snapshot(), &input, 0).unwrap();
+    assert!(!held.expansion_allowed);
+    assert!(held.would_drain.is_empty());
+    let decision = engine
+        .evaluate(&config(), &snapshot(), &input, 1500)
         .unwrap();
     assert!(!decision.expansion_allowed);
     assert_eq!(decision.would_drain, ["gpu-worker"]);
@@ -4023,6 +4034,60 @@ fn an_applied_gpu_cap_under_unknown_activity_is_credited_at_its_duty() {
                 .take(3)
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+/// A gap in the device's memory accounting, here its used memory missing, holds GPU memory
+/// steps through the unknown window and drains nothing, whether the gap lasts one interval
+/// or the whole window; the inventory missing for a while is held the same way (FR-008,
+/// GPU-5).
+#[test]
+fn a_gpu_memory_gap_holds_through_the_unknown_window() {
+    use cedegrid::contention::ResourceKey;
+    let cfg = config();
+    let window = u64::from(
+        cfg.contention
+            .thresholds(cedegrid::contention::ResourceKind::GpuMemory)
+            .unknown_window_intervals,
+    );
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )],
+        facts: rootless(&["job"]),
+        ..PolicyInput::default()
+    };
+    let known = gpu_snapshot();
+    let mut no_memory = known.clone();
+    no_memory.gpus[0].used_memory_mib = None;
+    let mut no_inventory = known.clone();
+    no_inventory.gpu_inventory = CapabilityStatus::Unknown;
+    no_inventory.gpus.clear();
+    for gap in [no_memory, no_inventory] {
+        for length in [1, window - 1] {
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            let mut steps = Vec::new();
+            for snap in std::iter::once(&known)
+                .chain(std::iter::repeat_n(&gap, length as usize))
+                .chain(std::iter::repeat_n(&known, 4))
+            {
+                let decision = engine.evaluate(&cfg, snap, &input, now).unwrap();
+                steps.extend(
+                    decision
+                        .actions
+                        .into_iter()
+                        .filter(|a| matches!(a.resource, ResourceKey::GpuMemory(_)))
+                        .map(|a| (now, a.step)),
+                );
+                assert!(decision.would_drain.is_empty(), "at {now}");
+                now += cfg.monitor.interval_ms;
+            }
+            assert!(steps.is_empty(), "{length} intervals: {steps:?}");
+        }
     }
 }
 

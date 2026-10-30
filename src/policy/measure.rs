@@ -1032,6 +1032,7 @@ impl<'a> Interval<'a> {
             for gpu in self.charged.gpu_memory_mib.keys() {
                 self.budget.gpu_memory_mib.insert(gpu.clone(), 0);
                 self.blocked_gpus.insert(gpu.clone());
+                self.gpu_memory_unknown.insert(gpu.clone());
                 self.unsafe_now = true;
             }
             return;
@@ -1043,6 +1044,7 @@ impl<'a> Interval<'a> {
             if !snapshot.gpus.iter().any(|item| &item.uuid == gpu) {
                 self.budget.gpu_memory_mib.insert(gpu.clone(), 0);
                 self.blocked_gpus.insert(gpu.clone());
+                self.gpu_memory_unknown.insert(gpu.clone());
                 self.unsafe_now = true;
                 self.reasons.push(ReasonCode::new(
                     "gpu_absent",
@@ -1065,6 +1067,9 @@ impl<'a> Interval<'a> {
         let (activity, compute_admission, telemetry_unknown) =
             self.gpu_admission(gpu, &previous, &memory);
         let (measured, measured_streak) = self.gpu_compute_path(gpu, &previous);
+        if telemetry_unknown {
+            self.gpu_memory_unknown.insert(gpu.uuid.clone());
+        }
         if !telemetry_unknown {
             let budget = self.compute_budget_for(gpu, measured, activity);
             self.gpu_compute_budget.insert(gpu.uuid.clone(), budget);

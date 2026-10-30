@@ -89,14 +89,22 @@ impl<'a> Interval<'a> {
         self.collect_actions();
     }
 
-    /// Since when each unknown or held resource, and each allocation of unknown
-    /// usage, has been unknown.
+    /// Since when each unknown or held resource, a device's memory included, and each
+    /// allocation of unknown usage, has been unknown.
     fn unknown_windows(&mut self) {
         let (prev, now) = (self.prev, self.now);
+        let gpu_memory: Vec<(ResourceKey, bool)> = self
+            .gpu_memory_unknown
+            .iter()
+            .map(|uuid| (ResourceKey::GpuMemory(uuid.clone()), true))
+            .collect();
         for (key, unknown) in [
             (ResourceKey::Cpu, self.cpu_unknown || self.cpu_held),
             (ResourceKey::Ram, self.ram_unknown || self.ram_held),
-        ] {
+        ]
+        .into_iter()
+        .chain(gpu_memory)
+        {
             if unknown {
                 let start = prev.unknown_since.get(&key).copied().unwrap_or(now);
                 self.next.unknown_since.insert(key, start);

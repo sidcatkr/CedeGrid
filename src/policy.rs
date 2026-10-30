@@ -414,6 +414,9 @@ struct Interval<'a> {
     compute_paths: BTreeMap<String, ComputePath>,
     /// The devices whose external activity is unknown.
     gpu_activity_unknown: BTreeSet<String>,
+    /// The allocated devices whose memory telemetry is unknown: unobservable, missing
+    /// from the inventory, or with no inventory at all.
+    gpu_memory_unknown: BTreeSet<String>,
     /// Why GPU admission is blocked on a device, for its admission state.
     gpu_block_reasons: BTreeMap<String, String>,
     cooled_down: bool,
@@ -507,6 +510,7 @@ impl<'a> Interval<'a> {
             gpu_compute_budget: BTreeMap::new(),
             compute_paths: BTreeMap::new(),
             gpu_activity_unknown: BTreeSet::new(),
+            gpu_memory_unknown: BTreeSet::new(),
             gpu_block_reasons: BTreeMap::new(),
             cooled_down: false,
             actions: Vec::new(),
