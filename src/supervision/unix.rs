@@ -623,6 +623,7 @@ fn apply_runtime_commands(
     control: &mut dyn SupervisorControl,
     (hint_ready, observes_drain): (bool, bool),
     leader_exited: bool,
+    outside_family: u64,
 ) {
     use crate::contention::{ResourceKind, StepRequest, YieldCause, YieldStep};
     for command in commands {
@@ -909,6 +910,7 @@ fn apply_runtime_commands(
                     sequence: contention.sequence,
                     hint_ready,
                     observes_drain,
+                    outside_family,
                     causes: contention
                         .applied
                         .iter()
@@ -1064,6 +1066,9 @@ pub(super) fn supervise(
     // (hint_ready, observes_drain), reported when either changes (FR-062).
     let mut readiness = (false, false);
     let mut readiness_checked_at: Option<Instant> = None;
+    // The most processes found outside the verified family, and when they were last counted.
+    let mut outside_family = 0u64;
+    let mut outside_checked_at: Option<Instant> = None;
     let duty_period = Duration::from_millis(options.duty_period_ms.max(1));
     let mut contention = crate::contention::AllocationContention::default();
     // The RAM cap code last reported to the agent.
@@ -1386,6 +1391,7 @@ pub(super) fn supervise(
                     leaf_oom_kills,
                     log_bytes_dropped: logs.dropped,
                     log_capture_error: logs.error,
+                    single_process_violated: outside_family,
                 });
             }
             let polled_at = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -1515,8 +1521,35 @@ pub(super) fn supervise(
                         control,
                         readiness,
                         leader_status.is_some(),
+                        outside_family,
                     );
                     ram_code = actuator.step_code(crate::contention::ResourceKind::Ram);
+                }
+                // Processes outside the verified family are counted once per duty period and
+                // reported when more are found; none of them is acted on (FR-082).
+                if leader_status.is_none()
+                    && outside_checked_at.is_none_or(|at: Instant| at.elapsed() >= duty_period)
+                {
+                    outside_checked_at = Some(Instant::now());
+                    let verified: std::collections::BTreeSet<u32> =
+                        family.identities().iter().map(|id| id.pid).collect();
+                    let found = actuator
+                        .members()
+                        .or_else(|| crate::supervision::leader_children(leader_identity.pid));
+                    let count = found.map_or(0, |found| {
+                        crate::supervision::outside_family(&found, &verified)
+                    });
+                    if count > outside_family {
+                        outside_family = count;
+                        report(
+                            "single_process_violated",
+                            &request.assignment_id,
+                            format!(
+                                "{count} processes outside the verified family; none is measured as own work or stepped"
+                            ),
+                        );
+                        let _ = control.report(SupervisorReport::OutsideFamily { count });
+                    }
                 }
                 if lifecycle.phase == LifecyclePhase::Running
                     && leader_status.is_none()

@@ -387,6 +387,9 @@ pub struct AllocationFacts {
     /// found unavailable, per resource.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub step_codes: BTreeMap<crate::contention::ResourceKey, String>,
+    /// Processes the supervisor found outside the verified family, at the most (FR-082).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub outside_family: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

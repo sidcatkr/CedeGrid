@@ -242,6 +242,10 @@ pub trait Actuator {
     fn step_code(&self, _kind: crate::contention::ResourceKind) -> Option<&'static str> {
         None
     }
+    /// The processes in the allocation's leaf, where the backend has one; read-only.
+    fn members(&self) -> Option<std::collections::BTreeSet<u32>> {
+        None
+    }
     /// Match controls to the recorded steps when an agent reattaches: adopt a
     /// recorded step, and undo a limit no step records.
     fn reconcile(

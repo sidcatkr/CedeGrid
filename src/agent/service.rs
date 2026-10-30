@@ -422,11 +422,16 @@ impl AgentLoop<'_> {
                         targets,
                         hint_ready,
                         observes_drain,
+                        outside_family,
                         ..
                     }) => {
                         slot.applied = applied;
                         slot.applied_targets = targets;
                         slot.note_readiness(hint_ready, observes_drain);
+                        slot.outside_family = slot.outside_family.max(outside_family);
+                    }
+                    Ok(Event::OutsideFamily { count }) => {
+                        slot.outside_family = slot.outside_family.max(count);
                     }
                     Ok(Event::Readiness {
                         hint_ready,

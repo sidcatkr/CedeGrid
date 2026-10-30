@@ -275,6 +275,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         oom_verdict: None,
         seed: None,
         journal_seen: None,
+        outside_family: 0,
     };
     send(&mut slot, &Control::Query)?;
     let deadline = Instant::now() + Duration::from_secs(2);

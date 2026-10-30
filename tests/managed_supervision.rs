@@ -57,6 +57,66 @@ fn options() -> SupervisorOptions {
     }
 }
 
+/// Records every report a supervisor sends.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct Reports(Vec<supervision::SupervisorReport>);
+#[cfg(target_os = "linux")]
+impl supervision::SupervisorControl for Reports {
+    fn report(&mut self, report: supervision::SupervisorReport) -> anyhow::Result<()> {
+        self.0.push(report);
+        Ok(())
+    }
+}
+
+/// A leader that forks a helper outside the SDK is reported once as outside its verified
+/// family, with the count, in the reports and the outcome; nothing is done to the helper,
+/// which exits on its own (FR-082, Constitution I).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fork_outside_the_sdk_is_reported_and_left_alone() {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let store = StateStore::open(&dir.path().join("state")).unwrap();
+    let mut request = request(
+        dir.path(),
+        r#"
+import os, sys, time
+from pathlib import Path
+pid = os.fork()
+if pid == 0:
+    time.sleep(1.5)
+    Path('helper-done').write_text('1')
+    os._exit(0)
+_, status = os.waitpid(pid, 0)
+sys.exit(0 if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 7)
+"#,
+    );
+    request.managed_child_limit = 0;
+    let mut reports = Reports::default();
+    let outcome = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut reports,
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0), "the helper ran undisturbed");
+    assert!(dir.path().join("helper-done").exists());
+    assert_eq!(outcome.single_process_violated, 1, "{outcome:?}");
+    let found: Vec<u64> = reports
+        .0
+        .iter()
+        .filter_map(|report| match report {
+            supervision::SupervisorReport::OutsideFamily { count } => Some(*count),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found, [1]);
+}
+
 #[derive(Default)]
 struct ChangingChildPolicy {
     checks: usize,

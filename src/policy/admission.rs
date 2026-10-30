@@ -546,6 +546,20 @@ impl Interval<'_> {
             let Some(facts) = input.facts.get(&allocation.id) else {
                 continue;
             };
+            // Processes outside the verified family are neither own work nor stepped (FR-082).
+            if facts.outside_family > 0 {
+                for key in [ResourceKey::Cpu, ResourceKey::Ram] {
+                    note(
+                        &mut self.statuses,
+                        key,
+                        "single_process_violated",
+                        format!(
+                            "allocation {}: {} processes outside its verified family are not measured as own work or stepped",
+                            allocation.id, facts.outside_family
+                        ),
+                    );
+                }
+            }
             for (key, code) in &facts.step_codes {
                 if let Some(text) = crate::contention::reason_text(code) {
                     note(

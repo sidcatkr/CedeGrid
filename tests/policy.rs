@@ -1866,6 +1866,40 @@ fn codes(decision: &Decision, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A run whose supervisor found processes outside its verified family is noted as
+/// `single_process_violated` with the count, on CPU and RAM, where `explain` shows it; its
+/// steps are unchanged (FR-082).
+#[test]
+fn processes_outside_the_family_are_noted() {
+    let mut facts = rootless(&["job"]);
+    facts.get_mut("job").unwrap().outside_family = 2;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "job",
+            AllocationPhase::Running,
+            resources(1000, 1000, 0),
+            Some(resources(1000, 1000, 0)),
+        )],
+        facts,
+        ..PolicyInput::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snapshot(), &input, 0)
+        .unwrap();
+    for key in ["cpu", "ram"] {
+        let notes = &decision.resources[&key.parse().unwrap()].reasons;
+        let note = notes
+            .iter()
+            .find(|r| r.code == "single_process_violated")
+            .unwrap_or_else(|| panic!("{key}: {notes:?}"));
+        assert!(
+            note.text.contains("job") && note.text.contains('2'),
+            "{note:?}"
+        );
+    }
+    assert!(decision.actions.is_empty() && decision.would_drain.is_empty());
+}
+
 /// GPU attribution unknown for one allocation, its device's entry missing from the
 /// observation, keeps its CPU and RAM readings: neither holds for it, while the device's
 /// memory charges it at max(request, last known) as unknown own usage, so its external usage

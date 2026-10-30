@@ -1596,3 +1596,25 @@ fn supervisor_runtime_code_never_uses_eprintln() {
         assert!(uses.is_empty(), "{file}: eprintln! on lines {uses:?}");
     }
 }
+
+/// Processes outside the verified family: the leader's children read from its `/proc` task
+/// lists, less the family, are counted and nothing else (FR-082).
+#[test]
+fn processes_outside_the_family_are_counted() {
+    use std::collections::BTreeSet;
+    assert_eq!(
+        cedegrid::supervision::parse_children("41 42\n43\n"),
+        BTreeSet::from([41, 42, 43])
+    );
+    assert_eq!(
+        cedegrid::supervision::outside_family(
+            &BTreeSet::from([10, 41, 42]),
+            &BTreeSet::from([10, 42])
+        ),
+        1
+    );
+    assert_eq!(
+        cedegrid::supervision::outside_family(&BTreeSet::from([10]), &BTreeSet::from([10])),
+        0
+    );
+}

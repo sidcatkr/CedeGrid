@@ -141,6 +141,7 @@ impl SupervisorControl for PipeControl {
                 hint_ready,
                 observes_drain,
                 causes,
+                outside_family,
             } => Event::State {
                 applied,
                 targets,
@@ -150,7 +151,11 @@ impl SupervisorControl for PipeControl {
                 hint_ready,
                 observes_drain,
                 causes,
+                outside_family,
             },
+            supervision::SupervisorReport::OutsideFamily { count } => {
+                Event::OutsideFamily { count }
+            }
             supervision::SupervisorReport::Readiness {
                 hint_ready,
                 observes_drain,

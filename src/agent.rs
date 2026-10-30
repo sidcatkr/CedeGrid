@@ -148,6 +148,13 @@ enum Event {
         /// Each applied step's cause; an older supervisor reports none.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         causes: BTreeMap<crate::contention::ResourceKey, crate::contention::YieldCause>,
+        /// Processes found outside the verified family; an older supervisor reports none.
+        #[serde(default)]
+        outside_family: u64,
+    },
+    /// More processes were found outside the verified family (FR-082).
+    OutsideFamily {
+        count: u64,
     },
     Readiness {
         hint_ready: bool,
@@ -622,6 +629,8 @@ struct ChildSlot {
     seed: Option<BTreeMap<crate::contention::ResourceKey, crate::contention::StepRequest>>,
     /// What the slot pass last read from the journal for this slot.
     journal_seen: Option<JournalSeen>,
+    /// The most processes the supervisor found outside the verified family (FR-082).
+    outside_family: u64,
 }
 
 /// What the slot pass last read from the journal for a slot, at which change key; while the
@@ -683,6 +692,7 @@ impl ChildSlot {
             applied_targets: self.applied_targets.clone(),
             ram_cap: false,
             step_codes: self.step_codes.clone(),
+            outside_family: self.outside_family,
         }
     }
 }
@@ -2072,6 +2082,7 @@ mod drain_tests {
             oom_verdict: None,
             seed: None,
             journal_seen: None,
+            outside_family: 0,
         }
     }
 

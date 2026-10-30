@@ -77,6 +77,43 @@ pub struct ExecutionOutcome {
     /// Why output capture stopped keeping bytes, if it did; the run's result is unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_capture_error: Option<String>,
+    /// The most processes found outside the verified family at once, none acted on (FR-082).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub single_process_violated: u64,
+}
+
+/// The PIDs a `/proc/<pid>/task/<tid>/children` list names.
+pub fn parse_children(text: &str) -> std::collections::BTreeSet<u32> {
+    text.split_whitespace()
+        .filter_map(|pid| pid.parse().ok())
+        .collect()
+}
+
+/// How many of the processes found are outside the verified family (FR-082).
+pub fn outside_family(
+    found: &std::collections::BTreeSet<u32>,
+    family: &std::collections::BTreeSet<u32>,
+) -> u64 {
+    found.difference(family).count() as u64
+}
+
+/// The leader's direct children, from each of its threads' `children` list, read-only; `None`
+/// where the list cannot be read (FR-082).
+pub(crate) fn leader_children(leader: u32) -> Option<std::collections::BTreeSet<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut children = std::collections::BTreeSet::new();
+        for task in std::fs::read_dir(format!("/proc/{leader}/task")).ok()? {
+            let path = task.ok()?.path().join("children");
+            children.extend(parse_children(&std::fs::read_to_string(path).ok()?));
+        }
+        Some(children)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = leader;
+        None
+    }
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -411,7 +448,13 @@ pub enum SupervisorReport {
             crate::contention::ResourceKey,
             crate::contention::YieldCause,
         >,
+        /// The most processes found outside the verified family so far (FR-082).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        outside_family: u64,
     },
+    /// More processes than before were found outside the verified family: the leader's
+    /// children in Tracked, leaf members in Full. None of them is acted on (FR-082).
+    OutsideFamily { count: u64 },
     /// Readiness changed: the worker acked its target file or used the
     /// supervisor socket (FR-062).
     Readiness {

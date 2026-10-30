@@ -458,6 +458,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "CPU busy time is unavailable, so CPU admission is blocked.",
     ),
     (
+        "single_process_violated",
+        "Processes outside the run's verified family were found; they are not measured as own work or stepped.",
+    ),
+    (
         "cap_at_minimum_duty",
         "The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval.",
     ),

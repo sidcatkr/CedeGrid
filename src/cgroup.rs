@@ -925,6 +925,15 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         }
     }
 
+    fn members(&self) -> Option<BTreeSet<u32>> {
+        self.leaf
+            .read("cgroup.procs")
+            .ok()?
+            .split_whitespace()
+            .map(|pid| pid.parse().ok())
+            .collect()
+    }
+
     fn step_code(&self, kind: ResourceKind) -> Option<&'static str> {
         match kind {
             ResourceKind::Ram => self.ram_refused.or_else(|| {
