@@ -1367,8 +1367,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 
 **Group 7: GPU (FR-021, FR-008)**
 
-- [ ] T328 [P] Write failing telemetry tests from report 029 run 5's two shapes: a duty-capped own process beside a light user whose samples lag the device reads measured, not unknown; a saturating user whose truncated means leave 1% unattributed creates no third principal; a disagreement beyond the tolerance still reads unknown, per FR-021 and research R33 (GPU-1, GPU-2) (contradicts)
-- [ ] T329 Measure device utilization from `Device::samples` over the interval and each PID's share over the whole interval, rounded, with the rounding remainder not a principal, in `src/telemetry/gpu.rs` and `src/telemetry.rs`, until T328 passes (GPU-1, GPU-2) (contradicts)
+- [X] T328 [P] Write failing telemetry tests from report 029 run 5's two shapes: a duty-capped own process beside a light user whose samples lag the device reads measured, not unknown; a saturating user whose truncated means leave 1% unattributed creates no third principal; a disagreement beyond the tolerance still reads unknown, per FR-021 and research R33 (GPU-1, GPU-2) (contradicts)
+- [X] T329 Measure device utilization from `Device::samples` over the interval and each PID's share over the whole interval, rounded, with the rounding remainder not a principal, in `src/telemetry/gpu.rs` and `src/telemetry.rs`, until T328 passes (GPU-1, GPU-2) (contradicts)
 - [ ] T330 [P] Write a failing policy test: while device telemetry is unknown, GPU compute caps and pauses hold, per FR-008 (GPU-3) (contradicts)
 - [ ] T331 Hold GPU compute ladder entries while device telemetry is unknown in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T330 passes (GPU-3) (contradicts)
 - [ ] T332 [P] Write a failing policy test: under GPU activity of unknown amount a 500 cap is credited at its applied duty and does not escalate to a pause, per FR-022 (GPU-4) (contradicts)

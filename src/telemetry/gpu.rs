@@ -1,6 +1,7 @@
 //! GPU devices through NVML: memory, activity classified over the quiet window,
 //! measured compute, external process identity, and the release check for own work.
 use super::*;
+use nvml_wrapper::{enums::device::SampleValue, struct_wrappers::device::Sample};
 
 pub(super) fn gpu_memory_mib(total: u64, used: u64) -> Option<(u64, u64)> {
     let total_mib = total / MIB;
@@ -392,6 +393,55 @@ pub(super) fn context_uid(pid: u32) -> Option<u32> {
     }
 }
 
+/// Device utilization over the per-process samples' interval: the mean of the device's own
+/// samples since the cursor, with their count, or the driver's latest rate without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeviceUtilization {
+    pub percent: u32,
+    /// The device's samples over the interval; each PID's share is its summed samples over
+    /// this count, so time a process was stopped counts as idle (FR-021, R33).
+    pub samples: Option<u64>,
+}
+
+impl From<u32> for DeviceUtilization {
+    fn from(percent: u32) -> Self {
+        Self {
+            percent,
+            samples: None,
+        }
+    }
+}
+
+/// The device's utilization over the interval from its samples newer than `previous`, rounded
+/// to the nearest point, else `rate`, the driver's latest sample period.
+pub(super) fn device_utilization(
+    samples: &std::result::Result<Vec<Sample>, NvmlError>,
+    previous: Option<u64>,
+    rate: Option<u32>,
+) -> Option<DeviceUtilization> {
+    let values: Vec<u64> = match (samples, previous) {
+        (Ok(samples), Some(previous)) => samples
+            .iter()
+            .filter(|sample| sample.timestamp > previous)
+            .filter_map(|sample| match sample.value {
+                SampleValue::U32(value) => Some(u64::from(value.min(100))),
+                SampleValue::U64(value) => Some(value.min(100)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if values.is_empty() {
+        return rate.map(DeviceUtilization::from);
+    }
+    let count = values.len() as u64;
+    let percent = (values.iter().sum::<u64>() + count / 2) / count;
+    Some(DeviceUtilization {
+        percent: u32::try_from(percent).unwrap_or(100),
+        samples: Some(count),
+    })
+}
+
 /// External and own GPU compute of one interval, in thousandths of device time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ComputeAmount {
@@ -421,18 +471,20 @@ pub(super) fn process_name(pid: u32) -> Option<String> {
 }
 
 /// The interval's GPU compute per side from fresh per-process samples: each PID's
-/// average, capped at 100%, own PIDs being the verified managed ones, all others
-/// external. The amount is trusted only when the sum is within `tolerance` points
+/// share of the whole interval, its summed samples over the device's sample count rounded
+/// to the nearest point and capped at 100%, own PIDs being the verified managed ones, all
+/// others external. The amount is trusted only when the sum is within `tolerance` points
 /// of device utilization over the same interval (FR-021). While an external PID is
-/// listed, device time nobody accounts for is external too, the unattributed
-/// part; with own PIDs only it is sampling error on own work.
+/// listed, device time nobody accounts for beyond one point per sampled process is
+/// external too, the unattributed part; within that it is rounding, and with own PIDs
+/// only it is sampling error on own work (R33).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn measure_compute(
     external: Option<&[u32]>,
     own: &BTreeSet<u32>,
     previous: Option<u64>,
     samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
-    device: Option<u32>,
+    device: Option<DeviceUtilization>,
     mps: bool,
     tolerance: u8,
     background: &BTreeSet<u32>,
@@ -470,20 +522,31 @@ pub(super) fn measure_compute(
         *sum += u64::from(sample.sm_util.min(100));
         *count += 1;
     }
+    // Without the device's own sample count, the PID sampled most often stands for the
+    // interval's length.
+    let slots = device
+        .samples
+        .filter(|count| *count > 0)
+        .or_else(|| per_pid.values().map(|(_, count)| *count).max())
+        .unwrap_or(1);
+    let sampled = per_pid.len() as u64;
     let (mut external_percent, mut own_percent, mut background_percent) = (0u64, 0u64, 0u64);
     let mut by_pid = BTreeMap::new();
-    for (pid, (sum, count)) in per_pid {
+    for (pid, (sum, _)) in per_pid {
+        let share = ((sum + slots / 2) / slots).min(100);
         // Background contexts are neither side: their share leaves the device's time.
         if background.contains(&pid) {
-            background_percent += sum / count;
+            background_percent += share;
         } else if own.contains(&pid) {
-            own_percent += sum / count;
+            own_percent += share;
         } else {
-            external_percent += sum / count;
-            by_pid.insert(pid, (sum / count).min(100) * 10);
+            external_percent += share;
+            by_pid.insert(pid, share * 10);
         }
     }
-    let device = device.saturating_sub(u32::try_from(background_percent).unwrap_or(u32::MAX));
+    let device = device
+        .percent
+        .saturating_sub(u32::try_from(background_percent).unwrap_or(u32::MAX));
     let total = external_percent + own_percent;
     if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
         return (
@@ -495,8 +558,13 @@ pub(super) fn measure_compute(
     }
     let device = u64::from(device);
     let (external_percent, own_percent) = if external.is_some_and(|pids| !pids.is_empty()) {
+        let remainder = device.saturating_sub(total);
         (
-            external_percent.max(device.saturating_sub(own_percent)),
+            if remainder <= sampled {
+                external_percent
+            } else {
+                external_percent + remainder
+            },
             own_percent,
         )
     } else {

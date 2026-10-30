@@ -759,6 +759,11 @@ impl Collector {
                 self.gpu_sample_max_age,
             );
             let samples = device.process_utilization_stats(previous);
+            // The device's own samples over the same interval (R33).
+            let device_samples = device.samples(
+                nvml_wrapper::enum_wrappers::device::Sampling::GpuUtilization,
+                previous,
+            );
             // Include query latency in the freshness bound. Preserve the actual
             // submitted cursor in diagnostics even if it expires during the call.
             let baseline_age = baseline.map(|(_, at)| at.elapsed());
@@ -845,7 +850,7 @@ impl Collector {
                     &self.managed_pids,
                     activity_baseline,
                     &samples,
-                    utilization_percent,
+                    device_utilization(&device_samples, activity_baseline, utilization_percent),
                     mps,
                     self.attribution_tolerance_percent,
                     &background,
@@ -1260,7 +1265,7 @@ mod tests {
                 &own,
                 Some(100),
                 &samples,
-                Some(63),
+                Some(63.into()),
                 false,
                 15,
                 &background
@@ -1281,7 +1286,7 @@ mod tests {
             &own,
             Some(100),
             &both,
-            Some(83),
+            Some(83.into()),
             false,
             15,
             &background,
@@ -1298,6 +1303,157 @@ mod tests {
             classify_activity(Some(&[]), Some(100), None).0,
             ComputeActivity::Idle
         );
+    }
+
+    fn device_sample(
+        timestamp: u64,
+        percent: u32,
+    ) -> nvml_wrapper::struct_wrappers::device::Sample {
+        nvml_wrapper::struct_wrappers::device::Sample {
+            timestamp,
+            value: nvml_wrapper::enums::device::SampleValue::U32(percent),
+        }
+    }
+
+    /// Report 029 run 5's two shapes (FR-021, R33). An own process duty-capped to a third of
+    /// the interval at 60% beside a light 10% user: the device reads 30%, and each process at
+    /// its share of the whole interval accounts for it, so compute is measured, not unknown.
+    /// A saturating pair whose means round to 99 of 100 points leaves no remainder to count
+    /// as a third principal. A disagreement beyond the tolerance still reads unknown.
+    #[test]
+    fn gpu_compute_counts_each_process_over_the_whole_interval() {
+        let own = BTreeSet::from([7]);
+        let mut capped = vec![];
+        let mut device = vec![];
+        for (i, at) in (110..=160).step_by(10).enumerate() {
+            capped.push(gpu_sample(42, at, 10));
+            let running = i < 2;
+            if running {
+                capped.push(gpu_sample(7, at, 60));
+            }
+            device.push(device_sample(at, if running { 70 } else { 10 }));
+        }
+        let interval = device_utilization(&Ok(device.clone()), Some(100), Some(70));
+        assert_eq!(
+            interval,
+            Some(DeviceUtilization {
+                percent: 30,
+                samples: Some(6)
+            })
+        );
+        let (amount, by_pid) = measure_compute(
+            Some(&[42]),
+            &own,
+            Some(100),
+            &Ok(capped.clone()),
+            interval,
+            false,
+            15,
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            amount,
+            ComputeAmount::Measured {
+                external: 100,
+                own: 200
+            }
+        );
+        assert_eq!(by_pid, BTreeMap::from([(42, 100)]));
+        // Without the device's samples the light user's six stand for the interval.
+        assert_eq!(
+            measure_compute(
+                Some(&[42]),
+                &own,
+                Some(100),
+                &Ok(capped),
+                Some(30.into()),
+                false,
+                15,
+                &BTreeSet::new(),
+            )
+            .0,
+            ComputeAmount::Measured {
+                external: 100,
+                own: 200
+            }
+        );
+        // Saturated: own at 49.4% and the user at 50% of five samples on a device at 100%.
+        let mut saturated = vec![];
+        for (at, own_util, user) in [
+            (110, 50, 50),
+            (120, 49, 50),
+            (130, 50, 50),
+            (140, 49, 50),
+            (150, 49, 50),
+        ] {
+            saturated.push(gpu_sample(7, at, own_util));
+            saturated.push(gpu_sample(42, at, user));
+        }
+        let (amount, by_pid) = measure_compute(
+            Some(&[42]),
+            &own,
+            Some(100),
+            &Ok(saturated),
+            Some(DeviceUtilization {
+                percent: 100,
+                samples: Some(5),
+            }),
+            false,
+            15,
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            amount,
+            ComputeAmount::Measured {
+                external: 500,
+                own: 490
+            }
+        );
+        assert_eq!(by_pid, BTreeMap::from([(42, 500)]));
+        // Shares that account for 30 points of a device at 50% are beyond the tolerance.
+        assert!(matches!(
+            measure_compute(
+                Some(&[42]),
+                &own,
+                Some(100),
+                &Ok(device_sample_free(&device)),
+                Some(DeviceUtilization {
+                    percent: 50,
+                    samples: Some(6),
+                }),
+                false,
+                15,
+                &BTreeSet::new(),
+            )
+            .0,
+            ComputeAmount::Unknown(reason) if reason.contains("differs")
+        ));
+        // Device samples older than the cursor, or none, fall back to the driver's rate.
+        assert_eq!(
+            device_utilization(&Ok(device), Some(200), Some(70)),
+            Some(70.into())
+        );
+        assert_eq!(
+            device_utilization(&Err(NvmlError::NotSupported), Some(100), None),
+            None
+        );
+    }
+
+    /// The capped shape's process samples, for the disagreement case.
+    fn device_sample_free(
+        device: &[nvml_wrapper::struct_wrappers::device::Sample],
+    ) -> Vec<ProcessUtilizationSample> {
+        device
+            .iter()
+            .enumerate()
+            .flat_map(|(i, sample)| {
+                let mut out = vec![gpu_sample(42, sample.timestamp, 10)];
+                if i < 2 {
+                    out.push(gpu_sample(7, sample.timestamp, 60));
+                }
+                out
+            })
+            .collect()
     }
 
     /// External GPU compute is measured from fresh per-process samples, averaged
@@ -1317,15 +1473,15 @@ mod tests {
                 &own,
                 Some(100),
                 samples,
-                device,
+                device.map(Into::into),
                 false,
                 15,
                 &BTreeSet::new(),
             )
             .0
         };
-        // One external PID at 5% beside own work at 94%, on a device at 100%: the
-        // unattributed point counts as external while an external PID is listed.
+        // One external PID at 5% beside own work at 94%, on a device at 100%: one point per
+        // sampled process is rounding, not unattributed usage (R33).
         let five = ok(vec![
             gpu_sample(42, 110, 5),
             gpu_sample(7, 110, 94),
@@ -1337,7 +1493,16 @@ mod tests {
         assert_eq!(
             measure(&five, Some(100)),
             ComputeAmount::Measured {
-                external: 60,
+                external: 50,
+                own: 940
+            }
+        );
+        // Beyond that, device time nobody accounts for is external while an external PID
+        // is listed.
+        assert_eq!(
+            measure(&five, Some(103)),
+            ComputeAmount::Measured {
+                external: 90,
                 own: 940
             }
         );
@@ -1386,7 +1551,7 @@ mod tests {
                 &own,
                 Some(100),
                 &own_only,
-                Some(100),
+                Some(100.into()),
                 false,
                 15,
                 &BTreeSet::new()
@@ -1409,7 +1574,7 @@ mod tests {
                 &own,
                 Some(100),
                 &five,
-                Some(100),
+                Some(100.into()),
                 false,
                 15,
                 &BTreeSet::new()
@@ -1423,7 +1588,7 @@ mod tests {
                 &own,
                 None,
                 &five,
-                Some(100),
+                Some(100.into()),
                 false,
                 15,
                 &BTreeSet::new()
@@ -1432,7 +1597,7 @@ mod tests {
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100), true, 15, &BTreeSet::new()).0,
+            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100.into()), true, 15, &BTreeSet::new()).0,
             ComputeAmount::Unknown(reason) if reason.contains("MPS")
         ));
         // A PID above 100 counts as 100.
