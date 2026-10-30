@@ -949,6 +949,164 @@ maintainer's typed approval after report 029-2.
   - VII: the worker-context and wire additions are optional fields, in all three languages with
     the contract fixture; old configurations load, with the default-mode notice.
 
+## Item 030: the cross-checked fixes (2026-10-30)
+
+Spec Session 2026-10-30's nine answers (amended FR-008, FR-021, FR-022, FR-034; new FR-078 to
+FR-082) and the item 030 addendum's list, in its order. The problem statements are the verified
+findings of the two audits of `a2f68aa` (`030-findings.md`, `030-reviewer-findings.md` in the
+review outbox). Each finding: a failing test first, the fix, one commit. A medium finding no
+test reproduces moves to the report's appendix instead. The 32 low findings are deferred.
+
+**Technical Context**: Rust 1.88, no new dependency. `libc::prctl(PR_SET_PDEATHSIG)` in the
+worker gate; std `CommandExt::process_group` for supervisors; `nvml-wrapper` 0.11's
+`Device::samples(Sampling::GpuUtilization, ..)` for device utilization over the interval;
+`tokio::time::timeout` for coordinator RPCs. Linux-only parts (parent-death signal, `/proc`
+children, cgroup leaf members, NVML) are tested on Linux in the Docker check and with fakes on
+macOS. No NEEDS CLARIFICATION remains.
+
+1. **Retention and history loading (FR-081; AGT-1, EFF-1, EFF-3, EFF-5, R4)**:
+   - `ExecutionJournal` gains `active_executions()`: rows not Released, in SQL. The loop's
+     per-iteration passes (slot service, outbox recovery, `allocation_facts`, sampling) use it.
+     Released rows are scanned once at start for spool reclamation and outbox recovery; a record
+     reaching Released during the run is reclaimed when it gets there, then never again.
+   - The heartbeat reports active rows plus the last 256 Released ones (by release time), and
+     the coordinator's 2048 bound stays.
+   - `observations`: after each insert, every 600th iteration deletes rows older than 24 h and
+     rows beyond the newest 200,000, in one statement.
+   - An attempt's directory under `attempts/` is removed once its outcome receipt is written and
+     publication GC has nothing left in it; `spool_size` keeps a running total updated on
+     reservation, release and removal instead of walking the tree every 5 s.
+   - `upgrade_attempt_held`'s schema check runs once per agent start.
+2. **Supervisor death and stop state (FR-078; SUP-1 with 028 Decision 1, SUP-5/R2, SUP-4,
+   SUP-6)**:
+   - The worker gate calls `prctl(PR_SET_PDEATHSIG, SIGKILL)` for Opportunistic work and
+     `SIGCONT` for Guaranteed work before exec, then checks `getppid()` against the supervisor
+     it was started by and exits if it already changed. The signal reaches only the gate's own
+     process, a verified own process, and is set before the user's command runs.
+   - The supervisor installs SIGTERM, SIGINT and SIGHUP handlers that set a flag; its loop then
+     releases runtime steps and drains, as for a drain request. Supervisors are started in their
+     own process group, so a terminal's SIGINT or SIGHUP to the agent's group does not reach
+     them.
+   - `CgroupActuator::reconcile` (on a reattaching agent's Query) thaws a leaf found frozen when
+     the applied steps record no Pause, after verifying membership; a recorded Pause stays.
+   - Rootless stop state: `stopped` is set before the family signal, `resume` and `release`
+     send SIGCONT to every member whatever the flag, and the family signal continues past a
+     failing member and returns the first error after signalling the rest.
+   - A failed `release` is reported (`step_release_failed`), never discarded, and a refused thaw
+     is retried every tick while `cgroup.freeze` stays recorded.
+   - After the leader exits, the actuator keeps ticking while children run, and releases when
+     the children's drain starts.
+3. **Log capture and supervisor errors (SUP-2, R3, SUP-7, AGT-9)**:
+   - The capture thread never closes the pipe's read end before the writer is gone: a quota,
+     write or reservation error switches it to read-and-discard, counting dropped bytes in the
+     outcome. The spool reservation is taken in chunks of at least 1 MiB, not per read.
+   - Errors in the supervisor's own bookkeeping after EXEC (`try_wait`, the child server's
+     `poll` and `accept`, `logs.finish`) hold the current step and report, as `control.poll`
+     errors already do; a capture error after a clean leader exit is recorded in the outcome,
+     not a failure.
+   - The error path drains managed children before SIGKILL, and keeps a running Guaranteed
+     leader supervised.
+   - Every supervisor message goes through the non-panicking `report` helper; no `eprintln!`
+     remains on the supervisor's runtime paths.
+4. **Heartbeat freshness and loop health (FR-079; AGT-2, AGT-3, AGT-4, AGT-6)**:
+   - The node report carries `sample_age_ms`, the agent's monotonic time from the sample to the
+     send (negotiated; an older agent's report keeps the wall-clock check). A stale report
+     marks the node stale in the coordinator: no renewals and no new offers until a fresh
+     report, and no drain because of it.
+   - Reconciliation checks a NeedsReconciliation record's GPU release with one NVML read per
+     heartbeat, never a sleep loop, and backs off to every 10th heartbeat after 3 checks.
+   - Each coordinator RPC in the loop runs under `tokio::time::timeout` of half the monitor
+     interval; on timeout the iteration goes on to sampling and yielding and the request is
+     retried next iteration (lease items are idempotent per item, FR-074).
+   - Transient iteration errors (`EPIPE` on stdout, `NotFound` while walking the spool, a
+     panicked preparation or publication task, `ENOSPC` on a refusal proof) are reported and
+     skip the interval, like `EMFILE`; other errors still end the loop.
+5. **Agent stop, reload and re-adoption (FR-080; AGT-5, AGT-7, AGT-8, AGT-10, AGT-11)**:
+   - SIGTERM and SIGINT end the agent's loop without draining; supervisors keep running for
+     re-adoption, and Opportunistic work drains at its lease deadline if no agent re-adopts it.
+     An explicit operator drain, and `max_runtime_seconds`, still drain everything.
+   - SIGHUP reloads the configuration: the file is parsed and validated; if only `[contention]`
+     sections differ, the new settings apply from the next iteration (`config_reloaded`);
+     otherwise nothing changes and the agent reports `config_reload_refused` with the keys that
+     need a restart.
+   - Re-adoption: a live supervisor whose Query failed is retried on later iterations, with
+     backoff, until it answers or exits; replay mode re-adopts as well.
+   - The coordinator extends an Opportunistic offer's deadline whenever the agent reports it
+     preparing (heartbeat phase), so a long preparation does not expire it.
+   - The journal keeps each run's start and last checkpoint times; re-adoption restores them,
+     so victim order sees the progress a restart would lose.
+6. **Policy (FR-008, FR-022; POL-1 to POL-5)**:
+   - CPU unknown in Performance and Aggressive: the policy keeps the last known CPU view; while
+     CPU is unknown the budget is Neutral's fair share of that view with one more contending
+     principal of unbounded demand, and with no view yet no new step is taken (current steps
+     hold). Yield First and Neutral keep budget 0.
+   - Performance pauses only on a cap the supervisor reports at the minimum duty
+     (`cap_at_minimum_duty`, from the actuator's duty) with own usage above the fair share.
+   - While RAM is held, the last known memory fair share stays in force, so in-share own memory
+     keeps FR-023's protection; a breach episode's save-progress request goes out when the
+     protection applies.
+   - External memory peaks, CPU satisfied records, probes, the quiet count and allocations' p95
+     windows carry across held and unknown intervals.
+   - POL-5 (PLAUSIBLE): a test of a satisfied record above current usage under own-caused
+     saturation first; if it cycles, saturation is judged with own work at its Neutral share.
+7. **GPU (FR-021; GPU-1 to GPU-5)**:
+   - `measure_compute` averages device utilization from `Device::samples` over the same
+     interval as the per-process samples, and counts each PID at its sum of samples divided by
+     the device's sample count, so periods without a sample count as idle. Means round to the
+     nearest point; a remainder within one point per listed process is not unattributed usage.
+     A disagreement beyond the tolerance still reads unknown.
+   - Device telemetry unknown: the GPU compute ladder entries are held, not dropped.
+   - Activity of unknown amount: applied duties are credited as on the unsettled measured path.
+   - GPU memory joins `unknown_windows`, with RAM's window.
+8. **029 Decisions 1 and 2 (FR-034, FR-080)**:
+   - A draining stop sends at most as many Drain lines per iteration as fit within 250 ms of
+     the iteration's budget, the rest the next iteration, so no iteration exceeds the 1 s
+     cadence; renewals and heartbeats go first.
+   - Once the quiet count says contention has ended, held CPU caps move to the mode's target in
+     one move, in every mode, as the allowance does.
+9. **cgroup, telemetry and cost (SUP-3, TEL-1 to TEL-5, EFF-2, EFF-4, AGT-12/R6)**:
+   - A managed child under the cgroup backend is verified against its own identity, and the
+     leaf's expected membership is the leader plus its verified children.
+   - The busy upper bound counts iowait as idle. Own RAM is the leaf's `memory.current` in
+     Full; on the rootless path it adds each verified process's `Pss_Shmem`.
+   - Validation requires `monitor.interval_ms` below `gpu.process_sample_max_age_ms`; the GPU
+     sample cursor's age refreshes when its timestamp is unchanged.
+   - The CPU set is intersected with `/sys/devices/system/cpu/online`.
+   - GPU attribution unknown marks only the allocation's GPU reading unknown; CPU and RAM
+     bounds stay.
+   - The journal cache key is taken again after the agent's own observation insert, so only
+     other writes invalidate it. Messages to supervisors are serialized to a buffer and
+     written once.
+   - An OOM verdict trusts a known leaf `oom_kill` count over the host count; uncounted OOM
+     requeues stop at 3 × `max_attempts`, then count as attempts.
+10. **Forks outside the SDK and SDK reads (FR-082; R1, SDK-1 with R5, SDK-2)**:
+    - Every interval the supervisor lists processes outside the verified family: the leaf's
+      `cgroup.procs` in Full; the children named in `/proc/<leader>/task/*/children`, read
+      through the leader's verified `/proc` directory, in Tracked. Any process outside the
+      family sets `single_process_violated` (status, `explain`, the outcome), once per run,
+      with the count. Nothing is done to those processes. The README states the limit.
+    - SDKs: the stat identity is stored only after a successful read, and the file is parsed
+      again while its mtime is within 50 ms of now. Drain hooks are isolated like resource
+      hooks; `DrainRequested` is raised after them.
+
+**Constitution Check (7.0.0)**:
+- I: the parent-death signal is set by the gate on its own process before exec, a verified own
+  process; R1's detection reads `/proc` and `cgroup.procs` only and acts on nothing outside the
+  family; the cgroup thaw on reattach verifies membership first. Pass.
+- II: Opportunistic work killed with its dead supervisor gives its capacity back, and a second
+  copy never runs beside an uncontrolled first; Performance's CPU-unknown hold at Neutral's fair
+  share and the GPU measurement fixes remove losses the loss rule does not allow. No priority is
+  raised. Pass.
+- III: CPU unknown still counts as busy (Neutral's share with the unknown as a principal, or no
+  new step), and GPU memory unknown gets a bounded window, not an instant drain; a stale report
+  stops grants, a graduated response. Pass.
+- IV: the policy changes stay pure; signals, thaws and file removal stay in the agent and the
+  supervisor; detection is read-only telemetry. Pass.
+- VI: tests first per finding. Pass.
+- VII: `sample_age_ms` is a negotiated optional field; old agents and coordinators keep working.
+  Pass.
+No violation; no Complexity Tracking entry.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

@@ -410,3 +410,20 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - `reservations.yield_cause TEXT`
 - A CHECK constraint on `reservations.phase`
 - Triggers are recreated by the migration
+
+## Item 030 additions
+
+- `NodeReport.sample_age_ms` (u64, optional, `report_age/1`): the agent's monotonic age of the
+  sample at send. A coordinator node row keeps `stale_since` while reports are stale; no grants
+  or offers go to a stale node.
+- `ExecutionJournal::active_executions()`: rows not Released. Execution records keep
+  `started_at_unix_ms` and `last_checkpoint_at_unix_ms`, restored on re-adoption.
+- `observations`: kept for 24 h and at most 200,000 rows.
+- Supervisor events `adjusted` and `state` gain `outside_family` (count of processes outside the
+  verified family, FR-082) and `min_duty` (resources whose cap runs at the minimum duty). The
+  outcome gains `single_process_violated` (count) and `log_bytes_dropped`.
+- `PolicyState` keeps the last known CPU view for Performance's unknown hold, the last memory
+  fair share while RAM is held, and the peaks, satisfied records, probes, quiet count and p95
+  windows across held intervals.
+- Reason codes: `single_process_violated`, `config_reloaded`, `config_reload_refused`,
+  `report_stale` (coordinator), `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`.

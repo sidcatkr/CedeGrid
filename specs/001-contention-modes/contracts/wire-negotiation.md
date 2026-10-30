@@ -7,6 +7,7 @@
 | `api/1` | Today's protocol |
 | `contention/1` | Everything below; frozen when released, so a later field needs `contention/2` |
 | `lease_batch/1` | `Request::Leases` and `Response::Leases` (FR-074) |
+| `report_age/1` | `NodeReport.sample_age_ms`, the agent's monotonic age of its sample; a stale report gets no renewals or offers and causes no drain (FR-079, item 030) |
 
 ## Lease batches (`lease_batch/1`)
 

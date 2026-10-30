@@ -163,3 +163,18 @@ cargo test --locked --test coordinator mixed_version -- --test-threads=1
 - Recorded 0.2 agent heartbeats are accepted.
 - Replies to 0.2 agents never contain new `LaunchRequest` fields.
 - A new agent sends no new fields before `contention/1` is advertised (SC-008).
+
+## 9. Item 030 fixes (any OS for the unit tests; Linux for the signal, `/proc` and cgroup parts)
+
+- `cargo test --locked --test supervision` and `--test managed_supervision`: a supervisor killed
+  in an off phase leaves no stopped Opportunistic workload (it is killed) and a running
+  Guaranteed one; SIGTERM to a supervisor releases and drains.
+- `cargo test --locked --test agent`: SIGTERM to the agent leaves supervisors running and a new
+  agent re-adopts them; a heartbeat stays accepted after 2100 released executions; SIGHUP applies
+  a mode change and refuses a path change.
+- `cargo test --locked --test policy --test contention`: CPU unknown in Performance holds
+  Neutral's fair share; caps return to the target in one move at the quiet count.
+- `cargo test --locked --test telemetry`: run 5's two shapes measure without unknown and without
+  a phantom principal.
+- On the test host, after the user's typed approval: run 5 again beside the light and saturating
+  GPU users, in Performance and Neutral (`native-gates.md`).

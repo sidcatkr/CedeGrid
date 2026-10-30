@@ -68,3 +68,10 @@ These are new:
 - **Agent loss.** On stdin EOF with no socket controller, the supervisor holds the applied
   steps. The existing lease-expiry rules then apply.
 - **Errors.** No control or actuation error leads straight to SIGKILL (R3).
+- **Signals (item 030, FR-078).** The supervisor turns SIGTERM, SIGINT and SIGHUP into a release
+  of runtime steps and a drain. It runs in its own process group. Its gate sets a parent-death
+  signal before exec: SIGKILL for Opportunistic work, SIGCONT for Guaranteed work.
+- **Outside the family (item 030, FR-082).** `adjusted` and `state` carry `outside_family`, the
+  count of processes found outside the verified family this interval (leaf members in Full, the
+  leader's children in Tracked), and `min_duty`, the resources whose cap runs at the minimum
+  duty. Nothing is done to processes outside the family.

@@ -627,3 +627,69 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: every own process at 1000 (rejected by constitution 7.0.0: in-share own work
   died first for others' growth; kept as the opt-in `ram.prefer_own_oom_victim`); a negative
   value for in-share work (needs privilege; a later System mode).
+
+## R29. Work whose supervisor died (item 030)
+
+- **Decision**: the worker gate sets `PR_SET_PDEATHSIG` before exec: SIGKILL for Opportunistic
+  work, SIGCONT for Guaranteed work; it then compares `getppid()` with the supervisor it was
+  started by and exits if the parent already changed. The supervisor turns SIGTERM, SIGINT and
+  SIGHUP into a release and drain. Supervisors run in their own process group.
+- **Kernel facts** (`prctl(2)`): the signal is sent when the thread that created the child
+  exits; it is kept across `execve` except for set-user-ID, set-group-ID or file-capability
+  binaries, and it is not inherited by the workload's own children. A frozen cgroup v2 task and a
+  stopped task both die on SIGKILL; SIGCONT resumes a stopped task.
+- **Rationale**: without its supervisor an Opportunistic workload has no owner holding its
+  handle, so it can be neither yielded nor drained, and after its lease expires the coordinator
+  starts a second copy. Guaranteed work survives coordinator loss already, so it continues.
+  A separate process group keeps a terminal's SIGINT or SIGHUP to the agent from reaching
+  supervisors, which FR-080 leaves running.
+- **Alternatives**: a subreaper that resumes orphans (it would have to act on processes through
+  a handle it does not own); thawing from the agent (no handle; Principle I).
+
+## R30. A report's age on the wire (item 030)
+
+- **Decision**: `NodeReport.sample_age_ms`, behind a new feature `report_age/1`: the agent's
+  monotonic milliseconds from the sample's start to the send. The coordinator judges freshness
+  by it when negotiated, and by its wall clock against `observed_at_unix_ms` otherwise.
+- **Rationale**: two hosts' wall clocks can differ by seconds; one monotonic age measured on one
+  host cannot. Transit time is not counted, which is the same for either check.
+- **Alternatives**: a coordinator-side receive timestamp (still compares sample time on another
+  host); a larger `telemetry_ttl_ms` (hides real staleness).
+
+## R31. The reload trigger (item 030)
+
+- **Decision**: SIGHUP reloads the agent's configuration file. A file that validates and differs
+  only in `[contention]` sections applies from the next iteration; any other difference is
+  refused with `config_reload_refused`, naming the keys, and the running settings stay.
+- **Rationale**: SIGHUP is the usual daemon reload signal and needs no new command or socket.
+  Mode settings are what operators change at run time (the spec's assumptions); paths, the
+  coordinator, TLS and storage profiles are read once and would need a restart to apply safely.
+- **Alternatives**: a reload command over a new local socket (more surface); restarting the
+  agent, which FR-080 now allows without losing work but which still pauses scheduling.
+
+## R32. Retention constants (item 030)
+
+- **Decision**: heartbeats report active executions plus the last 256 Released ones; the
+  `observations` table keeps 24 h and at most 200,000 rows, pruned every 600 iterations; an
+  attempt's directory goes once its outcome receipt is written and publication GC has emptied
+  it.
+- **Rationale**: 256 Released entries cover the coordinator's reconciliation of recent outcomes
+  well inside its 2048 bound with 117 running tasks; 200,000 rows hold more than 24 h at the
+  500 ms default, and the only reader takes the newest rows; pruning every 600 iterations keeps
+  the delete off most iterations.
+- **Alternatives**: operator keys for each (a config change; later if needed).
+
+## R33. GPU compute over the whole interval (item 030)
+
+- **Decision**: device utilization is the mean of `Device::samples(GpuUtilization)` since the
+  previous read, the same interval the per-process samples cover; each PID's share is its summed
+  `sm_util` over those samples divided by the device's sample count, rounded to the nearest
+  point. A remainder of device minus listed processes up to one point per listed process is
+  rounding, not unattributed usage.
+- **Rationale**: a process stopped for part of each period has no samples while stopped; dividing
+  by its own sample count read its busy level (run 5: 56% against a device at 13–36%), and
+  truncation left a one-point remainder that the 1% principal floor counted as a principal (run
+  5: a fair share of 334 instead of 500). Comparing like with like keeps the tolerance check
+  meaningful.
+- **Alternatives**: crediting own processes at their applied duty (only covers own work);
+  raising the principal floor (hides small real users).
