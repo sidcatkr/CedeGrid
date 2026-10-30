@@ -223,6 +223,24 @@ impl Interval<'_> {
                 .insert(key.clone(), peak.saturating_sub(external));
             self.next.external_peaks.insert(key.clone(), samples);
         }
+        // A memory resource still present but unknown this interval keeps its peaks, which
+        // age out by time once it is known again (FR-060).
+        let present = |key: &ResourceKey| match key {
+            ResourceKey::GpuMemory(uuid) => snapshot.gpus.iter().any(|gpu| &gpu.uuid == uuid),
+            _ => true,
+        };
+        for (key, samples) in &prev.external_peaks {
+            if !self.next.external_peaks.contains_key(key) && present(key) {
+                self.next
+                    .external_peaks
+                    .insert(key.clone(), samples.clone());
+                for (id, samples) in &prev.process_peaks {
+                    if &id.0 == key {
+                        self.next.process_peaks.insert(id.clone(), samples.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Admission headroom: the budget less every charge, less the external memory

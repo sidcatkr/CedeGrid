@@ -3454,6 +3454,33 @@ fn memory_headroom_uses_the_external_peak_over_its_window() {
     assert_eq!(headroom(26_000, 10_500), 25_000);
 }
 
+/// One unknown RAM interval keeps the external peaks: once RAM is known again, admission
+/// still subtracts the window's peak until it ages out (FR-060, POL-4).
+#[test]
+fn an_unknown_ram_interval_keeps_the_external_peaks() {
+    let mut cfg = config();
+    cfg.contention.ram.memory_peak_window_s = Some(10);
+    cfg.contention
+        .acknowledge_caution
+        .insert("relaxed_detection".into());
+    let mut engine = PolicyEngine::new();
+    let mut headroom = |available: Option<u64>, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = available;
+        engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .ram_mib
+    };
+    assert_eq!(headroom(Some(26_000), 0), 25_000);
+    assert_eq!(headroom(Some(16_000), 500), 15_000);
+    assert_eq!(headroom(None, 1000), 0);
+    assert_eq!(headroom(Some(26_000), 1500), 15_000);
+    assert_eq!(headroom(Some(26_000), 10_000), 15_000);
+    assert_eq!(headroom(Some(26_000), 10_500), 25_000);
+}
+
 /// A quiet GPU context's memory counts toward the device's external peak.
 #[test]
 fn a_quiet_gpu_context_counts_toward_the_device_peak() {
@@ -6179,6 +6206,43 @@ mod measurement_window {
         assert_eq!(credit(None), 0);
         assert_eq!(credit(Some(200)), 50);
     }
+}
+
+/// One missing observation keeps an allocation's admission p95 window: once observed again
+/// it is charged at its p95 at once, not at its request for another window (POL-4).
+#[test]
+fn a_missing_observation_keeps_the_admission_p95_window() {
+    let cfg = config();
+    let job = |observed: Option<Resources>| PolicyInput {
+        allocations: vec![allocation(
+            "a",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            observed,
+        )],
+        facts: rootless(&["a"]),
+        ..Default::default()
+    };
+    let seen = job(Some(resources(1000, 0, 0)));
+    let snap = snapshot();
+    let mut engine = PolicyEngine::new();
+    let mut now = 0;
+    let mut credit = 0;
+    while now <= 61_000 {
+        credit = engine
+            .evaluate(&cfg, &snap, &seen, now)
+            .unwrap()
+            .cpu_admission_credit_millicores;
+        now += 500;
+    }
+    assert_eq!(
+        credit, 3000,
+        "charged at its 1000m p95, not its 4000m request"
+    );
+    engine.evaluate(&cfg, &snap, &job(None), now).unwrap();
+    now += 500;
+    let back = engine.evaluate(&cfg, &snap, &seen, now).unwrap();
+    assert_eq!(back.cpu_admission_credit_millicores, 3000);
 }
 
 /// A CPU drain planned while an allocation was pending cancels the reservation; once the

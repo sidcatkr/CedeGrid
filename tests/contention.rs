@@ -3388,6 +3388,8 @@ mod psi_saturation {
         cap: Option<u64>,
         wants: u64,
         class: AllocationClass,
+        /// Whether own usage is observed; without it CPU holds.
+        observed: bool,
     }
 
     impl Host {
@@ -3405,6 +3407,7 @@ mod psi_saturation {
                 cap: None,
                 wants: 5500,
                 class: AllocationClass::Opportunistic,
+                observed: true,
             }
         }
 
@@ -3447,7 +3450,12 @@ mod psi_saturation {
             kernel.cpu_pressure = pressure;
             snap.kernel = Some(kernel);
             let input = PolicyInput {
-                allocations: vec![allocation("own", self.class, 1000, Some(own))],
+                allocations: vec![allocation(
+                    "own",
+                    self.class,
+                    1000,
+                    self.observed.then_some(own),
+                )],
                 facts: BTreeMap::from([(
                     "own".into(),
                     AllocationFacts {
@@ -3645,6 +3653,33 @@ mod psi_saturation {
                 codes(&decision).iter().all(|c| c != "probing_demand"),
                 "interval {i}: {:?}",
                 codes(&decision)
+            );
+        }
+    }
+
+    /// One interval in which own usage is unknown holds CPU but keeps the satisfied record:
+    /// on return nothing probes again and the target stays the uncontended one (FR-021,
+    /// POL-4).
+    #[test]
+    fn a_held_interval_keeps_the_satisfied_record() {
+        let mut host = Host::new(ContentionMode::Neutral).wanting(7200);
+        host.run(100, 500, available(40.0));
+        assert_eq!(host.own(), 7100);
+        host.observed = false;
+        let held = host.tick(100 * 500, 500, available(40.0));
+        assert!(codes(&held).contains(&"allocation_unknown_hold".to_string()));
+        host.observed = true;
+        for i in 101..200u64 {
+            let decision = host.tick(i * 500, 500, available(40.0));
+            assert!(
+                codes(&decision).iter().all(|c| c != "probing_demand"),
+                "interval {i}: {:?}",
+                codes(&decision)
+            );
+            assert_eq!(
+                decision.resources[&ResourceKey::Cpu].target_share,
+                Some(8000 - 500 - 400),
+                "interval {i}"
             );
         }
     }
@@ -4573,6 +4608,33 @@ mod contention_ended {
             let after = reached(&run, 45_000, target);
             assert!(
                 after.is_some_and(|ms| ms <= 2000 + INTERVAL),
+                "{mode:?}: {after:?} to reach {target}m"
+            );
+        }
+    }
+
+    /// An unknown CPU interval after the contender leaves keeps the quiet count, so the return
+    /// is late by that one interval only (FR-034, POL-4).
+    #[test]
+    fn an_unknown_interval_keeps_the_quiet_count() {
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let run = run_with(
+                mode,
+                240,
+                |now| match now {
+                    10_000..45_000 => 1000,
+                    _ => 0,
+                },
+                |now, snap| {
+                    if now == 46_000 {
+                        snap.cpu_busy_millicores = None;
+                    }
+                },
+            );
+            let target = run.last().unwrap().share;
+            let after = reached(&run, 45_000, target);
+            assert!(
+                after.is_some_and(|ms| ms <= 2000 + 2 * INTERVAL),
                 "{mode:?}: {after:?} to reach {target}m"
             );
         }

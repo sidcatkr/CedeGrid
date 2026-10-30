@@ -94,6 +94,12 @@ impl<'a> Interval<'a> {
                             .last_observed
                             .insert(allocation.id.clone(), last.clone());
                     }
+                    // A missing observation keeps the admission window (POL-4).
+                    if let Some(window) = prev.cpu_usage.get(&allocation.id) {
+                        self.next
+                            .cpu_usage
+                            .insert(allocation.id.clone(), window.clone());
+                    }
                     self.unknown_charge.add_checked(&charge)?;
                     if last.is_none() {
                         self.unknown_new.add_checked(&charge)?;
@@ -737,6 +743,8 @@ impl<'a> Interval<'a> {
         if self.cpu_unknown || self.cpu_held {
             self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_sub(cedegrid);
             self.next.cpu_view = self.prev.cpu_view.clone();
+            self.next.cpu_quiet_intervals = self.prev.cpu_quiet_intervals;
+            self.carry_principals(&ResourceKey::Cpu);
             if self.cpu_unknown
                 && governing(config, ResourceKind::Cpu) >= ContentionMode::Performance
             {
@@ -802,6 +810,26 @@ impl<'a> Interval<'a> {
             // Capacity minus the reserve and external usage, within the ancestor quota.
             .min(self.budget.cpu_millicores)
             .saturating_sub(cedegrid);
+    }
+
+    /// While a resource is unknown or held, its principals, satisfied records and probes
+    /// stand as they were (POL-4).
+    fn carry_principals(&mut self, key: &ResourceKey) {
+        let prev = self.prev;
+        for ((k, uid), count) in &prev.principal_counts {
+            if k == key {
+                self.next.principal_counts.insert((k.clone(), *uid), *count);
+            }
+        }
+        if let Some(records) = prev.satisfied.get(key) {
+            self.next.satisfied.insert(key.clone(), records.clone());
+        }
+        if let Some(probe) = prev.probes.get(key) {
+            self.next.probes.insert(key.clone(), probe.clone());
+        }
+        if let Some(seen) = prev.principal_seen.get(key) {
+            self.next.principal_seen.insert(key.clone(), seen.clone());
+        }
     }
 
     /// While CPU telemetry is unknown, Performance and Aggressive hold own CPU at Neutral's
@@ -894,6 +922,7 @@ impl<'a> Interval<'a> {
     pub(super) fn ram_target(&mut self) {
         if self.ram_unknown || self.ram_held {
             self.next.ram_fair_share = self.prev.ram_fair_share;
+            self.carry_principals(&ResourceKey::Ram);
             // While RAM is held its availability is still known, so a floor breach is real
             // and in-share own memory keeps its protection at the last fair share (FR-023).
             if !self.ram_unknown

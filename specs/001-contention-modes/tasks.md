@@ -1360,8 +1360,8 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T321 Report the minimum duty from `src/actuation.rs` through the supervisor events and use it in `src/contention.rs` `plan_step`, until T320 passes, per FR-022 (POL-2) (contradicts)
 - [X] T322 [P] Write failing tests: while RAM is held, the last memory fair share keeps in-share own memory protected at a breach others caused, and the save-progress request goes out when protection applies, per FR-023 and FR-075 (POL-3) (contradicts)
 - [X] T323 Keep the last memory fair share through held intervals in `src/policy/measure.rs` and `src/policy/ladder.rs`, until T322 passes (POL-3) (contradicts)
-- [ ] T324 [P] Write failing tests: one unknown RAM interval keeps the 300 s external peaks, a held CPU interval keeps satisfied records, probes and the quiet count, and one missing observation keeps an allocation's p95 window, per FR-060 and FR-021 (POL-4) (contradicts)
-- [ ] T325 Carry that state across held and unknown intervals in `src/policy.rs`, `src/policy/measure.rs` and `src/policy/admission.rs`, until T324 passes (POL-4) (contradicts)
+- [X] T324 [P] Write failing tests: one unknown RAM interval keeps the 300 s external peaks, a held CPU interval keeps satisfied records, probes and the quiet count, and one missing observation keeps an allocation's p95 window, per FR-060 and FR-021 (POL-4) (contradicts)
+- [X] T325 Carry that state across held and unknown intervals in `src/policy.rs`, `src/policy/measure.rs` and `src/policy/admission.rs`, until T324 passes (POL-4) (contradicts)
 - [ ] T326 [P] Write a test of a satisfied record above current usage under own-caused saturation in Performance; if the target cycles, it fails and T327 follows, else POL-5 moves to the report's appendix (POL-5) (partial)
 - [ ] T327 Judge CPU saturation with own work at its Neutral share in `src/policy/measure.rs`, until T326 passes, only if T326 reproduces the cycling (POL-5) (partial)
 
