@@ -106,27 +106,42 @@ fn marker(directory: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 fn bounded_bytes(directory: &Path) -> Result<u64> {
-    let mut bytes = 0_u64;
+    let mut entries = Vec::new();
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
-        let meta = match std::fs::symlink_metadata(entry.path()) {
+        let meta = std::fs::symlink_metadata(entry.path()).map(|meta| (meta.is_file(), meta.len()));
+        entries.push((entry.file_name(), meta));
+    }
+    summed_bytes(entries)
+}
+/// SQLite may remove a companion file between the listing and the read: the rollback journal
+/// after a DELETE commit, the WAL and shared-memory files when the last connection to a WAL
+/// database closes. This is an expected namespace race, not a suppressed I/O error.
+fn transient(name: &std::ffi::OsStr) -> bool {
+    ["journal", "wal", "shm"]
+        .iter()
+        .any(|companion| name == format!("{DB}-{companion}").as_str())
+}
+/// The listing's total size; each entry is its name and whether it is a file, with its length.
+fn summed_bytes(entries: Vec<(std::ffi::OsString, std::io::Result<(bool, u64)>)>) -> Result<u64> {
+    let mut bytes = 0_u64;
+    for (name, meta) in entries {
+        let (is_file, len) = match meta {
             Ok(meta) => meta,
-            // DELETE commits can remove their journal after read_dir observed
-            // it. This is an expected namespace race, not a suppressed I/O error.
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && entry.file_name() == format!("{DB}-journal").as_str() =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && transient(&name) => {
                 continue;
             }
-            Err(error) => return Err(error).context("cannot inspect qualification file"),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot inspect qualification file {name:?}"));
+            }
         };
         ensure!(
-            meta.is_file(),
+            is_file,
             "unexpected non-file in isolated qualification directory"
         );
         bytes = bytes
-            .checked_add(meta.len())
+            .checked_add(len)
             .context("qualification size overflow")?;
         ensure!(bytes <= MAX_BYTES, "qualification exceeded 16 MiB bound");
     }
@@ -671,4 +686,27 @@ pub fn run(
     file.write_all(&report_bytes)?;
     file.sync_all()?;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SQLite removes its companion files when it no longer needs them: the rollback journal
+    /// after a DELETE commit, and the WAL and shared-memory files when the last connection to a
+    /// WAL database closes. One removed between the listing and the read is skipped; any other
+    /// missing file is an error that names it.
+    #[test]
+    fn a_companion_file_removed_after_the_listing_is_skipped() {
+        let gone = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        for companion in ["journal", "wal", "shm"] {
+            let entries = vec![
+                (DB.into(), Ok((true, 4096))),
+                (format!("{DB}-{companion}").into(), gone()),
+            ];
+            assert_eq!(summed_bytes(entries).unwrap(), 4096, "{companion}");
+        }
+        let error = summed_bytes(vec![("ready".into(), gone())]).unwrap_err();
+        assert!(format!("{error:#}").contains("ready"), "{error:#}");
+    }
 }

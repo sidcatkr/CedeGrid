@@ -162,7 +162,7 @@ if __name__ == '__main__':
     sys.exit(sum(worker.exitcode for worker in workers))
 "#,
     ] {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (outcome, reports) = supervise_family(&forking(dir.path(), code), dir.path());
         assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
         let seen = family_seen(&reports);
@@ -178,7 +178,7 @@ if __name__ == '__main__':
 #[cfg(target_os = "linux")]
 #[test]
 fn an_orphan_joins_and_is_reaped_by_its_pid() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let code = r#"
 import os, sys, time
 from pathlib import Path
@@ -219,7 +219,7 @@ sys.exit(3)
 #[cfg(target_os = "linux")]
 #[test]
 fn descendants_past_the_bound_are_reported_not_tracked() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let code = r#"
 import os, sys, time
 pids = []
@@ -313,7 +313,7 @@ fn run_with_child_policy(
     options: &SupervisorOptions,
     class: AllocationClass,
 ) -> (tempfile::TempDir, StateStore, supervision::ExecutionOutcome) {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let mut request = request(
         dir.path(),
@@ -587,7 +587,7 @@ fn guaranteed_child_final_gpu_check_is_not_superseded_by_parent_policy_poll() {
 
 #[test]
 fn sdk_mediated_child_executes_once_and_parent_waits_for_verified_release() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let code = r#"
 import sys,json
@@ -625,7 +625,7 @@ Path('family-result').write_text(json.dumps(result))
 }
 #[test]
 fn leader_exit_drains_and_reaps_each_registered_child_before_parent_release() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -682,7 +682,7 @@ fn managed_child_preparation_failure_never_executes_child_code() {
             Ok(())
         }
     }
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -716,7 +716,7 @@ assert result['exit_code'] is None
 
 #[test]
 fn workload_stdout_and_stderr_are_retained_with_bounded_size() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let mut request = request(
         dir.path(),
@@ -836,7 +836,7 @@ impl ExecutionJournal for InjectJournal {
 #[test]
 fn every_mediated_child_persistence_barrier_failure_prevents_execution() {
     for stage in 0..3 {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let journal = InjectJournal {
             store: StateStore::open(&dir.path().join("state")).unwrap(),
             stage,
@@ -915,7 +915,7 @@ fn supervisor_loss_before_child_authorization_retains_then_reconciles_family() {
             }
         }
     }
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut supervisor = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -1091,7 +1091,7 @@ impl supervision::SupervisorControl for ActuationAudit {
 /// outside the family and no step reaches it (FR-083, FR-086, Constitution I).
 #[test]
 fn runtime_steps_reach_only_the_verified_family() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     // A test-owned process outside the family is never verified, so no step may reach it.
     let mut foreign = std::process::Command::new("sleep")
@@ -1179,7 +1179,7 @@ child.stop();child.wait(timeout=6,poll_interval=.01)
 #[cfg(target_os = "linux")]
 #[test]
 fn managed_children_carry_the_oom_preference() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -1303,7 +1303,7 @@ fn run_targets_with(
     code: &str,
     steps: Vec<(&'static str, cedegrid::contention::YieldStep, Option<u64>)>,
 ) -> (tempfile::TempDir, TargetScript) {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(dir.path(), code);
     let mut script = TargetScript {
@@ -1672,7 +1672,7 @@ fn allowance(ram_mib: u64, cpu_millicores: u64) -> supervision::SupervisorComman
 #[test]
 fn allowances_publish_apart_from_targets_and_reach_managed_children() {
     use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -1745,7 +1745,7 @@ child.wait(timeout=6,poll_interval=.01)
 /// no target or allowance hook fires for it (FR-075).
 #[test]
 fn save_progress_lines_reach_the_worker_once_each() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -1984,7 +1984,7 @@ impl supervision::SupervisorControl for RamCapScript {
 fn a_ram_cap_is_clamped_recorded_reported_kept_under_a_hint_and_reconciled() {
     use cedegrid::contention::{ResourceKey, YieldStep};
     use supervision::SupervisorReport::{Adjusted, State};
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let request = request(
         dir.path(),
@@ -2285,7 +2285,7 @@ fn start_paused_fixture(
 #[test]
 fn a_supervisor_that_dies_kills_opportunistic_work_and_resumes_guaranteed_work() {
     for class in ["opportunistic", "guaranteed"] {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (mut fixture, pid, watched) = start_paused_fixture(dir.path(), class, false);
         fixture.kill().unwrap();
         fixture.wait().unwrap();
@@ -2310,7 +2310,7 @@ fn a_supervisor_that_dies_kills_opportunistic_work_and_resumes_guaranteed_work()
 #[test]
 fn a_signalled_supervisor_releases_its_steps_and_drains() {
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (mut fixture, _pid, watched) = start_paused_fixture(dir.path(), "opportunistic", true);
         unsafe { libc::kill(fixture.id() as i32, signal) };
         assert!(
@@ -2364,7 +2364,7 @@ impl supervision::SupervisorControl for PauseAfterLeaderExit {
 /// cannot stop a child that must see its drain file (030, SUP-6).
 #[test]
 fn no_runtime_step_reaches_children_draining_after_the_leader_exit() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let mut request = request(
         dir.path(),
@@ -2427,7 +2427,7 @@ while not (d/'child.pid').exists():
 /// run and is retried; it never drains the leader (030, R3).
 #[test]
 fn a_bookkeeping_failure_holds_and_retries_instead_of_draining() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let journal = InjectJournal {
         store: StateStore::open(&dir.path().join("state")).unwrap(),
         stage: 4,
@@ -2513,7 +2513,7 @@ fn oom_of(pid: u32) -> i32 {
 #[test]
 fn a_pause_reaches_members_forked_during_the_stop() {
     use cedegrid::contention::YieldStep;
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut foreign = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -2620,7 +2620,7 @@ for pid in kids:
 #[cfg(target_os = "linux")]
 #[test]
 fn members_return_to_their_own_oom_baseline() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut foreign = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -2744,7 +2744,7 @@ fn gone_and_reaped(pid: u32) -> bool {
 #[test]
 fn leftover_members_are_ended_when_the_leader_exits() {
     for class in [AllocationClass::Guaranteed, AllocationClass::Opportunistic] {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut foreign = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -2790,7 +2790,7 @@ while len(list(Path('.').glob('polite-*')) + list(Path('.').glob('stubborn-*')))
 #[test]
 fn a_drain_signals_the_leader_first_then_kills_members() {
     for leader_exits in [false, true] {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut request = forking(
             dir.path(),
             &format!(
