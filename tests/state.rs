@@ -1795,3 +1795,47 @@ fn the_journal_change_key_moves_on_any_commit() {
     store.append_observation(&snapshot, &decision).unwrap();
     assert_ne!(store.change_key().unwrap(), after_other);
 }
+
+/// Observations keep a bounded window: rows older than the age limit and rows beyond the row
+/// cap go, newest kept (FR-081).
+#[test]
+fn observations_are_pruned_by_age_and_row_count() {
+    let directory = storage_dir();
+    let store = StateStore::open(directory.path()).unwrap();
+    let day = 24 * 3600 * 1000;
+    let now = 10 * day;
+    for observed in [
+        now - 3 * day,
+        now - 2 * day,
+        now - day - 1,
+        now - 5,
+        now - 4,
+        now - 3,
+        now - 2,
+        now - 1,
+    ] {
+        let (mut snapshot, decision) = observation();
+        snapshot.observed_at_unix_ms = observed;
+        store.append_observation(&snapshot, &decision).unwrap();
+    }
+    assert_eq!(
+        store.prune_observations(now, day, 1000).unwrap(),
+        3,
+        "older than a day"
+    );
+    assert_eq!(store.observations(100).unwrap().len(), 5);
+    assert_eq!(
+        store.prune_observations(now, day, 2).unwrap(),
+        3,
+        "beyond the row cap"
+    );
+    let kept = store.observations(100).unwrap();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(
+        kept[0]["snapshot"]["observed_at_unix_ms"],
+        now - 1,
+        "the newest stay"
+    );
+    assert_eq!(cedegrid::state::OBSERVATION_RETENTION_MS, day);
+    assert_eq!(cedegrid::state::OBSERVATION_ROWS, 200_000);
+}

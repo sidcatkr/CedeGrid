@@ -21,6 +21,8 @@ pub const LAUNCHES_PER_HEARTBEAT: usize = 32;
 
 /// Launch preparations that run at once on the blocking pool; each makes synced writes.
 const LAUNCH_CONCURRENCY: usize = 4;
+/// Iterations between prunes of the `observations` table (FR-081).
+const OBSERVATIONS_PER_PRUNE: u32 = 600;
 
 /// How many new assignments one heartbeat may take. Parallelism grows by one
 /// worker per CPU and RAM cooldown, except in Performance, where one heartbeat may
@@ -239,6 +241,8 @@ struct AgentLoop<'a> {
     launch_gate: std::sync::Arc<tokio::sync::Semaphore>,
     /// Which journal records each iteration reads (FR-081).
     history: super::history::HistoryScope,
+    /// Observations written since `observations` was last pruned.
+    observations_since_prune: u32,
 }
 
 impl AgentLoop<'_> {
@@ -1907,6 +1911,8 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
         host_checked: false,
         launch_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(LAUNCH_CONCURRENCY)),
         history,
+        // Prune on the first iteration, then every `OBSERVATIONS_PER_PRUNE`.
+        observations_since_prune: OBSERVATIONS_PER_PRUNE - 1,
     };
     for slot in attached {
         state
@@ -1951,6 +1957,15 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             state.actuate(&mut decision, &allocations)?;
             mark = state.cost.charge("actuate", mark);
             state.store.append_observation(&snapshot, &decision)?;
+            state.observations_since_prune += 1;
+            if state.observations_since_prune >= OBSERVATIONS_PER_PRUNE {
+                state.observations_since_prune = 0;
+                state.store.prune_observations(
+                    snapshot.observed_at_unix_ms,
+                    crate::state::OBSERVATION_RETENTION_MS,
+                    crate::state::OBSERVATION_ROWS,
+                )?;
+            }
             mark = state.cost.charge("store", mark);
             state.heartbeat(&snapshot, &allocations, &decision).await?;
             state.cost.charge("heartbeat", mark);

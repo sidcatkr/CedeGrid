@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
+/// How long observations are kept, and at most how many (FR-081).
+pub const OBSERVATION_RETENTION_MS: u64 = 24 * 3600 * 1000;
+pub const OBSERVATION_ROWS: u64 = 200_000;
 #[cfg(unix)]
 const INITIALIZATION_LOCK_FILENAME: &str = ".storage-profile.lock";
 /// Unified schema fence. Schema 6 adds the terminal `cancelled` task status.
@@ -902,6 +905,27 @@ impl StateStore {
         let id = transaction.last_insert_rowid();
         transaction.commit()?;
         Ok(id)
+    }
+
+    /// Delete observations older than `max_age_ms` before `now_unix_ms` and beyond the newest
+    /// `max_rows`, in one statement (FR-081). Rows arrive in time order, so each bound is an
+    /// ID below which everything goes, and the larger one applies.
+    pub fn prune_observations(
+        &self,
+        now_unix_ms: u64,
+        max_age_ms: u64,
+        max_rows: u64,
+    ) -> Result<usize> {
+        let cutoff = i64::try_from(now_unix_ms.saturating_sub(max_age_ms))
+            .context("observation cutoff exceeds SQLite integer range")?;
+        let rows = i64::try_from(max_rows).context("observation row cap is too large")?;
+        Ok(self.connection.execute(
+            "DELETE FROM observations WHERE id < MAX(
+                (SELECT MAX(id) FROM observations) - ?2 + 1,
+                COALESCE((SELECT id FROM observations WHERE observed_at_unix_ms >= ?1 ORDER BY id LIMIT 1),
+                         (SELECT MAX(id) + 1 FROM observations)))",
+            params![cutoff, rows],
+        )?)
     }
 
     /// Newest-first, bounded by the caller; zero returns no observations.
