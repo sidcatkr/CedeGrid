@@ -1705,3 +1705,33 @@ fn performance_is_the_default_and_needs_no_acknowledgement() {
             .contains("default_mode = \"performance\"")
     );
 }
+
+/// A reload may change the `[contention]` sections only: a mode change applies, and any other
+/// change is refused with the keys that need a restart (FR-080).
+#[test]
+fn a_reload_applies_contention_changes_and_refuses_the_rest() {
+    use cedegrid::contention::ContentionMode;
+    let current = Config::default();
+    let mut next = current.clone();
+    next.contention.cpu.mode = Some(ContentionMode::YieldFirst);
+    let applied = cedegrid::config::reloadable(&current, &next)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        applied.contention.cpu.mode,
+        Some(ContentionMode::YieldFirst)
+    );
+    let mut moved = next.clone();
+    moved.state_dir = "/elsewhere".into();
+    moved.monitor.interval_ms += 100;
+    let refused = cedegrid::config::reloadable(&current, &moved)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused, ["monitor", "state_dir"]);
+    assert!(
+        cedegrid::config::reloadable(&current, &current)
+            .unwrap()
+            .is_ok(),
+        "no change is fine"
+    );
+}

@@ -451,6 +451,56 @@ pub enum NodeMode {
     Opportunistic,
 }
 
+/// Load a configuration file as a command runs it: relative paths resolved against the file,
+/// the kernel settings filled from the monitor and cgroup ones, then validated. Returns the
+/// load-time warnings too.
+pub fn load_for_run(path: &Path) -> Result<(Config, Vec<String>)> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
+    let loaded = Config::load_reporting(&canonical)?;
+    let (mut config, warnings) = (loaded.config, loaded.warnings);
+    config.kernel.monitor_interval_ms = config.monitor.interval_ms;
+    if config.kernel.delegated_root.is_none() {
+        config.kernel.delegated_root = config.cgroup.delegated_root.clone();
+    }
+    if config.state_dir.is_relative() {
+        config.state_dir = canonical
+            .parent()
+            .context("configuration has no parent directory")?
+            .join(&config.state_dir);
+    }
+    config.validate()?;
+    Ok((config, warnings))
+}
+
+/// What a reload may change while the agent runs: the `[contention]` sections, which hold the
+/// mode settings (FR-080). Returns the running configuration with the new sections, or the
+/// top-level keys whose change needs a restart.
+pub fn reloadable(
+    current: &Config,
+    next: &Config,
+) -> Result<std::result::Result<Config, Vec<String>>> {
+    let (before, after) = (serde_json::to_value(current)?, serde_json::to_value(next)?);
+    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        anyhow::bail!("a configuration must serialize to a table");
+    };
+    let mut changed: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|key| key.as_str() != "contention" && before.get(*key) != after.get(*key))
+        .cloned()
+        .collect();
+    changed.sort();
+    changed.dedup();
+    if !changed.is_empty() {
+        return Ok(Err(changed));
+    }
+    let mut applied = current.clone();
+    applied.contention = next.contention.clone();
+    Ok(Ok(applied))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {

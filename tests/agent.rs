@@ -2264,3 +2264,51 @@ async fn a_signalled_agent_leaves_its_supervisors_for_a_restarted_one() {
         assert_eq!(outcome.exit_code, Some(0));
     }
 }
+
+/// SIGHUP reloads the configuration: a mode change applies without a restart, and a change
+/// to anything outside `[contention]` is refused while the agent keeps running (FR-080).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sighup_applies_a_mode_change_and_refuses_a_path_change() {
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec!["/bin/true".into()],
+        |_| {},
+    )
+    .await;
+    let mut agent = service.agent("reload");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let write = |config: &cedegrid::config::Config| {
+        fs::write(
+            &service.config_file,
+            cedegrid::config::serialize_runtime(config, cedegrid::config::RuntimeConfigKind::Node)
+                .unwrap(),
+        )
+        .unwrap();
+    };
+    let log = || fs::read_to_string(service.dir.path().join("reload.log")).unwrap_or_default();
+    let mut config = service.local.config.clone();
+    config.contention.cpu.mode = Some(cedegrid::contention::ContentionMode::YieldFirst);
+    write(&config);
+    // SAFETY: the test's own unreaped child.
+    unsafe { libc::kill(agent.id() as libc::pid_t, libc::SIGHUP) };
+    let end = Instant::now() + Duration::from_secs(5);
+    while !log().contains("config_reloaded") {
+        assert!(Instant::now() < end, "no reload: {}", log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    config.state_dir = service.dir.path().join("elsewhere");
+    write(&config);
+    unsafe { libc::kill(agent.id() as libc::pid_t, libc::SIGHUP) };
+    let end = Instant::now() + Duration::from_secs(5);
+    while !log().contains("config_reload_refused") {
+        assert!(Instant::now() < end, "no refusal: {}", log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(log().contains("state_dir"), "{}", log());
+    assert!(
+        agent.try_wait().unwrap().is_none(),
+        "the agent keeps running"
+    );
+    let _ = agent.kill();
+    let _ = agent.wait();
+}

@@ -217,7 +217,9 @@ type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool
 
 /// State of one agent service loop. Each stage of an interval is a method.
 struct AgentLoop<'a> {
-    config: &'a Config,
+    /// The running configuration; a SIGHUP reload replaces its `[contention]` (FR-080).
+    config: std::sync::Arc<Config>,
+    config_path: Option<std::path::PathBuf>,
     agent: &'a AgentConfig,
     executable: &'a Path,
     store: StateStore,
@@ -271,7 +273,8 @@ struct AgentLoop<'a> {
 impl AgentLoop<'_> {
     /// Finished preparations become slots; refused launches get a durable refusal.
     async fn collect_preparations(&mut self) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let ready: Vec<_> = self
             .preparations
             .iter()
@@ -349,7 +352,8 @@ impl AgentLoop<'_> {
     /// Slot lifecycle: supervisor events, authorization, lease renewal, result
     /// publication and reaping, one pass over every owned slot.
     async fn service_slots(&mut self) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
         let mut records = BTreeMap::new();
         // Lease requests wait in one queue, longest waiting first: an authorization since
@@ -869,7 +873,8 @@ impl AgentLoop<'_> {
     }
 
     fn retire_slots(&mut self, records: &[ExecutionRecord]) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let mut released_families = BTreeSet::new();
         for record in records.iter().filter(|r| {
             r.phase == ExecutionPhase::Released && self.slots.contains_key(&r.assignment_id)
@@ -900,7 +905,8 @@ impl AgentLoop<'_> {
 
     /// Durable outbox recovery after agent loss or a lost final ACK.
     fn recover_outbox(&mut self, records: &[ExecutionRecord]) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         // Durable outbox recovery after agent loss or a lost final ACK. Only
         // previously journaled attempts are considered, never directory names as IDs.
         for record in records.iter().filter(|r| {
@@ -1042,7 +1048,8 @@ impl AgentLoop<'_> {
         Vec<crate::model::Allocation>,
         crate::model::Decision,
     )> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let agent = self.agent;
         // Absolute monitor cadence can arrive just before the OS CPU sampling
         // interval. Wait for fresh evidence after pending control/reaping work;
@@ -1358,7 +1365,7 @@ impl AgentLoop<'_> {
                         .or_default()
                         .insert(YieldStep::LowerShare);
                 }
-                facts.ram_cap = ram_cap_available(self.config, backend);
+                facts.ram_cap = ram_cap_available(&self.config, backend);
                 (allocation.id.clone(), facts)
             })
             .collect();
@@ -1376,7 +1383,8 @@ impl AgentLoop<'_> {
         allocations: &[crate::model::Allocation],
         decision: &crate::model::Decision,
     ) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let agent = self.agent;
         let executable = self.executable;
         if self.stopping.is_none()
@@ -1716,9 +1724,36 @@ impl AgentLoop<'_> {
         Ok(())
     }
 
+    /// Reload the configuration file on SIGHUP: a change to `[contention]` applies from the
+    /// next iteration; any other change is refused and the running settings stay (FR-080).
+    fn reload_config(&mut self) -> Result<()> {
+        let Some(path) = self.config_path.clone() else {
+            return emit(
+                &serde_json::json!({"event":"config_reload_refused","detail":"the agent runs without a configuration file"}),
+            );
+        };
+        let next = crate::config::load_for_run(&path)
+            .and_then(|(next, _)| crate::config::reloadable(&self.config, &next));
+        match next {
+            Ok(Ok(applied)) => {
+                self.config = std::sync::Arc::new(applied);
+                emit(
+                    &serde_json::json!({"event":"config_reloaded","detail":"contention settings apply from the next iteration"}),
+                )
+            }
+            Ok(Err(keys)) => emit(
+                &serde_json::json!({"event":"config_reload_refused","keys":keys,"detail":"these settings need a restart; the running ones stay"}),
+            ),
+            Err(error) => emit(
+                &serde_json::json!({"event":"config_reload_refused","detail":format!("{error:#}")}),
+            ),
+        }
+    }
+
     /// Whether the stop sequence finished or its release deadline elapsed.
     fn stop_due(&mut self, records: &[ExecutionRecord]) -> Result<bool> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         let agent = self.agent;
         if agent.max_runtime_seconds > 0
             && self.start.elapsed() >= Duration::from_secs(agent.max_runtime_seconds)
@@ -1758,7 +1793,8 @@ impl AgentLoop<'_> {
     }
 
     async fn shutdown(mut self) -> Result<()> {
-        let config = self.config;
+        let config = std::sync::Arc::clone(&self.config);
+        let config = &*config;
         for (id, (assignment, handle, _)) in std::mem::take(&mut self.preparations) {
             handle.abort();
             match handle.await {
@@ -1801,7 +1837,12 @@ impl AgentLoop<'_> {
 /// How often the agent reports its loop's own CPU by stage.
 const LOOP_COST_PERIOD: Duration = Duration::from_secs(60);
 
-pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    config_path: Option<&Path>,
+    agent: &AgentConfig,
+    executable: &Path,
+) -> Result<()> {
     ensure!(
         config.execution.enabled,
         "agent execution requires execution.enabled=true"
@@ -1954,9 +1995,12 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
     let observation_interval = Duration::from_millis(config.monitor.interval_ms);
     let mut next_observation = start;
     let mut stop_signal = Box::pin(shutdown_signal());
+    // Installed before the loop: SIGHUP's default action would end the agent.
+    let mut hangup = reload_signal_stream();
     let history = super::history::HistoryScope::new(&store, &config.state_dir)?;
     let mut state = AgentLoop {
-        config,
+        config: std::sync::Arc::new(config.clone()),
+        config_path: config_path.map(Path::to_path_buf),
         agent,
         executable,
         store,
@@ -2078,7 +2122,7 @@ pub async fn run(config: &Config, agent: &AgentConfig, executable: &Path) -> Res
             }
             Err(error) => return Err(error),
         }
-        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now()); state.leave_supervisors=true;}}
+        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now()); state.leave_supervisors=true;}, _=reload_signal(&mut hangup)=>{state.reload_config()?;}}
     }
     state.shutdown().await?;
     drop(lock);
@@ -2159,6 +2203,33 @@ impl LoopCost {
         *self = Self::new(now, self.period);
         Some(report)
     }
+}
+
+#[cfg(unix)]
+type ReloadSignal = Option<tokio::signal::unix::Signal>;
+#[cfg(not(unix))]
+type ReloadSignal = Option<()>;
+
+fn reload_signal_stream() -> ReloadSignal {
+    #[cfg(unix)]
+    {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Resolves at each SIGHUP; never without one.
+async fn reload_signal(signal: &mut ReloadSignal) {
+    #[cfg(unix)]
+    if let Some(signal) = signal {
+        signal.recv().await;
+        return;
+    }
+    let _ = signal;
+    std::future::pending::<()>().await
 }
 
 async fn shutdown_signal() {

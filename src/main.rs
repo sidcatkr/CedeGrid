@@ -251,23 +251,7 @@ fn read_config(path: &Path) -> Result<Config> {
 fn read_config_reporting(path: &Path) -> Result<(Config, Vec<String>)> {
     // On a terminal, a missing configuration offers setup; never without one.
     cedegrid::setup::offer_for_missing(path)?;
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
-    let loaded = Config::load_reporting(&canonical)?;
-    let (mut config, warnings) = (loaded.config, loaded.warnings);
-    config.kernel.monitor_interval_ms = config.monitor.interval_ms;
-    if config.kernel.delegated_root.is_none() {
-        config.kernel.delegated_root = config.cgroup.delegated_root.clone();
-    }
-    if config.state_dir.is_relative() {
-        config.state_dir = canonical
-            .parent()
-            .context("configuration has no parent directory")?
-            .join(&config.state_dir);
-    }
-    config.validate()?;
-    Ok((config, warnings))
+    cedegrid::config::load_for_run(path)
 }
 
 fn emit(value: &impl Serialize) -> Result<()> {
@@ -587,7 +571,13 @@ async fn async_main(cli: Cli) -> Result<()> {
                 &deployment,
                 cedegrid::config::RuntimeConfigKind::Agent,
             )?;
-            cedegrid::agent::run(&config, &settings, &std::env::current_exe()?).await
+            cedegrid::agent::run(
+                &config,
+                Some(&cli.config),
+                &settings,
+                &std::env::current_exe()?,
+            )
+            .await
         }
         Command::Reconcile => emit(&cedegrid::agent::reconcile(&config)?),
         Command::Supervise { .. }
