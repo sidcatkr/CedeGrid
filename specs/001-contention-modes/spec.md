@@ -413,6 +413,27 @@ back more.
   value and say it was derived. An explicit value at or below `monitor.interval_ms` is refused on
   every host, as now; the error names both keys and the smallest value that would load.
   `config_migration` is unchanged (item 032, report 030's Decision 4).
+- Q: When a Tracked run's supervisor dies, what happens to its members? → A: The agent recovers
+  them by identity. It keeps each run's last family (leader, SDK children and verified
+  descendants with their start times, the run's boot ID and user and group IDs) in its state
+  directory, so an agent that was down when the supervisor died still acts when it starts. When
+  reconciliation finds a Tracked supervisor gone, with the agent running or at its start, for each
+  recorded process it opens a pidfd first; then requires the start time and the real, effective
+  and saved user and group IDs, read through the matching `/proc` directory, to equal the record;
+  then checks through the pidfd that it is alive; then signals through the pidfd only. Guaranteed
+  members get SIGCONT and are left running; Opportunistic members get SIGKILL. The counts
+  (continued, ended, identity mismatch, already gone) go to the run's outcome and an event. Full
+  keeps its leaf and the thaw on reattach (item 033, C).
+- Q: Does the workload share its supervisor's session? → A: No. A pin showed that a Tracked
+  supervisor killed in an off phase orphans the workload's process group, so the kernel sends its
+  members SIGHUP and SIGCONT. The worker gate calls `setsid()` after setting the parent-death
+  signal and before exec, for the leader and for SDK children; the supervisor keeps its own group.
+  Full is unaffected (item 033, A and B).
+- Q: When does the agent learn of a member the supervisor just found? → A: The supervisor sends a
+  family report right after any stop pass that found a new member, without waiting for an
+  answer, besides its per-interval report. A member found and stopped in the instant its
+  supervisor dies can be missed and stays stopped until an agent runs; the docs say so (item 033,
+  C.1).
 
 ## Terms
 
@@ -770,7 +791,9 @@ node reports with the expected per-resource values at each step.
   terminated only because the authority restarted. SIGTERM, SIGINT and a configuration reload
   leave supervisors running too; an explicit operator drain drains everything (FR-080).
 - **A run's supervisor dies.** Opportunistic work ends with it, through the parent-death signal;
-  Guaranteed work continues (FR-078).
+  Guaranteed work continues (FR-078). In Tracked the agent recovers the run's other members by
+  their recorded identity: it continues Guaranteed members and kills Opportunistic ones, at once
+  if it is running, else when it starts (FR-088).
 - **A run forks helpers outside the SDK** (for example PyTorch DataLoader workers or Python
   `multiprocessing`). On Linux each verified helper joins the run's family and is measured and
   stepped with it; a helper that fails verification, or is past the 256-member bound, is reported
@@ -1270,9 +1293,11 @@ node reports with the expected per-resource values at each step.
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
   supervisor MUST handle SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining
   first. Under the cgroup backend, a reattaching supervisor MUST thaw a leaf whose journal records
-  no Pause, after verifying the leaf's membership against the family. The parent-death signal
-  reaches only the leader and SDK children: in Full a dead supervisor's other members stay in the
-  leaf, kept for reconciliation; in Tracked they cannot be found again, and the docs say so.
+  no Pause, after verifying the leaf's membership against the family. The gate MUST start the
+  workload in a session of its own (`setsid`), for the leader and SDK children, so that no exit
+  orphans its process group into SIGHUP. The parent-death signal reaches only the leader and SDK
+  children: in Full a dead supervisor's other members stay in the leaf, kept for reconciliation;
+  in Tracked the agent recovers them (FR-088).
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
   For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
   grant no renewals and offer no new work for that node; it MUST NOT drain on that report, and
@@ -1309,6 +1334,8 @@ node reports with the expected per-resource values at each step.
     and never by a wait for any child.
   - At most 256 members per run are tracked; members past it are reported and never acted on. An
     fd or `/proc` error during discovery MUST hold the step and be reported, never drain own work.
+  - The family is reported each interval it changes and right after any stop pass that found a
+    new member, without waiting for an answer.
 - **FR-084**: On Linux the rootless launch MUST NOT require `single_process`, which stays accepted
   for compatibility. On platforms without a subreaper or `/proc` the single-process contract MUST
   stay required, and the docs say so.
@@ -1337,6 +1364,19 @@ node reports with the expected per-resource values at each step.
   A drain MUST signal the leader first and SIGKILL members still alive after the grace. The README
   MUST say that a job script which starts work in the background ends it with `wait`, and that a
   process meant to outlive its run is started as its own run.
+- **FR-088**: When a Tracked run's supervisor is gone, the agent MUST recover the run's members
+  from the last family it recorded in its state directory (leader, SDK children and verified
+  descendants with their start times, and the run's boot ID and user and group IDs), when its
+  reconciliation finds the supervisor gone and when it starts.
+  - For each recorded process: a pidfd first; then its start time and real, effective and saved
+    user and group IDs, read through the matching `/proc` directory, equal to the record; then
+    alive through the pidfd; then a signal through the pidfd only, never by PID alone. A process
+    that fails a check is never signalled, and is counted.
+  - Guaranteed members get SIGCONT and are left running; Opportunistic members get SIGKILL. One
+    member's failed signal does not stop the others.
+  - The counts (continued, ended, identity mismatch, already gone) go to the run's outcome and an
+    event. A member found and stopped in the instant its supervisor dies can be missed, and stays
+    stopped until an agent runs. Full keeps its leaf and the thaw on reattach.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
