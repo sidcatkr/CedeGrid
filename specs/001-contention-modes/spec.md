@@ -1141,8 +1141,10 @@ node reports with the expected per-resource values at each step.
   the granularity, is documented. On a time-sliced device own work at full duty beside another busy
   context holds only its slices, so in Performance, Aggressive and Neutral the duty MUST be the
   cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in which
-  it ran on the device, at most 60, restarted with the external estimate), clamped to the minimum
-  duty and 1; with no uncapped share yet, and in Yield First, it is target ÷ 1000. External GPU compute MUST be measured, in thousandths of
+  it ran on the device, at most 60, restarted with the external estimate and when own work's
+  allocations there change), clamped to the minimum duty and 1; with no uncapped share yet, while
+  the device's amount is unknown, for a cap set for unknown activity, and in Yield First, it is
+  target ÷ 1000. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%: a sample at t, whose process's previous sample was at p, counts in full in the window
@@ -1182,9 +1184,9 @@ node reports with the expected per-resource values at each step.
   where the sampler caught its context, so gaps in own work raise another user's reading at the
   same demand; in Performance, Aggressive and Neutral, the external amount that sets own work's
   GPU compute target, per principal and in total, MUST therefore be the average of the amounts
-  measured in the last 60 intervals in which own work ran uncapped on the device (no cap or pause,
-  on GPU compute or CPU, for any own allocation using it, in the decision that set the interval and
-  the one before it), or had no allocation running there; with fewer, the average of what there
+  measured in the last 60 intervals in which own work ran uncapped on the device (no cap below full
+  duty and no pause, on GPU compute or CPU, for any own allocation using it, in the decision that
+  set the interval and the one before it), or had no allocation running there; with fewer, the average of what there
   is, and with none since the average started (the agent's start or a restart), the interval's own
   amount. Capped intervals and intervals of unknown amount never feed it. While own work is held
   back by GPU compute steps only, its GPU compute caps on the device MUST be lifted every 30 s for a
