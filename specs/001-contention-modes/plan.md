@@ -1400,6 +1400,49 @@ PSS path; the GPU path is unit-tested with fixtures.
   in the policy. Pass.
 - V, VI, VII: user space only; tests first; `compute_sampling` is additive and optional. Pass.
 
+## Item 036: the GPU sample span and Yield First's bound (2026-10-31)
+
+Spec Session 2026-10-31 Q17 and Q18 (FR-021, FR-034), answering report 035's Decision 1 and the
+035 rerun report's Decision 1. The 034 rerun showed the driver returning one sample per process
+per query, the duty-capped probe's 1 or 2 device periods before the window's end.
+
+**Technical Context**: Rust 1.88, no new dependency. No wire or SDK change: `compute_sampling` is
+persisted with each observation and shown by `history`, `observe` and `doctor`, which return it as
+stored. Telemetry stays read-only; the policy is untouched.
+
+1. **The sample span (Q17)**: in `src/telemetry/gpu.rs`, a per-device `GpuSampleState` that the
+   collector keeps per UUID holds each PID's last sample timestamp and the last 4 intervals' summed
+   shares, device utilization and per-side amounts. Each PID's share is the sum over its fresh
+   samples of sm_util × min(t − p, W) ÷ W: p is its previous sample (from the state, or the earlier
+   sample in this window, or the window's start), and W the window from the cursor to the newest
+   per-process sample; the share is rounded and capped at 100%. The tolerance check runs on the
+   interval alone, then on the last 4 intervals summed on both sides. A 4-interval pass reports the
+   4 intervals' average amounts (external, own, per PID), with the remainder rule applied to the
+   averages. An interval that cannot be compared (no baseline, MPS, an incomplete inventory, a
+   failed per-process query) clears the history. After each interval each listed PID's newest
+   timestamp is kept and unlisted PIDs are dropped. `compute_slots`, `SlotsFrom` and 034's fallback
+   go.
+2. **The record**: `ComputeSampling` in `src/model.rs` keeps the device's count and first and last
+   timestamps, the window's start and end, whether the amount came from the interval alone or the
+   last 4, and per process its previous sample, each sample's timestamp and sm_util (at most 32
+   per process per interval) and the time counted. `slots`, `period_us` and `slots_from` go.
+3. **Yield First's bound (Q18)**: the return tests bound Yield First's own usage at 2 intervals
+   after the quiet count, which is `principal_window_intervals` after the contender's last usage,
+   and Neutral and Performance at 3 s as before. T396 is recorded as passing on the 035 rerun in
+   `docs/validation.md`: at `eef1b4d`'s run the quiet count came at 32.7 s and own usage was at
+   98% at 33.7 s.
+4. **Afterwards**: the full suites, the macOS serial suite, the Docker Linux check and the decision
+   snapshot comparison; T368 on the test host waits for the user's typed approval.
+
+**Constitution Check (7.0.0)**:
+- II: Performance loses no own GPU work to a counting error where samples arrive; the 4-interval
+  amounts are averages, so a sample missed in one interval does not read a process as idle. Pass.
+- III: a missing baseline, MPS and an incomplete inventory keep their unknown reasons; over 4
+  intervals a missed sample is not idle time; `quiet_window_intervals` is unchanged. Pass.
+- IV: the policy is untouched and telemetry stays read-only. Pass.
+- VI, VII: tests first; `compute_sampling` changes shape before any release, and stored rows are
+  returned as stored. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

@@ -809,6 +809,8 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   then applies. The recorded counts decide that natively.
 - **Alternatives**: comparing shares instead of absolute sums (the item's fallback, not the plan);
   dividing by each PID's own count (reads a stopped process at its busy level, R33).
+- **Superseded** by R46: the 034 rerun showed one sample per process per interval, so no period was
+  readable within a window and the fallback applied in every interval (item 036).
 
 ## R44. The one-move return (item 034)
 
@@ -845,4 +847,33 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: reading only members whose RSS changed (an active worker's RSS changes every
   interval, so it saves little); holding the last PSS (misses growth); RSS in Tracked (overcounts
   shared pages, R37).
+
+## R46. A GPU sample's span (item 036)
+
+- **Decision**: a sample at t whose process's previous sample was at p counts sm_util × min(t − p,
+  W) ÷ W in the window W where it arrives; with no previous sample it covers from the window's
+  start. Each PID's last timestamp is kept across intervals per device and dropped when the PID
+  leaves the device's process list.
+- **Rationale**: the driver returns one sample per process per query, covering the time since that
+  process's previous sample. The duty-capped probe's sample arrived steadily 1 or 2 device periods
+  before the window's end, so part of its span lay in the previous window, which was already
+  decided; counting only the overlap credited it 0.46–0.69 of its time (report 035), the whole
+  span 0.96–0.98. min(t − p, W) keeps a long gap from crediting more than one window; busy time
+  can shift by up to one window, but none is lost or counted twice.
+- **Alternatives**: the overlap with the window only (loses the part before the window, report
+  035); 034's in-window period (none readable on this driver).
+
+## R47. The 4-interval comparison (item 036)
+
+- **Decision**: when one interval's summed shares miss the tolerance, the shares and the device
+  summed over that interval and the 3 before are compared; a pass reports the 4 intervals' average
+  amounts. An interval that cannot be compared clears the history.
+- **Rationale**: the unmanaged probe was sampled in only 27–71 of 80 intervals, with gaps of up to
+  30 device periods. Estimated from the 034 rerun's timestamps, with the span alone the managed
+  windows read unknown in 42–74 of 80 intervals, counting `quiet_window_intervals`; with the 4
+  intervals as well, in 0–40. Averages, not this interval's amounts, since a sample missed here
+  would read its process as idle. What remains is the 20-interval quiet window at each managed
+  window's start, which item 036 leaves unchanged.
+- **Alternatives**: a longer window (slower to see a real change); lowering the tolerance's bar
+  (hides real disagreement).
 
