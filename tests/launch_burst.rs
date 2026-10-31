@@ -35,6 +35,12 @@ impl Drop for Evidence {
                 "retained_failed_burst_evidence={}",
                 directory.keep().display()
             );
+        } else if let Some(directory) = &self.0
+            && let Ok(control) = cedegrid::namespace::control_dir_for(directory.path())
+            && control.exists()
+        {
+            // The namespace control directory beside the state root goes with it.
+            let _ = std::fs::remove_dir_all(control);
         }
     }
 }
@@ -137,12 +143,12 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         std::env::var_os("CEDEGRID_TEST_LAUNCH_BURST").is_some(),
         "explicit CEDEGRID_TEST_LAUNCH_BURST=1 is required"
     );
-    let evidence = Evidence(Some(StateDir(
+    let evidence = Evidence(Some(
         tempfile::Builder::new()
             .prefix(".launch-burst-")
             .tempdir_in(std::env::current_dir().unwrap())
             .unwrap(),
-    )));
+    ));
     let root = evidence.0.as_ref().unwrap().path().to_path_buf();
     let root = root.as_path();
     let pki = root.join("pki");
@@ -364,5 +370,3 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         "longest gap between observations {longest} ms exceeds {GAP_BOUND_MS} ms"
     );
 }
-
-include!("support/state_dir.rs");

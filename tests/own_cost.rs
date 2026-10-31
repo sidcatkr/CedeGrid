@@ -36,6 +36,12 @@ impl Drop for Evidence {
                 "retained_failed_cost_evidence={}",
                 directory.keep().display()
             );
+        } else if let Some(directory) = &self.0
+            && let Ok(control) = cedegrid::namespace::control_dir_for(directory.path())
+            && control.exists()
+        {
+            // The namespace control directory beside the state root goes with it.
+            let _ = std::fs::remove_dir_all(control);
         }
     }
 }
@@ -162,12 +168,12 @@ async fn cedegrid_costs_at_117_tasks() {
         std::env::var_os("CEDEGRID_TEST_OWN_COST").is_some(),
         "explicit CEDEGRID_TEST_OWN_COST=1 is required"
     );
-    let evidence = Evidence(Some(StateDir(
+    let evidence = Evidence(Some(
         tempfile::Builder::new()
             .prefix(".own-cost-")
             .tempdir_in(std::env::current_dir().unwrap())
             .unwrap(),
-    )));
+    ));
     let root = evidence.0.as_ref().unwrap().path().to_path_buf();
     let root = root.as_path();
     let pki = root.join("pki");
@@ -373,5 +379,3 @@ async fn cedegrid_costs_at_117_tasks() {
     assert_eq!(pids.len(), TASKS, "one supervisor per task");
     assert_eq!(ran, TASKS, "every task ran through the window");
 }
-
-include!("support/state_dir.rs");
