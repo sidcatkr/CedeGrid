@@ -1108,7 +1108,8 @@ node reports with the expected per-resource values at each step.
   amount is measured when the summed per-process utilization of all processes is within
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
   utilization over the same interval, or, when that interval alone is not, when the shares and the
-  device summed over it and the 3 intervals before it are. While the device's process inventory lists an external
+  device summed over it and the 3 intervals before it are; the amounts are then those 4 intervals'
+  averages, so a sample missed in one interval does not read its process as idle. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
   the part nobody accounts for being one unattributed principal, except a remainder within the
   rounding (one point per listed process), which is not a principal; with own processes only,
