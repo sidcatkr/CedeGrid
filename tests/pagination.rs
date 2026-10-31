@@ -103,7 +103,7 @@ fn page(c: &mut Coordinator, q: PageQuery) -> cedegrid::pagination::Page {
 }
 #[test]
 fn continuous_inserts_do_not_extend_traversal_and_epoch_invalidates_cursor() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let cfg = config(dir.path());
     let mut c = Coordinator::open(cfg.clone()).unwrap();
     submit(&mut c, "a", "p", 5);
@@ -133,7 +133,7 @@ fn continuous_inserts_do_not_extend_traversal_and_epoch_invalidates_cursor() {
 }
 #[test]
 fn filters_exclude_unrelated_jobs_pools_and_membership_arrays() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let mut c = Coordinator::open(config(dir.path())).unwrap();
     submit(&mut c, "a", "p", 1);
     submit(&mut c, "b", "q", 1);
@@ -164,7 +164,7 @@ fn filters_exclude_unrelated_jobs_pools_and_membership_arrays() {
 }
 #[test]
 fn legacy_large_status_refuses_before_full_materialization() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let mut c = Coordinator::open(config(dir.path())).unwrap();
     submit(&mut c, "a", "p", 1001);
     let error = c
@@ -210,3 +210,5 @@ fn report_overflow_and_invalid_controls_fail_without_dropping_inventory() {
     report.allocations[0].detail.clear();
     assert!(report.validate_bounds().is_ok());
 }
+
+include!("support/state_dir.rs");

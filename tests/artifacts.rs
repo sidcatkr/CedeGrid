@@ -1,10 +1,12 @@
 use cedegrid::{artifacts::ArtifactStore, protocol::ArtifactRef};
 use sha2::{Digest, Sha256};
-fn dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(".artifact-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap()
+fn dir() -> StateDir {
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".artifact-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    )
 }
 fn reference(data: &[u8]) -> ArtifactRef {
     ArtifactRef {
@@ -120,3 +122,5 @@ fn symlink_blob_is_never_followed() {
     assert!(store.publish(&id).is_err());
     assert!(store.read(&a.sha256, 0, 10).is_err());
 }
+
+include!("support/state_dir.rs");

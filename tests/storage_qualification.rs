@@ -2,7 +2,7 @@ use cedegrid::state::StorageProfile;
 use cedegrid::storage_qualification::{child_main, run};
 use std::path::Path;
 
-fn home_test_parent() -> tempfile::TempDir {
+fn home_test_parent() -> StateDir {
     let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
     let home = Path::new(&std::env::var_os("HOME").unwrap())
         .canonicalize()
@@ -11,10 +11,12 @@ fn home_test_parent() -> tempfile::TempDir {
         cwd.starts_with(home),
         "qualification tests must run inside home"
     );
-    tempfile::Builder::new()
-        .prefix(".qualification-test-")
-        .tempdir_in(cwd)
-        .unwrap()
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".qualification-test-")
+            .tempdir_in(cwd)
+            .unwrap(),
+    )
 }
 
 #[test]
@@ -141,3 +143,5 @@ fn refuses_parent_symlink_without_writing_through_alias() {
     );
     assert!(std::fs::read_dir(real).unwrap().next().is_none());
 }
+
+include!("support/state_dir.rs");

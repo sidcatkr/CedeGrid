@@ -32,6 +32,11 @@ backup restore, live database recreation, journal-error bypass or blind state re
 Detected namespace loss or a missing active attempt stops the agent. Full detection
 of every possible in-place storage rollback is not claimed.
 
+Each state directory has a private control directory beside it in the same parent,
+`.<name>.cedegrid-control`, which holds the namespace's owner and lifetime locks outside
+anything quarantine renames. There is no uninstall or purge command: removing a stopped
+node's or coordinator's state means removing both directories.
+
 Recovery never adopts or signals a stored numeric PID. Release requires verified
 original-process absence and GPU release observations. Missing preparation,
 unknown survivors or lost mediated-child inventories retain the reservation;

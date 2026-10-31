@@ -137,12 +137,12 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         std::env::var_os("CEDEGRID_TEST_LAUNCH_BURST").is_some(),
         "explicit CEDEGRID_TEST_LAUNCH_BURST=1 is required"
     );
-    let evidence = Evidence(Some(
+    let evidence = Evidence(Some(StateDir(
         tempfile::Builder::new()
             .prefix(".launch-burst-")
             .tempdir_in(std::env::current_dir().unwrap())
             .unwrap(),
-    ));
+    )));
     let root = evidence.0.as_ref().unwrap().path().to_path_buf();
     let root = root.as_path();
     let pki = root.join("pki");
@@ -364,3 +364,5 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         "longest gap between observations {longest} ms exceeds {GAP_BOUND_MS} ms"
     );
 }
+
+include!("support/state_dir.rs");

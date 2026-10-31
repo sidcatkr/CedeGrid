@@ -19,10 +19,12 @@ fn usage() -> (f64, i64) {
 #[test]
 #[ignore = "explicit bounded history-component measurement; creates no workloads"]
 fn four_thousand_released_records_component_cost() {
-    let temporary = tempfile::Builder::new()
-        .prefix(".history-cost-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap();
+    let temporary = StateDir(
+        tempfile::Builder::new()
+            .prefix(".history-cost-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    );
     let store = StateStore::open(temporary.path()).unwrap();
     let mut connection =
         rusqlite::Connection::open(temporary.path().join("state.sqlite3")).unwrap();
@@ -141,3 +143,5 @@ fn four_thousand_released_records_component_cost() {
         "whole_manager_target_status":"not_evaluated_by_component_measurement"})
     );
 }
+
+include!("support/state_dir.rs");

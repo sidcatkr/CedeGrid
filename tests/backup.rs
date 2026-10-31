@@ -6,11 +6,13 @@ use cedegrid::{
 };
 use serde_json::json;
 use std::{fs, path::Path, time::Duration};
-fn dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(".backup-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap()
+fn dir() -> StateDir {
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".backup-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    )
 }
 fn config(path: &Path) -> CoordinatorConfig {
     serde_json::from_value(json!({"state_dir":path,"listen":"127.0.0.1:0","tls":{"ca_cert":"","certificate":"","private_key":""},"clients":{}})).unwrap()
@@ -589,3 +591,5 @@ fn a_schema_five_snapshot_restores_like_a_current_one() {
     }
     assert_eq!(restored[0], restored[1]);
 }
+
+include!("support/state_dir.rs");

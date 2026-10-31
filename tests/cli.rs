@@ -122,7 +122,7 @@ fn invalid_config_and_missing_history_never_initialize_database() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn doctor_separates_selected_profile_from_requested_role_without_creating_state() {
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let path = setup(dir.path());
     let mut config = Config::load(&path).unwrap();
     config.storage_profile = cedegrid::state::StorageProfile::BurstReplayDeleteExtra;
@@ -155,7 +155,7 @@ fn doctor_separates_selected_profile_from_requested_role_without_creating_state(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn observe_and_doctor_show_each_resource() {
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let path = setup(dir.path());
     let mut config = Config::load(&path).unwrap();
     // Neutral below a Performance cap, with a reduced margin as the caution option.
@@ -302,7 +302,7 @@ fn observation_without_state_is_read_only_and_honest_about_enforcement() {
 fn observation_is_persisted_and_history_round_trips() {
     // Durable integration requires a local volume; /tmp may be volatile even
     // when the checkout is on a supported filesystem.
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let path = setup(dir.path());
     let observed = success_json(run(&path, &["observe"]));
     assert!(observed["observation_id"].as_i64().unwrap() > 0);
@@ -502,7 +502,7 @@ fn execution_setup(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf)
 #[test]
 fn enabled_supervision_commits_exit_receipt_and_releases_capacity() {
     use cedegrid::state::{StateStore, TaskStatus};
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config, job) = execution_setup(dir.path());
     let outcome = success_json(run(&config, &["supervise", job.to_str().unwrap()]));
     assert_eq!(outcome["record"]["phase"], "released");
@@ -529,7 +529,7 @@ fn enabled_supervision_commits_exit_receipt_and_releases_capacity() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn standalone_supervise_drains_its_run_on_sigint() {
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config_path, job_path) = execution_setup(dir.path());
     let mut config: Config = cedegrid::config::parse_runtime(
         &fs::read_to_string(&config_path).unwrap(),
@@ -606,7 +606,7 @@ fn standalone_supervise_drains_its_run_on_sigint() {
 fn npm_launcher_identity_does_not_reach_internal_gate_or_supervisor() {
     // The npm launcher's spawn fallback sets CEDEGRID_LAUNCHER_PID for the native
     // process it starts. The gate it spawns in turn must not inherit that check.
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config, job) = execution_setup(dir.path());
     let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("--config")
@@ -627,7 +627,7 @@ fn npm_launcher_identity_does_not_reach_internal_gate_or_supervisor() {
 #[test]
 fn missing_required_control_never_executes_and_safe_resubmission_uses_new_attempt() {
     use cedegrid::state::{StateStore, TaskStatus};
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config, job) = execution_setup(dir.path());
     let mut request: Value = serde_json::from_slice(&fs::read(&job).unwrap()).unwrap();
     request["required_controls"] = serde_json::json!(["cpu.max"]);
@@ -661,7 +661,7 @@ fn missing_required_control_never_executes_and_safe_resubmission_uses_new_attemp
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn local_gpu_execution_refuses_before_state_or_workload_creation() {
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config, job) = execution_setup(dir.path());
     let mut request: Value = serde_json::from_slice(&fs::read(&job).unwrap()).unwrap();
     request["resources"]["gpu_memory_mib"] = serde_json::json!({"GPU-test": 64});
@@ -677,7 +677,7 @@ fn local_gpu_execution_refuses_before_state_or_workload_creation() {
 #[test]
 fn configured_rollback_profile_is_used_through_execution_history_and_restart() {
     use cedegrid::state::{StateStore, StorageProfile};
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let (config_path, job) = execution_setup(dir.path());
     let mut config = Config::load(&config_path).unwrap();
     config.storage_profile = StorageProfile::DeleteExtra;
@@ -1652,3 +1652,5 @@ mod setup_terminal {
         assert!(!path.exists());
     }
 }
+
+include!("support/state_dir.rs");

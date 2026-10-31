@@ -1270,7 +1270,9 @@ mod tests {
         // An older kernel lists no Pss_Shmem.
         assert_eq!(own_memory_from_rollup("Pss_Anon:  2048 kB\n"), Some(2));
         assert_eq!(own_memory_from_rollup("Pss_Shmem:  3072 kB\n"), None);
-        let leaf = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let leaf = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         std::fs::write(
             leaf.path().join("memory.stat"),
             "anon 5242880\nfile 104857600\nkernel 1048576\nshmem 2097152\nanon_thp 0\n",

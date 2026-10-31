@@ -181,6 +181,7 @@ ALLOWLIST = (
     'tests/storage_qualification.rs',
     'tests/supervision.rs',
     'tests/support/snapshot.rs',
+    'tests/support/state_dir.rs',
     'tests/telemetry.rs',
     'tests/test_anchor_validation.py',
     'tests/test_bundle.py',

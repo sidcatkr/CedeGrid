@@ -819,10 +819,12 @@ mod lock_tests {
     use super::*;
     #[test]
     fn duplicate_description_retains_service_ownership_until_final_close() {
-        let directory = tempfile::Builder::new()
-            .prefix(".lock-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".lock-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
         let path = directory.path().join("coordinator.lock");
         let file = OpenOptions::new()
             .read(true)

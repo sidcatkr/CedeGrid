@@ -305,8 +305,10 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-    fn fixture() -> (tempfile::TempDir, StateStore, PathBuf) {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    fn fixture() -> (crate::namespace::TestStateDir, StateStore, PathBuf) {
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path().join("state");
         let store = StateStore::open(&root).unwrap();
         let resources = Resources {

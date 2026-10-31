@@ -55,7 +55,7 @@ fn offline_upgrade_preserves_payload_bytes_receipts_outboxes_and_profile() {
         (StorageProfile::WalFull, 2),
         (StorageProfile::DeleteExtra, 3),
     ] {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
         let state = temp.path().join("state");
         let store = StateStore::open_with_profile(&state, profile).unwrap();
         store.submit("historical-RESMGR-identity", true).unwrap();
@@ -106,7 +106,7 @@ fn offline_upgrade_preserves_payload_bytes_receipts_outboxes_and_profile() {
 
 #[test]
 fn future_schema_and_live_handles_fail_before_original_changes() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     let store = StateStore::open(&state).unwrap();
     let bundle = temp.path().join("bundle");
@@ -122,7 +122,7 @@ fn future_schema_and_live_handles_fail_before_original_changes() {
 
 #[test]
 fn replay_upgrade_preserves_local_bytes_and_requires_authenticated_rebuild() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     let profile = StorageProfile::BurstReplayDeleteExtra;
     let store = StateStore::open_with_profile(&state, profile).unwrap();
@@ -142,7 +142,7 @@ fn replay_upgrade_preserves_local_bytes_and_requires_authenticated_rebuild() {
 #[test]
 fn upgrade_requires_confirmation_and_refuses_symlink_members() {
     use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     drop(StateStore::open(&state).unwrap());
     mark_legacy(&state, 2);
@@ -172,7 +172,7 @@ fn upgrade_requires_confirmation_and_refuses_symlink_members() {
 fn upgrade_indexes_valid_receipts_and_preserves_unresolved_outboxes() {
     use cedegrid::protocol::{Receipt, Response, ResultSubmission};
     use sha2::{Digest, Sha256};
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     let store = StateStore::open(&state).unwrap();
     store.submit("legacy-task", true).unwrap();
@@ -253,7 +253,7 @@ fn upgrade_indexes_valid_receipts_and_preserves_unresolved_outboxes() {
 
 #[test]
 fn completed_upgrade_retry_does_not_hold_new_work_and_rejects_changed_bundle() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     let store = StateStore::open(&state).unwrap();
     store.submit("old", true).unwrap();
@@ -275,7 +275,7 @@ fn completed_upgrade_retry_does_not_hold_new_work_and_rejects_changed_bundle() {
 
 #[test]
 fn native_writer_identity_blocks_upgrade_without_touching_legacy_state() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     drop(StateStore::open(&state).unwrap());
     mark_legacy(&state, 2);
@@ -299,7 +299,7 @@ fn native_writer_identity_blocks_upgrade_without_touching_legacy_state() {
 fn interrupted_after_schema_commit_resumes_recorded_bundle_without_empty_replacement() {
     use cedegrid::namespace::Namespace;
     use std::time::Duration;
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     let store = StateStore::open(&state).unwrap();
     store.submit("retained", true).unwrap();
@@ -390,7 +390,7 @@ fn assert_schema_four(db: &Connection) {
 
 #[test]
 fn new_coordinator_state_starts_at_distributed_schema_four() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let state = root.path().join("state");
     drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
     assert_schema_four(&Connection::open(state.join("state.sqlite3")).unwrap());
@@ -398,7 +398,7 @@ fn new_coordinator_state_starts_at_distributed_schema_four() {
 
 #[test]
 fn distributed_schema_three_migrates_to_four_with_check_and_recreated_triggers() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let state = root.path().join("state");
     drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
     {
@@ -443,7 +443,7 @@ fn schema_five_state_migrates_in_place_to_the_cancelled_status() {
         StorageProfile::DeleteExtra,
         StorageProfile::BurstReplayDeleteExtra,
     ] {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
         let state = temp.path().join("state");
         let store = StateStore::open_with_profile(&state, profile).unwrap();
         store.submit("waiting", true).unwrap();
@@ -481,7 +481,7 @@ fn schema_five_state_migrates_in_place_to_the_cancelled_status() {
 /// `tasks` intact.
 #[test]
 fn schema_five_coordinator_state_migrates_with_its_references_intact() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
     let state = root.path().join("state");
     drop(cedegrid::coordinator::Coordinator::open(coordinator_config(&state)).unwrap());
     {
@@ -517,7 +517,7 @@ fn schema_five_coordinator_state_migrates_with_its_references_intact() {
 /// Schema 5 needs no offline upgrade; the command refuses and changes nothing.
 #[test]
 fn offline_upgrade_refuses_schema_five_because_it_migrates_in_place() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let state = temp.path().join("state");
     drop(StateStore::open(&state).unwrap());
     downgrade_tasks(&state, 5);
@@ -530,3 +530,5 @@ fn offline_upgrade_refuses_schema_five_because_it_migrates_in_place() {
     assert_eq!(fs::read(state.join("state.sqlite3")).unwrap(), before);
     assert!(!bundle.exists());
 }
+
+include!("support/state_dir.rs");

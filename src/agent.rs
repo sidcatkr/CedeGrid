@@ -1349,7 +1349,9 @@ mod agent_transport_tests {
     #[cfg(unix)]
     #[test]
     fn accepted_receipt_reserves_complete_utf8_bytes_before_writing_and_retains_uncertainty() {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path().join("state");
         let store = StateStore::open(&root).unwrap();
         let path = root.join("attempts/attempt/result.receipt.json");
@@ -2083,7 +2085,9 @@ mod drain_tests {
     /// connection's commit, or an entry read at another key, is not moved (EFF-2).
     #[test]
     fn own_observation_writes_keep_the_journal_cache() {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let store = crate::state::StateStore::open(dir.path()).unwrap();
         let before = store.change_key().unwrap();
         let snapshot: crate::model::Snapshot = serde_json::from_value(serde_json::json!({

@@ -63,10 +63,12 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         !evidence.exists(),
         "refuse overwriting an existing evidence file"
     );
-    let dir = tempfile::Builder::new()
-        .prefix("gpu-native-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap();
+    let dir = StateDir(
+        tempfile::Builder::new()
+            .prefix("gpu-native-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    );
     let marker = dir.path().join("cuda-ready");
     let script = "import os,pathlib,time,torch; assert torch.cuda.is_available(); torch.set_num_threads(1); x=torch.ones(8*1024*1024,device='cuda'); torch.cuda.synchronize(); pathlib.Path(os.environ['READY']).write_text(str(x.sum().item())); time.sleep(30)";
     let request = LaunchRequest {
@@ -150,3 +152,5 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
     )
     .unwrap();
 }
+
+include!("support/state_dir.rs");

@@ -1983,10 +1983,12 @@ mod directory_tests {
 
     #[test]
     fn nested_creation_syncs_each_directory_then_parent_before_next_child() {
-        let directory = tempfile::Builder::new()
-            .prefix(".directory-sync-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".directory-sync-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
         let root = directory.path();
         let child = root.join("a");
         let grandchild = child.join("b");
@@ -2015,10 +2017,12 @@ mod directory_tests {
 
     #[test]
     fn failed_directory_sync_stops_before_creating_deeper_children() {
-        let directory = tempfile::Builder::new()
-            .prefix(".directory-sync-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".directory-sync-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
         let child = directory.path().join("a");
         let grandchild = child.join("b");
         let result = create_directory_durably(&grandchild, &mut |path: &Path| {
@@ -2034,10 +2038,12 @@ mod directory_tests {
 
     #[test]
     fn replayable_directory_creation_still_propagates_sync_failure() {
-        let directory = tempfile::Builder::new()
-            .prefix(".replay-sync-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".replay-sync-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
         let child = directory.path().join("a");
         let grandchild = child.join("b");
         let result = create_directory_with_profile(

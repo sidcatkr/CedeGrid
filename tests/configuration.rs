@@ -1482,7 +1482,7 @@ fn the_supervisor_writes_the_target_files_the_sdks_read() {
     use cedegrid::actuation::{ResourceTarget, TARGET_FILE, TargetChannel};
     let cases = contract()["target_file_cases"].as_array().unwrap().clone();
     let case = |id: &str| cases.iter().find(|c| c["id"] == id).unwrap().clone();
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let mut channel = TargetChannel::new(5000);
     let tf01 = case("TF-01");
     assert!(
@@ -1493,7 +1493,7 @@ fn the_supervisor_writes_the_target_files_the_sdks_read() {
         serde_json::from_slice(&fs::read(dir.path().join(TARGET_FILE)).unwrap()).unwrap();
     assert_eq!(written, tf01["file"]);
     // A save-progress request on a fresh channel writes exactly TF-06 (FR-075).
-    let fresh = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let fresh = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     TargetChannel::new(5000)
         .publish_save_progress(&[fresh.path().to_owned()])
         .unwrap();
@@ -1781,3 +1781,5 @@ fn a_reload_applies_contention_changes_and_refuses_the_rest() {
         "no change is fine"
     );
 }
+
+include!("support/state_dir.rs");

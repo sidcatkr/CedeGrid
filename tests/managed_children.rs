@@ -1,23 +1,6 @@
 use cedegrid::{execution_model::*, managed_children::*, model::Resources, state::StateStore};
 use std::{collections::BTreeMap, path::PathBuf};
-/// A temporary state root in the checkout. Its namespace control directory, a
-/// sibling, is removed with it unless the test failed.
-struct StateDir(tempfile::TempDir);
-impl std::ops::Deref for StateDir {
-    type Target = tempfile::TempDir;
-    fn deref(&self) -> &tempfile::TempDir {
-        &self.0
-    }
-}
-impl Drop for StateDir {
-    fn drop(&mut self) {
-        if !std::thread::panicking()
-            && let Ok(control) = cedegrid::namespace::control_dir_for(self.0.path())
-        {
-            let _ = std::fs::remove_dir_all(control);
-        }
-    }
-}
+include!("support/state_dir.rs");
 fn dir() -> StateDir {
     StateDir(
         tempfile::Builder::new()

@@ -71,10 +71,12 @@ fn fingerprint(dir: &Path, name: &str) -> String {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
-    let directory = tempfile::Builder::new()
-        .prefix(".tls-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap();
+    let directory = StateDir(
+        tempfile::Builder::new()
+            .prefix(".tls-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    );
     let dir = directory.path();
     std::fs::write(dir.join("ca.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n").unwrap();
     openssl(
@@ -237,3 +239,5 @@ async fn real_mtls_rejects_missing_unlisted_and_wrong_role_certificates() {
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }
+
+include!("support/state_dir.rs");

@@ -3,8 +3,8 @@ use cedegrid::{
     telemetry::ManagedCollector,
 };
 use std::{collections::BTreeMap, fs::OpenOptions};
-fn setup() -> (tempfile::TempDir, Config, StateStore, ExecutionRecord) {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+fn setup() -> (StateDir, Config, StateStore, ExecutionRecord) {
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let config = Config {
         state_dir: dir.path().join("state"),
         ..Config::default()
@@ -59,7 +59,7 @@ fn reconciliation_preserves_a_live_identity_and_never_signals_it() {
 /// supervisor is gone (FR-088).
 #[test]
 fn a_run_with_a_living_recorded_descendant_is_not_released() {
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let config = Config {
         state_dir: dir.path().join("state"),
         ..Config::default()
@@ -166,7 +166,7 @@ fn pending_usage_stays_unobserved_and_reused_pid_identity_never_becomes_zero() {
 #[test]
 fn requested_modes_travel_from_the_request_to_the_policy_allocation() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let config = Config {
         state_dir: dir.path().join("state"),
         ..Config::default()
@@ -205,3 +205,5 @@ fn requested_modes_travel_from_the_request_to_the_policy_allocation() {
     let (_, allocations) = collector.sample(std::slice::from_ref(&record)).unwrap();
     assert_eq!(allocations[0].modes, modes);
 }
+
+include!("support/state_dir.rs");

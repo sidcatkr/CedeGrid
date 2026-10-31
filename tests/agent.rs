@@ -29,6 +29,12 @@ impl TestDir {
 }
 impl Drop for TestDir {
     fn drop(&mut self) {
+        // The namespace control directory beside a state root here goes with it.
+        if let Ok(control) = cedegrid::namespace::control_dir_for(&self.0)
+            && control.exists()
+        {
+            let _ = fs::remove_dir_all(control);
+        }
         // The test's own processes may still be exiting, so removal is retried.
         let mut result = fs::remove_dir_all(&self.0);
         for _ in 0..40 {

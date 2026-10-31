@@ -50,7 +50,7 @@ fn family_termination_deadline_is_shared_and_unrelated_same_uid_child_survives()
             .spawn()
             .unwrap(),
     );
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let store = StateStore::open(&dir.path().join("state")).unwrap();
     let code = r#"
 import sys,time
@@ -146,3 +146,5 @@ Path('leader-exit-time').write_text(str(time.clock_gettime_ns(time.CLOCK_MONOTON
         "manager affected unrelated same-user child"
     );
 }
+
+include!("support/state_dir.rs");

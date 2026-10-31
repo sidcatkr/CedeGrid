@@ -5,24 +5,7 @@ use cedegrid::{
 };
 use std::collections::BTreeMap;
 
-/// A temporary state root in the checkout. Its namespace control directory, a
-/// sibling, is removed with it unless the test failed.
-struct StateDir(tempfile::TempDir);
-impl std::ops::Deref for StateDir {
-    type Target = tempfile::TempDir;
-    fn deref(&self) -> &tempfile::TempDir {
-        &self.0
-    }
-}
-impl Drop for StateDir {
-    fn drop(&mut self) {
-        if !std::thread::panicking()
-            && let Ok(control) = cedegrid::namespace::control_dir_for(self.0.path())
-        {
-            let _ = std::fs::remove_dir_all(control);
-        }
-    }
-}
+include!("support/state_dir.rs");
 
 fn store() -> (StateDir, StateStore) {
     let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
@@ -271,7 +254,7 @@ fn offline_schema_two_upgrade_preserves_tasks_and_observations() {
         .unwrap();
     drop(db);
     assert!(StateStore::open(dir.path()).is_err());
-    let backup_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let backup_root = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     cedegrid::upgrade::upgrade(
         dir.path(),
         &backup_root.path().join("bundle"),
@@ -306,7 +289,7 @@ fn unaudited_schema_one_requires_external_legacy_recovery_without_mutation() {
     drop(db);
     let before = std::fs::read(dir.path().join(DATABASE_FILENAME)).unwrap();
     assert!(StateStore::open(dir.path()).is_err());
-    let backup_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let backup_root = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let backup = backup_root.path().join("bundle");
     assert!(
         cedegrid::upgrade::upgrade(

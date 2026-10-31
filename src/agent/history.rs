@@ -181,7 +181,9 @@ mod tests {
 
     #[test]
     fn released_history_is_read_once_at_start_and_never_per_iteration() {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let store = StateStore::open(dir.path()).unwrap();
         for i in 0..40 {
             let record = store
@@ -205,7 +207,9 @@ mod tests {
 
     #[test]
     fn a_run_released_during_the_run_is_followed_until_settled() {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let store = StateStore::open(dir.path()).unwrap();
         let record = store.reserve(&request("t", "a1"), &capacity()).unwrap();
         let output = dir.path().join("attempts").join("a1");
@@ -233,7 +237,9 @@ mod tests {
 
     #[test]
     fn settled_attempt_directories_beyond_the_newest_256_are_removed() {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let store = StateStore::open(dir.path()).unwrap();
         let attempts = dir.path().join("attempts");
         for i in 0..300 {
@@ -276,7 +282,9 @@ mod tests {
 
     #[test]
     fn the_upgrade_holds_table_is_looked_up_once_per_start() {
-        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let dir = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let store = StateStore::open(dir.path()).unwrap();
         let record = store.reserve(&request("t", "a1"), &capacity()).unwrap();
         let scope = HistoryScope::new(&store, dir.path()).unwrap();

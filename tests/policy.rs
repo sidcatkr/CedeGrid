@@ -6008,10 +6008,12 @@ mod reclaim_admission {
     /// the agent builds for `decision`.
     fn coordinator_places(sim: &Sim, decision: &Decision, cpu: u64) -> Vec<String> {
         use cedegrid::protocol::*;
-        let dir = tempfile::Builder::new()
-            .prefix(".coordinator-test-")
-            .tempdir_in(std::env::current_dir().unwrap())
-            .unwrap();
+        let dir = StateDir(
+            tempfile::Builder::new()
+                .prefix(".coordinator-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
         let mut coordinator = cedegrid::coordinator::Coordinator::open(CoordinatorConfig {
             storage_profile: Default::default(),
             state_dir: dir.path().join("state"),
@@ -7549,3 +7551,5 @@ mod save_progress {
         }
     }
 }
+
+include!("support/state_dir.rs");

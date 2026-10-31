@@ -7,7 +7,7 @@ use std::{fs, io::Write, sync::mpsc, time::Duration};
 
 #[test]
 fn recovery_waits_for_db_and_output_lifetimes_and_fences_delayed_supervisor() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let root = temp.path().join("state");
     let store = StateStore::open(&root).unwrap();
     store.submit("retained-task", true).unwrap();
@@ -85,7 +85,7 @@ fn recovery_waits_for_db_and_output_lifetimes_and_fences_delayed_supervisor() {
 
 #[test]
 fn nested_existing_store_reuses_guard_while_recovery_blocks_admission() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let root = temp.path().join("state");
     let store = StateStore::open(&root).unwrap();
     let namespace = Namespace::new(&root).unwrap();
@@ -107,7 +107,7 @@ fn nested_existing_store_reuses_guard_while_recovery_blocks_admission() {
 
 #[test]
 fn persisted_fencing_intent_prevents_readiness_after_recovery_process_dies() {
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let root = temp.path().join("state");
     let store = StateStore::open(&root).unwrap();
     store.submit("must-remain-retained", true).unwrap();
@@ -161,7 +161,7 @@ fn persisted_fencing_intent_prevents_readiness_after_recovery_process_dies() {
 #[test]
 fn namespace_rejects_lock_substitution_symlinks_and_hardlinks() {
     use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let root = temp.path().join("state");
     let namespace = Namespace::new(&root).unwrap();
     let path = namespace.control_dir().join("lifecycle.lock");
@@ -176,7 +176,7 @@ fn namespace_rejects_lock_substitution_symlinks_and_hardlinks() {
 #[test]
 fn replaced_regular_lock_cannot_split_an_existing_lifecycle() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let temp = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
     let root = temp.path().join("state");
     let namespace = Namespace::new(&root).unwrap();
     let guard = namespace.acquire(None, Duration::ZERO).unwrap();
@@ -193,3 +193,5 @@ fn replaced_regular_lock_cannot_split_an_existing_lifecycle() {
         "even no holder cannot authorize an unanchored replacement inode"
     );
 }
+
+include!("support/state_dir.rs");

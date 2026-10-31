@@ -922,8 +922,10 @@ impl CaptureCharge {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    fn publisher() -> (tempfile::TempDir, NativePublisher) {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    fn publisher() -> (crate::namespace::TestStateDir, NativePublisher) {
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path().join("state");
         let store = StateStore::open(&root).unwrap();
         let guard = store.namespace_guard();
@@ -954,7 +956,9 @@ mod tests {
     }
     #[test]
     fn first_input_reservation_counts_retained_quarantine_without_a_publisher() {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path().join("state");
         let store = StateStore::open(&root).unwrap();
         let guard = store.namespace_guard();
@@ -1011,7 +1015,9 @@ mod tests {
     }
     #[test]
     fn only_exact_database_names_at_state_roots_are_exempt_from_spool_accounting() {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path().join("state");
         let store = StateStore::open(&root).unwrap();
         let quarantine = temp.path().join(".state.quarantine-old");
@@ -1269,7 +1275,9 @@ mod tests {
     #[cfg(unix)]
     fn bounded_open_rejects_fifo_and_intermediate_symlink_without_blocking() {
         use std::os::unix::{ffi::OsStrExt, fs::symlink};
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let root = temp.path();
         fs::create_dir(root.join("real")).unwrap();
         fs::write(root.join("real/data"), b"abcdef").unwrap();

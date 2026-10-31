@@ -8,11 +8,13 @@ use cedegrid::{
 };
 use serde_json::json;
 use std::{collections::BTreeMap, path::PathBuf};
-fn dir() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix(".coordinator-test-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap()
+fn dir() -> StateDir {
+    StateDir(
+        tempfile::Builder::new()
+            .prefix(".coordinator-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap(),
+    )
 }
 fn config(path: &std::path::Path) -> CoordinatorConfig {
     CoordinatorConfig {
@@ -4701,3 +4703,5 @@ fn a_preparing_offer_does_not_expire_while_its_node_reports_it() {
         "an offer no report mentioned expired as before"
     );
 }
+
+include!("support/state_dir.rs");

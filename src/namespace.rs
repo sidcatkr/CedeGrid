@@ -336,6 +336,31 @@ impl Maintenance {
         Ok((NamespaceOwner { _file: _owner }, guard))
     }
 }
+/// A unit test's temporary directory in the checkout, removed with the namespace control
+/// directory beside it unless the test failed, as `tests/support/state_dir.rs` does.
+#[cfg(test)]
+pub(crate) struct TestStateDir(pub tempfile::TempDir);
+
+#[cfg(test)]
+impl std::ops::Deref for TestStateDir {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &tempfile::TempDir {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestStateDir {
+    fn drop(&mut self) {
+        if !std::thread::panicking()
+            && let Ok(control) = control_dir_for(self.0.path())
+            && control.exists()
+        {
+            let _ = std::fs::remove_dir_all(control);
+        }
+    }
+}
+
 /// The control directory a namespace keeps beside its state root.
 pub fn control_dir_for(root: &Path) -> Result<PathBuf> {
     control_path(&canonical_location(root, false)?)
@@ -595,7 +620,9 @@ mod tests {
     use std::os::fd::AsRawFd;
     #[test]
     fn duplicated_lifecycle_description_retains_lock_and_is_close_on_exec() {
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
         let namespace = Namespace::new(&temp.path().join("state")).unwrap();
         let guard = namespace.acquire(None, Duration::ZERO).unwrap();
         let duplicate = guard.0._lifecycle.try_clone().unwrap();

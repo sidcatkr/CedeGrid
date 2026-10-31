@@ -36,6 +36,12 @@ impl Drop for FailureEvidence {
                 "retained_failed_service_evidence={}",
                 directory.keep().display()
             );
+        } else if let Some(directory) = &self.0
+            && let Ok(control) = cedegrid::namespace::control_dir_for(directory.path())
+            && control.exists()
+        {
+            // The namespace control directory beside the state root goes with it.
+            let _ = std::fs::remove_dir_all(control);
         }
     }
 }
