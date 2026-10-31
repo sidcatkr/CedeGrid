@@ -345,7 +345,8 @@ back more.
 - Q: How do held CPU caps return once contention has ended? → A: Once the quiet count says
   contention has ended, held CPU caps are raised straight to the mode's target in one move, as the
   allowance already is; own usage, not only the target, returns within 3 s of the contender
-  stopping, in Yield First and Performance (reviewer decision A on report 029, Decision 2).
+  stopping, in Yield First and Performance (reviewer decision A on report 029, Decision 2; Yield
+  First's bound counts from its quiet count since item 036).
 - Q: How is GPU compute measured beside another GPU user? → A: Each process counts at its share of
   the whole interval, so time it was stopped counts as idle; a remainder within the rounding, one
   point per listed process, is not a principal; a disagreement beyond the tolerance still reads
@@ -443,7 +444,7 @@ back more.
   period, today's path and its unknown reasons apply; a driver that samples processes at the
   device's rate reads as today. Each interval's measurement keeps the device's sample count and
   window and each process's sample count with its first and last timestamps, in the persisted
-  observation (item 034, 1).
+  observation (item 034, 1; the slot rule is replaced by the sample-span answer below, item 036).
 - Q: Does the return after contention change Yield First's quiet count? → A: No. At the quiet
   count every held CPU cap rises to the mode's target in one move, in the same interval, not in
   steps from the minimum duty. Yield First's quiet count stays as it is, since it is that mode's
@@ -457,6 +458,25 @@ back more.
   floor-breach Hint or Drain, or anything else that acts on own work because of own memory, PSS
   is read fresh, and the step is taken only if that reading confirms it. A family of one keeps its
   current reading, and Full keeps `memory.current` (item 034, 3).
+- Q: How does one GPU sample count toward its process's share of an interval? → A: A sample at t,
+  whose process's previous sample was at p, counts in full in the window where it arrives:
+  sm_util × min(t − p, window) ÷ window, so busy time can shift by up to one window but none is
+  lost or counted twice. A sample with no previous one (a PID's first, or the first after an agent
+  start) covers from the window's start. Each PID's last sample timestamp is kept across
+  intervals, per device, and dropped when the PID leaves the device's process list; a process with
+  no sample in the window counts 0, so stopped time stays idle (R33). The device side and the
+  tolerance check are unchanged; when one interval fails the tolerance, the summed shares and the
+  device are also compared over the last 4 intervals, both sides summed over the same 4, and a
+  single interval still reads measured when it passes alone; `quiet_window_intervals` does not
+  change. Each interval's `compute_sampling` also keeps each sample's `sm_util` and timestamp per
+  PID. This replaces the slot rule above: 034's in-window period path and its fallback are
+  removed, and a missing baseline, MPS and an incomplete inventory keep their reasons (item 036,
+  1).
+- Q: How is Yield First's return after contention bounded? → A: From the quiet count, since the
+  quiet count is that mode's hysteresis, kept by item 034: in Yield First own usage is back within
+  2 intervals of the quiet count being reached. Neutral and Performance keep their bound, within 3
+  s of the contender stopping. The measured total from the contender's end stays in
+  `docs/validation.md` as the measured return (item 036, 2).
 
 ## Terms
 
@@ -1079,16 +1099,16 @@ node reports with the expected per-resource values at each step.
   the granularity, is documented. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
-  100%: each process's summed samples count against the slots of the per-process sampling
-  period, the window since the cursor divided by the period read from the per-process timestamps
-  in it, never against the device's sample count or the most-sampled process's count; when no
-  process has 2 samples in the window, today's slots stand: the device's sample count, else the
-  most-sampled process's count.
-  Each interval's persisted observation keeps the device's sample count and window and each
-  process's sample count with its first and last timestamps. The amount is measured when the
-  summed per-process utilization of all processes is within
+  100%: a sample at t, whose process's previous sample was at p, counts in full in the window
+  since the cursor where it arrives, as sm_util × min(t − p, window) ÷ window, a process's first
+  sample (or its first after an agent start) covering from the window's start; each PID's last
+  sample timestamp is kept across intervals per device and dropped when the PID leaves the
+  device's process list. Each interval's persisted observation keeps the device's sample count
+  and window and, per process, its previous sample and each sample's timestamp and `sm_util`. The
+  amount is measured when the summed per-process utilization of all processes is within
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
-  utilization over the same interval. While the device's process inventory lists an external
+  utilization over the same interval, or, when that interval alone is not, when the shares and the
+  device summed over it and the 3 intervals before it are. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
   the part nobody accounts for being one unattributed principal, except a remainder within the
   rounding (one point per listed process), which is not a principal; with own processes only,
@@ -1285,7 +1305,8 @@ node reports with the expected per-resource values at each step.
   has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
   one move to the uncontended target, without waiting for the mode's interval, for the allowance
   and for held caps alike, so own usage, not only the target, returns within 3 s of the
-  contender stopping: in that interval, while own work holds no excess, every binding CPU cap, hint
+  contender stopping in Neutral and Performance, and in Yield First, whose quiet count is that
+  mode's hysteresis, within 2 intervals of the quiet count being reached: in that interval, while own work holds no excess, every binding CPU cap, hint
   or pause held for external growth rises so that together they hold the mode's target, the
   lowest first and none lowered, never in steps from the minimum duty; steps held for other causes,
   and caps their work does not reach, keep their own paths. The quiet count is each mode's hysteresis and does not change with
