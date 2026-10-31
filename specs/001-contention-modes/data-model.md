@@ -453,3 +453,10 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - `attempts/<assignment>/family-recovery.json` (agent): `continued`, `ended`, `mismatched`,
   `gone`, `failed`, and when it ran; also the record's detail and a `family_recovered` event.
 
+## Item 034 additions
+
+- `GpuSnapshot.compute_sampling` (optional): `device_samples`, `device_first_us`,
+  `device_last_us`, `window_us`, `period_us`, `slots`, `slots_from` (`process_period`,
+  `device_samples` or `most_sampled`), and `processes`: per PID `pid`, `samples`, `first_us`,
+  `last_us`. Persisted with each observation; not on the wire.
+

@@ -776,6 +776,9 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: `setpgid` alone (the group would still be orphaned by the supervisor's exit,
   since its parent stays in the same session); leaving it (Guaranteed work that handles SIGHUP is
   told to hang up, and members are continued by the kernel rather than by CedeGrid).
+- **Observed, unexplained**: in the pin, members that left SIGHUP at its default action were not
+  ended by it, although that action ends a process. A session of its own makes the rule moot, so
+  it was not pursued (item 034).
 
 ## R42. Recovery by recorded identity (item 033)
 
@@ -787,4 +790,53 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: the supervisor passes pidfds to the agent with `SCM_RIGHTS` (up to 256 fds per
   run, lost on every agent restart, nothing to act with if the agent is down); a watchdog process
   per run (one more process to supervise).
+
+## R43. The per-process sampling period (item 034)
+
+- **Decision**: each PID's summed `sm_util` counts against the slots of the per-process sampling
+  period: the window from the cursor to the newest per-process timestamp, divided by the shortest
+  positive gap between one PID's consecutive timestamps in it, rounded, and at least each PID's
+  own count. With no PID holding 2 samples in the window, R33's slots (the device's sample count)
+  stay. Each interval records the device's and each PID's sample counts and timestamps.
+- **Rationale**: in the 033 batch the summed per-process reading was a steady third of the
+  device's in every window (33% against 99%, 19% against 55%, and 5% against 15% with a light
+  user alone), which fits a driver that samples processes at a third of the device's rate while
+  R33 divides by the device's count. A process with fewer samples than its slots was idle or
+  stopped for the rest, so R33's "stopped time counts as idle" holds. The most-sampled PID's count
+  would overstate every share when all were stopped for part of the window.
+- **Risk**: the batch's observations returned 1 or 2 per-process samples per interval with 2 or 3
+  processes listed, so a PID may hold fewer than 2 samples in a 500 ms window, and the fallback
+  then applies. The recorded counts decide that natively.
+- **Alternatives**: comparing shares instead of absolute sums (the item's fallback, not the plan);
+  dividing by each PID's own count (reads a stopped process at its busy level, R33).
+
+## R44. The one-move return (item 034)
+
+- **Decision**: at the first interval with contention ended, held CPU steps rise to a common level
+  L, filled from the lowest current targets upwards, so that they together hold the mode's target;
+  none is lowered, and that one move skips the dwell.
+- **Rationale**: the batch's records show 13 caps at targets from 1 m to 253 m at the contender's
+  end; each rose to its usage plus an equal part of the spare, so caps at the minimum duty got a
+  small rise and the rest waited 2 s per step. Report 030's simulation had equal caps, so the same
+  rule summed to the target there. Water-filling gives the lowest caps the room and keeps the sum
+  at the target, so no step overshoots and is capped again.
+- **Alternatives**: releasing every held cap (own usage could overshoot the target and be capped
+  again, a cap-uncap cycle); an equal split (would lower caps above it); shortening the quiet
+  count (it is each mode's hysteresis).
+
+## R45. The PSS period (item 034)
+
+- **Decision**: a Tracked family's PSS is read every K intervals, K from the timed pass so that PSS
+  averages at most 0.5% of the scope's CPU, 1 to 10; between passes own memory is the last PSS plus
+  the members' RSS growth since that pass; a member set change forces a pass; a new or changed RAM
+  step or OOM preferred mark on an estimated allocation makes the agent read fresh and evaluate
+  again on the state from before the interval.
+- **Rationale**: `smaps_rollup` walks each member's mappings, so its cost grows with mapped memory:
+  five processes sharing 1 GiB cost about 43 ms per interval in the batch, T385's 64 MiB family 3
+  ms. New private pages raise RSS and PSS alike, so the estimate does not miss growth; it misses a
+  copy-on-write break until the next pass. Reading fresh before acting means an estimate never
+  costs own work.
+- **Alternatives**: reading only members whose RSS changed (an active worker's RSS changes every
+  interval, so it saves little); holding the last PSS (misses growth); RSS in Tracked (overcounts
+  shared pages, R37).
 

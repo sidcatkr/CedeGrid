@@ -1336,6 +1336,67 @@ identities are already in the store. No schema, wire or SDK change beyond additi
   their leader's parent-death signal ends it. Pass.
 - III, IV, V, VI, VII: no policy change; tests first; additive fields. Pass.
 
+## Item 034: the batch's three findings (2026-10-31)
+
+Spec Session 2026-10-31 Q14 to Q16 (FR-021, FR-034, FR-085), the 033 batch report's Decisions 1
+to 3. The batch at `cd077e9`: beside a light GPU user own GPU work stayed at its fair share,
+since the summed per-process reading was a steady third of the device's; Yield First's return
+brought own usage back in 9 s; a Tracked 1 GiB family cost the agent 86 m on a 4-CPU scope.
+
+**Technical Context**: Rust 1.88, no new dependency. No wire or SDK change: the GPU snapshot and
+its observation are persisted with each observation and shown by `history`, `observe` and
+`doctor`, never sent to the coordinator, and `history` returns them as stored. Linux only for the
+PSS path; the GPU path is unit-tested with fixtures.
+
+1. **GPU slots (Q14)**: in `src/telemetry/gpu.rs` `measure_compute`, each PID's summed samples
+   count against the slots of the per-process sampling period. The window runs from the cursor to
+   the newest per-process timestamp; the period is the shortest positive gap between one PID's
+   consecutive timestamps in the window; the slots are the window divided by the period, rounded,
+   and at least each PID's own count. With no PID holding 2 samples in the window, today's slots
+   (the device's sample count, else the most-sampled PID) and today's reasons apply. `GpuSnapshot`
+   gains `compute_sampling`: the device's sample count with its first and last timestamps, the
+   window, the period and slots used and which path chose them, and per PID its sample count and
+   first and last timestamps; optional, left out when there is nothing to show.
+2. **The return (Q15, T339)**: at the interval the quiet count reaches
+   `principal_window_intervals`, the first interval contention has ended, every held CPU cap,
+   hint or pause rises in one move to a common level L, so that the held steps together hold the
+   mode's target: L fills from the lowest current targets upwards (water-filling) and no step is
+   lowered. That one move skips the dwell; later rises keep today's path (usage plus an equal part
+   of the spare, after the dwell). The frame in `src/policy/ladder.rs` computes L, and
+   `src/contention.rs` `plan_step` applies it through the calm raise. The quiet count and
+   Performance's and Neutral's paths are unchanged, and a test pins that their return times do not
+   get worse.
+3. **The PSS period (Q16)**: in `src/telemetry/managed.rs`, for a Tracked run with more than its
+   leader, each PSS pass over its members is timed and K = ceil(pass cost ÷ 0.5% of the scope's CPU
+   time per interval), clamped to 1..10. Between passes each member keeps its PSS from the last
+   pass and the run adds max(0, its members' RSS sum now minus their RSS sum at that pass). A
+   change in the member set forces a pass. A family of one and Full's leaf reading are unchanged.
+   The collector reports which allocations' RAM is an estimate this interval. In the agent
+   (`src/agent/service.rs`), when a decision adds or changes a RAM step, or marks a new OOM
+   preferred victim, for an allocation whose RAM was estimated, the agent reads those families'
+   PSS fresh, puts the fresh readings into the allocations and evaluates again on the policy state
+   from before the interval (`PolicyEngine` becomes `Clone`), so only a step the fresh reading
+   confirms is applied.
+4. **Small things**: a test helper removes a state directory's sibling
+   `.<name>.cedegrid-control` (`src/namespace.rs`) with the state directory, and every test that
+   makes state with `tempdir_in(current_dir)` uses it; a test checks that `uninstall` (or purge)
+   removes a real user's sibling. R41 records the pin's default-SIGHUP observation as observed and
+   unexplained. Existing directories are left for the user.
+5. **Afterwards**: the efficiency gate's family figures again (031's 16-member family, and a
+   1 GiB shared buffer), the full suites, the macOS serial suite and the Docker Linux check; the
+   test-host rerun waits for the user's typed approval.
+
+**Constitution Check (7.0.0)**:
+- I: no new action on any process; the fresh PSS read reads only verified members. Pass.
+- II: Performance no longer loses own GPU work to a sampling-rate mismatch where the period is
+  readable; own memory is acted on only from a fresh PSS reading, so an estimate cannot cost own
+  work; the agent stays within its measured-overhead budget (SC-014). Pass.
+- III: with no readable period the GPU path keeps today's unknown reasons; the RSS-growth estimate
+  never undercounts growth, and a copy-on-write break is at most K intervals late. Pass.
+- IV: `policy.rs` stays pure; the engine is cloned and evaluated again by the agent, with no I/O
+  in the policy. Pass.
+- V, VI, VII: user space only; tests first; `compute_sampling` is additive and optional. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
