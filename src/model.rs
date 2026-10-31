@@ -543,6 +543,42 @@ pub struct YieldAction {
     pub deadline_ms: Option<u64>,
 }
 
+/// How a device's external GPU compute demand was read in one interval (FR-021, Q19).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuDemandRecord {
+    /// Neither the decision that set the interval nor the one before sent own work on the
+    /// device a cap or pause, or no own allocation ran there.
+    pub uncapped: bool,
+    /// The interval's measured amount fed the estimate.
+    pub fed: bool,
+    /// The external total averaged over the uncapped intervals kept; absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<u64>,
+    /// How many uncapped intervals the estimate averages, at most 60.
+    pub intervals: u32,
+    /// The time since the last uncapped interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_uncapped_ms: Option<u64>,
+    /// A re-measure window lifts own work's GPU compute caps on the device this decision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub window: bool,
+    /// Which amount set the target.
+    pub source: GpuDemandSource,
+}
+
+/// The external GPU compute amount a target was set from (FR-021, Q19).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuDemandSource {
+    /// The interval's own amount: no uncapped interval since the estimate started.
+    #[default]
+    Interval,
+    /// The average over uncapped intervals.
+    Estimate,
+    /// Yield First: the larger of the interval's amount and the average.
+    Larger,
+}
+
 /// Per-resource state reported in decisions, `observe`, `doctor` and node reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceStatus {
@@ -579,6 +615,10 @@ pub struct ResourceStatus {
     pub held_back: Option<HeldBack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<ReasonCode>,
+    /// How the device's external GPU compute demand was read this interval, on GPU compute
+    /// (FR-021, Q19); the contention report does not carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_demand: Option<GpuDemandRecord>,
 }
 
 /// What a resource keeps from own work or from admission, and why, in resource

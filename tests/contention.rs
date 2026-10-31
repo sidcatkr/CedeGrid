@@ -5242,18 +5242,30 @@ mod gpu_demand {
         intervals: u64,
         reading: &dyn Fn(u64, bool) -> u64,
     ) -> Vec<(u64, u64)> {
+        loop_decisions(mode, job_mode, intervals, reading)
+            .1
+            .iter()
+            .map(|decision| (target_of(decision), cap_of(decision)))
+            .collect()
+    }
+
+    /// `closed_loop`'s decisions: the light user's alone, then own work's beside the other user.
+    pub(super) fn loop_decisions(
+        mode: ContentionMode,
+        job_mode: Option<ContentionMode>,
+        intervals: u64,
+        reading: &dyn Fn(u64, bool) -> u64,
+    ) -> (Vec<Decision>, Vec<Decision>) {
         let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
-        let mut now = 0;
+        let (mut now, mut alone) = (0, vec![]);
         for i in 0..60u64 {
-            engine
-                .evaluate(
-                    &config,
-                    &interval(None, ALONE[i as usize], i + 1),
-                    &PolicyInput::default(),
-                    now,
-                )
-                .unwrap();
+            let snap = interval(None, ALONE[i as usize], i + 1);
+            alone.push(
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), now)
+                    .unwrap(),
+            );
             now += INTERVAL;
         }
         let input = PolicyInput {
@@ -5265,14 +5277,13 @@ mod gpu_demand {
             let capped = caps.iter().any(|cap| *cap < 1000);
             let external = reading(i, capped);
             let own = caps[0].min(990 - external);
-            let decision = engine
-                .evaluate(&config, &interval(Some(own), external, 61 + i), &input, now)
-                .unwrap();
+            let snap = interval(Some(own), external, 61 + i);
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
             caps = [cap_of(&decision), caps[0]];
-            out.push((target_of(&decision), caps[0]));
+            out.push(decision);
             now += INTERVAL;
         }
-        out
+        (alone, out)
     }
 
     fn median(mut values: Vec<u64>) -> u64 {
@@ -5420,6 +5431,86 @@ mod gpu_demand {
         assert!(
             !(first..caps.len() - 6).any(|i| caps[i..i + 6].iter().all(|c| *c == 1000)),
             "a window lifted Yield First's cap"
+        );
+    }
+
+    /// Each decision records how the device's GPU demand was read (FR-021, Q19): whether the
+    /// interval was uncapped and fed the estimate, the estimate and its count, the time since the
+    /// last uncapped interval, an open window, and which amount set the target. The contention
+    /// report does not carry it.
+    #[test]
+    fn each_decision_records_how_gpu_demand_was_read() {
+        use cedegrid::model::GpuDemandSource;
+        let key = ResourceKey::GpuCompute(GPU.into());
+        let record = |decision: &Decision| {
+            decision.resources[&key]
+                .gpu_demand
+                .clone()
+                .expect("no gpu_demand record")
+        };
+        let light = |i: u64, capped: bool| {
+            if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            }
+        };
+        let (alone, own) = loop_decisions(ContentionMode::Performance, None, 200, &light);
+        // A new device reads unknown until its amount is measured; those intervals feed nothing.
+        let start = alone
+            .iter()
+            .position(|d| record(d).fed)
+            .expect("the light user alone never fed the estimate");
+        for (i, decision) in alone[..start].iter().enumerate() {
+            let read = record(decision);
+            assert!(
+                read.uncapped && !read.fed && read.estimate.is_none(),
+                "alone {i}: {read:?}"
+            );
+            assert_eq!(read.source, GpuDemandSource::Interval);
+        }
+        for (i, decision) in alone.iter().enumerate().skip(start) {
+            let read = record(decision);
+            assert!(read.uncapped && read.fed, "alone {i}: {read:?}");
+            assert_eq!(read.intervals, (i - start + 1) as u32);
+            assert_eq!(read.since_uncapped_ms, Some(0));
+            assert_eq!(read.source, GpuDemandSource::Estimate);
+            assert!(!read.window);
+        }
+        let fed = &ALONE[start..];
+        let mean = (fed.iter().sum::<u64>() + fed.len() as u64 / 2) / fed.len() as u64;
+        assert_eq!(record(&alone[59]).estimate, Some(mean));
+        // The job's first interval is set by decisions that sent no cap.
+        assert!(record(&own[0]).fed);
+        let capped = own
+            .iter()
+            .position(|d| !record(d).uncapped)
+            .expect("never capped");
+        let read = record(&own[capped + 4]);
+        assert!(!read.fed && !read.uncapped, "{read:?}");
+        assert!(read.since_uncapped_ms.unwrap() >= 4 * INTERVAL);
+        assert_eq!(
+            read.intervals,
+            record(&own[capped - 1]).intervals,
+            "capped intervals do not feed it"
+        );
+        let window = own
+            .iter()
+            .position(|d| record(d).window)
+            .expect("no window recorded");
+        assert_eq!(cap_of(&own[window]), 1000, "a window sends no cap");
+        let fed = (window..window + 7)
+            .filter(|&i| record(&own[i]).fed)
+            .count();
+        assert_eq!(fed, 5, "a window feeds its 5 uncapped intervals");
+        let (_, yield_first) = loop_decisions(ContentionMode::YieldFirst, None, 40, &light);
+        assert_eq!(record(&yield_first[39]).source, GpuDemandSource::Larger);
+        let config = mode_config(ContentionMode::Performance);
+        let report = cedegrid::agent::node_contention_report(&config, &own[window], 1);
+        let report = serde_json::to_string(&report).unwrap();
+        assert!(
+            report.contains("gpu_compute") && !report.contains("gpu_demand"),
+            "{report}"
         );
     }
 }

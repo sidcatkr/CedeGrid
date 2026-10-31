@@ -82,6 +82,14 @@ impl<'a> Interval<'a> {
         let budgets = std::mem::take(&mut self.gpu_compute_budget);
         for (uuid, budget) in &budgets {
             if self.remeasuring(uuid, budget.own.is_some()) {
+                let key = ResourceKey::GpuCompute(uuid.clone());
+                if let Some(record) = self
+                    .statuses
+                    .get_mut(&key)
+                    .and_then(|s| s.gpu_demand.as_mut())
+                {
+                    record.window = true;
+                }
                 self.hold_remeasured(uuid);
             } else {
                 self.plan_gpu_compute(uuid, budget);

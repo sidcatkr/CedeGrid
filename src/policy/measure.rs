@@ -1092,7 +1092,12 @@ impl<'a> Interval<'a> {
         let (activity, compute_admission, telemetry_unknown) =
             self.gpu_admission(gpu, &previous, &memory);
         let (measured, measured_streak) = self.gpu_compute_path(gpu, &previous);
-        let estimate = self.gpu_demand(gpu, measured);
+        let (estimate, mut demand_record) = self.gpu_demand(gpu, measured);
+        demand_record.source = match (&estimate, governing(self.config, ResourceKind::GpuCompute)) {
+            (None, _) => GpuDemandSource::Interval,
+            (Some(_), ContentionMode::YieldFirst) => GpuDemandSource::Larger,
+            (Some(_), _) => GpuDemandSource::Estimate,
+        };
         if telemetry_unknown {
             self.gpu_memory_unknown.insert(gpu.uuid.clone());
         }
@@ -1105,6 +1110,7 @@ impl<'a> Interval<'a> {
             .entry(ResourceKey::GpuCompute(gpu.uuid.clone()))
             .or_default();
         compute_status.activity = Some(activity);
+        compute_status.gpu_demand = Some(demand_record);
         if let Some((external, own)) = measured {
             compute_status.external = Some(external);
             compute_status.own = Some((own, own));
@@ -1387,7 +1393,7 @@ impl<'a> Interval<'a> {
         &mut self,
         gpu: &GpuSnapshot,
         measured: Option<(u64, u64)>,
-    ) -> Option<(u64, BTreeMap<u32, u64>)> {
+    ) -> (Option<DemandEstimate>, GpuDemandRecord) {
         let mut demand = self
             .prev
             .gpu_demand
@@ -1411,8 +1417,9 @@ impl<'a> Interval<'a> {
             a.phase == AllocationPhase::Running
                 && a.requested.gpu_memory_mib.contains_key(&gpu.uuid)
         });
+        let uncapped = !running || !demand.sent_capped.contains(&true);
         if let Some((external, _)) = measured
-            && (!running || !demand.sent_capped.contains(&true))
+            && uncapped
         {
             let amounts = self
                 .snapshot
@@ -1449,8 +1456,19 @@ impl<'a> Interval<'a> {
             }
         }
         let estimate = demand.estimate();
+        let record = GpuDemandRecord {
+            uncapped,
+            fed: uncapped && measured.is_some(),
+            estimate: estimate.as_ref().map(|(total, _)| *total),
+            intervals: demand.uncapped.len() as u32,
+            since_uncapped_ms: demand
+                .last_uncapped_ms
+                .map(|last| self.now.saturating_sub(last)),
+            window: false,
+            source: GpuDemandSource::Interval,
+        };
         self.next.gpu_demand.insert(gpu.uuid.clone(), demand);
-        estimate
+        (estimate, record)
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU
@@ -1463,7 +1481,7 @@ impl<'a> Interval<'a> {
         gpu: &GpuSnapshot,
         measured: Option<(u64, u64)>,
         activity: ComputeActivity,
-        estimate: Option<&(u64, BTreeMap<u32, u64>)>,
+        estimate: Option<&DemandEstimate>,
     ) -> GpuComputeBudget {
         let config = self.config;
         let compute_key = ResourceKey::GpuCompute(gpu.uuid.clone());

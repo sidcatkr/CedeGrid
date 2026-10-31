@@ -165,6 +165,9 @@ struct PreviousGpu {
 /// Uncapped intervals averaged into a device's external GPU compute demand (FR-021, R48).
 const GPU_DEMAND_INTERVALS: usize = 60;
 
+/// A device's external GPU compute demand: the average total and each principal UID's.
+type DemandEstimate = (u64, BTreeMap<u32, u64>);
+
 /// External GPU compute demand read where own work ran uncapped, per device (FR-021, Q19): on a
 /// time-sliced device own work's gaps raise another user's reading at the same demand.
 #[derive(Debug, Clone, Default)]
@@ -192,7 +195,7 @@ struct RemeasureWindow {
 
 impl GpuDemand {
     /// The average external total and each principal's, or None before an uncapped interval.
-    fn estimate(&self) -> Option<(u64, BTreeMap<u32, u64>)> {
+    fn estimate(&self) -> Option<DemandEstimate> {
         let count = self.uncapped.len() as u64;
         if count == 0 {
             return None;

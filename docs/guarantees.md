@@ -100,7 +100,15 @@ interval, in the interval where it arrives, a process's first sample covering fr
 interval's start and time without a sample counting as idle, and each observation records the
 samples (`compute_sampling`). When one interval misses the tolerance, as when a busy process's
 sample is late, the shares and the device summed over it and the 3 intervals before it decide,
-and the amounts are then those 4 intervals' averages. A measured amount takes the CPU paths, with external processes grouped into
+and the amounts are then those 4 intervals' averages. On a time-sliced device another user's
+reading rises when own work leaves gaps, at the same demand, so in Neutral, Performance and
+Aggressive the external amount that sets own work's target is the average over the last 60
+intervals in which own work ran uncapped on the device (no cap or pause sent by the decision
+that set the interval or the one before it), or had no allocation there. While own work is held
+back by GPU compute caps alone, a 6-decision window lifts them every 30 s to measure again, at
+most 10% of the capped time, and a window 200 thousandths or more from the average restarts it;
+Yield First takes the larger of the interval's amount and the average and takes no window, and
+each decision records how the demand was read (`gpu_demand`). A measured amount takes the CPU paths, with external processes grouped into
 principals by UID as on CPU and device time nobody accounts for counted as one more
 external principal while an external process is listed, so own work keeps capacity minus
 that amount minus the mode's margin under Performance, and its fair share or a learned
