@@ -243,11 +243,12 @@ measured rate, and no step is entered until usage has stayed over the target for
 budget that fell steps at once with `external_growth`. Caps already held give an external
 increase between them, lowered at one level within their tier, rather than each by the
 whole increase. While a resource is not contended, a held cap or hint rises again toward
-the mode's target at the mode's scale-up rate. On CPU in Yield First and Neutral, once
-every external principal, the unattributed remainder included and background left out,
-has stayed below `principal_min_percent` for `principal_window_intervals`, held caps rise
-to the target after the step dwell alone and the CPU allowance in one move; while
-contention only falls, the scale-up interval applies. A Guaranteed allocation's
+the mode's target at the mode's scale-up rate. On CPU, once every external principal, the
+unattributed remainder included and background left out, has stayed below
+`principal_min_percent` for `principal_window_intervals`, the CPU allowance returns in one
+move, and in that interval every held cap, hint or pause rises in one move without the step
+dwell, the lowest first and none lowered, so that together they hold the target; later rises
+wait for the step dwell alone. While contention only falls, the scale-up interval applies. A Guaranteed allocation's
 CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:

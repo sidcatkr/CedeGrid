@@ -406,6 +406,9 @@ impl<'a> Interval<'a> {
         if kind.is_memory() && (floor_breach || usage_excess > 0) {
             self.next.reclaiming.insert(key.clone());
         }
+        let return_level = (kind == ResourceKind::Cpu && self.cpu_contention_returned)
+            .then(|| self.return_level(&key, cpu_usage))
+            .flatten();
         Frame {
             external: self.external_of(&key),
             key,
@@ -424,7 +427,33 @@ impl<'a> Interval<'a> {
                 judged_total
             },
             contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
+            return_level,
         }
+    }
+
+    /// The level every held CPU step rises to when contention has just ended: filled from the
+    /// lowest up, each step counted at the smaller of its target and its usage, since room a
+    /// step does not use is spare, so the held steps together hold the mode's target beside the
+    /// usage of own work that holds none, and none is lowered (FR-034, R44).
+    fn return_level(&self, key: &ResourceKey, cpu_usage: u64) -> Option<u64> {
+        let mut targets: Vec<u64> = Vec::new();
+        let mut held_usage = 0u64;
+        for ((id, k), state) in &self.prev.ladder {
+            let Some(allocation) = self.input.allocations.iter().find(|a| &a.id == id) else {
+                continue;
+            };
+            let Some(target) = held_target(state).filter(|_| k == key) else {
+                continue;
+            };
+            let usage = cpu_usage_of(allocation);
+            targets.push(target.min(usage));
+            held_usage = held_usage.saturating_add(usage);
+        }
+        let room = self
+            .budget
+            .cpu_millicores
+            .saturating_sub(cpu_usage.saturating_sub(held_usage));
+        water_level(&mut targets, room)
     }
 
     /// A floor breach or own work beyond the operator envelope on a resource,
@@ -759,15 +788,18 @@ impl<'a> Interval<'a> {
                 at_minimum_duty: at_minimum_duty(input, key, &victim.id),
                 // What the allocation may use: while contended, a cap
                 // or hint target; while calm, its usage plus its share
-                // of the spare, toward which a held cap rises; never
+                // of the spare, toward which a held cap rises, and when
+                // contention has just ended, the return level; never
                 // above its own mode's target.
                 target: Some(
-                    if contended {
-                        victim.amount.saturating_sub(excess)
-                    } else {
-                        victim.amount.saturating_add(frame.spare_share)
+                    match (contended, frame.return_level, state.and_then(held_target)) {
+                        (true, ..) => victim.amount.saturating_sub(excess).saturating_add(kept),
+                        (false, Some(level), Some(held)) => level.max(held),
+                        _ => victim
+                            .amount
+                            .saturating_add(frame.spare_share)
+                            .saturating_add(kept),
                     }
-                    .saturating_add(kept)
                     .min(limit.unwrap_or(u64::MAX)),
                 ),
             },
@@ -1288,6 +1320,8 @@ struct Frame {
     own_usage: u64,
     /// CPU contention has fully ended: held steps rise without the mode's interval.
     contention_ended: bool,
+    /// The first interval it has: the level held CPU steps rise to in one move (R44).
+    return_level: Option<u64>,
 }
 
 impl Frame {
@@ -1307,6 +1341,7 @@ impl Frame {
             } else {
                 paced.scale_up_ms
             },
+            returning: self.return_level.is_some(),
             ..self.timing.clone()
         }
     }
@@ -1480,6 +1515,34 @@ fn replanned_pending_drain(
         && !guaranteed
         && kind == ResourceKind::Cpu
         && state.is_some_and(|state| state.pending && state.step >= YieldStep::Drain)
+}
+
+/// A held step's target for the return level: a cap's or hint's, nothing for a pause.
+fn held_target(state: &StepState) -> Option<u64> {
+    match state.step {
+        YieldStep::Cap | YieldStep::Hint => Some(state.target.unwrap_or(0)),
+        YieldStep::Pause => Some(0),
+        _ => None,
+    }
+}
+
+/// The level that lifts the lowest of `targets` so that together they hold `room`, none
+/// lowered; none when they already hold it.
+fn water_level(targets: &mut [u64], room: u64) -> Option<u64> {
+    targets.sort_unstable();
+    let mut above: u64 = targets.iter().sum();
+    if targets.is_empty() || room <= above {
+        return None;
+    }
+    for (i, target) in targets.iter().enumerate() {
+        above -= target;
+        let raised = i as u64 + 1;
+        let level = room.saturating_sub(above) / raised;
+        if targets.get(i + 1).is_none_or(|next| level <= *next) {
+            return Some(level.max(*target));
+        }
+    }
+    None
 }
 
 fn cpu_usage_of(allocation: &Allocation) -> u64 {

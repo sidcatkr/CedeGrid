@@ -382,6 +382,9 @@ struct Interval<'a> {
     /// CPU contention has fully ended: Yield First and Neutral return CPU in one move,
     /// without the mode's scale-up interval (FR-034).
     cpu_contention_ended: bool,
+    /// The first interval CPU contention has ended: held CPU steps rise to the mode's target in
+    /// one move (FR-034, R44).
+    cpu_contention_returned: bool,
     /// CPU is unknown in Performance or Aggressive with no view known yet: steps hold and
     /// none is taken (FR-022).
     cpu_unviewed: bool,
@@ -490,6 +493,7 @@ impl<'a> Interval<'a> {
             cpu_own_hold: false,
             cedegrid_cpu: 0,
             cpu_contention_ended: false,
+            cpu_contention_returned: false,
             cpu_unviewed: false,
             cpu_new_only: false,
             ram_new_only: false,

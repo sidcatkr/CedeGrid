@@ -893,6 +893,9 @@ pub struct LadderTiming {
     pub reversal_room_min: u64,
     /// The reclaim backoff a floor-breach step's reversal also waits (FR-061).
     pub breach_backoff_ms: u64,
+    /// The first interval CPU contention has ended: a held step's rise to the return level is
+    /// one move and does not wait for the dwell (FR-034, R44).
+    pub returning: bool,
 }
 
 impl LadderTiming {
@@ -925,6 +928,7 @@ impl LadderTiming {
             hysteresis_percent: thresholds.hysteresis_percent,
             reversal_room_min: thresholds.noise_tolerance_mib,
             breach_backoff_ms: 0,
+            returning: false,
         }
     }
 }
@@ -1173,7 +1177,7 @@ pub fn plan_step(
     // While nothing is contended, a held cap or hint rises toward what the mode
     // allows now, one move per scale-up interval, and a pause becomes such a cap.
     if let Some(allowed) = input.target
-        && since_change >= timing.dwell_ms.max(timing.scale_up_ms)
+        && (timing.returning || since_change >= timing.dwell_ms.max(timing.scale_up_ms))
     {
         let raise = match current {
             YieldStep::Cap | YieldStep::Hint => held.target.is_some_and(|target| allowed > target),

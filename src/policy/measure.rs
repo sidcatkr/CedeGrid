@@ -957,8 +957,10 @@ impl<'a> Interval<'a> {
         } else {
             0
         };
-        self.cpu_contention_ended =
-            self.next.cpu_quiet_intervals >= self.config.contention.principal_window_intervals;
+        let window = self.config.contention.principal_window_intervals;
+        self.cpu_contention_ended = self.next.cpu_quiet_intervals >= window;
+        self.cpu_contention_returned =
+            self.cpu_contention_ended && self.prev.cpu_quiet_intervals < window;
     }
 
     /// RAM: the mode's target beside the contending principals.

@@ -4550,18 +4550,43 @@ mod contention_ended {
         demand: impl Fn(u64) -> u64,
         tweak: impl Fn(u64, &mut Snapshot),
     ) -> Vec<Tick> {
+        run_seeded(mode, ticks, &vec![undershoot; tasks], &[], demand, tweak)
+    }
+
+    /// `run_shaped` with each task's own undershoot, and with CPU caps already held at
+    /// `seeded` targets from the start, as an agent that re-adopts them begins.
+    fn run_seeded(
+        mode: ContentionMode,
+        ticks: u64,
+        undershoots: &[u64],
+        seeded: &[u64],
+        demand: impl Fn(u64) -> u64,
+        tweak: impl Fn(u64, &mut Snapshot),
+    ) -> Vec<Tick> {
+        let tasks = undershoots.len();
         let mut config = config();
         config.cpu.reserve_physical_cores = 0;
         config.contention.default_mode = mode;
         let mut engine = PolicyEngine::new();
         let mut caps: Vec<(YieldStep, Option<u64>)> = vec![(YieldStep::None, None); tasks];
         let ids: Vec<String> = (0..tasks).map(|i| format!("t{i}")).collect();
+        for (i, target) in seeded.iter().enumerate() {
+            let request = cedegrid::contention::StepRequest {
+                step: YieldStep::Cap,
+                target: Some(*target),
+                cause: cedegrid::contention::YieldCause::ExternalGrowth,
+                deadline_ms: None,
+            };
+            engine.seed(&ids[i], ResourceKey::Cpu, request, 0);
+            caps[i] = (YieldStep::Cap, Some(*target));
+        }
         let mut out = Vec::new();
         for tick in 0..ticks {
             let now = tick * INTERVAL;
             let mut demands: Vec<u64> = caps
                 .iter()
-                .map(|(step, target)| match step {
+                .zip(undershoots)
+                .map(|((step, target), undershoot)| match step {
                     YieldStep::Pause => 0,
                     YieldStep::Cap if target.is_some_and(|target| target < TASK) => {
                         target.unwrap_or(TASK) * undershoot / 100
@@ -4687,6 +4712,51 @@ mod contention_ended {
                 after.is_some_and(|ms| ms <= 2000 + 2 * INTERVAL),
                 "{mode:?}: {after:?} to reach {target}m"
             );
+        }
+    }
+
+    /// The 033 batch's run 7 shape (FR-034, Q15, R44): at the contender's end the held caps ran
+    /// from the minimum duty up (1 m to 253 m), each binding. At the quiet count the held caps
+    /// together reach the mode's target in one move, so in Yield First own usage is back within
+    /// 3 s of the contender stopping, not in rises one dwell apart (6.5 s before item 034).
+    /// Neutral's (3.5 s) and Performance's (1.0 s) returns on the same shape get no slower.
+    #[test]
+    fn uneven_held_caps_return_to_the_target_in_one_move() {
+        const SEEDED: [u64; 13] = [1, 5, 24, 135, 184, 205, 220, 230, 240, 245, 250, 253, 253];
+        let level = 13 * TASK;
+        for (mode, bound) in [
+            (ContentionMode::YieldFirst, 3000),
+            (ContentionMode::Neutral, 3500),
+            (ContentionMode::Performance, 1000),
+        ] {
+            let run = run_seeded(
+                mode,
+                60,
+                &[100; 13],
+                &SEEDED,
+                |now| if now < 10_000 { 1000 } else { 0 },
+                |_, _| {},
+            );
+            let after: Vec<u64> = run
+                .iter()
+                .filter(|tick| tick.now >= 10_000)
+                .map(|tick| tick.own)
+                .collect();
+            let back = after.iter().position(|own| own * 100 >= level * 98);
+            assert!(
+                back.is_some_and(|i| i as u64 * INTERVAL <= bound),
+                "{mode:?}: back after {:?} intervals, {:?}",
+                back,
+                &after[..14]
+            );
+            if mode == ContentionMode::YieldFirst {
+                let rose = after.iter().position(|own| *own > after[0]).unwrap();
+                assert!(
+                    after[rose..].iter().all(|own| *own == after[rose]),
+                    "{mode:?}: {:?}",
+                    &after[..14]
+                );
+            }
         }
     }
 
