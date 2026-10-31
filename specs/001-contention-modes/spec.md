@@ -502,6 +502,23 @@ back more.
   record says, per device, whether the interval was uncapped and fed the estimate, and keeps the
   estimate, its interval count and the time since the last uncapped interval (item 039, 3; the
   values from the traces in research R48).
+- Q: How long does a GPU compute cap run own work in each duty cycle? → A: In Performance,
+  Aggressive and Neutral, the duty is the cap's target ÷ own work's uncapped share, clamped to the
+  minimum duty and 1, as a CPU cap uses the measured rate (R20). Own work's uncapped share is its
+  amount averaged over the same uncapped intervals that feed the external estimate, those in which
+  own work ran on the device (60 at most), restarted with that estimate. With no uncapped share
+  yet the duty is target ÷ 1000, as before, which yields more, never less; Yield First keeps target
+  ÷ 1000. A 15-point dead band is not used, since own work with several contexts could overshoot
+  its target by up to 15 points. The targets, margins, the estimate, the windows, R33, VRAM, CPU and
+  RAM are unchanged (item 040, 1).
+- Q: How is own GPU work's efficiency beside one other GPU user judged (T368)? → A: In the same
+  run, "alone" being the same probe or user with nothing else on the device: own work with
+  CedeGrid ÷ own work alone is at least min(the mode's target ÷ 1000, own work without CedeGrid ÷
+  alone) − 0.03, the 0.03 covering the 2% margin and CedeGrid's cost (Neutral's margin is in its
+  target); the other user's rate with CedeGrid is at least min(its rate without CedeGrid, its fair
+  share × its rate alone) − 3%; the old ratio, with CedeGrid ÷ without CedeGrid beside the same
+  user, is reported too. On a time-sliced device own work without CedeGrid beside one busy context
+  already sits near the fair share, so the earlier 0.5 gates rewarded over-yielding (item 040, 2).
 
 ## Terms
 
@@ -1121,7 +1138,11 @@ node reports with the expected per-resource values at each step.
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
   memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
-  the granularity, is documented. External GPU compute MUST be measured, in thousandths of
+  the granularity, is documented. On a time-sliced device own work at full duty beside another busy
+  context holds only its slices, so in Performance, Aggressive and Neutral the duty MUST be the
+  cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in which
+  it ran on the device, at most 60, restarted with the external estimate), clamped to the minimum
+  duty and 1; with no uncapped share yet, and in Yield First, it is target ÷ 1000. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%: a sample at t, whose process's previous sample was at p, counts in full in the window
@@ -1792,6 +1813,11 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-016**: `doctor` and `status` show, per resource, how much is held back and why: floor,
   reserve, margin, an ancestor CPU ceiling (never as contention), contention, contention by PSI
   alone, peak, noise tolerance, unknown, cooldown, backoff and charge shortfall.
+- **SC-017**: Beside one other GPU user, measured in the same run with "alone" the same probe or
+  user with nothing else on the device: own work with CedeGrid ÷ own work alone is at least
+  min(the mode's target ÷ 1000, own work without CedeGrid ÷ alone) − 0.03, and the other user's
+  rate with CedeGrid is at least min(its rate without CedeGrid, its fair share × its rate alone) −
+  3%. The ratio with CedeGrid ÷ without CedeGrid beside the same user is reported beside them.
 
 ### Provisional thresholds
 
