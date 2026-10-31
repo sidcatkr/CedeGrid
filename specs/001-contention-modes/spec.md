@@ -490,11 +490,12 @@ back more.
   feed it. While own work is held back by GPU compute steps only, own work's GPU compute caps on
   the device are lifted every 30 s for a window of 6 intervals (3 s, at most 10% of the capped
   time), whose intervals feed the average as any uncapped interval does; when the window's mean
-  differs from the average by 200 thousandths or more, the average restarts from the window, so a
-  light user that turns saturating is seen within one or two windows. While a CPU cap or a pause
-  holds own work on the device, no window is taken and the estimate keeps its age. A change in the
-  device's external process list restarts the average, an agent restart loses it, and with no
-  uncapped interval yet the interval's own amount is used, as before. Yield First keeps the
+  differs from the average before the window by 200 thousandths or more, the average restarts from
+  the window, so a light user that turns saturating is seen within one or two windows. While a CPU
+  step of cap or more, or a GPU pause, holds own work on the device, no window is taken and the
+  estimate keeps its age. A change in the device's external PIDs, background contexts left out,
+  restarts the average, an agent restart loses it, and with no uncapped interval since it started
+  the interval's own amount is used, as before; an interval of unknown amount feeds nothing. Yield First keeps the
   interval's amount, or the average where that is higher, so its target stays at or below
   Neutral's (FR-065), and takes no window. VRAM, CPU, each mode's margin, R33, the sample span and
   the 4-interval tolerance are unchanged; Full and Tracked use the same estimate. Each decision
@@ -1163,12 +1164,13 @@ node reports with the expected per-resource values at each step.
   measured in the last 60 intervals in which own work ran uncapped on the device (no cap or pause,
   on GPU compute or CPU, for any own allocation using it, in the decision that set the interval and
   the one before it), or had no allocation running there; with fewer, the average of what there
-  is, and with none since the agent started, the interval's own amount. Capped intervals never feed
-  it. While own work is held back by GPU compute steps only, its GPU compute caps on the device
-  MUST be lifted every 30 s for a window of 6 intervals, at most 10% of the capped time; a window
-  whose mean differs from the average by 200 thousandths or more restarts the average from it. While
-  a CPU cap or a pause holds own work on the device no window is taken. A change in the device's
-  external process list restarts the average, and an agent restart loses it. Yield First uses the
+  is, and with none since the average started (the agent's start or a restart), the interval's own
+  amount. Capped intervals and intervals of unknown amount never feed it. While own work is held
+  back by GPU compute steps only, its GPU compute caps on the device MUST be lifted every 30 s for a
+  window of 6 intervals, at most 10% of the capped time; a window whose mean differs from the average
+  before it by 200 thousandths or more restarts the average from it. While a CPU step of cap or
+  more, or a GPU pause, holds own work on the device no window is taken. A change in the device's
+  external PIDs, background contexts left out, restarts the average, and an agent restart loses it. Yield First uses the
   interval's amount, or the average where that is higher, and takes no window. The decision record
   states per device whether the interval was uncapped and fed the estimate, the estimate, its
   interval count and the time since the last uncapped interval. The node report's held-back breakdown

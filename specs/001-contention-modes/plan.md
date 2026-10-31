@@ -1463,12 +1463,12 @@ the change is in the pure policy.
 2. **The estimate** (`src/policy/measure.rs`): an interval is uncapped when neither the decision
    that set it nor the one before it sent a Cap or Pause, on CPU or on that device's GPU compute,
    to an allocation running on the device, or when no allocation runs there. A measured uncapped
-   interval feeds its amounts; an interval of unknown amount feeds nothing. A changed external PID
-   list clears the estimate. `compute_budget_for` builds Neutral's, Performance's and Aggressive's
+   interval feeds its amounts; an interval of unknown amount feeds nothing. A changed list of
+   external PIDs, background contexts left out, clears the estimate. `compute_budget_for` builds Neutral's, Performance's and Aggressive's
    view from the estimate (per principal through `principals`' usage closure, the total from the
    averaged totals), and Yield First's target from the larger of the interval's amount and the
-   estimate, so FR-065 holds. With no uncapped interval since the agent started, the interval's
-   amount is used, as before.
+   estimate, so FR-065 holds. With no uncapped interval since the estimate started (the agent's
+   start or a restart), the interval's amount is used, as before.
 3. **The window** (`src/policy/ladder.rs`): when every running allocation on the device runs in
    Neutral, Performance or Aggressive, at least one holds a GPU compute cap, none holds a CPU step
    of cap or more or a GPU pause, and the last uncapped interval is 30 s old, a window opens for 6
