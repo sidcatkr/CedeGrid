@@ -1511,3 +1511,19 @@ The batch's three findings (spec Session 2026-10-31 Q14 to Q16; plan "Item 034")
 - [X] T420 Rerun the own-efficiency gate locally with 031's 16-member family and with a 1 GiB shared buffer, and report the PSS pass cost, the K chosen and the agent's cost per interval, per plan "Item 034" 5 and SC-014 (missing)
 - [X] T421 Add item 034's rerun to `specs/001-contention-modes/native-gates.md`: T368 in Performance and Neutral with `compute_sampling` in the trace, T396's Yield First return, and T387's Tracked multiprocessing run with the 1 GiB family for the agent's cost, per plan "Item 034" 5 (missing)
 - [X] T422 Run T421 on the test host. *Deferred: needs the user's typed approval in this session after 034.done.* (missing)
+
+## Phase 29: Convergence (item 036)
+
+The GPU sample span and Yield First's bound (spec Session 2026-10-31 Q17 and Q18; plan "Item 036"). `/speckit-tasks` would regenerate this file, so the tasks are appended here. Each pair: a failing test first, then the code, one commit per group. T117 and T228 stay as they are.
+
+- [ ] T423 [P] Write failing `measure_compute` tests in `src/telemetry.rs` from report 035's shape, the state carried across intervals: one process sampled at the window's end and the duty-capped probe 1 or 2 device periods before it, at the batch's utilizations, reads a third today and measured after; and idle then busy, first seen mid-run, a PID that leaves and is reused, own stopped over half the window, an agent restart costing at most one interval; the device-rate test unchanged; 034's cases updated to the span rule, per FR-021 (Q17, R46) (contradicts)
+- [ ] T424 Count each GPU sample over its span since its process's previous sample, min(t − p, window), with a per-device `GpuSampleState` in `src/telemetry/gpu.rs` and `src/telemetry.rs`, removing `compute_slots`, `SlotsFrom` and 034's fallback, until T423 passes, per FR-021 (contradicts)
+- [ ] T425 [P] Write failing tests for the 4-interval comparison from the rerun's sparse-sample shape: an interval that misses a busy process's sample reads measured over the last 4 with the average amounts; an interval that passes alone keeps its own amounts; an interval that cannot be compared clears the history, per FR-021 (Q17, R47) (missing)
+- [ ] T426 Add the 4-interval comparison to `measure_compute` in `src/telemetry/gpu.rs`, until T425 passes, per FR-021 (missing)
+- [ ] T427 [P] Write a failing test: `compute_sampling` keeps the window's start and end, whether the amount came from the interval or the last 4, and per process its previous sample, each sample's timestamp and `sm_util` (at most 32 per interval) and the time counted, per FR-021 (Q17) (partial)
+- [ ] T428 Reshape `ComputeSampling` in `src/model.rs` and `src/telemetry/gpu.rs` and update the guarantees' sentence on how a sample counts, until T427 passes, per FR-021 (partial)
+- [ ] T429 [P] Bound Yield First's own-usage return at 2 intervals after the quiet count, and Neutral's and Performance's at 3 s from the contender's stop, in `tests/contention.rs`'s return tests, per FR-034 (Q18) (partial)
+- [ ] T430 Update `docs/guarantees.md` on the return bound and record in `docs/validation.md` that T396 passes under it on the 035 rerun (`eef1b4d`: the quiet count at 32.7 s, own usage at 98% at 33.7 s), per FR-034 (partial)
+- [ ] T431 Compare `decision_snapshot` with the code at `bff2d27` and record the held-back table, per plan "Item 036" 4 (missing)
+- [ ] T432 Add item 036's T368 run to `specs/001-contention-modes/native-gates.md`, with a replay of the new trace's samples through the code, per plan "Item 036" 4 (missing)
+- [ ] T433 Run T432 on the test host. *Deferred: approved by the user for after 036.done.* (missing)
