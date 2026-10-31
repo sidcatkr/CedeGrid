@@ -185,11 +185,21 @@ class GateRunnerTests(unittest.TestCase):
         self.assertEqual(pause(0.,0.,.4,.2),(0.,0.))
         self.assertEqual(pause(.079,0.,.4,.2),(0.,0.))
         for now,idle in [(.081,.119),(.199,.001)]:
-            seconds,phase=pause(now,0.,.4,.2)
-            self.assertAlmostEqual(seconds,idle);self.assertAlmostEqual(phase,.2)
-        self.assertEqual(pause(.21,.2,.4,.2),(0.,.2))
+            self.assertEqual(pause(now,0.,.4,.2)[1],0.,'the off phase still belongs to its period')
+            self.assertAlmostEqual(pause(now,0.,.4,.2)[0],idle)
+        self.assertEqual(pause(.21,0.,.4,.2),(0.,.2))
         seconds,phase=pause(.65,0.,.4,.2)
         self.assertEqual(seconds,0.);self.assertAlmostEqual(phase,.6,msg='a late unit starts the period it falls in')
+        def busy(duty,unit=.001,seconds=20.,period=.5):
+            # The probe's loop: idle in steps no longer than the drain check, else run a unit.
+            now=phase=spent=0.
+            while now<seconds:
+                idle,phase=pause(now,phase,duty,period)
+                if idle:now+=min(idle,pressure_probe.CHECK_SECONDS);continue
+                now+=unit;spent+=unit
+            return spent/now
+        for duty in [1.,.7,.4]:
+            self.assertAlmostEqual(busy(duty),duty,delta=.01,msg=f'duty {duty}')
         for duty,period_ms in [(0.,200),(1.5,200),(.5,0),(.5,20000)]:
             with self.assertRaises(ValueError):
                 pressure_probe.run(argparse.Namespace(mode='gpu',seconds=1.,cpu=0,output='unused',duty=duty,period_ms=period_ms))

@@ -30,12 +30,14 @@ def checker(context,output,clock=time.monotonic):
 
 
 def duty_pause(now,phase,duty,period):
-    """Seconds to idle before the next unit, and the period's start: at a duty below 1 the
-    probe is busy for duty x period at the start of each period and idles for the rest."""
+    """Seconds to idle before the next unit, and the start of the period `now` falls in: at a
+    duty below 1 the probe is busy for duty x period at the start of each period and idles for
+    the rest. The period starts only when it is reached, so every idle step of an off phase
+    still sees that phase."""
     if duty>=1:return 0.,phase
     if now>=phase+period:phase+=period*((now-phase)//period)
     if now<phase+duty*period:return 0.,phase
-    return phase+period-now,phase+period
+    return phase+period-now,phase
 
 
 def run(args):
