@@ -251,8 +251,9 @@ whole increase. While a resource is not contended, a held cap or hint rises agai
 the mode's target at the mode's scale-up rate. On CPU, once every external principal, the
 unattributed remainder included and background left out, has stayed below
 `principal_min_percent` for `principal_window_intervals`, the CPU allowance returns in one
-move, and in that interval every held cap, hint or pause rises in one move without the step
-dwell, the lowest first and none lowered, so that together they hold the target; later rises
+move, and in that interval, while own work holds no excess, every binding cap, hint or pause
+held for external growth rises in one move without the step dwell, the lowest first and none
+lowered, so that together they hold the target; later rises, and steps held for other causes,
 wait for the step dwell alone. While contention only falls, the scale-up interval applies. A Guaranteed allocation's
 CPU is never capped below its request, by the policy or by its supervisor.
 

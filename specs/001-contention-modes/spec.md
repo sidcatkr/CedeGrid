@@ -1285,9 +1285,10 @@ node reports with the expected per-resource values at each step.
   has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
   one move to the uncontended target, without waiting for the mode's interval, for the allowance
   and for held caps alike, so own usage, not only the target, returns within 3 s of the
-  contender stopping: in that interval every held CPU cap, hint or pause rises so that together
-  they hold the mode's target, the lowest first and none lowered, never in steps from the minimum
-  duty. The quiet count is each mode's hysteresis and does not change with
+  contender stopping: in that interval, while own work holds no excess, every binding CPU cap, hint
+  or pause held for external growth rises so that together they hold the mode's target, the
+  lowest first and none lowered, never in steps from the minimum duty; steps held for other causes,
+  and caps their work does not reach, keep their own paths. The quiet count is each mode's hysteresis and does not change with
   it, and Performance's and Neutral's return times do not get worse.
   Quiet intervals count each principal's usage and this interval's unattributed external
   estimate, not the window's, against the larger of `principal_min_percent` of capacity and the

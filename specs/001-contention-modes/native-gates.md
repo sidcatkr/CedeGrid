@@ -470,6 +470,35 @@ whether any was still stopped 2 s after the kill, and how it ended. Guaranteed: 
 every member running again within one reconciliation interval, the workload's output complete.
 Opportunistic: every member ended, none left stopped. `family_recovered` counts match.
 
+## Item 034: the rerun after the batch's fixes (T422)
+
+Runs once on the authorized test host after `034.done`, with the user's typed approval in the
+session, under the 033 batch's host rules: light test-owned loads and the second account's own
+loads only, nothing on the shared host, no installs. The harness is the 033 batch's
+(`same_gpu_029.py`, `return_033.py`, `family_031.py`, `gpu_trace_033.py` and the Mac-side
+`runs-033.sh`), from a `git archive` of the final commit.
+
+```sh
+# 1. T368: run 5 in Performance and Neutral beside the light and saturating GPU users.
+bash runs-033.sh <commit> <second account uid> t368
+# Then, read only, each run's GPU trace, which now holds `compute_sampling`:
+$py $H/gpu_trace_033.py <each e033-r5 output>
+# 2. T396's Yield First return, with the agent's decision records.
+$py $H/return_033.py --repo $repo --root $root --output <dir> --contender-uid <uid> --mode yield_first
+ssh <second account>@<test host> 'T=<epoch> CPUS=<cpu> S=30 sh -s' < $H/peer-contender-027.sh
+# 3. T387's Tracked multiprocessing run with the 1 GiB family, idle and beside the load.
+$py $H/family_031.py --repo $repo --output <dir> --backend tracked --workload multiprocessing \
+    --workers 4 --buffer-mib 1024 --seconds 120 --load <none|saturating> --peer-uid <uid>
+```
+
+Gates: run 1, managed throughput against unmanaged at least 0.9 beside the light user in
+Performance and Neutral, and about 0.5 beside the saturating one, with `compute_sampling` showing
+the slots each interval used (`process_period` where a PID held 2 samples, else the device's
+count, in which case the report says the fallback applied and why); run 2, own usage back at 98%
+of its level within 3 s of the contender's end, in one move; run 3, the agent's own CPU within 1%
+of the scope, own memory within 10% of the buffer plus the workers' private pages, and the PSS
+period K the agent chose.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

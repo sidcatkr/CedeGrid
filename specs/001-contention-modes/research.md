@@ -812,9 +812,15 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 
 ## R44. The one-move return (item 034)
 
-- **Decision**: at the first interval with contention ended, held CPU steps rise to a common level
-  L, filled from the lowest current targets upwards, so that they together hold the mode's target;
-  none is lowered, and that one move skips the dwell.
+- **Decision**: at the first interval with contention ended, while own work holds no excess, the
+  binding CPU steps held for external growth rise to a common level L, filled from the lowest
+  upwards with each counted at the smaller of its target and its usage, so that they together hold
+  the mode's target; none is lowered, and only that one move skips the dwell. Steps held for other
+  causes and caps their work does not reach keep their paths.
+- **Why the limits**: the first snapshot comparison showed that with excess left a raised cap frees
+  nothing and the excess falls on the next victim, that the dwell skip also moved caps held for
+  unknown measurement, and that a cap its work did not reach was kept where the old path released
+  it; with the limits every changed decision is a rise of a binding step held for external growth.
 - **Rationale**: the batch's records show 13 caps at targets from 1 m to 253 m at the contender's
   end; each rose to its usage plus an equal part of the spare, so caps at the minimum duty got a
   small rise and the rest waited 2 s per step. Report 030's simulation had equal caps, so the same

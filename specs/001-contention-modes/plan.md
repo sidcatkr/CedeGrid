@@ -1358,10 +1358,12 @@ PSS path; the GPU path is unit-tested with fixtures.
    window, the period and slots used and which path chose them, and per PID its sample count and
    first and last timestamps; optional, left out when there is nothing to show.
 2. **The return (Q15, T339)**: at the interval the quiet count reaches
-   `principal_window_intervals`, the first interval contention has ended, every held CPU cap,
-   hint or pause rises in one move to a common level L, so that the held steps together hold the
-   mode's target: L fills from the lowest current targets upwards (water-filling) and no step is
-   lowered. That one move skips the dwell; later rises keep today's path (usage plus an equal part
+   `principal_window_intervals`, the first interval contention has ended, and while own work holds
+   no excess, every binding CPU cap, hint or pause held for external growth rises in one move to a
+   common level L, so that those steps together hold the mode's target: L fills from the lowest
+   upwards, each step counted at the smaller of its target and its usage (water-filling), and no
+   step is lowered; steps held for other causes and caps their work does not reach keep their
+   paths. That one move skips the dwell; later rises keep today's path (usage plus an equal part
    of the spare, after the dwell). The frame in `src/policy/ladder.rs` computes L, and
    `src/contention.rs` `plan_step` applies it through the calm raise. The one move applies in
    every mode, as FR-034 says; the quiet count and every mode's other steps are unchanged, and a

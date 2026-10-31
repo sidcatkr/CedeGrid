@@ -406,9 +406,12 @@ impl<'a> Interval<'a> {
         if kind.is_memory() && (floor_breach || usage_excess > 0) {
             self.next.reclaiming.insert(key.clone());
         }
-        let return_level = (kind == ResourceKind::Cpu && self.cpu_contention_returned)
-            .then(|| self.return_level(&key, cpu_usage))
-            .flatten();
+        // Only while own work holds no excess: a step raised then frees nothing, and the
+        // excess would fall on the next victim instead.
+        let return_level =
+            (kind == ResourceKind::Cpu && self.cpu_contention_returned && usage_excess == 0)
+                .then(|| self.return_level(&key, cpu_usage))
+                .flatten();
         Frame {
             external: self.external_of(&key),
             key,
@@ -431,10 +434,10 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// The level every held CPU step rises to when contention has just ended: filled from the
-    /// lowest up, each step counted at the smaller of its target and its usage, since room a
-    /// step does not use is spare, so the held steps together hold the mode's target beside the
-    /// usage of own work that holds none, and none is lowered (FR-034, R44).
+    /// The level every CPU step held for external growth rises to when contention has just
+    /// ended: filled from the lowest up, each counted at the smaller of its target and its
+    /// usage, since room a step does not use is spare, so those steps together hold the mode's
+    /// target beside the usage of other own work, and none is lowered (FR-034, R44).
     fn return_level(&self, key: &ResourceKey, cpu_usage: u64) -> Option<u64> {
         let mut targets: Vec<u64> = Vec::new();
         let mut held_usage = 0u64;
@@ -442,7 +445,7 @@ impl<'a> Interval<'a> {
             let Some(allocation) = self.input.allocations.iter().find(|a| &a.id == id) else {
                 continue;
             };
-            let Some(target) = held_target(state).filter(|_| k == key) else {
+            let Some(target) = returning_target(state).filter(|_| k == key) else {
                 continue;
             };
             let usage = cpu_usage_of(allocation);
@@ -746,6 +749,15 @@ impl<'a> Interval<'a> {
             ]);
         }
         let contended = excess > 0 && victim.frees;
+        // When contention has just ended, a binding step held for external growth rises to the
+        // return level in one move, without the dwell; others take their own paths (R44).
+        let returning = (!contended)
+            .then_some(frame.return_level)
+            .flatten()
+            .zip(state.and_then(returning_target))
+            .filter(|(_, held)| victim.amount.saturating_mul(100) >= held.saturating_mul(95))
+            .map(|(level, held)| level.max(held));
+        victim_timing.returning = returning.is_some();
         if kind == ResourceKind::Cpu
             && !pending_pass
             && !contended
@@ -792,9 +804,9 @@ impl<'a> Interval<'a> {
                 // contention has just ended, the return level; never
                 // above its own mode's target.
                 target: Some(
-                    match (contended, frame.return_level, state.and_then(held_target)) {
-                        (true, ..) => victim.amount.saturating_sub(excess).saturating_add(kept),
-                        (false, Some(level), Some(held)) => level.max(held),
+                    match (contended, returning) {
+                        (true, _) => victim.amount.saturating_sub(excess).saturating_add(kept),
+                        (false, Some(level)) => level,
                         _ => victim
                             .amount
                             .saturating_add(frame.spare_share)
@@ -1341,7 +1353,6 @@ impl Frame {
             } else {
                 paced.scale_up_ms
             },
-            returning: self.return_level.is_some(),
             ..self.timing.clone()
         }
     }
@@ -1517,8 +1528,12 @@ fn replanned_pending_drain(
         && state.is_some_and(|state| state.pending && state.step >= YieldStep::Drain)
 }
 
-/// A held step's target for the return level: a cap's or hint's, nothing for a pause.
-fn held_target(state: &StepState) -> Option<u64> {
+/// A step's target for the return level, when it was held for external growth: a cap's or
+/// hint's, nothing for a pause. Steps held for other causes keep their own paths.
+fn returning_target(state: &StepState) -> Option<u64> {
+    if state.cause != YieldCause::ExternalGrowth {
+        return None;
+    }
     match state.step {
         YieldStep::Cap | YieldStep::Hint => Some(state.target.unwrap_or(0)),
         YieldStep::Pause => Some(0),
@@ -1547,4 +1562,34 @@ fn water_level(targets: &mut [u64], room: u64) -> Option<u64> {
 
 fn cpu_usage_of(allocation: &Allocation) -> u64 {
     allocation.observed.as_ref().map_or(0, |o| o.cpu_millicores)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::water_level;
+
+    /// The return level lifts the lowest steps until they hold the room, and never lowers one
+    /// (FR-034, R44).
+    #[test]
+    fn the_return_level_fills_the_lowest_first_and_lowers_none() {
+        let fill = |targets: &[u64], room| water_level(&mut targets.to_vec(), room);
+        assert_eq!(fill(&[1, 5, 24, 135, 184], 1000), Some(200));
+        // The highest stays where it is: 100 + 100 + 900 holds 1100.
+        assert_eq!(fill(&[100, 900, 10], 1100), Some(100));
+        assert_eq!(fill(&[300, 300], 600), None, "already holding the room");
+        assert_eq!(fill(&[300, 300], 500), None, "never lowered");
+        assert_eq!(fill(&[], 1000), None);
+        for (targets, room) in [
+            (vec![0, 7, 250, 3000], 4000u64),
+            (vec![13; 9], 200),
+            (vec![5], 6),
+        ] {
+            let level = fill(&targets, room).unwrap();
+            let held: u64 = targets.iter().map(|t| (*t).max(level)).sum();
+            assert!(
+                held <= room && room - held < targets.len() as u64,
+                "{targets:?} {room} {level}"
+            );
+        }
+    }
 }
