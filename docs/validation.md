@@ -352,6 +352,16 @@ either run.
 | The diagnostic again at `c52ba5c`, the probe's duty fixed | The probe alone 1573 units/s; at 100% 1311 and 1304 (0.833 and 0.829 of alone); at 70% (busy 0.699) 912; at 40% (busy 0.399) 520. The light user's request rate stayed at 200 a second. Its mean per-interval reading: 158 m alone; 130 m and 77 m beside the probe at 100%; 251 m at 70% and 264 m at 40%, sampled in 112 and 120 of 120 intervals. Its p99: 1.22 ms alone, 0.88 ms beside the probe at 100%, 1.06 ms at 70% and 1.07 ms at 40%. The SM clock read 1885–1898 MHz at every probe level and 1506 MHz with the light user alone, in P2 throughout | the reading rises as own work's duty falls, at a constant rate: inflation, not demand; the gaps also raise its p99 |
 | T368, Neutral beside the saturating GPU user, with run 5 waiting for each probe's result | 0.513: managed 386 and 366 units/s against unmanaged 736 and 729; the managed probes launched 1.7 and 1.8 s into their windows; GPU compute measured in every interval; the saturating user 1132–1146 requests a second beside the managed probe, 747–754 beside the unmanaged one | as specified |
 
+Read under SC-017 (item 040), which judges own work against the same probe alone on the device
+and the other user against its rate without CedeGrid and its fair share alone, the saturating
+results above are over-yields, not passes. The probe alone ran 1572–1573 units a second on this
+device. Beside the saturating user without CedeGrid it ran 729–736, 0.46–0.47 of alone, so
+SC-017's bound is about 0.44. With CedeGrid it ran 0.27–0.32 of alone in 036's Performance
+saturating run (0.628 against without) and 0.23–0.25 in 038's Neutral saturating run (0.513),
+while the saturating user ran 1023–1146 requests a second against 747–755 without CedeGrid: own
+work gave that user more than its fair share. The rows keep their values; the gap is a GPU
+compute cap's duty of target ÷ 1000, which item 040 replaces.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
