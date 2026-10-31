@@ -836,13 +836,19 @@ impl Collector {
             let external_compute =
                 quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
             let (compute_amount, compute_by_pid) = match utilization_percent {
-                Some(device) if own_only => (
-                    ComputeAmount::Measured {
-                        external: 0,
-                        own: u64::from(device.min(100)) * 10,
-                    },
-                    BTreeMap::new(),
-                ),
+                Some(device) if own_only => {
+                    self.gpu_samples
+                        .entry(uuid.clone())
+                        .or_default()
+                        .interrupt();
+                    (
+                        ComputeAmount::Measured {
+                            external: 0,
+                            own: u64::from(device.min(100)) * 10,
+                        },
+                        BTreeMap::new(),
+                    )
+                }
                 _ => measure_compute(
                     active_external.as_deref(),
                     &self.managed_pids,
@@ -1600,6 +1606,68 @@ mod tests {
                 own: 400
             }
         );
+    }
+
+    /// The 034 rerun's sparse samples (FR-021, Q17, R47): an interval that misses the busy probe's
+    /// sample fails the tolerance alone, so the shares and the device summed over it and the 3
+    /// before it decide, and the amounts are those 4 intervals' averages, the part nobody accounts
+    /// for counting as external. An interval that passes alone keeps its own amounts; fewer than
+    /// 4 comparable intervals, or an interval that cannot be compared in between, leave it unknown.
+    #[test]
+    fn a_missed_gpu_sample_is_compared_over_the_last_four_intervals() {
+        let both = [(42, 0, 5), (7, 1, 50)];
+        let mut run = Intervals::new();
+        for _ in 0..4 {
+            run.next(&both, 55, &[42]);
+        }
+        // The probe's sample is missed: 5% against 55% alone; over the last 4, 170 against 220.
+        assert_eq!(
+            run.next(&[(42, 0, 5)], 55, &[42]),
+            ComputeAmount::Measured {
+                external: 170,
+                own: 380
+            }
+        );
+        // An interval that passes alone keeps its own amounts.
+        assert_eq!(
+            run.next(&[(42, 0, 5), (7, 1, 40)], 45, &[42]),
+            ComputeAmount::Measured {
+                external: 50,
+                own: 400
+            }
+        );
+        // Too few intervals: a missed sample right after the start reads unknown.
+        let mut early = Intervals::new();
+        early.next(&both, 55, &[42]);
+        early.next(&both, 55, &[42]);
+        assert!(matches!(
+            early.next(&[(42, 0, 5)], 55, &[42]),
+            ComputeAmount::Unknown(_)
+        ));
+        // An interval that cannot be compared clears the intervals before it.
+        let mut cleared = Intervals::new();
+        for _ in 0..4 {
+            cleared.next(&both, 55, &[42]);
+        }
+        let mps = measure_compute(
+            Some(&[42]),
+            &BTreeSet::from([7]),
+            Some(cleared.cursor),
+            &Ok(vec![]),
+            Some(55.into()),
+            true,
+            15,
+            &BTreeSet::new(),
+            &mut cleared.state,
+        );
+        assert!(matches!(mps.0, ComputeAmount::Unknown(_)));
+        for _ in 0..2 {
+            cleared.next(&both, 55, &[42]);
+        }
+        assert!(matches!(
+            cleared.next(&[(42, 0, 5)], 55, &[42]),
+            ComputeAmount::Unknown(_)
+        ));
     }
 
     /// The 033 batch's shape (FR-021, R43, R46): the device is sampled about 3 times as often as

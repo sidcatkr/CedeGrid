@@ -477,14 +477,64 @@ pub(super) fn process_name(pid: u32) -> Option<String> {
     }
 }
 
-/// What one device's per-process measurement keeps between intervals (FR-021, R46): each PID's
-/// newest sample timestamp, where its next sample's span starts.
+/// What one device's per-process measurement keeps between intervals (FR-021, R46, R47): each
+/// PID's newest sample timestamp, where its next sample's span starts, and the last intervals
+/// compared, for the 4-interval check.
 #[derive(Debug, Clone, Default)]
 pub(super) struct GpuSampleState {
     last: BTreeMap<u32, u64>,
+    recent: std::collections::VecDeque<Compared>,
+    /// Whether the last measured amount came from the last 4 intervals, not the interval alone.
+    pub(super) over_last_4: bool,
+}
+
+/// How many intervals a missed sample is compared over (R47).
+const COMPARED_INTERVALS: usize = 4;
+
+/// One interval's summed shares beside the device's utilization, both less background, with each
+/// side's part, each external PID's share and how many processes were sampled, in percent.
+#[derive(Debug, Clone, Default)]
+struct Compared {
+    shares: u64,
+    device: u64,
+    external: u64,
+    own: u64,
+    by_pid: BTreeMap<u32, u64>,
+    sampled: u64,
+}
+
+impl Compared {
+    /// The intervals' average, each value rounded, and every PID sampled in any of them.
+    fn average(intervals: &std::collections::VecDeque<Compared>) -> Self {
+        let n = intervals.len().max(1) as u64;
+        let mean = |sum: u64| (sum + n / 2) / n;
+        let mut by_pid: BTreeMap<u32, u64> = BTreeMap::new();
+        for interval in intervals {
+            for (pid, share) in &interval.by_pid {
+                *by_pid.entry(*pid).or_default() += share;
+            }
+        }
+        Self {
+            shares: mean(intervals.iter().map(|i| i.shares).sum()),
+            device: mean(intervals.iter().map(|i| i.device).sum()),
+            external: mean(intervals.iter().map(|i| i.external).sum()),
+            own: mean(intervals.iter().map(|i| i.own).sum()),
+            sampled: intervals.iter().map(|i| i.sampled).max().unwrap_or(0),
+            by_pid: by_pid
+                .into_iter()
+                .map(|(pid, sum)| (pid, mean(sum)))
+                .collect(),
+        }
+    }
 }
 
 impl GpuSampleState {
+    /// An interval measured another way, own only, also ends the run of compared intervals.
+    pub(super) fn interrupt(&mut self) {
+        self.recent.clear();
+        self.over_last_4 = false;
+    }
+
     /// Keeps each listed PID's newest fresh sample timestamp for its next sample's span, and drops
     /// a PID that left the device's process list.
     pub(super) fn remember(
@@ -665,30 +715,34 @@ pub(super) fn measure_compute(
     background: &BTreeSet<u32>,
     state: &mut GpuSampleState,
 ) -> (ComputeAmount, BTreeMap<u32, u64>) {
-    let unknown = |reason: &str| (ComputeAmount::Unknown(reason.into()), BTreeMap::new());
+    // An interval that cannot be compared ends the run of intervals the 4-interval check sums.
+    let unknown = |state: &mut GpuSampleState, reason: &str| {
+        state.recent.clear();
+        state.over_last_4 = false;
+        (ComputeAmount::Unknown(reason.into()), BTreeMap::new())
+    };
     if mps {
         return unknown(
+            state,
             "an MPS daemon or server shares the device, so per-process samples do not attribute compute",
         );
     }
     let Some(device) = device else {
-        return unknown("device utilization is unavailable");
+        return unknown(state, "device utilization is unavailable");
     };
     if external.is_none() {
-        return unknown("the device's process inventory is incomplete");
+        return unknown(state, "the device's process inventory is incomplete");
     }
     let Some(previous) = previous else {
-        return unknown("no fresh per-process sample baseline");
+        return unknown(state, "no fresh per-process sample baseline");
     };
     let samples: &[ProcessUtilizationSample] = match samples {
         Ok(samples) => samples,
         Err(NvmlError::NotFound) => &[],
         Err(error) => {
-            return (
-                ComputeAmount::Unknown(format!(
-                    "per-process utilization is unavailable: {error:?}"
-                )),
-                BTreeMap::new(),
+            return unknown(
+                state,
+                &format!("per-process utilization is unavailable: {error:?}"),
             );
         }
     };
@@ -704,41 +758,73 @@ pub(super) fn measure_compute(
             own_percent += share;
         } else {
             external_percent += share;
-            by_pid.insert(pid, share * 10);
+            by_pid.insert(pid, share);
         }
     }
-    let device = device
-        .percent
-        .saturating_sub(u32::try_from(background_percent).unwrap_or(u32::MAX));
+    let device = u64::from(
+        device
+            .percent
+            .saturating_sub(u32::try_from(background_percent).unwrap_or(u32::MAX)),
+    );
     let total = external_percent + own_percent;
-    if total.abs_diff(u64::from(device)) > u64::from(tolerance) {
-        return (
-            ComputeAmount::Unknown(format!(
-                "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
-            )),
-            BTreeMap::new(),
-        );
+    let interval = Compared {
+        shares: total,
+        device,
+        external: external_percent,
+        own: own_percent,
+        by_pid,
+        sampled,
+    };
+    state.recent.push_back(interval.clone());
+    while state.recent.len() > COMPARED_INTERVALS {
+        state.recent.pop_front();
     }
-    let device = u64::from(device);
+    // The interval alone; else, when a sample was missed, the last 4 summed on both sides, with
+    // their average amounts so a missed sample does not read its process as idle (R47).
+    let tolerance = u64::from(tolerance);
+    let chosen = if total.abs_diff(device) <= tolerance {
+        state.over_last_4 = false;
+        interval
+    } else {
+        let average = Compared::average(&state.recent);
+        if state.recent.len() == COMPARED_INTERVALS
+            && average.shares.abs_diff(average.device) <= tolerance
+        {
+            state.over_last_4 = true;
+            average
+        } else {
+            state.over_last_4 = false;
+            return (
+                ComputeAmount::Unknown(format!(
+                    "summed per-process utilization {total}% differs from device utilization {device}% by more than {tolerance} points"
+                )),
+                BTreeMap::new(),
+            );
+        }
+    };
     let (external_percent, own_percent) = if external.is_some_and(|pids| !pids.is_empty()) {
-        let remainder = device.saturating_sub(total);
+        let remainder = chosen.device.saturating_sub(chosen.shares);
         (
-            if remainder <= sampled {
-                external_percent
+            if remainder <= chosen.sampled {
+                chosen.external
             } else {
-                external_percent + remainder
+                chosen.external + remainder
             },
-            own_percent,
+            chosen.own,
         )
     } else {
-        (0, device)
+        (0, chosen.device)
     };
     (
         ComputeAmount::Measured {
             external: external_percent.min(100) * 10,
             own: own_percent.min(100) * 10,
         },
-        by_pid,
+        chosen
+            .by_pid
+            .into_iter()
+            .map(|(pid, share)| (pid, share * 10))
+            .collect(),
     )
 }
 
