@@ -5775,4 +5775,110 @@ mod gpu_demand {
             "the estimate never lowered Yield First"
         );
     }
+
+    /// Replays a recorded run's GPU readings through the policy, open loop (plan "Item 039" 5):
+    /// `CEDEGRID_GPU_DEMAND_REPLAY` names a run folder with `gpu-trace.json` and
+    /// `gpu-replay.json`, `CEDEGRID_GPU_DEMAND_MODE` its mode (`performance`, `neutral`). Own work
+    /// runs in the managed windows only; the readings are those recorded under the run's own caps.
+    #[test]
+    #[ignore = "replay: needs CEDEGRID_GPU_DEMAND_REPLAY"]
+    fn replay_gpu_demand() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("CEDEGRID_GPU_DEMAND_REPLAY")
+                .expect("CEDEGRID_GPU_DEMAND_REPLAY names a run folder"),
+        );
+        let mode = match std::env::var("CEDEGRID_GPU_DEMAND_MODE").as_deref() {
+            Ok("neutral") => ContentionMode::Neutral,
+            _ => ContentionMode::Performance,
+        };
+        let read = |name: &str| -> Vec<serde_json::Value> {
+            serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+        };
+        let (replay, trace) = (read("gpu-replay.json"), read("gpu-trace.json"));
+        let config = mode_config(mode);
+        let mut engine = PolicyEngine::new();
+        let mut now = 0;
+        for (window, recorded) in replay.iter().zip(&trace) {
+            let name = window["name"].as_str().unwrap_or("?");
+            let gpus: Vec<GpuSnapshot> =
+                serde_json::from_value(window["snapshots"].clone()).unwrap();
+            let observations = recorded["observations"].as_array().unwrap();
+            let (mut targets, mut caps, mut was, mut fed, mut windows) =
+                (vec![], vec![], vec![], 0, 0);
+            let mut last = None;
+            for (gpu, observation) in gpus.iter().zip(observations) {
+                let key = ResourceKey::GpuCompute(gpu.uuid.clone());
+                // Busy CPU above own work's, so own CPU reads consistent beside it.
+                let mut snap = snapshot(1000);
+                snap.gpu_inventory = CapabilityStatus::Available;
+                snap.gpus = vec![gpu.clone()];
+                // The recorded observation belongs to the snapshot it was taken with.
+                if let Some(observation) = &gpu.observation {
+                    snap.observed_at_unix_ms = observation.observed_at_unix_ms;
+                }
+                let mut principals = vec![PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                }];
+                for entry in observation["principals"].as_array().into_iter().flatten() {
+                    let uid = entry[0].as_u64().map(|uid| uid as u32);
+                    let milli = entry[1]
+                        .as_object()
+                        .and_then(|m| m.values().next())
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    principals.push(PrincipalUsage {
+                        uid,
+                        gpu_compute_milli: BTreeMap::from([(gpu.uuid.clone(), milli)]),
+                        ..PrincipalUsage::default()
+                    });
+                }
+                snap.principals = Some(principals);
+                let mut allocation = job(None);
+                allocation.requested.gpu_memory_mib = BTreeMap::from([(gpu.uuid.clone(), 1000)]);
+                // Own memory within what the device reports in use, as the probe's was.
+                let mut observed = allocation.requested.clone();
+                observed.gpu_memory_mib = BTreeMap::from([(gpu.uuid.clone(), 100)]);
+                allocation.observed = Some(observed);
+                let input = PolicyInput {
+                    allocations: if name == "managed" {
+                        vec![allocation]
+                    } else {
+                        vec![]
+                    },
+                    ..PolicyInput::default()
+                };
+                let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+                now += INTERVAL;
+                let status = &decision.resources[&key];
+                targets.push(status.target_share.unwrap_or(0));
+                caps.push(
+                    decision
+                        .actions
+                        .iter()
+                        .find(|a| a.resource == key)
+                        .map_or(1000, |a| {
+                            if a.step == YieldStep::Cap {
+                                a.target.unwrap_or(1000)
+                            } else {
+                                0
+                            }
+                        }),
+                );
+                was.push(observation["status"]["target_share"].as_u64().unwrap_or(0));
+                let record = status.gpu_demand.clone().unwrap_or_default();
+                fed += usize::from(record.fed);
+                windows += usize::from(record.window);
+                last = record.estimate;
+            }
+            println!(
+                "replay {name}: {} intervals, target median {} (recorded {}), cap median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}",
+                targets.len(),
+                median(targets.clone()),
+                median(was),
+                median(caps)
+            );
+        }
+    }
 }
