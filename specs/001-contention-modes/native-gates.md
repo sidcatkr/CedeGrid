@@ -544,6 +544,24 @@ pattern own work had under T368's caps; it is 3 of the device's samples. If the 
 reading rises with own duty while its request rate stays flat, the extra reading is time-slice
 inflation, not demand.
 
+## Item 039: T368 with GPU demand from uncapped intervals (T445)
+
+Runs once on the authorized test host after `039.done`, with the user's typed approval in the
+session, under the same host rules. The harness is `batch-037`'s with the fixed probe; run 5
+waits for each probe's result and moves later windows by any delay.
+
+```sh
+bash runs-037.sh <commit> <second account uid> t368   # Performance and Neutral, light and saturating
+# Read only, after each run: the GPU trace, now with each decision's gpu_demand record.
+$py $H/gpu_trace_035.py <each e037-r5 output>
+```
+
+Record per run each managed window's ratio against own work unmanaged beside the same user in
+the same run, and the light user's request rate, p50 and p99 in each window. Gates: at least 0.9
+beside the light user in Performance, and about 0.5 beside the saturating one; in each managed
+window, how many decisions fed the estimate, how many were in a re-measure window (at most 10% of
+the capped ones), the estimate against the light user's alone reading, and own work's cap.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
