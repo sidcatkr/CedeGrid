@@ -184,8 +184,13 @@ impl<'a> Interval<'a> {
         let input = self.input;
         for (uuid, demand) in self.next.gpu_demand.iter_mut() {
             let compute = ResourceKey::GpuCompute(uuid.clone());
+            // A GPU compute cap sent at full duty holds nothing back.
             let capped = self.actions.iter().any(|action| {
+                let full = action.resource == compute
+                    && action.step == YieldStep::Cap
+                    && action.duty.is_some_and(|duty| duty >= GPU_COMPUTE_CAPACITY);
                 matches!(action.step, YieldStep::Cap | YieldStep::Pause)
+                    && !full
                     && (action.resource == ResourceKey::Cpu || action.resource == compute)
                     && input.allocations.iter().any(|a| {
                         a.id == action.allocation_id
@@ -262,6 +267,7 @@ impl<'a> Interval<'a> {
                 cause: YieldCause::OperatorDrain,
                 code: "yield_step_drain".into(),
                 deadline_ms: None,
+                duty: None,
             });
         }
     }
@@ -1386,6 +1392,12 @@ impl<'a> Interval<'a> {
             {
                 continue;
             }
+            let duty = match key {
+                ResourceKey::GpuCompute(uuid) if state.step == YieldStep::Cap => {
+                    self.gpu_duty(id, uuid, state)
+                }
+                _ => None,
+            };
             self.actions.push(YieldAction {
                 allocation_id: id.clone(),
                 resource: key.clone(),
@@ -1394,8 +1406,52 @@ impl<'a> Interval<'a> {
                 cause: state.cause,
                 code: format!("yield_step_{}", step_name(state.step)),
                 deadline_ms: self.hint_deadlines.get(&(id.clone(), key.clone())).copied(),
+                duty,
             });
         }
+    }
+
+    /// A GPU compute cap's duty in thousandths, which the supervisor applies: in Neutral,
+    /// Performance and Aggressive, on a device measured this interval and for a cap not set for
+    /// unknown activity, the share target over the allocation's part of own work's uncapped share,
+    /// since own work at full duty beside another busy context holds only its slices (FR-021,
+    /// Q20, R49). None leaves the duty at the share target, target ÷ 1000.
+    fn gpu_duty(&self, id: &str, uuid: &str, state: &StepState) -> Option<u64> {
+        let yield_first = self
+            .allocation_modes
+            .get(id)
+            .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
+            .is_none_or(|mode| *mode == ContentionMode::YieldFirst);
+        let measured = self
+            .gpu_compute_budget
+            .get(uuid)
+            .is_some_and(|budget| budget.own.is_some());
+        if yield_first || !measured || state.cause == YieldCause::UnknownMeasurement {
+            return None;
+        }
+        let share = self
+            .next
+            .gpu_demand
+            .get(uuid)?
+            .own_share()
+            .filter(|share| *share > 0)?;
+        let running = self
+            .input
+            .allocations
+            .iter()
+            .filter(|a| {
+                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
+            })
+            .count()
+            .max(1) as u64;
+        let target = state.target?;
+        Some(
+            (target
+                .saturating_mul(GPU_COMPUTE_CAPACITY)
+                .saturating_mul(running)
+                / share)
+                .min(GPU_COMPUTE_CAPACITY),
+        )
     }
 
     /// The allocations a step would drain, each once, and charges beyond the

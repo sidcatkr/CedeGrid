@@ -2044,6 +2044,7 @@ mod drain_tests {
             cause: YieldCause::OperatorDrain,
             code: "yield_step_drain".into(),
             deadline_ms: None,
+            duty: None,
         };
         let mut actions: Vec<crate::model::YieldAction> =
             children.iter().map(|id| stop(id)).collect();

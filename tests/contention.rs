@@ -5207,7 +5207,7 @@ mod gpu_demand {
             .iter()
             .find(|a| a.resource == key && a.allocation_id == "job")
             .map_or(1000, |a| match a.step {
-                YieldStep::Cap => a.target.unwrap_or(1000),
+                YieldStep::Cap => a.duty.or(a.target).unwrap_or(1000),
                 YieldStep::Pause => 0,
                 _ => 1000,
             })
@@ -5330,19 +5330,26 @@ mod gpu_demand {
     #[test]
     fn a_light_user_turning_saturating_is_seen_at_the_next_window() {
         const RISE: u64 = 100;
-        let run = closed_loop(ContentionMode::Performance, None, 260, &|i, capped| match (
-            i >= RISE,
-            capped,
-        ) {
-            (false, true) => BESIDE_CAPS[(i % 60) as usize],
-            (false, false) => BESIDE_FULL_DUTY[(i % 60) as usize],
-            (true, true) => 600,
-            (true, false) => 500,
-        });
+        let (_, decisions) =
+            loop_decisions(ContentionMode::Performance, None, 260, &|i, capped| match (
+                i >= RISE,
+                capped,
+            ) {
+                (false, true) => BESIDE_CAPS[(i % 60) as usize],
+                (false, false) => BESIDE_FULL_DUTY[(i % 60) as usize],
+                (true, true) => 600,
+                (true, false) => 500,
+            });
+        let run: Vec<(u64, u64)> = decisions
+            .iter()
+            .map(|decision| (target_of(decision), cap_of(decision)))
+            .collect();
         let caps: Vec<u64> = run.iter().map(|(_, cap)| *cap).collect();
+        let windowed: Vec<bool> = decisions.iter().map(|d| record_of(d).window).collect();
         // A window: 6 decisions in a row that send no GPU compute cap, after own work was capped.
-        let window = (RISE as usize..caps.len() - 6)
-            .find(|&i| caps[i - 1] < 1000 && caps[i..i + 6].iter().all(|c| *c == 1000));
+        let window = (RISE as usize..caps.len() - 6).find(|&i| {
+            windowed[i] && caps[i - 1] < 1000 && caps[i..i + 6].iter().all(|c| *c == 1000)
+        });
         let window = window.expect("no window lifted the cap after the rise");
         assert!(
             window as u64 - RISE <= 61 + 6,
@@ -5361,12 +5368,12 @@ mod gpu_demand {
             run[fallen..].iter().all(|(target, _)| *target <= 520),
             "the target rose again beside the saturating user"
         );
-        // Uncapped at most 10% of the capped time.
-        let lifted = caps[20..].iter().filter(|c| **c == 1000).count();
+        // Windows hold own work uncapped at most 10% of the time.
+        let lifted = windowed[20..].iter().filter(|w| **w).count();
         assert!(
-            lifted * 10 <= caps.len() - 20,
-            "{lifted} of {} decisions lifted the cap",
-            caps.len() - 20
+            lifted * 10 <= windowed.len() - 20,
+            "{lifted} of {} decisions were in a window",
+            windowed.len() - 20
         );
     }
 
@@ -5860,7 +5867,7 @@ mod gpu_demand {
                         .find(|a| a.resource == key)
                         .map_or(1000, |a| {
                             if a.step == YieldStep::Cap {
-                                a.target.unwrap_or(1000)
+                                a.duty.or(a.target).unwrap_or(1000)
                             } else {
                                 0
                             }
@@ -5880,5 +5887,84 @@ mod gpu_demand {
                 median(caps)
             );
         }
+    }
+
+    /// T368's Performance saturating run (036's evidence): the probe's reading per interval beside
+    /// the saturating user without CedeGrid, 419 on average. Its slices come in whole samples, so
+    /// one interval reads 0 and the next 990 at the same share.
+    const SATURATING_FULL_DUTY: [u64; 60] = [
+        0, 0, 0, 220, 330, 330, 390, 330, 330, 360, 660, 660, 330, 580, 660, 330, 440, 0, 0, 190,
+        990, 0, 500, 990, 360, 0, 990, 300, 440, 990, 0, 580, 990, 0, 580, 520, 0, 990, 390, 440,
+        0, 0, 250, 990, 330, 990, 0, 0, 990, 990, 0, 0, 990, 990, 0, 580, 990, 440, 0, 440,
+    ];
+
+    /// A time-sliced device (item 040): each busy context gets an equal slice of the time the
+    /// device is busy. The other user, saturating, runs alone for 60 intervals, then own work
+    /// runs `own_contexts` contexts at the duty its last decision sent and holds duty × its slices,
+    /// the other user the rest; own work's reading follows the recorded pattern at that share.
+    /// Returns, per own interval, the duty sent and own work's share.
+    fn saturating_loop(mode: ContentionMode, own_contexts: u64, intervals: u64) -> Vec<(u64, u64)> {
+        let config = mode_config(mode);
+        let mut engine = PolicyEngine::new();
+        let mut now = 0;
+        for i in 0..60u64 {
+            engine
+                .evaluate(
+                    &config,
+                    &interval(None, 990, i + 1),
+                    &PolicyInput::default(),
+                    now,
+                )
+                .unwrap();
+            now += INTERVAL;
+        }
+        let input = PolicyInput {
+            allocations: vec![job(None)],
+            ..PolicyInput::default()
+        };
+        // The recorded pattern's swing around its mean, at half its size, keeps every reading
+        // below the device's and the readings' mean at the share.
+        let mean = SATURATING_FULL_DUTY.iter().sum::<u64>() as i64 / 60;
+        let (mut duty, mut out) = (1000u64, vec![]);
+        for i in 0..intervals {
+            let share = duty * own_contexts / (own_contexts + 1);
+            let swing = (SATURATING_FULL_DUTY[(i % 60) as usize] as i64 - mean) / 2;
+            let own = (share as i64 + swing).clamp(0, 990) as u64;
+            let snap = interval(Some(own), 990 - own, 61 + i);
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            duty = cap_of(&decision);
+            out.push((duty, share));
+            now += INTERVAL;
+        }
+        out
+    }
+
+    /// One own context beside a saturating user already holds its slice, the fair share, at full
+    /// duty, so a cap at the fair share keeps a duty near 1 and own work at the unmanaged share,
+    /// where a duty of target ÷ 1000 halved it (FR-021, Q20, R49).
+    #[test]
+    fn one_own_context_beside_a_saturating_user_keeps_its_slice() {
+        for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+            let run = saturating_loop(mode, 1, 200);
+            for (i, (duty, own)) in run.iter().enumerate().skip(20) {
+                assert!(*duty >= 950, "{mode:?} interval {i}: duty {duty}");
+                assert!(
+                    own.abs_diff(500) <= 30,
+                    "{mode:?} interval {i}: own work holds {own}"
+                );
+            }
+        }
+    }
+
+    /// Two own contexts beside one saturating context hold two slices, 667, at full duty; Neutral's
+    /// fair share, 500, then needs a duty near 0.75, and own work settles at 500 (FR-021, Q20).
+    #[test]
+    fn two_own_contexts_settle_at_the_fair_share() {
+        let run = saturating_loop(ContentionMode::Neutral, 2, 300);
+        let late = &run[100..];
+        let duty = median(late.iter().map(|(duty, _)| *duty).collect());
+        let own = median(late.iter().map(|(_, own)| *own).collect());
+        assert!((700..=800).contains(&duty), "duty {duty}");
+        assert!(own.abs_diff(500) <= 30, "own work holds {own}");
     }
 }

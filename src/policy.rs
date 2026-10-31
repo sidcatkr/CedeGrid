@@ -172,8 +172,12 @@ type DemandEstimate = (u64, BTreeMap<u32, u64>);
 /// time-sliced device own work's gaps raise another user's reading at the same demand.
 #[derive(Debug, Clone, Default)]
 struct GpuDemand {
-    /// The last uncapped intervals' amounts: the external total and each principal UID's.
-    uncapped: std::collections::VecDeque<(u64, BTreeMap<u32, u64>)>,
+    /// The last uncapped intervals' amounts: the external total, each principal UID's, and own
+    /// work's where it ran on the device.
+    uncapped: std::collections::VecDeque<(u64, BTreeMap<u32, u64>, Option<u64>)>,
+    /// The own allocations running on the device at the last interval; another set is another
+    /// own share (FR-021, Q20).
+    own_allocations: Option<Vec<String>>,
     /// Whether the last decision and the one before it sent own work there a cap or pause.
     sent_capped: [bool; 2],
     /// The device's external PIDs, background contexts left out, at the last listed interval.
@@ -202,18 +206,30 @@ impl GpuDemand {
         }
         let mean = |sum: u64| (sum + count / 2) / count;
         let mut by_uid: BTreeMap<u32, u64> = BTreeMap::new();
-        for (_, amounts) in &self.uncapped {
+        for (_, amounts, _) in &self.uncapped {
             for (uid, amount) in amounts {
                 *by_uid.entry(*uid).or_default() += amount;
             }
         }
         Some((
-            mean(self.uncapped.iter().map(|(total, _)| total).sum()),
+            mean(self.uncapped.iter().map(|(total, _, _)| total).sum()),
             by_uid
                 .into_iter()
                 .map(|(uid, sum)| (uid, mean(sum)))
                 .collect(),
         ))
+    }
+
+    /// Own work's uncapped share: its amount averaged over the uncapped intervals in which it ran
+    /// on the device (FR-021, Q20).
+    fn own_share(&self) -> Option<u64> {
+        let owns: Vec<u64> = self
+            .uncapped
+            .iter()
+            .filter_map(|(_, _, own)| *own)
+            .collect();
+        let count = owns.len() as u64;
+        (count > 0).then(|| (owns.iter().sum::<u64>() + count / 2) / count)
     }
 }
 

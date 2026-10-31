@@ -541,6 +541,10 @@ pub struct YieldAction {
     /// For a hint, the deadline the policy enforces before the next step (FR-037).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
+    /// For a GPU compute cap, the duty in thousandths its supervisor applies, when it differs
+    /// from the share target: the target over own work's uncapped share (FR-021, Q20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<u64>,
 }
 
 /// How a device's external GPU compute demand was read in one interval (FR-021, Q19).

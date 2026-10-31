@@ -1292,7 +1292,8 @@ impl AgentLoop<'_> {
                     action.resource.clone(),
                     crate::contention::StepRequest {
                         step: action.step,
-                        target: action.target,
+                        // A GPU compute cap goes to its supervisor as the duty to apply.
+                        target: action.duty.or(action.target),
                         cause: action.cause,
                         deadline_ms: action.deadline_ms,
                     },

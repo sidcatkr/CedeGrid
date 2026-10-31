@@ -1413,12 +1413,31 @@ impl<'a> Interval<'a> {
             }
             demand.pids = Some(pids);
         }
-        let running = self.input.allocations.iter().any(|a| {
-            a.phase == AllocationPhase::Running
-                && a.requested.gpu_memory_mib.contains_key(&gpu.uuid)
-        });
-        let uncapped = !running || !demand.sent_capped.contains(&true);
-        if let Some((external, _)) = measured
+        let mut running: Vec<String> = self
+            .input
+            .allocations
+            .iter()
+            .filter(|a| {
+                a.phase == AllocationPhase::Running
+                    && a.requested.gpu_memory_mib.contains_key(&gpu.uuid)
+            })
+            .map(|a| a.id.clone())
+            .collect();
+        running.sort_unstable();
+        // Other own work is another own share.
+        if demand
+            .own_allocations
+            .as_ref()
+            .is_some_and(|before| before != &running)
+        {
+            for (_, _, own) in demand.uncapped.iter_mut() {
+                *own = None;
+            }
+        }
+        let uncapped = running.is_empty() || !demand.sent_capped.contains(&true);
+        let own_ran = !running.is_empty();
+        demand.own_allocations = Some(running);
+        if let Some((external, own)) = measured
             && uncapped
         {
             let amounts = self
@@ -1434,7 +1453,9 @@ impl<'a> Interval<'a> {
                     ))
                 })
                 .collect();
-            demand.uncapped.push_back((external, amounts));
+            demand
+                .uncapped
+                .push_back((external, amounts, own_ran.then_some(own)));
             while demand.uncapped.len() > GPU_DEMAND_INTERVALS {
                 demand.uncapped.pop_front();
             }

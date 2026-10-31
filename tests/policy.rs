@@ -2190,6 +2190,7 @@ fn d4_cpu_contention_caps_instead_of_draining() {
             cause: cedegrid::contention::YieldCause::ExternalGrowth,
             code: "yield_step_cap".into(),
             deadline_ms: None,
+            duty: None,
         }]
     );
     assert_eq!(contended.admission_headroom.cpu_millicores, 0);
