@@ -2794,6 +2794,7 @@ mod ramp {
             compute_amount_unknown: None,
             own_only: false,
             background_process_ids: vec![],
+            compute_sampling: None,
         }];
         snap.principals = Some(vec![
             PrincipalUsage {

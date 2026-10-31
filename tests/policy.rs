@@ -367,6 +367,7 @@ fn gpu_snapshot() -> Snapshot {
         compute_amount_unknown: None,
         own_only: false,
         background_process_ids: vec![],
+        compute_sampling: None,
     });
     result
 }

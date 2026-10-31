@@ -939,6 +939,7 @@ impl Collector {
                 },
                 own_only,
                 background_process_ids: background.into_iter().collect(),
+                compute_sampling: compute_sampling(activity_baseline, &samples, &device_samples),
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -1342,6 +1343,177 @@ mod tests {
             timestamp,
             value: nvml_wrapper::enums::device::SampleValue::U32(percent),
         }
+    }
+
+    /// The 033 batch's shape (FR-021, R43): the device is sampled about 3 times as often as each
+    /// process, so dividing by the device's count read every share at a third. Each process's
+    /// samples count against the slots of its own sampling period instead; with no process
+    /// holding 2 samples in the window the device's count stays, with today's reasons.
+    #[test]
+    fn gpu_compute_counts_against_the_per_process_period() {
+        let own = BTreeSet::from([7]);
+        let none = BTreeSet::new();
+        let device = |percent| {
+            device_utilization(
+                &Ok((1..=9)
+                    .map(|i| device_sample(100 + i * 600 / 9, percent))
+                    .collect()),
+                Some(100),
+                Some(percent),
+            )
+        };
+        let every = |pid, sm| [300, 500, 700].map(|at| gpu_sample(pid, at, sm)).to_vec();
+        let measure = |listed: &[u32], samples: Vec<ProcessUtilizationSample>, percent| {
+            measure_compute(
+                Some(listed),
+                &own,
+                Some(100),
+                &Ok(samples),
+                device(percent),
+                false,
+                15,
+                &none,
+            )
+        };
+        // Own and external busy.
+        let (amount, by_pid) = measure(&[42], [every(7, 60), every(42, 30)].concat(), 90);
+        assert_eq!(
+            amount,
+            ComputeAmount::Measured {
+                external: 300,
+                own: 600
+            }
+        );
+        assert_eq!(by_pid, BTreeMap::from([(42, 300)]));
+        // Own alone, and external alone.
+        assert_eq!(
+            measure(&[], every(7, 60), 60).0,
+            ComputeAmount::Measured {
+                external: 0,
+                own: 600
+            }
+        );
+        assert_eq!(
+            measure(&[42], every(42, 30), 30).0,
+            ComputeAmount::Measured {
+                external: 300,
+                own: 0
+            }
+        );
+        // Own stopped for the rest of the window after its first sample: idle for that time.
+        let stopped = [vec![gpu_sample(7, 300, 60)], every(42, 30)].concat();
+        assert_eq!(
+            measure(&[42], stopped, 50).0,
+            ComputeAmount::Measured {
+                external: 300,
+                own: 200
+            }
+        );
+        // A process seen once counts for one slot of three.
+        let once = [every(7, 60), vec![gpu_sample(43, 500, 30)]].concat();
+        assert_eq!(
+            measure(&[43], once, 70).0,
+            ComputeAmount::Measured {
+                external: 100,
+                own: 600
+            }
+        );
+        // No samples at all: as today.
+        let not_found = |percent| {
+            measure_compute(
+                Some(&[42]),
+                &own,
+                Some(100),
+                &Err(NvmlError::NotFound),
+                device(percent),
+                false,
+                15,
+                &none,
+            )
+            .0
+        };
+        assert_eq!(
+            not_found(0),
+            ComputeAmount::Measured {
+                external: 0,
+                own: 0
+            }
+        );
+        assert_eq!(
+            not_found(40),
+            ComputeAmount::Unknown(
+                "summed per-process utilization 0% differs from device utilization 40% by more than 15 points".into()
+            )
+        );
+        // No process with 2 samples: the device's count stays the slots, with today's reason.
+        let single = vec![gpu_sample(7, 700, 60), gpu_sample(42, 700, 30)];
+        assert_eq!(
+            measure(&[42], single, 90).0,
+            ComputeAmount::Unknown(
+                "summed per-process utilization 10% differs from device utilization 90% by more than 15 points".into()
+            )
+        );
+    }
+
+    /// Each interval keeps how its samples were counted (FR-021, Q14): the device's count and
+    /// first and last timestamps, the window, the period and slots used with their path, and
+    /// each PID's count and first and last timestamps, measured or not; with no baseline there
+    /// is nothing to show and the snapshot leaves the field out.
+    #[test]
+    fn an_interval_records_how_its_gpu_samples_were_counted() {
+        use crate::model::{ComputeSampling, ProcessSampling, SlotsSource};
+        let device: Vec<_> = (1..=9)
+            .map(|i| device_sample(100 + i * 600 / 9, 90))
+            .collect();
+        let busy: Vec<_> = [7, 42]
+            .into_iter()
+            .flat_map(|pid| [300, 500, 700].map(|at| gpu_sample(pid, at, 30)))
+            .collect();
+        let process = |pid, samples, first_us, last_us| ProcessSampling {
+            pid,
+            samples,
+            first_us,
+            last_us,
+        };
+        assert_eq!(
+            compute_sampling(Some(100), &Ok(busy), &Ok(device.clone())),
+            Some(ComputeSampling {
+                device_samples: 9,
+                device_first_us: Some(166),
+                device_last_us: Some(700),
+                window_us: Some(600),
+                period_us: Some(200),
+                slots: 3,
+                slots_from: SlotsSource::ProcessPeriod,
+                processes: vec![process(7, 3, 300, 700), process(42, 3, 300, 700)],
+            })
+        );
+        let single = vec![gpu_sample(7, 700, 60), gpu_sample(42, 700, 30)];
+        let unknown = compute_sampling(Some(100), &Ok(single), &Ok(device.clone())).unwrap();
+        assert_eq!(
+            (unknown.slots, unknown.slots_from, unknown.window_us),
+            (9, SlotsSource::DeviceSamples, None)
+        );
+        assert_eq!(
+            unknown.processes,
+            vec![process(7, 1, 700, 700), process(42, 1, 700, 700)]
+        );
+        assert_eq!(compute_sampling(None, &Ok(vec![]), &Ok(device)), None);
+        let mut snap: crate::model::GpuSnapshot = serde_json::from_value(serde_json::json!({
+            "uuid": "GPU-a", "total_memory_mib": 1, "used_memory_mib": null,
+            "utilization_percent": null, "external_process_ids": null,
+            "external_compute": "unknown", "compute_sample_id": null
+        }))
+        .unwrap();
+        assert!(
+            !serde_json::to_string(&snap)
+                .unwrap()
+                .contains("compute_sampling")
+        );
+        snap.compute_sampling = Some(unknown);
+        let back: crate::model::GpuSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(back.compute_sampling, snap.compute_sampling);
     }
 
     /// Report 029 run 5's two shapes (FR-021, R33). An own process duty-capped to a third of

@@ -783,6 +783,7 @@ fn host(total_ram_mib: u64, gpus: &[u64]) -> cedegrid::model::Snapshot {
                 compute_amount_unknown: None,
                 own_only: false,
                 background_process_ids: vec![],
+                compute_sampling: None,
             })
             .collect(),
         capabilities: Default::default(),

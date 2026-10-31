@@ -293,6 +293,7 @@ fn sequence(seed: u64) -> usize {
                 compute_amount_unknown: None,
                 own_only: false,
                 background_process_ids: vec![],
+                compute_sampling: None,
             }],
             capabilities: BTreeMap::new(),
             kernel: None,

@@ -90,7 +90,9 @@ the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty
 through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
-utilization; a measured amount takes the CPU paths, with external processes grouped into
+utilization. Each process's samples count against the slots of the per-process sampling period
+over the interval, time without a sample counting as idle, and each observation records the
+sample counts (`compute_sampling`). A measured amount takes the CPU paths, with external processes grouped into
 principals by UID as on CPU and device time nobody accounts for counted as one more
 external principal while an external process is listed, so own work keeps capacity minus
 that amount minus the mode's margin under Performance, and its fair share or a learned

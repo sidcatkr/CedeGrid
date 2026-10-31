@@ -477,8 +477,113 @@ pub(super) fn process_name(pid: u32) -> Option<String> {
     }
 }
 
+/// Where the slots a process's summed samples count against came from (FR-021, R43).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlotsFrom {
+    /// The window divided by the per-process sampling period.
+    ProcessPeriod { window_us: u64, period_us: u64 },
+    /// No process held 2 samples: the device's sample count, as before.
+    DeviceSamples,
+    /// Neither: the PID sampled most often stands for the interval's length.
+    MostSampled,
+}
+
+/// The slots of one interval, from the samples newer than `previous`. The per-process period is
+/// the shortest positive gap between one PID's consecutive timestamps and the window runs from
+/// `previous` to the newest of them, so a process with fewer samples than the slots was idle or
+/// stopped for the rest (R33). Without a period the device's count stays the slots, never the
+/// most-sampled PID's while the device has samples, since that overstates every share when all
+/// were stopped for part of the window.
+pub(super) fn compute_slots(
+    previous: u64,
+    samples: &[ProcessUtilizationSample],
+    device_samples: Option<u64>,
+) -> (u64, SlotsFrom) {
+    let mut times: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
+    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+        times.entry(sample.pid).or_default().push(sample.timestamp);
+    }
+    let most = times.values().map(|t| t.len() as u64).max().unwrap_or(0);
+    let period = times
+        .values_mut()
+        .filter_map(|t| {
+            t.sort_unstable();
+            t.windows(2)
+                .map(|w| w[1] - w[0])
+                .filter(|gap| *gap > 0)
+                .min()
+        })
+        .min();
+    let newest = times.values().flatten().max().copied();
+    if let (Some(period_us), Some(newest)) = (period, newest) {
+        let window_us = newest - previous;
+        let slots = ((window_us + period_us / 2) / period_us).max(most).max(1);
+        return (
+            slots,
+            SlotsFrom::ProcessPeriod {
+                window_us,
+                period_us,
+            },
+        );
+    }
+    match device_samples.filter(|count| *count > 0) {
+        Some(count) => (count, SlotsFrom::DeviceSamples),
+        None => (most.max(1), SlotsFrom::MostSampled),
+    }
+}
+
+/// How an interval's samples newer than `previous` were counted, for the persisted
+/// observation; none without a baseline.
+pub(super) fn compute_sampling(
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    device: &std::result::Result<Vec<Sample>, NvmlError>,
+) -> Option<crate::model::ComputeSampling> {
+    use crate::model::{ComputeSampling, ProcessSampling, SlotsSource};
+    let previous = previous?;
+    let samples = samples.as_deref().unwrap_or_default();
+    let device: Vec<u64> = device
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|sample| sample.timestamp)
+        .filter(|at| *at > previous)
+        .collect();
+    let mut processes: BTreeMap<u32, ProcessSampling> = BTreeMap::new();
+    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+        let entry = processes.entry(sample.pid).or_insert(ProcessSampling {
+            pid: sample.pid,
+            samples: 0,
+            first_us: sample.timestamp,
+            last_us: sample.timestamp,
+        });
+        entry.samples += 1;
+        entry.first_us = entry.first_us.min(sample.timestamp);
+        entry.last_us = entry.last_us.max(sample.timestamp);
+    }
+    let (slots, from) = compute_slots(previous, samples, Some(device.len() as u64));
+    let (window_us, period_us, slots_from) = match from {
+        SlotsFrom::ProcessPeriod {
+            window_us,
+            period_us,
+        } => (Some(window_us), Some(period_us), SlotsSource::ProcessPeriod),
+        SlotsFrom::DeviceSamples => (None, None, SlotsSource::DeviceSamples),
+        SlotsFrom::MostSampled => (None, None, SlotsSource::MostSampled),
+    };
+    Some(ComputeSampling {
+        device_samples: device.len() as u64,
+        device_first_us: device.iter().min().copied(),
+        device_last_us: device.iter().max().copied(),
+        window_us,
+        period_us,
+        slots,
+        slots_from,
+        processes: processes.into_values().collect(),
+    })
+}
+
 /// The interval's GPU compute per side from fresh per-process samples: each PID's
-/// share of the whole interval, its summed samples over the device's sample count rounded
+/// share of the whole interval, its summed samples over the slots of `compute_slots` rounded
 /// to the nearest point and capped at 100%, own PIDs being the verified managed ones, all
 /// others external. The amount is trusted only when the sum is within `tolerance` points
 /// of device utilization over the same interval (FR-021). While an external PID is
@@ -529,13 +634,7 @@ pub(super) fn measure_compute(
         *sum += u64::from(sample.sm_util.min(100));
         *count += 1;
     }
-    // Without the device's own sample count, the PID sampled most often stands for the
-    // interval's length.
-    let slots = device
-        .samples
-        .filter(|count| *count > 0)
-        .or_else(|| per_pid.values().map(|(_, count)| *count).max())
-        .unwrap_or(1);
+    let slots = compute_slots(previous, samples, device.samples).0;
     let sampled = per_pid.len() as u64;
     let (mut external_percent, mut own_percent, mut background_percent) = (0u64, 0u64, 0u64);
     let mut by_pid = BTreeMap::new();

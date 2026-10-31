@@ -244,6 +244,45 @@ pub struct GpuSnapshot {
     /// counts as external usage.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_process_ids: Vec<u32>,
+    /// How this interval's per-process samples were counted (FR-021, R43), when there was a
+    /// fresh baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_sampling: Option<ComputeSampling>,
+}
+
+/// One interval's GPU sample counts, in driver microseconds: the device's samples, the window
+/// from the cursor to the newest per-process sample, the per-process period, and the slots
+/// each process's summed samples counted against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputeSampling {
+    pub device_samples: u64,
+    pub device_first_us: Option<u64>,
+    pub device_last_us: Option<u64>,
+    pub window_us: Option<u64>,
+    pub period_us: Option<u64>,
+    pub slots: u64,
+    pub slots_from: SlotsSource,
+    pub processes: Vec<ProcessSampling>,
+}
+
+/// Where an interval's slots came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotsSource {
+    ProcessPeriod,
+    DeviceSamples,
+    MostSampled,
+}
+
+/// One process's fresh samples in an interval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSampling {
+    pub pid: u32,
+    pub samples: u64,
+    pub first_us: u64,
+    pub last_us: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
