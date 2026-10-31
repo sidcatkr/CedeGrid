@@ -499,6 +499,27 @@ of its level within 3 s of the contender's end, in one move; run 3, the agent's 
 of the scope, own memory within 10% of the buffer plus the workers' private pages, and the PSS
 period K the agent chose.
 
+## Item 036: T368 with the sample span (T433)
+
+Runs once on the authorized test host after `036.done`, with the user's typed approval in the
+session, under the 033 batch's host rules: light test-owned loads and the second account's own
+loads only, nothing on the shared host, no installs. The harness is `batch-035`'s, which ends each
+run before stopping its agent and stops the batch if a test process of either account is left;
+its trace tool also writes each window's GPU snapshots for a replay.
+
+```sh
+bash runs-035.sh <commit> <second account uid> t368
+# Read only, after each run: the GPU trace and the replay input from the agent's state database.
+$py $H/gpu_trace_035.py <each e035-r5 output>
+# On the Mac, the redacted copy replayed through the code:
+CEDEGRID_GPU_REPLAY=<the run's gpu-replay.json> cargo test --locked --lib replay_gpu_trace -- --ignored --nocapture
+```
+
+Gates: managed throughput against unmanaged at least 0.9 beside the light user in Performance
+and Neutral, and about 0.5 beside the saturating one; per managed window, how many intervals read
+measured alone, over the last 4, or unknown, and whether the replay equals the recorded reading;
+if the windows stay unknown at their start, how many intervals `quiet_window_intervals` holds.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

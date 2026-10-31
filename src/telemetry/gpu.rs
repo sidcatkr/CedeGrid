@@ -619,6 +619,7 @@ pub(super) fn compute_sampling(
     previous: Option<u64>,
     samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
     device: &std::result::Result<Vec<Sample>, NvmlError>,
+    device_percent: Option<u32>,
     state: &GpuSampleState,
 ) -> Option<crate::model::ComputeSampling> {
     use crate::model::{ComparedOver, ComputeSampling, ProcessSampling};
@@ -640,6 +641,7 @@ pub(super) fn compute_sampling(
         device_samples: device.len() as u64,
         device_first_us: device.iter().min().copied(),
         device_last_us: device.iter().max().copied(),
+        device_percent,
         window_start_us: previous,
         window_end_us: end,
         compared_over: if state.over_last_4 {

@@ -259,6 +259,8 @@ pub struct ComputeSampling {
     pub device_samples: u64,
     pub device_first_us: Option<u64>,
     pub device_last_us: Option<u64>,
+    /// The device's utilization over the interval, the side the shares are compared with.
+    pub device_percent: Option<u32>,
     pub window_start_us: u64,
     pub window_end_us: Option<u64>,
     pub compared_over: ComparedOver,

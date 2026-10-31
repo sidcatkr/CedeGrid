@@ -866,6 +866,8 @@ impl Collector {
                 activity_baseline,
                 &samples,
                 &device_samples,
+                device_utilization(&device_samples, activity_baseline, utilization_percent)
+                    .map(|device| device.percent),
                 self.gpu_samples.entry(uuid.clone()).or_default(),
             );
             // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
@@ -1677,6 +1679,94 @@ mod tests {
         ));
     }
 
+    /// Replays a recorded run's GPU observations through `measure_compute` (FR-021, Q17): set
+    /// `CEDEGRID_GPU_REPLAY` to a JSON file of windows, each a `name` and its GPU `snapshots` in
+    /// order, as the test host's trace tool writes them. Each interval's previous samples come from
+    /// its record. Prints per window how many intervals read measured alone, over the last 4 or
+    /// unknown, and how many match the reading the agent recorded.
+    #[test]
+    #[ignore]
+    fn replay_gpu_trace() {
+        let path = std::env::var_os("CEDEGRID_GPU_REPLAY")
+            .expect("CEDEGRID_GPU_REPLAY names the trace to replay");
+        let windows: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for window in windows {
+            let snapshots: Vec<crate::model::GpuSnapshot> =
+                serde_json::from_value(window["snapshots"].clone()).unwrap();
+            let mut state = GpuSampleState::default();
+            let (mut alone, mut over_4, mut unknown, mut same, mut replayed) = (0, 0, 0, 0, 0);
+            for snapshot in &snapshots {
+                let Some(record) = &snapshot.compute_sampling else {
+                    continue;
+                };
+                let listed = snapshot.external_process_ids.clone().unwrap_or_default();
+                let background: BTreeSet<u32> =
+                    snapshot.background_process_ids.iter().copied().collect();
+                let own: BTreeSet<u32> = record
+                    .processes
+                    .iter()
+                    .map(|p| p.pid)
+                    .filter(|pid| !listed.contains(pid) && !background.contains(pid))
+                    .collect();
+                let samples: Vec<_> = record
+                    .processes
+                    .iter()
+                    .flat_map(|p| p.samples.iter().map(|(at, sm)| gpu_sample(p.pid, *at, *sm)))
+                    .collect();
+                let mut known: Vec<_> = record
+                    .processes
+                    .iter()
+                    .filter_map(|p| p.previous_us.map(|at| gpu_sample(p.pid, at, 0)))
+                    .collect();
+                known.sort_by_key(|s| s.timestamp);
+                state.remember(0, &known, None);
+                let device = record.device_percent.map(|percent| DeviceUtilization {
+                    percent,
+                    samples: Some(record.device_samples),
+                });
+                let external: Vec<u32> = listed
+                    .iter()
+                    .copied()
+                    .filter(|pid| !background.contains(pid))
+                    .collect();
+                let (amount, _) = measure_compute(
+                    Some(&external),
+                    &own,
+                    Some(record.window_start_us),
+                    &Ok(samples),
+                    device,
+                    false,
+                    15,
+                    &background,
+                    &mut state,
+                );
+                replayed += 1;
+                match &amount {
+                    ComputeAmount::Measured { external, own } => {
+                        if state.over_last_4 {
+                            over_4 += 1
+                        } else {
+                            alone += 1
+                        }
+                        same += usize::from(
+                            snapshot.external_compute_milli == Some(*external)
+                                && snapshot.own_compute_milli == Some(*own),
+                        );
+                    }
+                    ComputeAmount::Unknown(_) => {
+                        unknown += 1;
+                        same += usize::from(snapshot.compute_amount_unknown.is_some());
+                    }
+                }
+            }
+            println!(
+                "replay {}: {replayed} intervals, measured alone {alone}, over the last 4 {over_4}, unknown {unknown}; equal to the recorded reading {same}",
+                window["name"].as_str().unwrap_or("?")
+            );
+        }
+    }
+
     /// The 033 batch's shape (FR-021, R43, R46): the device is sampled about 3 times as often as
     /// each process, so dividing by the device's count read every share at a third. Each sample
     /// now counts its span since its process's previous one; with no previous sample the span
@@ -1806,13 +1896,20 @@ mod tests {
         ];
         let mut state = GpuSampleState::default();
         state.remember(0, &[gpu_sample(7, 90, 40)], None);
-        let record = compute_sampling(Some(100), &Ok(samples), &Ok(device.clone()), &state);
+        let record = compute_sampling(
+            Some(100),
+            &Ok(samples),
+            &Ok(device.clone()),
+            Some(60),
+            &state,
+        );
         assert_eq!(
             record,
             Some(ComputeSampling {
                 device_samples: 3,
                 device_first_us: Some(300),
                 device_last_us: Some(700),
+                device_percent: Some(60),
                 window_start_us: 100,
                 window_end_us: Some(700),
                 compared_over: ComparedOver::Interval,
@@ -1833,18 +1930,25 @@ mod tests {
             })
         );
         let many: Vec<_> = (1..=40).map(|i| gpu_sample(42, 100 + i * 10, 5)).collect();
-        let bounded = compute_sampling(Some(100), &Ok(many), &Ok(device.clone()), &state).unwrap();
+        let bounded =
+            compute_sampling(Some(100), &Ok(many), &Ok(device.clone()), Some(60), &state).unwrap();
         assert_eq!(bounded.processes[0].samples.len(), 32);
         assert_eq!(bounded.processes[0].counted_us, 400);
         state.over_last_4 = true;
         assert_eq!(
-            compute_sampling(Some(100), &Ok(vec![]), &Ok(device.clone()), &state)
-                .unwrap()
-                .compared_over,
+            compute_sampling(
+                Some(100),
+                &Ok(vec![]),
+                &Ok(device.clone()),
+                Some(60),
+                &state
+            )
+            .unwrap()
+            .compared_over,
             ComparedOver::Last4
         );
         assert_eq!(
-            compute_sampling(None, &Ok(vec![]), &Ok(device), &state),
+            compute_sampling(None, &Ok(vec![]), &Ok(device), Some(60), &state),
             None
         );
         let mut snap: crate::model::GpuSnapshot = serde_json::from_value(serde_json::json!({

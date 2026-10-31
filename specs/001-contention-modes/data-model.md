@@ -456,7 +456,8 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 ## Item 034 additions
 
 - `GpuSnapshot.compute_sampling` (optional; reshaped by item 036): `device_samples`,
-  `device_first_us`, `device_last_us`, `window_start_us`, `window_end_us`, `compared_over`
+  `device_first_us`, `device_last_us`, `device_percent` (the device's utilization over the
+  interval), `window_start_us`, `window_end_us`, `compared_over`
   (`interval` or `last_4`), and `processes`: per PID `pid`, `previous_us`, `samples` (each
   `[timestamp_us, sm_util]`, at most 32 per interval) and `counted_us`. Persisted with each
   observation; not on the wire.
