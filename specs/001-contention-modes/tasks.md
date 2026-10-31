@@ -1526,4 +1526,4 @@ The GPU sample span and Yield First's bound (spec Session 2026-10-31 Q17 and Q18
 - [X] T430 Update `docs/guarantees.md` on the return bound and record in `docs/validation.md` that T396 passes under it on the 035 rerun (`eef1b4d`: the quiet count at 32.7 s, own usage at 98% at 33.7 s), per FR-034 (partial)
 - [X] T431 Compare `decision_snapshot` with the code at `bff2d27` and record the held-back table, per plan "Item 036" 4 (missing)
 - [X] T432 Add item 036's T368 run to `specs/001-contention-modes/native-gates.md`, with a replay of the new trace's samples through the code, per plan "Item 036" 4 (missing)
-- [ ] T433 Run T432 on the test host. *Deferred: approved by the user for after 036.done.* (missing)
+- [X] T433 Run T432 on the test host. *Deferred: approved by the user for after 036.done.* (missing)

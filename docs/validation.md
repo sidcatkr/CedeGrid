@@ -328,6 +328,16 @@ before or after the run. Run 5 waits for item 035's GPU decision.
 |---|---|---|
 | T396, run 7's return in Yield First beside a 30 s one-core contender, 13 tasks admitted | own work at the contended target after 1 interval; after the contender's last usage the target is back in 2.5 s; at the quiet count, 2.5 s after it, every held cap rose in one move and own usage was at 97.96% of its level before 0.5 s later and at 98% in 3.5 s (9.0 s in the batch); 273 pause samples, no drain | pass under FR-034's Yield First bound since item 036: the quiet count at 32.7 s, own usage at 98% at 33.7 s, 2 intervals after it; the measured return from the contender's last usage is 3.5 s |
 
+### Rerun after item 036
+
+Run on 2026-10-31 on the same test host at `5f729bc`, with the commands under "Item 036: T368
+with the sample span (T433)" in `specs/001-contention-modes/native-gates.md`. No test process of
+either account was left before the first run or after any run.
+
+| Run | Values | Result |
+|---|---|---|
+| T368, run 5 beside the light (200 small multiplies a second) and saturating GPU users | GPU compute reads measured in every interval of every managed window (74–80 of 80 alone, 0–6 over the last 4), where the earlier runs read unknown whenever the probe was on the device. Performance: light 0.834 (the two managed windows 0.77 and 0.90), saturating 0.628. Neutral: light 0.642, saturating not measured: its first managed probe launched 9.8 s into its window, held by Neutral's CPU admission cooldown after the unmanaged probe stopped, and the harness read its result before it ended. Beside the light user, own work is duty-capped in 72–75 intervals per managed window. That user reads 13–16% alone and mostly 26–33% beside own work, 61–77% in some intervals, and the target follows it. Its latency: p50 0.77 ms with and without CedeGrid; p99 1.21–1.23 ms alone, 0.88–0.89 ms beside the probe without CedeGrid, 1.15–1.16 ms with it. The saturating user ran 750 requests a second beside the probe without CedeGrid and 1023–1189 with it. Replaying each run's records through the code gives the recorded reading in 1609 of 1610 intervals. The other one is a window's third interval, where the agent compared over intervals before the window that the replay does not carry. The agent 18–20 m (0.6–0.7%) | measured; light fail in both modes; saturating as specified in Performance, Neutral not measured |
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
