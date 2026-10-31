@@ -257,7 +257,9 @@ unattributed remainder included and background left out, has stayed below
 move, and in that interval, while own work holds no excess, every binding cap, hint or pause
 held for external growth rises in one move without the step dwell, the lowest first and none
 lowered, so that together they hold the target; later rises, and steps held for other causes,
-wait for the step dwell alone. While contention only falls, the scale-up interval applies. A Guaranteed allocation's
+wait for the step dwell alone. Own usage is back within 3 s of the contender stopping in Neutral
+and Performance, and in Yield First, whose quiet count is that mode's hysteresis, within 2
+intervals of the quiet count. While contention only falls, the scale-up interval applies. A Guaranteed allocation's
 CPU is never capped below its request, by the policy or by its supervisor.
 
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:

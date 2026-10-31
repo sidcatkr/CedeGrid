@@ -4715,18 +4715,34 @@ mod contention_ended {
         }
     }
 
+    /// The return bound after the contender stops, in ms from its stop (FR-034, Q18): Yield First
+    /// within 2 intervals of its quiet count, reached `principal_window_intervals` intervals into
+    /// the quiet, since that count is the mode's hysteresis; Neutral and Performance within 3 s.
+    fn return_bound(mode: ContentionMode) -> u64 {
+        match mode {
+            ContentionMode::YieldFirst => {
+                (u64::from(config().contention.principal_window_intervals) - 1 + 2) * INTERVAL
+            }
+            _ => 3000,
+        }
+    }
+
     /// The 033 batch's run 7 shape (FR-034, Q15, R44): at the contender's end the held caps ran
     /// from the minimum duty up (1 m to 253 m), each binding. At the quiet count the held caps
     /// together reach the mode's target in one move, so in Yield First own usage is back within
-    /// 3 s of the contender stopping, not in rises one dwell apart (6.5 s before item 034).
-    /// Neutral's (3.5 s) and Performance's (1.0 s) returns on the same shape get no slower.
+    /// 2 intervals of its quiet count, not in rises one dwell apart (6.5 s before item 034).
+    /// Neutral's (3.5 s before item 034) and Performance's (1.0 s) returns on the same shape
+    /// stay within their 3 s and get no slower.
     #[test]
     fn uneven_held_caps_return_to_the_target_in_one_move() {
         const SEEDED: [u64; 13] = [1, 5, 24, 135, 184, 205, 220, 230, 240, 245, 250, 253, 253];
         let level = 13 * TASK;
         for (mode, bound) in [
-            (ContentionMode::YieldFirst, 3000),
-            (ContentionMode::Neutral, 3500),
+            (
+                ContentionMode::YieldFirst,
+                return_bound(ContentionMode::YieldFirst),
+            ),
+            (ContentionMode::Neutral, 3000),
             (ContentionMode::Performance, 1000),
         ] {
             let run = run_seeded(
@@ -4763,7 +4779,8 @@ mod contention_ended {
     /// Report 029 run 7's return (FR-034, Decision 2): 13 steady 250 m tasks in Yield First
     /// and 15 in Performance beside a one-core contender for 30 s, each capped task running at
     /// 85% of a binding cap. Once the quiet count says contention has ended, own usage comes
-    /// back to its level before in one move, within 3 s of the contender stopping.
+    /// back to its level before in one move: in Yield First within 2 intervals of the quiet
+    /// count, in Performance within 3 s of the contender stopping (FR-034, Q18).
     #[test]
     fn run_7s_return_brings_own_usage_back_in_one_move_within_three_seconds() {
         for (mode, tasks) in [
@@ -4789,7 +4806,7 @@ mod contention_ended {
                 .collect();
             let back = after.iter().position(|own| own * 100 >= before * 98);
             assert!(
-                back.is_some_and(|i| i as u64 * INTERVAL <= 3000),
+                back.is_some_and(|i| i as u64 * INTERVAL <= return_bound(mode)),
                 "{mode:?}: {before}m before, {:?}",
                 &after[..12]
             );

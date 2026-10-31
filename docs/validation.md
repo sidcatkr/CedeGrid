@@ -326,7 +326,7 @@ before or after the run. Run 5 waits for item 035's GPU decision.
 
 | Run | Values | Result |
 |---|---|---|
-| T396, run 7's return in Yield First beside a 30 s one-core contender, 13 tasks admitted | own work at the contended target after 1 interval; after the contender's last usage the target is back in 2.5 s; at the quiet count, 2.5 s after it, every held cap rose in one move and own usage was at 97.96% of its level before 0.5 s later and at 98% in 3.5 s (9.0 s in the batch); 273 pause samples, no drain | one move pass; 3.5 s, one interval over the 3 s bound, of which the quiet count is 2.5 s |
+| T396, run 7's return in Yield First beside a 30 s one-core contender, 13 tasks admitted | own work at the contended target after 1 interval; after the contender's last usage the target is back in 2.5 s; at the quiet count, 2.5 s after it, every held cap rose in one move and own usage was at 97.96% of its level before 0.5 s later and at 98% in 3.5 s (9.0 s in the batch); 273 pause samples, no drain | pass under FR-034's Yield First bound since item 036: the quiet count at 32.7 s, own usage at 98% at 33.7 s, 2 intervals after it; the measured return from the contender's last usage is 3.5 s |
 
 ### Own-work ratios in the protection runs
 
