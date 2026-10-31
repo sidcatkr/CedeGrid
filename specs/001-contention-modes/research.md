@@ -912,3 +912,24 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   Performance's 2% margin can still leave own work's target a little below its usage, and a GPU
   cap is a duty of target ÷ 1000. The replays and T368 measure what that costs.
 
+## R49. The GPU duty from own share (item 040)
+
+- **Decision**: in Performance, Aggressive and Neutral a GPU compute cap's duty is its target ÷
+  own work's uncapped share, clamped to the minimum duty and 1; the share is own work's amount
+  averaged over the uncapped intervals in which it ran on the device, restarted with the estimate.
+  With no share yet, and in Yield First, the duty stays target ÷ 1000.
+- **Rationale**: target ÷ 1000 assumes own work at full duty holds the whole device. Beside another
+  busy context on a time-sliced device it holds only its slices:
+  - Performance beside the saturating user (036): the other user ran about 1555 requests a second
+    alone, 750 beside own work without CedeGrid and 1023–1084 with it, about 68/32 where the
+    time-slicer gives 50/50: own work 0.628 of without, for a user that already had its fair share.
+  - Neutral beside the saturating user (038): own work 386 and 366 units a second against 736
+    without CedeGrid and 1573 alone; the other user 1132–1146, about 75/25.
+  - Beside the light user (039): a 10–30 m excess cut own work's running time by 17–19%.
+  - A CPU cap already divides by the measured rate (R20). Dividing by own work's uncapped share
+    turns an excess of e into a duty cut of about e ÷ S.
+- **The allocation split**: with n own allocations on the device each is taken to hold S ÷ n, as
+  the ladder's frame already splits own work's usage.
+- **Alternatives**: a 15-point dead band (own work with several contexts could overshoot its target
+  by up to 15 points); a duty from the device's busy share (it counts the other user's slices).
+

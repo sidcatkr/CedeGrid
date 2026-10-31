@@ -477,3 +477,12 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   intervals' amounts (the external total and each principal UID's amount), whether the last two
   decisions sent a cap or pause to own work there, the external PID list, the time of the last
   uncapped interval, and an open window's progress.
+
+## Item 040 additions
+
+- `GpuDemandRecord.own_uncapped` (optional): own work's amount averaged over the uncapped
+  intervals in which it ran on the device, at most 60, restarted with the estimate and when the own
+  allocations there change. `GpuDemandRecord.duty` (optional): the smallest duty, in thousandths,
+  sent with the device's GPU compute caps this decision.
+- `YieldAction.target` on a GPU compute Cap is the duty in thousandths that the supervisor applies;
+  the ladder's `StepState.target` stays the share target.

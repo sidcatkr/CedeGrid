@@ -1505,6 +1505,54 @@ the change is in the pure policy.
 - VI: tests first. FR-065: Yield First takes the larger of the interval's amount and the estimate,
   so its target stays at or below Neutral's. Pass.
 
+## Item 040: the GPU duty from own share (2026-11-01)
+
+Spec Session 2026-11-01 Q20 and Q21 (FR-021's duty-cycle sentence, SC-017), answering report 039's
+Decisions 1 and 2. A GPU compute cap was a duty of target ÷ 1000, which assumes own work at full
+duty holds the whole device; on a time-sliced device beside another busy context it holds only its
+slices, so the cap cut own work's running time by far more than its excess.
+
+**Technical Context**: Rust 1.88, no new dependency. No wire, SDK or supervisor change: the policy
+sends a GPU compute cap's target to the supervisor as the duty in thousandths, which the supervisor
+already applies as target ÷ 1000; the ladder keeps its targets in device shares.
+
+1. **Own work's uncapped share** (`src/policy.rs`, `src/policy/measure.rs`): each uncapped interval
+   in which own work ran on the device also keeps own work's measured amount; the share is their
+   average (at most 60), restarted with the external estimate (a changed external PID list, a
+   window's restart) and when the set of own allocations running on the device changes.
+2. **The duty** (`src/policy/ladder.rs`): in `collect_actions`, a GPU compute Cap for an allocation
+   that does not run in Yield First, on a device measured this interval and not for unknown
+   activity, with an uncapped share S known, goes out with target min(1000, target × 1000 × n ÷ S),
+   n the own allocations running on the device, each holding S ÷ n; otherwise as before. The
+   supervisor's minimum duty still applies. A Cap sent at 1000 holds nothing back, so it does not
+   count as capped for 039's two-decision rule.
+3. **The record** (`src/model.rs`): `GpuDemandRecord.own_uncapped` (S) and `duty` (the duty sent,
+   in thousandths, the smallest over the device's caps).
+4. **Tests first** (`tests/contention.rs`), on a time-sliced device model in which each busy
+   context gets an equal slice of the time the device is busy: one own context beside a saturating
+   user in Performance and Neutral (duty at least 0.95, own work within 3 points of unmanaged);
+   039's light shapes (the duty against capacity less the estimate and the margin); two own contexts
+   beside one saturating context in Neutral (duty near 0.75, own work within 3 points of 500);
+   convergence across the two-decision rule and the windows; the edges (no share yet, a share
+   below the target, a new engine, Yield First pinned to its duties and targets). Replays of 036's
+   Performance saturating and light and Neutral light runs and 038's Neutral saturating run report
+   the duty each would set. The decision snapshots are compared with the code at `f6ebac7`.
+5. **Records**: `docs/validation.md` notes that 036's Performance saturating 0.628 and 038's Neutral
+   saturating 0.513 are over-yields under SC-017; `native-gates.md`'s T445 adds the probe-alone and
+   saturating-alone windows and reports both forms of each ratio.
+6. **Afterwards**: the full suites, the macOS serial suite and the Docker Linux check; T445 waits for
+   the user's typed approval.
+
+**Constitution Check (7.0.0)**:
+- II: Performance and Aggressive no longer cut own work's running time by more than its excess when
+  own work holds only its slices; the other user keeps min(demand, fair share), which the target
+  sets. Pass.
+- III: with no uncapped share, on a device of unknown amount, or for a cap set for unknown activity,
+  the duty stays target ÷ 1000, which yields more. Pass.
+- IV: the policy stays pure; the supervisor is unchanged. Pass.
+- VI, VII: tests first; a GPU compute Cap action's target is now a duty in thousandths, and the
+  decision record carries both the share target (the ladder's step) and the duty. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
