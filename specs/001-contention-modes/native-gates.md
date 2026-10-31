@@ -544,23 +544,27 @@ pattern own work had under T368's caps; it is 3 of the device's samples. If the 
 reading rises with own duty while its request rate stays flat, the extra reading is time-slice
 inflation, not demand.
 
-## Item 039: T368 with GPU demand from uncapped intervals (T445)
+## Item 039 and 040: T368 with GPU demand from uncapped intervals and the duty from own share (T445)
 
-Runs once on the authorized test host after `039.done`, with the user's typed approval in the
-session, under the same host rules. The harness is `batch-037`'s with the fixed probe; run 5
-waits for each probe's result and moves later windows by any delay.
+Runs once on the authorized test host after `040.done`, with the user's typed approval in the
+session, under the same host rules. The harness is `batch-037`'s with the fixed probe: run 5 now
+starts with the probe alone, before the second account's load starts, then that user alone beside
+no process of own work's, then the unmanaged and managed windows in turn; it waits for each
+probe's result and moves later windows by any delay.
 
 ```sh
 bash runs-037.sh <commit> <second account uid> t368   # Performance and Neutral, light and saturating
-# Read only, after each run: the GPU trace, now with each decision's gpu_demand record.
+# Read only, after each run: the GPU trace, with each decision's gpu_demand record and duty.
 $py $H/gpu_trace_035.py <each e037-r5 output>
 ```
 
-Record per run each managed window's ratio against own work unmanaged beside the same user in
-the same run, and the light user's request rate, p50 and p99 in each window. Gates: at least 0.9
-beside the light user in Performance, and about 0.5 beside the saturating one; in each managed
-window, how many decisions fed the estimate, how many were in a re-measure window (at most 10% of
-the capped ones), the estimate against the light user's alone reading, and own work's cap.
+Gates, per run, in SC-017's form ("alone" the same probe or user with nothing else on the device,
+in the same run): own work with CedeGrid ÷ the probe alone is at least min(the mode's target ÷
+1000, own work without CedeGrid ÷ alone) − 0.03; the other user's rate with CedeGrid is at least
+min(its rate without CedeGrid, its fair share × its rate alone) − 3%. Report beside them the old
+ratio, own work with CedeGrid ÷ without beside the same user, and per managed window the other
+user's rate, p50 and p99, the duty CedeGrid set, how many decisions fed the estimate, how many
+were in a re-measure window, and the estimate and own work's uncapped share.
 
 ## C. Deferred gates that need later work
 
