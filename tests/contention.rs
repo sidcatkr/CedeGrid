@@ -5224,6 +5224,24 @@ mod gpu_demand {
     /// decisions without a cap, else its amounts under caps; own work takes the rest of a busy
     /// device within its cap. Returns each own interval's target and cap.
     pub(super) fn light_loop(mode: ContentionMode, intervals: u64) -> Vec<(u64, u64)> {
+        closed_loop(mode, None, intervals, &|i, capped| {
+            if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            }
+        })
+    }
+
+    /// The light user alone for 60 intervals, then own work beside the other user, whose reading
+    /// in own interval `i` is `reading(i, capped)`, capped when either decision that set the
+    /// interval sent own work a cap. Returns each own interval's target and cap.
+    pub(super) fn closed_loop(
+        mode: ContentionMode,
+        job_mode: Option<ContentionMode>,
+        intervals: u64,
+        reading: &dyn Fn(u64, bool) -> u64,
+    ) -> Vec<(u64, u64)> {
         let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
         let mut now = 0;
@@ -5239,17 +5257,13 @@ mod gpu_demand {
             now += INTERVAL;
         }
         let input = PolicyInput {
-            allocations: vec![job(None)],
+            allocations: vec![job(job_mode)],
             ..PolicyInput::default()
         };
         let (mut caps, mut out) = ([1000u64, 1000u64], vec![]);
         for i in 0..intervals {
             let capped = caps.iter().any(|cap| *cap < 1000);
-            let external = if capped {
-                BESIDE_CAPS[(i % 60) as usize]
-            } else {
-                BESIDE_FULL_DUTY[(i % 60) as usize]
-            };
+            let external = reading(i, capped);
             let own = caps[0].min(990 - external);
             let decision = engine
                 .evaluate(&config, &interval(Some(own), external, 61 + i), &input, now)
@@ -5295,6 +5309,117 @@ mod gpu_demand {
             median(neutral.clone()) >= 770,
             "Neutral's target fell to {}",
             median(neutral)
+        );
+    }
+
+    /// A light user that turns saturating while own work is capped (FR-021, Q19): the next
+    /// window, 30 s after the last uncapped interval, lifts the GPU compute cap for 6 decisions,
+    /// its intervals read the new demand 200 or more above the estimate, and the target falls to
+    /// the fair share. Beside full duty a saturating user reads half the device, beside caps more.
+    #[test]
+    fn a_light_user_turning_saturating_is_seen_at_the_next_window() {
+        const RISE: u64 = 100;
+        let run = closed_loop(ContentionMode::Performance, None, 260, &|i, capped| match (
+            i >= RISE,
+            capped,
+        ) {
+            (false, true) => BESIDE_CAPS[(i % 60) as usize],
+            (false, false) => BESIDE_FULL_DUTY[(i % 60) as usize],
+            (true, true) => 600,
+            (true, false) => 500,
+        });
+        let caps: Vec<u64> = run.iter().map(|(_, cap)| *cap).collect();
+        // A window: 6 decisions in a row that send no GPU compute cap, after own work was capped.
+        let window = (RISE as usize..caps.len() - 6)
+            .find(|&i| caps[i - 1] < 1000 && caps[i..i + 6].iter().all(|c| *c == 1000));
+        let window = window.expect("no window lifted the cap after the rise");
+        assert!(
+            window as u64 - RISE <= 61 + 6,
+            "the first window after the rise came {} intervals later",
+            window as u64 - RISE
+        );
+        let fallen = (window..run.len())
+            .find(|&i| run[i].0 <= 520)
+            .expect("the target never fell to the fair share");
+        assert!(
+            fallen <= window + 8,
+            "the target fell {} intervals after the window opened",
+            fallen - window
+        );
+        assert!(
+            run[fallen..].iter().all(|(target, _)| *target <= 520),
+            "the target rose again beside the saturating user"
+        );
+        // Uncapped at most 10% of the capped time.
+        let lifted = caps[20..].iter().filter(|c| **c == 1000).count();
+        assert!(
+            lifted * 10 <= caps.len() - 20,
+            "{lifted} of {} decisions lifted the cap",
+            caps.len() - 20
+        );
+    }
+
+    /// A window opens only while own work on the device is held back by GPU compute caps alone,
+    /// and never with a Yield First allocation there (FR-021, Q19).
+    #[test]
+    fn a_window_needs_gpu_compute_caps_only() {
+        use cedegrid::contention::{RemeasureFacts, remeasure_window_allowed};
+        let facts = |yield_first, gpu_step, cpu_step| RemeasureFacts {
+            yield_first,
+            gpu_step,
+            cpu_step,
+        };
+        assert!(remeasure_window_allowed(&[facts(
+            false,
+            YieldStep::Cap,
+            YieldStep::None
+        )]));
+        assert!(remeasure_window_allowed(&[
+            facts(false, YieldStep::Cap, YieldStep::None),
+            facts(false, YieldStep::None, YieldStep::LowerShare),
+        ]));
+        for blocked in [
+            vec![],
+            vec![facts(false, YieldStep::None, YieldStep::None)],
+            vec![facts(false, YieldStep::Cap, YieldStep::Cap)],
+            vec![facts(false, YieldStep::Pause, YieldStep::None)],
+            vec![
+                facts(false, YieldStep::Cap, YieldStep::None),
+                facts(false, YieldStep::None, YieldStep::Pause),
+            ],
+            vec![facts(true, YieldStep::Cap, YieldStep::None)],
+            vec![
+                facts(false, YieldStep::Cap, YieldStep::None),
+                facts(true, YieldStep::None, YieldStep::None),
+            ],
+        ] {
+            assert!(!remeasure_window_allowed(&blocked), "{blocked:?}");
+        }
+    }
+
+    /// Yield First takes no window: its allocation's cap never lifts while the light user stays.
+    #[test]
+    fn yield_first_takes_no_window() {
+        let run = closed_loop(
+            ContentionMode::Performance,
+            Some(ContentionMode::YieldFirst),
+            200,
+            &|i, capped| {
+                if capped {
+                    BESIDE_CAPS[(i % 60) as usize]
+                } else {
+                    BESIDE_FULL_DUTY[(i % 60) as usize]
+                }
+            },
+        );
+        let caps: Vec<u64> = run.iter().map(|(_, cap)| *cap).collect();
+        let first = caps
+            .iter()
+            .position(|c| *c < 1000)
+            .expect("Yield First never capped");
+        assert!(
+            !(first..caps.len() - 6).any(|i| caps[i..i + 6].iter().all(|c| *c == 1000)),
+            "a window lifted Yield First's cap"
         );
     }
 }

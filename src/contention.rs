@@ -1271,6 +1271,38 @@ pub fn plan_step(
     }
 }
 
+/// A re-measure window lifts own work's GPU compute caps on a device for this many decisions
+/// (FR-021, R48): 3 s at the default interval, its first interval still capped by the duty period.
+pub const GPU_DEMAND_WINDOW_DECISIONS: u32 = 6;
+/// A window opens when the device's last uncapped interval is this old (FR-021, R48).
+pub const GPU_DEMAND_WINDOW_EVERY_MS: u64 = 30_000;
+/// A window whose mean differs from the estimate before it by this much restarts the estimate
+/// from the window, in thousandths of device time (FR-021, R48).
+pub const GPU_DEMAND_RESTART_MILLI: u64 = 200;
+
+/// One running allocation on a device, as a re-measure window sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemeasureFacts {
+    /// The allocation runs GPU compute in Yield First.
+    pub yield_first: bool,
+    /// Its step on the device's GPU compute.
+    pub gpu_step: YieldStep,
+    /// Its step on CPU.
+    pub cpu_step: YieldStep,
+}
+
+/// Whether a re-measure window may lift own work's GPU compute caps on a device: own work there
+/// is held back by GPU compute caps alone, with no CPU step of cap or more and no GPU pause, and
+/// no allocation there runs in Yield First, which puts the other user first (FR-021, Q19).
+pub fn remeasure_window_allowed(running: &[RemeasureFacts]) -> bool {
+    running.iter().any(|facts| facts.gpu_step == YieldStep::Cap)
+        && running.iter().all(|facts| {
+            !facts.yield_first
+                && facts.gpu_step <= YieldStep::Cap
+                && facts.cpu_step < YieldStep::Cap
+        })
+}
+
 /// Facts about one candidate for victim selection (FR-016).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VictimFacts {

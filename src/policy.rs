@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    Admission, ComputeFloor, ContentionMode, LadderInput, LadderTiming, Measurement, ModeInput,
-    Principal, ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts, YieldCause,
-    YieldStep, guaranteed_may_drain, own_allowance, plan_step, victim_order,
+    Admission, ComputeFloor, ContentionMode, GPU_DEMAND_WINDOW_DECISIONS,
+    GPU_DEMAND_WINDOW_EVERY_MS, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
+    RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts,
+    YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
+    remeasure_window_allowed, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -175,6 +177,17 @@ struct GpuDemand {
     pids: Option<Vec<u32>>,
     /// When the last uncapped interval was observed.
     last_uncapped_ms: Option<u64>,
+    /// An open re-measure window (FR-021, Q19).
+    window: Option<RemeasureWindow>,
+}
+
+/// A re-measure window: the decisions still to send own work no GPU compute cap on the device,
+/// the estimate before it, and the external totals its uncapped intervals fed.
+#[derive(Debug, Clone, Default)]
+struct RemeasureWindow {
+    decisions_left: u32,
+    before: Option<u64>,
+    fed: Vec<u64>,
 }
 
 impl GpuDemand {
@@ -477,6 +490,9 @@ struct Interval<'a> {
     gpu_memory_unknown: BTreeSet<String>,
     /// Why GPU admission is blocked on a device, for its admission state.
     gpu_block_reasons: BTreeMap<String, String>,
+    /// Devices in a re-measure window this decision: their GPU compute steps hold and none is
+    /// sent (FR-021, Q19).
+    remeasured: BTreeSet<String>,
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
@@ -572,6 +588,7 @@ impl<'a> Interval<'a> {
             gpu_activity_unknown: BTreeSet::new(),
             gpu_memory_unknown: BTreeSet::new(),
             gpu_block_reasons: BTreeMap::new(),
+            remeasured: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
             over_target: BTreeMap::new(),

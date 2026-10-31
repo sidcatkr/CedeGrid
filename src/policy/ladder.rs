@@ -81,13 +81,93 @@ impl<'a> Interval<'a> {
         }
         let budgets = std::mem::take(&mut self.gpu_compute_budget);
         for (uuid, budget) in &budgets {
-            self.plan_gpu_compute(uuid, budget);
+            if self.remeasuring(uuid, budget.own.is_some()) {
+                self.hold_remeasured(uuid);
+            } else {
+                self.plan_gpu_compute(uuid, budget);
+            }
         }
         self.hold_unbudgeted_gpu_compute(&budgets);
         self.gpu_compute_budget = budgets;
         self.note_reversals();
         self.collect_actions();
         self.record_sent_caps();
+    }
+
+    /// Whether this decision is part of a re-measure window on the device, opening one when the
+    /// last uncapped interval is `GPU_DEMAND_WINDOW_EVERY_MS` old and own work there is held back
+    /// by GPU compute caps alone, in a mode other than Yield First, beside a measured amount
+    /// (FR-021, Q19). An amount of unknown activity ends a window: only a measured interval
+    /// re-measures, and a cap for unknown activity is not the estimate's to lift.
+    fn remeasuring(&mut self, uuid: &str, measured: bool) -> bool {
+        let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
+        let compute = ResourceKey::GpuCompute(uuid.to_string());
+        let unknown_cause = prev.ladder.iter().any(|((_, key), state)| {
+            key == &compute && state.cause == YieldCause::UnknownMeasurement
+        });
+        let facts: Vec<RemeasureFacts> = input
+            .allocations
+            .iter()
+            .filter(|a| {
+                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
+            })
+            .map(|a| RemeasureFacts {
+                yield_first: self
+                    .allocation_modes
+                    .get(&a.id)
+                    .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
+                    .is_some_and(|mode| *mode == ContentionMode::YieldFirst),
+                gpu_step: prev
+                    .ladder
+                    .get(&(a.id.clone(), compute.clone()))
+                    .map_or(YieldStep::None, |s| s.step),
+                cpu_step: prev
+                    .ladder
+                    .get(&(a.id.clone(), ResourceKey::Cpu))
+                    .map_or(YieldStep::None, |s| s.step),
+            })
+            .collect();
+        let Some(demand) = self.next.gpu_demand.get_mut(uuid) else {
+            return false;
+        };
+        if !measured || unknown_cause {
+            demand.window = None;
+            return false;
+        }
+        if let Some(window) = demand.window.as_mut() {
+            window.decisions_left = window.decisions_left.saturating_sub(1);
+            self.remeasured.insert(uuid.to_string());
+            return true;
+        }
+        let due = demand
+            .last_uncapped_ms
+            .is_none_or(|last| now.saturating_sub(last) >= GPU_DEMAND_WINDOW_EVERY_MS);
+        if !due
+            || governing(config, ResourceKind::GpuCompute) == ContentionMode::YieldFirst
+            || !remeasure_window_allowed(&facts)
+        {
+            return false;
+        }
+        demand.window = Some(RemeasureWindow {
+            decisions_left: GPU_DEMAND_WINDOW_DECISIONS - 1,
+            before: demand.estimate().map(|(total, _)| total),
+            fed: Vec::new(),
+        });
+        self.remeasured.insert(uuid.to_string());
+        true
+    }
+
+    /// In a re-measure window each GPU compute step on the device holds as it was, so the cap
+    /// returns unchanged after the window, and none is sent meanwhile.
+    fn hold_remeasured(&mut self, uuid: &str) {
+        let compute = ResourceKey::GpuCompute(uuid.to_string());
+        for ((id, key), state) in &self.prev.ladder {
+            if key == &compute && self.input.allocations.iter().any(|a| &a.id == id) {
+                self.next
+                    .ladder
+                    .insert((id.clone(), key.clone()), state.clone());
+            }
+        }
     }
 
     /// Whether this decision sends own work on each device a cap or pause, on CPU or that
@@ -1286,10 +1366,16 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// Every step above none becomes an action, a hint with its deadline.
+    /// Every step above none becomes an action, a hint with its deadline; a device's GPU compute
+    /// steps in a re-measure window are held but not sent.
     fn collect_actions(&mut self) {
         for ((id, key), state) in &self.next.ladder {
             if state.step == YieldStep::None {
+                continue;
+            }
+            if let ResourceKey::GpuCompute(uuid) = key
+                && self.remeasured.contains(uuid)
+            {
                 continue;
             }
             self.actions.push(YieldAction {
