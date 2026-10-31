@@ -629,6 +629,11 @@ match the run's. It is acted on only through that pidfd, or for `oom_score_adj` 
 verified family is measured as own work: CPU summed over its members (a member that exits
 counts up to its last sample), memory by the members' summed proportional set size, and GPU
 memory and compute per process, so none of it is the owner's unmanaged use (FR-085). In
+Tracked a family of more than its leader has its proportional set size read every K intervals,
+K chosen from the timed read so it averages at most 0.5% of the scope's CPU, from 1 to 10;
+between reads its memory is the last reading plus the members' resident growth since it, and a
+memory step, preferred-victim mark or save-progress signal on that estimate is taken only after
+a fresh read confirms it. In
 Tracked a stop reaches every member and repeats discovery until a pass finds no new member,
 at most three passes; a member that joins while the family is stopped is stopped at once,
 and continue reaches every member past one that fails. Each member's `oom_score_adj`

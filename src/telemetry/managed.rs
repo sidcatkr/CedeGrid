@@ -239,6 +239,13 @@ pub struct ManagedCollector {
     delegated_root: Option<std::path::PathBuf>,
     /// Pidfds of own processes verified once, for each interval's re-verification.
     pub(super) handles: HeldHandles,
+    /// The monitor interval, for the PSS period's budget.
+    interval: Duration,
+    /// Each Tracked family's PSS schedule and its members this interval, by run (FR-085).
+    family_pss: BTreeMap<String, FamilyPss>,
+    family_members: BTreeMap<String, BTreeSet<Member>>,
+    /// The runs whose RAM this interval is an estimate between passes.
+    ram_estimated: BTreeSet<String>,
 }
 
 /// A CPU reading taken as the start of an allocation's next delta.
@@ -283,6 +290,10 @@ impl ManagedCollector {
             previous: BTreeMap::new(),
             window_baselines: BTreeMap::new(),
             handles: HeldHandles::default(),
+            interval: Duration::from_millis(config.monitor.interval_ms),
+            family_pss: BTreeMap::new(),
+            family_members: BTreeMap::new(),
+            ram_estimated: BTreeSet::new(),
             delegated_root: config
                 .cgroup
                 .enabled
@@ -406,6 +417,121 @@ impl ManagedCollector {
                 self.previous.insert(record.assignment_id.clone(), baseline);
             }
         }
+    }
+    /// Each member's RAM this interval for Tracked families of more than their leader: a timed
+    /// PSS pass every K intervals, else each member's last PSS with the family's RSS growth on
+    /// the leader (FR-085, R45). A member missing from the result is read as before.
+    fn family_ram(
+        &mut self,
+        active: &[&crate::execution_model::ExecutionRecord],
+        parents: &BTreeMap<String, String>,
+        verified: &BTreeSet<u32>,
+    ) -> BTreeMap<u32, u64> {
+        let mut families: BTreeMap<String, BTreeSet<Member>> = BTreeMap::new();
+        let mut leaders: BTreeMap<String, u32> = BTreeMap::new();
+        for record in active {
+            let Some(id) = record
+                .identity
+                .as_ref()
+                .filter(|id| verified.contains(&id.pid))
+            else {
+                continue;
+            };
+            let run = parents
+                .get(&record.assignment_id)
+                .unwrap_or(&record.assignment_id)
+                .clone();
+            if !parents.contains_key(&record.assignment_id) {
+                if leaf_path(record).is_some() {
+                    continue;
+                }
+                leaders.insert(run.clone(), id.pid);
+            }
+            families
+                .entry(run)
+                .or_default()
+                .insert((id.pid, id.start_time));
+        }
+        families.retain(|run, members| {
+            leaders.contains_key(run) && family_pss_applies(members.len(), false)
+        });
+        self.family_pss.retain(|run, _| families.contains_key(run));
+        self.ram_estimated.clear();
+        let scope_cpu = self
+            .interval
+            .saturating_mul(u32::try_from(scope_cpus()).unwrap_or(1));
+        let mut ram = BTreeMap::new();
+        for (run, members) in &families {
+            let rss: Option<BTreeMap<Member, u64>> = members
+                .iter()
+                .map(|member| Some((*member, self.resident_bytes(member.0)?)))
+                .collect();
+            let Some(rss) = rss else {
+                continue;
+            };
+            if self.family_pss.entry(run.clone()).or_default().due(members) {
+                let started = Instant::now();
+                let read: Option<BTreeMap<Member, (u64, u64)>> = members
+                    .iter()
+                    .map(|member| Some((*member, (own_memory_mib(member.0)?, rss[member]))))
+                    .collect();
+                let Some(read) = read else {
+                    continue;
+                };
+                let schedule = self.family_pss.get_mut(run).expect("entry above");
+                schedule.passed(read.clone(), started.elapsed(), scope_cpu);
+                ram.extend(read.into_iter().map(|((pid, _), (pss, _))| (pid, pss)));
+            } else {
+                let schedule = self.family_pss.get_mut(run).expect("entry above");
+                let (held, growth) = schedule.estimate(&rss);
+                ram.extend(held.into_iter().map(|((pid, _), pss)| (pid, pss)));
+                if let Some(leader) = ram.get_mut(&leaders[run]) {
+                    *leader = leader.saturating_add(growth);
+                }
+                self.ram_estimated.insert(run.clone());
+            }
+        }
+        self.family_members = families;
+        ram
+    }
+    /// The runs whose RAM this interval is an estimate between PSS passes (FR-085).
+    pub fn ram_estimated(&self) -> &BTreeSet<String> {
+        &self.ram_estimated
+    }
+    /// Reads these runs' family PSS now, as a pass, and returns each one's RAM in MiB; none for
+    /// a run whose members could not all be read, which is then unknown.
+    pub fn fresh_family_ram(&mut self, runs: &BTreeSet<String>) -> BTreeMap<String, Option<u64>> {
+        let scope_cpu = self
+            .interval
+            .saturating_mul(u32::try_from(scope_cpus()).unwrap_or(1));
+        let mut out = BTreeMap::new();
+        for run in runs {
+            let Some(members) = self.family_members.get(run).cloned() else {
+                continue;
+            };
+            let started = Instant::now();
+            let read: Option<BTreeMap<Member, (u64, u64)>> = members
+                .iter()
+                .map(|member| {
+                    Some((
+                        *member,
+                        (own_memory_mib(member.0)?, self.resident_bytes(member.0)?),
+                    ))
+                })
+                .collect();
+            let total = read
+                .as_ref()
+                .map(|read| read.values().map(|(pss, _)| pss).sum());
+            if let Some(read) = read {
+                self.family_pss.entry(run.clone()).or_default().passed(
+                    read,
+                    started.elapsed(),
+                    scope_cpu,
+                );
+            }
+            out.insert(run.clone(), total);
+        }
+        out
     }
     /// Records for a run's verified descendants, each keyed apart and mapped to its run, so
     /// they are measured as the run's own work (FR-085).
@@ -615,6 +741,7 @@ impl ManagedCollector {
                     .insert(id.pid);
             }
         }
+        let family_ram = self.family_ram(&active, parents, &verified);
         let pids: Vec<_> = verified
             .iter()
             .map(|p| sysinfo::Pid::from_u32(*p))
@@ -750,7 +877,10 @@ impl ManagedCollector {
                 } else {
                     match leaf_path(record).filter(|_| leaf_read) {
                         Some(leaf) => leaf_memory_mib(leaf)?,
-                        None => own_memory_mib(id.pid)?,
+                        None => match family_ram.get(&id.pid) {
+                            Some(ram) => *ram,
+                            None => own_memory_mib(id.pid)?,
+                        },
                     }
                 };
                 let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources);
@@ -1482,6 +1612,75 @@ pub(super) fn leaf_memory_mib(leaf: &std::path::Path) -> Option<u64> {
 #[cfg(target_os = "linux")]
 fn own_memory_mib(pid: u32) -> Option<u64> {
     own_memory_from_rollup(&std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?)
+}
+
+/// A family member, by PID and start time.
+pub(super) type Member = (u32, u64);
+
+/// The longest period between a Tracked family's PSS passes, in intervals.
+const PSS_PERIOD_MAX: u32 = 10;
+
+/// The intervals between PSS passes so that a pass costing `cost` averages at most 0.5% of the
+/// scope's CPU, `scope_cpu` per interval: from 1 to 10 (FR-085, R45).
+pub(super) fn pss_period(cost: Duration, scope_cpu: Duration) -> u32 {
+    let budget = scope_cpu.as_nanos() / 200;
+    if budget == 0 {
+        return PSS_PERIOD_MAX;
+    }
+    u32::try_from(cost.as_nanos().div_ceil(budget))
+        .unwrap_or(PSS_PERIOD_MAX)
+        .clamp(1, PSS_PERIOD_MAX)
+}
+
+/// A family's memory takes the PSS period only in Tracked with more than its leader; a family
+/// of one and a Full leaf keep their readings.
+pub(super) fn family_pss_applies(members: usize, full: bool) -> bool {
+    members > 1 && !full
+}
+
+/// When a Tracked family's PSS is read, and what was read at the last pass.
+#[derive(Debug, Clone, Default)]
+pub(super) struct FamilyPss {
+    /// Each member's PSS in MiB and RSS in bytes at the last pass.
+    members: BTreeMap<Member, (u64, u64)>,
+    /// Intervals since the last pass, and the period after it; 0 before the first.
+    since: u32,
+    period: u32,
+}
+
+impl FamilyPss {
+    #[cfg(test)]
+    pub(super) fn period(&self) -> u32 {
+        self.period
+    }
+    /// Whether this interval reads PSS: the first, the period's last, or any change in members.
+    pub(super) fn due(&self, members: &BTreeSet<Member>) -> bool {
+        self.period == 0 || self.since + 1 >= self.period || !members.iter().eq(self.members.keys())
+    }
+    /// A pass read `readings` (PSS in MiB, RSS in bytes) at `cost`.
+    pub(super) fn passed(
+        &mut self,
+        readings: BTreeMap<Member, (u64, u64)>,
+        cost: Duration,
+        scope_cpu: Duration,
+    ) {
+        self.members = readings;
+        self.since = 0;
+        self.period = pss_period(cost, scope_cpu);
+    }
+    /// Between passes: each member's last PSS, and the family's RSS growth since that pass in
+    /// MiB, rounded up, never a fall, since new private pages raise RSS and PSS alike.
+    pub(super) fn estimate(&mut self, rss: &BTreeMap<Member, u64>) -> (BTreeMap<Member, u64>, u64) {
+        self.since = self.since.saturating_add(1);
+        let then: u64 = self.members.values().map(|(_, rss)| rss).sum();
+        let now: u64 = rss.values().sum();
+        let held = self
+            .members
+            .iter()
+            .map(|(member, (pss, _))| (*member, *pss))
+            .collect();
+        (held, now.saturating_sub(then).div_ceil(MIB))
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

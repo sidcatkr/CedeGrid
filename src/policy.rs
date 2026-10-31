@@ -160,7 +160,7 @@ struct PreviousGpu {
     measured_streak: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PolicyEngine {
     previous_gpus: BTreeMap<String, PreviousGpu>,
     stable_since: Option<u64>,
@@ -254,6 +254,18 @@ struct PrincipalCount {
 impl PolicyEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The step held on an allocation's resource, with its target.
+    pub fn step(&self, allocation_id: &str, key: &ResourceKey) -> Option<(YieldStep, Option<u64>)> {
+        self.ladder
+            .get(&(allocation_id.to_owned(), key.clone()))
+            .map(|state| (state.step, state.target))
+    }
+
+    /// The allocations marked as preferred OOM victims at the last evaluation.
+    pub fn oom_preferred(&self) -> &BTreeSet<String> {
+        &self.oom_preferred
     }
 
     /// Re-establish a step a supervisor already applied, after an agent restart

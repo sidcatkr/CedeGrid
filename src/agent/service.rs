@@ -1166,19 +1166,27 @@ impl AgentLoop<'_> {
                     .seed(id, key, step, self.start.elapsed().as_millis() as u64);
             }
         }
-        let mut decision = self.policy.evaluate(
+        let mut input = PolicyInput {
+            allocations,
+            // A signal stop leaves running work to the next agent (FR-080).
+            explicit_drain: self.stopping.is_some() && !self.leave_supervisors,
+            facts: BTreeMap::new(),
+            envelope: Some(agent.capacity.clone()),
+            spool_full: self.spool_full,
+        };
+        input.facts = self.allocation_facts(records, &input.allocations);
+        let estimated = self.collector.ram_estimated().clone();
+        let collector = &mut self.collector;
+        let mut decision = crate::agent::confirm_memory_steps(
+            &mut self.policy,
             config,
             &snapshot,
-            &PolicyInput {
-                allocations: allocations.clone(),
-                // A signal stop leaves running work to the next agent (FR-080).
-                explicit_drain: self.stopping.is_some() && !self.leave_supervisors,
-                facts: self.allocation_facts(records, &allocations),
-                envelope: Some(agent.capacity.clone()),
-                spool_full: self.spool_full,
-            },
+            &mut input,
             self.start.elapsed().as_millis() as u64,
+            &estimated,
+            |runs| collector.fresh_family_ram(runs),
         )?;
+        let allocations = input.allocations;
         let mark = self.cost.charge("policy", mark);
         decision.managed_budget = minimum(&decision.managed_budget, &agent.capacity);
         decision.observe_only = false;

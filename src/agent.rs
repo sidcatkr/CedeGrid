@@ -227,6 +227,77 @@ enum Control {
         snapshot: Box<crate::model::Snapshot>,
     },
 }
+/// Evaluates the policy. When the decision takes a new memory step on an allocation whose RAM
+/// is an estimate between PSS passes (a new or changed RAM step, a new OOM preferred mark or a
+/// save-progress signal), `fresh` reads those allocations now and the policy evaluates again
+/// from its state before the interval, so only a step a fresh reading confirms is applied
+/// (FR-085, R45). `input` keeps the fresh readings; a run `fresh` could not read is unknown.
+pub fn confirm_memory_steps(
+    policy: &mut PolicyEngine,
+    config: &Config,
+    snapshot: &crate::model::Snapshot,
+    input: &mut PolicyInput,
+    now_ms: u64,
+    estimated: &BTreeSet<String>,
+    fresh: impl FnOnce(&BTreeSet<String>) -> BTreeMap<String, Option<u64>>,
+) -> Result<crate::model::Decision> {
+    use crate::contention::ResourceKey;
+    let before = (!estimated.is_empty()).then(|| policy.clone());
+    let decision = policy.evaluate(config, snapshot, input, now_ms)?;
+    let Some(before) = before else {
+        return Ok(decision);
+    };
+    let mut runs: BTreeSet<String> = decision
+        .actions
+        .iter()
+        .filter(|action| {
+            action.resource == ResourceKey::Ram
+                && estimated.contains(&action.allocation_id)
+                && before.step(&action.allocation_id, &ResourceKey::Ram)
+                    != Some((action.step, action.target))
+        })
+        .map(|action| action.allocation_id.clone())
+        .collect();
+    runs.extend(
+        decision
+            .oom_preferred
+            .iter()
+            .filter(|id| estimated.contains(*id) && !before.oom_preferred().contains(*id))
+            .cloned(),
+    );
+    runs.extend(
+        decision
+            .save_progress
+            .iter()
+            .filter(|id| estimated.contains(*id))
+            .cloned(),
+    );
+    if runs.is_empty() {
+        return Ok(decision);
+    }
+    for (id, ram) in fresh(&runs) {
+        let Some(allocation) = input.allocations.iter_mut().find(|a| a.id == id) else {
+            continue;
+        };
+        match ram {
+            Some(ram) => {
+                if let Some(observed) = allocation.observed.as_mut() {
+                    observed.ram_mib = ram;
+                }
+                if let Some(upper) = allocation.observed_upper.as_mut() {
+                    upper.ram_mib = upper.ram_mib.max(ram);
+                }
+            }
+            None => {
+                allocation.observed = None;
+                allocation.observed_upper = None;
+            }
+        }
+    }
+    *policy = before;
+    policy.evaluate(config, snapshot, input, now_ms)
+}
+
 fn emit(value: &impl Serialize) -> Result<()> {
     let mut line = serde_json::to_vec(value)?;
     line.push(b'\n');

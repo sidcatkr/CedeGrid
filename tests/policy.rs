@@ -7051,6 +7051,93 @@ mod oom_order {
         assert!(back.oom_preferred.is_empty(), "{:?}", back.oom_preferred);
     }
 
+    /// An estimate between PSS passes never marks or steps own work by itself (FR-085, Q16): a
+    /// new mark on an estimated allocation makes the agent read it fresh and evaluate again
+    /// from the policy state before the interval. A fresh reading back within the share marks
+    /// nothing, one that confirms it marks, and a mark held unchanged reads nothing new.
+    #[test]
+    fn a_new_memory_mark_on_an_estimate_is_read_fresh_first() {
+        use std::cell::Cell;
+        // In Performance own memory within its share is not given up for others' growth.
+        let mut cfg = config();
+        cfg.contention.default_mode = cedegrid::contention::ContentionMode::Performance;
+        let estimated = std::collections::BTreeSet::from(["b".to_string()]);
+        let reads = Cell::new(0);
+        let interval = |engine: &mut PolicyEngine, available, now, fresh: Option<u64>| {
+            let mut snap = snapshot();
+            snap.available_ram_mib = Some(available);
+            let mut input = PolicyInput {
+                allocations: vec![
+                    allocation(
+                        "a",
+                        AllocationPhase::Running,
+                        resources(100, 10_000, 0),
+                        Some(resources(100, 10_000, 0)),
+                    ),
+                    // Requested 4 000 MiB, so its judged memory follows the reading.
+                    allocation(
+                        "b",
+                        AllocationPhase::Running,
+                        resources(100, 4_000, 0),
+                        Some(resources(100, 6_000, 0)),
+                    ),
+                ],
+                facts: rootless(&["a", "b"]),
+                ..PolicyInput::default()
+            };
+            let decision = cedegrid::agent::confirm_memory_steps(
+                engine,
+                &cfg,
+                &snap,
+                &mut input,
+                now,
+                &estimated,
+                |runs| {
+                    reads.set(reads.get() + 1);
+                    runs.iter().map(|run| (run.clone(), fresh)).collect()
+                },
+            )
+            .unwrap();
+            (decision, input.allocations[1].observed.clone())
+        };
+        // The estimate says 6 000 MiB, over the share once external use grows; fresh says
+        // 4 000 MiB, within it.
+        let mut engine = PolicyEngine::new();
+        let (calm, _) = interval(&mut engine, 10_000, 0, Some(4_000));
+        assert!(calm.oom_preferred.is_empty());
+        assert_eq!(reads.get(), 0, "nothing new to confirm");
+        let (refuted, observed) = interval(&mut engine, 0, 500, Some(4_000));
+        assert_eq!(reads.get(), 1);
+        assert!(
+            refuted.oom_preferred.is_empty(),
+            "{:?}",
+            refuted.oom_preferred
+        );
+        let ram_steps = |decision: &Decision| -> Vec<String> {
+            decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == cedegrid::contention::ResourceKey::Ram)
+                .map(|a| a.allocation_id.clone())
+                .collect()
+        };
+        assert!(ram_steps(&refuted).is_empty(), "{:?}", refuted.actions);
+        assert_eq!(observed.map(|o| o.ram_mib), Some(4_000));
+        // Fresh confirms the estimate: the mark stands, and held unchanged it reads nothing.
+        let mut engine = PolicyEngine::new();
+        interval(&mut engine, 10_000, 0, Some(6_000));
+        let (confirmed, _) = interval(&mut engine, 0, 500, Some(6_000));
+        assert_eq!(reads.get(), 2);
+        assert_eq!(
+            confirmed.oom_preferred,
+            std::collections::BTreeSet::from(["b".to_string()])
+        );
+        assert_eq!(ram_steps(&confirmed), vec!["b".to_string()]);
+        let (held, _) = interval(&mut engine, 0, 1_000, Some(6_000));
+        assert_eq!(held.oom_preferred, confirmed.oom_preferred);
+        assert_eq!(reads.get(), 2, "a held mark needs no new read");
+    }
+
     /// `ram.prefer_own_oom_victim` marks every own task, within its share too (FR-023).
     #[test]
     fn the_opt_in_marks_every_own_task() {
@@ -7133,7 +7220,7 @@ mod floors_by_mode {
                 decision
                     .actions
                     .into_iter()
-                    .filter(|a| a.resource == ResourceKey::Ram)
+                    .filter(|a| a.resource == cedegrid::contention::ResourceKey::Ram)
                     .map(|a| (now, a)),
             );
         }
@@ -7212,7 +7299,7 @@ mod floors_by_mode {
                     decision
                         .actions
                         .into_iter()
-                        .filter(|a| a.resource == ResourceKey::Ram)
+                        .filter(|a| a.resource == cedegrid::contention::ResourceKey::Ram)
                         .map(|a| (now, a)),
                 );
                 if !decision.save_progress.is_empty() {

@@ -1068,6 +1068,74 @@ mod tests {
     use super::managed::*;
     use super::*;
 
+    /// The Tracked PSS period (FR-085, Q16, R45): K keeps PSS reading at most 0.5% of the
+    /// scope's CPU on average, from 1 to 10, from the cost of the last timed pass.
+    #[test]
+    fn the_pss_period_follows_the_measured_cost() {
+        let ms = Duration::from_millis;
+        // 4 CPUs at 500 ms intervals: 10 ms of PSS reading per interval on average.
+        let scope = ms(2000);
+        assert_eq!(pss_period(ms(43), scope), 5);
+        assert_eq!(pss_period(ms(10), scope), 1);
+        assert_eq!(pss_period(ms(3), scope), 1);
+        assert_eq!(pss_period(Duration::ZERO, scope), 1);
+        assert_eq!(pss_period(ms(1000), scope), 10);
+        assert_eq!(pss_period(ms(1), Duration::ZERO), 10);
+    }
+
+    /// Between passes each member keeps its last PSS and the family adds its RSS growth since
+    /// that pass, never a fall; the period's last interval reads again, and so does any change
+    /// in the members.
+    #[test]
+    fn family_pss_is_read_every_k_intervals_and_estimated_between() {
+        const MIB: u64 = 1 << 20;
+        let members = |list: &[(u32, u64)]| list.iter().copied().collect::<BTreeSet<_>>();
+        let family = members(&[(10, 1), (11, 2)]);
+        let mut pss = FamilyPss::default();
+        assert!(pss.due(&family), "the first interval reads");
+        pss.passed(
+            BTreeMap::from([((10, 1), (900, 1000 * MIB)), ((11, 2), (130, 1000 * MIB))]),
+            Duration::from_millis(25),
+            Duration::from_millis(2000),
+        );
+        assert_eq!(pss.period(), 3);
+        assert!(!pss.due(&family));
+        // RSS grew by 64 MiB in one member and fell by 16 MiB in the other.
+        let (held, growth) = pss.estimate(&BTreeMap::from([
+            ((10, 1), 1064 * MIB),
+            ((11, 2), 984 * MIB),
+        ]));
+        assert_eq!(held, BTreeMap::from([((10, 1), 900), ((11, 2), 130)]));
+        assert_eq!(growth, 48);
+        assert!(!pss.due(&family));
+        let (_, fell) = pss.estimate(&BTreeMap::from([
+            ((10, 1), 900 * MIB),
+            ((11, 2), 900 * MIB),
+        ]));
+        assert_eq!(fell, 0);
+        assert!(pss.due(&family), "the period's third interval reads again");
+        let mut joined = family.clone();
+        joined.insert((12, 3));
+        let mut fresh = FamilyPss::default();
+        fresh.passed(
+            BTreeMap::from([((10, 1), (900, MIB)), ((11, 2), (130, MIB))]),
+            Duration::from_millis(25),
+            Duration::from_millis(2000),
+        );
+        assert!(!fresh.due(&family));
+        assert!(fresh.due(&joined), "a new member forces a pass");
+        assert!(fresh.due(&members(&[(10, 1)])), "so does one that left");
+    }
+
+    /// Only a Tracked family of more than its leader is read on a period; a family of one and
+    /// a Full leaf keep their readings.
+    #[test]
+    fn only_tracked_families_take_the_pss_period() {
+        assert!(family_pss_applies(2, false));
+        assert!(!family_pss_applies(1, false));
+        assert!(!family_pss_applies(5, true));
+    }
+
     fn process(pid: u32, uid: Option<u32>, cpu_millicores: u64, ram_mib: u64) -> ProcessSample {
         ProcessSample {
             pid,
