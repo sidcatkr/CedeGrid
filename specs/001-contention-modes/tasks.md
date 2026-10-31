@@ -1419,7 +1419,7 @@ The cross-checked list of item 030 Part B (spec Session 2026-10-30; plan "Item 0
 - [X] T365 Record report 029 Decision 3 in `docs/validation.md` as a known limit, with run 4's numbers (the other user's p99 beside Tracked duty cycles), per report 029 Decision 3 B (missing)
 - [X] T366 Add the new reason codes to the catalog in `src/contention.rs` and `docs/guarantees.md` (`single_process_violated`, `config_reloaded`, `config_reload_refused`, `report_stale`, `cap_at_minimum_duty`, `cpu_unknown_fair_share_hold`) (missing)
 - [X] T367 Compare the decision snapshots before and after Phase 24 and record each class of change (missing)
-- [ ] T368 Run 5 again on the test host beside the light and saturating GPU users, in Performance and Neutral, after the GPU fixes, with the commands in `native-gates.md`. *Deferred: needs the user's typed approval in this session.* Per FR-021 and SC-005 (missing)
+- [X] T368 Run 5 again on the test host beside the light and saturating GPU users, in Performance and Neutral, after the GPU fixes, with the commands in `native-gates.md`. *Deferred: needs the user's typed approval in this session.* Per FR-021 and SC-005 (missing)
 
 ## Phase 25: Convergence (item 031)
 
@@ -1460,7 +1460,7 @@ Multi-process families (spec Session 2026-10-31; plan "Item 031"), in item 031's
 - [X] T384 Record the held-back table with a 4-worker family against a single process of the same total demand in Performance; own throughput should match, per plan "Item 031" 6 (missing)
 - [X] T385 Rerun the own-efficiency gate (029) locally with a family of 16 members of about 50 threads each, and report the cost of discovery and of PSS reads per interval; apply R35's fallback order if over budget, per plan "Item 031" 7 (missing)
 - [X] T386 Add exact commands to `specs/001-contention-modes/native-gates.md` for the test host, in Tracked and Full: a `multiprocessing` stand-in with a shared buffer, and a `DataLoader(num_workers=4)` loop where PyTorch is present, per plan "Item 031" 7 (missing)
-- [ ] T387 Run T386's native gate on the test host. *Deferred: needs the user's typed approval in this session, asked together with T368.* (missing)
+- [X] T387 Run T386's native gate on the test host. *Deferred: needs the user's typed approval in this session, asked together with T368.* (missing)
 
 ## Phase 26: Convergence (item 032)
 
@@ -1474,7 +1474,7 @@ The derived GPU sample age (spec Session 2026-10-31 Q10; plan "Item 032") and re
 - [X] T393 Show derived settings in `src/config.rs`, `src/explain.rs` and `src/main.rs`, until T392 passes, per FR-070 (missing)
 - [X] T394 Document the derived default beside the bounds in `docs/guarantees.md`, per FR-070 and R40 (partial)
 - [X] T395 Add run 7's return to the test-host batch of T368 and T387 in `specs/001-contention-modes/native-gates.md`, keeping the agent's decision records for that run in the evidence copy, redacted, per plan "Item 032" 3 (missing)
-- [ ] T396 Run T395's addition with that batch on the test host and report where the return's lag comes from, or record in `docs/validation.md` that it does not reproduce and close T339. *Deferred: needs the user's typed approval of the batch in this session.* (missing)
+- [X] T396 Run T395's addition with that batch on the test host and report where the return's lag comes from, or record in `docs/validation.md` that it does not reproduce and close T339. *Deferred: needs the user's typed approval of the batch in this session.* (missing)
 
 ## Phase 27: Convergence (item 033)
 
@@ -1489,4 +1489,4 @@ Supervisor loss in Tracked (spec Session 2026-10-31 Q11 to Q13; plan "Item 033")
 - [X] T403 Build `agent::recovery` in `src/agent/recovery.rs` and call it from the slot pass when a supervisor exits without releasing its run and from `reconcile_guarded` for a run with no live supervisor, which also releases a dead rootless run only once its recorded descendants are absent, with the counts in `family-recovery.json`, the record's detail and a `family_recovered` event, until T402 and T397 pass, per FR-088 and R42 (missing)
 - [X] T404 Replace the Tracked limit in `docs/guarantees.md` and the README with recovery and what remains: a member found and stopped in the instant its supervisor dies stays stopped until an agent runs; say that the workload runs in a session of its own, per FR-078 and FR-088 (partial)
 - [X] T405 Add a Tracked supervisor-loss check to the test-host batch in `specs/001-contention-modes/native-gates.md`: a leader and 2 workers in an off phase beside a test-owned light load, the run's own supervisor killed, once per class, recording signals and outcomes as T397 does, per plan "Item 033" 5 (missing)
-- [ ] T406 Run T405's check with the T368, T387 and T396 batch on the test host. *Deferred: needs the user's typed approval of the batch in this session.* (missing)
+- [X] T406 Run T405's check with the T368, T387 and T396 batch on the test host. *Deferred: needs the user's typed approval of the batch in this session.* (missing)

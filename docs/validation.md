@@ -272,7 +272,36 @@ cycle) and the step churn are left to a later item.
 
 Item 030 changed what rows 5 and 7 measured: GPU compute now counts each process over the
 whole interval with rounding not a principal, and a draining stop spreads its drains over
-intervals (a signal stop no longer drains). Those rows stand as recorded until they run again.
+intervals (a signal stop no longer drains). Those rows stand as recorded; the batch after item
+033 below runs row 5's GPU users and row 7's return again.
+
+### Batch after item 033
+
+Run on 2026-10-31 on the same test host at `cd077e9`, a release build, with the commands under
+"Item 029 native gates" (row 5), "Item 031 native gates", "Item 032" and "Item 033" in
+`specs/001-contention-modes/native-gates.md`. Loads of the other user ran as the second
+unprivileged account, which started and stopped them; the supervisor-loss runs used a light
+load of the test's own account. The agent's cost is its own CPU, against 1% of its scope, the
+029 own-efficiency budget.
+
+| Run | Values | Result |
+|---|---|---|
+| T368, run 5 again, the GPU probe on 3 CPUs beside a light (200 small multiplies a second) or saturating other GPU user | Performance: light 0.497, saturating 0.501. Neutral: light 0.498, saturating 0.500. Own work is capped at its fair share (500) in every managed window: GPU compute reads unknown (`gpu_compute_amount_unknown`) whenever the probe or the saturating user is on the device, because the summed per-process utilization is about a third of the device's (33% against 99% beside the unmanaged probe, 19% against 55% beside the capped one, 11% against 33% with the saturating user alone). With the light user alone it is 5% against 15%, within the 15-point tolerance, and reads measured. The other user's p99: light 1.21–1.22 ms alone, 0.88 ms beside the probe without CedeGrid, 1.15–1.16 ms with it; saturating 0.68 ms alone, 1.37–1.38 ms beside the probe with or without CedeGrid. The agent 18–21 m (0.6–0.7%) | saturating as specified; light fail in both modes |
+| T387 1, a multiprocessing stand-in: a leader filling 1 GiB, then 4 forked workers reading it and spinning for 120 s, 4 CPUs, Performance | Tracked and Full: a family of 5 in every decision (`family_members`), nothing outside it, no `cap_at_minimum_duty`, every member at the launch baseline `oom_score_adj` 0. Own memory 1035 MiB against the buffer plus the workers' private pages, 1029 MiB. Beside the other user saturating the 4 CPUs: own CPU 1877 m against a target of 1804 m (Tracked) and 1685 m against 1671 m (Full); the leader idle in its join. The agent 83–86 m in Tracked (2.1–2.2% of the scope, 0.43% of the host), 12 m in Full | pass, but Tracked's agent cost is over budget |
+| T387 2, a PyTorch `DataLoader(num_workers=4)` (fork) over a synthetic dataset, the same way | a family of 5, nothing outside it; own CPU beside the load 1954 m against 1917 m (Tracked) and 1901 m against 1887 m (Full); own memory 303 MiB (anonymous and shared PSS) against 606 MiB of total PSS with the library pages. In Tracked, 8 of the 10 samples that caught a stop had all 5 members stopped at once, and every stop was followed by all 5 running. The agent 35 m in Tracked (0.9%), 11–12 m in Full | pass |
+| T387 3, leftovers: the leader exits after 5 s while its 4 workers run on | Tracked and Full, Guaranteed and Opportunistic: `members_ended` 4, the release confirmed 7–8 ms after the leader's exit, no member, zombie or leaf left | pass |
+| T396, run 7's return after a 30 s one-core contender, 4 CPUs, with the agent's decision records | Yield First: the target back 2.5 s after the contender's last usage, own usage at 98% of its level before in 9.0 s; the held caps stay at the minimum duty for 3 intervals, the quiet count then reverses them to 107–131 m against a 250 m task target, and they rise in four more steps 2 s apart; at the start own work is within 80 m of the contended target after 4 intervals (120 m above it after 1). Performance: the target and own usage back in 1.0 s, no pause | Yield First's return fails (T339 open); Performance pass |
+| T406, supervisor loss in Tracked: a leader and 2 CPU workers held in an off phase by a Yield First cap beside a light load of the test's own account, the run's supervisor killed while all 3 were stopped | Guaranteed: no SIGHUP; the leader running at once (its parent-death signal is SIGCONT), every member running 0.45 s after the kill, the output complete; `family_recovered` continued 3. Opportunistic: every member gone 0.45 s after the kill, none left stopped; `family_recovered` ended 2, already gone 1 (the leader, by its parent-death signal) | pass |
+
+The per-process GPU reading in T368 is a steady third of the device's in every window, which
+fits each process's summed samples being divided by the device's sample count while the driver
+returns fewer per-process samples per interval; the records do not hold the device's sample
+count, so this is the likely cause, not a proven one. Tracked's agent cost in T387 1 is the
+per-interval `smaps_rollup` read of each member, which walks its mapping: five processes
+sharing 1 GiB cost about 43 ms per interval, where T385's 64 MiB family cost 3 ms. Full reads
+the leaf instead. In T387 1's Tracked runs the harness read each member's `smaps_rollup`
+between the state reads, so its samples rarely show all members stopped at once; T387 2's
+read every state first.
 
 ### Own-work ratios in the protection runs
 
