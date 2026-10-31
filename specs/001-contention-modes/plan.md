@@ -1363,17 +1363,18 @@ PSS path; the GPU path is unit-tested with fixtures.
    mode's target: L fills from the lowest current targets upwards (water-filling) and no step is
    lowered. That one move skips the dwell; later rises keep today's path (usage plus an equal part
    of the spare, after the dwell). The frame in `src/policy/ladder.rs` computes L, and
-   `src/contention.rs` `plan_step` applies it through the calm raise. The quiet count and
-   Performance's and Neutral's paths are unchanged, and a test pins that their return times do not
-   get worse.
+   `src/contention.rs` `plan_step` applies it through the calm raise. The one move applies in
+   every mode, as FR-034 says; the quiet count and every mode's other steps are unchanged, and a
+   test pins that Performance's and Neutral's return times do not get worse.
 3. **The PSS period (Q16)**: in `src/telemetry/managed.rs`, for a Tracked run with more than its
    leader, each PSS pass over its members is timed and K = ceil(pass cost ÷ 0.5% of the scope's CPU
    time per interval), clamped to 1..10. Between passes each member keeps its PSS from the last
    pass and the run adds max(0, its members' RSS sum now minus their RSS sum at that pass). A
    change in the member set forces a pass. A family of one and Full's leaf reading are unchanged.
    The collector reports which allocations' RAM is an estimate this interval. In the agent
-   (`src/agent/service.rs`), when a decision adds or changes a RAM step, or marks a new OOM
-   preferred victim, for an allocation whose RAM was estimated, the agent reads those families'
+   (`src/agent/service.rs`), when a decision adds or changes a RAM step, marks a new OOM
+   preferred victim, or sends a new save-progress signal (FR-075), for an allocation whose RAM was
+   estimated, the agent reads those families'
    PSS fresh, puts the fresh readings into the allocations and evaluates again on the policy state
    from before the interval (`PolicyEngine` becomes `Clone`), so only a step the fresh reading
    confirms is applied.

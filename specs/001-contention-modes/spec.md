@@ -438,8 +438,8 @@ back more.
   of the per-process sampling period, not the device's sample count. The period comes from the
   per-process timestamps in the window, the time since the cursor; the expected slots are the
   window divided by the period, and a process with fewer samples than its slots was idle or
-  stopped for the rest, so time without a sample counts as idle. The most-sampled process's count
-  is never the slots. When no process has 2 samples in the window, so the timestamps give no
+  stopped for the rest, so time without a sample counts as idle. While a period is readable, the
+  most-sampled process's count is never the slots. When no process has 2 samples in the window, so the timestamps give no
   period, today's path and its unknown reasons apply; a driver that samples processes at the
   device's rate reads as today. Each interval's measurement keeps the device's sample count and
   window and each process's sample count with its first and last timestamps, in the persisted
@@ -1082,7 +1082,8 @@ node reports with the expected per-resource values at each step.
   100%: each process's summed samples count against the slots of the per-process sampling
   period, the window since the cursor divided by the period read from the per-process timestamps
   in it, never against the device's sample count or the most-sampled process's count; when no
-  process has 2 samples in the window, the device's sample count stands for the slots as before.
+  process has 2 samples in the window, today's slots stand: the device's sample count, else the
+  most-sampled process's count.
   Each interval's persisted observation keeps the device's sample count and window and each
   process's sample count with its first and last timestamps. The amount is measured when the
   summed per-process utilization of all processes is within
@@ -1284,8 +1285,9 @@ node reports with the expected per-resource values at each step.
   has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
   one move to the uncontended target, without waiting for the mode's interval, for the allowance
   and for held caps alike, so own usage, not only the target, returns within 3 s of the
-  contender stopping: every held CPU cap goes to the mode's target in that interval, never in
-  steps from the minimum duty. The quiet count is each mode's hysteresis and does not change with
+  contender stopping: in that interval every held CPU cap, hint or pause rises so that together
+  they hold the mode's target, the lowest first and none lowered, never in steps from the minimum
+  duty. The quiet count is each mode's hysteresis and does not change with
   it, and Performance's and Neutral's return times do not get worse.
   Quiet intervals count each principal's usage and this interval's unattributed external
   estimate, not the window's, against the larger of `principal_min_percent` of capacity and the
@@ -1380,7 +1382,8 @@ node reports with the expected per-resource values at each step.
     memory is the last PSS plus max(0, the members' RSS sum now minus their RSS sum at that read),
     so growth is never missed and a copy-on-write break is counted at most K intervals late.
     Before a floor-breach Hint or Drain, or any other step on own work because of own memory, PSS
-    MUST be read fresh, and the step is taken only if that reading confirms it.
+    MUST be read fresh, and the step is taken only if that reading confirms it; a step taken that
+    way and held unchanged needs no new read.
   - GPU: verified descendants' per-process GPU memory and compute count as own, including in
     FR-021's interval shares.
   - Verified descendants are in the managed set, so they are not the owner's unmanaged use and the
