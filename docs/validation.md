@@ -303,6 +303,21 @@ the leaf instead. In T387 1's Tracked runs the harness read each member's `smaps
 between the state reads, so its samples rarely show all members stopped at once; T387 2's
 read every state first.
 
+### Rerun after item 034
+
+Run on 2026-10-31 on the same test host at `5c49ee2`, with the commands under "Item 034: the
+rerun after the batch's fixes" in `specs/001-contention-modes/native-gates.md` and the same
+host rules.
+
+| Run | Values | Result |
+|---|---|---|
+| T368, run 5 beside the light and saturating GPU users | Performance: light 0.497, saturating 0.501. Neutral: light 0.497, saturating 0.500 over the windows that finished; its last managed probe launched late and the run failed. `compute_sampling` shows each process with exactly 1 sample in every interval against the device's 3, so no process period was readable and every interval kept the device's count | unchanged; the fix's fallback applies on this host |
+| T396, run 7's return in Yield First | only 3 of 16 tasks were admitted: the previous run's late probe, left running after its agent's signal stop (FR-080), was still on a scope CPU when admission began; own usage back in 0.51 s and the target in 1.0 s, with no held cap | not the batch's shape; no result |
+| T387, the Tracked multiprocessing run with the 1 GiB family | a family of 5, nothing outside it; own memory 1035 MiB against 1029 MiB; beside the saturating user own CPU 1914 m against a target of 1849 m, and 17 of 18 stopped samples with all 5 members stopped; the agent 22 m idle and 21 m beside the load (0.56% and 0.53% of the scope, 86 m and 83 m in the batch) | pass |
+
+On this driver the per-process samples come once per process per query, at the device's sample
+times, so each process's period can only be read across intervals.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
