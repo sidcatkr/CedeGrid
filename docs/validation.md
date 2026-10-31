@@ -338,6 +338,19 @@ either account was left before the first run or after any run.
 |---|---|---|
 | T368, run 5 beside the light (200 small multiplies a second) and saturating GPU users | GPU compute reads measured in every interval of every managed window (74–80 of 80 alone, 0–6 over the last 4), where the earlier runs read unknown whenever the probe was on the device. Performance: light 0.834 (the two managed windows 0.77 and 0.90), saturating 0.628. Neutral: light 0.642, saturating not measured: its first managed probe launched 9.8 s into its window, held by Neutral's CPU admission cooldown after the unmanaged probe stopped, and the harness read its result before it ended. Beside the light user, own work is duty-capped in 72–75 intervals per managed window. That user reads 13–16% alone and mostly 26–33% beside own work, 61–77% in some intervals, and the target follows it. Its latency: p50 0.77 ms with and without CedeGrid; p99 1.21–1.23 ms alone, 0.88–0.89 ms beside the probe without CedeGrid, 1.15–1.16 ms with it. The saturating user ran 750 requests a second beside the probe without CedeGrid and 1023–1189 with it. Replaying each run's records through the code gives the recorded reading in 1609 of 1610 intervals. The other one is a window's third interval, where the agent compared over intervals before the window that the replay does not carry. The agent 18–20 m (0.6–0.7%) | measured; light fail in both modes; saturating as specified in Performance, Neutral not measured |
 
+### Item 037 and 038 runs
+
+Run on 2026-10-31 on the same test host at `8e16cc1`, with the commands under "Item 037: the
+light-user diagnostic and T368's Neutral saturating case" in
+`specs/001-contention-modes/native-gates.md`, the probe-alone level and the device's clocks
+sampled every 100 ms. No test process of either account was left before the first run or after
+either run.
+
+| Run | Values | Result |
+|---|---|---|
+| The light-user diagnostic: the GPU probe unmanaged at fixed duty levels (500 ms period) beside the light user (200 small multiplies a second), 120 intervals per level, no managed run | The probe alone 1572 units/s; beside the light user at 100% 1312 and, at the end, 1302 (0.835 and 0.828 of alone). The 70% and 40% levels ran at 89.8% busy each, 1172 and 1168 units/s: the probe idled only 50 ms of each period, a fault fixed in `c52ba5c`. The light user's request rate stayed at 200 a second at every level. Its mean per-interval reading: 158 m alone, sampled in every interval at 15–16%; 120 m and 78 m beside the probe at 100%, sampled in 47 and 34 of 120 intervals at 33% or 66%; 170 m and 160 m beside the probe at about 90%, sampled in 63 and 57 intervals. Its p50: 1.11 ms alone, 0.77–0.78 ms beside the probe; p99: 1.22 ms alone, 0.88 ms beside the probe at 100%, 1.01–1.03 ms beside it at about 90%. The device stayed in P2 with its memory clock at 3802 MHz. The SM clock read 1506 MHz with the light user alone (30 W) and 1873–1911 MHz with the probe (80 W) | the light user costs own work 16.5% at full duty; its reading beside own work comes in 33% steps; 70% and 40% not measured |
+| T368, Neutral beside the saturating GPU user, with run 5 waiting for each probe's result | 0.513: managed 386 and 366 units/s against unmanaged 736 and 729; the managed probes launched 1.7 and 1.8 s into their windows; GPU compute measured in every interval; the saturating user 1132–1146 requests a second beside the managed probe, 747–754 beside the unmanaged one | as specified |
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
