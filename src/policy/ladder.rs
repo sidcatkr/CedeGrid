@@ -199,6 +199,19 @@ impl<'a> Interval<'a> {
                     })
             });
             demand.sent_capped = [capped, demand.sent_capped[0]];
+            let duty = self
+                .actions
+                .iter()
+                .filter(|action| action.resource == compute)
+                .filter_map(|action| action.duty)
+                .min();
+            if let Some(record) = self
+                .statuses
+                .get_mut(&compute)
+                .and_then(|status| status.gpu_demand.as_mut())
+            {
+                record.duty = duty;
+            }
         }
     }
 

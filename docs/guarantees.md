@@ -92,7 +92,11 @@ measured natural rate, so it holds from its first period. On a delegated cgroup 
 `cgroup.events` within the off phase, and never thaws a freeze a pause holds; otherwise, or
 after a refused freeze, it stops the verified processes, as without a delegated cgroup. Where
 the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
-through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. External compute is
+through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. Own work at full duty beside another busy
+context holds only its slices, so in Neutral, Performance and Aggressive a GPU compute cap's duty
+is its target over own work's uncapped share, its amount averaged over the uncapped intervals in
+which it ran on the device; with no share yet, while the amount is unknown, and in Yield First the
+duty is the target over the whole device. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
 utilization. A sample counts its whole span since its process's previous sample, at most one

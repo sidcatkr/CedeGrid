@@ -1487,6 +1487,8 @@ impl<'a> Interval<'a> {
                 .map(|last| self.now.saturating_sub(last)),
             window: false,
             source: GpuDemandSource::Interval,
+            own_uncapped: demand.own_share(),
+            duty: None,
         };
         self.next.gpu_demand.insert(gpu.uuid.clone(), demand);
         (estimate, record)

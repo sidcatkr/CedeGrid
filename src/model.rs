@@ -568,6 +568,13 @@ pub struct GpuDemandRecord {
     pub window: bool,
     /// Which amount set the target.
     pub source: GpuDemandSource,
+    /// Own work's amount averaged over the uncapped intervals in which it ran on the device;
+    /// absent before the first (FR-021, Q20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_uncapped: Option<u64>,
+    /// The smallest duty, in thousandths, sent with the device's GPU compute caps this decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<u64>,
 }
 
 /// The external GPU compute amount a target was set from (FR-021, Q19).

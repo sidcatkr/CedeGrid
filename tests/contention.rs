@@ -6056,4 +6056,129 @@ mod gpu_demand {
             run[after].1
         );
     }
+
+    /// The duty's edges and its record (FR-021, Q20): the record shows own work's uncapped share
+    /// and the duty sent; a share at or below the target sends a full duty; Yield First's caps
+    /// carry no duty, so their duty stays target ÷ 1000; after a restart while own work is capped
+    /// there is no share, and the cap goes out at its target; a new engine has no share.
+    #[test]
+    fn the_duty_edges_and_its_record() {
+        let key = ResourceKey::GpuCompute(GPU.into());
+        let duty_of = |decision: &Decision| {
+            decision
+                .actions
+                .iter()
+                .find(|a| a.resource == key && a.step == YieldStep::Cap)
+                .and_then(|a| a.duty)
+        };
+        let light = |i: u64, capped: bool| {
+            if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            }
+        };
+        let (_, performance) = loop_decisions(ContentionMode::Performance, None, 200, &light);
+        let mut checked = 0;
+        for decision in &performance[20..] {
+            let read = record_of(decision);
+            let (Some(share), Some(duty)) = (read.own_uncapped, duty_of(decision)) else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(read.duty, Some(duty), "the record shows the duty sent");
+            let target = decision
+                .actions
+                .iter()
+                .find(|a| a.resource == key && a.step == YieldStep::Cap)
+                .and_then(|a| a.target)
+                .unwrap();
+            let expected = (target * 1000 / share).min(1000);
+            assert!(
+                duty.abs_diff(expected) <= 1,
+                "duty {duty} for target {target} over share {share}"
+            );
+            if share <= target {
+                assert_eq!(duty, 1000);
+            }
+        }
+        assert!(checked > 100, "{checked} capped decisions carried a duty");
+        // Yield First's caps carry no duty.
+        let (_, yield_first) = loop_decisions(
+            ContentionMode::Performance,
+            Some(ContentionMode::YieldFirst),
+            120,
+            &light,
+        );
+        assert!(
+            yield_first.iter().any(|d| cap_of(d) < 1000),
+            "Yield First never capped"
+        );
+        assert!(
+            yield_first
+                .iter()
+                .all(|d| duty_of(d).is_none() && record_of(d).duty.is_none())
+        );
+        // A restart while own work is capped leaves no share: the cap goes out at its target.
+        let config = mode_config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        let busy = PolicyInput {
+            allocations: vec![job(None)],
+            ..PolicyInput::default()
+        };
+        let (mut now, mut sample) = (0, 0);
+        steps(
+            &mut engine,
+            &config,
+            &PolicyInput::default(),
+            &mut now,
+            &mut sample,
+            60,
+            &|i, _| interval_listing(None, ALONE[i as usize], 1 + i, &[987], &[]),
+        );
+        let running = steps(
+            &mut engine,
+            &config,
+            &busy,
+            &mut now,
+            &mut sample,
+            8,
+            &|i, cap| {
+                let external = if cap < 1000 { 300 } else { 150 };
+                interval_listing(Some(cap.min(990 - external)), external, 61 + i, &[987], &[])
+            },
+        );
+        assert!(
+            cap_of(running.last().unwrap()) < 1000,
+            "own work is not capped"
+        );
+        let restarted = steps(
+            &mut engine,
+            &config,
+            &busy,
+            &mut now,
+            &mut sample,
+            3,
+            &|i, cap| interval_listing(Some(cap.min(690)), 300, 69 + i, &[987, 988], &[]),
+        );
+        for decision in &restarted[1..] {
+            assert_eq!(record_of(decision).own_uncapped, None);
+            assert_eq!(
+                duty_of(decision),
+                None,
+                "no share: the duty stays the target over 1000"
+            );
+            assert!(cap_of(decision) < 1000);
+        }
+        // A new engine has no share.
+        let fresh = PolicyEngine::new()
+            .evaluate(
+                &config,
+                &interval_listing(None, 150, 1, &[987], &[]),
+                &PolicyInput::default(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(record_of(&fresh).own_uncapped, None);
+    }
 }
