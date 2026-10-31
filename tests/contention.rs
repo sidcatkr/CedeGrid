@@ -5513,4 +5513,266 @@ mod gpu_demand {
             "{report}"
         );
     }
+
+    /// One interval with the device's external PIDs and its background contexts given.
+    fn interval_listing(
+        own: Option<u64>,
+        external: u64,
+        sample: u64,
+        pids: &[u32],
+        background: &[u32],
+    ) -> Snapshot {
+        let mut snap = interval(own, external, sample);
+        snap.gpus[0].external_process_ids = Some(pids.to_vec());
+        snap.gpus[0].background_process_ids = background.to_vec();
+        snap
+    }
+
+    fn record_of(decision: &Decision) -> cedegrid::model::GpuDemandRecord {
+        decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+            .gpu_demand
+            .clone()
+            .expect("no gpu_demand record")
+    }
+
+    /// Runs `steps` intervals on `engine` from `now`, the light user reading `external(i)` and own
+    /// work, when `input` runs the job, taking the rest within its last cap.
+    fn steps(
+        engine: &mut PolicyEngine,
+        config: &Config,
+        input: &PolicyInput,
+        now: &mut u64,
+        sample: &mut u64,
+        count: u64,
+        snap: &dyn Fn(u64, u64) -> Snapshot,
+    ) -> Vec<Decision> {
+        let mut out = vec![];
+        let mut cap = 1000;
+        for i in 0..count {
+            *sample += 1;
+            let decision = engine.evaluate(config, &snap(i, cap), input, *now).unwrap();
+            cap = cap_of(&decision);
+            out.push(decision);
+            *now += INTERVAL;
+        }
+        out
+    }
+
+    /// The edges (FR-021, FR-065, Q19): a changed list of external PIDs restarts the estimate, a
+    /// background context's arrival does not, and with no uncapped interval since then the
+    /// interval's amount sets the target; own work idle on the device feeds it; an interval of
+    /// unknown amount feeds nothing and keeps its unknown path; a new engine starts without one.
+    #[test]
+    fn gpu_demand_edges() {
+        use cedegrid::model::GpuDemandSource;
+        let config = mode_config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        let (mut now, mut sample) = (0, 0);
+        let idle = PolicyInput::default();
+        let busy = PolicyInput {
+            allocations: vec![job(None)],
+            ..PolicyInput::default()
+        };
+        let alone = steps(
+            &mut engine,
+            &config,
+            &idle,
+            &mut now,
+            &mut sample,
+            60,
+            &|i, _| interval_listing(None, ALONE[i as usize], 1 + i, &[987], &[]),
+        );
+        let settled = record_of(alone.last().unwrap()).intervals;
+        assert!(settled > 30, "{settled}");
+        // An interval of unknown amount feeds nothing and keeps the unknown path.
+        let mut unknown = interval_listing(None, 150, 61, &[987], &[]);
+        unknown.gpus[0].external_compute_milli = None;
+        unknown.gpus[0].own_compute_milli = None;
+        unknown.gpus[0].compute_amount_unknown =
+            Some("summed per-process utilization differs".into());
+        let decision = engine.evaluate(&config, &unknown, &idle, now).unwrap();
+        now += INTERVAL;
+        let read = record_of(&decision);
+        assert!(!read.fed && read.intervals == settled, "{read:?}");
+        let path = decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+            .held_back
+            .as_ref()
+            .and_then(|held| held.compute_path.clone());
+        assert!(
+            matches!(path, Some(ComputePath::Unknown { .. })),
+            "{path:?}"
+        );
+        // Back on the measured path after `quiet_window_intervals` measured intervals.
+        sample = 61;
+        steps(
+            &mut engine,
+            &config,
+            &idle,
+            &mut now,
+            &mut sample,
+            25,
+            &|i, _| interval_listing(None, 150, 62 + i, &[987], &[]),
+        );
+        // A background context arriving is not another demand.
+        let before = record_of(
+            &engine
+                .clone()
+                .evaluate(
+                    &config,
+                    &interval_listing(None, 150, 87, &[987], &[]),
+                    &idle,
+                    now,
+                )
+                .unwrap(),
+        )
+        .intervals;
+        let background = steps(
+            &mut engine,
+            &config,
+            &idle,
+            &mut now,
+            &mut sample,
+            1,
+            &|_, _| interval_listing(None, 150, 87, &[50, 987], &[50]),
+        );
+        assert_eq!(record_of(&background[0]).intervals, before);
+        // Another external process is: the estimate restarts from this interval.
+        let changed = steps(
+            &mut engine,
+            &config,
+            &idle,
+            &mut now,
+            &mut sample,
+            1,
+            &|_, _| interval_listing(None, 300, 88, &[50, 987, 988], &[50]),
+        );
+        let read = record_of(&changed[0]);
+        assert_eq!((read.intervals, read.estimate), (1, Some(300)), "{read:?}");
+        // Own work runs and is capped; another process restarts the estimate a few seconds later,
+        // before a window is due, so the interval's amount sets the target.
+        let pids = [50, 987, 988];
+        let running = steps(
+            &mut engine,
+            &config,
+            &busy,
+            &mut now,
+            &mut sample,
+            6,
+            &|i, cap| {
+                let external = if cap < 1000 { 300 } else { 150 };
+                interval_listing(
+                    Some(cap.min(990 - external)),
+                    external,
+                    89 + i,
+                    &pids,
+                    &[50],
+                )
+            },
+        );
+        assert!(
+            cap_of(running.last().unwrap()) < 1000,
+            "own work is not capped"
+        );
+        let restarted = steps(
+            &mut engine,
+            &config,
+            &busy,
+            &mut now,
+            &mut sample,
+            3,
+            &|i, cap| {
+                interval_listing(Some(cap.min(690)), 300, 95 + i, &[50, 987, 988, 989], &[50])
+            },
+        );
+        for decision in &restarted[1..] {
+            let read = record_of(decision);
+            assert_eq!(
+                (read.intervals, read.estimate, read.source, read.window),
+                (0, None, GpuDemandSource::Interval, false),
+                "{read:?}"
+            );
+            assert_eq!(
+                target_of(decision),
+                680,
+                "the interval's 300 sets Performance's target"
+            );
+        }
+        // Own work idle on the device: the job gone, the next interval feeds the estimate even
+        // though the last decision capped it.
+        let gone = steps(
+            &mut engine,
+            &config,
+            &idle,
+            &mut now,
+            &mut sample,
+            1,
+            &|_, _| interval_listing(None, 150, 98, &[50, 987, 988, 989], &[50]),
+        );
+        let read = record_of(&gone[0]);
+        assert!(read.uncapped && read.fed, "{read:?}");
+        // A new engine starts without an estimate.
+        let fresh = PolicyEngine::new()
+            .evaluate(
+                &config,
+                &interval_listing(None, 150, 1, &[987], &[]),
+                &idle,
+                0,
+            )
+            .unwrap();
+        assert_eq!(record_of(&fresh).estimate, None);
+        assert_eq!(record_of(&fresh).intervals, 0);
+    }
+
+    /// Yield First's targets on T434's and T436's fixtures, with the node in Yield First, are
+    /// those it had from the interval's amount alone or lower, per interval (FR-021, FR-065):
+    /// pinned from the code before item 039 (`15aa96e`), which repeats with the readings every
+    /// 60 intervals, and holds 250 beside the saturating user.
+    #[test]
+    fn yield_first_targets_are_the_intervals_or_lower() {
+        const BEFORE: [u64; 61] = [
+            0, 690, 690, 690, 520, 1000, 1000, 1000, 520, 700, 580, 490, 590, 530, 540, 210, 540,
+            540, 210, 540, 540, 0, 430, 540, 540, 540, 220, 550, 550, 220, 550, 550, 220, 430, 550,
+            550, 430, 560, 560, 430, 560, 560, 570, 570, 570, 570, 570, 580, 580, 580, 580, 580,
+            590, 590, 590, 600, 670, 680, 690, 700, 700,
+        ];
+        let before = |i: usize| {
+            if i < 61 {
+                BEFORE[i]
+            } else {
+                BEFORE[1 + (i - 1) % 60]
+            }
+        };
+        let light = |i: u64, capped: bool| {
+            if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            }
+        };
+        let rise = |i: u64, capped: bool| match (i >= 100, capped) {
+            (false, _) => light(i, capped),
+            (true, true) => 600,
+            (true, false) => 500,
+        };
+        let light_run = closed_loop(ContentionMode::YieldFirst, None, 200, &light);
+        let rise_run = closed_loop(ContentionMode::YieldFirst, None, 260, &rise);
+        for (i, (target, _)) in light_run.iter().enumerate() {
+            assert!(
+                *target <= before(i),
+                "light {i}: {target} above {}",
+                before(i)
+            );
+        }
+        for (i, (target, _)) in rise_run.iter().enumerate() {
+            let old = if i < 100 { before(i) } else { 250 };
+            assert!(*target <= old, "rise {i}: {target} above {old}");
+        }
+        assert!(
+            light_run
+                .iter()
+                .zip(0..)
+                .any(|((target, _), i)| *target < before(i)),
+            "the estimate never lowered Yield First"
+        );
+    }
 }
