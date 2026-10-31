@@ -5812,7 +5812,7 @@ mod gpu_demand {
             let observations = recorded["observations"].as_array().unwrap();
             let (mut targets, mut caps, mut was, mut fed, mut windows) =
                 (vec![], vec![], vec![], 0, 0);
-            let mut last = None;
+            let (mut last, mut own_share) = (None, None);
             for (gpu, observation) in gpus.iter().zip(observations) {
                 let key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 // Busy CPU above own work's, so own CPU reads consistent beside it.
@@ -5835,6 +5835,12 @@ mod gpu_demand {
                         .and_then(|m| m.values().next())
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                    // The test account is the agent's owner, as on the host.
+                    if uid == Some(1000) {
+                        principals[0].gpu_compute_milli =
+                            BTreeMap::from([(gpu.uuid.clone(), milli)]);
+                        continue;
+                    }
                     principals.push(PrincipalUsage {
                         uid,
                         gpu_compute_milli: BTreeMap::from([(gpu.uuid.clone(), milli)]),
@@ -5878,9 +5884,10 @@ mod gpu_demand {
                 fed += usize::from(record.fed);
                 windows += usize::from(record.window);
                 last = record.estimate;
+                own_share = record.own_uncapped;
             }
             println!(
-                "replay {name}: {} intervals, target median {} (recorded {}), cap median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}",
+                "replay {name}: {} intervals, target median {} (recorded {}), duty median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}, own share at the end {own_share:?}",
                 targets.len(),
                 median(targets.clone()),
                 median(was),
