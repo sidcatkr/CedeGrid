@@ -250,39 +250,39 @@ pub struct GpuSnapshot {
     pub compute_sampling: Option<ComputeSampling>,
 }
 
-/// One interval's GPU sample counts, in driver microseconds: the device's samples, the window
-/// from the cursor to the newest per-process sample, the per-process period, and the slots
-/// each process's summed samples counted against.
+/// What a replay of one interval's GPU measurement needs, in driver microseconds: the device's
+/// samples, the window from the cursor to the newest per-process sample, whether the amount came
+/// from the interval alone or the last 4, and each process's samples with its previous one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComputeSampling {
     pub device_samples: u64,
     pub device_first_us: Option<u64>,
     pub device_last_us: Option<u64>,
-    pub window_us: Option<u64>,
-    pub period_us: Option<u64>,
-    pub slots: u64,
-    pub slots_from: SlotsSource,
+    pub window_start_us: u64,
+    pub window_end_us: Option<u64>,
+    pub compared_over: ComparedOver,
     pub processes: Vec<ProcessSampling>,
 }
 
-/// Where an interval's slots came from.
+/// Whether a measured amount came from the interval alone or the last 4 intervals (R47).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlotsSource {
-    ProcessPeriod,
-    DeviceSamples,
-    MostSampled,
+pub enum ComparedOver {
+    #[serde(rename = "interval")]
+    Interval,
+    #[serde(rename = "last_4")]
+    Last4,
 }
 
-/// One process's fresh samples in an interval.
+/// One process's fresh samples in an interval: the previous sample its span started from, each
+/// sample as `[timestamp, sm_util]` (at most 32) and the time counted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSampling {
     pub pid: u32,
-    pub samples: u64,
-    pub first_us: u64,
-    pub last_us: u64,
+    pub previous_us: Option<u64>,
+    pub samples: Vec<(u64, u32)>,
+    pub counted_us: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

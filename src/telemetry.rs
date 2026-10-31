@@ -861,6 +861,13 @@ impl Collector {
                     self.gpu_samples.entry(uuid.clone()).or_default(),
                 ),
             };
+            // The record is read before this interval's timestamps are kept (FR-021, Q17).
+            let compute_record = compute_sampling(
+                activity_baseline,
+                &samples,
+                &device_samples,
+                self.gpu_samples.entry(uuid.clone()).or_default(),
+            );
             // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
             if let (Some(previous), Ok(fresh)) = (activity_baseline, &samples) {
                 self.gpu_samples.entry(uuid.clone()).or_default().remember(
@@ -957,7 +964,7 @@ impl Collector {
                 },
                 own_only,
                 background_process_ids: background.into_iter().collect(),
-                compute_sampling: compute_sampling(activity_baseline, &samples, &device_samples),
+                compute_sampling: compute_record,
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -1783,50 +1790,63 @@ mod tests {
         );
     }
 
-    /// Each interval keeps how its samples were counted (FR-021, Q14): the device's count and
-    /// first and last timestamps, the window, the period and slots used with their path, and
-    /// each PID's count and first and last timestamps, measured or not; with no baseline there
-    /// is nothing to show and the snapshot leaves the field out.
+    /// Each interval keeps what a replay needs (FR-021, Q17): the device's count and first and last
+    /// timestamps, the window, whether the amount came from the interval alone or the last 4,
+    /// and per process its previous sample, each sample's timestamp and sm_util, at most 32, and
+    /// the time counted; with no baseline there is nothing to show and the snapshot leaves the
+    /// field out.
     #[test]
     fn an_interval_records_how_its_gpu_samples_were_counted() {
-        use crate::model::{ComputeSampling, ProcessSampling, SlotsSource};
-        let device: Vec<_> = (1..=9)
-            .map(|i| device_sample(100 + i * 600 / 9, 90))
-            .collect();
-        let busy: Vec<_> = [7, 42]
-            .into_iter()
-            .flat_map(|pid| [300, 500, 700].map(|at| gpu_sample(pid, at, 30)))
-            .collect();
-        let process = |pid, samples, first_us, last_us| ProcessSampling {
-            pid,
-            samples,
-            first_us,
-            last_us,
-        };
+        use crate::model::{ComparedOver, ComputeSampling, ProcessSampling};
+        let device: Vec<_> = (1..=3).map(|i| device_sample(100 + i * 200, 60)).collect();
+        let samples = vec![
+            gpu_sample(7, 500, 40),
+            gpu_sample(42, 700, 20),
+            gpu_sample(42, 400, 20),
+        ];
+        let mut state = GpuSampleState::default();
+        state.remember(0, &[gpu_sample(7, 90, 40)], None);
+        let record = compute_sampling(Some(100), &Ok(samples), &Ok(device.clone()), &state);
         assert_eq!(
-            compute_sampling(Some(100), &Ok(busy), &Ok(device.clone())),
+            record,
             Some(ComputeSampling {
-                device_samples: 9,
-                device_first_us: Some(166),
+                device_samples: 3,
+                device_first_us: Some(300),
                 device_last_us: Some(700),
-                window_us: Some(600),
-                period_us: Some(200),
-                slots: 3,
-                slots_from: SlotsSource::ProcessPeriod,
-                processes: vec![process(7, 3, 300, 700), process(42, 3, 300, 700)],
+                window_start_us: 100,
+                window_end_us: Some(700),
+                compared_over: ComparedOver::Interval,
+                processes: vec![
+                    ProcessSampling {
+                        pid: 7,
+                        previous_us: Some(90),
+                        samples: vec![(500, 40)],
+                        counted_us: 410,
+                    },
+                    ProcessSampling {
+                        pid: 42,
+                        previous_us: None,
+                        samples: vec![(400, 20), (700, 20)],
+                        counted_us: 600,
+                    },
+                ],
             })
         );
-        let single = vec![gpu_sample(7, 700, 60), gpu_sample(42, 700, 30)];
-        let unknown = compute_sampling(Some(100), &Ok(single), &Ok(device.clone())).unwrap();
+        let many: Vec<_> = (1..=40).map(|i| gpu_sample(42, 100 + i * 10, 5)).collect();
+        let bounded = compute_sampling(Some(100), &Ok(many), &Ok(device.clone()), &state).unwrap();
+        assert_eq!(bounded.processes[0].samples.len(), 32);
+        assert_eq!(bounded.processes[0].counted_us, 400);
+        state.over_last_4 = true;
         assert_eq!(
-            (unknown.slots, unknown.slots_from, unknown.window_us),
-            (9, SlotsSource::DeviceSamples, None)
+            compute_sampling(Some(100), &Ok(vec![]), &Ok(device.clone()), &state)
+                .unwrap()
+                .compared_over,
+            ComparedOver::Last4
         );
         assert_eq!(
-            unknown.processes,
-            vec![process(7, 1, 700, 700), process(42, 1, 700, 700)]
+            compute_sampling(None, &Ok(vec![]), &Ok(device), &state),
+            None
         );
-        assert_eq!(compute_sampling(None, &Ok(vec![]), &Ok(device)), None);
         let mut snap: crate::model::GpuSnapshot = serde_json::from_value(serde_json::json!({
             "uuid": "GPU-a", "total_memory_mib": 1, "used_memory_mib": null,
             "utilization_percent": null, "external_process_ids": null,
@@ -1838,9 +1858,10 @@ mod tests {
                 .unwrap()
                 .contains("compute_sampling")
         );
-        snap.compute_sampling = Some(unknown);
-        let back: crate::model::GpuSnapshot =
-            serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        snap.compute_sampling = record;
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"samples\":[[500,40]]"), "{json}");
+        let back: crate::model::GpuSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.compute_sampling, snap.compute_sampling);
     }
 
