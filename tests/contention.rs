@@ -5097,3 +5097,204 @@ mod launch_nice {
         }
     }
 }
+
+/// Item 039: external GPU compute demand read where own work ran uncapped (FR-021, FR-022, Q19).
+mod gpu_demand {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const INTERVAL: u64 = 500;
+    const GPU: &str = "GPU-demand";
+    const PEER: u32 = 2001;
+
+    /// T368's Performance light run at `5f729bc` (036's evidence): the light user's reading per
+    /// interval alone, beside the probe at full duty without CedeGrid, and beside it under
+    /// CedeGrid's caps. Its demand was the same 200 requests a second throughout.
+    const ALONE: [u64; 60] = [
+        60, 150, 150, 150, 150, 160, 150, 150, 160, 150, 150, 160, 150, 150, 150, 160, 160, 150,
+        150, 160, 150, 150, 160, 150, 150, 160, 160, 160, 150, 150, 160, 160, 150, 160, 150, 160,
+        150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 160, 160, 160, 160, 160, 150,
+        150, 160, 150, 160, 160, 160,
+    ];
+    const BESIDE_FULL_DUTY: [u64; 60] = [
+        150, 70, 0, 330, 220, 660, 0, 0, 250, 0, 0, 0, 330, 0, 0, 330, 220, 0, 0, 330, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 330, 0, 660, 0, 330, 330, 250, 0, 250, 0, 0, 330, 330, 0, 0, 0, 330,
+        0, 0, 330, 0, 0, 0, 0, 80, 220, 0, 0, 330,
+    ];
+    const BESIDE_CAPS: [u64; 60] = [
+        150, 160, 160, 160, 330, 0, 0, 0, 330, 150, 270, 360, 260, 320, 310, 640, 310, 310, 640,
+        310, 310, 640, 420, 310, 310, 310, 630, 300, 300, 630, 300, 300, 630, 420, 300, 300, 420,
+        290, 290, 420, 290, 290, 280, 280, 280, 280, 280, 270, 270, 270, 270, 270, 260, 260, 260,
+        250, 180, 170, 160, 150,
+    ];
+
+    pub(super) fn mode_config(mode: ContentionMode) -> Config {
+        let mut config = config();
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        config
+    }
+
+    pub(super) fn job(mode: Option<ContentionMode>) -> Allocation {
+        let resources = Resources {
+            cpu_millicores: 100,
+            ram_mib: 100,
+            gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 1000)]),
+        };
+        Allocation {
+            id: "job".into(),
+            class: AllocationClass::Opportunistic,
+            phase: AllocationPhase::Running,
+            requested: resources.clone(),
+            observed: Some(resources),
+            observed_upper: None,
+            observed_window_cpu: None,
+            modes: mode
+                .map(|mode| {
+                    BTreeMap::from([(cedegrid::contention::ResourceKind::GpuCompute, mode)])
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// One measured interval: the other user's reading, own work's (none while it does not run),
+    /// the device busy as both; the other user's process stays listed whether sampled or not.
+    pub(super) fn interval(own: Option<u64>, external: u64, sample: u64) -> Snapshot {
+        let mut snap = snapshot(0);
+        snap.gpu_inventory = CapabilityStatus::Available;
+        snap.gpus = vec![GpuSnapshot {
+            uuid: GPU.into(),
+            total_memory_mib: 16_000,
+            used_memory_mib: Some(2000),
+            utilization_percent: Some(((own.unwrap_or(0) + external) / 10).min(100) as u32),
+            external_process_ids: Some(vec![987]),
+            external_compute: ComputeActivity::Active,
+            compute_sample_id: Some(sample),
+            observation: None,
+            reserved_memory_mib: None,
+            free_memory_mib: None,
+            unattributed_memory_mib: None,
+            external_compute_milli: Some(external),
+            own_compute_milli: Some(own.unwrap_or(0)),
+            compute_amount_unknown: None,
+            own_only: false,
+            background_process_ids: vec![],
+            compute_sampling: None,
+        }];
+        snap.principals = Some(vec![
+            PrincipalUsage {
+                uid: Some(1000),
+                is_owner: true,
+                ..PrincipalUsage::default()
+            },
+            PrincipalUsage {
+                uid: Some(PEER),
+                gpu_compute_milli: BTreeMap::from([(GPU.to_string(), external)]),
+                ..PrincipalUsage::default()
+            },
+        ]);
+        snap
+    }
+
+    /// The GPU compute cap a decision sends the job: 1000 when none.
+    pub(super) fn cap_of(decision: &Decision) -> u64 {
+        let key = ResourceKey::GpuCompute(GPU.into());
+        decision
+            .actions
+            .iter()
+            .find(|a| a.resource == key && a.allocation_id == "job")
+            .map_or(1000, |a| match a.step {
+                YieldStep::Cap => a.target.unwrap_or(1000),
+                YieldStep::Pause => 0,
+                _ => 1000,
+            })
+    }
+
+    pub(super) fn target_of(decision: &Decision) -> u64 {
+        decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+            .target_share
+            .unwrap_or(0)
+    }
+
+    /// T368's loop, closed: 60 intervals of the light user alone, then own work beside it for
+    /// `intervals`. The light user reads its full-duty amounts in an interval set by two
+    /// decisions without a cap, else its amounts under caps; own work takes the rest of a busy
+    /// device within its cap. Returns each own interval's target and cap.
+    pub(super) fn light_loop(mode: ContentionMode, intervals: u64) -> Vec<(u64, u64)> {
+        let config = mode_config(mode);
+        let mut engine = PolicyEngine::new();
+        let mut now = 0;
+        for i in 0..60u64 {
+            engine
+                .evaluate(
+                    &config,
+                    &interval(None, ALONE[i as usize], i + 1),
+                    &PolicyInput::default(),
+                    now,
+                )
+                .unwrap();
+            now += INTERVAL;
+        }
+        let input = PolicyInput {
+            allocations: vec![job(None)],
+            ..PolicyInput::default()
+        };
+        let (mut caps, mut out) = ([1000u64, 1000u64], vec![]);
+        for i in 0..intervals {
+            let capped = caps.iter().any(|cap| *cap < 1000);
+            let external = if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            };
+            let own = caps[0].min(990 - external);
+            let decision = engine
+                .evaluate(&config, &interval(Some(own), external, 61 + i), &input, now)
+                .unwrap();
+            caps = [cap_of(&decision), caps[0]];
+            out.push((target_of(&decision), caps[0]));
+            now += INTERVAL;
+        }
+        out
+    }
+
+    fn median(mut values: Vec<u64>) -> u64 {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    /// The loop from T368's Performance light trace: a cap, a higher reading under it, a deeper
+    /// cap. Read where own work ran uncapped, the light user's demand holds own work's target at
+    /// the device less that demand and the margin, and the target does not fall over the run.
+    #[test]
+    fn a_capped_light_user_does_not_deepen_the_cap() {
+        let run = light_loop(ContentionMode::Performance, 240);
+        let targets: Vec<u64> = run[20..].iter().map(|(target, _)| *target).collect();
+        let late = median(targets[targets.len() - 60..].to_vec());
+        assert!(
+            median(targets.clone()) >= 800,
+            "Performance's target fell to {} beside a light user",
+            median(targets.clone())
+        );
+        assert!(
+            late + 30 >= median(targets[..60].to_vec()),
+            "the target fell over the run to {late}"
+        );
+        let low = targets.iter().filter(|target| **target < 760).count();
+        assert!(
+            low * 20 <= targets.len(),
+            "{low} of {} targets below 760",
+            targets.len()
+        );
+        let neutral = light_loop(ContentionMode::Neutral, 240);
+        let neutral: Vec<u64> = neutral[20..].iter().map(|(target, _)| *target).collect();
+        assert!(
+            median(neutral.clone()) >= 770,
+            "Neutral's target fell to {}",
+            median(neutral)
+        );
+    }
+}

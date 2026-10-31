@@ -160,9 +160,52 @@ struct PreviousGpu {
     measured_streak: u32,
 }
 
+/// Uncapped intervals averaged into a device's external GPU compute demand (FR-021, R48).
+const GPU_DEMAND_INTERVALS: usize = 60;
+
+/// External GPU compute demand read where own work ran uncapped, per device (FR-021, Q19): on a
+/// time-sliced device own work's gaps raise another user's reading at the same demand.
+#[derive(Debug, Clone, Default)]
+struct GpuDemand {
+    /// The last uncapped intervals' amounts: the external total and each principal UID's.
+    uncapped: std::collections::VecDeque<(u64, BTreeMap<u32, u64>)>,
+    /// Whether the last decision and the one before it sent own work there a cap or pause.
+    sent_capped: [bool; 2],
+    /// The device's external PIDs, background contexts left out, at the last listed interval.
+    pids: Option<Vec<u32>>,
+    /// When the last uncapped interval was observed.
+    last_uncapped_ms: Option<u64>,
+}
+
+impl GpuDemand {
+    /// The average external total and each principal's, or None before an uncapped interval.
+    fn estimate(&self) -> Option<(u64, BTreeMap<u32, u64>)> {
+        let count = self.uncapped.len() as u64;
+        if count == 0 {
+            return None;
+        }
+        let mean = |sum: u64| (sum + count / 2) / count;
+        let mut by_uid: BTreeMap<u32, u64> = BTreeMap::new();
+        for (_, amounts) in &self.uncapped {
+            for (uid, amount) in amounts {
+                *by_uid.entry(*uid).or_default() += amount;
+            }
+        }
+        Some((
+            mean(self.uncapped.iter().map(|(total, _)| total).sum()),
+            by_uid
+                .into_iter()
+                .map(|(uid, sum)| (uid, mean(sum)))
+                .collect(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PolicyEngine {
     previous_gpus: BTreeMap<String, PreviousGpu>,
+    /// Each device's external GPU compute demand from uncapped intervals (FR-021).
+    gpu_demand: BTreeMap<String, GpuDemand>,
     stable_since: Option<u64>,
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
@@ -479,6 +522,7 @@ impl<'a> Interval<'a> {
             prev,
             next: PolicyEngine {
                 previous_gpus,
+                gpu_demand: prev.gpu_demand.clone(),
                 last_kernel_cpu_sample: prev.last_kernel_cpu_sample,
                 ..PolicyEngine::default()
             },

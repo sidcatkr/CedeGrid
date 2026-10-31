@@ -87,6 +87,26 @@ impl<'a> Interval<'a> {
         self.gpu_compute_budget = budgets;
         self.note_reversals();
         self.collect_actions();
+        self.record_sent_caps();
+    }
+
+    /// Whether this decision sends own work on each device a cap or pause, on CPU or that
+    /// device's GPU compute, for the next intervals' demand estimate (FR-021, Q19).
+    fn record_sent_caps(&mut self) {
+        let input = self.input;
+        for (uuid, demand) in self.next.gpu_demand.iter_mut() {
+            let compute = ResourceKey::GpuCompute(uuid.clone());
+            let capped = self.actions.iter().any(|action| {
+                matches!(action.step, YieldStep::Cap | YieldStep::Pause)
+                    && (action.resource == ResourceKey::Cpu || action.resource == compute)
+                    && input.allocations.iter().any(|a| {
+                        a.id == action.allocation_id
+                            && a.phase == AllocationPhase::Running
+                            && a.requested.gpu_memory_mib.contains_key(uuid)
+                    })
+            });
+            demand.sent_capped = [capped, demand.sent_capped[0]];
+        }
     }
 
     /// Since when each unknown or held resource, a device's memory included, and each

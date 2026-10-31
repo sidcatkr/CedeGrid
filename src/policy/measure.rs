@@ -1092,11 +1092,12 @@ impl<'a> Interval<'a> {
         let (activity, compute_admission, telemetry_unknown) =
             self.gpu_admission(gpu, &previous, &memory);
         let (measured, measured_streak) = self.gpu_compute_path(gpu, &previous);
+        let estimate = self.gpu_demand(gpu, measured);
         if telemetry_unknown {
             self.gpu_memory_unknown.insert(gpu.uuid.clone());
         }
         if !telemetry_unknown {
-            let budget = self.compute_budget_for(gpu, measured, activity);
+            let budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
             self.gpu_compute_budget.insert(gpu.uuid.clone(), budget);
         }
         let compute_status = self
@@ -1378,6 +1379,65 @@ impl<'a> Interval<'a> {
         (measured, measured_streak)
     }
 
+    /// Feeds the device's demand estimate with an uncapped interval's amounts and returns the
+    /// estimate (FR-021, Q19). An interval is uncapped when neither the decision that set it nor
+    /// the one before sent own work on the device a cap or pause, since a lifted cap takes effect
+    /// within one duty period, or when no own allocation runs there.
+    fn gpu_demand(
+        &mut self,
+        gpu: &GpuSnapshot,
+        measured: Option<(u64, u64)>,
+    ) -> Option<(u64, BTreeMap<u32, u64>)> {
+        let mut demand = self
+            .prev
+            .gpu_demand
+            .get(&gpu.uuid)
+            .cloned()
+            .unwrap_or_default();
+        // Another set of external processes is another demand.
+        if let Some(listed) = &gpu.external_process_ids {
+            let mut pids: Vec<u32> = listed
+                .iter()
+                .copied()
+                .filter(|pid| !gpu.background_process_ids.contains(pid))
+                .collect();
+            pids.sort_unstable();
+            if demand.pids.as_ref().is_some_and(|before| before != &pids) {
+                demand.uncapped.clear();
+            }
+            demand.pids = Some(pids);
+        }
+        let running = self.input.allocations.iter().any(|a| {
+            a.phase == AllocationPhase::Running
+                && a.requested.gpu_memory_mib.contains_key(&gpu.uuid)
+        });
+        if let Some((external, _)) = measured
+            && (!running || !demand.sent_capped.contains(&true))
+        {
+            let amounts = self
+                .snapshot
+                .principals
+                .iter()
+                .flatten()
+                .filter(|p| !p.is_owner)
+                .filter_map(|p| {
+                    Some((
+                        p.uid?,
+                        p.gpu_compute_milli.get(&gpu.uuid).copied().unwrap_or(0),
+                    ))
+                })
+                .collect();
+            demand.uncapped.push_back((external, amounts));
+            while demand.uncapped.len() > GPU_DEMAND_INTERVALS {
+                demand.uncapped.pop_front();
+            }
+            demand.last_uncapped_ms = Some(self.now);
+        }
+        let estimate = demand.estimate();
+        self.next.gpu_demand.insert(gpu.uuid.clone(), demand);
+        estimate
+    }
+
     /// A device's GPU compute budget. A measured external amount takes the CPU
     /// paths (FR-021, FR-022): one principal of that amount, saturation from
     /// device utilization, probing and satisfied records. Without one, external
@@ -1388,46 +1448,110 @@ impl<'a> Interval<'a> {
         gpu: &GpuSnapshot,
         measured: Option<(u64, u64)>,
         activity: ComputeActivity,
+        estimate: Option<&(u64, BTreeMap<u32, u64>)>,
     ) -> GpuComputeBudget {
         let config = self.config;
         let compute_key = ResourceKey::GpuCompute(gpu.uuid.clone());
         let compute_thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
         let mode = governing(config, ResourceKind::GpuCompute);
+        // Neutral, Performance and Aggressive read external demand where own work ran uncapped;
+        // Yield First takes the larger of that and this interval's amount, so its target stays
+        // at or below Neutral's (FR-021, FR-065).
+        let averaged_total = estimate.map(|(total, _)| *total);
         match measured {
-            Some((external, own)) if external > 0 => {
-                // External users are principals by UID, as on CPU.
-                let (members, background) =
+            Some((external, own)) if external.max(averaged_total.unwrap_or(0)) > 0 => {
+                let averaged_total = averaged_total.unwrap_or(external);
+                let now_of =
+                    |p: &PrincipalUsage| p.gpu_compute_milli.get(&gpu.uuid).copied().unwrap_or(0);
+                let averaged_of = |p: &PrincipalUsage| match (estimate, p.uid) {
+                    (Some((_, by_uid)), Some(uid)) if !p.is_owner => {
+                        by_uid.get(&uid).copied().unwrap_or_else(|| now_of(p))
+                    }
+                    _ => now_of(p),
+                };
+                // External users are principals by UID, as on CPU, joining on the larger amount.
+                let (larger_members, larger_background) =
                     self.principals(compute_key.clone(), GPU_COMPUTE_CAPACITY, &|p| {
-                        p.gpu_compute_milli.get(&gpu.uuid).copied().unwrap_or(0)
+                        now_of(p).max(averaged_of(p))
                     });
-                let mut view = ModeInput {
+                let listed: Vec<&PrincipalUsage> =
+                    self.snapshot.principals.iter().flatten().collect();
+                let averaged_members = larger_members.as_ref().map(|members| {
+                    members
+                        .iter()
+                        .map(|(principal, usage)| {
+                            let averaged = listed
+                                .iter()
+                                .find(|p| {
+                                    p.uid == principal.uid && p.is_owner == principal.is_owner
+                                })
+                                .map_or(*usage, |p| averaged_of(p));
+                            (*principal, averaged)
+                        })
+                        .collect()
+                });
+                let averaged_background = listed
+                    .iter()
+                    .filter(|p| {
+                        !p.is_owner && p.uid.is_some_and(|uid| uid < config.contention.uid_min)
+                    })
+                    .map(|p| averaged_of(p))
+                    .sum();
+                let satisfied = self
+                    .prev
+                    .satisfied
+                    .get(&compute_key)
+                    .cloned()
+                    .unwrap_or_default();
+                let view = |external, principals, background| ModeInput {
                     kind: ResourceKind::GpuCompute,
                     mode,
                     capacity: GPU_COMPUTE_CAPACITY,
                     external,
                     own,
-                    principals: members,
+                    principals,
                     background,
                     saturated: gpu.utilization_percent.is_some_and(|busy| {
                         busy >= u32::from(compute_thresholds.saturation_percent)
                     }),
                     psi_only: false,
                     unknown_activity: false,
-                    satisfied: self
-                        .prev
-                        .satisfied
-                        .get(&compute_key)
-                        .cloned()
-                        .unwrap_or_default(),
+                    satisfied: satisfied.clone(),
                     probe: None,
                 };
-                self.probe(&compute_key, &mut view, &compute_thresholds);
+                let mut averaged_view = view(averaged_total, averaged_members, averaged_background);
+                let mut larger_view = view(
+                    external.max(averaged_total),
+                    larger_members,
+                    larger_background,
+                );
+                // The governing mode's view probes and records; the other takes its records.
+                if mode == ContentionMode::YieldFirst {
+                    self.probe(&compute_key, &mut larger_view, &compute_thresholds);
+                    averaged_view.satisfied = larger_view.satisfied.clone();
+                } else {
+                    self.probe(&compute_key, &mut averaged_view, &compute_thresholds);
+                    larger_view.satisfied = averaged_view.satisfied.clone();
+                }
+                let governing_view = if mode == ContentionMode::YieldFirst {
+                    &larger_view
+                } else {
+                    &averaged_view
+                };
+                let mut targets =
+                    targets_of(&averaged_view, &compute_thresholds, GPU_COMPUTE_CAPACITY);
+                if let Some(yield_first) =
+                    targets_of(&larger_view, &compute_thresholds, GPU_COMPUTE_CAPACITY)
+                        .get(&ContentionMode::YieldFirst)
+                {
+                    targets.insert(ContentionMode::YieldFirst, *yield_first);
+                }
                 GpuComputeBudget {
-                    share: own_allowance(&view, &compute_thresholds),
-                    contended: crate::contention::contended(&view, &compute_thresholds),
-                    external,
+                    share: own_allowance(governing_view, &compute_thresholds),
+                    contended: crate::contention::contended(governing_view, &compute_thresholds),
+                    external: governing_view.external,
                     own: Some(own),
-                    targets: targets_of(&view, &compute_thresholds, GPU_COMPUTE_CAPACITY),
+                    targets,
                 }
             }
             None if matches!(activity, ComputeActivity::Active | ComputeActivity::Unknown) => {
