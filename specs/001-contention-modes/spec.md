@@ -377,8 +377,8 @@ back more.
 - Q: How is a family's usage measured? → A: Own CPU: in Full the leaf reading, now usable since
   the leaf holds only family members; in Tracked the sum of the members' CPU deltas, a member that
   exits counting up to its last sample. Own memory: the family's summed PSS, never RSS; a family
-  of one, and Full while its leaf reading is usable, keep today's reading; if `smaps_rollup` is
-  over the efficiency budget it is read every N intervals and held between. Verified descendants'
+  of one, and Full while its leaf reading is usable, keep today's reading; how often PSS is read
+  is the PSS-period answer below (item 034). Verified descendants'
   GPU memory and compute count as own, and they are not the owner's unmanaged use (item 031, B).
 - Q: How does a step reach a whole family in Tracked? → A: A stop (the duty's off phase, a Pause,
   the GPU duty's off phase) discovers, stops every member through its pidfd, and repeats until a
@@ -434,6 +434,29 @@ back more.
   answer, besides its per-interval report. A member found and stopped in the instant its
   supervisor dies can be missed and stays stopped until an agent runs; the docs say so (item 033,
   C.1).
+- Q: How is each process's share of GPU compute counted over an interval? → A: Against the slots
+  of the per-process sampling period, not the device's sample count. The period comes from the
+  per-process timestamps in the window, the time since the cursor; the expected slots are the
+  window divided by the period, and a process with fewer samples than its slots was idle or
+  stopped for the rest, so time without a sample counts as idle. The most-sampled process's count
+  is never the slots. When no process has 2 samples in the window, so the timestamps give no
+  period, today's path and its unknown reasons apply; a driver that samples processes at the
+  device's rate reads as today. Each interval's measurement keeps the device's sample count and
+  window and each process's sample count with its first and last timestamps, in the persisted
+  observation (item 034, 1).
+- Q: Does the return after contention change Yield First's quiet count? → A: No. At the quiet
+  count every held CPU cap rises to the mode's target in one move, in the same interval, not in
+  steps from the minimum duty. Yield First's quiet count stays as it is, since it is that mode's
+  hysteresis; Performance and Neutral keep their paths, and their return times do not get worse
+  (item 034, 2).
+- Q: How often is a Tracked family's PSS read? → A: Every K intervals. Each PSS pass is timed and
+  K is chosen so that PSS reading averages at most 0.5% of the scope's CPU, K from 1 to 10, the
+  agent's total within the 1% budget. Between reads own memory is the last PSS plus
+  max(0, the members' RSS sum now minus their RSS sum at that read), so growth is never missed;
+  copy-on-write breaks are missed until the next read, at most K intervals late. Before a
+  floor-breach Hint or Drain, or anything else that acts on own work because of own memory, PSS
+  is read fresh, and the step is taken only if that reading confirms it. A family of one keeps its
+  current reading, and Full keeps `memory.current` (item 034, 3).
 
 ## Terms
 
@@ -1056,7 +1079,13 @@ node reports with the expected per-resource values at each step.
   the granularity, is documented. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
-  100%, when the summed per-process utilization of all processes is within
+  100%: each process's summed samples count against the slots of the per-process sampling
+  period, the window since the cursor divided by the period read from the per-process timestamps
+  in it, never against the device's sample count or the most-sampled process's count; when no
+  process has 2 samples in the window, the device's sample count stands for the slots as before.
+  Each interval's persisted observation keeps the device's sample count and window and each
+  process's sample count with its first and last timestamps. The amount is measured when the
+  summed per-process utilization of all processes is within
   `contention.gpu_compute.attribution_tolerance_percent` (default 15, 1–30) points of device
   utilization over the same interval. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
@@ -1255,7 +1284,9 @@ node reports with the expected per-resource values at each step.
   has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
   one move to the uncontended target, without waiting for the mode's interval, for the allowance
   and for held caps alike, so own usage, not only the target, returns within 3 s of the
-  contender stopping.
+  contender stopping: every held CPU cap goes to the mode's target in that interval, never in
+  steps from the minimum duty. The quiet count is each mode's hysteresis and does not change with
+  it, and Performance's and Neutral's return times do not get worse.
   Quiet intervals count each principal's usage and this interval's unattributed external
   estimate, not the window's, against the larger of `principal_min_percent` of capacity and the
   scope's per-interval measurement band. The
@@ -1343,8 +1374,13 @@ node reports with the expected per-resource values at each step.
   - CPU: in Full the leaf reading, usable while the leaf holds only family members; in Tracked the
     sum of the members' CPU deltas, a member that exits counting up to its last sample.
   - Memory: the family's summed PSS, never RSS. A family of one, and Full while its leaf reading is
-    usable, keep the existing reading. If `smaps_rollup` is over the efficiency budget it MAY be
-    read every N intervals, the last value held between.
+    usable (`memory.current`), keep the existing reading. In Tracked, family PSS MUST be read every
+    K intervals: each PSS pass is timed and K chosen so that PSS reading averages at most 0.5% of
+    the scope's CPU, K from 1 to 10, the agent's total within SC-014's budget. Between reads own
+    memory is the last PSS plus max(0, the members' RSS sum now minus their RSS sum at that read),
+    so growth is never missed and a copy-on-write break is counted at most K intervals late.
+    Before a floor-breach Hint or Drain, or any other step on own work because of own memory, PSS
+    MUST be read fresh, and the step is taken only if that reading confirms it.
   - GPU: verified descendants' per-process GPU memory and compute count as own, including in
     FR-021's interval shares.
   - Verified descendants are in the managed set, so they are not the owner's unmanaged use and the
