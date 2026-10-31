@@ -478,6 +478,30 @@ back more.
   s of the contender stopping. The measured total from the contender's end stays in
   `docs/validation.md` as the measured return (item 036, 2).
 
+### Session 2026-11-01
+
+- Q: How do Performance, Aggressive and Neutral read external GPU compute demand? → A: Only from
+  intervals in which own work ran uncapped on the device: no cap and no pause, on GPU compute or
+  CPU, for any own allocation using the device in the decision that set the interval and the one
+  before it, since a lifted cap takes effect within one duty period; or no own allocation running
+  on the device. Per external principal and in total (the unattributed part included), the demand
+  is the average of its amounts over the last 60 such intervals (30 s at the default interval);
+  with fewer, the average of what there is, and the decision record says so; capped intervals never
+  feed it. While own work is held back by GPU compute steps only, own work's GPU compute caps on
+  the device are lifted every 30 s for a window of 6 intervals (3 s, at most 10% of the capped
+  time), whose intervals feed the average as any uncapped interval does; when the window's mean
+  differs from the average by 200 thousandths or more, the average restarts from the window, so a
+  light user that turns saturating is seen within one or two windows. While a CPU cap or a pause
+  holds own work on the device, no window is taken and the estimate keeps its age. A change in the
+  device's external process list restarts the average, an agent restart loses it, and with no
+  uncapped interval yet the interval's own amount is used, as before. Yield First keeps the
+  interval's amount, or the average where that is higher, so its target stays at or below
+  Neutral's (FR-065), and takes no window. VRAM, CPU, each mode's margin, R33, the sample span and
+  the 4-interval tolerance are unchanged; Full and Tracked use the same estimate. Each decision
+  record says, per device, whether the interval was uncapped and fed the estimate, and keeps the
+  estimate, its interval count and the time since the last uncapped interval (item 039, 3; the
+  values from the traces in research R48).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1132,7 +1156,22 @@ node reports with the expected per-resource values at each step.
   principals by UID with the same `uid_min`, `principal_min_percent`, join window and leave
   window as CPU, a PID whose UID cannot be read is unattributed, saturation is at
   `saturation_percent` of device utilization, and probing and satisfied records apply;
-  admission still follows FR-026 and FR-027. The node report's held-back breakdown
+  admission still follows FR-026 and FR-027. On a time-sliced device a process's reading follows
+  where the sampler caught its context, so gaps in own work raise another user's reading at the
+  same demand; in Performance, Aggressive and Neutral, the external amount that sets own work's
+  GPU compute target, per principal and in total, MUST therefore be the average of the amounts
+  measured in the last 60 intervals in which own work ran uncapped on the device (no cap or pause,
+  on GPU compute or CPU, for any own allocation using it, in the decision that set the interval and
+  the one before it), or had no allocation running there; with fewer, the average of what there
+  is, and with none since the agent started, the interval's own amount. Capped intervals never feed
+  it. While own work is held back by GPU compute steps only, its GPU compute caps on the device
+  MUST be lifted every 30 s for a window of 6 intervals, at most 10% of the capped time; a window
+  whose mean differs from the average by 200 thousandths or more restarts the average from it. While
+  a CPU cap or a pause holds own work on the device no window is taken. A change in the device's
+  external process list restarts the average, and an agent restart loses it. Yield First uses the
+  interval's amount, or the average where that is higher, and takes no window. The decision record
+  states per device whether the interval was uncapped and fed the estimate, the estimate, its
+  interval count and the time since the last uncapped interval. The node report's held-back breakdown
   states, per device, whether the amount was measured or why it is unknown.
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin
@@ -1143,7 +1182,8 @@ node reports with the expected per-resource values at each step.
     mode's response time;
   - on a contended compute resource, keep the larger of the Neutral fair share and capacity
     minus observed external usage minus the margin: give back what external demand takes, and
-    never go below the fair share;
+    never go below the fair share; on GPU compute, observed external usage is FR-021's average
+    over intervals in which own work ran uncapped;
   - on CPU and GPU compute, in Tracked and Full, never take a step that targets below the fair
     share: a cap that misses its target after the hold window (the step dwell) is recomputed from the measured
     rate and applied again, without escalating to pause; only a cap already at the minimum duty
