@@ -5900,10 +5900,14 @@ mod gpu_demand {
 
     /// A time-sliced device (item 040): each busy context gets an equal slice of the time the
     /// device is busy. The other user, saturating, runs alone for 60 intervals, then own work
-    /// runs `own_contexts` contexts at the duty its last decision sent and holds duty × its slices,
-    /// the other user the rest; own work's reading follows the recorded pattern at that share.
-    /// Returns, per own interval, the duty sent and own work's share.
-    fn saturating_loop(mode: ContentionMode, own_contexts: u64, intervals: u64) -> Vec<(u64, u64)> {
+    /// runs `contexts(i)` contexts at the duty its last decision sent and holds duty × its slices,
+    /// the other user the rest; own work's reading swings as the recorded pattern does around that
+    /// share. Returns, per own interval, the duty sent, own work's share and whether a window ran.
+    fn saturating_loop(
+        mode: ContentionMode,
+        contexts: &dyn Fn(u64) -> u64,
+        intervals: u64,
+    ) -> Vec<(u64, u64, bool)> {
         let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
         let mut now = 0;
@@ -5927,13 +5931,14 @@ mod gpu_demand {
         let mean = SATURATING_FULL_DUTY.iter().sum::<u64>() as i64 / 60;
         let (mut duty, mut out) = (1000u64, vec![]);
         for i in 0..intervals {
-            let share = duty * own_contexts / (own_contexts + 1);
+            let k = contexts(i);
+            let share = duty * k / (k + 1);
             let swing = (SATURATING_FULL_DUTY[(i % 60) as usize] as i64 - mean) / 2;
             let own = (share as i64 + swing).clamp(0, 990) as u64;
             let snap = interval(Some(own), 990 - own, 61 + i);
             let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
             duty = cap_of(&decision);
-            out.push((duty, share));
+            out.push((duty, share, record_of(&decision).window));
             now += INTERVAL;
         }
         out
@@ -5945,8 +5950,8 @@ mod gpu_demand {
     #[test]
     fn one_own_context_beside_a_saturating_user_keeps_its_slice() {
         for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
-            let run = saturating_loop(mode, 1, 200);
-            for (i, (duty, own)) in run.iter().enumerate().skip(20) {
+            let run = saturating_loop(mode, &|_| 1, 200);
+            for (i, (duty, own, _)) in run.iter().enumerate().skip(20) {
                 assert!(*duty >= 950, "{mode:?} interval {i}: duty {duty}");
                 assert!(
                     own.abs_diff(500) <= 30,
@@ -5960,11 +5965,95 @@ mod gpu_demand {
     /// fair share, 500, then needs a duty near 0.75, and own work settles at 500 (FR-021, Q20).
     #[test]
     fn two_own_contexts_settle_at_the_fair_share() {
-        let run = saturating_loop(ContentionMode::Neutral, 2, 300);
+        let run = saturating_loop(ContentionMode::Neutral, &|_| 2, 300);
         let late = &run[100..];
-        let duty = median(late.iter().map(|(duty, _)| *duty).collect());
-        let own = median(late.iter().map(|(_, own)| *own).collect());
+        let duty = median(late.iter().map(|(duty, _, _)| *duty).collect());
+        let own = median(late.iter().map(|(_, own, _)| *own).collect());
         assert!((700..=800).contains(&duty), "duty {duty}");
         assert!(own.abs_diff(500) <= 30, "own work holds {own}");
+    }
+
+    /// 039's light loop (FR-021, Q20): beside a light user own work holds the device less that
+    /// user's slices at full duty, so a cap at capacity less the estimate and the margin leaves a
+    /// duty near 1, where a duty of target ÷ 1000 left about 0.81.
+    #[test]
+    fn a_light_user_leaves_the_duty_near_full() {
+        let light = |i: u64, capped: bool| {
+            if capped {
+                BESIDE_CAPS[(i % 60) as usize]
+            } else {
+                BESIDE_FULL_DUTY[(i % 60) as usize]
+            }
+        };
+        let (_, decisions) = loop_decisions(ContentionMode::Performance, None, 600, &light);
+        let duties: Vec<u64> = decisions[20..].iter().map(cap_of).collect();
+        assert!(
+            median(duties.clone()) >= 970,
+            "duty median {}",
+            median(duties.clone())
+        );
+        let low = *duties.iter().min().unwrap();
+        assert!(low >= 950, "duty fell to {low}");
+    }
+
+    /// Across the two-decision rule and the windows the duty settles (FR-021, Q20): with two own
+    /// contexts beside a saturating user in Performance, every duty outside a window stays within
+    /// 30 of their median.
+    #[test]
+    fn the_duty_settles_without_oscillating() {
+        let run = saturating_loop(ContentionMode::Performance, &|_| 2, 400);
+        let settled: Vec<u64> = run[100..]
+            .iter()
+            .filter(|(_, _, window)| !window)
+            .map(|(duty, _, _)| *duty)
+            .collect();
+        let middle = median(settled.clone());
+        let far = settled
+            .iter()
+            .filter(|duty| duty.abs_diff(middle) > 30)
+            .count();
+        assert_eq!(
+            far, 0,
+            "{far} duties more than 30 from {middle}: {settled:?}"
+        );
+    }
+
+    /// A window that measures a changed own share updates the duty within that window (FR-021,
+    /// Q20): in Performance own work drops from three contexts to one while capped, so its share
+    /// falls from 750 to 500 and the other user's rises; the window restarts both, and the fair
+    /// share then needs a duty near 1, where the old share would give 667.
+    #[test]
+    fn a_window_that_changes_own_share_updates_the_duty() {
+        const DROP: u64 = 120;
+        let run = saturating_loop(
+            ContentionMode::Performance,
+            &|i| if i < DROP { 3 } else { 1 },
+            300,
+        );
+        let before = median(
+            run[60..DROP as usize]
+                .iter()
+                .map(|(duty, _, _)| *duty)
+                .collect(),
+        );
+        assert!(
+            before < 1000,
+            "own work is not capped before the drop: {before}"
+        );
+        let window = (DROP as usize..run.len())
+            .find(|&i| run[i].2)
+            .expect("no window after the drop");
+        let after = window + 7;
+        assert!(after < run.len());
+        assert!(
+            run[after].0 >= 950,
+            "the duty after the window is {}",
+            run[after].0
+        );
+        assert!(
+            run[after].1.abs_diff(500) <= 30,
+            "own work holds {}",
+            run[after].1
+        );
     }
 }
