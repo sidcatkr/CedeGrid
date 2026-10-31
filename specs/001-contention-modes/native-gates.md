@@ -520,6 +520,30 @@ and Neutral, and about 0.5 beside the saturating one; per managed window, how ma
 measured alone, over the last 4, or unknown, and whether the replay equals the recorded reading;
 if the windows stay unknown at their start, how many intervals `quiet_window_intervals` holds.
 
+## Item 037: the light-user diagnostic and T368's Neutral saturating case
+
+Runs once on the authorized test host after `037.done`, with the user's typed approval in the
+session, under the same host rules. The harness is `batch-035`'s with item 037's changes: run 5
+waits for each probe's `result.json`, up to the probe's length after its `ready.json`, and moves
+later windows by any delay; the leftover check also names the probe.
+
+```sh
+bash runs-037.sh <commit> <second account uid> diag t368ns
+# diag: the second account's light load (200 multiplies a second) beside the GPU probe run
+# unmanaged at a fixed duty of 100%, 70%, 40%, 0% (that user alone) and 100% again, 60 s each,
+# with an agent recording every interval and no managed run. The probe sets its duty itself:
+"$py" tools/pressure_probe.py --mode gpu --seconds 60 --cpu <scope CPU> --output <dir> --duty 0.7 --period-ms 500
+# t368ns: T368's Neutral saturating case, as under "Item 036".
+```
+
+Record per duty level: the probe's measured duty (`busy_seconds` over `elapsed_seconds`) and
+throughput; the light user's mean per-interval reading and its samples' `sm_util`; the device's
+utilization; and the light user's request rate and p50 and p99 latency. The 500 ms period is
+CedeGrid's own duty-cycle period (the monitor interval), so the probe repeats the on and off
+pattern own work had under T368's caps; it is 3 of the device's samples. If the light user's
+reading rises with own duty while its request rate stays flat, the extra reading is time-slice
+inflation, not demand.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

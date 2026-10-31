@@ -178,6 +178,26 @@ class GateRunnerTests(unittest.TestCase):
             clock[0]=1.
             self.assertTrue(pressure_probe.checker(pressure_probe.NoContext(),Path(temporary),clock=lambda:clock[0])())
 
+    def test_a_duty_probe_is_busy_for_its_duty_of_each_period(self):
+        import argparse,pressure_probe
+        pause=pressure_probe.duty_pause
+        self.assertEqual(pause(.15,0.,1.,.2),(0.,0.),'a full duty never idles')
+        self.assertEqual(pause(0.,0.,.4,.2),(0.,0.))
+        self.assertEqual(pause(.079,0.,.4,.2),(0.,0.))
+        for now,idle in [(.081,.119),(.199,.001)]:
+            seconds,phase=pause(now,0.,.4,.2)
+            self.assertAlmostEqual(seconds,idle);self.assertAlmostEqual(phase,.2)
+        self.assertEqual(pause(.21,.2,.4,.2),(0.,.2))
+        seconds,phase=pause(.65,0.,.4,.2)
+        self.assertEqual(seconds,0.);self.assertAlmostEqual(phase,.6,msg='a late unit starts the period it falls in')
+        for duty,period_ms in [(0.,200),(1.5,200),(.5,0),(.5,20000)]:
+            with self.assertRaises(ValueError):
+                pressure_probe.run(argparse.Namespace(mode='gpu',seconds=1.,cpu=0,output='unused',duty=duty,period_ms=period_ms))
+        usage=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_probe.py'),'--help'],
+            capture_output=True,text=True,check=True).stdout
+        for option in ['--duty','--period-ms']:
+            self.assertIn(option,usage)
+
     def test_the_own_efficiency_profile_uses_the_defaults_outside_the_probes_scope(self):
         node={'node_mode':'guaranteed','cpu':{'reserve_physical_cores':1,'nice':0},
             'gpu':{'scale_up_cooldown_ms':30000},'contention':{'default_mode':'neutral'}}

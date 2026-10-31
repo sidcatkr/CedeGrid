@@ -29,9 +29,20 @@ def checker(context,output,clock=time.monotonic):
     return check
 
 
+def duty_pause(now,phase,duty,period):
+    """Seconds to idle before the next unit, and the period's start: at a duty below 1 the
+    probe is busy for duty x period at the start of each period and idles for the rest."""
+    if duty>=1:return 0.,phase
+    if now>=phase+period:phase+=period*((now-phase)//period)
+    if now<phase+duty*period:return 0.,phase
+    return phase+period-now,phase+period
+
+
 def run(args):
     if args.mode not in {'cpu','gpu'} or not 0<args.seconds<=60:
         raise ValueError('explicit CPU/GPU probe must finish within60s')
+    if not 0<args.duty<=1 or not 0<args.period_ms<=10000:
+        raise ValueError('probe duty must be in (0, 1] and its period in (0, 10] s')
     output=inside_home(args.output);output.mkdir(parents=True,exist_ok=False)
     os.sched_setaffinity(0,{args.cpu})
     context=NoContext()
@@ -51,6 +62,7 @@ def run(args):
         gpu=Nvml(os.environ['CUDA_VISIBLE_DEVICES'])
     atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic()})
     deadline=time.monotonic()+args.seconds;started=time.monotonic();units=0;drained=False;next_guard=0
+    period=args.period_ms/1000;phase=started;busy=0.
     while time.monotonic()<deadline:
         if stopped():
             drained=True;break
@@ -62,6 +74,10 @@ def run(args):
                 reading=gpu.sample(True)
                 if reading['own_memory_bytes']>1024**3 or reading['free_bytes']<4*1024**3:raise RuntimeError('probe GPU budget/reserve guard failed')
             next_guard=time.monotonic()+.5
+        idle,phase=duty_pause(time.monotonic(),phase,args.duty,period)
+        if idle:
+            # Idle in steps no longer than the drain check, so a duty probe drains as fast.
+            time.sleep(min(idle,CHECK_SECONDS));continue
         began=time.monotonic()
         if args.mode=='cpu':
             hashlib.pbkdf2_hmac('sha256',b'cedegrid-matched-probe',b'fixed-seed',1500)
@@ -70,10 +86,10 @@ def run(args):
             time.sleep(time.monotonic()-began)
         else:
             torch.mm(a,b,out=c);torch.cuda.synchronize()
-        units+=1
+        units+=1;busy+=time.monotonic()-began
     result={'mode':args.mode,'completed_units':units,'elapsed_seconds':time.monotonic()-started,
         'drained':drained,'finished_monotonic':time.monotonic(),'managed':not isinstance(context,NoContext),
-        'check_seconds':CHECK_SECONDS}
+        'check_seconds':CHECK_SECONDS,'duty':args.duty,'period_seconds':period,'busy_seconds':busy}
     atomic_json(output/'result.json',result)
     context.complete(result)
     if gpu is not None:gpu.close()
@@ -85,4 +101,6 @@ if __name__=='__main__':
     parser.add_argument('--mode',choices=['cpu','gpu'],required=True)
     parser.add_argument('--seconds',type=float,required=True);parser.add_argument('--cpu',type=int,required=True)
     parser.add_argument('--output',required=True)
+    parser.add_argument('--duty',type=float,default=1.,help='busy fraction of each period (default 1)')
+    parser.add_argument('--period-ms',type=float,default=500.,help="duty period in ms (default 500, the agent's duty-cycle period)")
     print(json.dumps(run(parser.parse_args())))
