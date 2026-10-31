@@ -462,3 +462,18 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   `[timestamp_us, sm_util]`, at most 32 per interval) and `counted_us`. Persisted with each
   observation; not on the wire.
 
+
+## Item 039 additions
+
+- `ResourceStatus.gpu_demand` (optional, GPU compute only): `uncapped` (the interval ran with no
+  cap or pause sent to own work on the device by the decision that set it or the one before, or
+  with no own allocation there), `fed` (it fed the estimate), `estimate` (the external total
+  averaged over the uncapped intervals kept, absent before the first), `intervals` (how many, at
+  most 60), `since_uncapped_ms` (the time since the last uncapped interval), `window` (a
+  re-measure window is open), and `source` (`estimate`, `interval`, or `larger` for Yield First:
+  which amount set the target). Persisted with each decision; the contention report does not carry
+  it, so not on the wire.
+- Policy state (not persisted; an agent restart loses it): per device, the last 60 uncapped
+  intervals' amounts (the external total and each principal UID's amount), whether the last two
+  decisions sent a cap or pause to own work there, the external PID list, the time of the last
+  uncapped interval, and an open window's progress.

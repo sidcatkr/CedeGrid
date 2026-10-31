@@ -877,3 +877,38 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: a longer window (slower to see a real change); lowering the tolerance's bar
   (hides real disagreement).
 
+## R48. GPU demand from uncapped intervals (item 039)
+
+- **Decision**: in Neutral, Performance and Aggressive, external GPU compute demand is the average
+  of the amounts measured in the last 60 intervals in which own work ran uncapped on the device. An
+  interval is uncapped when neither the decision that set it nor the one before sent a cap or
+  pause to own work there. While own work is held back by GPU compute caps only, a window of 6
+  decisions lifts them every 30 s; a window whose mean differs from the estimate by 200 or more
+  restarts it. Yield First takes the larger of the interval's amount and the estimate.
+- **Rationale**: at `c52ba5c` a light user at a constant 200 requests a second read 158 m alone,
+  77–130 m beside own work at full duty and 251–264 m beside own work at 70% and 40%, with its p99
+  rising from 0.88 to 1.06–1.07 ms: the reading follows where the sampler caught its context, and
+  the caps that the reading causes raise it.
+  - **N**: beside full duty the light user is sampled in only 28–53% of intervals, at 33% or 66%.
+    Over 800 full-duty intervals (038's two runs and 036's unmanaged windows), the mean of N
+    consecutive intervals has an sd of 56 m at 10, 37 m at 20, 27 m at 40 and 23 m at 60 (90% of
+    60-interval means within 27 m); 60 brings the error near Performance's 20 m margin.
+  - **The window**: 5-interval means reach 300 m in 1.6% of the light user's windows beside full
+    duty and in 82% of a saturating user's, so a rise is seen at the first window 82% of the time
+    and within two windows 97% of the time, while a light user restarts the estimate about once in
+    60 windows and the next window corrects it. 6 decisions every 30 s keep own work uncapped 3 s
+    in 30, 10% of the capped time. During the window the time-slicer still gives the other user its
+    slices, so it loses little.
+  - **Two decisions**: a supervisor applies a changed duty at its next phase, up to one duty period
+    (one interval) later, so the interval after the first uncapped decision can still hold a gap.
+  - **Yield First's larger amount**: a sparse interval can read the other user at 0 while the
+    estimate is above it; the larger keeps Yield First's target at or below Neutral's (FR-065)
+    and never yields less than before.
+- **Alternatives**: reading demand from own work's off phases (a sample spans about 167 ms and
+  cannot be split at a phase edge); a per-host inflation factor (no single factor fits: beside full
+  duty the reading is below alone, beside gaps above); uncapped windows in Yield First (that mode
+  puts the other user first and its over-yield is the loss it allows).
+- **What it leaves**: on a time-sliced device at full duty the device reads about 99% busy, so
+  Performance's 2% margin can still leave own work's target a little below its usage, and a GPU
+  cap is a duty of target ÷ 1000. The replays and T368 measure what that costs.
+

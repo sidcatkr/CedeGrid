@@ -1443,6 +1443,68 @@ stored. Telemetry stays read-only; the policy is untouched.
 - VI, VII: tests first; `compute_sampling` changes shape before any release, and stored rows are
   returned as stored. Pass.
 
+## Item 039: GPU demand from uncapped intervals (2026-11-01)
+
+Spec Session 2026-11-01 Q19 (FR-021, FR-022), answering the 038 run report's Decisions 1 and 2.
+The diagnostic at `c52ba5c` showed a light user, at a constant 200 requests a second, reading 158 m
+alone, 77–130 m beside own work at full duty and 251–264 m beside own work at 70% and 40% duty: on
+a time-sliced device own work's gaps raise another user's reading, and the caps that follow make
+the gaps.
+
+**Technical Context**: Rust 1.88, no new dependency. No wire or SDK change: the estimate's record is
+a new field of the decision's per-resource status, which the contention report
+(`src/agent/report.rs`) does not copy; it is persisted with each decision. Telemetry is untouched;
+the change is in the pure policy.
+
+1. **State** (`src/policy.rs`): per device, a `GpuDemand` in the `PolicyEngine`: the amounts of the
+   last 60 uncapped intervals (the external total and each principal UID's amount), whether the
+   last two decisions sent a cap or pause to own work on the device, the external PID list at the
+   last interval, the time of the last uncapped interval, and an open window's progress.
+2. **The estimate** (`src/policy/measure.rs`): an interval is uncapped when neither the decision
+   that set it nor the one before it sent a Cap or Pause, on CPU or on that device's GPU compute,
+   to an allocation running on the device, or when no allocation runs there. A measured uncapped
+   interval feeds its amounts; an interval of unknown amount feeds nothing. A changed external PID
+   list clears the estimate. `compute_budget_for` builds Neutral's, Performance's and Aggressive's
+   view from the estimate (per principal through `principals`' usage closure, the total from the
+   averaged totals), and Yield First's target from the larger of the interval's amount and the
+   estimate, so FR-065 holds. With no uncapped interval since the agent started, the interval's
+   amount is used, as before.
+3. **The window** (`src/policy/ladder.rs`): when every running allocation on the device runs in
+   Neutral, Performance or Aggressive, at least one holds a GPU compute cap, none holds a CPU step
+   of cap or more or a GPU pause, and the last uncapped interval is 30 s old, a window opens for 6
+   decisions. During it the device's GPU compute steps hold as they are and their actions are left
+   out, so each supervisor lifts the duty and the cap returns unchanged after the window. Its 5
+   uncapped intervals (the first is not, by the two-decision rule) feed the estimate; if their mean
+   differs from the estimate before the window by 200 or more, the estimate restarts from them.
+4. **The record** (`src/model.rs`): `ResourceStatus.gpu_demand` on GPU compute: whether the
+   interval was uncapped and fed the estimate, the estimate (the external total), its interval
+   count, the time since the last uncapped interval, whether a window is open, and which amount set
+   the target (the estimate, the interval's amount, or for Yield First the larger).
+5. **Tests first** (`tests/contention.rs`): the loop from T368's Performance light trace (a cap, a
+   higher reading, a deeper cap) fails on today's code and holds own work's target near capacity
+   less the estimate after the fix; a light user turning saturating while own work is capped is
+   seen at the next window and the target falls to the fair share; the edges (no uncapped interval
+   yet, own work idle on the device, a PID that leaves, a new policy engine, Yield First's targets
+   pinned on the same fixtures). Replays through the policy of 036's Performance and Neutral light
+   runs and 038's Neutral saturating run report the targets with the estimate. The decision
+   snapshots are compared with the code at `15aa96e`; those with a GPU compute status gain the
+   record, and those whose target changes are listed.
+6. **Afterwards**: the full suites, the macOS serial suite and the Docker Linux check; T368 on the
+   test host waits for the user's typed approval.
+
+**Constitution Check (7.0.0)**:
+- II: Performance and Aggressive no longer give own GPU work away to a reading that own work's gaps
+  inflate; the other user stays at min(demand, fair share), its demand read where own work ran
+  uncapped, and a rise is seen within one or two windows, while the time-slicer keeps giving it
+  its slices meanwhile. Pass.
+- III: an amount of unknown activity keeps its path and feeds nothing; with no uncapped interval
+  yet the interval's amount is used, as before; a new external process restarts the estimate.
+  Pass.
+- IV: the estimate and the windows live in the policy's own state, from the ladder it already
+  keeps; telemetry stays read-only. Pass.
+- VI: tests first. FR-065: Yield First takes the larger of the interval's amount and the estimate,
+  so its target stays at or below Neutral's. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
