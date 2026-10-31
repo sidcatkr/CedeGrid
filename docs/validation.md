@@ -318,6 +318,16 @@ host rules.
 On this driver the per-process samples come once per process per query, at the device's sample
 times, so each process's period can only be read across intervals.
 
+### Rerun after item 035
+
+Run on 2026-10-31 on the same test host at `113067a` (the code of `5c49ee2`), with the return
+harness ending its own run before stopping its agent and no test process of either account left
+before or after the run. Run 5 waits for item 035's GPU decision.
+
+| Run | Values | Result |
+|---|---|---|
+| T396, run 7's return in Yield First beside a 30 s one-core contender, 13 tasks admitted | own work at the contended target after 1 interval; after the contender's last usage the target is back in 2.5 s; at the quiet count, 2.5 s after it, every held cap rose in one move and own usage was at 97.96% of its level before 0.5 s later and at 98% in 3.5 s (9.0 s in the batch); 273 pause samples, no drain | one move pass; 3.5 s, one interval over the 3 s bound, of which the quiet count is 2.5 s |
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
