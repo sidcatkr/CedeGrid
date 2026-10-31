@@ -42,6 +42,8 @@ pub struct Collector {
     physical_cores: Option<u32>,
     gpu: GpuCollector,
     gpu_cursors: BTreeMap<String, (u64, Instant)>,
+    /// Each device's per-process sample state across intervals (FR-021, R46).
+    gpu_samples: BTreeMap<String, GpuSampleState>,
     gpu_sample_max_age: Duration,
     gpu_config: crate::config::GpuConfig,
     platform_capabilities: BTreeMap<String, Capability>,
@@ -260,6 +262,7 @@ impl Collector {
             physical_cores,
             gpu: GpuCollector::Uninitialized,
             gpu_cursors: BTreeMap::new(),
+            gpu_samples: BTreeMap::new(),
             gpu_sample_max_age: Duration::from_millis(
                 crate::config::Config::default().gpu_sample_max_age_ms(),
             ),
@@ -849,8 +852,17 @@ impl Collector {
                     mps,
                     self.attribution_tolerance_percent,
                     &background,
+                    self.gpu_samples.entry(uuid.clone()).or_default(),
                 ),
             };
+            // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
+            if let (Some(previous), Ok(fresh)) = (activity_baseline, &samples) {
+                self.gpu_samples.entry(uuid.clone()).or_default().remember(
+                    previous,
+                    fresh,
+                    listed.as_deref(),
+                );
+            }
             if sets_memory_baseline(
                 own_only,
                 queries_ok,
@@ -1368,7 +1380,8 @@ mod tests {
                 Some(63.into()),
                 false,
                 15,
-                &background
+                &background,
+                &mut GpuSampleState::default()
             )
             .0,
             ComputeAmount::Measured {
@@ -1390,6 +1403,7 @@ mod tests {
             false,
             15,
             &background,
+            &mut GpuSampleState::default(),
         );
         assert_eq!(
             amount,
@@ -1415,10 +1429,183 @@ mod tests {
         }
     }
 
-    /// The 033 batch's shape (FR-021, R43): the device is sampled about 3 times as often as each
-    /// process, so dividing by the device's count read every share at a third. Each process's
-    /// samples count against the slots of its own sampling period instead; with no process
-    /// holding 2 samples in the window the device's count stays, with today's reasons.
+    /// Consecutive 500 ms intervals as the 034 rerun recorded them: the device sampled 3 times an
+    /// interval, each process once, the cursor following the newest per-process sample.
+    struct Intervals {
+        state: GpuSampleState,
+        cursor: u64,
+    }
+
+    impl Intervals {
+        const W: u64 = 500_000;
+        const PERIOD: u64 = 166_667;
+        fn new() -> Self {
+            Self {
+                state: GpuSampleState::default(),
+                cursor: 1_000_000,
+            }
+        }
+        /// One interval: `samples` are (PID, device periods before the window's end, sm_util),
+        /// `listed` the external PIDs listed, 7 being own.
+        fn next(
+            &mut self,
+            samples: &[(u32, u64, u32)],
+            device_percent: u32,
+            listed: &[u32],
+        ) -> ComputeAmount {
+            let end = self.cursor + Self::W;
+            let device: Vec<_> = (1..=3)
+                .map(|i| device_sample(self.cursor + i * Self::W / 3, device_percent))
+                .collect();
+            let fresh: Vec<_> = samples
+                .iter()
+                .map(|(pid, before, sm)| gpu_sample(*pid, end - before * Self::PERIOD, *sm))
+                .collect();
+            let (amount, _) = measure_compute(
+                Some(listed),
+                &BTreeSet::from([7]),
+                Some(self.cursor),
+                &Ok(fresh.clone()),
+                device_utilization(&Ok(device), Some(self.cursor), Some(device_percent)),
+                false,
+                15,
+                &BTreeSet::new(),
+                &mut self.state,
+            );
+            let all: Vec<u32> = listed.iter().copied().chain([7]).collect();
+            self.state.remember(self.cursor, &fresh, Some(&all));
+            self.cursor = fresh
+                .iter()
+                .map(|s| s.timestamp)
+                .max()
+                .unwrap_or(self.cursor)
+                .max(self.cursor);
+            amount
+        }
+    }
+
+    /// Report 035's shape (FR-021, Q17, R46): the other user's process sampled at the window's
+    /// end, the duty-capped own probe 1 or 2 device periods before it, once each per interval.
+    /// Each sample counts its whole span since its process's previous one, at most one window, so
+    /// after the first interval, whose probe sample covers only from the window's start, both
+    /// read in full: 5% and 50% against the device's 55%. Dividing by the device's 3 samples read
+    /// 2% and 17%.
+    #[test]
+    fn a_gpu_sample_counts_its_span_since_its_previous_sample() {
+        for before in [1, 2] {
+            let mut run = Intervals::new();
+            let first = run.next(&[(42, 0, 5), (7, before, 50)], 55, &[42]);
+            assert!(
+                !matches!(first, ComputeAmount::Measured { own: 500, .. }),
+                "the first interval cannot know the probe's span: {first:?}"
+            );
+            for _ in 0..3 {
+                assert_eq!(
+                    run.next(&[(42, 0, 5), (7, before, 50)], 55, &[42]),
+                    ComputeAmount::Measured {
+                        external: 50,
+                        own: 500
+                    },
+                    "{before} periods before the end"
+                );
+            }
+        }
+    }
+
+    /// The span's edges (FR-021, Q17): a process idle for 3 intervals and then busy counts at most
+    /// one window; one first seen mid-run, or a PID reused after it left the device's list, covers
+    /// from the window's start; own work stopped after half the window counts half; an agent
+    /// restart loses the timestamps and costs one interval.
+    #[test]
+    fn a_gpu_sample_span_starts_from_what_is_known() {
+        let steady = [(42, 0, 10), (7, 1, 40)];
+        let mut run = Intervals::new();
+        run.next(&steady, 50, &[42, 43]);
+        run.next(&steady, 50, &[42, 43]);
+        // 43 listed but idle for 3 intervals, then busy at 30%: one window's worth, not four.
+        for _ in 0..3 {
+            run.next(&steady, 50, &[42, 43]);
+        }
+        assert_eq!(
+            run.next(&[(42, 0, 10), (7, 1, 40), (43, 1, 30)], 80, &[42, 43]),
+            ComputeAmount::Measured {
+                external: 400,
+                own: 400
+            }
+        );
+        // 44 first seen 1 period before the end: 2 of 3 periods of the window, 20 of its 30%.
+        assert_eq!(
+            run.next(&[(42, 0, 10), (7, 1, 40), (44, 1, 30)], 70, &[42, 44]),
+            ComputeAmount::Measured {
+                external: 300,
+                own: 400
+            }
+        );
+        // 44 leaves the list, and a new process takes its PID: it starts from the window again.
+        run.next(&steady, 50, &[42]);
+        assert_eq!(
+            run.next(&[(42, 0, 10), (7, 1, 40), (44, 1, 30)], 70, &[42, 44]),
+            ComputeAmount::Measured {
+                external: 300,
+                own: 400
+            }
+        );
+        // Own work sampled half a window after its previous sample, then stopped: half its 40%.
+        let mut half = Intervals::new();
+        half.next(&[(42, 0, 10), (7, 0, 40)], 50, &[42]);
+        let end = half.cursor + Intervals::W;
+        let samples = vec![
+            gpu_sample(42, end, 10),
+            gpu_sample(7, end - Intervals::W / 2, 40),
+        ];
+        let device: Vec<_> = (1..=3)
+            .map(|i| device_sample(half.cursor + i * Intervals::W / 3, 30))
+            .collect();
+        assert_eq!(
+            measure_compute(
+                Some(&[42]),
+                &BTreeSet::from([7]),
+                Some(half.cursor),
+                &Ok(samples),
+                device_utilization(&Ok(device), Some(half.cursor), Some(30)),
+                false,
+                15,
+                &BTreeSet::new(),
+                &mut half.state,
+            )
+            .0,
+            ComputeAmount::Measured {
+                external: 100,
+                own: 200
+            }
+        );
+        // An agent restart forgets every timestamp: one interval reads the probe from the window's
+        // start, the next in full again.
+        let mut restart = Intervals::new();
+        for _ in 0..2 {
+            restart.next(&steady, 50, &[42]);
+        }
+        restart.state = GpuSampleState::default();
+        assert_ne!(
+            restart.next(&steady, 50, &[42]),
+            ComputeAmount::Measured {
+                external: 100,
+                own: 400
+            }
+        );
+        assert_eq!(
+            restart.next(&steady, 50, &[42]),
+            ComputeAmount::Measured {
+                external: 100,
+                own: 400
+            }
+        );
+    }
+
+    /// The 033 batch's shape (FR-021, R43, R46): the device is sampled about 3 times as often as
+    /// each process, so dividing by the device's count read every share at a third. Each sample
+    /// now counts its span since its process's previous one; with no previous sample the span
+    /// starts at the window's start, so a single sample reads in full.
     #[test]
     fn gpu_compute_counts_against_the_per_process_period() {
         let own = BTreeSet::from([7]);
@@ -1443,6 +1630,7 @@ mod tests {
                 false,
                 15,
                 &none,
+                &mut GpuSampleState::default(),
             )
         };
         // Own and external busy.
@@ -1479,12 +1667,12 @@ mod tests {
                 own: 200
             }
         );
-        // A process seen once counts for one slot of three.
+        // A process seen once covers from the window's start: 400 of 600 µs of its 30%.
         let once = [every(7, 60), vec![gpu_sample(43, 500, 30)]].concat();
         assert_eq!(
-            measure(&[43], once, 70).0,
+            measure(&[43], once, 80).0,
             ComputeAmount::Measured {
-                external: 100,
+                external: 200,
                 own: 600
             }
         );
@@ -1499,6 +1687,7 @@ mod tests {
                 false,
                 15,
                 &none,
+                &mut GpuSampleState::default(),
             )
             .0
         };
@@ -1515,13 +1704,14 @@ mod tests {
                 "summed per-process utilization 0% differs from device utilization 40% by more than 15 points".into()
             )
         );
-        // No process with 2 samples: the device's count stays the slots, with today's reason.
+        // One sample each, at the window's end: each covers the whole window.
         let single = vec![gpu_sample(7, 700, 60), gpu_sample(42, 700, 30)];
         assert_eq!(
             measure(&[42], single, 90).0,
-            ComputeAmount::Unknown(
-                "summed per-process utilization 10% differs from device utilization 90% by more than 15 points".into()
-            )
+            ComputeAmount::Measured {
+                external: 300,
+                own: 600
+            }
         );
     }
 
@@ -1621,6 +1811,7 @@ mod tests {
             false,
             15,
             &BTreeSet::new(),
+            &mut GpuSampleState::default(),
         );
         assert_eq!(
             amount,
@@ -1641,6 +1832,7 @@ mod tests {
                 false,
                 15,
                 &BTreeSet::new(),
+                &mut GpuSampleState::default()
             )
             .0,
             ComputeAmount::Measured {
@@ -1672,6 +1864,7 @@ mod tests {
             false,
             15,
             &BTreeSet::new(),
+            &mut GpuSampleState::default(),
         );
         assert_eq!(
             amount,
@@ -1694,8 +1887,7 @@ mod tests {
                 }),
                 false,
                 15,
-                &BTreeSet::new(),
-            )
+                &BTreeSet::new(), &mut GpuSampleState::default())
             .0,
             ComputeAmount::Unknown(reason) if reason.contains("differs")
         ));
@@ -1748,6 +1940,7 @@ mod tests {
                 false,
                 15,
                 &BTreeSet::new(),
+                &mut GpuSampleState::default(),
             )
             .0
         };
@@ -1825,7 +2018,8 @@ mod tests {
                 Some(100.into()),
                 false,
                 15,
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                &mut GpuSampleState::default()
             )
             .0,
             ComputeAmount::Measured {
@@ -1848,7 +2042,8 @@ mod tests {
                 Some(100.into()),
                 false,
                 15,
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                &mut GpuSampleState::default()
             )
             .0,
             ComputeAmount::Unknown(_)
@@ -1862,13 +2057,14 @@ mod tests {
                 Some(100.into()),
                 false,
                 15,
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                &mut GpuSampleState::default()
             )
             .0,
             ComputeAmount::Unknown(_)
         ));
         assert!(matches!(
-            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100.into()), true, 15, &BTreeSet::new()).0,
+            measure_compute(Some(&[42]), &own, Some(100), &five, Some(100.into()), true, 15, &BTreeSet::new(), &mut GpuSampleState::default()).0,
             ComputeAmount::Unknown(reason) if reason.contains("MPS")
         ));
         // A PID above 100 counts as 100.

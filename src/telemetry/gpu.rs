@@ -477,6 +477,69 @@ pub(super) fn process_name(pid: u32) -> Option<String> {
     }
 }
 
+/// What one device's per-process measurement keeps between intervals (FR-021, R46): each PID's
+/// newest sample timestamp, where its next sample's span starts.
+#[derive(Debug, Clone, Default)]
+pub(super) struct GpuSampleState {
+    last: BTreeMap<u32, u64>,
+}
+
+impl GpuSampleState {
+    /// Keeps each listed PID's newest fresh sample timestamp for its next sample's span, and drops
+    /// a PID that left the device's process list.
+    pub(super) fn remember(
+        &mut self,
+        previous: u64,
+        samples: &[ProcessUtilizationSample],
+        listed: Option<&[u32]>,
+    ) {
+        for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+            let newest = self.last.entry(sample.pid).or_insert(sample.timestamp);
+            *newest = (*newest).max(sample.timestamp);
+        }
+        if let Some(listed) = listed {
+            self.last.retain(|pid, _| listed.contains(pid));
+        }
+    }
+}
+
+/// Each PID's share of the window from `previous` to the newest fresh per-process sample, in
+/// percent, rounded and capped at 100: each sample counts sm_util × min(t − p, window) ÷ window,
+/// p the process's previous sample (from `last`, else its earlier sample in this window, else the
+/// window's start). A sample covers the time since its process's previous one, so it counts its
+/// whole span, at most one window, in the window where it arrives (FR-021, R46).
+pub(super) fn span_shares(
+    previous: u64,
+    samples: &[ProcessUtilizationSample],
+    last: &BTreeMap<u32, u64>,
+) -> BTreeMap<u32, u64> {
+    let mut per_pid: BTreeMap<u32, Vec<(u64, u32)>> = BTreeMap::new();
+    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
+        per_pid
+            .entry(sample.pid)
+            .or_default()
+            .push((sample.timestamp, sample.sm_util.min(100)));
+    }
+    let Some(end) = per_pid.values().flatten().map(|(at, _)| *at).max() else {
+        return BTreeMap::new();
+    };
+    let window = u128::from(end - previous);
+    per_pid
+        .into_iter()
+        .map(|(pid, mut samples)| {
+            samples.sort_unstable();
+            let mut start = last.get(&pid).copied().unwrap_or(previous);
+            let mut weighted = 0u128;
+            for (at, sm_util) in samples {
+                weighted += u128::from(sm_util) * u128::from(at.saturating_sub(start)).min(window);
+                start = at;
+            }
+            let share = ((weighted + window / 2) / window).min(100);
+            (pid, u64::try_from(share).unwrap_or(100))
+        })
+        .collect()
+}
+
 /// Where the slots a process's summed samples count against came from (FR-021, R43).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SlotsFrom {
@@ -600,6 +663,7 @@ pub(super) fn measure_compute(
     mps: bool,
     tolerance: u8,
     background: &BTreeSet<u32>,
+    state: &mut GpuSampleState,
 ) -> (ComputeAmount, BTreeMap<u32, u64>) {
     let unknown = |reason: &str| (ComputeAmount::Unknown(reason.into()), BTreeMap::new());
     if mps {
@@ -628,18 +692,11 @@ pub(super) fn measure_compute(
             );
         }
     };
-    let mut per_pid: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
-    for sample in samples.iter().filter(|sample| sample.timestamp > previous) {
-        let (sum, count) = per_pid.entry(sample.pid).or_default();
-        *sum += u64::from(sample.sm_util.min(100));
-        *count += 1;
-    }
-    let slots = compute_slots(previous, samples, device.samples).0;
-    let sampled = per_pid.len() as u64;
+    let shares = span_shares(previous, samples, &state.last);
+    let sampled = shares.len() as u64;
     let (mut external_percent, mut own_percent, mut background_percent) = (0u64, 0u64, 0u64);
     let mut by_pid = BTreeMap::new();
-    for (pid, (sum, _)) in per_pid {
-        let share = ((sum + slots / 2) / slots).min(100);
+    for (pid, share) in shares {
         // Background contexts are neither side: their share leaves the device's time.
         if background.contains(&pid) {
             background_percent += share;
