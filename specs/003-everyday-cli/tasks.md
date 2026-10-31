@@ -276,3 +276,9 @@ per-core contention. Tests first; T039 and T040 build on T074–T078.
 1. MVP: Setup, Foundational and US1 give `cedegrid run` on the existing supervisor path.
 2. Then US2 (see and stop), then US6 (Full and Tracked with gates), each tested on its own.
 3. Then US3, US4 and US7, and finally US5.
+
+## Backlog (notes, not tasks)
+
+- `cedegrid state purge`: remove a stopped node's or coordinator's state directory together with the
+  control directory beside it (`.<name>.cedegrid-control`). Until then `docs/guarantees.md` names
+  the control directory, and removing state means removing both (feature 001, T418).
