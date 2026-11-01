@@ -473,10 +473,11 @@ pub(super) fn time_sliced(
     }
 }
 
-/// The interval's compute contexts for the time-slice rule (FR-021, Q22), with a complete
-/// process inventory: own work's verified PIDs listed, the owner's unmanaged PIDs listed, and
-/// each listed non-background PID with a positive sample newer than the cursor, with its UID.
-/// Without a fresh cursor or readable samples nothing counts as sampled.
+/// The interval's compute contexts for the time-slice rule (FR-021, Q22, Q29), with a complete
+/// process inventory: own work's verified PIDs listed, the owner's unmanaged PIDs listed, the
+/// other listed non-background PIDs with their UIDs, and each listed non-background PID with a
+/// positive sample newer than the cursor, with its UID. Without a fresh cursor or readable
+/// samples nothing counts as sampled.
 pub(super) fn compute_contexts(
     listed: Option<&[u32]>,
     own: &BTreeSet<u32>,
@@ -491,8 +492,11 @@ pub(super) fn compute_contexts(
     for pid in listed {
         if own.contains(pid) {
             contexts.own.push(*pid);
-        } else if !background.contains(pid) && owner.is_some() && uid_of(*pid) == owner {
-            contexts.owner.push(*pid);
+        } else if !background.contains(pid) {
+            match uid_of(*pid) {
+                uid if owner.is_some() && uid == owner => contexts.owner.push(*pid),
+                uid => contexts.listed.push((*pid, uid)),
+            }
         }
     }
     if let (Some(previous), Ok(samples)) = (previous, samples) {
@@ -508,6 +512,8 @@ pub(super) fn compute_contexts(
     contexts.own.dedup();
     contexts.owner.sort_unstable();
     contexts.owner.dedup();
+    contexts.listed.sort_unstable();
+    contexts.listed.dedup();
     Some(contexts)
 }
 

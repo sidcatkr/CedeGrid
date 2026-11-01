@@ -6279,7 +6279,7 @@ mod gpu_demand {
     /// gets an equal slice of the time the device is busy (FR-021, Q22).
     mod time_slice {
         use super::*;
-        use cedegrid::model::{GpuComputeContexts, TimeSliceRecord, YieldAction};
+        use cedegrid::model::{GpuComputeContexts, SliceStep, TimeSliceRecord, YieldAction};
         use std::collections::BTreeSet;
 
         const OWN_PIDS: [u32; 3] = [100, 101, 102];
@@ -7236,6 +7236,200 @@ mod gpu_demand {
                     "{mode:?}: capped again"
                 );
             }
+        }
+
+        /// With the listing known and the amounts unknown, d0 comes from the listed counts with
+        /// every listed principal slice-bound, (2 + 2) ÷ (2 × 3), and without a utilization
+        /// reading the duty never steps up; with one showing idle time it does (FR-021, Q29).
+        #[test]
+        fn unknown_amounts_take_d0_from_the_listed_principals() {
+            const SECOND_PID: u32 = 950;
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let config = mode_config(ContentionMode::Performance);
+            for utilization in [None, Some(10)] {
+                let mut engine = PolicyEngine::new();
+                let input = PolicyInput {
+                    allocations: vec![job(None)],
+                    ..PolicyInput::default()
+                };
+                let mut duties = BTreeSet::new();
+                let mut last = None;
+                for i in 0..120u64 {
+                    let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
+                    let gpu = &mut snap.gpus[0];
+                    gpu.external_compute_milli = None;
+                    gpu.own_compute_milli = None;
+                    gpu.compute_amount_unknown =
+                        Some("summed per-process utilization differs from the device".into());
+                    gpu.utilization_percent = utilization;
+                    gpu.external_process_ids.as_mut().unwrap().push(SECOND_PID);
+                    let contexts = gpu.compute_contexts.as_mut().unwrap();
+                    contexts.listed.push((SECOND_PID, Some(2002)));
+                    let decision = engine
+                        .evaluate(&config, &snap, &input, i * INTERVAL)
+                        .unwrap();
+                    assert!(!paused(&decision), "{utilization:?} interval {i}");
+                    if let Some(cap) = decision
+                        .actions
+                        .iter()
+                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
+                    {
+                        duties.insert(cap.duty);
+                    }
+                    last = Some(decision);
+                }
+                let slice = slice_of(&last.unwrap());
+                assert_eq!(slice.d0, Some(666), "{utilization:?}");
+                let uids: Vec<Option<u32>> = slice.bound.iter().map(|b| b.uid).collect();
+                assert_eq!(uids, vec![Some(PEER), Some(2002)], "{utilization:?}");
+                if utilization.is_none() {
+                    assert_eq!(duties, BTreeSet::from([Some(666)]));
+                    assert_eq!(
+                        (slice.step, slice.utilization),
+                        (Some(SliceStep::Holding), None)
+                    );
+                } else {
+                    assert!(duties.iter().any(|d| d > &Some(666)), "{duties:?}");
+                }
+            }
+        }
+
+        /// After the estimate restarts on a new external PID, its window is empty: d0 comes from
+        /// the listed counts, every listed principal bound, and a re-measure window opens at
+        /// once (FR-021, Q29).
+        #[test]
+        fn an_empty_window_after_a_restart_takes_the_listed_counts() {
+            const CHANGE: u64 = 61 + 120;
+            let renamed = |mut snap: Snapshot| {
+                let gpu = &mut snap.gpus[0];
+                if gpu.compute_sample_id.is_some_and(|sample| sample >= CHANGE) {
+                    let rename = |pid: &mut u32| {
+                        if *pid == PEER_PIDS[0] {
+                            *pid = 905;
+                        }
+                    };
+                    gpu.external_process_ids
+                        .iter_mut()
+                        .flatten()
+                        .for_each(rename);
+                    let contexts = gpu.compute_contexts.as_mut().unwrap();
+                    contexts.listed.iter_mut().for_each(|(pid, _)| rename(pid));
+                    contexts.sampled.iter_mut().for_each(|(pid, _)| rename(pid));
+                }
+                snap
+            };
+            let run = saturating_with(ContentionMode::Performance, None, &|_| 2, 1, 200, &renamed);
+            let before = slice_of(&run[118].0);
+            assert_eq!((before.external, before.d0), (Some(1), Some(750)));
+            let after = slice_of(&run[120].0);
+            assert_eq!(
+                (
+                    after.external,
+                    after.principals,
+                    after.d0,
+                    after.bound.len()
+                ),
+                (None, None, Some(750), 1),
+                "{after:?}"
+            );
+            assert!(
+                run[120..123].iter().any(|(d, _)| record_of(d).window),
+                "no window opened"
+            );
+            assert!(run[120..].iter().all(|(d, _)| !paused(d)));
+        }
+
+        /// When a device last read as time-sliced can no longer be read so, its contexts' listing
+        /// unknown with the amounts still measured, the cap is target ÷ 1000 and never a pause, own
+        /// work reading above its target; on a device never read as time-sliced the same readings
+        /// end in a pause (FR-021, Q25, Q29).
+        #[test]
+        fn an_unknown_listing_on_a_sliced_device_caps_without_a_pause() {
+            const UNKNOWN: u64 = 40;
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let config = mode_config(ContentionMode::Neutral);
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let mut pauses = vec![];
+            for last_sliced in [true, false] {
+                let mut engine = PolicyEngine::new();
+                let (mut paused_at, mut duties) = (None, BTreeSet::new());
+                for i in 0..400u64 {
+                    // The control starts with the unknown listing, never read as time-sliced.
+                    if !last_sliced && i < UNKNOWN {
+                        continue;
+                    }
+                    let mut snap = if i < UNKNOWN {
+                        sliced(Some(500), 490, i + 1, 2, 1)
+                    } else {
+                        sliced(Some(600), 390, i + 1, 2, 1)
+                    };
+                    let gpu = &mut snap.gpus[0];
+                    if i >= UNKNOWN {
+                        gpu.time_sliced = None;
+                        gpu.compute_contexts = None;
+                    }
+                    let decision = engine
+                        .evaluate(&config, &snap, &input, i * INTERVAL)
+                        .unwrap();
+                    if i < UNKNOWN {
+                        continue;
+                    }
+                    if paused(&decision) {
+                        paused_at.get_or_insert(i);
+                    }
+                    if let Some(cap) = decision
+                        .actions
+                        .iter()
+                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
+                    {
+                        duties.insert(cap.duty);
+                    }
+                }
+                if last_sliced {
+                    assert_eq!(duties, BTreeSet::from([None]), "target ÷ 1000");
+                }
+                pauses.push(paused_at);
+            }
+            assert_eq!(pauses[0], None, "a device last read as time-sliced paused");
+            assert!(pauses[1].is_some(), "the control never paused");
+        }
+
+        /// Each decision on the duty records the slice-bound principals with their readings and
+        /// thresholds, d0, the duty, the step and the utilization the step read (FR-021, Q30).
+        #[test]
+        fn the_record_states_the_slice_bound_principals_and_the_duty() {
+            let run = tick_loop(
+                ContentionMode::Performance,
+                &|_| 2,
+                &|_| vec![(PEER, 1, 1000)],
+                120,
+            );
+            let t = run[60..]
+                .iter()
+                .find(|t| slice_of(&t.decision).utilization.is_some())
+                .unwrap();
+            let slice = slice_of(&t.decision);
+            let [bound] = slice.bound.as_slice() else {
+                panic!("{slice:?}");
+            };
+            assert_eq!(
+                (bound.uid, bound.contexts, bound.threshold),
+                (Some(PEER), 1, 250)
+            );
+            assert!(bound.reading >= bound.threshold, "{bound:?}");
+            assert_eq!(
+                (slice.own, slice.external, slice.principals, slice.holds),
+                (2, Some(1), Some(1), false)
+            );
+            assert_eq!((slice.d0, slice.duty), (Some(750), Some(750)));
+            // The device is saturated, so the duty holds at d0.
+            assert_eq!(
+                (slice.step, slice.utilization),
+                (Some(SliceStep::Holding), Some(100))
+            );
         }
     }
 }

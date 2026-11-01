@@ -2320,7 +2320,7 @@ mod tests {
         let background = BTreeSet::from([30]);
         let uid_of = |pid: u32| match pid {
             10 | 11 | 20 => Some(1000),
-            21 | 22 => Some(1002),
+            21 | 22 => Some(2002),
             30 => Some(0),
             _ => None,
         };
@@ -2349,7 +2349,7 @@ mod tests {
         assert_eq!(contexts.owner, vec![20]);
         assert_eq!(
             contexts.sampled,
-            vec![(10, Some(1000)), (20, Some(1000)), (21, Some(1002))]
+            vec![(10, Some(1000)), (20, Some(1000)), (21, Some(2002))]
         );
         // An unreadable UID stays unattributed.
         let unread = ok(vec![gpu_sample(23, 150, 50)]);
@@ -2394,6 +2394,39 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The listing the time-slice duty counts while the amounts are unknown: every listed PID
+    /// that is neither own work's, the owner's nor background, with its UID where readable
+    /// (FR-021, Q29).
+    #[test]
+    fn compute_contexts_list_the_external_pids_with_their_uids() {
+        let uid_of = |pid: u32| match pid {
+            10 | 20 => Some(1000),
+            21 | 22 => Some(2002),
+            30 => Some(0),
+            _ => None,
+        };
+        let listed = [10, 20, 21, 22, 23, 30];
+        for (previous, samples) in [
+            (Some(100), Ok(vec![gpu_sample(21, 150, 33)])),
+            (None, Err(NvmlError::Unknown)),
+        ] {
+            let contexts = compute_contexts(
+                Some(&listed),
+                &BTreeSet::from([10]),
+                &BTreeSet::from([30]),
+                previous,
+                &samples,
+                uid_of,
+                Some(1000),
+            )
+            .unwrap();
+            assert_eq!(
+                contexts.listed,
+                vec![(21, Some(2002)), (22, Some(2002)), (23, None)]
+            );
+        }
     }
 
     #[test]

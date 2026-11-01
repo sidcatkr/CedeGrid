@@ -1253,7 +1253,12 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: victim.guaranteed,
                     allow_drain: false,
-                    unavailable: compute_unavailable(input, key, &victim.id, &self.no_gpu_pause),
+                    unavailable: compute_unavailable(
+                        input,
+                        key,
+                        &victim.id,
+                        self.no_gpu_pause(&victim.id, key),
+                    ),
                     excess: if contended_victim { excess } else { 0 },
                     external: frame.external,
                     measurement_known: frame.measurement_known,
@@ -1340,7 +1345,12 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: is_guaranteed(allocation),
                     allow_drain: false,
-                    unavailable: compute_unavailable(input, &frame.key, id, &self.no_gpu_pause),
+                    unavailable: compute_unavailable(
+                        input,
+                        &frame.key,
+                        id,
+                        self.no_gpu_pause(id, &frame.key),
+                    ),
                     excess: 0,
                     external: frame.external,
                     measurement_known: frame.measurement_known
@@ -1492,6 +1502,20 @@ impl<'a> Interval<'a> {
         }
     }
 
+    /// Whether a Neutral, Performance or Aggressive allocation takes no GPU compute pause: its
+    /// device was last read as time-sliced and its listing is now unknown (FR-021, Q29).
+    fn no_gpu_pause(&self, id: &str, key: &ResourceKey) -> bool {
+        let ResourceKey::GpuCompute(uuid) = key else {
+            return false;
+        };
+        self.no_gpu_pause.contains(uuid)
+            && self
+                .allocation_modes
+                .get(id)
+                .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
+                .is_some_and(|mode| *mode != ContentionMode::YieldFirst)
+    }
+
     /// Whether the ladder plans no GPU compute step for an allocation on a device: the time-slice
     /// rule holds there or the time-slice duty sets its cap, and the allocation runs in Neutral,
     /// Performance or Aggressive (FR-021, Q22, Q27).
@@ -1508,7 +1532,8 @@ impl<'a> Interval<'a> {
     /// Performance and Aggressive, on a device measured this interval and for a cap not set for
     /// unknown activity, the share target over the allocation's part of own work's uncapped share,
     /// since own work at full duty beside another busy context holds only its slices (FR-021,
-    /// Q20, R49). On the time-slice duty it is that duty (Q27). None leaves the duty at the share
+    /// Q20, R49). On the time-slice duty it is that duty (Q27), and on a device last read as
+    /// time-sliced whose listing is unknown it is none (Q29). None leaves the duty at the share
     /// target, target ÷ 1000.
     fn gpu_duty(&self, id: &str, uuid: &str, state: &StepState) -> Option<u64> {
         let yield_first = self
@@ -1525,7 +1550,11 @@ impl<'a> Interval<'a> {
             .gpu_compute_budget
             .get(uuid)
             .is_some_and(|budget| budget.own.is_some());
-        if yield_first || !measured || state.cause == YieldCause::UnknownMeasurement {
+        if yield_first
+            || !measured
+            || state.cause == YieldCause::UnknownMeasurement
+            || self.no_gpu_pause.contains(uuid)
+        {
             return None;
         }
         let share = self
@@ -1751,13 +1780,13 @@ fn applied_duty(
 }
 
 /// Steps unavailable on GPU compute: no backend lowers a GPU compute share, and
-/// a worker's resource targets carry no GPU compute amount. A device last read as
-/// time-sliced, its listing now unknown, takes no pause either (FR-021, Q29).
+/// a worker's resource targets carry no GPU compute amount; nor a pause where
+/// `no_pause` says so.
 fn compute_unavailable(
     input: &PolicyInput,
     key: &ResourceKey,
     id: &str,
-    no_pause: &BTreeSet<String>,
+    no_pause: bool,
 ) -> BTreeSet<YieldStep> {
     let mut steps = input
         .facts
@@ -1766,9 +1795,7 @@ fn compute_unavailable(
         .cloned()
         .unwrap_or_default();
     steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
-    if let ResourceKey::GpuCompute(uuid) = key
-        && no_pause.contains(uuid)
-    {
+    if no_pause {
         steps.insert(YieldStep::Pause);
     }
     steps
