@@ -598,6 +598,17 @@ back more.
   decision records which source it used (item 044).
 - Q: Does the slice-bound threshold change? → A: No, it stays 0.75 (`slice_bound_percent` 75)
   (item 044).
+- Q: How is the device's utilization read for the time-slice duty's steps? → A: The dwell's
+  readings are averaged in per mille, rounded to nearest (sum × 10 ÷ len), not floored to whole
+  percent. Utilization comes in whole percent, so spare time under one reading's quantum (10 per
+  mille) cannot be told from the dips as phases switch: in every mode the duty rises only while
+  spare > max(margin, 10) and counts as saturated while spare × 2 < max(margin, 10). Performance
+  (20) and Neutral (50) keep their thresholds; with a zero margin CedeGrid takes device time only
+  beyond 1% averaged spare, the reading's resolution. The step stays 5% (item 045).
+- Q: Which process set restarts the external estimate? → A: The device's external PIDs with the
+  background contexts and the owner's unmanaged processes left out, since the owner's usage is
+  already out of the estimate (Q23). The owner's unmanaged processes reach the device's external
+  PIDs on Linux, so their coming and going no longer restarts the average (item 045).
 
 ## Terms
 
@@ -1259,12 +1270,15 @@ node reports with the expected per-resource values at each step.
     5%, Aggressive 0), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
     time the slice-bound principals want, less the margin the mode's target holds; principals that
     are not slice-bound keep their slices.
-  - From the device's own utilization alone, averaged over the step dwell and never from
-    per-process readings, the duty rises by `contention.gpu_compute.slice_step_percent` (default
-    5) points toward 1 while the device's spare time exceeds the mode's margin (Aggressive 0), at
-    most once per the mode's scale-up interval and the step dwell, whichever is longer. It falls by
-    a step toward d0 once per step dwell while the spare time is below half that margin (in
-    Aggressive, while the device is fully busy), and holds between the two. So it settles within
+  - From the device's own utilization alone, averaged over the step dwell in per mille, rounded
+    to nearest, and never from per-process readings, the duty rises by
+    `contention.gpu_compute.slice_step_percent` (default 5) points toward 1 while the device's
+    spare time exceeds the mode's margin or one reading's quantum, 10 per mille, whichever is
+    larger, at most once per the mode's scale-up interval and the step dwell, whichever is longer.
+    It falls by a step toward d0 once per step dwell while the spare time is below half of that
+    larger value, and holds between the two. Spare time under one reading's quantum cannot be told
+    from the dips as own work's phases switch, so with a zero margin the duty rises only beyond
+    1% averaged spare. So it settles within
     one step, and a duty that reaches 1 stays a cap at full duty rather than being lifted and set
     again.
   - A principal that turns slice-bound returns own work to d0 within 33 s, the estimate's next
@@ -1342,7 +1356,8 @@ node reports with the expected per-resource values at each step.
   window of 6 intervals, at most 10% of the capped time; a window whose mean differs from the average
   before it by 200 thousandths or more restarts the average from it. While a CPU step of cap or
   more, or a GPU pause, holds own work on the device no window is taken. A change in the device's
-  external PIDs, background contexts left out, restarts the average, and an agent restart loses it. Yield First uses the
+  external PIDs, background contexts and the owner's unmanaged processes left out, restarts the
+  average, and an agent restart loses it. Yield First uses the
   interval's amount, or the average where that is higher, and takes no window. The decision record
   states per device whether the interval was uncapped and fed the estimate, the estimate, its
   interval count and the time since the last uncapped interval. The node report's held-back breakdown
