@@ -1757,6 +1757,8 @@ wire, SDK or config change.
      current on-phase, never resumes inside an off-phase, and never skips one.
    - `next_deadline` is the next switch: the end of the on-phase while running, the period's end
      while stopped.
+   - The node clock is `clock_gettime(CLOCK_MONOTONIC)` on Unix. Elsewhere, where duty cycles are
+     unavailable anyway, it falls back to a process-local monotonic anchor so the crate builds.
    - A CPU-only cycle keeps its per-allocation phase, with the CPU rate measurement unchanged.
      When CPU and GPU caps share one cycle, it follows the aligned phase at the smaller duty.
 2. **The margin at d0** (`src/policy/measure.rs`):
@@ -1788,12 +1790,17 @@ wire, SDK or config change.
      - with the margin, 480, 450 and 500 at m = 2 beside a saturating context;
      - an idle listed context doesn't count while samples are readable, and does when they aren't;
      - the light shape with an idle listed context stays uncapped.
-   - Replays of 043's six managed windows: each decision's source and d0.
+   - Replays of 043's six managed windows: each decision's source and d0. The recordings predate
+     `samples_readable`, so the replay sets it from the recorded `compute_sampling`, readable when
+     that lists processes.
    - The decision snapshots, compared with `c2ae762`.
 5. **Docs:** `docs/guarantees.md`, covering the aligned phase, the margin at d0 and the busy
    counts.
 6. **Harness (uncommitted):** an Aggressive two-process part beside the saturating user, and the
-   probes' off-phase overlap and own work's share against m × d ÷ (m + E) from the agent's records.
+   probes' off-phase overlap. No product record holds the supervisors' stop and resume times, so
+   the harness samples its own probe processes' run state from `/proc/<pid>/stat` (stopped or
+   running), read-only, about every 10 ms. From that it gives each window's off-phase overlap and
+   own work's share against m × d ÷ (m + E) at the duty held.
 7. **Afterwards:** the suites, the macOS serial suite and the Docker Linux check. Then the test-host
    runs:
    - Performance and Neutral, two probes beside the saturating user;
