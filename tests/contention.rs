@@ -6251,18 +6251,30 @@ mod gpu_demand {
             peer: usize,
             intervals: u64,
         ) -> Vec<(Decision, u64)> {
+            saturating_with(mode, None, own, peer, intervals, &|snap| snap)
+        }
+
+        /// `saturating` with the job in `job_mode` and each snapshot passed through `adjust`.
+        pub(super) fn saturating_with(
+            mode: ContentionMode,
+            job_mode: Option<ContentionMode>,
+            own: &dyn Fn(u64) -> usize,
+            peer: usize,
+            intervals: u64,
+            adjust: &dyn Fn(Snapshot) -> Snapshot,
+        ) -> Vec<(Decision, u64)> {
             let config = mode_config(mode);
             let mut engine = PolicyEngine::new();
             let mut now = 0;
             for i in 0..60u64 {
-                let snap = sliced(None, 990, i + 1, 0, peer);
+                let snap = adjust(sliced(None, 990, i + 1, 0, peer));
                 engine
                     .evaluate(&config, &snap, &PolicyInput::default(), now)
                     .unwrap();
                 now += INTERVAL;
             }
             let input = PolicyInput {
-                allocations: vec![job(None)],
+                allocations: vec![job(job_mode)],
                 ..PolicyInput::default()
             };
             let mean = SATURATING_FULL_DUTY.iter().sum::<u64>() as i64 / 60;
@@ -6272,7 +6284,7 @@ mod gpu_demand {
                 let share = duty * m as u64 / (m + peer) as u64;
                 let swing = (SATURATING_FULL_DUTY[(i % 60) as usize] as i64 - mean) / 2;
                 let reading = (share as i64 + swing).clamp(0, 990) as u64;
-                let snap = sliced(Some(reading), 990 - reading, 61 + i, m, peer);
+                let snap = adjust(sliced(Some(reading), 990 - reading, 61 + i, m, peer));
                 let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
                 duty = cap_of(&decision);
                 out.push((decision, share));
@@ -6572,6 +6584,195 @@ mod gpu_demand {
                 "a window from {next:?} right after the share formed at {share_at}"
             );
             assert!(next.is_some(), "no window after the share formed");
+        }
+
+        /// The rule needs a device known to be time-sliced (FR-021, Q22): under MPS, or with the
+        /// MPS or MIG state unknown, one own context beside a saturating user keeps today's caps
+        /// and no time-slice record.
+        #[test]
+        fn mps_or_an_unknown_mode_keeps_the_caps() {
+            for slicing in [Some(false), None] {
+                let run = saturating_with(
+                    ContentionMode::Neutral,
+                    None,
+                    &|_| 2,
+                    1,
+                    120,
+                    &|mut snap| {
+                        snap.gpus[0].time_sliced = slicing;
+                        snap
+                    },
+                );
+                assert!(
+                    run.iter().any(|(d, _)| !gpu_steps(d).is_empty()),
+                    "{slicing:?}: no cap"
+                );
+                let key = ResourceKey::GpuCompute(GPU.into());
+                assert!(
+                    run.iter()
+                        .all(|(d, _)| d.resources[&key].time_slice.is_none())
+                );
+            }
+        }
+
+        /// A background context takes slices but is no principal and is not counted (FR-021,
+        /// Q22): beside one external context it leaves E = 1, so two own contexts are capped;
+        /// a busy context of a UID below `uid_min` that is not background is left out too.
+        #[test]
+        fn a_background_context_is_not_counted() {
+            for listed_as_background in [true, false] {
+                let run =
+                    saturating_with(ContentionMode::Neutral, None, &|_| 2, 1, 80, &|mut snap| {
+                        let gpu = &mut snap.gpus[0];
+                        gpu.external_process_ids.as_mut().unwrap().push(50);
+                        if listed_as_background {
+                            gpu.background_process_ids = vec![50];
+                        }
+                        gpu.compute_contexts
+                            .as_mut()
+                            .unwrap()
+                            .sampled
+                            .push((50, Some(0)));
+                        snap
+                    });
+                let slice = slice_of(&run[79].0);
+                assert_eq!(
+                    (slice.own, slice.external, slice.principals, slice.holds),
+                    (2, Some(1), Some(1), false),
+                    "background listed {listed_as_background}"
+                );
+            }
+        }
+
+        /// An external process that leaves stops counting (FR-021, Q22): two own contexts beside
+        /// two of the other user's hold the fair share without a cap; once one of the other
+        /// user's processes leaves, E falls to 1 within one window and own work is capped.
+        #[test]
+        fn an_external_process_that_leaves_stops_counting() {
+            const LEAVE: u64 = 100;
+            let config = mode_config(ContentionMode::Neutral);
+            let mut engine = PolicyEngine::new();
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let mut now = 0;
+            for i in 0..60u64 {
+                let snap = sliced(None, 990, i + 1, 0, 2);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), now)
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let (mut duty, mut out) = (1000u64, vec![]);
+            for i in 0..200u64 {
+                let peer = if i < LEAVE { 2 } else { 1 };
+                let share = duty * 2 / (2 + peer as u64);
+                let snap = sliced(Some(share), 990 - share, 61 + i, 2, peer);
+                let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+                duty = cap_of(&decision);
+                out.push(decision);
+                now += INTERVAL;
+            }
+            for (i, decision) in out[..LEAVE as usize].iter().enumerate() {
+                assert!(gpu_steps(decision).is_empty(), "interval {i}");
+                assert!(slice_of(decision).holds, "interval {i}");
+            }
+            let after = &out[LEAVE as usize..LEAVE as usize + 60];
+            assert!(
+                after
+                    .iter()
+                    .any(|d| slice_of(d).external == Some(1) && !slice_of(d).holds),
+                "E never fell"
+            );
+            assert!(
+                after.iter().any(|d| !gpu_steps(d).is_empty()),
+                "never capped"
+            );
+        }
+
+        /// On the unknown path the rule holds with at most one own process listed, since unseen
+        /// external contexts can only add to E and k; with two the cap at Neutral's share keeps
+        /// target ÷ 1000 (FR-021, Q22, Q25).
+        #[test]
+        fn the_unknown_path_holds_the_rule_only_for_one_own_process() {
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let config = mode_config(ContentionMode::Neutral);
+            for own_n in [1, 2] {
+                let mut engine = PolicyEngine::new();
+                let input = PolicyInput {
+                    allocations: vec![job(None)],
+                    ..PolicyInput::default()
+                };
+                let (mut last, mut capped) = (None, None);
+                for i in 0..200u64 {
+                    let mut snap = sliced(Some(500), 490, i + 1, own_n, 1);
+                    let gpu = &mut snap.gpus[0];
+                    gpu.external_compute_milli = None;
+                    gpu.own_compute_milli = None;
+                    gpu.compute_amount_unknown =
+                        Some("summed per-process utilization differs from the device".into());
+                    let decision = engine
+                        .evaluate(&config, &snap, &input, i * INTERVAL)
+                        .unwrap();
+                    if own_n == 1 {
+                        assert!(gpu_steps(&decision).is_empty(), "interval {i}");
+                    }
+                    if let Some(cap) = decision
+                        .actions
+                        .iter()
+                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
+                    {
+                        capped.get_or_insert((cap.target, cap.duty));
+                    }
+                    last = Some(decision);
+                }
+                let slice = slice_of(&last.unwrap());
+                assert_eq!(
+                    (slice.own, slice.external, slice.principals, slice.holds),
+                    (own_n as u32, None, None, own_n == 1)
+                );
+                if own_n == 2 {
+                    assert_eq!(
+                        capped,
+                        Some((Some(500), None)),
+                        "two own processes on the unknown path are capped at target ÷ 1000"
+                    );
+                }
+            }
+        }
+
+        /// Yield First is unchanged by the rule (FR-020, FR-021, Q22): a Yield First job's GPU
+        /// compute steps, targets and duties on a time-sliced device are those it gets on a
+        /// device not known to be time-sliced, with the node in Yield First and in Performance.
+        #[test]
+        fn yield_first_keeps_its_targets_and_duties() {
+            let steps = |decision: &Decision| {
+                gpu_steps(decision)
+                    .iter()
+                    .map(|a| (a.step, a.target, a.duty))
+                    .collect::<Vec<_>>()
+            };
+            for node in [ContentionMode::YieldFirst, ContentionMode::Performance] {
+                let run = |slicing: Option<bool>| {
+                    saturating_with(
+                        node,
+                        Some(ContentionMode::YieldFirst),
+                        &|_| 1,
+                        1,
+                        200,
+                        &move |mut snap| {
+                            snap.gpus[0].time_sliced = slicing;
+                            snap
+                        },
+                    )
+                };
+                let (sliced_run, plain) = (run(Some(true)), run(None));
+                assert!(plain.iter().any(|(d, _)| !gpu_steps(d).is_empty()));
+                for (i, ((a, _), (b, _))) in sliced_run.iter().zip(&plain).enumerate() {
+                    assert_eq!(steps(a), steps(b), "{node:?} interval {i}");
+                }
+            }
         }
     }
 }
