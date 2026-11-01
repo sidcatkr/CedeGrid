@@ -1597,3 +1597,23 @@ The time-slice duty from the context counts (spec Session 2026-11-01 Q27–Q30; 
 - [X] T481 Compare `decision_snapshot` with the code at `c78f240` and list the snapshots that change and why, per plan "Item 043" 6 (missing)
 - [X] T482 Add the time-slice duty to `docs/guarantees.md`, the README GPU section and the config reference for the two keys, per plan "Item 043" 7 (missing)
 - [X] T483 Add T456's remaining runs to `specs/001-contention-modes/native-gates.md` with their gates, and the 40 s lead and a light two-process part to `batch-037`'s harness, per plan "Item 043" 8 (missing)
+
+## Phase 34: Convergence (item 044)
+
+Aligned GPU duty phases, the margin at d0 and the busy counts (spec Session 2026-11-01 Q31–Q34; plan "Item 044"; research R52). Each pair is test first: the tests fail on today's code, then the code makes them pass. T456 stays open for 044's host runs; T117 and T228 are unchanged.
+
+- [ ] T484 [P] Write failing unit tests in `src/actuation.rs`: while a GPU compute cap is in the cycle the actuator runs while (node clock mod period) < duty × period; two actuators capped 0.3 of a period apart stop and resume together; a duty change mid-period shortens or lengthens the on-phase but never resumes inside an off-phase; `next_deadline` is the next switch on the node clock; a CPU-only cycle keeps its per-allocation phase. In `src/cgroup.rs`, the freeze duty follows the same aligned phase. Per FR-021 (missing)
+- [ ] T485 [P] Write failing phase-level tests in `tests/contention.rs`: own allocations on or off within each period beside one saturating context, every busy context an equal share. Two caps 0.3 of a period apart on per-allocation phases give own work more than 0.52 at duty 750; on the aligned phase it is within 10 thousandths of m × d ÷ (m + E). Alignment holds across a duty step, a re-measure window, three allocations and an allocation that joins later. Per FR-021, SC-017 (missing)
+- [ ] T486 Add the aligned phase (`AlignedPhase` on the node's CLOCK_MONOTONIC) to `src/actuation.rs` and use it for `RootlessActuator`'s GPU duty cycles and `src/cgroup.rs`'s `FreezeDuty`, until T484 and T485 pass. Per FR-021 (missing)
+- [ ] T487 [P] Update 043's shape tests in `tests/contention.rs` to the margin at d0, failing on today's code: at m = 2 beside one saturating context the first duty is 720 (Performance), 675 (Neutral) and 750 (Aggressive), and own work's share is within 30 of 480, 450 and 500. The partial, rise and unknown-path tests take the new d0. Per FR-021, SC-017 (contradicts)
+- [ ] T488 Make d0 leave the mode's margin in `src/policy/measure.rs`, d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), clamped, as the steps' floor, until T487 passes. Per FR-021 (contradicts)
+- [ ] T489 [P] Write failing busy-count tests:
+  - `src/telemetry.rs`: `compute_contexts` marks the samples readable or not.
+  - `tests/contention.rs`: an idle listed context, never sampled busy, doesn't count while samples are readable, even with inconsistent amounts, and d0 stays the one-principal value. With unreadable samples the listing counts it. The light shape with an idle listed context stays uncapped. An empty window takes the interval's sampled busy contexts. The record states its source (window, interval, listing).
+
+  Per FR-021 (contradicts)
+- [ ] T490 Add `GpuComputeContexts.samples_readable` in `src/model.rs` and `src/telemetry/gpu.rs`, the record's `source`, and the count sources in `src/policy/measure.rs`, until T489 passes. Per FR-021 (contradicts)
+- [ ] T491 Replay 043's six managed windows through the policy, reporting each decision's count source and d0. Per plan "Item 044" 4 (missing)
+- [ ] T492 Compare `decision_snapshot` with the code at `c2ae762` and list the snapshots that change and why. Per plan "Item 044" 4 (missing)
+- [ ] T493 Add the aligned phase, the margin at d0 and the busy counts to `docs/guarantees.md`, `README.md` and `CHANGELOG.md`. Per plan "Item 044" 5 (missing)
+- [ ] T494 Add 044's host runs to `specs/001-contention-modes/native-gates.md` with their gates: the targets 480 and 450, Aggressive for the record, and the phase measurement. Add the Aggressive two-process part and the phase measurement to `batch-037`'s harness. Per plan "Item 044" 6–7 (missing)
