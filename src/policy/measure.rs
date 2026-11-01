@@ -1464,6 +1464,8 @@ impl<'a> Interval<'a> {
         if let Some((external, own)) = measured
             && uncapped
         {
+            // The owner's unmanaged usage is the owner principal's, not external demand (Q23).
+            let external = external.saturating_sub(owner_unmanaged(self.snapshot, &gpu.uuid));
             let amounts = self
                 .snapshot
                 .principals
@@ -1594,7 +1596,10 @@ impl<'a> Interval<'a> {
         // Neutral, Performance and Aggressive read external demand where own work ran uncapped;
         // Yield First takes the larger of that and this interval's amount, so its target stays
         // at or below Neutral's (FR-021, FR-065).
-        let averaged_total = estimate.map(|(total, _)| *total);
+        // The estimate leaves the owner's unmanaged usage out; this interval's counts, as in the
+        // interval's view (FR-021, Q23).
+        let averaged_total =
+            estimate.map(|(total, _)| total + owner_unmanaged(self.snapshot, &gpu.uuid));
         match measured {
             Some((external, own)) if external.max(averaged_total.unwrap_or(0)) > 0 => {
                 let averaged_total = averaged_total.unwrap_or(external);
@@ -1902,4 +1907,16 @@ fn sampled_contexts(gpu: &GpuSnapshot) -> Option<SampledContexts> {
         }
     }
     Some(sampled)
+}
+
+/// The owner's unmanaged GPU compute on a device this interval: its own-account processes that
+/// CedeGrid did not launch.
+fn owner_unmanaged(snapshot: &Snapshot, uuid: &str) -> u64 {
+    snapshot
+        .principals
+        .iter()
+        .flatten()
+        .filter(|p| p.is_owner)
+        .filter_map(|p| p.gpu_compute_milli.get(uuid))
+        .sum()
 }

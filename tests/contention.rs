@@ -6405,5 +6405,77 @@ mod gpu_demand {
                 );
             }
         }
+
+        /// One interval beside a saturating user whose per-process samples leave `gap` of the
+        /// device unattributed: the device is busy 990, the other user reads 990 − gap.
+        fn gapped(gap: u64, sample: u64) -> Snapshot {
+            let mut snap = interval(None, 990, sample);
+            let principals = snap.principals.as_mut().unwrap();
+            principals[1].gpu_compute_milli = BTreeMap::from([(GPU.to_string(), 990 - gap)]);
+            snap
+        }
+
+        /// On GPU compute, a gap between the device and the per-process sum forms the
+        /// unattributed principal only at the attribution tolerance, 15 points (FR-021, Q23):
+        /// below it Neutral's fair share is two-way, at or above it three-way. Either way the gap
+        /// counts in external demand.
+        #[test]
+        fn a_sampling_gap_below_the_tolerance_forms_no_principal() {
+            let config = mode_config(ContentionMode::Neutral);
+            for (gap, target) in [(100, 500), (140, 500), (150, 334), (200, 334)] {
+                let mut engine = PolicyEngine::new();
+                let mut last = None;
+                for i in 0..60u64 {
+                    let decision = engine
+                        .evaluate(
+                            &config,
+                            &gapped(gap, i + 1),
+                            &PolicyInput::default(),
+                            i * INTERVAL,
+                        )
+                        .unwrap();
+                    last = Some(decision);
+                }
+                let last = last.unwrap();
+                assert_eq!(target_of(&last), target, "gap {gap}");
+                assert_eq!(record_of(&last).estimate, Some(990), "gap {gap}");
+            }
+        }
+
+        /// The owner's unmanaged usage is the owner principal's, not external demand: the
+        /// interval in which an unmanaged own-account process exits leaves the estimate at the
+        /// other user's amounts, as if the process had never run (FR-021, FR-059, Q23).
+        #[test]
+        fn the_owners_unmanaged_usage_stays_out_of_the_estimate() {
+            let config = mode_config(ContentionMode::Neutral);
+            let estimate = |owner: u64| {
+                let mut engine = PolicyEngine::new();
+                let mut last = None;
+                for i in 0..40u64 {
+                    // The exiting process in interval 20: the owner's amount beside the other
+                    // user's 80.
+                    let snap = if i == 20 {
+                        let mut exit = interval(None, owner + 80, i + 1);
+                        let principals = exit.principals.as_mut().unwrap();
+                        principals[0].gpu_compute_milli =
+                            BTreeMap::from([(GPU.to_string(), owner)]);
+                        principals[1].gpu_compute_milli = BTreeMap::from([(GPU.to_string(), 80)]);
+                        exit
+                    } else {
+                        interval(None, 160, i + 1)
+                    };
+                    let decision = engine
+                        .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                        .unwrap();
+                    assert!(
+                        i != 20 || record_of(&decision).fed,
+                        "the exit interval feeds"
+                    );
+                    last = Some(decision);
+                }
+                record_of(&last.unwrap()).estimate.unwrap()
+            };
+            assert_eq!(estimate(740), estimate(0));
+        }
     }
 }

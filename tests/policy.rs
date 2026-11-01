@@ -4320,7 +4320,10 @@ fn gpu_compute_target(
 /// A measured external GPU compute amount takes the CPU paths on a saturated
 /// device (FR-021, FR-022): Performance keeps capacity minus the external amount
 /// minus its 2% margin, never below the fair share; Neutral gives the fair share
-/// at once. Yield First probes a demand below its 15% margin step, stepping to
+/// at once to usage that forms a principal. On GPU compute, usage no UID accounts
+/// for does so only at the 15-point attribution tolerance (Q23), so beside 50
+/// Neutral leaves the device less that and its margin. Yield First probes a
+/// demand below its 15% margin step, stepping to
 /// capacity minus the user minus the margin, and pauses for a larger one while
 /// own work below capacity minus the margin does not cause the saturation. An
 /// unknown amount keeps the one-principal share, and held_back names the path.
@@ -4330,9 +4333,9 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
         ContentionMode::*,
         YieldStep::{Cap, Pause},
     };
-    for (external, performance, yield_first) in [
-        (50, 930, (Some(Cap), Some(800))),
-        (400, 580, (Some(Pause), None)),
+    for (external, performance, yield_first, neutral) in [
+        (50, 930, (Some(Cap), Some(800)), 900),
+        (400, 580, (Some(Pause), None), 500),
     ] {
         assert_eq!(
             gpu_compute_target(Performance, Some(external)),
@@ -4346,7 +4349,7 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
         );
         assert_eq!(
             gpu_compute_target(Neutral, Some(external)),
-            (Some(Cap), Some(500), Some(ComputePath::Measured)),
+            (Some(Cap), Some(neutral), Some(ComputePath::Measured)),
             "{external}"
         );
     }

@@ -1526,8 +1526,25 @@ fn principal_floor(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
         .max(1)
 }
 
+/// The usage from which unattributed usage stands for a principal: the contention floor, on
+/// GPU compute the attribution tolerance, below which a gap between the device and its
+/// per-process samples is sampling error the tolerance already accepts (FR-021, Q23).
+fn unattributed_floor(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 {
+    let floor = principal_floor(input, thresholds);
+    if input.kind == ResourceKind::GpuCompute {
+        floor.max(
+            input
+                .capacity
+                .saturating_mul(u64::from(thresholds.attribution_tolerance_percent))
+                / 100,
+        )
+    } else {
+        floor
+    }
+}
+
 /// External principals using at least the contention floor, by UID (`None`: the
-/// unattributed usage that stands for one), with their usage.
+/// unattributed usage that stands for one, from `unattributed_floor`), with their usage.
 pub fn contending_principals(
     input: &ModeInput,
     thresholds: &ResourceThresholds,
@@ -1542,7 +1559,7 @@ pub fn contending_principals(
         }
     }
     let unattributed = input.external.saturating_sub(accounted);
-    if unattributed >= floor {
+    if unattributed >= unattributed_floor(input, thresholds) {
         result.push((None, unattributed));
     }
     result
@@ -1712,7 +1729,8 @@ pub fn probe_demand(
             .filter(|(principal, usage)| !principal.is_owner && *usage >= floor)
             .map(|(principal, usage)| (principal.uid, *usage))
             .collect();
-        if let Some(usage) = usage_of(None).filter(|usage| *usage >= floor) {
+        let unattributed = unattributed_floor(input, thresholds);
+        if let Some(usage) = usage_of(None).filter(|usage| *usage >= unattributed) {
             present.insert(None, usage);
         }
         // The baseline is the usage once the fair share applies, an interval later;
@@ -1856,7 +1874,7 @@ pub fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
             .saturating_add(owner_unmanaged)
             .saturating_add(input.background),
     );
-    if unattributed >= floor {
+    if unattributed >= unattributed_floor(input, thresholds) {
         demands.push(demand(None, unattributed));
     }
     if input.unknown_activity {
