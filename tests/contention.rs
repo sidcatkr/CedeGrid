@@ -5906,13 +5906,15 @@ mod gpu_demand {
             let (mut last, mut own_share) = (None, None);
             let (mut held, mut counts) = (0, vec![]);
             let mut steps: BTreeMap<String, usize> = BTreeMap::new();
-            let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) = (
-                BTreeMap::<(Option<u64>, Option<cedegrid::model::SliceSource>), usize>::new(),
-                vec![],
-                vec![],
-                0,
-                0,
+            // Item 046: d0, w and d0' per decision.
+            type D0Key = (
+                Option<u64>,
+                Option<u64>,
+                Option<u64>,
+                Option<cedegrid::model::SliceSource>,
             );
+            let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) =
+                (BTreeMap::<D0Key, usize>::new(), vec![], vec![], 0, 0);
             for (gpu, observation) in gpus.iter_mut().zip(observations) {
                 let key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 // Busy CPU above own work's, so own CPU reads consistent beside it.
@@ -5995,7 +5997,13 @@ mod gpu_demand {
                     held += usize::from(slice.holds);
                     counts.push((slice.own, slice.external, slice.principals));
                     if !slice.holds {
-                        *d0s.entry((slice.d0, slice.source)).or_default() += 1;
+                        *d0s.entry((
+                            slice.d0,
+                            slice.window_share,
+                            slice.d0_windows,
+                            slice.source,
+                        ))
+                        .or_default() += 1;
                     }
                     if let Some(step) = slice
                         .step
@@ -6033,7 +6041,7 @@ mod gpu_demand {
                 counts.last()
             );
             println!(
-                "replay {name}: steps {steps:?}; duty in {} decisions, (d0, source) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
+                "replay {name}: steps {steps:?}; duty in {} decisions, (d0, w, d0', source) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
                 duties.len(),
                 (!duties.is_empty()).then(|| median(duties.clone())),
                 duties.iter().min(),
