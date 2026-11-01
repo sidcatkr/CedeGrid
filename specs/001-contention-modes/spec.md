@@ -581,6 +581,23 @@ back more.
   slice-bound, with their readings and thresholds, d0, the current duty and the step-up state,
   beside 041's m, E, k and whether the rule held. m × k ≤ E (no cap), Yield First, VRAM, CPU, RAM
   and the MPS and MIG path are unchanged (item 043, Decision 1).
+- Q: How do own allocations' GPU duty cycles on one node line up? → A: When an allocation's duty
+  comes from a GPU compute cap, its on- and off-phases follow a clock every supervisor on the node
+  shares (CLOCK_MONOTONIC modulo the period): own work runs while (now mod period) < duty ×
+  period, so all own allocations on a device stop and resume together whatever their start times,
+  and nothing drifts. CPU-only duty cycles keep their per-allocation phase. A duty change
+  mid-period never adds a second on-phase and never skips an off-phase (item 044).
+- Q: How does d0 leave the mode's margin? → A: Own work's share at d0 is 1 ÷ (k_b + 1) less the
+  mode's margin: d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), clamped as before (720 in
+  Performance and 675 in Neutral at m = 2, E_b = 1; 750 in Aggressive). This is each mode's
+  existing margin, held where the mode's target would hold it, and the duty's steps never go
+  below this d0 (item 044).
+- Q: Which contexts do E, k, E_b and k_b count? → A: While the device's per-process samples are
+  readable, even with inconsistent amounts, only the contexts sampled busy over the averaged
+  window (041's counts); the full listing only when the samples themselves are unreadable. Each
+  decision records which source it used (item 044).
+- Q: Does the slice-bound threshold change? → A: No, it stays 0.75 (`slice_bound_percent` 75)
+  (item 044).
 
 ## Terms
 
@@ -976,7 +993,8 @@ node reports with the expected per-resource values at each step.
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
   memory floor covers all of them together. On a time-sliced device their processes together are
   FR-021's m, so two single-process jobs beside one external process take FR-021's time-slice
-  duty while that process is slice-bound, and run uncapped while it is not.
+  duty while that process is slice-bound, their off-phases aligned on the node's clock so they
+  stop and resume together, and run uncapped while it is not.
 - **Caution option chosen non-interactively without its acknowledgement flag.** Setup refuses
   and writes nothing.
 - **Configuration edited by hand to select Performance.** It loads without an acknowledgement
@@ -1207,7 +1225,12 @@ node reports with the expected per-resource values at each step.
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
   memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
-  the granularity, is documented. A device is time-sliced when it is neither under MPS (an MPS
+  the granularity, is documented. While a GPU compute cap sets an allocation's duty, its on- and
+  off-phases follow a clock every supervisor on the node shares, CLOCK_MONOTONIC modulo the
+  period: own work runs while (now mod period) < duty × period, so all own allocations stop and
+  resume together whatever their start times. A duty change mid-period takes effect within the
+  period without a second on-phase or a skipped off-phase. A CPU-only duty cycle keeps its own
+  phase. A device is time-sliced when it is neither under MPS (an MPS
   control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
   MIG state cannot be read is not taken as time-sliced. On a time-sliced device the driver gives
   each busy context its slice, so in Performance, Aggressive and Neutral own work MUST NOT be
@@ -1216,7 +1239,9 @@ node reports with the expected per-resource values at each step.
   the external principals with compute samples on the device over the external estimate's averaged
   window and still listed there, background contexts left out and an unattributed principal
   counted as one principal with one process: own work's share m ÷ (m + E) is then at most its fair
-  share 1 ÷ (k + 1), and with one own process this always holds. On the unknown path the rule
+  share 1 ÷ (k + 1), and with one own process this always holds. While the amounts are unknown or
+  inconsistent but the per-process samples are readable, the counts are the same busy contexts.
+  Only when the samples themselves are unreadable do they come from the listing, and then the rule
   holds when m ≤ 1, m counting the processes listed there, since unseen external contexts can only
   add to E and k. VRAM is unaffected,
   and Yield First keeps its targets and duties. When m × k > E, own work at full duty holds more
@@ -1229,10 +1254,11 @@ node reports with the expected per-resource values at each step.
     below the attribution tolerance is its sampling error (Q23). An unattributed principal
     counts as one with one context.
   - With no slice-bound principal there is no GPU compute cap. Otherwise each own process runs at
-    the base duty d0 = (m + E_b) ÷ (m × (k_b + 1)), E_b and k_b being the slice-bound principals'
-    contexts and number, clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of
-    the time the slice-bound principals want; principals that are not slice-bound keep their
-    slices.
+    the base duty d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), E_b and k_b being the
+    slice-bound principals' contexts and number and the margin the mode's (Performance 2%, Neutral
+    5%, Aggressive 0), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
+    time the slice-bound principals want, less the margin the mode's target holds; principals that
+    are not slice-bound keep their slices.
   - From the device's own utilization alone, averaged over the step dwell and never from
     per-process readings, the duty rises by `contention.gpu_compute.slice_step_percent` (default
     5) points toward 1 while the device's spare time exceeds the mode's margin (Aggressive 0), at
@@ -1246,13 +1272,16 @@ node reports with the expected per-resource values at each step.
     most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
   - This path uses no estimate-based target, no ladder excess from one interval's own reading and
     no pause in any mode; the minimum duty is the floor.
-  - When the process listing is known but the amounts are unknown or inconsistent, or the
-    estimate has no uncapped interval since it restarted, d0 comes from the listed counts with
-    every listed external principal slice-bound, and the duty steps up only with a device
-    utilization reading. When the listing itself is unknown on a device last read
-    as time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
-  - Each decision's GPU compute status states m, E, k, whether the rule held, the slice-bound
-    principals with their readings and thresholds, d0, the duty and the step-up state.
+  - When the amounts are unknown or inconsistent, or the estimate has no uncapped interval since
+    it restarted, every counted external principal is slice-bound and the duty steps up only with
+    a device utilization reading. The counts are the contexts sampled busy over the averaged
+    window, or in the interval when the window has none, while the per-process samples are
+    readable, and the listed ones only when the samples themselves are unreadable. When the
+    listing itself is unknown on a device last read as time-sliced, the cap is target ÷ 1000
+    (Q25), without a pause.
+  - Each decision's GPU compute status states m, E, k, whether the rule held, the source of its
+    counts, the slice-bound principals with their readings and thresholds, d0, the duty and the
+    step-up state.
 
   On a device not known to be time-sliced, in Performance, Aggressive and Neutral, the duty is
   the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in
@@ -1943,8 +1972,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-017**: Beside one other GPU user, measured in the same run with "alone" the same probe or
   user with nothing else on the device: own work with CedeGrid ÷ own work alone is at least
   min(the mode's target ÷ 1000, own work without CedeGrid ÷ alone) − 0.03, the target being the
-  mode's for the principals actually on the device (500 beside one saturating user), not the
-  recorded one, and the other user's
+  mode's for the principals actually on the device (beside one saturating user, half less the
+  mode's margin: 480 in Performance, 450 in Neutral, 500 in Aggressive), not the recorded one, and
+  the other user's
   rate with CedeGrid is at least min(its rate without CedeGrid, its fair share × its rate alone) −
   3%. The ratio with CedeGrid ÷ without CedeGrid beside the same user is reported beside them.
 
