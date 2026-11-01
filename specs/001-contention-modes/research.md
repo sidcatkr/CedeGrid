@@ -933,3 +933,29 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: a 15-point dead band (own work with several contexts could overshoot its target
   by up to 15 points); a duty from the device's busy share (it counts the other user's slices).
 
+
+## R50. The GPU time-slice rule (item 041)
+
+- **Decision**: on a time-sliced GPU (no MPS, no MIG), Performance, Aggressive and Neutral cap own
+  GPU compute only while own work holds more than its share of the busy contexts, m × k > E, with
+  m own work's contexts, E the external ones and k the external principals over the estimate's
+  window; on the unknown path the rule holds with m ≤ 1. Yield First is unchanged.
+- **Rationale**:
+  - **T445**: beside the saturating user, own work at full duty ran 0.47 of the probe alone, and
+    that user ran 747–754 requests a second against about 1555 alone, so the time-slicer split the
+    device about 50/50 on its own.
+  - **The light user** kept its full rate beside own work at full duty, with its best p50 and p99
+    there; every cap raised its p99, to 1.13–1.18 ms against 0.82–0.89 ms.
+  - **The readings**: caps built on per-process readings failed four host runs in a row. The
+    readings are residency, not demand (037–039), come in steps of about 330, are sparse, and gave
+    a phantom principal and an own share learned from two to five readings (T445). Each fix
+    exposed the next fault.
+  - **Counting is enough**: while m ÷ (m + E) ≤ 1 ÷ (k + 1) own work cannot take more than its
+    fair share, and with one own context that always holds.
+- **Assumption**: the driver gives busy contexts equal slices. It does not hold under MPS (one
+  shared context), on a MIG parent (instances, not slices), or with unequal context priorities.
+  The docs say so, and MPS and MIG keep the measured path.
+- **Alternatives**:
+  - more tuning of the estimate and the duty (the inputs stay coarse and biased);
+  - a dead band around the target (it still caps one own context for no gain);
+  - a duty per context (it needs per-context readings the time-slicer does not give).

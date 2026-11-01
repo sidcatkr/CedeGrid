@@ -486,3 +486,22 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   sent with the device's GPU compute caps this decision.
 - `YieldAction.target` on a GPU compute Cap is the duty in thousandths that the supervisor applies;
   the ladder's `StepState.target` stays the share target.
+
+## Item 041 additions
+
+- `GpuSnapshot.time_sliced` (optional bool): true when neither process query lists an MPS control
+  daemon or server and MIG mode is disabled or not supported; false under MPS or with MIG
+  enabled; absent when a process query or the MIG query fails.
+- `GpuSnapshot.compute_contexts` (optional), present when the device's process inventory is
+  complete:
+  - `own`: own work's verified PIDs listed on the device;
+  - `owner`: the owner's unmanaged PIDs listed there;
+  - `sampled`: each non-background PID with a nonzero sample this interval, with its UID when
+    readable.
+- `ResourceStatus.time_slice` (optional), on a device known to be time-sliced:
+  - `time_sliced`;
+  - `own` (m), `external` (E) and `principals` (k), over the estimate's window;
+  - `holds`: whether the rule held, so Neutral, Performance and Aggressive set no GPU compute step
+    on the device.
+- The estimate's entries keep the external total without the owner's unmanaged usage. Own
+  work's uncapped share exists from 6 entries.

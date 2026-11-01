@@ -1553,6 +1553,99 @@ already applies as target ÷ 1000; the ladder keeps its targets in device shares
 - VI, VII: tests first; a GPU compute Cap action's target is now a duty in thousandths, and the
   decision record carries both the share target (the ladder's step) and the duty. Pass.
 
+## Item 041: the GPU time-slice rule (2026-11-01)
+
+Spec Session 2026-11-01 Q22–Q26 (FR-021's GPU compute paragraph, FR-022's GPU bullets, FR-059,
+the Contended term, SC-017), answering T445's report. Four host runs in a row showed caps built on
+per-process readings costing own work for no gain; the readings are coarse (steps of about 330),
+sparse and biased under time-slicing, while the time-slicer itself already gives each busy
+context its slice (research R50).
+
+**Technical Context**: Rust 1.88, no new dependency: `nvml-wrapper` 0.11 already has
+`Device::mig_mode`. No wire, SDK or supervisor change. The snapshot's `GpuSnapshot` gains optional
+fields (serde default), and the decision record a time-slice record.
+
+1. **Telemetry** (`src/telemetry/gpu.rs`, `src/telemetry.rs`, read-only):
+   - `GpuSnapshot.time_sliced`: true when both process queries succeeded with no MPS control
+     daemon or server listed and MIG mode is disabled or not supported; false with MPS or MIG
+     enabled; unknown when a process query or the MIG query fails.
+   - `GpuSnapshot.compute_contexts`, when the device's process inventory is complete: own work's
+     verified PIDs listed, the owner's unmanaged PIDs listed, and each non-background PID with a
+     nonzero sample this interval, with its UID when readable.
+2. **Counting** (`src/policy.rs`, `src/policy/measure.rs`): the device's demand state keeps each
+   interval's sampled contexts over the estimate's 60-interval window and restarts.
+   - It counts every interval whose contexts are known, since a context's presence, unlike its
+     amount, does not depend on own work's cap.
+   - m: own work's sampled PIDs still listed, with the owner's unmanaged ones, since the owner is
+     one principal (FR-059).
+   - E: the other sampled PIDs still listed, UIDs below `uid_min` left out.
+   - k: their distinct principals, a PID whose UID cannot be read counting as the unattributed
+     principal.
+   - An unattributed principal from the averaged gap (step 4) adds one principal with one context.
+3. **The rule** (`src/policy/measure.rs`, `src/policy/ladder.rs`):
+   - On a time-sliced device, with contexts known, the rule holds when m × k ≤ E on the measured
+     path, or m ≤ 1 on the unknown path (m from own work's and the owner's listed PIDs).
+   - While it holds, the device's budget gives Neutral, Performance and Aggressive the whole
+     device, and the ladder ends those allocations' GPU compute steps on the device at once: no
+     cap, no pause and no hold-then-escalate.
+   - Yield First allocations plan as before. Admission and VRAM are unchanged.
+4. **Decision 1** (`src/contention.rs`, `src/policy/measure.rs`):
+   - GPU compute's unattributed principal needs `attribution_tolerance_percent` of capacity
+     (150 at the default) in `contending_principals`, `neutral_share` and `probe_demand`.
+   - The estimate's entries leave the owner's unmanaged usage out of the external total. The
+     averaged view adds the interval's own amount of it back, as the interval's view counts it.
+5. **Decision 2** (`src/policy.rs`, `src/policy/ladder.rs`): `own_share` needs 6 entries. While
+   the share has fewer, a re-measure window opens at once rather than 30 s after the last
+   uncapped interval, and the duty stays target ÷ 1000. A window that ends still short of 6
+   entries waits the usual 30 s, which bounds the bootstrap to one window per share restart.
+6. **The record** (`src/model.rs`, `src/contention.rs`): `ResourceStatus.time_slice` carries
+   `time_sliced`, `own` (m), `external` (E), `principals` (k) and `holds`, on a device known to be
+   time-sliced. Reason code `gpu_time_slice_fair`.
+7. **Tests first**, in `tests/contention.rs`, on 040's time-sliced model with contexts:
+   - one own context beside the saturating and the light shapes, in Performance and Neutral: no
+     cap, own work at unmanaged;
+   - two own contexts beside one saturating context: 040's duty settles within 3 points of 500,
+     and the cap is gone within one window after one own context leaves;
+   - two own contexts beside an external principal with two contexts: no cap;
+   - the phantom gap: 10 and 14 points form no principal, 15 and 20 do and count as external
+     demand;
+   - the share bootstrap;
+   - the edges: MPS, a background context, a leaving process, the unknown path with m = 1 and
+     m = 2, Yield First pinned to its targets and duties.
+   Telemetry unit tests cover `time_sliced` and the contexts. Replays of T445's four runs report
+   m, E and k. The decision snapshots are compared with `d101610`.
+8. **Docs**:
+   - `docs/guarantees.md` and the README's GPU compute sentences: on a time-sliced GPU, CedeGrid
+     relies on the driver's time-slicing for a job that holds no more than its share of contexts,
+     and this rests on the driver giving busy contexts equal slices. MPS and MIG keep the measured
+     path.
+   - `native-gates.md`'s T456: T368's four runs and a two-probe-process run in Performance and in
+     Neutral beside the saturating user. The gate is SC-017, and in the two-process runs the other
+     user must also reach ½ × its alone rate × 0.97.
+9. **Afterwards**: the full suites, the macOS serial suite and the Docker Linux check, with
+   `CARGO_BUILD_JOBS=2` if its linker runs out of memory. T456 waits for the user's typed approval.
+
+**Constitution Check (7.0.0)**:
+- I: telemetry only reads MIG mode, the process lists and samples; nothing acts on an external
+  process. Pass.
+- II:
+  - Under the rule own work holds at most its fair share of the busy contexts, 1 ÷ (k + 1), so
+    Performance's loss rule and every other principal's min(demand, fair share) hold.
+  - When own work holds more, the estimate and 040's duty still cap it.
+  - Yield First is unchanged. No margin is held idle under the rule, which is work-conserving:
+    a newcomer gets its slices at once.
+  - Pass.
+- III:
+  - On the unknown path the rule holds only with m ≤ 1, where unseen contexts can only lower own
+    work's share.
+  - An unreadable MPS or MIG state, or an incomplete inventory, is not taken as time-sliced, and
+    keeps today's graduated path.
+  - The unattributed amount below the tolerance still counts as external demand.
+  - Pass.
+- IV: the policy stays pure; the counts come from the snapshot. Pass.
+- VI: tests first. Pass.
+- VII: the new snapshot and record fields are optional, so older snapshots load. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
