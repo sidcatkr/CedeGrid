@@ -1596,4 +1596,4 @@ The time-slice duty from the context counts (spec Session 2026-11-01 Q27–Q30; 
 - [X] T480 Replay 042's two valid managed windows, the unmanaged two-process windows from 042 and T456, and T368's light traces through the policy, reporting each decision's slice-bound check and duty, per plan "Item 043" 6 (missing)
 - [X] T481 Compare `decision_snapshot` with the code at `c78f240` and list the snapshots that change and why, per plan "Item 043" 6 (missing)
 - [X] T482 Add the time-slice duty to `docs/guarantees.md`, the README GPU section and the config reference for the two keys, per plan "Item 043" 7 (missing)
-- [ ] T483 Add T456's remaining runs to `specs/001-contention-modes/native-gates.md` with their gates, and the 40 s lead and a light two-process part to `batch-037`'s harness, per plan "Item 043" 8 (missing)
+- [X] T483 Add T456's remaining runs to `specs/001-contention-modes/native-gates.md` with their gates, and the 40 s lead and a light two-process part to `batch-037`'s harness, per plan "Item 043" 8 (missing)

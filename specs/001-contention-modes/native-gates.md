@@ -586,6 +586,34 @@ device (500 beside the saturating user). In the two-process runs the other user 
 own work does not leave it. Report beside them the old ratio, per managed window the other user's
 rate, p50 and p99, the duty CedeGrid set, and m, E, k and whether the rule held in each decision.
 
+## Item 043: T456's remaining runs under the time-slice duty
+
+Runs once on the authorized test host after `043.done`, under the user's standing approval and
+the same host rules, with `batch-037`'s harness: two own probe processes per window, each its
+own job with a 512 MiB VRAM request when managed, submitted 40 s before its window
+(`--managed-lead 40`), so a launch cooldown cannot offset them. That is m = 2 against E = 1, the
+time-slice duty's path.
+
+```sh
+bash runs-037.sh <commit> <second account uid> two twolight   # Performance and Neutral beside the saturating user, then Performance beside the light user
+$py $H/gpu_trace_035.py <each e037-r5 output>                  # read only: each decision's time_slice record
+```
+
+Gates, per valid managed window:
+
+- Own work, in SC-017's form: managed ÷ pair alone ≥ min(target ÷ 1000, unmanaged ÷ pair alone) −
+  0.03, with the target 500 beside the saturating user and 1000 − the light user's reading
+  alone − the mode's margin beside the light one.
+- The saturating user: at least ½ × its rate alone × 0.97.
+- The light user: its rate within 3% of its rate beside unmanaged own work, and its p99 no worse
+  than that run's p99 + 10%.
+
+A window counts when both probes ran together, m = 2 held through it, and it lay inside the other
+user's load (042's checks). Report per decision m, E, k, the slice-bound principals, d0, the
+duty and the device's utilization; both forms of own work's ratio; and the other user's rate,
+p50 and p99. A failed gate changes no product code in that item; the report gives the cause
+and a recommended fix.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
