@@ -519,6 +519,38 @@ back more.
   share × its rate alone) − 3%; the old ratio, with CedeGrid ÷ without CedeGrid beside the same
   user, is reported too. On a time-sliced device own work without CedeGrid beside one busy context
   already sits near the fair share, so the earlier 0.5 gates rewarded over-yielding (item 040, 2).
+- Q: On a time-sliced GPU, when does GPU compute cap own work in Performance, Aggressive and
+  Neutral? → A: A device is time-sliced when it is neither under MPS (the existing MPS evidence)
+  nor a MIG parent. Over the same averaged window as the external estimate, m is own work's
+  processes with compute samples on the device, E the external processes with compute samples
+  there and k the external principals with compute samples there, background (system) contexts
+  left out as in the estimate. While m × k ≤ E (own share m ÷ (m + E) ≤ fair share 1 ÷ (k + 1))
+  there is no GPU compute cap: the time-slicer gives each busy context its slice, so own work
+  cannot take more than its fair share, and a cap only costs own work and the other user's
+  latency; with one own context this always holds, since every busy principal has at least one
+  context. When m × k > E, own work holds more slices than its fair share, and the estimate and
+  the duty from own share apply. On the unknown path the rule holds when m ≤ 1, since unseen
+  external contexts can only add to E and k; with m > 1 there the duty stays target ÷ 1000. Under
+  the rule the GPU compute margin is not held as idle time, because a newcomer gets its slices at
+  once. Yield First is unchanged: it may give others more than their slices, the loss its mode
+  allows. VRAM is unaffected. Each decision's GPU compute status carries m, E, k and whether the
+  rule held. CedeGrid relies on the driver giving busy contexts equal slices; MPS and MIG keep the
+  measured path (item 041, the rule).
+- Q: When does unattributed GPU compute usage form a principal? → A: On GPU compute, only at or
+  above `contention.gpu_compute.attribution_tolerance_percent` (default 15 points), not the 1%
+  contention floor; below it the gap is sampling error the tolerance already accepts. The
+  estimate keeps the owner's unmanaged usage out of external demand. The unattributed amount
+  still counts in external demand, so it is never idle, and the principal counts for the
+  m × k > E path, for Yield First's fair share and for k (item 041, Decision 1).
+- Q: When does the duty use own work's uncapped share? → A: With fewer than 6 uncapped intervals
+  of own work on the device, a re-measure window opens at once instead of 30 s later, and the
+  duty stays target ÷ 1000 until the share exists (item 041, Decision 2).
+- Q: What duty does a GPU compute cap set on the unknown path use? → A: Target ÷ 1000, unchanged,
+  except that on a time-sliced device with m ≤ 1 the time-slice rule holds and there is no cap
+  (item 041, Decision 3).
+- Q: In SC-017, what is "the mode's target"? → A: The mode's target for the principals actually
+  on the device (500 beside one saturating user), not the recorded target, which a phantom
+  principal can lower (item 041, Decision 4).
 
 ## Terms
 
@@ -541,7 +573,8 @@ back more.
   system-wide pressure are never evidence, and missing, unreadable or system-only PSI adds none.
   Each observation is judged on its own (FR-072).
 - **Contended**: a CPU or GPU compute resource is contended when it is saturated and an external
-  principal, or the unattributed principal, uses at least `principal_min_percent` of it without
+  principal, or the unattributed principal, uses at least `principal_min_percent` of it (on GPU
+  compute the unattributed principal needs `attribution_tolerance_percent`, FR-021) without
   its demand being known to be satisfied, or when it has external activity of unknown amount.
   Saturation by PSI alone still needs such a principal.
 - **Satisfied demand**: a principal's demand found by probing: the usage that did not grow into
@@ -911,7 +944,8 @@ node reports with the expected per-resource values at each step.
   once free memory is back above the floor, without using a retry; above it, it fails as usual
   (FR-076).
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
-  memory floor covers all of them together.
+  memory floor covers all of them together. On a time-sliced device their processes together are
+  FR-021's m, so two single-process jobs beside one external process are capped.
 - **Caution option chosen non-interactively without its acknowledgement flag.** Setup refuses
   and writes nothing.
 - **Configuration edited by hand to select Performance.** It loads without an acknowledgement
@@ -996,7 +1030,8 @@ node reports with the expected per-resource values at each step.
   (default 1000) whose usage of a resource has stayed at or above `principal_min_percent` for
   `principal_window_intervals`. Until a user joins, its usage counts toward the single
   unattributed principal, which unreadable owners share; that principal contends once its usage
-  reaches `principal_min_percent`. A principal MUST leave only after its usage has stayed below
+  reaches `principal_min_percent`, on GPU compute `attribution_tolerance_percent` (FR-021). A
+  principal MUST leave only after its usage has stayed below
   that threshold for `principal_leave_s` (default 60 s). Usage by user IDs below `uid_min` MUST
   count as background external demand: it is subtracted from capacity and never forms a
   principal. CedeGrid's own processes (the agent and supervisors) count toward the CedeGrid
@@ -1111,6 +1146,8 @@ node reports with the expected per-resource values at each step.
 - **FR-021**: Neutral MUST:
   - let own work use idle capacity minus the Neutral margin (default 5%, between the
     Performance and Yield First margins) on CPU and GPU compute; memory keeps only the floors;
+    on a time-sliced GPU while the time-slice rule below holds, no GPU compute margin is held as
+    idle time, since a newcomer gets its slices at once;
   - converge own work to its fair share under contention, and not step it below fair share
     except to keep a no-harm floor;
   - under saturation, probe a contending principal whose unknown demand is below one margin
@@ -1138,13 +1175,25 @@ node reports with the expected per-resource values at each step.
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
   memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
-  the granularity, is documented. On a time-sliced device own work at full duty beside another busy
-  context holds only its slices, so in Performance, Aggressive and Neutral the duty MUST be the
-  cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in which
-  it ran on the device, at most 60, restarted with the external estimate and when own work's
-  allocations there change), clamped to the minimum duty and 1; with no uncapped share yet, while
-  the device's amount is unknown, for a cap set for unknown activity, and in Yield First, it is
-  target ÷ 1000. External GPU compute MUST be measured, in thousandths of
+  the granularity, is documented. A device is time-sliced when it is neither under MPS (an MPS
+  control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
+  MIG state cannot be read is not taken as time-sliced. On a time-sliced device the driver gives
+  each busy context its slice, so in Performance, Aggressive and Neutral own work MUST NOT be
+  capped on GPU compute while m × k ≤ E (the time-slice rule), m being own work's processes, E the
+  external processes and k the external principals with compute samples on the device over the
+  external estimate's averaged window, background contexts left out and an unattributed principal
+  counted as one principal with one process: own work's share m ÷ (m + E) is then at most its fair
+  share 1 ÷ (k + 1), and with one own process this always holds. On the unknown path the rule
+  holds when m ≤ 1, since unseen external contexts can only add to E and k. VRAM is unaffected,
+  and Yield First keeps its targets and duties. When m × k > E, own work at full duty beside
+  another busy context still holds only its slices, so in Performance, Aggressive and Neutral the
+  duty MUST be the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped
+  intervals in which it ran on the device, at least 6 and at most 60, restarted with the external
+  estimate and when own work's allocations there change), clamped to the minimum duty and 1; while
+  the share has fewer than 6 intervals a re-measure window opens at once rather than 30 s after the
+  last one. Until the share exists, while the device's amount is unknown, for a cap set for unknown
+  activity, and in Yield First, the duty is target ÷ 1000. Each decision's GPU compute status
+  states m, E, k and whether the rule held. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%: a sample at t, whose process's previous sample was at p, counts in full in the window
@@ -1159,9 +1208,11 @@ node reports with the expected per-resource values at each step.
   device summed over it and the 3 intervals before it are; the amounts are then those 4 intervals'
   averages, so a sample missed in one interval does not read its process as idle. While the device's process inventory lists an external
   process, the external amount MUST be at least device utilization minus own processes' sum,
-  the part nobody accounts for being one unattributed principal, except a remainder within the
-  rounding (one point per listed process), which is not a principal; with own processes only,
-  the remainder is own work. External GPU compute MUST be measured as zero, without fresh samples,
+  the part nobody accounts for being unattributed external usage, except a remainder within the
+  rounding (one point per listed process), which is not; with own processes only, the remainder
+  is own work. Unattributed usage forms one principal only at or above
+  `attribution_tolerance_percent` points of device time, below which it is sampling error the
+  tolerance already accepts, and counts in external demand either way. External GPU compute MUST be measured as zero, without fresh samples,
   for an interval in which the compute and the graphics process queries both succeed, at least
   one PID is listed and every listed PID is an own verified PID (checked through its pidfd, with
   no PID 0 or unresolvable entry), no MPS control daemon or server is present, device utilization
@@ -1183,8 +1234,9 @@ node reports with the expected per-resource values at each step.
   admission still follows FR-026 and FR-027. On a time-sliced device a process's reading follows
   where the sampler caught its context, so gaps in own work raise another user's reading at the
   same demand; in Performance, Aggressive and Neutral, the external amount that sets own work's
-  GPU compute target, per principal and in total, MUST therefore be the average of the amounts
-  measured in the last 60 intervals in which own work ran uncapped on the device (no cap below full
+  GPU compute target, per principal and in total (the owner's unmanaged usage left out, the
+  interval's own amount of it counting as in the interval's view), MUST therefore be the average
+  of the amounts measured in the last 60 intervals in which own work ran uncapped on the device (no cap below full
   duty and no pause, on GPU compute or CPU, for any own allocation using it, in the decision that
   set the interval and the one before it), or had no allocation running there; with fewer, the average of what there
   is, and with none since the average started (the agent's start or a restart), the interval's own
@@ -1201,21 +1253,24 @@ node reports with the expected per-resource values at each step.
 - **FR-022**: Performance MUST:
   - let own work use all capacity external demand is not using, minus a small safety margin
     (default 2%) on CPU and GPU compute; memory keeps the floors, and own memory within its fair
-    share is not given up for a floor breach that others' growth caused (FR-023);
+    share is not given up for a floor breach that others' growth caused (FR-023); on a
+    time-sliced GPU while FR-021's time-slice rule holds, no GPU compute margin is held;
   - scale up quickly;
   - when external demand grows, yield what is needed to restore the margin and floors within the
     mode's response time;
   - on a contended compute resource, keep the larger of the Neutral fair share and capacity
     minus observed external usage minus the margin: give back what external demand takes, and
     never go below the fair share; on GPU compute, observed external usage is FR-021's average
-    over intervals in which own work ran uncapped;
+    over intervals in which own work ran uncapped, and on a time-sliced device own work is not
+    capped while FR-021's time-slice rule holds;
   - on CPU and GPU compute, in Tracked and Full, never take a step that targets below the fair
     share: a cap that misses its target after the hold window (the step dwell) is recomputed from the measured
     rate and applied again, without escalating to pause; only a cap already at the minimum duty
     with own usage still above the fair share may pause, for at most one monitor interval, before
     returning to the cap;
   - while external activity of unknown amount exists, hold own work to Neutral's fair share,
-    counting that activity as one active principal;
+    counting that activity as one active principal, except on a time-sliced GPU with at most one
+    own process, where FR-021's time-slice rule holds;
   - while CPU telemetry is unknown, hold own CPU at Neutral's fair share, counting the unknown as
     one active principal, and with no fair share known yet take no new step.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
@@ -1817,7 +1872,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   alone, peak, noise tolerance, unknown, cooldown, backoff and charge shortfall.
 - **SC-017**: Beside one other GPU user, measured in the same run with "alone" the same probe or
   user with nothing else on the device: own work with CedeGrid ÷ own work alone is at least
-  min(the mode's target ÷ 1000, own work without CedeGrid ÷ alone) − 0.03, and the other user's
+  min(the mode's target ÷ 1000, own work without CedeGrid ÷ alone) − 0.03, the target being the
+  mode's for the principals actually on the device (500 beside one saturating user), not the
+  recorded one, and the other user's
   rate with CedeGrid is at least min(its rate without CedeGrid, its fair share × its rate alone) −
   3%. The ratio with CedeGrid ÷ without CedeGrid beside the same user is reported beside them.
 
