@@ -493,6 +493,28 @@ re-measure window, 3 s of each 40 s managed window at full duty, which lifts own
 duty from 0.75 to about 0.773, and the time-slicing's own cost of about 1%, both of which fall on
 the other user while no margin absorbs them.
 
+### Item 046: own work pays for the re-measure windows
+
+Run on 2026-11-01 on the same test host at `23e386e`, with the commands under "Item 046: own work
+pays for the re-measure windows" in `specs/001-contention-modes/native-gates.md`: two own probe
+processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
+process of either account was left before the first run or after any run, no window paused own
+work, no duty stepped, and the probes' off-phases overlapped 0.995–0.999. Neutral's first run had
+no valid window: a moment of unknown GPU observation held the second probe's launch until the
+first had ended, and the delay took the second managed window past the other user's load. It ran
+once more.
+
+| Run | Values | Result |
+|---|---|---|
+| Zero margin (Performance with no GPU compute margin), beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 (0.33 of its 1569 alone). With it: own work 0.498 and 0.493 (bound 0.47); the other user 760.7 and 754.5 (½ × alone × 0.97 = 761.0). d0 750, w 91, d0' 725 in every duty decision; the duty held 0.754 in both windows | own work passes; the other user falls short by 0.3 and 6.5 requests a second (0.485 and 0.481 of alone) |
+| Performance, beside the saturating user | Pair alone 1478; without 0.662, the other user 508 (0.33 of 1550). With it: own work 0.481 and 0.460 (bound 0.45); the other user 784.4 and 809.5 (bound 751.5). d0 720, d0' 692; the duty held 0.725 and 0.697 | passes |
+| Neutral, beside the saturating user (the run again) | Pair alone 1487; without 0.659, the other user 508 (0.33 of 1554). With it: own work 0.447 and 0.481 (bound 0.42); the other user 833.1 and 780.5 (bound 753.7). d0 675, d0' 643; the duty held 0.677 and 0.726 | passes |
+
+With the windows paid by own work, the zero-margin duty held 0.754 against d0 0.75, where 045
+held 0.773, and the other user rose from 0.468–0.472 to 0.481–0.485 of its rate alone. Own work
+and the other user then split the device's time evenly, and the other user still holds 0.962–0.970
+of its half by throughput, against 0.98 of its third without CedeGrid.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
