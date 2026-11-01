@@ -473,6 +473,26 @@ The duty held is 1 − each probe's stopped share, which includes the re-measure
 the cap for 3 s of each window. Own work's share matched 2 × the duty held ÷ 3 within 0.009, and
 never exceeded it, so no drain after a stop shows at this resolution. All of T456's gates pass.
 
+### Item 045: the step floor with a zero margin
+
+Run on 2026-11-01 on the same test host at `2fa6587`, with the commands under "Item 045: the step
+floor with a zero margin" in `specs/001-contention-modes/native-gates.md`: two own probe
+processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
+process of either account was left before the first run or after any run. All four managed
+windows passed 042's checks, no window paused own work, and the probes' off-phases overlapped
+0.995–0.998.
+
+| Run | Values | Result |
+|---|---|---|
+| Zero margin (Performance with no GPU compute margin), beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 (0.33 of its 1569 alone). With it: own work 0.511 and 0.506 (bound 0.47); the other user 740.5 and 734.7 (½ × alone × 0.97 = 760.8). The duty held at d0 = 750 in all 77 duty decisions of each window, with no rise or fall; the probes were stopped 0.226–0.228 of the time, the duty held 0.772–0.774 with the re-measure window | own work passes; the other user falls short in both windows (0.472 and 0.468 of alone) |
+| Performance, beside the saturating user (regression check) | Pair alone 1477; without 0.661, the other user 507 (0.33 of 1549). With it: own work 0.496 and 0.497 (bound 0.45); the other user 761.0 and 752.1 (bound 751.4). d0 = 720 held throughout, no step; the duty held 0.748 and 0.752 | passes |
+
+The step floor removed the zero-margin rises: 044's run of the same shape rose 6 times on
+dwells floored to 99, this one never. What leaves the other user short at a zero margin is the
+re-measure window, 3 s of each 40 s managed window at full duty, which lifts own work's held
+duty from 0.75 to about 0.773, and the time-slicing's own cost of about 1%, both of which fall on
+the other user while no margin absorbs them.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
