@@ -1105,9 +1105,46 @@ impl<'a> Interval<'a> {
         if !telemetry_unknown {
             let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
             time_slice = self.time_slice(gpu, measured.is_some(), budget.unattributed);
-            // Under the time-slice rule, Neutral, Performance and Aggressive hold the device;
-            // Yield First keeps its target (FR-021, Q22).
-            if time_slice.is_some_and(|slice| slice.holds) {
+            if let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) {
+                match gpu.time_sliced {
+                    Some(sliced) => demand.last_time_sliced = sliced,
+                    // An unknown listing on a device last read as time-sliced: no pause (Q29).
+                    None if demand.last_time_sliced => {
+                        self.no_gpu_pause.insert(gpu.uuid.clone());
+                    }
+                    None => {}
+                }
+                if time_slice.as_ref().is_none_or(|slice| slice.d0.is_none()) {
+                    demand.slice = None;
+                }
+            }
+            // On the time-slice duty Neutral, Performance and Aggressive run at the duty, and own
+            // work's share is the duty's part of the busy contexts, the listed ones while the
+            // amounts are unknown (FR-021, Q27, Q29).
+            if let Some((duty, share)) = time_slice.as_ref().and_then(|slice| {
+                let duty = slice.duty?;
+                let own = u64::from(slice.own);
+                let external = slice
+                    .external
+                    .unwrap_or_else(|| slice.bound.iter().map(|b| b.contexts).sum());
+                Some((duty, duty * own / (own + u64::from(external)).max(1)))
+            }) {
+                self.time_slice_duty.insert(gpu.uuid.clone(), duty);
+                if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
+                    budget.share = share;
+                }
+                for (mode, target) in budget.targets.iter_mut() {
+                    if *mode != ContentionMode::YieldFirst {
+                        *target = share;
+                    }
+                }
+            }
+            // Under the time-slice rule, or with no slice-bound principal, Neutral, Performance
+            // and Aggressive hold the device; Yield First keeps its target (FR-021, Q22, Q27).
+            if time_slice
+                .as_ref()
+                .is_some_and(|slice| slice.holds || slice.d0.is_none())
+            {
                 self.time_slice_holds.insert(gpu.uuid.clone());
                 if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
                     budget.share = GPU_COMPUTE_CAPACITY;
@@ -1523,13 +1560,14 @@ impl<'a> Interval<'a> {
         (estimate, record)
     }
 
-    /// The time-slice rule on a device (FR-021, Q22). On a time-sliced device with its contexts
-    /// known, it holds while own work's busy contexts m, the external ones E and their principals
-    /// k give m × k ≤ E on the measured path, an unattributed principal counting as one
-    /// principal with one context; on the unknown path it holds while m ≤ 1, m then counting the
-    /// processes listed, since unseen external contexts can only add to E and k.
+    /// The time-slice rule on a device (FR-021, Q22, Q27-Q29). On a time-sliced device with its
+    /// contexts known, it holds while own work's busy contexts m, the external ones E and their
+    /// principals k give m × k ≤ E, an unattributed principal counting as one principal with one
+    /// context. While the amounts are unknown, or the estimate's window is empty, the listing
+    /// stands for the window and the rule holds only for m ≤ 1, since unseen busy contexts can
+    /// only add to E and k. When it does not hold, `slice_duty` sets the duty from the counts.
     fn time_slice(
-        &self,
+        &mut self,
         gpu: &GpuSnapshot,
         measured: bool,
         unattributed: bool,
@@ -1538,20 +1576,13 @@ impl<'a> Interval<'a> {
             return None;
         }
         let contexts = gpu.compute_contexts.as_ref()?;
+        let uid_min = self.config.contention.uid_min;
         let own_listed: BTreeSet<u32> = contexts
             .own
             .iter()
             .chain(&contexts.owner)
             .copied()
             .collect();
-        if !measured {
-            let own = own_listed.len() as u32;
-            return Some(TimeSliceRecord {
-                own,
-                holds: own <= 1,
-                ..TimeSliceRecord::default()
-            });
-        }
         let external_listed: BTreeSet<u32> = gpu
             .external_process_ids
             .iter()
@@ -1559,22 +1590,161 @@ impl<'a> Interval<'a> {
             .filter(|pid| !gpu.background_process_ids.contains(pid) && !own_listed.contains(pid))
             .copied()
             .collect();
-        let (own, mut external, principals) = self.next.gpu_demand.get(&gpu.uuid)?.contexts(
-            &own_listed,
-            &external_listed,
-            self.config.contention.uid_min,
-        )?;
-        let mut count = principals.len() as u32;
-        if unattributed && !principals.contains(&None) {
-            count += 1;
-            external += 1;
+        let demand = self.next.gpu_demand.get(&gpu.uuid)?;
+        let window = measured
+            .then(|| demand.contexts(&own_listed, &external_listed, uid_min))
+            .flatten();
+        let (own, mut principals, counted) = match window {
+            Some((own, principals)) => (own, principals, true),
+            None => {
+                let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
+                for (_, uid) in contexts
+                    .listed
+                    .iter()
+                    .filter(|(_, uid)| uid.is_none_or(|uid| uid >= uid_min))
+                {
+                    *principals.entry(*uid).or_default() += 1;
+                }
+                (own_listed.len() as u32, principals, false)
+            }
+        };
+        if counted && unattributed {
+            principals.entry(None).or_insert(1);
         }
-        Some(TimeSliceRecord {
+        let external: u32 = principals.values().sum();
+        let count = principals.len() as u32;
+        let holds = if counted {
+            own.saturating_mul(count) <= external
+        } else {
+            own <= 1
+        };
+        let mut record = TimeSliceRecord {
             own,
-            external: Some(external),
-            principals: Some(count),
-            holds: own.saturating_mul(count) <= external,
-        })
+            external: counted.then_some(external),
+            principals: counted.then_some(count),
+            holds,
+            ..TimeSliceRecord::default()
+        };
+        if !holds {
+            self.slice_duty(gpu, &principals, counted, &mut record);
+        }
+        Some(record)
+    }
+
+    /// The time-slice duty at m × k > E (FR-021, Q27, Q28): the slice-bound principals from the
+    /// external estimate's readings (every listed principal while the counts come from the
+    /// listing), d0 from their counts, and one step up or down from the device's utilization.
+    fn slice_duty(
+        &mut self,
+        gpu: &GpuSnapshot,
+        principals: &BTreeMap<Option<u32>, u32>,
+        counted: bool,
+        record: &mut TimeSliceRecord,
+    ) {
+        let config = self.config;
+        let thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
+        let own = u64::from(record.own);
+        let external: u64 = principals.values().map(|n| u64::from(*n)).sum();
+        let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) else {
+            return;
+        };
+        let estimate = demand.estimate();
+        // A lone principal reads the total: usage below the tolerance is its sampling error.
+        let reading = |uid: &Option<u32>| match (&estimate, principals.len()) {
+            (Some((total, _)), 1) => *total,
+            (Some((total, by_uid)), _) => match uid {
+                Some(uid) => by_uid.get(uid).copied().unwrap_or(0),
+                None => total.saturating_sub(by_uid.values().sum()),
+            },
+            (None, _) => 0,
+        };
+        let threshold = |contexts: u32| {
+            GPU_COMPUTE_CAPACITY
+                .saturating_mul(u64::from(contexts))
+                .saturating_mul(u64::from(thresholds.slice_bound_percent))
+                / (100 * (own + external).max(1))
+        };
+        record.bound = principals
+            .iter()
+            .map(|(uid, contexts)| SliceBound {
+                uid: *uid,
+                contexts: *contexts,
+                reading: if counted { reading(uid) } else { 0 },
+                threshold: if counted { threshold(*contexts) } else { 0 },
+            })
+            .filter(|bound| !counted || bound.reading >= bound.threshold)
+            .collect();
+        if record.bound.is_empty() {
+            demand.slice = None;
+            return;
+        }
+        let bound_contexts: u64 = record.bound.iter().map(|b| u64::from(b.contexts)).sum();
+        let bound_principals = record.bound.len() as u64;
+        let d0 = (GPU_COMPUTE_CAPACITY.saturating_mul(own + bound_contexts)
+            / (own * (bound_principals + 1)).max(1))
+        .clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY);
+        let now = self.now;
+        let state = demand.slice.get_or_insert(SliceDuty {
+            d0,
+            duty: d0,
+            since_ms: now,
+            ..SliceDuty::default()
+        });
+        // More slice-bound demand takes own work back to d0 at once; less raises the floor.
+        if d0 != state.d0 {
+            state.duty = if d0 < state.d0 {
+                d0
+            } else {
+                state.duty.max(d0)
+            };
+            state.d0 = d0;
+            state.since_ms = now;
+            state.utilization.clear();
+        }
+        let mode = governing(config, ResourceKind::GpuCompute);
+        let dwell = thresholds.min_step_dwell_intervals.max(1);
+        let dwell_ms = u64::from(dwell).saturating_mul(config.monitor.interval_ms);
+        let mut step = SliceStep::Holding;
+        // A re-measure window's uncapped intervals say nothing about the duty.
+        if demand.window.is_some() {
+            state.utilization.clear();
+        } else if let Some(busy) = gpu.utilization_percent {
+            state.utilization.push_back(busy.min(100));
+            while state.utilization.len() > dwell as usize {
+                state.utilization.pop_front();
+            }
+        }
+        let average = (state.utilization.len() >= dwell as usize)
+            .then(|| state.utilization.iter().sum::<u32>() / state.utilization.len() as u32);
+        if let Some(busy) = average {
+            let spare = GPU_COMPUTE_CAPACITY.saturating_sub(u64::from(busy) * 10);
+            let margin = u64::from(thresholds.margin_percent(mode)) * 10;
+            let since = now.saturating_sub(state.since_ms);
+            let step_milli = u64::from(thresholds.slice_step_percent) * 10;
+            let rise_ms = thresholds
+                .scale_up_interval_ms(mode, config.monitor.interval_ms)
+                .max(dwell_ms);
+            let saturated = if margin == 0 {
+                spare == 0
+            } else {
+                spare * 2 < margin
+            };
+            if spare > margin && state.duty < GPU_COMPUTE_CAPACITY && since >= rise_ms {
+                state.duty = (state.duty + step_milli).min(GPU_COMPUTE_CAPACITY);
+                step = SliceStep::Rising;
+            } else if saturated && state.duty > state.d0 && since >= dwell_ms {
+                state.duty = state.duty.saturating_sub(step_milli).max(state.d0);
+                step = SliceStep::Falling;
+            }
+            if step != SliceStep::Holding {
+                state.since_ms = now;
+                state.utilization.clear();
+            }
+        }
+        record.d0 = Some(d0);
+        record.duty = Some(state.duty);
+        record.step = Some(step);
+        record.utilization = average;
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU

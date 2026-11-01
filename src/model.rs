@@ -272,6 +272,10 @@ pub struct GpuComputeContexts {
     /// readable.
     #[serde(default)]
     pub sampled: Vec<(u32, Option<u32>)>,
+    /// Each listed external non-background PID that is not the owner's, with its UID when
+    /// readable (FR-021, Q29).
+    #[serde(default)]
+    pub listed: Vec<(u32, Option<u32>)>,
 }
 
 /// What a replay of one interval's GPU measurement needs, in driver microseconds: the device's
@@ -662,7 +666,7 @@ pub struct ResourceStatus {
 
 /// The time-slice rule on one device in one interval (FR-021, Q22): own work's busy contexts
 /// (m), the external ones (E) and their principals (k) over the estimate's window, still listed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeSliceRecord {
     /// Own work's contexts, the owner's unmanaged ones included; on the unknown path, those
     /// listed.
@@ -675,6 +679,40 @@ pub struct TimeSliceRecord {
     pub principals: Option<u32>,
     /// Whether the rule held, so Neutral, Performance and Aggressive set no GPU compute step.
     pub holds: bool,
+    /// At m × k > E, the slice-bound principals (FR-021, Q27); none means no cap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound: Vec<SliceBound>,
+    /// The base duty from the slice-bound principals' counts, in thousandths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d0: Option<u64>,
+    /// The duty sent to own work on the device, in thousandths (Q28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty: Option<u64>,
+    /// What the step-up did this decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<SliceStep>,
+    /// The device's utilization in percent, averaged over the step dwell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<u32>,
+}
+
+/// A slice-bound external principal (FR-021, Q27): its UID (none for the unattributed one), its
+/// busy contexts, its reading in the external estimate and the threshold it met.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SliceBound {
+    pub uid: Option<u32>,
+    pub contexts: u32,
+    pub reading: u64,
+    pub threshold: u64,
+}
+
+/// The time-slice duty's step this decision (FR-021, Q28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SliceStep {
+    Rising,
+    Falling,
+    Holding,
 }
 
 /// What a resource keeps from own work or from admission, and why, in resource

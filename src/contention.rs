@@ -1288,6 +1288,9 @@ pub const GPU_DEMAND_WINDOW_DECISIONS: u32 = 6;
 /// A window opens when the device's last uncapped interval is this old (FR-021, R48).
 pub const GPU_DEMAND_WINDOW_EVERY_MS: u64 = 30_000;
 
+/// FR-014's minimum duty, in thousandths: the floor of a GPU compute duty (FR-021, Q27).
+pub const GPU_MIN_DUTY_MILLI: u64 = 50;
+
 /// Uncapped intervals of own work from which its uncapped share sets a GPU compute duty
 /// (FR-021, Q24); with fewer, re-measure windows open at once.
 pub const GPU_OWN_SHARE_INTERVALS: usize = 6;

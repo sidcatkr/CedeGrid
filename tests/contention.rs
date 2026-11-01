@@ -5877,6 +5877,12 @@ mod gpu_demand {
                             (*pid, uid)
                         })
                         .collect(),
+                    listed: listed
+                        .iter()
+                        .copied()
+                        .filter(|pid| peer.contains(pid))
+                        .map(|pid| (pid, peer_uid))
+                        .collect(),
                 });
             }
             let observations = recorded["observations"].as_array().unwrap();
@@ -5956,7 +5962,7 @@ mod gpu_demand {
                 windows += usize::from(record.window);
                 last = record.estimate;
                 own_share = record.own_uncapped;
-                if let Some(slice) = status.time_slice {
+                if let Some(slice) = &status.time_slice {
                     held += usize::from(slice.holds);
                     counts.push((slice.own, slice.external, slice.principals));
                 }
@@ -6274,6 +6280,7 @@ mod gpu_demand {
     mod time_slice {
         use super::*;
         use cedegrid::model::{GpuComputeContexts, TimeSliceRecord, YieldAction};
+        use std::collections::BTreeSet;
 
         const OWN_PIDS: [u32; 3] = [100, 101, 102];
         const PEER_PIDS: [u32; 3] = [900, 901, 902];
@@ -6303,6 +6310,7 @@ mod gpu_demand {
                 own: own_pids.to_vec(),
                 owner: vec![],
                 sampled,
+                listed: peer.iter().map(|pid| (*pid, Some(PEER))).collect(),
             });
             snap
         }
@@ -6406,6 +6414,7 @@ mod gpu_demand {
         pub(super) fn slice_of(decision: &Decision) -> TimeSliceRecord {
             decision.resources[&ResourceKey::GpuCompute(GPU.into())]
                 .time_slice
+                .clone()
                 .expect("a time-sliced device records the rule")
         }
 
@@ -6758,8 +6767,9 @@ mod gpu_demand {
         }
 
         /// On the unknown path the rule holds with at most one own process listed, since unseen
-        /// external contexts can only add to E and k; with two the cap at Neutral's share keeps
-        /// target ÷ 1000 (FR-021, Q22, Q25).
+        /// external contexts can only add to E and k; with two, the listed external principal
+        /// counts as slice-bound and the duty starts at d0 from the listed counts, (2 + 1) ÷
+        /// (2 × 2), with the share at its part of the busy contexts (FR-021, Q22, Q29).
         #[test]
         fn the_unknown_path_holds_the_rule_only_for_one_own_process() {
             let key = ResourceKey::GpuCompute(GPU.into());
@@ -6801,9 +6811,10 @@ mod gpu_demand {
                 if own_n == 2 {
                     assert_eq!(
                         capped,
-                        Some((Some(500), None)),
-                        "two own processes on the unknown path are capped at target ÷ 1000"
+                        Some((Some(500), Some(750))),
+                        "two own processes on the unknown path take d0 from the listed counts"
                     );
+                    assert_eq!((slice.d0, slice.bound.len()), (Some(750), 1));
                 }
             }
         }
@@ -6838,6 +6849,253 @@ mod gpu_demand {
                 for (i, ((a, _), (b, _))) in sliced_run.iter().zip(&plain).enumerate() {
                     assert_eq!(steps(a), steps(b), "{node:?} interval {i}");
                 }
+            }
+        }
+
+        /// Item 043's tick-level time-sliced device: each interval is 100 ticks. Own work's m
+        /// contexts run in the first duty × 100 ticks; each external principal (UID, contexts,
+        /// demand in thousandths of the device it would take alone) runs while it still wants
+        /// time; each busy context takes an equal part of a tick. Returns own work's share, each
+        /// principal's, and the device's busy percent.
+        pub(super) fn tick(
+            m: usize,
+            duty: u64,
+            externals: &[(u32, usize, u64)],
+        ) -> (u64, Vec<u64>, u32) {
+            let (mut own, mut got, mut busy) = (0f64, vec![0f64; externals.len()], 0u32);
+            for t in 0..100u64 {
+                let on = m > 0 && t * 10 < duty;
+                let wanting: Vec<usize> = (0..externals.len())
+                    .filter(|&j| got[j] * 10.0 + 1e-9 < externals[j].2 as f64)
+                    .collect();
+                let active =
+                    if on { m } else { 0 } + wanting.iter().map(|&j| externals[j].1).sum::<usize>();
+                if active == 0 {
+                    continue;
+                }
+                busy += 1;
+                if on {
+                    own += m as f64 / active as f64;
+                }
+                for &j in &wanting {
+                    got[j] += externals[j].1 as f64 / active as f64;
+                }
+            }
+            let milli = |ticks: f64| (ticks * 10.0).round() as u64;
+            (milli(own), got.iter().map(|g| milli(*g)).collect(), busy)
+        }
+
+        /// A per-process reading in whole samples (0, 330, 660 or 990), carrying its rounding so
+        /// the readings average to the share, as NVML's do under time-slicing.
+        #[derive(Default)]
+        pub(super) struct Quantized(i64);
+
+        impl Quantized {
+            pub(super) fn read(&mut self, share: u64) -> u64 {
+                let want = share as i64 + self.0;
+                let reading = ((want + 165).div_euclid(330) * 330).clamp(0, 990);
+                self.0 = want - reading;
+                reading as u64
+            }
+        }
+
+        /// One interval on the tick device: own work's quantized reading and listed contexts, and
+        /// each external principal's, with the device busy as the ticks say.
+        pub(super) fn ticked(
+            own: Option<u64>,
+            m: usize,
+            externals: &[(u32, usize, u64)],
+            util: u32,
+            sample: u64,
+        ) -> Snapshot {
+            let external: u64 = externals.iter().map(|e| e.2).sum();
+            let mut snap = interval(own, external.min(1000), sample);
+            let gpu = &mut snap.gpus[0];
+            gpu.utilization_percent = Some(util);
+            gpu.time_sliced = Some(true);
+            let own_pids = &OWN_PIDS[..m];
+            let pids = |uid: u32, n: usize| (0..n as u32).map(move |i| uid * 10 + i);
+            gpu.external_process_ids =
+                Some(externals.iter().flat_map(|e| pids(e.0, e.1)).collect());
+            let mut sampled: Vec<(u32, Option<u32>)> = vec![];
+            if own.unwrap_or(0) > 0 {
+                sampled.extend(own_pids.iter().map(|pid| (*pid, Some(1000))));
+            }
+            for e in externals.iter().filter(|e| e.2 > 0) {
+                sampled.extend(pids(e.0, e.1).map(|pid| (pid, Some(e.0))));
+            }
+            gpu.compute_contexts = Some(GpuComputeContexts {
+                own: own_pids.to_vec(),
+                owner: vec![],
+                sampled,
+                listed: externals
+                    .iter()
+                    .flat_map(|e| pids(e.0, e.1).map(move |pid| (pid, Some(e.0))))
+                    .collect(),
+            });
+            let mut principals = vec![PrincipalUsage {
+                uid: Some(1000),
+                is_owner: true,
+                ..PrincipalUsage::default()
+            }];
+            principals.extend(externals.iter().map(|e| PrincipalUsage {
+                uid: Some(e.0),
+                gpu_compute_milli: BTreeMap::from([(GPU.to_string(), e.2)]),
+                ..PrincipalUsage::default()
+            }));
+            snap.principals = Some(principals);
+            snap
+        }
+
+        /// One interval of the tick loop: the decision, own work's share, each principal's and
+        /// the device's busy percent.
+        pub(super) struct Tick {
+            pub(super) decision: Decision,
+            pub(super) own: u64,
+            pub(super) others: Vec<u64>,
+            pub(super) util: u32,
+        }
+
+        /// The tick loop: the external principals alone for 60 intervals, then own work's m(i)
+        /// contexts at the duty each decision sends (0 while paused), every reading quantized.
+        /// `externals(i)` gives each principal's UID, contexts and demand in interval i.
+        pub(super) fn tick_loop(
+            mode: ContentionMode,
+            m_of: &dyn Fn(u64) -> usize,
+            externals: &dyn Fn(u64) -> Vec<(u32, usize, u64)>,
+            intervals: u64,
+        ) -> Vec<Tick> {
+            let config = mode_config(mode);
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            let mut quantized: BTreeMap<u32, Quantized> = BTreeMap::new();
+            for i in 0..60u64 {
+                let ext = externals(0);
+                let (_, got, util) = tick(0, 0, &ext);
+                let readings: Vec<(u32, usize, u64)> = ext
+                    .iter()
+                    .zip(&got)
+                    .map(|(e, g)| (e.0, e.1, quantized.entry(e.0).or_default().read(*g)))
+                    .collect();
+                let snap = ticked(None, 0, &readings, util, i + 1);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), now)
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let (mut duty, mut own_reading, mut out) = (1000u64, Quantized::default(), vec![]);
+            for i in 0..intervals {
+                let (m, ext) = (m_of(i), externals(i));
+                let (own, got, util) = tick(m, duty, &ext);
+                let readings: Vec<(u32, usize, u64)> = ext
+                    .iter()
+                    .zip(&got)
+                    .map(|(e, g)| (e.0, e.1, quantized.entry(e.0).or_default().read(*g)))
+                    .collect();
+                let snap = ticked(Some(own_reading.read(own)), m, &readings, util, 61 + i);
+                let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+                duty = cap_of(&decision);
+                out.push(Tick {
+                    decision,
+                    own,
+                    others: got,
+                    util,
+                });
+                now += INTERVAL;
+            }
+            out
+        }
+
+        pub(super) fn mean(values: impl Iterator<Item = u64>) -> u64 {
+            let values: Vec<u64> = values.collect();
+            values.iter().sum::<u64>() / values.len().max(1) as u64
+        }
+
+        pub(super) fn paused(decision: &Decision) -> bool {
+            gpu_steps(decision)
+                .iter()
+                .any(|a| a.step == YieldStep::Pause)
+        }
+
+        /// Two own contexts beside a saturating one hold two slices of three: the time-slice duty
+        /// d0 = (2 + 1) ÷ (2 × 2) = 0.75 gives own work its fair share, 500, with no pause, and
+        /// quantized own readings of 0, 330, 660 and 990 do not move the duty (FR-021, Q27).
+        #[test]
+        fn two_own_contexts_beside_a_saturating_one_take_the_counts_duty() {
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240);
+                assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
+                let late = &run[40..];
+                let own = mean(late.iter().map(|t| t.own));
+                assert!(own.abs_diff(500) <= 30, "{mode:?}: own work holds {own}");
+                let duties: BTreeSet<u64> = late
+                    .iter()
+                    .filter(|t| !record_of(&t.decision).window)
+                    .map(|t| cap_of(&t.decision))
+                    .collect();
+                assert_eq!(duties, BTreeSet::from([750]), "{mode:?}: duties {duties:?}");
+            }
+        }
+
+        /// Beside a light context, which reads well under its slice, no principal is slice-bound,
+        /// so there is no cap and own work keeps what it takes without CedeGrid (FR-021, Q27).
+        #[test]
+        fn two_own_contexts_beside_a_light_one_are_not_capped() {
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 158)], 200);
+                for (i, t) in run.iter().enumerate() {
+                    let steps = gpu_steps(&t.decision);
+                    assert!(steps.is_empty(), "{mode:?} interval {i}: {steps:?}");
+                }
+                let (unmanaged, _, _) = tick(2, 1000, &[(PEER, 1, 158)]);
+                assert!(run.iter().all(|t| t.own == unmanaged), "{mode:?}");
+            }
+        }
+
+        /// Beside a partial context that wants 40%, more than its slice: slice-bound, so the duty
+        /// starts at d0 and steps up while the device idles beyond the margin, until own work
+        /// holds the device less that user and the margin, and the user keeps its 400 (FR-021,
+        /// Q27, Q28).
+        #[test]
+        fn beside_a_partial_user_the_duty_steps_up_to_the_idle_time() {
+            for (mode, margin) in [
+                (ContentionMode::Performance, 20),
+                (ContentionMode::Neutral, 50),
+            ] {
+                let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 400)], 400);
+                assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
+                let first = run
+                    .iter()
+                    .find(|t| cap_of(&t.decision) < 1000)
+                    .map(|t| cap_of(&t.decision));
+                assert_eq!(first, Some(750), "{mode:?}: the first duty");
+                let late = &run[250..];
+                let own = mean(late.iter().map(|t| t.own));
+                assert!(
+                    own.abs_diff(1000 - 400 - margin) <= 30,
+                    "{mode:?}: own work holds {own}"
+                );
+                let user = mean(late.iter().map(|t| t.others[0]));
+                assert!(
+                    user * 100 >= 97 * 400,
+                    "{mode:?}: the partial user gets {user}"
+                );
+                let busy = mean(late.iter().map(|t| u64::from(t.util) * 10));
+                assert!(
+                    busy + margin + 30 >= 1000,
+                    "{mode:?}: the device is {busy} busy"
+                );
+                // Outside windows the duty moves at most one step around where it settles.
+                let duties: BTreeSet<u64> = late
+                    .iter()
+                    .filter(|t| !record_of(&t.decision).window)
+                    .map(|t| cap_of(&t.decision))
+                    .collect();
+                assert!(duties.len() <= 2, "{mode:?}: duties {duties:?}");
             }
         }
     }

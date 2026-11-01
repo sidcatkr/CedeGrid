@@ -94,6 +94,7 @@ impl<'a> Interval<'a> {
             } else {
                 self.plan_gpu_compute(uuid, budget);
             }
+            self.hold_slice_duty(uuid, budget);
         }
         self.hold_unbudgeted_gpu_compute(&budgets);
         self.gpu_compute_budget = budgets;
@@ -119,7 +120,8 @@ impl<'a> Interval<'a> {
             .filter(|a| {
                 a.phase == AllocationPhase::Running
                     && a.requested.gpu_memory_mib.contains_key(uuid)
-                    && !self.time_slice_exempt(&a.id, uuid)
+                    && !(self.time_slice_holds.contains(uuid)
+                        && self.time_slice_exempt(&a.id, uuid))
             })
             .map(|a| RemeasureFacts {
                 yield_first: self
@@ -151,8 +153,14 @@ impl<'a> Interval<'a> {
             return true;
         }
         // Until own work's share exists a window opens at once, and one ending short opens the
-        // next, since a window feeds only 4–5 uncapped intervals (FR-021, Q24).
-        let due = demand.own_share().is_none()
+        // next, since a window feeds only 4–5 uncapped intervals (FR-021, Q24). The time-slice
+        // duty needs no own share, so there a window opens at once only with none (Q28).
+        let bootstrap = if self.time_slice_duty.contains_key(uuid) {
+            demand.uncapped.is_empty()
+        } else {
+            demand.own_share().is_none()
+        };
+        let due = bootstrap
             || demand
                 .last_uncapped_ms
                 .is_none_or(|last| now.saturating_sub(last) >= GPU_DEMAND_WINDOW_EVERY_MS);
@@ -1245,7 +1253,7 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: victim.guaranteed,
                     allow_drain: false,
-                    unavailable: compute_unavailable(input, key, &victim.id),
+                    unavailable: compute_unavailable(input, key, &victim.id, &self.no_gpu_pause),
                     excess: if contended_victim { excess } else { 0 },
                     external: frame.external,
                     measurement_known: frame.measurement_known,
@@ -1332,7 +1340,7 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: is_guaranteed(allocation),
                     allow_drain: false,
-                    unavailable: compute_unavailable(input, &frame.key, id),
+                    unavailable: compute_unavailable(input, &frame.key, id, &self.no_gpu_pause),
                     excess: 0,
                     external: frame.external,
                     measurement_known: frame.measurement_known
@@ -1439,10 +1447,56 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// Whether an allocation sets no GPU compute step on a device: the time-slice rule holds
-    /// there and the allocation runs in Neutral, Performance or Aggressive (FR-021, Q22).
+    /// On the time-slice duty each Neutral, Performance and Aggressive allocation on the device
+    /// holds a cap at the duty, which `gpu_duty` sends, and never a pause; a re-measure window
+    /// lifts it without a step change (FR-021, Q27, Q28).
+    fn hold_slice_duty(&mut self, uuid: &str, budget: &GpuComputeBudget) {
+        if !self.time_slice_duty.contains_key(uuid) {
+            return;
+        }
+        let input = self.input;
+        let key = ResourceKey::GpuCompute(uuid.to_string());
+        let exempt: Vec<&Allocation> = input
+            .allocations
+            .iter()
+            .filter(|a| {
+                a.phase == AllocationPhase::Running
+                    && a.requested.gpu_memory_mib.contains_key(uuid)
+                    && self.time_slice_exempt(&a.id, uuid)
+            })
+            .collect();
+        let target = budget.share / exempt.len().max(1) as u64;
+        for allocation in exempt {
+            let id = (allocation.id.clone(), key.clone());
+            let previous = self
+                .prev
+                .ladder
+                .get(&id)
+                .filter(|state| state.step == YieldStep::Cap);
+            self.next.ladder.insert(
+                id,
+                StepState {
+                    step: YieldStep::Cap,
+                    entered_at_ms: previous.map_or(self.now, |state| state.entered_at_ms),
+                    cause: YieldCause::ExternalGrowth,
+                    target: Some(target),
+                    trigger_external: previous.map_or(budget.external, |s| s.trigger_external),
+                    calm_since_ms: None,
+                    contended_since_ms: previous.and_then(|s| s.contended_since_ms),
+                    after_pause: false,
+                    to_free: None,
+                    pending: false,
+                    recomputed: false,
+                },
+            );
+        }
+    }
+
+    /// Whether the ladder plans no GPU compute step for an allocation on a device: the time-slice
+    /// rule holds there or the time-slice duty sets its cap, and the allocation runs in Neutral,
+    /// Performance or Aggressive (FR-021, Q22, Q27).
     fn time_slice_exempt(&self, id: &str, uuid: &str) -> bool {
-        self.time_slice_holds.contains(uuid)
+        (self.time_slice_holds.contains(uuid) || self.time_slice_duty.contains_key(uuid))
             && self
                 .allocation_modes
                 .get(id)
@@ -1454,13 +1508,19 @@ impl<'a> Interval<'a> {
     /// Performance and Aggressive, on a device measured this interval and for a cap not set for
     /// unknown activity, the share target over the allocation's part of own work's uncapped share,
     /// since own work at full duty beside another busy context holds only its slices (FR-021,
-    /// Q20, R49). None leaves the duty at the share target, target ÷ 1000.
+    /// Q20, R49). On the time-slice duty it is that duty (Q27). None leaves the duty at the share
+    /// target, target ÷ 1000.
     fn gpu_duty(&self, id: &str, uuid: &str, state: &StepState) -> Option<u64> {
         let yield_first = self
             .allocation_modes
             .get(id)
             .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
             .is_none_or(|mode| *mode == ContentionMode::YieldFirst);
+        if let Some(duty) = self.time_slice_duty.get(uuid)
+            && !yield_first
+        {
+            return Some(*duty);
+        }
         let measured = self
             .gpu_compute_budget
             .get(uuid)
@@ -1691,8 +1751,14 @@ fn applied_duty(
 }
 
 /// Steps unavailable on GPU compute: no backend lowers a GPU compute share, and
-/// a worker's resource targets carry no GPU compute amount.
-fn compute_unavailable(input: &PolicyInput, key: &ResourceKey, id: &str) -> BTreeSet<YieldStep> {
+/// a worker's resource targets carry no GPU compute amount. A device last read as
+/// time-sliced, its listing now unknown, takes no pause either (FR-021, Q29).
+fn compute_unavailable(
+    input: &PolicyInput,
+    key: &ResourceKey,
+    id: &str,
+    no_pause: &BTreeSet<String>,
+) -> BTreeSet<YieldStep> {
     let mut steps = input
         .facts
         .get(id)
@@ -1700,6 +1766,11 @@ fn compute_unavailable(input: &PolicyInput, key: &ResourceKey, id: &str) -> BTre
         .cloned()
         .unwrap_or_default();
     steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
+    if let ResourceKey::GpuCompute(uuid) = key
+        && no_pause.contains(uuid)
+    {
+        steps.insert(YieldStep::Pause);
+    }
     steps
 }
 

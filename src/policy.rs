@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Config;
 use crate::contention::{
     Admission, ComputeFloor, ContentionMode, GPU_DEMAND_WINDOW_DECISIONS,
-    GPU_DEMAND_WINDOW_EVERY_MS, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
-    RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts,
-    YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
+    GPU_DEMAND_WINDOW_EVERY_MS, GPU_MIN_DUTY_MILLI, LadderInput, LadderTiming, Measurement,
+    ModeInput, Principal, RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState,
+    VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
     remeasure_window_allowed, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
@@ -185,6 +185,21 @@ struct GpuDemand {
     last_uncapped_ms: Option<u64>,
     /// An open re-measure window (FR-021, Q19).
     window: Option<RemeasureWindow>,
+    /// The time-slice duty on the device and its steps (FR-021, Q27, Q28).
+    slice: Option<SliceDuty>,
+    /// Whether the device was last read as time-sliced, for an interval whose listing is
+    /// unknown (FR-021, Q29).
+    last_time_sliced: bool,
+}
+
+/// The time-slice duty's state: the base duty it started from, the duty sent, when it last
+/// stepped, and the device's utilization since then (FR-021, Q28).
+#[derive(Debug, Clone, Default)]
+struct SliceDuty {
+    d0: u64,
+    duty: u64,
+    since_ms: u64,
+    utilization: std::collections::VecDeque<u32>,
 }
 
 /// One uncapped interval on a device: the external total, each principal UID's, own work's
@@ -255,7 +270,7 @@ impl GpuDemand {
         own_listed: &BTreeSet<u32>,
         external_listed: &BTreeSet<u32>,
         uid_min: u32,
-    ) -> Option<(u32, u32, BTreeSet<Option<u32>>)> {
+    ) -> Option<(u32, BTreeMap<Option<u32>, u32>)> {
         let (mut known, mut own, mut external) = (
             false,
             BTreeSet::<u32>::new(),
@@ -275,11 +290,11 @@ impl GpuDemand {
             }
         }
         known.then(|| {
-            (
-                own.len() as u32,
-                external.len() as u32,
-                external.into_values().collect(),
-            )
+            let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
+            for uid in external.into_values() {
+                *principals.entry(uid).or_default() += 1;
+            }
+            (own.len() as u32, principals)
         })
     }
 }
@@ -563,9 +578,13 @@ struct Interval<'a> {
     /// Devices in a re-measure window this decision: their GPU compute steps hold and none is
     /// sent (FR-021, Q19).
     remeasured: BTreeSet<String>,
-    /// Devices where the time-slice rule holds this decision: Neutral, Performance and
-    /// Aggressive set no GPU compute step there (FR-021, Q22).
+    /// Devices where Neutral, Performance and Aggressive set no GPU compute step this decision:
+    /// the time-slice rule holds, or no external principal is slice-bound (FR-021, Q22, Q27).
     time_slice_holds: BTreeSet<String>,
+    /// Devices on the time-slice duty, with the duty those modes' allocations run at (Q27).
+    time_slice_duty: BTreeMap<String, u64>,
+    /// Devices last read as time-sliced whose listing is unknown: no GPU compute pause (Q29).
+    no_gpu_pause: BTreeSet<String>,
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
@@ -663,6 +682,8 @@ impl<'a> Interval<'a> {
             gpu_block_reasons: BTreeMap::new(),
             remeasured: BTreeSet::new(),
             time_slice_holds: BTreeSet::new(),
+            time_slice_duty: BTreeMap::new(),
+            no_gpu_pause: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
             over_target: BTreeMap::new(),
