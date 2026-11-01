@@ -5819,14 +5819,71 @@ mod gpu_demand {
         let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
         let mut now = 0;
+        // Item 041: the recordings predate the device's contexts. The other user's processes are
+        // those listed while it ran alone, the owner's unmanaged ones the other listed processes,
+        // and own work's the sampled ones not listed as external; the device is taken as
+        // time-sliced, as the test host's has neither MPS nor MIG.
+        let snapshots = |window: &serde_json::Value| -> Vec<GpuSnapshot> {
+            serde_json::from_value(window["snapshots"].clone()).unwrap()
+        };
+        let peer: std::collections::BTreeSet<u32> = replay
+            .iter()
+            .filter(|window| window["name"] == "alone")
+            .flat_map(snapshots)
+            .flat_map(|gpu| gpu.external_process_ids.unwrap_or_default())
+            .collect();
+        let peer_uid = trace
+            .iter()
+            .flat_map(|window| {
+                window["observations"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .flat_map(|o| o["principals"].as_array().cloned().unwrap_or_default())
+            .filter_map(|entry| entry[0].as_u64().map(|uid| uid as u32))
+            .find(|uid| *uid != 1000);
         for (window, recorded) in replay.iter().zip(&trace) {
             let name = window["name"].as_str().unwrap_or("?");
-            let gpus: Vec<GpuSnapshot> =
-                serde_json::from_value(window["snapshots"].clone()).unwrap();
+            let mut gpus = snapshots(window);
+            let mut own_seen = std::collections::BTreeSet::new();
+            for gpu in gpus.iter_mut() {
+                let listed = gpu.external_process_ids.clone().unwrap_or_default();
+                let sampled: Vec<u32> = gpu
+                    .compute_sampling
+                    .iter()
+                    .flat_map(|sampling| &sampling.processes)
+                    .filter(|p| p.samples.iter().any(|(_, util)| *util > 0))
+                    .map(|p| p.pid)
+                    .collect();
+                own_seen.extend(sampled.iter().copied().filter(|pid| !listed.contains(pid)));
+                let owner: Vec<u32> = listed
+                    .iter()
+                    .copied()
+                    .filter(|pid| !peer.contains(pid))
+                    .collect();
+                gpu.time_sliced = Some(true);
+                gpu.compute_contexts = Some(cedegrid::model::GpuComputeContexts {
+                    own: own_seen.iter().copied().collect(),
+                    owner: owner.clone(),
+                    sampled: sampled
+                        .iter()
+                        .map(|pid| {
+                            let uid = if peer.contains(pid) {
+                                peer_uid
+                            } else {
+                                Some(1000)
+                            };
+                            (*pid, uid)
+                        })
+                        .collect(),
+                });
+            }
             let observations = recorded["observations"].as_array().unwrap();
             let (mut targets, mut caps, mut was, mut fed, mut windows) =
                 (vec![], vec![], vec![], 0, 0);
             let (mut last, mut own_share) = (None, None);
+            let (mut held, mut counts) = (0, vec![]);
             for (gpu, observation) in gpus.iter().zip(observations) {
                 let key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 // Busy CPU above own work's, so own CPU reads consistent beside it.
@@ -5899,13 +5956,22 @@ mod gpu_demand {
                 windows += usize::from(record.window);
                 last = record.estimate;
                 own_share = record.own_uncapped;
+                if let Some(slice) = status.time_slice {
+                    held += usize::from(slice.holds);
+                    counts.push((slice.own, slice.external, slice.principals));
+                }
             }
+            let at = |i: usize| counts.get(i).copied();
             println!(
-                "replay {name}: {} intervals, target median {} (recorded {}), duty median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}, own share at the end {own_share:?}",
+                "replay {name}: {} intervals, target median {} (recorded {}), duty median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}, own share at the end {own_share:?}; time-slice rule held in {held} of {} (m, E, k) at the start {:?}, middle {:?}, end {:?}",
                 targets.len(),
                 median(targets.clone()),
                 median(was),
-                median(caps)
+                median(caps),
+                counts.len(),
+                at(0),
+                at(counts.len() / 2),
+                counts.last()
             );
         }
     }

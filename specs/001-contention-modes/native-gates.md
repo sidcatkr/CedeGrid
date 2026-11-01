@@ -566,6 +566,26 @@ ratio, own work with CedeGrid ÷ without beside the same user, and per managed w
 user's rate, p50 and p99, the duty CedeGrid set, how many decisions fed the estimate, how many
 were in a re-measure window, and the estimate and own work's uncapped share.
 
+## Item 041: T368 and two own processes under the time-slice rule (T456)
+
+Runs once on the authorized test host after `041.done`, with the user's typed approval in the
+session, under the same host rules and `batch-037`'s harness with the fixed probe and the
+probe-alone and other-user-alone windows. The `two` part runs two probe processes per window,
+each its own job when managed, beside the saturating user. That is m = 2 against E = 1, the path
+that still caps.
+
+```sh
+bash runs-037.sh <commit> <second account uid> t368 two   # T368's four runs, then the two-process runs
+# Read only, after each run: the GPU trace, with each decision's time_slice record.
+$py $H/gpu_trace_035.py <each e037-r5 output>
+```
+
+Gates, per run, in SC-017's form, with the mode's target for the principals actually on the
+device (500 beside the saturating user). In the two-process runs the other user must also reach
+½ × its rate alone × 0.97, since there the caps exist to give it the fair share that unmanaged
+own work does not leave it. Report beside them the old ratio, per managed window the other user's
+rate, p50 and p99, the duty CedeGrid set, and m, E, k and whether the rule held in each decision.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

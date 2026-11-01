@@ -92,11 +92,20 @@ measured natural rate, so it holds from its first period. On a delegated cgroup 
 `cgroup.events` within the off phase, and never thaws a freeze a pause holds; otherwise, or
 after a refused freeze, it stops the verified processes, as without a delegated cgroup. Where
 the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
-through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. Own work at full duty beside another busy
-context holds only its slices, so in Neutral, Performance and Aggressive a GPU compute cap's duty
-is its target over own work's uncapped share, its amount averaged over the uncapped intervals in
-which it ran on the device; with no share yet, while the amount is unknown, and in Yield First the
-duty is the target over the whole device. External compute is
+through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. On a
+time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
+time-slicing: in Neutral, Performance and Aggressive own work is not capped while it holds no
+more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the
+owner's unmanaged ones, E the external busy processes and k their principals over the
+estimate's window. A single-process job always meets it, and on an amount of unknown size it
+holds with at most one own process listed. This rests on the driver giving busy contexts equal
+slices, so MPS, a MIG parent and a device whose MPS or MIG state cannot be read keep the
+measured path, and Yield First is unchanged; each decision records the counts (`time_slice`).
+Own work at full duty beside another busy context holds only its slices, so when it holds more
+than its share a GPU compute cap's duty is its target over own work's uncapped share, its amount
+averaged over at least 6 uncapped intervals in which it ran on the device, with windows to
+measure it opening at once while it has fewer; until then, while the amount is unknown, and in
+Yield First the duty is the target over the whole device. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
 utilization. A sample counts its whole span since its process's previous sample, at most one
@@ -106,15 +115,16 @@ samples (`compute_sampling`). When one interval misses the tolerance, as when a 
 sample is late, the shares and the device summed over it and the 3 intervals before it decide,
 and the amounts are then those 4 intervals' averages. On a time-sliced device another user's
 reading rises when own work leaves gaps, at the same demand, so in Neutral, Performance and
-Aggressive the external amount that sets own work's target is the average over the last 60
-intervals in which own work ran uncapped on the device (no cap or pause sent by the decision
+Aggressive the external amount that sets own work's target, the owner's unmanaged usage left
+out, is the average over the last 60 intervals in which own work ran uncapped on the device (no cap or pause sent by the decision
 that set the interval or the one before it), or had no allocation there. While own work is held
 back by GPU compute caps alone, a 6-decision window lifts them every 30 s to measure again, at
 most 10% of the capped time, and a window 200 thousandths or more from the average restarts it;
 Yield First takes the larger of the interval's amount and the average and takes no window, and
 each decision records how the demand was read (`gpu_demand`). A measured amount takes the CPU paths, with external processes grouped into
-principals by UID as on CPU and device time nobody accounts for counted as one more
-external principal while an external process is listed, so own work keeps capacity minus
+principals by UID as on CPU and device time nobody accounts for counted as external usage
+while an external process is listed, and as one more external principal from the attribution
+tolerance's 15 points, below which it is sampling error, so own work keeps capacity minus
 that amount minus the mode's margin under Performance, and its fair share or a learned
 satisfied demand under Neutral. A device leaves the measured path at once and returns
 only after `quiet_window_intervals` consecutive measured intervals. An interval in which
