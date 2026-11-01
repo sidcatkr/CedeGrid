@@ -1617,3 +1617,26 @@ Aligned GPU duty phases, the margin at d0 and the busy counts (spec Session 2026
 - [X] T492 Compare `decision_snapshot` with the code at `c2ae762` and list the snapshots that change and why. Per plan "Item 044" 4 (missing)
 - [X] T493 Add the aligned phase, the margin at d0 and the busy counts to `docs/guarantees.md`, `README.md` and `CHANGELOG.md`. Per plan "Item 044" 5 (missing)
 - [X] T494 Add 044's host runs to `specs/001-contention-modes/native-gates.md` with their gates: the targets 480 and 450, Aggressive for the record, and the phase measurement. Add the Aggressive two-process part and the phase measurement to `batch-037`'s harness. Per plan "Item 044" 6–7 (missing)
+
+## Phase 35: Convergence (item 045)
+
+The step floor, the per-mille dwell average and the restart set (spec Session 2026-11-01 Q35–Q36; plan "Item 045"; research R53). Each pair is test first: the tests fail on today's code, then the code makes them pass. T117 and T228 are unchanged.
+
+- [ ] T495 [P] Write failing step-rule tests in `tests/contention.rs`:
+  - dwell readings 100, 100, 99 hold the duty at d0 with a zero margin, where today they raise it;
+  - Performance above d0 falls on them, where today it holds;
+  - zero margin beside the saturating shape with one reading in three at 99 stays at d0, own work within 30 of 500 and the external context at 485 or more;
+  - the partial user at 40% with a zero margin settles within 30 of 1000 − 400 − 10, and Performance and Neutral settle as before.
+
+  Per FR-021 (contradicts)
+- [ ] T496 Average the dwell's utilization in per mille, rounded, and step on max(margin, 10) in `slice_duty` in `src/policy/measure.rs`, with the record's `utilization_milli` in `src/model.rs`, until T495 passes. Per FR-021 (contradicts)
+- [ ] T497 [P] Write failing restart-set tests:
+  - `src/telemetry.rs`: the device's external PID list holds the owner's unmanaged PIDs.
+  - `tests/contention.rs`: an owner's unmanaged process that comes or goes keeps the external estimate, and a new external PID still restarts it.
+
+  Per FR-022 (contradicts)
+- [ ] T498 Leave the owner's unmanaged PIDs out of `gpu_demand`'s restart set in `src/policy/measure.rs`, until T497 passes. Per FR-022 (contradicts)
+- [ ] T499 Replay 044-t456's traces through the step rule, with Aggressive as Performance with no margin. Report per window the recorded rises and falls against the replay's at HEAD. Per plan "Item 045" 3 (missing)
+- [ ] T500 Compare `decision_snapshot` with the code at `b3b426a` and list the snapshots that change and why. Per plan "Item 045" 3 (missing)
+- [ ] T501 State in `docs/guarantees.md` that with a zero margin CedeGrid takes device time only beyond 1% averaged spare, and update the step rule's wording there. Per plan "Item 045" 4 (missing)
+- [ ] T502 Add 045's host runs to `specs/001-contention-modes/native-gates.md` with their gates: zero margin beside the saturating user, gated, and Performance as a regression check. Add the per-window rises and falls, with the utilization readings around them, to `batch-037`'s analyzer. Per plan "Item 045" 5 (missing)
