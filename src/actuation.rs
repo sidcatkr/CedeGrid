@@ -14,6 +14,79 @@ pub(crate) fn gpu_compute_duty(target: Option<u64>) -> f64 {
     (target.unwrap_or(500) as f64 / 1000.0).clamp(MIN_DUTY, 1.0)
 }
 
+/// The node's duty-cycle clock: CLOCK_MONOTONIC, which every supervisor on the node reads alike,
+/// so aligned phases need no coordination (FR-021, Q31). Elsewhere, where duty cycles are
+/// unavailable, a process-local monotonic anchor keeps it defined.
+pub fn node_clock() -> Duration {
+    #[cfg(unix)]
+    {
+        let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } == 0
+            && time.tv_sec >= 0
+            && (0..1_000_000_000).contains(&time.tv_nsec)
+        {
+            return Duration::new(time.tv_sec as u64, time.tv_nsec as u32);
+        }
+    }
+    static ANCHOR: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ANCHOR.get_or_init(Instant::now).elapsed()
+}
+
+/// A GPU duty cycle's phase on the node clock (FR-021, Q31): it runs while the clock's position in
+/// the period is below duty × period, and a stop holds until that period ends, so a duty change
+/// mid-period never resumes inside an off-phase and never skips one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlignedPhase {
+    /// The period, counted on the node clock, in which the cycle last stopped.
+    stopped_in: Option<u128>,
+}
+
+impl AlignedPhase {
+    /// Whether the cycle runs at `now` on the node clock; a stop holds for the rest of its period.
+    pub fn running(&mut self, now: Duration, period: Duration, duty: f64) -> bool {
+        if duty >= 1.0 {
+            self.stopped_in = None;
+            return true;
+        }
+        let (index, position, length) = Self::position(now, period);
+        if self.stopped_in == Some(index) {
+            return false;
+        }
+        let on = (position as f64) < duty * length as f64;
+        if !on {
+            self.stopped_in = Some(index);
+        }
+        on
+    }
+
+    /// When, on the node clock, the cycle next switches: the on-phase's end while running, the
+    /// period's end while stopped.
+    pub fn next_switch(
+        &self,
+        now: Duration,
+        period: Duration,
+        duty: f64,
+        running: bool,
+    ) -> Duration {
+        let (index, position, length) = Self::position(now, period);
+        let on = (duty.clamp(0.0, 1.0) * length as f64) as u128;
+        let start = index * length;
+        let at = if running && position < on {
+            start + on
+        } else {
+            start + length
+        };
+        Duration::from_nanos(u64::try_from(at).unwrap_or(u64::MAX))
+    }
+
+    /// The period's index on the node clock, the position within it and its length, in ns.
+    fn position(now: Duration, period: Duration) -> (u128, u128, u128) {
+        let length = period.as_nanos().max(1);
+        let now = now.as_nanos();
+        (now / length, now % length, length)
+    }
+}
+
 /// Rootless mechanisms (research R4): a SIGSTOP/SIGCONT duty cycle for a CPU cap
 /// and for a GPU compute share, and SIGSTOP for a pause, all through owned
 /// handles. One cycle serves both caps at the smaller duty. Lower share and memory
@@ -32,7 +105,11 @@ pub struct RootlessActuator {
     /// The share of each period a GPU compute cap allows: its target in
     /// thousandths of the device's time.
     gpu_duty: f64,
+    /// Where a CPU-only cycle's current phase began; a cycle with a GPU compute cap follows
+    /// `aligned` on the node clock instead (FR-021, Q31).
     phase_started: Instant,
+    aligned: AlignedPhase,
+    clock: fn() -> Duration,
     /// CPU time and instant at the start of the current running phase.
     run_mark: Option<(Duration, Instant)>,
     /// The family's natural CPU rate in millicores, from its last measured
@@ -52,6 +129,8 @@ impl RootlessActuator {
             duty: 1.0,
             gpu_duty: 1.0,
             phase_started: Instant::now(),
+            aligned: AlignedPhase::default(),
+            clock: node_clock,
             run_mark: None,
             rate: None,
         }
@@ -91,13 +170,47 @@ impl RootlessActuator {
         cpu.min(self.gpu_duty)
     }
 
-    /// Bring the family to the state the applied steps require.
+    /// Whether a GPU compute cap is part of the cycle, so it follows the node clock.
+    fn aligned(&self) -> bool {
+        self.gpu_duty < 1.0
+    }
+
+    /// Bring the family to the state the applied steps require. A cycle with a GPU compute cap
+    /// takes its aligned phase at once, so a changed duty never resumes inside an off-phase.
     fn enforce(&mut self, family: &mut dyn Family) -> Result<()> {
         if !self.paused.is_empty() {
             self.stop(family)
+        } else if self.aligned() {
+            let running = self
+                .aligned
+                .running((self.clock)(), self.period, self.duty());
+            if running {
+                self.resume(family)
+            } else {
+                self.stop(family)
+            }
         } else {
             self.phase_started = Instant::now();
             self.resume(family)
+        }
+    }
+
+    /// Measure the family's unthrottled rate over the running phase that is ending and set the
+    /// share of the next period it may run under the CPU cap.
+    fn measure_rate(&mut self, family: &mut dyn Family) {
+        if let (Some(target), Some((start_cpu, start)), Some(cpu)) =
+            (self.cap, self.run_mark, family.cpu_time())
+        {
+            let running = start.elapsed().as_secs_f64();
+            if running > 0.0 {
+                let rate = cpu.saturating_sub(start_cpu).as_secs_f64() / running * 1000.0;
+                // The family runs unthrottled in this phase, so the rate is its
+                // natural usage and target / rate is the share that meets the cap.
+                if rate > 1.0 {
+                    self.rate = Some(rate);
+                    self.duty = (target as f64 / rate).clamp(MIN_DUTY, 1.0);
+                }
+            }
         }
     }
 }
@@ -174,27 +287,24 @@ impl Actuator for RootlessActuator {
         if !self.paused.is_empty() || (self.cap.is_none() && self.gpu_duty >= 1.0) {
             return Ok(());
         }
+        if self.aligned() {
+            let running = self
+                .aligned
+                .running((self.clock)(), self.period, self.duty());
+            if running && self.stopped {
+                self.resume(family)?;
+            } else if !running && !self.stopped {
+                self.measure_rate(family);
+                self.stop(family)?;
+            }
+            return Ok(());
+        }
         let elapsed = self.phase_started.elapsed();
         if !self.stopped {
             if elapsed < self.period.mul_f64(self.duty()) {
                 return Ok(());
             }
-            // Measure the family's unthrottled rate over this running phase and
-            // set the share of the next period it may run.
-            if let (Some(target), Some((start_cpu, start)), Some(cpu)) =
-                (self.cap, self.run_mark, family.cpu_time())
-            {
-                let running = start.elapsed().as_secs_f64();
-                if running > 0.0 {
-                    let rate = cpu.saturating_sub(start_cpu).as_secs_f64() / running * 1000.0;
-                    // The family runs unthrottled in this phase, so the rate is its
-                    // natural usage and target / rate is the share that meets the cap.
-                    if rate > 1.0 {
-                        self.rate = Some(rate);
-                        self.duty = (target as f64 / rate).clamp(MIN_DUTY, 1.0);
-                    }
-                }
-            }
+            self.measure_rate(family);
             if self.duty() < 1.0 {
                 self.stop(family)?;
             }
@@ -219,6 +329,13 @@ impl Actuator for RootlessActuator {
         if !self.paused.is_empty() || (self.cap.is_none() && self.gpu_duty >= 1.0) {
             return None;
         }
+        if self.aligned() {
+            let now = (self.clock)();
+            let at = self
+                .aligned
+                .next_switch(now, self.period, self.duty(), !self.stopped);
+            return Some(Instant::now() + at.saturating_sub(now));
+        }
         let share = if self.stopped {
             1.0 - self.duty()
         } else {
@@ -232,6 +349,7 @@ impl Actuator for RootlessActuator {
         self.cap = None;
         self.duty = 1.0;
         self.gpu_duty = 1.0;
+        self.aligned = AlignedPhase::default();
         // The flag is set before any stop and covers a member stopped as it joined, so the
         // continue reaches every member the family holds (R2, FR-086).
         if self.stopped {
@@ -728,5 +846,178 @@ mod tests {
         );
         actuator.release(&mut family).unwrap();
         assert_eq!(family.stopped, [false; 3], "every member is continued");
+    }
+
+    thread_local! {
+        /// The node clock as these tests set it.
+        static NODE_CLOCK: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    }
+
+    fn test_clock() -> Duration {
+        NODE_CLOCK.with(|clock| clock.get())
+    }
+
+    fn set_clock(millis: u64) {
+        NODE_CLOCK.with(|clock| clock.set(Duration::from_millis(millis)));
+    }
+
+    /// An actuator on the tests' node clock, with a 100 ms period.
+    fn clocked() -> RootlessActuator {
+        let mut actuator = actuator(AllocationClass::Opportunistic);
+        actuator.clock = test_clock;
+        actuator
+    }
+
+    /// The aligned phase runs while the node clock's position in the period is below the duty,
+    /// and a stop holds until that period ends (FR-021, Q31).
+    #[test]
+    fn the_aligned_phase_runs_below_the_duty_and_holds_a_stop_to_the_period_end() {
+        let period = Duration::from_millis(100);
+        let at = Duration::from_millis;
+        let mut phase = AlignedPhase::default();
+        assert!(phase.running(at(10_010), period, 0.75));
+        assert_eq!(
+            phase.next_switch(at(10_010), period, 0.75, true),
+            at(10_075)
+        );
+        assert!(!phase.running(at(10_080), period, 0.75));
+        assert_eq!(
+            phase.next_switch(at(10_080), period, 0.75, false),
+            at(10_100)
+        );
+        // A higher duty in the off-phase waits for the next period.
+        assert!(!phase.running(at(10_085), period, 0.9));
+        assert!(phase.running(at(10_101), period, 0.9));
+        // A lower duty ends the on-phase sooner.
+        assert!(phase.running(at(10_140), period, 0.5));
+        assert!(!phase.running(at(10_160), period, 0.5));
+        assert!(!phase.running(at(10_170), period, 0.75));
+        // At full duty the cycle always runs.
+        assert!(phase.running(at(10_299), period, 1.0));
+    }
+
+    /// Two allocations whose GPU compute caps began 30 ms apart stop and resume together on the
+    /// node clock (FR-021, Q31).
+    #[test]
+    fn gpu_duty_cycles_capped_apart_stop_and_resume_together() {
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        let (mut first, mut second) = (clocked(), clocked());
+        set_clock(50_007);
+        first
+            .apply(&mut a, ResourceKind::GpuCompute, YieldStep::Cap, Some(750))
+            .unwrap();
+        set_clock(50_037);
+        second
+            .apply(&mut b, ResourceKind::GpuCompute, YieldStep::Cap, Some(750))
+            .unwrap();
+        let mut off = 0;
+        for millis in 50_037..50_537 {
+            set_clock(millis);
+            first.tick(&mut a).unwrap();
+            second.tick(&mut b).unwrap();
+            assert_eq!(first.stopped, second.stopped, "at {millis} ms");
+            off += usize::from(first.stopped);
+        }
+        assert!(off.abs_diff(125) <= 5, "stopped {off} of 500 ms");
+    }
+
+    /// A duty change mid-period shortens or lengthens the on-phase, never resumes inside an
+    /// off-phase and never skips one (FR-021, Q31).
+    #[test]
+    fn a_gpu_duty_change_mid_period_never_resumes_inside_an_off_phase() {
+        let mut family = Recorder::default();
+        let mut actuator = clocked();
+        set_clock(1_000);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(500),
+            )
+            .unwrap();
+        set_clock(1_060);
+        actuator.tick(&mut family).unwrap();
+        assert!(actuator.stopped);
+        set_clock(1_070);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(900),
+            )
+            .unwrap();
+        actuator.tick(&mut family).unwrap();
+        assert!(actuator.stopped, "no resume inside the off-phase");
+        set_clock(1_105);
+        actuator.tick(&mut family).unwrap();
+        assert!(!actuator.stopped, "the next period runs");
+        set_clock(1_140);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(300),
+            )
+            .unwrap();
+        actuator.tick(&mut family).unwrap();
+        assert!(actuator.stopped, "a lower duty ends the on-phase");
+    }
+
+    /// On the aligned phase the next deadline is the next switch on the node clock: the on-phase's
+    /// end while running, the period's end while stopped (FR-021, Q31).
+    #[test]
+    fn the_aligned_deadline_is_the_next_switch_on_the_node_clock() {
+        let mut family = Recorder::default();
+        let mut actuator = clocked();
+        set_clock(2_010);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(750),
+            )
+            .unwrap();
+        let ahead = |actuator: &RootlessActuator| {
+            actuator
+                .next_deadline()
+                .unwrap()
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+        };
+        assert!(
+            (60..=65).contains(&ahead(&actuator)),
+            "{}",
+            ahead(&actuator)
+        );
+        set_clock(2_080);
+        actuator.tick(&mut family).unwrap();
+        assert!(actuator.stopped);
+        assert!(
+            (15..=20).contains(&ahead(&actuator)),
+            "{}",
+            ahead(&actuator)
+        );
+    }
+
+    /// A CPU-only duty cycle keeps its per-allocation phase: it starts running when the cap is
+    /// applied, wherever the node clock stands (FR-021, Q31).
+    #[test]
+    fn a_cpu_only_duty_cycle_keeps_its_own_phase() {
+        let mut family = Recorder::default();
+        let mut actuator = clocked();
+        set_clock(3_090);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        actuator.tick(&mut family).unwrap();
+        assert!(!actuator.stopped, "the CPU cycle starts in its on-phase");
+        assert_eq!(
+            actuator.next_deadline(),
+            Some(actuator.phase_started + Duration::from_millis(25))
+        );
     }
 }

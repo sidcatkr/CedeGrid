@@ -450,14 +450,15 @@ struct RamCap {
     throttled_since: Option<Instant>,
 }
 
-/// A GPU compute share whose off phase freezes the leaf (research R27).
+/// A GPU compute share whose off phase freezes the leaf (research R27), on the node clock's aligned
+/// phase (FR-021, Q31).
 #[derive(Clone, Copy)]
 struct FreezeDuty {
     target: Option<u64>,
     /// The share of each period own work runs.
     duty: f64,
     frozen: bool,
-    phase_started: Instant,
+    phase: crate::actuation::AlignedPhase,
 }
 
 /// Runtime steps through authorized delegated controls (research R4), with the
@@ -712,11 +713,15 @@ impl<L: LeafIo> CgroupActuator<L> {
             return Ok(());
         }
         let period = self.fallback.period();
-        let elapsed = duty.phase_started.elapsed();
+        let mut duty = duty;
+        let running = duty
+            .phase
+            .running(crate::actuation::node_clock(), period, duty.duty);
+        if running == !duty.frozen {
+            self.gpu_duty = Some(duty);
+            return Ok(());
+        }
         if !duty.frozen {
-            if elapsed < period.mul_f64(duty.duty) {
-                return Ok(());
-            }
             let off = period.mul_f64(1.0 - duty.duty);
             if let Err(refusal) = self.freeze(family, ResourceKind::GpuCompute, off) {
                 self.gpu_duty = None;
@@ -728,14 +733,11 @@ impl<L: LeafIo> CgroupActuator<L> {
                     refusal,
                 );
             }
-        } else if elapsed >= period.mul_f64(1.0 - duty.duty) {
-            self.restore(family, ResourceKind::GpuCompute)?;
         } else {
-            return Ok(());
+            self.restore(family, ResourceKind::GpuCompute)?;
         }
         self.gpu_duty = Some(FreezeDuty {
             frozen: !duty.frozen,
-            phase_started: Instant::now(),
             ..duty
         });
         Ok(())
@@ -821,6 +823,19 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 && (step == YieldStep::None || !self.unavailable(kind).contains(&step)),
             "step {step:?} is not a runtime step for {kind:?} here"
         );
+        // A new share on a running freeze duty keeps its phase, so a changed duty never thaws
+        // the leaf inside an off phase (FR-021, Q31).
+        if kind == ResourceKind::GpuCompute
+            && step == YieldStep::Cap
+            && let Some(duty) = self.gpu_duty
+        {
+            self.gpu_duty = Some(FreezeDuty {
+                target,
+                duty: crate::actuation::gpu_compute_duty(target),
+                ..duty
+            });
+            return Ok(step);
+        }
         // One step per resource: undo the previous one before applying the next.
         self.retry_restore.remove(&kind);
         self.restore(family, kind)?;
@@ -853,7 +868,7 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                     target,
                     duty: crate::actuation::gpu_compute_duty(target),
                     frozen: false,
-                    phase_started: Instant::now(),
+                    phase: crate::actuation::AlignedPhase::default(),
                 });
             }
             (ResourceKind::Ram, YieldStep::Cap) => {
@@ -901,12 +916,9 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
             .gpu_duty
             .filter(|duty| duty.duty < 1.0 && !self.freeze_held_elsewhere())
             .map(|duty| {
-                let share = if duty.frozen {
-                    1.0 - duty.duty
-                } else {
-                    duty.duty
-                };
-                duty.phase_started + period.mul_f64(share)
+                let now = crate::actuation::node_clock();
+                let at = duty.phase.next_switch(now, period, duty.duty, !duty.frozen);
+                Instant::now() + at.saturating_sub(now)
             });
         [self.fallback.next_deadline(), duty, ram]
             .into_iter()

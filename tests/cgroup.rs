@@ -960,6 +960,62 @@ mod runtime_steps {
         assert_eq!(family.signals.last().map(|s| s.0), Some(libc::SIGCONT));
     }
 
+    /// Two leaves whose GPU compute caps began 37 ms apart freeze and thaw together, their
+    /// freeze duties following the node clock modulo the period (FR-021, Q31).
+    #[test]
+    fn freeze_duties_capped_apart_freeze_and_thaw_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut actuators, mut families, mut dirs) = (vec![], vec![], vec![]);
+        for (index, pid) in [(0, 81), (1, 82)] {
+            let dir = temp.path().join(format!("leaf{index}"));
+            fs::create_dir(&dir).unwrap();
+            leaf(&dir, &format!("{pid}\n"));
+            fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+            let mut actuator = CgroupActuator::new(
+                DirectoryLeaf::open(&dir).unwrap(),
+                &all_controls(),
+                &settings(AllocationClass::Opportunistic),
+            );
+            let mut family = timed(pid);
+            actuator
+                .apply(
+                    &mut family,
+                    ResourceKind::GpuCompute,
+                    YieldStep::Cap,
+                    Some(500),
+                )
+                .unwrap();
+            actuators.push(actuator);
+            families.push(family);
+            dirs.push(dir);
+            std::thread::sleep(Duration::from_millis(37));
+        }
+        let end = std::time::Instant::now() + Duration::from_millis(1000);
+        let (mut samples, mut agree, mut frozen) = (0, 0, 0);
+        while std::time::Instant::now() < end {
+            for (actuator, family) in actuators.iter_mut().zip(families.iter_mut()) {
+                actuator.tick(family).unwrap();
+            }
+            let states: Vec<bool> = dirs
+                .iter()
+                .map(|dir| read(dir, "cgroup.freeze") == "1")
+                .collect();
+            samples += 1;
+            agree += usize::from(states[0] == states[1]);
+            frozen += usize::from(states[0]);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (agree, frozen) = (
+            agree as f64 / samples as f64,
+            frozen as f64 / samples as f64,
+        );
+        assert!(
+            agree >= 0.95,
+            "the leaves agreed in {agree:.2} of {samples} samples"
+        );
+        assert!((frozen - 0.5).abs() < 0.08, "frozen {frozen:.2}");
+    }
+
     /// A refused duty freeze, or a leaf that does not report frozen within the off
     /// phase, falls back to the rootless duty and keeps why as the step's detail.
     #[test]
