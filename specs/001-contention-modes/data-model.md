@@ -505,3 +505,14 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
     on the device.
 - The estimate's entries keep the external total without the owner's unmanaged usage. Own
   work's uncapped share exists from 6 entries.
+
+## Item 043 additions
+
+- `contention.gpu_compute.slice_bound_percent` (default 75, 50–100) and `slice_step_percent`
+  (default 5, 1–50): GPU compute only.
+- `GpuComputeContexts.listed` (default empty): each listed external non-background PID that is
+  not the owner's, with its UID when readable.
+- `TimeSliceRecord` gains:
+  - `bound`: each slice-bound principal's UID, contexts, reading and threshold;
+  - `d0`, `duty` and `step` (rising, falling, holding);
+  - `utilization`: the device's percent averaged over the dwell.

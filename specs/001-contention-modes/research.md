@@ -959,3 +959,39 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - more tuning of the estimate and the duty (the inputs stay coarse and biased);
   - a dead band around the target (it still caps one own context for no gain);
   - a duty per context (it needs per-context readings the time-slicer does not give).
+
+## R51. The time-slice duty from the context counts (item 043)
+
+- **Decision:** at m × k > E on a time-sliced device, own work's duty comes from the context
+  counts of slice-bound principals, d0 = (m + E_b) ÷ (m × (k_b + 1)). It steps up from the
+  device's utilization while the device idles beyond the margin, with no estimate target, no
+  single-reading excess and no pause.
+- **Rationale:**
+  - 042's traces: caps of 0–5 from single readings of 990, pauses held 20–45 s beside a saturating
+    user that fills what a pause frees, and a target of 659 read from a slice.
+  - Counts don't need readings. The device's utilization shows idle time without per-process
+    sampling.
+  - The slice-bound check keeps the light and partial cases work-conserving.
+- **The 0.75 threshold against the traces:** averages of uncapped readings over each unmanaged
+  two-process window (two own probes beside the saturating user), against a threshold of
+  0.75 × 1000 ÷ 3 = 250.
+  - Saturating side: per-UID 195–508 across 13 windows; the external total, owner left out,
+    228–554. So 1 of 13 windows lies up to 9% below the threshold on the total, and 2 on per-UID.
+  - Light side: T368's light user read 111–156 (alone 154–156), at least 38% below 250.
+  - The readings stay biased toward own work's contexts when own work holds more contexts, so the
+    saturating side's margin is thin. A factor of 0.65 (217) would put all 13 windows above and
+    keep the light side 28% below.
+  - The default stays at 0.75, as item 043 sets it. The report raises the lower value.
+- **The step and hysteresis:**
+  - It rises 5 points once per max(scale-up interval, dwell) and falls once per dwell. That is
+    1.5 s in Performance and Aggressive at the default dwell of 3 intervals; Neutral rises once
+    per 10 s.
+  - It holds between half the margin and the margin of spare time, so it settles within one step.
+  - Rise bound: from 1000 to d0 ≥ 500, at most 10 steps, 15 s. A principal turning slice-bound is
+    seen within the estimate's 60 intervals (30 s), or a window's 3 s once capped: at most 33 s.
+- **No pause:** at d0 own work already holds its share, and a pause beside a saturating user never
+  reverses.
+- **Alternatives:**
+  - a fixed duty with no slice-bound check (it leaves idle time beside light and partial users);
+  - the 040 duty with smoothed readings (still readings);
+  - a pause bound on GPU compute only (the readings problem remains).

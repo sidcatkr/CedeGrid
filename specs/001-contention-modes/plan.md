@@ -1649,6 +1649,91 @@ fields (serde default), and the decision record a time-slice record.
 - VI: tests first. Pass.
 - VII: the new snapshot and record fields are optional, so older snapshots load. Pass.
 
+## Item 043: the time-slice duty from the context counts (2026-11-01)
+
+Spec Session 2026-11-01 Q27–Q30 (FR-021's time-slice duty, FR-022's GPU bullets, FR-025, the
+several-own-jobs edge case), answering 042's Decision 1. At m × k > E, 042 showed caps from
+single quantized readings, pauses that never reversed beside a saturating user, and a target
+read from a slice. This replaces that path on a time-sliced device with a duty from the context
+counts, stepped up from the device's own utilization (research R51).
+
+**Technical Context**: Rust 1.88, no new dependency, no wire, SDK or supervisor change.
+- **Config:** two keys under `contention.gpu_compute`, `slice_bound_percent` (75, 50–100) and
+  `slice_step_percent` (5, 1–50). They are GPU compute only, as `attribution_tolerance_percent`
+  is (FR-025).
+- **Snapshot:** `GpuComputeContexts` gains the listed external PIDs with their UIDs.
+- **Record:** the time-slice record gains the slice-bound principals, d0, the duty, the step state
+  and the device's utilization.
+
+1. **Telemetry** (`src/telemetry/gpu.rs`): `compute_contexts` also lists each external
+   non-background PID that is not the owner's, with its UID when readable.
+2. **The slice-bound check** (`src/policy/measure.rs`):
+   - A principal's reading is its average in the external estimate (039). For a lone external
+     principal it is the estimate's total, since usage below the attribution tolerance is that
+     principal's sampling error (Q23).
+   - E_j counts its sampled contexts in the estimate's window that are still listed. An
+     unattributed principal counts as one with one context.
+   - It is slice-bound when the reading is at least `slice_bound_percent` × 1000 × E_j ÷ (m + E).
+3. **The duty state** (`src/policy.rs`, per device in `GpuDemand`):
+   - d0 = (m + E_b) ÷ (m × (k_b + 1)), clamped to the minimum duty and 1.
+   - The duty rises by `slice_step_percent` points once per max(the mode's scale-up interval, the
+     step dwell) while the device's utilization, averaged over the dwell, leaves spare time above
+     the mode's margin.
+   - It falls a step once per dwell while the spare time is below half the margin (Aggressive:
+     while the device is fully busy), and holds between.
+   - It is never below d0, starts at d0 and resets when the path ends. A duty of 1000 stays a cap
+     at full duty.
+4. **The ladder** (`src/policy/ladder.rs`):
+   - On such a device, Neutral, Performance and Aggressive allocations are taken out of planning
+     and keep a Cap state at the duty; `gpu_duty` returns it, and no step pauses.
+   - Re-measure windows run every 30 s, without 042's share bootstrap. One opens at once while the
+     estimate has no entries, as after a restart.
+5. **The unknown path:**
+   - With the listing known but the amounts unknown or inconsistent, d0 comes from the listed
+     counts, every listed principal bound, and there is no step-up without a utilization reading.
+     The same applies while the estimate's window is empty.
+   - With the listing unknown on a device last read as time-sliced, the ladder caps at target ÷ 1000
+     with Pause unavailable.
+6. **Tests first** (`tests/contention.rs`), on a tick-level time-sliced model: own work's m
+   contexts run at the duty; each external principal has a demand, and every busy context gets an
+   equal share of each tick. The quantized readings come from that model.
+   - m = 2 beside a saturating context: 500 ± 30, no pause, the duty unchanged by readings of 0,
+     330, 660 and 990.
+   - m = 2 beside a light context: no cap.
+   - m = 2 beside a partial context at 40%: the duty steps up, own work lands within 30 of
+     1000 − 400 − the margin, and the partial user gets at least 0.97 × 400.
+   - m = 3 beside one, and m = 2 beside two saturating contexts.
+   - m = 2 beside a saturating and a light context.
+   - The rise, the leave, the unknown path, and m × k ≤ E, Yield First and MPS pinned.
+   - Config validation tests. Replays of 042's valid windows, the unmanaged two-process windows
+     and T368's light traces. The decision snapshots compared with `c78f240`.
+7. **Docs:** `docs/guarantees.md` and the README GPU section, as the item words it, and the two
+   config keys where the config reference lists `attribution_tolerance_percent`.
+8. **Harness (uncommitted):** managed probes submitted 40 s ahead through `start_at.py`.
+9. **Afterwards:**
+   - the full suites, the macOS serial suite and the Docker Linux check;
+   - then T456's remaining runs on the test host: Performance and Neutral with two probes beside
+     the saturating user, and Performance with two beside the light user.
+
+**Constitution Check (7.0.0)**:
+- I: telemetry only reads; caps act on own processes only. Pass.
+- II:
+  - A slice-bound principal keeps its fair share of the time it wants, and a principal that isn't
+    bound keeps its slices, so others keep min(demand, fair share).
+  - The step-up returns time the device leaves idle beyond the margin, which is work-conserving.
+  - No pause on this path is a softer response, but d0 already holds own work at its share, and
+    FR-022 forbade Performance's long pauses anyway.
+  - Pass.
+- III:
+  - Unknown amounts with a known listing take d0 with every listed principal bound, the strictest
+    duty the counts give.
+  - An unknown listing keeps Q25's target ÷ 1000, without a pause; there is no relaxation beyond
+    that.
+  - Pass.
+- IV: the policy stays pure; the duty state lives in the engine's carried state. Pass.
+- VI: tests first. Pass.
+- VII: the snapshot, record and config fields are optional, with defaults. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
