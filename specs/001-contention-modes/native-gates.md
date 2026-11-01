@@ -614,6 +614,35 @@ duty and the device's utilization; both forms of own work's ratio; and the other
 p50 and p99. A failed gate changes no product code in that item; the report gives the cause
 and a recommended fix.
 
+## Item 044: T456 under aligned duty phases and the margin at d0
+
+Runs once on the authorized test host after `044.done`, under the user's standing approval and
+the same host rules, with `batch-037`'s harness: two own probe processes per window, each its
+own job with a 512 MiB VRAM request when managed, submitted 40 s before its window. Aggressive
+runs as Performance with no GPU compute margin (`reduced_margin` acknowledged), since no mode or
+key names it, and is reported for the record without blocking T456.
+
+```sh
+bash runs-037.sh <commit> <second account uid> two twolight twoaggr
+$py $H/gpu_trace_035.py <each e037-r5 output>   # read only: each decision's time_slice record
+```
+
+Gates, per valid managed window (042's three checks):
+
+- Own work, in SC-017's form: managed ÷ pair alone ≥ min(target ÷ 1000, unmanaged ÷ pair alone) −
+  0.03, the target beside the saturating user 480 in Performance and 450 in Neutral (500 in
+  Aggressive), and beside the light user 1000 − its reading alone − the margin.
+- The saturating user: at least ½ × its rate alone × 0.97.
+- The light user: its rate within 3% of its rate beside unmanaged own work, and its p99 no worse
+  than that p99 + 10%.
+
+Also report the phases: the harness reads each managed probe's run state from `/proc/<pid>/stat`
+about every 10 ms, read-only, and gives both probes' off-phase overlap (both stopped ÷ either
+stopped), the duty held (1 − the mean stopped share), and own work's share against m × d ÷ (m +
+E) at that duty. The gap left after alignment is the drain; report it with what compensating it
+would take, without adding compensation. A failed gate changes no product code in that item. If
+every gate passes, T456 is checked off.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
