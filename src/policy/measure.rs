@@ -1590,12 +1590,19 @@ impl<'a> Interval<'a> {
             .copied()
             .collect();
         let demand = self.next.gpu_demand.get(&gpu.uuid)?;
-        let window = measured
-            .then(|| demand.contexts(&own_listed, &external_listed, uid_min))
-            .flatten();
-        let (own, mut principals, counted) = match window {
-            Some((own, principals)) => (own, principals, true),
-            None => {
+        // Busy contexts while the samples are readable, the window's or else the interval's; the
+        // listing only while they are not (Q33).
+        let window = demand.contexts(&own_listed, &external_listed, uid_min);
+        let interval = count_contexts(
+            sampled_contexts(gpu).as_ref(),
+            &own_listed,
+            &external_listed,
+            uid_min,
+        );
+        let (own, mut principals, source) = match (contexts.samples_readable, window, interval) {
+            (true, Some((own, principals)), _) => (own, principals, SliceSource::Window),
+            (true, None, Some((own, principals))) => (own, principals, SliceSource::Interval),
+            _ => {
                 let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
                 for (_, uid) in contexts
                     .listed
@@ -1604,14 +1611,18 @@ impl<'a> Interval<'a> {
                 {
                     *principals.entry(*uid).or_default() += 1;
                 }
-                (own_listed.len() as u32, principals, false)
+                (own_listed.len() as u32, principals, SliceSource::Listing)
             }
         };
-        if counted && unattributed {
+        // The window's readings decide which principals are slice-bound, even in an interval
+        // whose amounts are inconsistent; without a window every counted principal is (Q29).
+        let read = source == SliceSource::Window;
+        if read && measured && unattributed {
             principals.entry(None).or_insert(1);
         }
         let external: u32 = principals.values().sum();
         let count = principals.len() as u32;
+        let counted = source != SliceSource::Listing;
         let holds = if counted {
             own.saturating_mul(count) <= external
         } else {
@@ -1621,23 +1632,24 @@ impl<'a> Interval<'a> {
             own,
             external: counted.then_some(external),
             principals: counted.then_some(count),
+            source: Some(source),
             holds,
             ..TimeSliceRecord::default()
         };
         if !holds {
-            self.slice_duty(gpu, &principals, counted, &mut record);
+            self.slice_duty(gpu, &principals, read, &mut record);
         }
         Some(record)
     }
 
     /// The time-slice duty at m × k > E (FR-021, Q27, Q28): the slice-bound principals from the
-    /// external estimate's readings (every listed principal while the counts come from the
-    /// listing), d0 from their counts, and one step up or down from the device's utilization.
+    /// external estimate's readings when `read`, else every counted principal, d0 from their
+    /// counts, and one step up or down from the device's utilization.
     fn slice_duty(
         &mut self,
         gpu: &GpuSnapshot,
         principals: &BTreeMap<Option<u32>, u32>,
-        counted: bool,
+        read: bool,
         record: &mut TimeSliceRecord,
     ) {
         let config = self.config;
@@ -1668,10 +1680,10 @@ impl<'a> Interval<'a> {
             .map(|(uid, contexts)| SliceBound {
                 uid: *uid,
                 contexts: *contexts,
-                reading: if counted { reading(uid) } else { 0 },
-                threshold: if counted { threshold(*contexts) } else { 0 },
+                reading: if read { reading(uid) } else { 0 },
+                threshold: if read { threshold(*contexts) } else { 0 },
             })
-            .filter(|bound| !counted || bound.reading >= bound.threshold)
+            .filter(|bound| !read || bound.reading >= bound.threshold)
             .collect();
         if record.bound.is_empty() {
             demand.slice = None;
@@ -2068,7 +2080,10 @@ fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
 /// work's and the owner's unmanaged sampled PIDs on one side, every other sampled PID with its
 /// UID on the other.
 fn sampled_contexts(gpu: &GpuSnapshot) -> Option<SampledContexts> {
-    let contexts = gpu.compute_contexts.as_ref()?;
+    let contexts = gpu
+        .compute_contexts
+        .as_ref()
+        .filter(|contexts| contexts.samples_readable)?;
     let mut sampled = SampledContexts::default();
     for (pid, uid) in &contexts.sampled {
         if contexts.own.contains(pid) || contexts.owner.contains(pid) {

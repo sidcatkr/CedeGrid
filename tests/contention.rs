@@ -5891,6 +5891,12 @@ mod gpu_demand {
                         .filter(|pid| peer.contains(pid))
                         .map(|pid| (pid, peer_uid))
                         .collect(),
+                    // Item 044: the recordings predate the flag; samples were read where the
+                    // interval recorded any process's.
+                    samples_readable: gpu
+                        .compute_sampling
+                        .as_ref()
+                        .is_some_and(|sampling| !sampling.processes.is_empty()),
                 });
             }
             let observations = recorded["observations"].as_array().unwrap();
@@ -6319,7 +6325,9 @@ mod gpu_demand {
     /// gets an equal slice of the time the device is busy (FR-021, Q22).
     mod time_slice {
         use super::*;
-        use cedegrid::model::{GpuComputeContexts, SliceStep, TimeSliceRecord, YieldAction};
+        use cedegrid::model::{
+            GpuComputeContexts, SliceSource, SliceStep, TimeSliceRecord, YieldAction,
+        };
         use std::collections::BTreeSet;
 
         const OWN_PIDS: [u32; 3] = [100, 101, 102];
@@ -6351,6 +6359,7 @@ mod gpu_demand {
                 owner: vec![],
                 sampled,
                 listed: peer.iter().map(|pid| (*pid, Some(PEER))).collect(),
+                samples_readable: true,
             });
             snap
         }
@@ -6806,16 +6815,17 @@ mod gpu_demand {
             );
         }
 
-        /// On the unknown path the rule holds with at most one own process listed, since unseen
-        /// external contexts can only add to E and k; with two, the listed external principal
-        /// counts as slice-bound and the duty starts at d0 from the listed counts, (2 + 1) ÷ 2 ×
-        /// (½ − Neutral's 5%), with the share at its part of the busy contexts (FR-021, Q22, Q29,
-        /// Q32).
+        /// With the amounts unknown from the start the estimate has no interval. While the
+        /// samples are readable the interval's busy contexts count: one own process holds the
+        /// rule, and with two the busy external principal is slice-bound at d0 = (2 + 1) ÷ 2 ×
+        /// (½ − Neutral's 5%). With the samples unreadable the listing counts, and the rule holds
+        /// only with at most one own process listed, since unseen external contexts can only add
+        /// to E and k (FR-021, Q22, Q29, Q32, Q33).
         #[test]
         fn the_unknown_path_holds_the_rule_only_for_one_own_process() {
             let key = ResourceKey::GpuCompute(GPU.into());
             let config = mode_config(ContentionMode::Neutral);
-            for own_n in [1, 2] {
+            for (own_n, readable) in [(1, true), (2, true), (1, false), (2, false)] {
                 let mut engine = PolicyEngine::new();
                 let input = PolicyInput {
                     allocations: vec![job(None)],
@@ -6829,6 +6839,7 @@ mod gpu_demand {
                     gpu.own_compute_milli = None;
                     gpu.compute_amount_unknown =
                         Some("summed per-process utilization differs from the device".into());
+                    gpu.compute_contexts.as_mut().unwrap().samples_readable = readable;
                     let decision = engine
                         .evaluate(&config, &snap, &input, i * INTERVAL)
                         .unwrap();
@@ -6845,10 +6856,17 @@ mod gpu_demand {
                     last = Some(decision);
                 }
                 let slice = slice_of(&last.unwrap());
+                let (counts, source) = if readable {
+                    (Some(1), SliceSource::Interval)
+                } else {
+                    (None, SliceSource::Listing)
+                };
                 assert_eq!(
                     (slice.own, slice.external, slice.principals, slice.holds),
-                    (own_n as u32, None, None, own_n == 1)
+                    (own_n as u32, counts, counts, own_n == 1),
+                    "readable {readable}"
                 );
+                assert_eq!(slice.source, Some(source), "readable {readable}");
                 if own_n == 2 {
                     assert_eq!(
                         capped,
@@ -6984,6 +7002,7 @@ mod gpu_demand {
                     .iter()
                     .flat_map(|e| pids(e.0, e.1).map(move |pid| (pid, Some(e.0))))
                     .collect(),
+                samples_readable: true,
             });
             let mut principals = vec![PrincipalUsage {
                 uid: Some(1000),
@@ -7017,7 +7036,7 @@ mod gpu_demand {
             externals: &dyn Fn(u64) -> Vec<(u32, usize, u64)>,
             intervals: u64,
         ) -> Vec<Tick> {
-            tick_loop_with(&mode_config(mode), m_of, externals, intervals)
+            tick_loop_with(&mode_config(mode), m_of, externals, intervals, &|_, _| {})
         }
 
         /// Aggressive's GPU compute behavior: Performance with no margin, which is how a node
@@ -7032,12 +7051,14 @@ mod gpu_demand {
             config
         }
 
-        /// `tick_loop` under a given configuration.
+        /// `tick_loop` under a given configuration, each snapshot, the other users' alone ones
+        /// included, passed through `adjust` with its index in its part of the run.
         pub(super) fn tick_loop_with(
             config: &Config,
             m_of: &dyn Fn(u64) -> usize,
             externals: &dyn Fn(u64) -> Vec<(u32, usize, u64)>,
             intervals: u64,
+            adjust: &dyn Fn(u64, &mut Snapshot),
         ) -> Vec<Tick> {
             let config = config.clone();
             let mut engine = PolicyEngine::new();
@@ -7051,7 +7072,8 @@ mod gpu_demand {
                     .zip(&got)
                     .map(|(e, g)| (e.0, e.1, quantized.entry(e.0).or_default().read(*g)))
                     .collect();
-                let snap = ticked(None, 0, &readings, util, i + 1);
+                let mut snap = ticked(None, 0, &readings, util, i + 1);
+                adjust(i, &mut snap);
                 engine
                     .evaluate(&config, &snap, &PolicyInput::default(), now)
                     .unwrap();
@@ -7070,7 +7092,8 @@ mod gpu_demand {
                     .zip(&got)
                     .map(|(e, g)| (e.0, e.1, quantized.entry(e.0).or_default().read(*g)))
                     .collect();
-                let snap = ticked(Some(own_reading.read(own)), m, &readings, util, 61 + i);
+                let mut snap = ticked(Some(own_reading.read(own)), m, &readings, util, 61 + i);
+                adjust(i, &mut snap);
                 let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
                 duty = cap_of(&decision);
                 out.push(Tick {
@@ -7111,7 +7134,8 @@ mod gpu_demand {
                 ("Neutral", mode_config(ContentionMode::Neutral), 450, 675),
                 ("Aggressive", aggressive_config(), 500, 750),
             ] {
-                let run = tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240);
+                let run =
+                    tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240, &|_, _| {});
                 assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
                 let late = &run[40..];
                 let own = mean(late.iter().map(|t| t.own));
@@ -7325,10 +7349,10 @@ mod gpu_demand {
             }
         }
 
-        /// With the listing known and the amounts unknown, d0 comes from the listed counts with
+        /// With the listing known and the samples unreadable, d0 comes from the listed counts with
         /// every listed principal slice-bound, (2 + 2) ÷ 2 × (⅓ − Performance's 2%), and without
         /// a utilization reading the duty never steps up; with one showing idle time it does
-        /// (FR-021, Q29, Q32).
+        /// (FR-021, Q29, Q32, Q33).
         #[test]
         fn unknown_amounts_take_d0_from_the_listed_principals() {
             const SECOND_PID: u32 = 950;
@@ -7353,6 +7377,7 @@ mod gpu_demand {
                     gpu.external_process_ids.as_mut().unwrap().push(SECOND_PID);
                     let contexts = gpu.compute_contexts.as_mut().unwrap();
                     contexts.listed.push((SECOND_PID, Some(2002)));
+                    contexts.samples_readable = false;
                     let decision = engine
                         .evaluate(&config, &snap, &input, i * INTERVAL)
                         .unwrap();
@@ -7383,8 +7408,8 @@ mod gpu_demand {
         }
 
         /// After the estimate restarts on a new external PID, its window is empty: d0 comes from
-        /// the listed counts, every listed principal bound, and a re-measure window opens at
-        /// once (FR-021, Q29).
+        /// the interval's sampled busy contexts, every counted principal bound, and a re-measure
+        /// window opens at once (FR-021, Q29, Q33).
         #[test]
         fn an_empty_window_after_a_restart_takes_the_listed_counts() {
             const CHANGE: u64 = 61 + 120;
@@ -7417,9 +7442,10 @@ mod gpu_demand {
                     after.d0,
                     after.bound.len()
                 ),
-                (None, None, Some(720), 1),
+                (Some(1), Some(1), Some(720), 1),
                 "{after:?}"
             );
+            assert_eq!(after.source, Some(SliceSource::Interval));
             assert!(
                 run[120..123].iter().any(|(d, _)| record_of(d).window),
                 "no window opened"
@@ -7485,6 +7511,97 @@ mod gpu_demand {
             assert!(pauses[1].is_some(), "the control never paused");
         }
 
+        /// An idle context of another principal, listed throughout but never sampled busy, does
+        /// not count while the samples are readable, even in intervals whose amounts are
+        /// inconsistent: the counts come from the busy contexts, the window's or, while every
+        /// third interval cuts each re-measure window short, the interval's, and d0 stays the
+        /// one-principal value, 720 in Performance. With the samples unreadable the listing
+        /// counts it, and d0 is the two-principal value, 626 (FR-021, Q33).
+        #[test]
+        fn an_idle_listed_context_counts_only_when_the_samples_are_unreadable() {
+            const IDLE: u32 = 950;
+            let config = mode_config(ContentionMode::Performance);
+            for (readable, d0, sources_wanted) in [
+                (
+                    true,
+                    720,
+                    BTreeSet::from([SliceSource::Window, SliceSource::Interval]),
+                ),
+                (false, 626, BTreeSet::from([SliceSource::Listing])),
+            ] {
+                let mut engine = PolicyEngine::new();
+                let input = PolicyInput {
+                    allocations: vec![job(None)],
+                    ..PolicyInput::default()
+                };
+                let (mut sources, mut d0s) = (BTreeSet::new(), BTreeSet::new());
+                for i in 0..240u64 {
+                    let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
+                    let gpu = &mut snap.gpus[0];
+                    gpu.external_process_ids.as_mut().unwrap().push(IDLE);
+                    let contexts = gpu.compute_contexts.as_mut().unwrap();
+                    contexts.listed.push((IDLE, Some(2002)));
+                    contexts.samples_readable = readable;
+                    if !readable || i % 3 == 0 {
+                        gpu.external_compute_milli = None;
+                        gpu.own_compute_milli = None;
+                        gpu.compute_amount_unknown =
+                            Some("summed per-process utilization differs from the device".into());
+                    }
+                    let decision = engine
+                        .evaluate(&config, &snap, &input, i * INTERVAL)
+                        .unwrap();
+                    assert!(!paused(&decision), "readable {readable}, interval {i}");
+                    if i >= 120 {
+                        let slice = slice_of(&decision);
+                        sources.extend(slice.source);
+                        d0s.extend(slice.d0);
+                    }
+                }
+                assert!(
+                    sources.is_subset(&sources_wanted),
+                    "readable {readable}: {sources:?}"
+                );
+                assert_eq!(d0s, BTreeSet::from([d0]), "readable {readable}");
+            }
+        }
+
+        /// Beside a light user, with an idle context of another principal listed throughout,
+        /// nothing is capped, also through the stretches after an interval with inconsistent
+        /// amounts, while the device waits to read as measured again: the window's busy contexts
+        /// and its readings still decide, and no principal is slice-bound (FR-021, Q27, Q33).
+        #[test]
+        fn beside_a_light_user_an_idle_listed_context_caps_nothing() {
+            const IDLE: u32 = 950;
+            let idle = |i: u64, snap: &mut Snapshot| {
+                let gpu = &mut snap.gpus[0];
+                gpu.external_process_ids.as_mut().unwrap().push(IDLE);
+                let contexts = gpu.compute_contexts.as_mut().unwrap();
+                contexts.listed.push((IDLE, Some(2002)));
+                // The alone part has no own context, so only the own part has inconsistent
+                // intervals.
+                if contexts.own.len() == 2 && (i == 40 || i == 120) {
+                    gpu.external_compute_milli = None;
+                    gpu.own_compute_milli = None;
+                    gpu.compute_amount_unknown =
+                        Some("summed per-process utilization differs from the device".into());
+                }
+            };
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = tick_loop_with(
+                    &mode_config(mode),
+                    &|_| 2,
+                    &|_| vec![(PEER, 1, 158)],
+                    200,
+                    &idle,
+                );
+                for (i, t) in run.iter().enumerate() {
+                    let steps = gpu_steps(&t.decision);
+                    assert!(steps.is_empty(), "{mode:?} interval {i}: {steps:?}");
+                }
+            }
+        }
+
         /// Each decision on the duty records the slice-bound principals with their readings and
         /// thresholds, d0, the duty, the step and the utilization the step read (FR-021, Q30).
         #[test]
@@ -7513,6 +7630,7 @@ mod gpu_demand {
                 (2, Some(1), Some(1), false)
             );
             assert_eq!((slice.d0, slice.duty), (Some(720), Some(720)));
+            assert_eq!(slice.source, Some(SliceSource::Window));
             // The device is saturated, so the duty holds at d0.
             assert_eq!(
                 (slice.step, slice.utilization),

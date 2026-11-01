@@ -500,6 +500,7 @@ pub(super) fn compute_contexts(
         }
     }
     if let (Some(previous), Ok(samples)) = (previous, samples) {
+        contexts.samples_readable = true;
         let busy: BTreeSet<u32> = samples
             .iter()
             .filter(|s| s.timestamp > previous && s.sm_util > 0)

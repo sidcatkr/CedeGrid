@@ -1272,13 +1272,14 @@ node reports with the expected per-resource values at each step.
     most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
   - This path uses no estimate-based target, no ladder excess from one interval's own reading and
     no pause in any mode; the minimum duty is the floor.
-  - When the amounts are unknown or inconsistent, or the estimate has no uncapped interval since
-    it restarted, every counted external principal is slice-bound and the duty steps up only with
-    a device utilization reading. The counts are the contexts sampled busy over the averaged
-    window, or in the interval when the window has none, while the per-process samples are
-    readable, and the listed ones only when the samples themselves are unreadable. When the
-    listing itself is unknown on a device last read as time-sliced, the cap is target ÷ 1000
-    (Q25), without a pause.
+  - While the per-process samples are readable the counts are the contexts sampled busy over
+    the averaged window, and while the window holds intervals its readings decide which
+    principals are slice-bound, even in an interval whose amounts are unknown or inconsistent.
+    When the estimate has no uncapped interval since it restarted, the counts are the interval's
+    busy contexts; when the samples themselves are unreadable, the listed ones. In both cases
+    every counted external principal is slice-bound, and the duty steps up only with a device
+    utilization reading. When the listing itself is unknown on a device last read as
+    time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
   - Each decision's GPU compute status states m, E, k, whether the rule held, the source of its
     counts, the slice-bound principals with their readings and thresholds, d0, the duty and the
     step-up state.

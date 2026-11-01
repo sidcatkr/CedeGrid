@@ -276,6 +276,10 @@ pub struct GpuComputeContexts {
     /// readable (FR-021, Q29).
     #[serde(default)]
     pub listed: Vec<(u32, Option<u32>)>,
+    /// Whether the interval's per-process samples were read, so an empty `sampled` means no busy
+    /// context rather than an unknown (FR-021, Q33).
+    #[serde(default)]
+    pub samples_readable: bool,
 }
 
 /// What a replay of one interval's GPU measurement needs, in driver microseconds: the device's
@@ -677,6 +681,9 @@ pub struct TimeSliceRecord {
     /// External principals, on the measured path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principals: Option<u32>,
+    /// Where the counts came from (Q33).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SliceSource>,
     /// Whether the rule held, so Neutral, Performance and Aggressive set no GPU compute step.
     pub holds: bool,
     /// At m × k > E, the slice-bound principals (FR-021, Q27); none means no cap.
@@ -704,6 +711,17 @@ pub struct SliceBound {
     pub contexts: u32,
     pub reading: u64,
     pub threshold: u64,
+}
+
+/// The source of the time-slice counts (FR-021, Q33): the contexts sampled busy over the
+/// estimate's window, those sampled in this interval while the window has none, or the listing
+/// while the samples are unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SliceSource {
+    Window,
+    Interval,
+    Listing,
 }
 
 /// The time-slice duty's step this decision (FR-021, Q28).

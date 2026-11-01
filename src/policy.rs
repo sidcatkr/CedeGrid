@@ -192,6 +192,38 @@ struct GpuDemand {
     last_time_sliced: bool,
 }
 
+/// The busy contexts over some intervals' samples: own work's still listed as own, and the
+/// external ones still listed, UIDs below `uid_min` left out, grouped into principals (FR-021, Q22,
+/// Q33). None without an interval whose samples were read.
+fn count_contexts<'a>(
+    intervals: impl IntoIterator<Item = &'a SampledContexts>,
+    own_listed: &BTreeSet<u32>,
+    external_listed: &BTreeSet<u32>,
+    uid_min: u32,
+) -> Option<(u32, BTreeMap<Option<u32>, u32>)> {
+    let (mut known, mut own, mut external) = (
+        false,
+        BTreeSet::<u32>::new(),
+        BTreeMap::<u32, Option<u32>>::new(),
+    );
+    for contexts in intervals {
+        known = true;
+        own.extend(contexts.own.intersection(own_listed));
+        for (pid, uid) in &contexts.external {
+            if external_listed.contains(pid) && uid.is_none_or(|uid| uid >= uid_min) {
+                external.insert(*pid, *uid);
+            }
+        }
+    }
+    known.then(|| {
+        let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
+        for uid in external.into_values() {
+            *principals.entry(uid).or_default() += 1;
+        }
+        (own.len() as u32, principals)
+    })
+}
+
 /// The time-slice duty's state: the base duty it started from, the duty sent, when it last
 /// stepped, and the device's utilization since then (FR-021, Q28).
 #[derive(Debug, Clone, Default)]
@@ -271,31 +303,14 @@ impl GpuDemand {
         external_listed: &BTreeSet<u32>,
         uid_min: u32,
     ) -> Option<(u32, BTreeMap<Option<u32>, u32>)> {
-        let (mut known, mut own, mut external) = (
-            false,
-            BTreeSet::<u32>::new(),
-            BTreeMap::<u32, Option<u32>>::new(),
-        );
-        for contexts in self
-            .uncapped
-            .iter()
-            .filter_map(|entry| entry.contexts.as_ref())
-        {
-            known = true;
-            own.extend(contexts.own.intersection(own_listed));
-            for (pid, uid) in &contexts.external {
-                if external_listed.contains(pid) && uid.is_none_or(|uid| uid >= uid_min) {
-                    external.insert(*pid, *uid);
-                }
-            }
-        }
-        known.then(|| {
-            let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
-            for uid in external.into_values() {
-                *principals.entry(uid).or_default() += 1;
-            }
-            (own.len() as u32, principals)
-        })
+        count_contexts(
+            self.uncapped
+                .iter()
+                .filter_map(|entry| entry.contexts.as_ref()),
+            own_listed,
+            external_listed,
+            uid_min,
+        )
     }
 }
 

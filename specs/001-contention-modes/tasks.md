@@ -1607,12 +1607,12 @@ Aligned GPU duty phases, the margin at d0 and the busy counts (spec Session 2026
 - [X] T486 Add the aligned phase (`AlignedPhase` on the node's CLOCK_MONOTONIC) to `src/actuation.rs` and use it for `RootlessActuator`'s GPU duty cycles and `src/cgroup.rs`'s `FreezeDuty`, until T484 and T485 pass. Per FR-021 (missing)
 - [X] T487 [P] Update 043's shape tests in `tests/contention.rs` to the margin at d0, failing on today's code: at m = 2 beside one saturating context the first duty is 720 (Performance), 675 (Neutral) and 750 (Aggressive), and own work's share is within 30 of 480, 450 and 500. The partial, rise and unknown-path tests take the new d0. Per FR-021, SC-017 (contradicts)
 - [X] T488 Make d0 leave the mode's margin in `src/policy/measure.rs`, d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), clamped, as the steps' floor, until T487 passes. Per FR-021 (contradicts)
-- [ ] T489 [P] Write failing busy-count tests:
+- [X] T489 [P] Write failing busy-count tests:
   - `src/telemetry.rs`: `compute_contexts` marks the samples readable or not.
   - `tests/contention.rs`: an idle listed context, never sampled busy, doesn't count while samples are readable, even with inconsistent amounts, and d0 stays the one-principal value. With unreadable samples the listing counts it. The light shape with an idle listed context stays uncapped. An empty window takes the interval's sampled busy contexts. The record states its source (window, interval, listing).
 
   Per FR-021 (contradicts)
-- [ ] T490 Add `GpuComputeContexts.samples_readable` in `src/model.rs` and `src/telemetry/gpu.rs`, the record's `source`, and the count sources in `src/policy/measure.rs`, until T489 passes. Per FR-021 (contradicts)
+- [X] T490 Add `GpuComputeContexts.samples_readable` in `src/model.rs` and `src/telemetry/gpu.rs`, the record's `source`, and the count sources in `src/policy/measure.rs`, until T489 passes. Per FR-021 (contradicts)
 - [ ] T491 Replay 043's six managed windows through the policy, reporting each decision's count source and d0. Per plan "Item 044" 4 (missing)
 - [ ] T492 Compare `decision_snapshot` with the code at `c2ae762` and list the snapshots that change and why. Per plan "Item 044" 4 (missing)
 - [ ] T493 Add the aligned phase, the margin at d0 and the busy counts to `docs/guarantees.md`, `README.md` and `CHANGELOG.md`. Per plan "Item 044" 5 (missing)

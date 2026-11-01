@@ -2426,6 +2426,8 @@ mod tests {
                 contexts.listed,
                 vec![(21, Some(2002)), (22, Some(2002)), (23, None)]
             );
+            // Item 044: whether the samples were read, so an empty `sampled` is known (Q33).
+            assert_eq!(contexts.samples_readable, previous.is_some());
         }
     }
 
