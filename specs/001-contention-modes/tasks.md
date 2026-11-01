@@ -1640,3 +1640,22 @@ The step floor, the per-mille dwell average and the restart set (spec Session 20
 - [X] T500 Compare `decision_snapshot` with the code at `b3b426a` and list the snapshots that change and why. Per plan "Item 045" 3 (missing)
 - [X] T501 State in `docs/guarantees.md` that with a zero margin CedeGrid takes device time only beyond 1% averaged spare, and update the step rule's wording there. Per plan "Item 045" 4 (missing)
 - [X] T502 Add 045's host runs to `specs/001-contention-modes/native-gates.md` with their gates: zero margin beside the saturating user, gated, and Performance as a regression check. Add the per-window rises and falls, with the utilization readings around them, to `batch-037`'s analyzer. Per plan "Item 045" 5 (missing)
+
+## Phase 36: Convergence (item 046)
+
+Own work pays for the re-measure windows (spec Session 2026-11-01 Q37; plan "Item 046"; research R54). The tests come first and fail on today's code; the code then makes them pass. T117 and T228 are unchanged.
+
+- [ ] T503 [P] Write failing tests in `tests/contention.rs`:
+  - zero margin beside the saturating shape, over the whole run with the windows included: the context gets at least 485 (484 today) and own work's held duty averages within 5 of 750;
+  - Performance and Neutral: the context gets at least 490 and 520, and own work is within 30 of 480 and 450;
+  - a Yield First neighbour on the device opens no window, so d0' = d0;
+  - the partial user's settle point is unchanged;
+  - the shapes' first duties are 725, 692 and 643;
+  - the record shows d0, w and d0'.
+
+  Per FR-021 (missing)
+- [ ] T504 In `slice_duty` (`src/policy/measure.rs`), compute w from `GPU_DEMAND_WINDOW_DECISIONS`, `GPU_DEMAND_WINDOW_EVERY_MS` and the monitor interval. Start the duty at d0', which is also its floor; d0' = d0 where no window can open. Add the record's `window_share` and `d0_windows` in `src/model.rs`. Done when T503 passes. Per FR-021 (missing)
+- [ ] T505 Replay 045's four managed windows, reporting d0, w and d0' per decision. Per plan "Item 046" 2 (missing)
+- [ ] T506 Compare `decision_snapshot` with the code at `f56e179`, listing which snapshots change and why. Per plan "Item 046" 2 (missing)
+- [ ] T507 State in `docs/guarantees.md` that own work pays for CedeGrid's re-measure windows on a time-sliced device, so others keep their share over time. Per plan "Item 046" 3 (missing)
+- [ ] T508 Add 046's host runs to `specs/001-contention-modes/native-gates.md` with their gates: zero margin gated as in 045, Performance and Neutral under T456's gates. Have `batch-037`'s analyzer report d0, w and d0' per window. Per plan "Item 046" 4 (missing)
