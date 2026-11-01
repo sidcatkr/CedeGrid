@@ -172,9 +172,8 @@ type DemandEstimate = (u64, BTreeMap<u32, u64>);
 /// time-sliced device own work's gaps raise another user's reading at the same demand.
 #[derive(Debug, Clone, Default)]
 struct GpuDemand {
-    /// The last uncapped intervals' amounts: the external total, each principal UID's, and own
-    /// work's where it ran on the device.
-    uncapped: std::collections::VecDeque<(u64, BTreeMap<u32, u64>, Option<u64>)>,
+    /// The last uncapped intervals.
+    uncapped: std::collections::VecDeque<UncappedInterval>,
     /// The own allocations running on the device at the last interval; another set is another
     /// own share (FR-021, Q20).
     own_allocations: Option<Vec<String>>,
@@ -186,6 +185,24 @@ struct GpuDemand {
     last_uncapped_ms: Option<u64>,
     /// An open re-measure window (FR-021, Q19).
     window: Option<RemeasureWindow>,
+}
+
+/// One uncapped interval on a device: the external total, each principal UID's, own work's
+/// amount where it ran there, and the busy contexts sampled (FR-021, Q19, Q20, Q22).
+#[derive(Debug, Clone, Default)]
+struct UncappedInterval {
+    external: u64,
+    by_uid: BTreeMap<u32, u64>,
+    own: Option<u64>,
+    contexts: Option<SampledContexts>,
+}
+
+/// An interval's busy contexts: own work's and the owner's unmanaged ones, and each external
+/// one with its UID when readable (FR-021, Q22).
+#[derive(Debug, Clone, Default)]
+struct SampledContexts {
+    own: BTreeSet<u32>,
+    external: BTreeMap<u32, Option<u32>>,
 }
 
 /// A re-measure window: the decisions still to send own work no GPU compute cap on the device,
@@ -206,13 +223,13 @@ impl GpuDemand {
         }
         let mean = |sum: u64| (sum + count / 2) / count;
         let mut by_uid: BTreeMap<u32, u64> = BTreeMap::new();
-        for (_, amounts, _) in &self.uncapped {
-            for (uid, amount) in amounts {
+        for entry in &self.uncapped {
+            for (uid, amount) in &entry.by_uid {
                 *by_uid.entry(*uid).or_default() += amount;
             }
         }
         Some((
-            mean(self.uncapped.iter().map(|(total, _, _)| total).sum()),
+            mean(self.uncapped.iter().map(|entry| entry.external).sum()),
             by_uid
                 .into_iter()
                 .map(|(uid, sum)| (uid, mean(sum)))
@@ -223,13 +240,46 @@ impl GpuDemand {
     /// Own work's uncapped share: its amount averaged over the uncapped intervals in which it ran
     /// on the device (FR-021, Q20).
     fn own_share(&self) -> Option<u64> {
-        let owns: Vec<u64> = self
-            .uncapped
-            .iter()
-            .filter_map(|(_, _, own)| *own)
-            .collect();
+        let owns: Vec<u64> = self.uncapped.iter().filter_map(|entry| entry.own).collect();
         let count = owns.len() as u64;
         (count > 0).then(|| (owns.iter().sum::<u64>() + count / 2) / count)
+    }
+
+    /// The time-slice rule's counts over the estimate's window (FR-021, Q22): own work's busy
+    /// contexts and the external ones still listed, UIDs below `uid_min` left out, and the
+    /// external principals among them, a PID whose UID cannot be read standing for the
+    /// unattributed principal. None before an interval with its contexts known.
+    fn contexts(
+        &self,
+        own_listed: &BTreeSet<u32>,
+        external_listed: &BTreeSet<u32>,
+        uid_min: u32,
+    ) -> Option<(u32, u32, BTreeSet<Option<u32>>)> {
+        let (mut known, mut own, mut external) = (
+            false,
+            BTreeSet::<u32>::new(),
+            BTreeMap::<u32, Option<u32>>::new(),
+        );
+        for contexts in self
+            .uncapped
+            .iter()
+            .filter_map(|entry| entry.contexts.as_ref())
+        {
+            known = true;
+            own.extend(contexts.own.intersection(own_listed));
+            for (pid, uid) in &contexts.external {
+                if external_listed.contains(pid) && uid.is_none_or(|uid| uid >= uid_min) {
+                    external.insert(*pid, *uid);
+                }
+            }
+        }
+        known.then(|| {
+            (
+                own.len() as u32,
+                external.len() as u32,
+                external.into_values().collect(),
+            )
+        })
     }
 }
 
@@ -512,6 +562,9 @@ struct Interval<'a> {
     /// Devices in a re-measure window this decision: their GPU compute steps hold and none is
     /// sent (FR-021, Q19).
     remeasured: BTreeSet<String>,
+    /// Devices where the time-slice rule holds this decision: Neutral, Performance and
+    /// Aggressive set no GPU compute step there (FR-021, Q22).
+    time_slice_holds: BTreeSet<String>,
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
@@ -608,6 +661,7 @@ impl<'a> Interval<'a> {
             gpu_memory_unknown: BTreeSet::new(),
             gpu_block_reasons: BTreeMap::new(),
             remeasured: BTreeSet::new(),
+            time_slice_holds: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
             over_target: BTreeMap::new(),
@@ -738,6 +792,8 @@ struct GpuComputeBudget {
     /// Each mode's share, which bounds the jobs in that mode; empty when no
     /// external work contends.
     targets: BTreeMap<ContentionMode, u64>,
+    /// Whether the governing view holds an unattributed principal (FR-021, Q23).
+    unattributed: bool,
 }
 
 fn scoped_cpu_valid(kernel: &KernelSnapshot, reasons: &mut Vec<ReasonCode>) -> bool {

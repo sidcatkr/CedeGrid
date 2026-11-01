@@ -117,7 +117,9 @@ impl<'a> Interval<'a> {
             .allocations
             .iter()
             .filter(|a| {
-                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
+                a.phase == AllocationPhase::Running
+                    && a.requested.gpu_memory_mib.contains_key(uuid)
+                    && !self.time_slice_exempt(&a.id, uuid)
             })
             .map(|a| RemeasureFacts {
                 yield_first: self
@@ -138,7 +140,8 @@ impl<'a> Interval<'a> {
         let Some(demand) = self.next.gpu_demand.get_mut(uuid) else {
             return false;
         };
-        if !measured || unknown_cause {
+        // Without a cap to lift, as under the time-slice rule, no window runs.
+        if !measured || unknown_cause || facts.is_empty() {
             demand.window = None;
             return false;
         }
@@ -170,7 +173,10 @@ impl<'a> Interval<'a> {
     fn hold_remeasured(&mut self, uuid: &str) {
         let compute = ResourceKey::GpuCompute(uuid.to_string());
         for ((id, key), state) in &self.prev.ladder {
-            if key == &compute && self.input.allocations.iter().any(|a| &a.id == id) {
+            if key == &compute
+                && self.input.allocations.iter().any(|a| &a.id == id)
+                && !self.time_slice_exempt(id, uuid)
+            {
                 self.next
                     .ladder
                     .insert((id.clone(), key.clone()), state.clone());
@@ -1118,7 +1124,9 @@ impl<'a> Interval<'a> {
             .allocations
             .iter()
             .filter(|a| {
-                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
+                a.phase == AllocationPhase::Running
+                    && a.requested.gpu_memory_mib.contains_key(uuid)
+                    && !self.time_slice_exempt(&a.id, uuid)
             })
             .collect();
         if running.is_empty() {
@@ -1303,8 +1311,11 @@ impl<'a> Interval<'a> {
     fn hold_compute(&mut self, frame: &ComputeFrame<'a>, planned: &BTreeSet<String>) {
         let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
         let kind = ResourceKind::GpuCompute;
+        let ResourceKey::GpuCompute(uuid) = &frame.key else {
+            return;
+        };
         for ((id, step_key), state) in &prev.ladder {
-            if step_key != &frame.key || planned.contains(id) {
+            if step_key != &frame.key || planned.contains(id) || self.time_slice_exempt(id, uuid) {
                 continue;
             }
             let Some(allocation) = input.allocations.iter().find(|a| &a.id == id) else {
@@ -1422,6 +1433,17 @@ impl<'a> Interval<'a> {
                 duty,
             });
         }
+    }
+
+    /// Whether an allocation sets no GPU compute step on a device: the time-slice rule holds
+    /// there and the allocation runs in Neutral, Performance or Aggressive (FR-021, Q22).
+    fn time_slice_exempt(&self, id: &str, uuid: &str) -> bool {
+        self.time_slice_holds.contains(uuid)
+            && self
+                .allocation_modes
+                .get(id)
+                .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
+                .is_some_and(|mode| *mode != ContentionMode::YieldFirst)
     }
 
     /// A GPU compute cap's duty in thousandths, which the supervisor applies: in Neutral,

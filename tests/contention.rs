@@ -6192,4 +6192,218 @@ mod gpu_demand {
             .unwrap();
         assert_eq!(record_of(&fresh).own_uncapped, None);
     }
+
+    /// Item 041's time-sliced device, with its contexts listed and sampled: each busy context
+    /// gets an equal slice of the time the device is busy (FR-021, Q22).
+    mod time_slice {
+        use super::*;
+        use cedegrid::model::{GpuComputeContexts, TimeSliceRecord, YieldAction};
+
+        const OWN_PIDS: [u32; 3] = [100, 101, 102];
+        const PEER_PIDS: [u32; 3] = [900, 901, 902];
+
+        /// One measured interval on a time-sliced device: own work's first `own_n` processes and
+        /// the other user's first `peer_n` listed, each side's sampled while it reads above zero.
+        pub(super) fn sliced(
+            own: Option<u64>,
+            external: u64,
+            sample: u64,
+            own_n: usize,
+            peer_n: usize,
+        ) -> Snapshot {
+            let mut snap = interval(own, external, sample);
+            let gpu = &mut snap.gpus[0];
+            gpu.time_sliced = Some(true);
+            let (own_pids, peer) = (&OWN_PIDS[..own_n], &PEER_PIDS[..peer_n]);
+            gpu.external_process_ids = Some(peer.to_vec());
+            let mut sampled = vec![];
+            if own.unwrap_or(0) > 0 {
+                sampled.extend(own_pids.iter().map(|pid| (*pid, Some(1000))));
+            }
+            if external > 0 {
+                sampled.extend(peer.iter().map(|pid| (*pid, Some(PEER))));
+            }
+            gpu.compute_contexts = Some(GpuComputeContexts {
+                own: own_pids.to_vec(),
+                owner: vec![],
+                sampled,
+            });
+            snap
+        }
+
+        /// The saturating loop on contexts: the other user's `peer` processes alone for 60
+        /// intervals, then own work's `own(i)` processes at the duty its last decision sent,
+        /// holding duty × own ÷ (own + peer) of the device, its reading swinging as 040's model's.
+        /// Returns each own interval's decision and own work's share.
+        pub(super) fn saturating(
+            mode: ContentionMode,
+            own: &dyn Fn(u64) -> usize,
+            peer: usize,
+            intervals: u64,
+        ) -> Vec<(Decision, u64)> {
+            let config = mode_config(mode);
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            for i in 0..60u64 {
+                let snap = sliced(None, 990, i + 1, 0, peer);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), now)
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let mean = SATURATING_FULL_DUTY.iter().sum::<u64>() as i64 / 60;
+            let (mut duty, mut out) = (1000u64, vec![]);
+            for i in 0..intervals {
+                let m = own(i);
+                let share = duty * m as u64 / (m + peer) as u64;
+                let swing = (SATURATING_FULL_DUTY[(i % 60) as usize] as i64 - mean) / 2;
+                let reading = (share as i64 + swing).clamp(0, 990) as u64;
+                let snap = sliced(Some(reading), 990 - reading, 61 + i, m, peer);
+                let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+                duty = cap_of(&decision);
+                out.push((decision, share));
+                now += INTERVAL;
+            }
+            out
+        }
+
+        /// The light loop on contexts: the light user alone, then one own process beside it,
+        /// reading its full-duty amounts while own work runs uncapped and its amounts under caps
+        /// otherwise; own work takes the rest of the device within its cap.
+        pub(super) fn light(mode: ContentionMode, intervals: u64) -> Vec<(Decision, u64)> {
+            let config = mode_config(mode);
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            for i in 0..60u64 {
+                let snap = sliced(None, ALONE[i as usize], i + 1, 0, 1);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), now)
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let (mut caps, mut out) = ([1000u64, 1000u64], vec![]);
+            for i in 0..intervals {
+                let external = if caps.iter().any(|cap| *cap < 1000) {
+                    BESIDE_CAPS[(i % 60) as usize]
+                } else {
+                    BESIDE_FULL_DUTY[(i % 60) as usize]
+                };
+                let own = caps[0].min(990 - external);
+                let snap = sliced(Some(own), external, 61 + i, 1, 1);
+                let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+                caps = [cap_of(&decision), caps[0]];
+                out.push((decision, own));
+                now += INTERVAL;
+            }
+            out
+        }
+
+        pub(super) fn gpu_steps(decision: &Decision) -> Vec<&YieldAction> {
+            let key = ResourceKey::GpuCompute(GPU.into());
+            decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == key)
+                .collect()
+        }
+
+        pub(super) fn slice_of(decision: &Decision) -> TimeSliceRecord {
+            decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+                .time_slice
+                .expect("a time-sliced device records the rule")
+        }
+
+        /// One own context beside a saturating user already holds its slice, the fair share, so
+        /// Performance and Neutral send it no GPU compute step and it keeps the unmanaged share;
+        /// the record shows m = 1, E = 1 and k = 1 (FR-021, Q22).
+        #[test]
+        fn one_own_context_beside_a_saturating_user_is_not_capped() {
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = saturating(mode, &|_| 1, 1, 200);
+                for (i, (decision, share)) in run.iter().enumerate() {
+                    let steps = gpu_steps(decision);
+                    assert!(steps.is_empty(), "{mode:?} interval {i}: {steps:?}");
+                    assert_eq!(*share, 500, "{mode:?} interval {i}");
+                }
+                let slice = slice_of(&run[199].0);
+                assert_eq!(
+                    (slice.own, slice.external, slice.principals, slice.holds),
+                    (1, Some(1), Some(1), true),
+                    "{mode:?}"
+                );
+            }
+        }
+
+        /// Beside a light user one own context takes the rest of the device at full duty, and
+        /// no step is sent either (FR-021, Q22).
+        #[test]
+        fn one_own_context_beside_a_light_user_is_not_capped() {
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = light(mode, 200);
+                for (i, (decision, own)) in run.iter().enumerate() {
+                    let steps = gpu_steps(decision);
+                    assert!(steps.is_empty(), "{mode:?} interval {i}: {steps:?}");
+                    let external = BESIDE_FULL_DUTY[i % 60];
+                    assert_eq!(*own, 990 - external, "{mode:?} interval {i}");
+                }
+                assert!(slice_of(&run[199].0).holds, "{mode:?}");
+            }
+        }
+
+        /// Two own contexts beside one saturating context hold two slices of three, more than
+        /// the fair share: m × k = 2 > E = 1, so 040's duty caps own work to 500. Once one own
+        /// context leaves the device, m counts only the processes still listed, the rule holds and
+        /// the cap is gone at once (FR-021, Q22).
+        #[test]
+        fn two_own_contexts_are_capped_until_one_leaves() {
+            const LEAVE: usize = 300;
+            let run = saturating(
+                ContentionMode::Neutral,
+                &|i| if (i as usize) < LEAVE { 2 } else { 1 },
+                1,
+                400,
+            );
+            let capped = &run[100..LEAVE];
+            let own = median(capped.iter().map(|(_, share)| *share).collect());
+            assert!(own.abs_diff(500) <= 30, "own work holds {own}");
+            for (decision, _) in capped {
+                let slice = slice_of(decision);
+                assert_eq!((slice.own, slice.holds), (2, false));
+            }
+            for (i, (decision, _)) in run.iter().enumerate().skip(LEAVE) {
+                let steps = gpu_steps(decision);
+                assert!(steps.is_empty(), "interval {i}: {steps:?}");
+                let slice = slice_of(decision);
+                assert_eq!((slice.own, slice.holds), (1, true), "interval {i}");
+            }
+        }
+
+        /// Two own contexts beside an external principal with two contexts hold half the device,
+        /// its fair share: m × k = 2 ≤ E = 2, so there is no cap (FR-021, Q22).
+        #[test]
+        fn two_own_contexts_beside_two_external_ones_are_not_capped() {
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = saturating(mode, &|_| 2, 2, 200);
+                for (i, (decision, share)) in run.iter().enumerate() {
+                    let steps = gpu_steps(decision);
+                    assert!(steps.is_empty(), "{mode:?} interval {i}: {steps:?}");
+                    assert_eq!(*share, 500, "{mode:?} interval {i}");
+                }
+                let slice = slice_of(&run[199].0);
+                assert_eq!(
+                    (slice.own, slice.external, slice.principals, slice.holds),
+                    (2, Some(2), Some(1), true),
+                    "{mode:?}"
+                );
+            }
+        }
+    }
 }

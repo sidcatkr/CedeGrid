@@ -1602,7 +1602,7 @@ fields (serde default), and the decision record a time-slice record.
    - The bootstrap ends as soon as the share has 6 entries, about two windows, since every
      measured uncapped interval of a running own allocation adds one.
 6. **The record** (`src/model.rs`, `src/contention.rs`): `ResourceStatus.time_slice` carries
-   `time_sliced`, `own` (m), `external` (E), `principals` (k) and `holds`, on a device known to be
+   `own` (m), `external` (E), `principals` (k) and `holds`, present only on a device known to be
    time-sliced. Reason code `gpu_time_slice_fair`.
 7. **Tests first**, in `tests/contention.rs`, on 040's time-sliced model with contexts:
    - one own context beside the saturating and the light shapes, in Performance and Neutral: no

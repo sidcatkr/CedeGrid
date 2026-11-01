@@ -1101,8 +1101,31 @@ impl<'a> Interval<'a> {
         if telemetry_unknown {
             self.gpu_memory_unknown.insert(gpu.uuid.clone());
         }
+        let mut time_slice = None;
         if !telemetry_unknown {
-            let budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
+            let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
+            time_slice = self.time_slice(gpu, measured.is_some(), budget.unattributed);
+            // Under the time-slice rule, Neutral, Performance and Aggressive hold the device;
+            // Yield First keeps its target (FR-021, Q22).
+            if time_slice.is_some_and(|slice| slice.holds) {
+                self.time_slice_holds.insert(gpu.uuid.clone());
+                if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
+                    budget.share = GPU_COMPUTE_CAPACITY;
+                }
+                for (mode, target) in budget.targets.iter_mut() {
+                    if *mode != ContentionMode::YieldFirst {
+                        *target = GPU_COMPUTE_CAPACITY;
+                    }
+                }
+                note(
+                    &mut self.statuses,
+                    ResourceKey::GpuCompute(gpu.uuid.clone()),
+                    "gpu_time_slice_fair",
+                    crate::contention::reason_text("gpu_time_slice_fair")
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
             self.gpu_compute_budget.insert(gpu.uuid.clone(), budget);
         }
         let compute_status = self
@@ -1111,6 +1134,7 @@ impl<'a> Interval<'a> {
             .or_default();
         compute_status.activity = Some(activity);
         compute_status.gpu_demand = Some(demand_record);
+        compute_status.time_slice = time_slice;
         if let Some((external, own)) = measured {
             compute_status.external = Some(external);
             compute_status.own = Some((own, own));
@@ -1430,8 +1454,8 @@ impl<'a> Interval<'a> {
             .as_ref()
             .is_some_and(|before| before != &running)
         {
-            for (_, _, own) in demand.uncapped.iter_mut() {
-                *own = None;
+            for entry in demand.uncapped.iter_mut() {
+                entry.own = None;
             }
         }
         let uncapped = running.is_empty() || !demand.sent_capped.contains(&true);
@@ -1453,9 +1477,12 @@ impl<'a> Interval<'a> {
                     ))
                 })
                 .collect();
-            demand
-                .uncapped
-                .push_back((external, amounts, own_ran.then_some(own)));
+            demand.uncapped.push_back(UncappedInterval {
+                external,
+                by_uid: amounts,
+                own: own_ran.then_some(own),
+                contexts: sampled_contexts(gpu),
+            });
             while demand.uncapped.len() > GPU_DEMAND_INTERVALS {
                 demand.uncapped.pop_front();
             }
@@ -1492,6 +1519,60 @@ impl<'a> Interval<'a> {
         };
         self.next.gpu_demand.insert(gpu.uuid.clone(), demand);
         (estimate, record)
+    }
+
+    /// The time-slice rule on a device (FR-021, Q22). On a time-sliced device with its contexts
+    /// known, it holds while own work's busy contexts m, the external ones E and their principals
+    /// k give m × k ≤ E on the measured path, an unattributed principal counting as one
+    /// principal with one context; on the unknown path it holds while m ≤ 1, m then counting the
+    /// processes listed, since unseen external contexts can only add to E and k.
+    fn time_slice(
+        &self,
+        gpu: &GpuSnapshot,
+        measured: bool,
+        unattributed: bool,
+    ) -> Option<TimeSliceRecord> {
+        if gpu.time_sliced != Some(true) {
+            return None;
+        }
+        let contexts = gpu.compute_contexts.as_ref()?;
+        let own_listed: BTreeSet<u32> = contexts
+            .own
+            .iter()
+            .chain(&contexts.owner)
+            .copied()
+            .collect();
+        if !measured {
+            let own = own_listed.len() as u32;
+            return Some(TimeSliceRecord {
+                own,
+                holds: own <= 1,
+                ..TimeSliceRecord::default()
+            });
+        }
+        let external_listed: BTreeSet<u32> = gpu
+            .external_process_ids
+            .iter()
+            .flatten()
+            .filter(|pid| !gpu.background_process_ids.contains(pid) && !own_listed.contains(pid))
+            .copied()
+            .collect();
+        let (own, mut external, principals) = self.next.gpu_demand.get(&gpu.uuid)?.contexts(
+            &own_listed,
+            &external_listed,
+            self.config.contention.uid_min,
+        )?;
+        let mut count = principals.len() as u32;
+        if unattributed && !principals.contains(&None) {
+            count += 1;
+            external += 1;
+        }
+        Some(TimeSliceRecord {
+            own,
+            external: Some(external),
+            principals: Some(count),
+            holds: own.saturating_mul(count) <= external,
+        })
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU
@@ -1608,6 +1689,12 @@ impl<'a> Interval<'a> {
                     external: governing_view.external,
                     own: Some(own),
                     targets,
+                    unattributed: crate::contention::contending_principals(
+                        &averaged_view,
+                        &compute_thresholds,
+                    )
+                    .iter()
+                    .any(|(uid, _)| uid.is_none()),
                 }
             }
             None if matches!(activity, ComputeActivity::Active | ComputeActivity::Unknown) => {
@@ -1631,6 +1718,7 @@ impl<'a> Interval<'a> {
                     external: GPU_COMPUTE_CAPACITY,
                     own: None,
                     targets: targets_of(&view, &compute_thresholds, GPU_COMPUTE_CAPACITY),
+                    unattributed: false,
                 }
             }
             // A measured idle device, or no external activity.
@@ -1640,6 +1728,7 @@ impl<'a> Interval<'a> {
                 external: 0,
                 own: None,
                 targets: BTreeMap::new(),
+                unattributed: false,
             },
         }
     }
@@ -1797,4 +1886,20 @@ fn raised_note(floor: &crate::config::FloorStatus, what: &str) -> String {
 /// never goes below the minimum floor (FR-063).
 fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
     (floor.saturating_mul(u64::from(config.contention.critical_floor_percent)) / 100).max(minimum)
+}
+
+/// The busy contexts an uncapped interval keeps for the time-slice rule (FR-021, Q22): own
+/// work's and the owner's unmanaged sampled PIDs on one side, every other sampled PID with its
+/// UID on the other.
+fn sampled_contexts(gpu: &GpuSnapshot) -> Option<SampledContexts> {
+    let contexts = gpu.compute_contexts.as_ref()?;
+    let mut sampled = SampledContexts::default();
+    for (pid, uid) in &contexts.sampled {
+        if contexts.own.contains(pid) || contexts.owner.contains(pid) {
+            sampled.own.insert(*pid);
+        } else {
+            sampled.external.insert(*pid, *uid);
+        }
+    }
+    Some(sampled)
 }

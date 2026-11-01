@@ -498,9 +498,9 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   - `owner`: the owner's unmanaged PIDs listed there;
   - `sampled`: each non-background PID with a nonzero sample this interval, with its UID when
     readable.
-- `ResourceStatus.time_slice` (optional), on a device known to be time-sliced:
-  - `time_sliced`;
-  - `own` (m), `external` (E) and `principals` (k), over the estimate's window;
+- `ResourceStatus.time_slice` (optional), present only on a device known to be time-sliced:
+  - `own` (m), and `external` (E) and `principals` (k) on the measured path, over the estimate's
+    window; on the unknown path `own` counts the processes listed;
   - `holds`: whether the rule held, so Neutral, Performance and Aggressive set no GPU compute step
     on the device.
 - The estimate's entries keep the external total without the owner's unmanaged usage. Own

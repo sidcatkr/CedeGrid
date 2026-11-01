@@ -351,6 +351,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "An external user's demand is recorded as satisfied, so it no longer contends below that demand.",
     ),
     (
+        "gpu_time_slice_fair",
+        "Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap.",
+    ),
+    (
         "applied_duty_credit",
         "Own GPU work is credited at the duty its supervisor applied.",
     ),

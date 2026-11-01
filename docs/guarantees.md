@@ -532,6 +532,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `launch_nice_kept` | A task launched at the Yield First nice keeps it in another CPU mode, since it cannot be lowered again; its caps do the yielding. |
 | `watching_larger_demand` | Own work holds the fair share while a larger external demand is watched for one response window. |
 | `satisfied_demand` | An external user's demand is recorded as satisfied, so it no longer contends below that demand. |
+| `gpu_time_slice_fair` | Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap. |
 | `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
 | `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |

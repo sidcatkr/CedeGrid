@@ -654,6 +654,27 @@ pub struct ResourceStatus {
     /// (FR-021, Q19); the contention report does not carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_demand: Option<GpuDemandRecord>,
+    /// The time-slice rule's counts on a device known to be time-sliced, on GPU compute
+    /// (FR-021, Q22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_slice: Option<TimeSliceRecord>,
+}
+
+/// The time-slice rule on one device in one interval (FR-021, Q22): own work's busy contexts
+/// (m), the external ones (E) and their principals (k) over the estimate's window, still listed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeSliceRecord {
+    /// Own work's contexts, the owner's unmanaged ones included; on the unknown path, those
+    /// listed.
+    pub own: u32,
+    /// External contexts, on the measured path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<u32>,
+    /// External principals, on the measured path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principals: Option<u32>,
+    /// Whether the rule held, so Neutral, Performance and Aggressive set no GPU compute step.
+    pub holds: bool,
 }
 
 /// What a resource keeps from own work or from admission, and why, in resource
