@@ -5801,6 +5801,8 @@ mod gpu_demand {
     /// `CEDEGRID_GPU_DEMAND_REPLAY` names a run folder with `gpu-trace.json` and
     /// `gpu-replay.json`, `CEDEGRID_GPU_DEMAND_MODE` its mode (`performance`, `neutral`). Own work
     /// runs in the managed windows only; the readings are those recorded under the run's own caps.
+    /// With `CEDEGRID_GPU_DEMAND_OWN=unmanaged` the owner's processes in the unmanaged windows are
+    /// taken as own work's instead, so the policy reads them uncapped (plan "Item 043" 6).
     #[test]
     #[ignore = "replay: needs CEDEGRID_GPU_DEMAND_REPLAY"]
     fn replay_gpu_demand() {
@@ -5816,6 +5818,7 @@ mod gpu_demand {
             serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
         };
         let (replay, trace) = (read("gpu-replay.json"), read("gpu-trace.json"));
+        let own_window = std::env::var("CEDEGRID_GPU_DEMAND_OWN").unwrap_or("managed".into());
         let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
         let mut now = 0;
@@ -5845,9 +5848,14 @@ mod gpu_demand {
             .find(|uid| *uid != 1000);
         for (window, recorded) in replay.iter().zip(&trace) {
             let name = window["name"].as_str().unwrap_or("?");
+            let as_own = name == own_window && name != "managed";
             let mut gpus = snapshots(window);
             let mut own_seen = std::collections::BTreeSet::new();
             for gpu in gpus.iter_mut() {
+                // The owner's unmanaged processes stand for own work's: no longer external.
+                if as_own && let Some(pids) = gpu.external_process_ids.as_mut() {
+                    pids.retain(|pid| peer.contains(pid));
+                }
                 let listed = gpu.external_process_ids.clone().unwrap_or_default();
                 let sampled: Vec<u32> = gpu
                     .compute_sampling
@@ -5890,12 +5898,13 @@ mod gpu_demand {
                 (vec![], vec![], vec![], 0, 0);
             let (mut last, mut own_share) = (None, None);
             let (mut held, mut counts) = (0, vec![]);
-            for (gpu, observation) in gpus.iter().zip(observations) {
+            let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) =
+                (BTreeMap::<(u64, bool), usize>::new(), vec![], vec![], 0, 0);
+            for (gpu, observation) in gpus.iter_mut().zip(observations) {
                 let key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 // Busy CPU above own work's, so own CPU reads consistent beside it.
                 let mut snap = snapshot(1000);
                 snap.gpu_inventory = CapabilityStatus::Available;
-                snap.gpus = vec![gpu.clone()];
                 // The recorded observation belongs to the snapshot it was taken with.
                 if let Some(observation) = &gpu.observation {
                     snap.observed_at_unix_ms = observation.observed_at_unix_ms;
@@ -5913,6 +5922,12 @@ mod gpu_demand {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
                     // The test account is the agent's owner, as on the host.
+                    if uid == Some(1000) && as_own {
+                        gpu.own_compute_milli = Some(milli);
+                        gpu.external_compute_milli =
+                            gpu.external_compute_milli.map(|e| e.saturating_sub(milli));
+                        continue;
+                    }
                     if uid == Some(1000) {
                         principals[0].gpu_compute_milli =
                             BTreeMap::from([(gpu.uuid.clone(), milli)]);
@@ -5925,6 +5940,7 @@ mod gpu_demand {
                     });
                 }
                 snap.principals = Some(principals);
+                snap.gpus = vec![gpu.clone()];
                 let mut allocation = job(None);
                 allocation.requested.gpu_memory_mib = BTreeMap::from([(gpu.uuid.clone(), 1000)]);
                 // Own memory within what the device reports in use, as the probe's was.
@@ -5932,7 +5948,7 @@ mod gpu_demand {
                 observed.gpu_memory_mib = BTreeMap::from([(gpu.uuid.clone(), 100)]);
                 allocation.observed = Some(observed);
                 let input = PolicyInput {
-                    allocations: if name == "managed" {
+                    allocations: if name == own_window {
                         vec![allocation]
                     } else {
                         vec![]
@@ -5965,8 +5981,26 @@ mod gpu_demand {
                 if let Some(slice) = &status.time_slice {
                     held += usize::from(slice.holds);
                     counts.push((slice.own, slice.external, slice.principals));
+                    if let Some(d0) = slice.d0 {
+                        *d0s.entry((d0, slice.external.is_some())).or_default() += 1;
+                    }
+                    duties.extend(slice.duty);
+                    readings.extend(slice.bound.iter().map(|b| (b.reading, b.threshold)));
+                    unbound += usize::from(!slice.holds && slice.d0.is_none());
                 }
+                pauses += usize::from(
+                    decision
+                        .actions
+                        .iter()
+                        .any(|a| a.resource == key && a.step == YieldStep::Pause),
+                );
             }
+            let (low, high) = (
+                readings.iter().map(|r| r.0).min(),
+                readings.iter().map(|r| r.0).max(),
+            );
+            let thresholds: std::collections::BTreeSet<u64> =
+                readings.iter().map(|r| r.1).collect();
             let at = |i: usize| counts.get(i).copied();
             println!(
                 "replay {name}: {} intervals, target median {} (recorded {}), duty median {}, fed {fed}, window decisions {windows}, estimate at the end {last:?}, own share at the end {own_share:?}; time-slice rule held in {held} of {} (m, E, k) at the start {:?}, middle {:?}, end {:?}",
@@ -5978,6 +6012,12 @@ mod gpu_demand {
                 at(0),
                 at(counts.len() / 2),
                 counts.last()
+            );
+            println!(
+                "replay {name}: duty in {} decisions, (d0, counted) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
+                duties.len(),
+                (!duties.is_empty()).then(|| median(duties.clone())),
+                duties.iter().min(),
             );
         }
     }
