@@ -1877,6 +1877,56 @@ time-slice record's dwell average becomes per mille: `utilization_milli` replace
 - VI: tests first. Pass.
 - VII: the record's field is optional. Pass.
 
+## Item 046: own work pays for the re-measure windows (2026-11-01)
+
+Spec Session 2026-11-01 Q37 (FR-021's d0' bullet, its floor, the bounds and the record),
+answering 045-runs' Decision 1, A without the fixed 1%. At a zero margin, a 3 s re-measure window
+in each 40 s managed window lifted own work's held duty from 0.75 to about 0.773. The saturating
+user got 0.468–0.472 of its rate alone, against 0.485 (research R54).
+
+**Technical Context**: Rust 1.88, no new dependency, no wire, SDK or config change. The
+time-slice record gains w (per mille) and d0'.
+
+1. **d0'** (`slice_duty` in `src/policy/measure.rs`):
+   - w = D ÷ (D + G), with D = `GPU_DEMAND_WINDOW_DECISIONS` and G =
+     ⌈`GPU_DEMAND_WINDOW_EVERY_MS` ÷ the monitor interval⌉.
+   - d0' = (d0 × (D + G) − 1000 × D) ÷ G, rounded, clamped to [50, 1000]. At 500 ms: 725 with no
+     margin, 692 in Performance, 643 in Neutral.
+   - The duty state's floor is d0'.
+   - The window's first interval counts as full duty for own work. Its decision lifts the cap at
+     once, though the interval feeds no estimate, since the decision before it still sent the cap.
+   - Windows can open unless the governing mode or an allocation on the device is in Yield First,
+     or an allocation there holds a CPU step of cap or more. Where none can open, d0' = d0.
+2. **Tests first** (`tests/contention.rs`):
+   - **Zero margin beside the saturating shape, over the whole run, windows included:** the
+     context gets at least 485 (it gets 484 on today's code), and own work's held duty averages
+     within 5 of 750.
+   - **Performance and Neutral:** the context gets at least 490 and 520, and own work is within 30
+     of 480 and 450.
+   - **No windows**, with a Yield First neighbour on the device: d0' = d0.
+   - **The partial user's settle point** is unchanged.
+   - **The shapes' first duties** become 725, 692 and 643.
+   - **Replays** of 045's four managed windows, with d0, w and d0'.
+   - **Decision snapshots** compared with `f56e179`.
+3. **Docs:** `docs/guarantees.md` says own work pays for CedeGrid's re-measure windows on a
+   time-sliced device, so others keep their share over time.
+4. **Afterwards:**
+   - the suites, the macOS serial suite and the Docker Linux check;
+   - then the test-host runs: zero margin, gated as in 045; Performance and Neutral, under T456's
+     gates.
+
+**Constitution Check (7.0.0)**:
+- I: no change to what CedeGrid acts on. Pass.
+- II:
+  - The windows are CedeGrid's measurement cost. Own work now bears it, so others keep min(demand,
+    fair share) over time, and Performance and Aggressive cost others nothing beyond that.
+  - Own work's loss is the windows' share, as Principle II allows for CedeGrid's own overhead.
+  - Pass.
+- III: no change to unknown handling. Pass.
+- IV: the policy stays pure. Pass.
+- VI: tests first. Pass.
+- VII: the record's new fields are optional. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

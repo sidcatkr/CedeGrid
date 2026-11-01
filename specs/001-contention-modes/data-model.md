@@ -536,3 +536,9 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - The estimate's restart set: the device's external PIDs less the background contexts and the
   owner's unmanaged processes.
 
+## Item 046 additions
+
+- `TimeSliceRecord.window_share` (per mille) and `d0_windows`: w, the re-measure windows' share of
+  the time the duty path caps own work, and d0' = (d0 − w) ÷ (1 − w), clamped to [50, 1000], the
+  duty's start and floor. `d0` stays the counts' base duty.
+

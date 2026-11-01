@@ -1077,3 +1077,32 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - keeping the restart: it costs a window of all-bound counts each time the owner starts or stops
     a process.
 
+## R54. Own work pays for the re-measure windows (item 046)
+
+- **Decision:** the time-slice duty starts at d0' = (d0 − w) ÷ (1 − w), with w the re-measure
+  windows' share of the time the duty path caps own work.
+- **w's arithmetic:**
+  - A window lifts the cap for `GPU_DEMAND_WINDOW_DECISIONS` = 6 decisions.
+  - The next window opens once the last uncapped interval is `GPU_DEMAND_WINDOW_EVERY_MS` = 30 s
+    old. That interval is fed at the decision after the window, so 60 capped intervals follow at
+    500 ms.
+  - A cycle is 66 decisions, 6 of them at full duty: w = 6 ÷ 66 ≈ 0.091.
+  - d0' = (d0 × 66 − 6000) ÷ 60, rounded: 725 at d0 = 750, 692 at 720, 643 at 675.
+- **The window's first interval:** its decision sends no cap, so the supervisor lifts it at once
+  and own work runs at full duty through it. It feeds no estimate, because the decision before
+  it still sent the cap (the estimate's two-decision rule). For own work's held duty it counts as
+  full duty: 6 intervals in each window.
+- **Why own work pays:**
+  - The windows are CedeGrid's measurement, and Principle II lets own work take CedeGrid's own
+    overhead, while others keep min(demand, fair share).
+  - On 045's host run the windows took the saturating user from ½ to 0.468–0.472 of its rate
+    alone at a zero margin. In Performance they ate most of the 2% margin.
+- **Why no fixed 1%:** the slicer's overhead exists without CedeGrid; unmanaged, the parts sum to
+  about 0.99. It stays within the gates' 3% tolerance and isn't CedeGrid's cost.
+- **Paths with no window:** a window opens only while every own allocation on the device is
+  outside Yield First, the governing mode isn't Yield First, and no allocation there holds a CPU
+  step of cap or more. Otherwise w = 0 and d0' = d0.
+- **Alternatives:**
+  - rarer or shorter windows: that slows reading external demand;
+  - measuring w from the windows seen: it lags, and moves d0' with every window.
+
