@@ -1201,7 +1201,8 @@ node reports with the expected per-resource values at each step.
     a duty cycle the supervisor reports applied counts as what own work holds, at the larger of
     the target it reports applied and the policy's current target, so a cap at the fair share is
     met and a lowered target counts only once applied; FR-008's hold-then-escalate applies to unknown activity from a telemetry
-    failure or a missing observation and to a duty not reported applied.
+    failure or a missing observation and to a duty not reported applied, except that on a
+    time-sliced GPU's time-slice path it escalates no further than the cap.
 
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
   memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
@@ -1224,7 +1225,9 @@ node reports with the expected per-resource values at each step.
   - An external principal j with E_j busy contexts is slice-bound when its reading in the
     external estimate (uncapped intervals and re-measure windows only) is at least
     `contention.gpu_compute.slice_bound_percent` (default 75) percent of its slice,
-    1000 × E_j ÷ (m + E). An unattributed principal counts as one with one context.
+    1000 × E_j ÷ (m + E). A lone external principal reads the estimate's total, since usage
+    below the attribution tolerance is its sampling error (Q23). An unattributed principal
+    counts as one with one context.
   - With no slice-bound principal there is no GPU compute cap. Otherwise each own process runs at
     the base duty d0 = (m + E_b) ÷ (m × (k_b + 1)), E_b and k_b being the slice-bound principals'
     contexts and number, clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of
@@ -1243,9 +1246,10 @@ node reports with the expected per-resource values at each step.
     most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
   - This path uses no estimate-based target, no ladder excess from one interval's own reading and
     no pause in any mode; the minimum duty is the floor.
-  - When the process listing is known but the amounts are unknown or inconsistent, d0 comes from
-    the listed counts with every listed external principal slice-bound, and the duty steps up only
-    with a device utilization reading. When the listing itself is unknown on a device last read
+  - When the process listing is known but the amounts are unknown or inconsistent, or the
+    estimate has no uncapped interval since it restarted, d0 comes from the listed counts with
+    every listed external principal slice-bound, and the duty steps up only with a device
+    utilization reading. When the listing itself is unknown on a device last read
     as time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
   - Each decision's GPU compute status states m, E, k, whether the rule held, the slice-bound
     principals with their readings and thresholds, d0, the duty and the step-up state.

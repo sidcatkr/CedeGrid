@@ -987,8 +987,9 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
     1.5 s in Performance and Aggressive at the default dwell of 3 intervals; Neutral rises once
     per 10 s.
   - It holds between half the margin and the margin of spare time, so it settles within one step.
-  - Rise bound: from 1000 to d0 ≥ 500, at most 10 steps, 15 s. A principal turning slice-bound is
-    seen within the estimate's 60 intervals (30 s), or a window's 3 s once capped: at most 33 s.
+  - Rise bound: from 1000 to d0, at most 10 steps (15 s) at m = 2, where d0 ≥ 500, and at most
+    19 steps (28.5 s) in general, down to the minimum duty. A principal turning slice-bound is seen
+    within the estimate's 60 intervals (30 s), or a window's 3 s once capped: at most 33 s.
 - **No pause:** at d0 own work already holds its share, and a pause beside a saturating user never
   reverses.
 - **Alternatives:**
