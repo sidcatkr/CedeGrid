@@ -59,6 +59,8 @@ fn host() -> Snapshot {
             own_only: false,
             background_process_ids: vec![],
             compute_sampling: None,
+            time_sliced: None,
+            compute_contexts: None,
         }],
         capabilities: BTreeMap::new(),
         kernel: None,

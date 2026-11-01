@@ -456,6 +456,61 @@ pub(super) enum ComputeAmount {
     Unknown(String),
 }
 
+/// Whether the device time-slices its busy contexts (FR-021, Q22): no MPS control daemon or
+/// server and MIG mode disabled or not supported. MPS or MIG says no at once; otherwise an
+/// unreadable process inventory or MIG mode is unknown, which is not taken as time-sliced.
+pub(super) fn time_sliced(
+    queries_ok: bool,
+    mps: bool,
+    mig_enabled: &std::result::Result<bool, NvmlError>,
+) -> Option<bool> {
+    match mig_enabled {
+        _ if mps => Some(false),
+        Ok(true) => Some(false),
+        _ if !queries_ok => None,
+        Ok(false) | Err(NvmlError::NotSupported) => Some(true),
+        Err(_) => None,
+    }
+}
+
+/// The interval's compute contexts for the time-slice rule (FR-021, Q22), with a complete
+/// process inventory: own work's verified PIDs listed, the owner's unmanaged PIDs listed, and
+/// each listed non-background PID with a positive sample newer than the cursor, with its UID.
+/// Without a fresh cursor or readable samples nothing counts as sampled.
+pub(super) fn compute_contexts(
+    listed: Option<&[u32]>,
+    own: &BTreeSet<u32>,
+    background: &BTreeSet<u32>,
+    previous: Option<u64>,
+    samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    uid_of: impl Fn(u32) -> Option<u32>,
+    owner: Option<u32>,
+) -> Option<crate::model::GpuComputeContexts> {
+    let listed = listed?;
+    let mut contexts = crate::model::GpuComputeContexts::default();
+    for pid in listed {
+        if own.contains(pid) {
+            contexts.own.push(*pid);
+        } else if !background.contains(pid) && owner.is_some() && uid_of(*pid) == owner {
+            contexts.owner.push(*pid);
+        }
+    }
+    if let (Some(previous), Ok(samples)) = (previous, samples) {
+        let busy: BTreeSet<u32> = samples
+            .iter()
+            .filter(|s| s.timestamp > previous && s.sm_util > 0)
+            .map(|s| s.pid)
+            .filter(|pid| listed.contains(pid) && !background.contains(pid))
+            .collect();
+        contexts.sampled = busy.into_iter().map(|pid| (pid, uid_of(pid))).collect();
+    }
+    contexts.own.sort_unstable();
+    contexts.own.dedup();
+    contexts.owner.sort_unstable();
+    contexts.owner.dedup();
+    Some(contexts)
+}
+
 /// MPS runs its clients in one shared context, so per-process samples do not
 /// attribute compute to them.
 pub(super) fn is_mps_process(name: &str) -> bool {

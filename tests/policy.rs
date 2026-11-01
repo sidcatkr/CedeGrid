@@ -368,6 +368,8 @@ fn gpu_snapshot() -> Snapshot {
         own_only: false,
         background_process_ids: vec![],
         compute_sampling: None,
+        time_sliced: None,
+        compute_contexts: None,
     });
     result
 }

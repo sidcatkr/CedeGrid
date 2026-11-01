@@ -870,6 +870,18 @@ impl Collector {
                     .map(|device| device.percent),
                 self.gpu_samples.entry(uuid.clone()).or_default(),
             );
+            // NVML_DEVICE_MIG_ENABLE is 1; a device without MIG reports NotSupported.
+            let mig_enabled = device.mig_mode().map(|mode| mode.current == 1);
+            let time_sliced = time_sliced(queries_ok, mps, &mig_enabled);
+            let compute_contexts = compute_contexts(
+                listed.as_deref().filter(|_| queries_ok),
+                &self.managed_pids,
+                &background,
+                activity_baseline,
+                &samples,
+                context_uid,
+                owner_uid(),
+            );
             // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
             if let (Some(previous), Ok(fresh)) = (activity_baseline, &samples) {
                 self.gpu_samples.entry(uuid.clone()).or_default().remember(
@@ -967,6 +979,8 @@ impl Collector {
                 own_only,
                 background_process_ids: background.into_iter().collect(),
                 compute_sampling: compute_record,
+                time_sliced,
+                compute_contexts,
             });
         }
         // A failed per-device query withholds that device's capacity only. Device
@@ -2272,6 +2286,114 @@ mod tests {
         assert!(is_mps_process("nvidia-cuda-mps-server"));
         assert!(is_mps_process("nvidia-cuda-mps-control"));
         assert!(!is_mps_process("python3"));
+    }
+
+    /// A device time-slices its busy contexts only with neither MPS nor MIG, and an unreadable
+    /// state is not taken as time-sliced (FR-021, Q22).
+    #[test]
+    fn a_device_is_time_sliced_only_without_mps_or_mig() {
+        assert_eq!(time_sliced(true, false, &Ok(false)), Some(true));
+        assert_eq!(
+            time_sliced(true, false, &Err(NvmlError::NotSupported)),
+            Some(true)
+        );
+        assert_eq!(time_sliced(true, true, &Ok(false)), Some(false));
+        assert_eq!(
+            time_sliced(false, true, &Err(NvmlError::Unknown)),
+            Some(false)
+        );
+        assert_eq!(time_sliced(true, false, &Ok(true)), Some(false));
+        assert_eq!(time_sliced(false, false, &Ok(false)), None);
+        assert_eq!(time_sliced(true, false, &Err(NvmlError::Unknown)), None);
+        assert_eq!(time_sliced(true, false, &Err(NvmlError::GpuLost)), None);
+    }
+
+    /// The interval's contexts: own work's listed PIDs, the owner's unmanaged ones, and each
+    /// listed non-background PID with a positive sample newer than the cursor, with its UID
+    /// (FR-021, Q22). Without a complete inventory there are none.
+    #[test]
+    fn compute_contexts_list_own_owner_and_sampled_pids() {
+        let ok = |samples| -> std::result::Result<Vec<ProcessUtilizationSample>, NvmlError> {
+            Ok(samples)
+        };
+        let own = BTreeSet::from([10, 11]);
+        let background = BTreeSet::from([30]);
+        let uid_of = |pid: u32| match pid {
+            10 | 11 | 20 => Some(1000),
+            21 | 22 => Some(1002),
+            30 => Some(0),
+            _ => None,
+        };
+        let listed = [10, 11, 20, 21, 22, 23, 30];
+        let samples = ok(vec![
+            gpu_sample(10, 150, 66),
+            gpu_sample(20, 160, 33),
+            gpu_sample(21, 170, 99),
+            // Idle, stale, unlisted and background samples are no busy context.
+            gpu_sample(22, 180, 0),
+            gpu_sample(23, 90, 50),
+            gpu_sample(40, 190, 50),
+            gpu_sample(30, 200, 20),
+        ]);
+        let contexts = compute_contexts(
+            Some(&listed),
+            &own,
+            &background,
+            Some(100),
+            &samples,
+            uid_of,
+            Some(1000),
+        )
+        .unwrap();
+        assert_eq!(contexts.own, vec![10, 11]);
+        assert_eq!(contexts.owner, vec![20]);
+        assert_eq!(
+            contexts.sampled,
+            vec![(10, Some(1000)), (20, Some(1000)), (21, Some(1002))]
+        );
+        // An unreadable UID stays unattributed.
+        let unread = ok(vec![gpu_sample(23, 150, 50)]);
+        let contexts = compute_contexts(
+            Some(&listed),
+            &own,
+            &background,
+            Some(100),
+            &unread,
+            uid_of,
+            Some(1000),
+        )
+        .unwrap();
+        assert_eq!(contexts.sampled, vec![(23, None)]);
+        // No fresh cursor or failed samples: the listing stands, nothing is sampled.
+        for (previous, samples) in [
+            (None, ok(vec![gpu_sample(10, 150, 66)])),
+            (Some(100), Err(NvmlError::Unknown)),
+        ] {
+            let contexts = compute_contexts(
+                Some(&listed),
+                &own,
+                &background,
+                previous,
+                &samples,
+                uid_of,
+                Some(1000),
+            )
+            .unwrap();
+            assert_eq!(contexts.own, vec![10, 11]);
+            assert!(contexts.sampled.is_empty());
+        }
+        assert_eq!(
+            compute_contexts(
+                None,
+                &own,
+                &background,
+                Some(100),
+                &samples,
+                uid_of,
+                Some(1000)
+            ),
+            None
+        );
     }
 
     #[test]

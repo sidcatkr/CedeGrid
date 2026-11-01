@@ -248,6 +248,30 @@ pub struct GpuSnapshot {
     /// fresh baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_sampling: Option<ComputeSampling>,
+    /// Whether the device time-slices its busy contexts, with neither MPS nor MIG (FR-021, Q22).
+    /// None is unknown, which is not taken as time-sliced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_sliced: Option<bool>,
+    /// The interval's compute contexts for the time-slice rule, when the process inventory is
+    /// complete (FR-021, Q22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_contexts: Option<GpuComputeContexts>,
+}
+
+/// A device's compute contexts in one interval (FR-021, Q22).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GpuComputeContexts {
+    /// Own work's verified PIDs listed on the device.
+    #[serde(default)]
+    pub own: Vec<u32>,
+    /// The owner's unmanaged PIDs listed there.
+    #[serde(default)]
+    pub owner: Vec<u32>,
+    /// Each listed non-background PID with a positive sample this interval, with its UID when
+    /// readable.
+    #[serde(default)]
+    pub sampled: Vec<(u32, Option<u32>)>,
 }
 
 /// What a replay of one interval's GPU measurement needs, in driver microseconds: the device's

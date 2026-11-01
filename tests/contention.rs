@@ -2795,6 +2795,8 @@ mod ramp {
             own_only: false,
             background_process_ids: vec![],
             compute_sampling: None,
+            time_sliced: None,
+            compute_contexts: None,
         }];
         snap.principals = Some(vec![
             PrincipalUsage {
@@ -5183,6 +5185,8 @@ mod gpu_demand {
             own_only: false,
             background_process_ids: vec![],
             compute_sampling: None,
+            time_sliced: None,
+            compute_contexts: None,
         }];
         snap.principals = Some(vec![
             PrincipalUsage {
