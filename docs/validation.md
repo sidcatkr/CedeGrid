@@ -452,6 +452,27 @@ needs. d0 leaves no part of the mode's margin. The windows that passed spent 27�
 666, which the listing path set from an idle context of another principal that the device lists
 throughout. T456 stays open.
 
+### T456 after item 044
+
+Run on 2026-11-01 on the same test host at `f81a7c0`, with the commands under "Item 044: T456
+under aligned duty phases and the margin at d0" in `specs/001-contention-modes/native-gates.md`:
+two own probe processes, each its own job with 512 MiB, submitted 40 s before each managed window.
+No test process of either account was left before the first run or after any run. Every managed
+window passed 042's checks (overlap 39.8–40.0 s, m = 2 in 75–78 decisions, inside the other
+user's load), and no window paused own work. The harness read each managed probe's run state from
+`/proc` about every 10 ms.
+
+| Run | Values | Result |
+|---|---|---|
+| Performance, beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.657 of it, the other user 511 (0.33 of its 1568 alone). With it: own work 0.490 and 0.488 (bound 0.45); the other user 780.4 and 762.7 (bound 760.6). d0 720 from the window's busy counts in every duty decision; the probes' off-phases overlapped 1.0 and 0.997, the duty held 0.735 and 0.745 | passes |
+| Neutral, beside the saturating user | Pair alone 1476; without 0.663, the other user 507 (0.33 of 1550). With it: own work 0.468 and 0.471 (bound 0.42); the other user 804.8 and 793.9 (bound 751.5). d0 675 in every duty decision; overlap 0.996 and 0.998, the duty held 0.704 and 0.713 | passes |
+| Performance, beside the light user | Pair alone 1474; without 0.864, the light user 200 requests a second, p99 2.73 ms. With it: own work 0.864 and 0.863 (bound 0.791), never capped (no principal slice-bound in any decision); the light user 200 and 200, p99 2.728 and 2.730 ms (bound 3.005) | passes |
+| Aggressive (Performance with no GPU compute margin), beside the saturating user, for the record | Pair alone 1482; without 0.660. With it: own work 0.518 and 0.499 (bound 0.47); the other user 724.6 and 746.8 (½ × 1552 × 0.97 = 752.7). d0 750; the duty stepped up to 850 and 800 on intervals the device read below 100% busy, and back | the other user falls short in both windows; not a T456 gate |
+
+The duty held is 1 − each probe's stopped share, which includes the re-measure window that lifts
+the cap for 3 s of each window. Own work's share matched 2 × the duty held ÷ 3 within 0.009, and
+never exceeded it, so no drain after a stop shows at this resolution. All of T456's gates pass.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
