@@ -719,6 +719,11 @@ pub struct ResourceThresholds {
     /// GPU compute: summed per-process utilization within this many points of
     /// device utilization makes the external amount measured (FR-021).
     pub attribution_tolerance_percent: u8,
+    /// GPU compute, the time-slice duty: an external principal reading at least this share of
+    /// its slice is slice-bound (FR-021, Q27).
+    pub slice_bound_percent: u8,
+    /// GPU compute, the time-slice duty: the points of duty one step moves (FR-021, Q28).
+    pub slice_step_percent: u8,
     /// CPU and GPU compute, which Performance scales up every monitor interval;
     /// memory keeps its slower scale-up (FR-034). Set from the resource kind.
     pub compute: bool,
@@ -757,6 +762,8 @@ impl ResourceThresholds {
             reclaim_backoff_max_ms: 30_000,
             admission_usage_window_s: 60,
             attribution_tolerance_percent: 15,
+            slice_bound_percent: 75,
+            slice_step_percent: 5,
             compute: !kind.is_memory(),
         }
     }

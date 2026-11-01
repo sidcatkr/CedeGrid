@@ -708,6 +708,10 @@ pub struct ResourceContentionConfig {
     pub admission_usage_window_s: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution_tolerance_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slice_bound_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slice_step_percent: Option<u8>,
 }
 
 impl ContentionConfig {
@@ -803,6 +807,12 @@ impl ContentionConfig {
             attribution_tolerance_percent: set
                 .attribution_tolerance_percent
                 .unwrap_or(defaults.attribution_tolerance_percent),
+            slice_bound_percent: set
+                .slice_bound_percent
+                .unwrap_or(defaults.slice_bound_percent),
+            slice_step_percent: set
+                .slice_step_percent
+                .unwrap_or(defaults.slice_step_percent),
             compute: defaults.compute,
         }
     }
@@ -953,6 +963,16 @@ impl ContentionConfig {
                 set.attribution_tolerance_percent.is_some(),
             )?;
             applies(
+                "slice_bound_percent",
+                &[GpuCompute],
+                set.slice_bound_percent.is_some(),
+            )?;
+            applies(
+                "slice_step_percent",
+                &[GpuCompute],
+                set.slice_step_percent.is_some(),
+            )?;
+            applies(
                 "scale_up_cooldown_ms",
                 &[Cpu, Ram, GpuMemory],
                 set.scale_up_cooldown_ms.is_some(),
@@ -1099,6 +1119,14 @@ impl ContentionConfig {
                 "contention.{name}.attribution_tolerance_percent must be between 1 and 30"
             );
             ensure!(
+                (50..=100).contains(&t.slice_bound_percent),
+                "contention.{name}.slice_bound_percent must be between 50 and 100"
+            );
+            ensure!(
+                (1..=50).contains(&t.slice_step_percent),
+                "contention.{name}.slice_step_percent must be between 1 and 50"
+            );
+            ensure!(
                 (1..=3600).contains(&t.admission_usage_window_s),
                 "contention.{name}.admission_usage_window_s must be between 1 and 3600"
             );
@@ -1184,6 +1212,7 @@ impl ContentionConfig {
                     "attribution_tolerance_percent",
                     i64::from(t.attribution_tolerance_percent),
                 ),
+                ("slice_bound_percent", i64::from(t.slice_bound_percent)),
             ]
         }));
         result
@@ -1334,6 +1363,11 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
             "contention.*.attribution_tolerance_percent",
             Caution("relaxed_detection"),
         ),
+        (
+            "contention.*.slice_bound_percent",
+            Caution("relaxed_detection"),
+        ),
+        ("contention.*.slice_step_percent", Bounded),
         ("contention.*.hint_deadline_s", Bounded),
         ("contention.*.hysteresis_percent", Bounded),
         ("contention.*.min_step_dwell_intervals", Bounded),

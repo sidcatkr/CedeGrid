@@ -987,6 +987,62 @@ fn the_gpu_compute_attribution_tolerance_is_bounded() {
     );
 }
 
+/// The time-slice duty's keys (FR-021, FR-025, Q27, Q28): `slice_bound_percent` is bounded at
+/// 50-100 and `slice_step_percent` at 1-50, both GPU compute only. A slice-bound share above its
+/// default leaves more demand unbound, a relaxed detection.
+#[test]
+fn the_time_slice_duty_keys_are_bounded() {
+    let body =
+        |section: &str, key: &str, value: u32| format!("[contention.{section}]\n{key} = {value}");
+    let thresholds = |config: &cedegrid::config::Config| {
+        config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::GpuCompute)
+    };
+    for (key, low, high, set) in [
+        ("slice_bound_percent", 49, 101, 60),
+        ("slice_step_percent", 0, 51, 10),
+    ] {
+        assert!(
+            parse_node(&body("gpu_compute", key, low)).is_err(),
+            "{key} {low}"
+        );
+        assert!(
+            parse_node(&body("gpu_compute", key, high)).is_err(),
+            "{key} {high}"
+        );
+        assert!(parse_node(&body("cpu", key, set)).is_err(), "{key} on CPU");
+        let config = parse_node(&body("gpu_compute", key, set)).unwrap();
+        let values = (
+            thresholds(&config).slice_bound_percent,
+            thresholds(&config).slice_step_percent,
+        );
+        let expected = if key == "slice_bound_percent" {
+            (set as u8, 5)
+        } else {
+            (75, set as u8)
+        };
+        assert_eq!(values, expected, "{key}");
+    }
+    let defaults = parse_node("").unwrap();
+    assert_eq!(
+        (
+            thresholds(&defaults).slice_bound_percent,
+            thresholds(&defaults).slice_step_percent
+        ),
+        (75, 5)
+    );
+    // Above its default, the slice-bound share is a relaxed detection.
+    assert!(parse_node(&body("gpu_compute", "slice_bound_percent", 90)).is_err());
+    assert!(
+        parse_node(&format!(
+            "[contention]\nacknowledge_caution = [\"relaxed_detection\"]\n{}",
+            body("gpu_compute", "slice_bound_percent", 90)
+        ))
+        .is_ok()
+    );
+}
+
 /// Settings that lengthen reclaim or let stale telemetry pass are bounded.
 #[test]
 fn settings_that_lengthen_reclaim_are_bounded() {
