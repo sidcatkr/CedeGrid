@@ -7104,6 +7104,13 @@ mod gpu_demand {
                 }
                 let (unmanaged, _, _) = tick(2, 1000, &[(PEER, 1, 158)]);
                 assert!(run.iter().all(|t| t.own == unmanaged), "{mode:?}");
+                let reasons = &run.last().unwrap().decision.resources
+                    [&ResourceKey::GpuCompute(GPU.into())]
+                    .reasons;
+                assert!(
+                    reasons.iter().any(|r| r.code == "gpu_time_slice_unbound"),
+                    "{mode:?}: {reasons:?}"
+                );
             }
         }
 
@@ -7469,6 +7476,11 @@ mod gpu_demand {
             assert_eq!(
                 (slice.step, slice.utilization),
                 (Some(SliceStep::Holding), Some(100))
+            );
+            let reasons = &t.decision.resources[&ResourceKey::GpuCompute(GPU.into())].reasons;
+            assert!(
+                reasons.iter().any(|r| r.code == "gpu_time_slice_duty"),
+                "{reasons:?}"
             );
         }
     }

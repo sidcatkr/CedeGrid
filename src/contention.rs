@@ -355,6 +355,14 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap.",
     ),
     (
+        "gpu_time_slice_unbound",
+        "Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap.",
+    ),
+    (
+        "gpu_time_slice_duty",
+        "Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause.",
+    ),
+    (
         "applied_duty_credit",
         "Own GPU work is credited at the duty its supervisor applied.",
     ),

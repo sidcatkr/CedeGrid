@@ -1138,6 +1138,7 @@ impl<'a> Interval<'a> {
                         *target = share;
                     }
                 }
+                note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_duty");
             }
             // Under the time-slice rule, or with no slice-bound principal, Neutral, Performance
             // and Aggressive hold the device; Yield First keeps its target (FR-021, Q22, Q27).
@@ -1154,14 +1155,12 @@ impl<'a> Interval<'a> {
                         *target = GPU_COMPUTE_CAPACITY;
                     }
                 }
-                note(
-                    &mut self.statuses,
-                    ResourceKey::GpuCompute(gpu.uuid.clone()),
-                    "gpu_time_slice_fair",
-                    crate::contention::reason_text("gpu_time_slice_fair")
-                        .unwrap_or_default()
-                        .to_string(),
-                );
+                let code = if time_slice.as_ref().is_some_and(|slice| slice.holds) {
+                    "gpu_time_slice_fair"
+                } else {
+                    "gpu_time_slice_unbound"
+                };
+                note_reason(&mut self.statuses, &gpu.uuid, code);
             }
             self.gpu_compute_budget.insert(gpu.uuid.clone(), budget);
         }
@@ -2089,4 +2088,20 @@ fn owner_unmanaged(snapshot: &Snapshot, uuid: &str) -> u64 {
         .filter(|p| p.is_owner)
         .filter_map(|p| p.gpu_compute_milli.get(uuid))
         .sum()
+}
+
+/// A catalog reason on a device's GPU compute status.
+fn note_reason(
+    statuses: &mut BTreeMap<ResourceKey, ResourceStatus>,
+    uuid: &str,
+    code: &'static str,
+) {
+    note(
+        statuses,
+        ResourceKey::GpuCompute(uuid.to_string()),
+        code,
+        crate::contention::reason_text(code)
+            .unwrap_or_default()
+            .to_string(),
+    );
 }

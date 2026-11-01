@@ -101,11 +101,29 @@ estimate's window. A single-process job always meets it, and on an amount of unk
 holds with at most one own process listed. This rests on the driver giving busy contexts equal
 slices, so MPS, a MIG parent and a device whose MPS or MIG state cannot be read keep the
 measured path, and Yield First is unchanged; each decision records the counts (`time_slice`).
-Own work at full duty beside another busy context holds only its slices, so when it holds more
-than its share a GPU compute cap's duty is its target over own work's uncapped share, its amount
-averaged over at least 6 uncapped intervals in which it ran on the device, with windows to
-measure it opening at once while it has fewer; until then, while the amount is unknown, and in
-Yield First the duty is the target over the whole device. External compute is
+When own work holds more than its share there, m × k > E, an external principal with E_j busy
+processes is slice-bound when its uncapped reading, averaged as below, is at least
+`contention.gpu_compute.slice_bound_percent` (75) percent of their equal slices, 1000 × E_j ÷
+(m + E). With none, own work is not capped, since the driver already gives every other
+principal what it asks for. Otherwise, in Neutral, Performance and Aggressive, each own process
+runs at a duty of d0 = (m + E_b) ÷ (m × (k_b + 1)), at least 50 thousandths, with E_b and k_b
+the slice-bound principals' processes and number, which leaves own work 1 ÷ (k_b + 1) of what
+they want while the others keep their slices. The duty rises
+`contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
+dwell, whichever is longer, while the device's utilization over the dwell shows more spare time
+than the mode's margin, falls a step toward d0 once per dwell while it shows less than half
+that margin (in Aggressive, while the device is fully busy), and at 1000 stays a cap at full
+duty. This path reads no per-process amount for the duty and never pauses. While the amounts
+are unknown or the estimate holds no interval, d0 comes from the listed processes, every listed
+principal slice-bound, and the duty rises only with a utilization reading; on a device last
+read as time-sliced whose listing is unknown, the cap is the target over the whole device,
+without a pause. Each decision records the slice-bound principals with their readings and
+thresholds, d0, the duty and its step. On other devices own work at full duty beside another
+busy context holds only its slices, so when it holds more than its share a GPU compute cap's
+duty is its target over own work's uncapped share, its amount averaged over at least 6 uncapped
+intervals in which it ran on the device, with windows to measure it opening at once while it
+has fewer; until then, while the amount is unknown, and in Yield First the duty is the target
+over the whole device. External compute is
 measured when fresh per-process samples, summed over every process on the device, are
 within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
 utilization. A sample counts its whole span since its process's previous sample, at most one
@@ -437,8 +455,9 @@ names the replacement settings. Every configuration key is classified as safe, b
 or caution. Three options are marked *caution* because they let own work hold more
 capacity within the floors: a floor below twice its minimum, a margin below its default,
 and a detection setting beyond its default (`saturation_percent`,
-`principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min` or
-`contention.gpu_compute.attribution_tolerance_percent` above it, `memory_peak_window_s` or
+`principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min`,
+`contention.gpu_compute.attribution_tolerance_percent` or
+`contention.gpu_compute.slice_bound_percent` above it, `memory_peak_window_s` or
 `quiet_window_intervals` below it). Performance is the default mode and needs no
 acknowledgement; a file that still lists `"performance_mode"` loads unchanged. A lower
 margin needs `contention.acknowledge_caution = ["reduced_margin"]` and a higher detection
@@ -543,6 +562,8 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `watching_larger_demand` | Own work holds the fair share while a larger external demand is watched for one response window. |
 | `satisfied_demand` | An external user's demand is recorded as satisfied, so it no longer contends below that demand. |
 | `gpu_time_slice_fair` | Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap. |
+| `gpu_time_slice_unbound` | Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap. |
+| `gpu_time_slice_duty` | Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause. |
 | `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
 | `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |
