@@ -115,11 +115,15 @@ runs at a duty of d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − the mode's margin),
 thousandths, with E_b and k_b the slice-bound principals' processes and number, which leaves own
 work 1 ÷ (k_b + 1) of what they want less the margin the mode's target holds (Performance 2%,
 Neutral 5%), while the others keep their slices: at m = 2 beside one saturating process, 720 in
-Performance and 675 in Neutral. The duty rises
+Performance and 675 in Neutral. Own work pays for CedeGrid's re-measure windows, which hold it at
+full duty for 6 decisions in each cycle of about 33 s: the duty starts at d0' = (d0 − w) ÷ (1 −
+w), with w the windows' share of the time, so own work's duty averages d0 with the windows and
+the others keep their share over time. That is 692 in Performance, 643 in Neutral and 725 with no
+margin at the default interval; where no window can open, d0' = d0. The duty rises
 `contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
 dwell, whichever is longer, while the device's utilization averaged over the dwell, in per
 mille, shows more spare time than the mode's margin or one reading's quantum of 1%, whichever is
-larger. It falls a step toward d0 once per dwell while the spare time is less than half of that,
+larger. It falls a step toward d0' once per dwell while the spare time is less than half of that,
 and at 1000 stays a cap at full duty. Utilization comes in whole percent, and a dip of one
 reading as own work's phases switch is no idle time, so with a zero margin CedeGrid takes device
 time only beyond 1% averaged spare. This path reads no per-process amount for the duty and never

@@ -668,6 +668,27 @@ Report per window each rise and fall of the duty with the dwell's average and th
 readings before it, and the probes' off-phase overlap. A failed gate changes no product code in
 that item.
 
+## Item 046: own work pays for the re-measure windows
+
+Runs once on the authorized test host after `046.done`, under the user's standing approval and
+the same host rules, with `batch-037`'s harness: two own probe processes per window, each its
+own job with a 512 MiB VRAM request when managed, submitted 40 s before its window.
+
+```sh
+bash runs-037.sh <commit> <second account uid> twoaggr two   # zero margin, then Performance and Neutral
+$py $H/gpu_trace_035.py <each e037-r5 output>   # read only: each decision's time_slice record
+```
+
+Gates, per valid managed window (042's three checks):
+
+- Zero margin beside the saturating user, as in 045: the saturating user gets at least ½ × its
+  rate alone × 0.97, and own work passes SC-017 at the target 500.
+- Performance and Neutral beside the saturating user, under T456's gates: own work by SC-017 at
+  480 and 450, the saturating user at least ½ × its rate alone × 0.97.
+
+Report per window the duty held, d0, w and d0', and the steps. A failed gate changes no product
+code in that item.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
