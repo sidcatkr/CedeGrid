@@ -362,6 +362,48 @@ while the saturating user ran 1023–1146 requests a second against 747–755 wi
 work gave that user more than its fair share. The rows keep their values; the gap is a GPU
 compute cap's duty of target ÷ 1000, which item 040 replaces.
 
+### T445 after items 039 and 040
+
+Run on 2026-11-01 on the same test host at `c581f4a`, with the commands under "Item 039 and 040:
+T368 with GPU demand from uncapped intervals and the duty from own share (T445)" in
+`specs/001-contention-modes/native-gates.md`. Each run starts with the probe alone, then the other
+user alone, then the unmanaged and managed windows in turn, 80 intervals each. No test process of
+either account was left before the first run or after any run. Own work's bound is SC-017's, at
+the target the mode sets for the two principals on the device: 500 beside the saturating user,
+Neutral's 792 and Performance's recorded targets beside the light user. The other user's bound
+is the smaller of its rate without CedeGrid and half its rate alone, less 3%.
+
+| Run | Values | Result |
+|---|---|---|
+| T368, Performance beside the light user | The probe alone 1573 units/s; without CedeGrid 1320 and 1303 (0.834 of alone); with it 1305 and 1294 (0.830 and 0.823 against bounds of 0.736 and 0.803 at targets 766 and 833); the old ratio 0.991. Duty median 0.998 and 1. GPU compute measured in every interval. The light user ran 200 requests a second in every window; p50 1.10 ms alone, 0.77 ms without and with CedeGrid; p99 1.22 ms alone, 0.82–0.88 ms without, 1.13–1.15 ms with | pass |
+| T368, Performance beside the saturating user | The probe alone 1559; without 736 and 731 (0.470); with 546 and 571 (0.350 and 0.366 against 0.44); the old ratio 0.761. The other user 1556 requests a second alone, 749–754 without, 978 and 932 with (bound 729); p50 1.36 ms and p99 1.37–1.38 ms with and without. First managed window: three intervals whose per-process samples summed 77% against the device's 99% put GPU compute on the unknown path for 43 of 80 intervals, 40 of them as recently inconsistent; 41 caps were set for unknown activity at 500 and a duty of 0.5, the others ran at 0.99. Second window: the target fell to 334 at 10.7 s and held for 59 decisions, at a duty of 0.706 | own work fails; the other user passes |
+| T368, Neutral beside the light user | The probe alone 1551; without 1303 and 1298 (0.838); with 825 and 759 (0.532 and 0.489 against 0.762); the old ratio 0.609. The light user 200 requests a second; p50 1.10 ms alone, 0.77–0.78 ms without and with; p99 1.21 ms alone, 0.89 ms without, 1.13–1.18 ms with. First window: own work's share was learned as 570 from two intervals, so a cap at the watch's 500 ran at a duty of 0.877; own work read 880–890, above that target, and was paused for 20 intervals. Second window: the target was 334 from the first cap on (54 decisions), with a share of 443 from three intervals and a duty of 0.753 | own work fails; the light user passes |
+| T368, Neutral beside the saturating user | The probe alone 1556; without 735 and 729 (0.470); with 654 and 618 (0.420 and 0.397 against 0.44); the old ratio 0.869. The other user 1551 requests a second alone, 747–753 without, 849 and 880 with (bound 728); p50 1.36–1.37 ms and p99 1.37–1.38 ms with and without. First window: the target fell to 334 at 15.8 s and held for 49 decisions, at a duty of 0.839. Second window: a share of 594 from three intervals set a duty of 0.841; after a re-measure window at 34 s the estimate restarted and a share of 660 set 0.757 | own work fails; the other user passes |
+
+Against the earlier runs the old ratio rose from 0.834 to 0.991 (Performance light), from 0.628 to
+0.761 (Performance saturating) and from 0.513 to 0.869 (Neutral saturating), and fell from 0.642
+to 0.609 (Neutral light). Each decision and the agent's state database show three causes:
+
+- **The 334 targets.** The fair share counts external usage that no UID accounts for as one more
+  principal once it reaches the contention floor, 1% on GPU compute, and on a saturated device
+  that principal's demand is unknown. In the estimate's averaged view the external total and the
+  per-UID averages drift apart. The device-level external amount exceeds the other user's
+  per-process samples in time-sliced intervals (770 against 660). The total also keeps the
+  owner's unmanaged usage, which the per-UID amounts leave out: Neutral light's second estimate
+  opened with the interval in which the unmanaged probe exited, 740 of 880. The mean gap reached
+  10 at the decision where Performance saturating's target fell to 334, and about 20 in Neutral
+  light's second window. While own work is capped below full duty no interval feeds the estimate,
+  so the gap held for the rest of each window.
+- **Own work's share.** It is learned from the first two to five uncapped intervals after own
+  work starts, whose readings come in steps of about 330, and is kept while own work is capped.
+  It read 443–660 in the Neutral runs, where Performance light, with 20 and 65 such intervals,
+  learned 767 and 843. Too low a share sets a duty above what the target needs, too high a share
+  one below it.
+- **The unknown path.** In Performance saturating's first window, 41 caps for unknown activity
+  ran at a duty of target ÷ 1000.
+
+The rows keep their values; the causes wait for a decision.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU

@@ -1543,7 +1543,7 @@ GPU demand from uncapped intervals (spec Session 2026-11-01 Q19; plan "Item 039"
 - [X] T442 Replay through the policy 036's Performance and Neutral light runs and 038's Neutral saturating run from their recorded GPU traces, open loop, and report each run's targets with the estimate, per plan "Item 039" 5 (missing)
 - [X] T443 Compare `decision_snapshot` with the code at `15aa96e`, list the snapshots that change (the record added, any target changed) and record the held-back table, per plan "Item 039" 5 (missing)
 - [X] T444 Add item 039's T368 run to `specs/001-contention-modes/native-gates.md`: Performance and Neutral beside the light and saturating users with `batch-037`'s harness and the fixed probe, each ratio against own work unmanaged beside the same user in the same run, and the light user's rate, p50 and p99 per window, per plan "Item 039" 6 (missing)
-- [ ] T445 Run T444 on the test host. *Deferred: needs the user's typed approval in this session after 039.done.* (missing)
+- [X] T445 Run T444 on the test host. *Deferred: needs the user's typed approval in this session after 039.done.* (missing)
 
 ## Phase 31: Convergence (item 040)
 
