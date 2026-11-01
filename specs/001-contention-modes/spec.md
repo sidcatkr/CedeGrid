@@ -609,6 +609,17 @@ back more.
   background contexts and the owner's unmanaged processes left out, since the owner's usage is
   already out of the estimate (Q23). The owner's unmanaged processes reach the device's external
   PIDs on Linux, so their coming and going no longer restarts the average (item 045).
+- Q: Who pays for the re-measure windows on the time-slice duty, and how? → A: Own work does. A
+  window holds own work at full duty so CedeGrid can read external demand: that is CedeGrid's own
+  cost, and others keep min(demand, fair share) over time. With w the windows' share of the time
+  while the duty path caps own work, d0' = (d0 − w) ÷ (1 − w), so the held duty, windows included,
+  averages d0. w comes from the window's length and the gap before the next window: the
+  `GPU_DEMAND_WINDOW_DECISIONS` decisions of full duty in each cycle of those decisions plus
+  `GPU_DEMAND_WINDOW_EVERY_MS` at the monitor interval (6 of 66 decisions at 500 ms, w = 6 ÷ 66).
+  d0' is clamped as d0 is and is the floor the steps fall back to; on a duty path that never opens
+  a window, d0' = d0. The record shows d0, d0' and w. The slicer's own overhead exists without
+  CedeGrid and stays within the gate's tolerance, so there is no fixed allowance for it
+  (item 046).
 
 ## Terms
 
@@ -1270,22 +1281,31 @@ node reports with the expected per-resource values at each step.
     5%, Aggressive 0), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
     time the slice-bound principals want, less the margin the mode's target holds; principals that
     are not slice-bound keep their slices.
+  - Own work pays for the re-measure windows, which hold it at full duty so CedeGrid can read
+    external demand. With w the windows' share of the time while this path caps own work, the
+    duty starts at d0' = (d0 − w) ÷ (1 − w), clamped as d0 is, so own work's held duty, windows
+    included, averages d0 and others keep their share over time. w is the window's
+    `GPU_DEMAND_WINDOW_DECISIONS` decisions of full duty in each cycle of those decisions and the
+    `GPU_DEMAND_WINDOW_EVERY_MS` gap before the next window: 6 of 66 decisions at the default
+    500 ms, so d0' is 725 with no margin, 692 in Performance and 643 in Neutral at m = 2, E_b = 1.
+    Where no window can open (the governing mode or an allocation on the device in Yield First, or
+    an allocation there held by a CPU step of cap or more), d0' = d0.
   - From the device's own utilization alone, averaged over the step dwell in per mille, rounded
     to nearest, and never from per-process readings, the duty rises by
     `contention.gpu_compute.slice_step_percent` (default 5) points toward 1 while the device's
     spare time exceeds the mode's margin or one reading's quantum, 10 per mille, whichever is
     larger, at most once per the mode's scale-up interval and the step dwell, whichever is longer.
-    It falls by a step toward d0 once per step dwell while the spare time is below half of that
+    It falls by a step toward d0' once per step dwell while the spare time is below half of that
     larger value, and holds between the two. Spare time under one reading's quantum cannot be told
     from the dips as own work's phases switch, so with a zero margin the duty rises only beyond
     1% averaged spare. So it settles within
     one step, and a duty that reaches 1 stays a cap at full duty rather than being lifted and set
     again.
-  - A principal that turns slice-bound returns own work to d0 within 33 s, the estimate's next
-    window. A stepped-up user that rises returns it within one step dwell per step above d0, at
+  - A principal that turns slice-bound returns own work to d0' within 33 s, the estimate's next
+    window. A stepped-up user that rises returns it within one step dwell per step above d0', at
     most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
   - This path uses no estimate-based target, no ladder excess from one interval's own reading and
-    no pause in any mode; the minimum duty is the floor.
+    no pause in any mode; d0', at least the minimum duty, is the floor.
   - While the per-process samples are readable the counts are the contexts sampled busy over
     the averaged window, and while the window holds intervals its readings decide which
     principals are slice-bound, even in an interval whose amounts are unknown or inconsistent.
@@ -1295,8 +1315,8 @@ node reports with the expected per-resource values at each step.
     utilization reading. When the listing itself is unknown on a device last read as
     time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
   - Each decision's GPU compute status states m, E, k, whether the rule held, the source of its
-    counts, the slice-bound principals with their readings and thresholds, d0, the duty and the
-    step-up state.
+    counts, the slice-bound principals with their readings and thresholds, d0, w and d0', the duty
+    and the step-up state.
 
   On a device not known to be time-sliced, in Performance, Aggressive and Neutral, the duty is
   the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in
