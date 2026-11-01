@@ -996,3 +996,52 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - a fixed duty with no slice-bound check (it leaves idle time beside light and partial users);
   - the 040 duty with smoothed readings (still readings);
   - a pause bound on GPU compute only (the readings problem remains).
+
+## R52. Aligned GPU duty phases, the margin at d0 and the busy counts (item 044)
+
+- **Decision:**
+  - While a GPU compute cap sets an allocation's duty, its phase follows CLOCK_MONOTONIC modulo
+    the period, so own allocations stop and resume together.
+  - d0 leaves the mode's margin.
+  - The counts take only contexts sampled busy, unless the samples are unreadable.
+- **The phase arithmetic,** at duty 0.75 with m = 2 beside one saturating context. Own work's
+  share is 2⁄3 while both run and ½ while one does:
+  - aligned off-phases: 0.75 × 2⁄3 = 0.5;
+  - random phases: 0.5625 × 2⁄3 + 0.375 × ½ = 0.5625;
+  - staggered off-phases that never overlap: 0.5 × 2⁄3 + 0.5 × ½ = 0.583.
+
+  043-t456 measured 0.515–0.522, between the aligned and random cases. Each actuator started its
+  phase at its cap and reset it with `Instant::now()` at every switch, so phases began apart and
+  drifted.
+- **Why CLOCK_MONOTONIC:** every process on the node reads the same clock, which never jumps with
+  wall-clock changes, so every supervisor computes the same position in the period without any
+  coordination. The period is the monitor interval, which every supervisor on the node uses.
+- **The mid-period rule:** own work runs while the position is below duty × period, and a stop
+  holds until the period ends.
+  - A lower duty ends the on-phase sooner.
+  - A higher one lengthens the on-phase, or waits for the next period while stopped.
+  - So no period has a second on-phase or a skipped off-phase. A change takes effect within one
+    period, the monitor interval.
+- **CPU-only cycles keep their phase:** aligned CPU stops would make own work's CPU use burstier
+  for others, with nothing to gain. A cycle shared by CPU and GPU caps follows the aligned phase,
+  since the GPU share depends on it.
+- **The margin at d0:** d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin).
+  - At m = 2, E_b = 1: 720 in Performance, 675 in Neutral, 750 in Aggressive.
+  - On 043-t456's slope, about 0.69 of the pair alone per unit of duty, 720 gives own work about
+    0.497 and 675 about 0.466. Aligned phases bring both down toward the counts' 0.48 and 0.45.
+- **The busy counts:**
+  - The test host's device lists an idle 2 MiB context of another principal throughout.
+  - In 043-t456 the listing path counted it in 21–44 decisions per window. That gave d0 666 beside
+    the saturating user, and a cap beside the light one, which wants no slices.
+  - The samples were readable in those decisions; only the amounts were inconsistent. Counting
+    the contexts sampled busy removes the idle one and keeps the listing for unreadable samples.
+- **What remains, the drain:** GPU work a stopped process has already queued keeps running after
+  the stop. After alignment the gap between own work's measured share and m × d ÷ (m + E) is that
+  drain. 044's host runs measure it, and compensation waits for those numbers.
+- **Alternatives:**
+  - per-device phase coordination through the agent: it needs supervisor messages, and the clock
+    gives the same result for free;
+  - staggering phases on purpose: that raises own work's share;
+  - keeping per-allocation phases and lowering d0 to match: that depends on how far phases happen
+    to drift.
+

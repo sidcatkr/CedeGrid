@@ -516,3 +516,14 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   - `bound`: each slice-bound principal's UID, contexts, reading and threshold;
   - `d0`, `duty` and `step` (rising, falling, holding);
   - `utilization`: the device's percent averaged over the dwell.
+
+## Item 044 additions
+
+- `GpuComputeContexts.samples_readable` (default false): whether the interval's per-process
+  samples were read, so `sampled` is known even when empty.
+- `TimeSliceRecord.source`: the counts' source, `window` (the estimate's window), `interval` (this
+  interval's sampled busy contexts) or `listing` (samples unreadable).
+- d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − the mode's margin), clamped to [50, 1000]. The steps
+  never go below it.
+- A GPU duty cycle's phase: running while (CLOCK_MONOTONIC mod period) < duty × period. A stop
+  holds until the period ends. A CPU-only cycle keeps its own phase.

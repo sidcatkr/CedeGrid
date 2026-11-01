@@ -1734,6 +1734,88 @@ counts, stepped up from the device's own utilization (research R51).
 - VI: tests first. Pass.
 - VII: the snapshot, record and config fields are optional, with defaults. Pass.
 
+## Item 044: aligned GPU duty phases, the margin at d0 and the busy counts (2026-11-01)
+
+Spec Session 2026-11-01 Q31–Q34 (FR-021's duty-cycle sentence, d0 with the margin, the count
+source and the record; the several-own-jobs edge case; SC-017's targets), answering 043's
+Decisions 1–2 and 043-t456's Decisions 1–2. At d0 = 750 own work took 0.515–0.522 rather than 0.5
+because each allocation's duty cycle runs from its own start, and the listing path counted an idle
+context (research R52).
+
+**Technical Context**: Rust 1.88, no new dependency (`libc::clock_gettime` is already used), no
+wire, SDK or config change.
+- **Snapshot:** `GpuComputeContexts` gains whether the interval's per-process samples were
+  readable.
+- **Record:** the time-slice record gains the source of its counts.
+
+1. **Aligned phases** (`src/actuation.rs`, and `FreezeDuty` in `src/cgroup.rs`):
+   - While a GPU compute cap is part of an allocation's duty cycle, its phase follows the node's
+     clock, CLOCK_MONOTONIC, modulo the period. The period is the monitor interval, which every
+     supervisor on the node uses.
+   - Own work runs while the position in the period is below duty × period.
+   - A stop holds until the period ends. So a duty change mid-period shortens or lengthens the
+     current on-phase, never resumes inside an off-phase, and never skips one.
+   - `next_deadline` is the next switch: the end of the on-phase while running, the period's end
+     while stopped.
+   - A CPU-only cycle keeps its per-allocation phase, with the CPU rate measurement unchanged.
+     When CPU and GPU caps share one cycle, it follows the aligned phase at the smaller duty.
+2. **The margin at d0** (`src/policy/measure.rs`):
+   - d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), with the mode's margin: Performance 20,
+     Neutral 50, Aggressive 0 thousandths. It is clamped to the minimum duty and 1000.
+   - The steps' floor is this d0.
+3. **The count source** (`src/telemetry/gpu.rs`, `src/policy/measure.rs`):
+   - **Window:** the estimate's window, 041's counts. When the interval's amounts are measured, its
+     readings decide which principals are slice-bound.
+   - **Interval:** this interval's sampled busy contexts, when the window has none and the samples
+     are readable.
+   - **Listing:** only when the samples are unreadable.
+   - With unknown or inconsistent amounts, or no window, every counted principal is bound, and the
+     record carries the source.
+4. **Tests first:**
+   - `src/actuation.rs` unit tests:
+     - the aligned on/off rule;
+     - two actuators started 0.3 of a period apart stop and resume together;
+     - a duty change mid-period (shorten, lengthen, no resume inside an off-phase);
+     - `next_deadline`;
+     - a CPU-only cycle keeping its own phase.
+   - `src/cgroup.rs`: the freeze duty aligned the same way.
+   - `tests/contention.rs`, a phase-level model with own allocations on or off within each period:
+     - caps 0.3 of a period apart give own work more than 0.52 at duty 750 on today's per-allocation
+       phase, and within 1 point of m × d ÷ (m + E) when aligned;
+     - alignment holds across a duty step, a re-measure window, three allocations and a late
+       joiner.
+   - `tests/contention.rs`, the shapes:
+     - with the margin, 480, 450 and 500 at m = 2 beside a saturating context;
+     - an idle listed context doesn't count while samples are readable, and does when they aren't;
+     - the light shape with an idle listed context stays uncapped.
+   - Replays of 043's six managed windows: each decision's source and d0.
+   - The decision snapshots, compared with `c2ae762`.
+5. **Docs:** `docs/guarantees.md`, covering the aligned phase, the margin at d0 and the busy
+   counts.
+6. **Harness (uncommitted):** an Aggressive two-process part beside the saturating user, and the
+   probes' off-phase overlap and own work's share against m × d ÷ (m + E) from the agent's records.
+7. **Afterwards:** the suites, the macOS serial suite and the Docker Linux check. Then the test-host
+   runs:
+   - Performance and Neutral, two probes beside the saturating user;
+   - Performance, two beside the light user;
+   - Aggressive, beside the saturating user, for the record.
+
+**Constitution Check (7.0.0)**:
+- I: the aligned phase changes only when own processes are stopped and continued, through the same
+  owned handles. Pass.
+- II:
+  - The margin at d0 holds each mode's documented margin where its target would, so others keep
+    min(demand, fair share) plus the margin.
+  - Aligned phases make own work's share match the counts, rather than exceed them.
+  - Pass.
+- III:
+  - Only contexts seen busy count, and an unreadable sample set still falls back to the full
+    listing, every principal bound. Unknown never reads as idle.
+  - Pass.
+- IV: the policy stays pure, and the clock is read in the supervisor's actuator. Pass.
+- VI: tests first. Pass.
+- VII: the snapshot and record fields are optional, with defaults. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
