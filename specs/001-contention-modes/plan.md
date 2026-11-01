@@ -1572,10 +1572,10 @@ fields (serde default), and the decision record a time-slice record.
    - `GpuSnapshot.compute_contexts`, when the device's process inventory is complete: own work's
      verified PIDs listed, the owner's unmanaged PIDs listed, and each non-background PID with a
      nonzero sample this interval, with its UID when readable.
-2. **Counting** (`src/policy.rs`, `src/policy/measure.rs`): the device's demand state keeps each
-   interval's sampled contexts over the estimate's 60-interval window and restarts.
-   - It counts every interval whose contexts are known, since a context's presence, unlike its
-     amount, does not depend on own work's cap.
+2. **Counting** (`src/policy.rs`, `src/policy/measure.rs`): each uncapped entry of the estimate
+   also keeps the interval's sampled contexts, so the counts share its 60-interval window and its
+   restarts. A PID no longer listed stops counting at once, and a new external PID restarts the
+   estimate.
    - m: own work's sampled PIDs still listed, with the owner's unmanaged ones, since the owner is
      one principal (FR-059).
    - E: the other sampled PIDs still listed, UIDs below `uid_min` left out.
@@ -1596,8 +1596,11 @@ fields (serde default), and the decision record a time-slice record.
      averaged view adds the interval's own amount of it back, as the interval's view counts it.
 5. **Decision 2** (`src/policy.rs`, `src/policy/ladder.rs`): `own_share` needs 6 entries. While
    the share has fewer, a re-measure window opens at once rather than 30 s after the last
-   uncapped interval, and the duty stays target ÷ 1000. A window that ends still short of 6
-   entries waits the usual 30 s, which bounds the bootstrap to one window per share restart.
+   uncapped interval, and the duty stays target ÷ 1000.
+   - A window ending short opens the next at once, because a 6-decision window feeds only 4–5
+     uncapped intervals under the two-decision rule.
+   - The bootstrap ends as soon as the share has 6 entries, about two windows, since every
+     measured uncapped interval of a running own allocation adds one.
 6. **The record** (`src/model.rs`, `src/contention.rs`): `ResourceStatus.time_slice` carries
    `time_sliced`, `own` (m), `external` (E), `principals` (k) and `holds`, on a device known to be
    time-sliced. Reason code `gpu_time_slice_fair`.

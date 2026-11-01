@@ -1179,12 +1179,14 @@ node reports with the expected per-resource values at each step.
   control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
   MIG state cannot be read is not taken as time-sliced. On a time-sliced device the driver gives
   each busy context its slice, so in Performance, Aggressive and Neutral own work MUST NOT be
-  capped on GPU compute while m × k ≤ E (the time-slice rule), m being own work's processes, E the
-  external processes and k the external principals with compute samples on the device over the
-  external estimate's averaged window, background contexts left out and an unattributed principal
+  capped on GPU compute while m × k ≤ E (the time-slice rule), m being own work's processes with
+  the owner's unmanaged ones (the owner is one principal, FR-059), E the external processes and k
+  the external principals with compute samples on the device over the external estimate's averaged
+  window and still listed there, background contexts left out and an unattributed principal
   counted as one principal with one process: own work's share m ÷ (m + E) is then at most its fair
   share 1 ÷ (k + 1), and with one own process this always holds. On the unknown path the rule
-  holds when m ≤ 1, since unseen external contexts can only add to E and k. VRAM is unaffected,
+  holds when m ≤ 1, m counting the processes listed there, since unseen external contexts can only
+  add to E and k. VRAM is unaffected,
   and Yield First keeps its targets and duties. When m × k > E, own work at full duty beside
   another busy context still holds only its slices, so in Performance, Aggressive and Neutral the
   duty MUST be the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped

@@ -1579,3 +1579,4 @@ The GPU time-slice rule and T445's decisions (spec Session 2026-11-01 Q22–Q26;
 - [ ] T468 Compare `decision_snapshot` with the code at `d101610` and list the snapshots that change and why, per plan "Item 041" 7 (missing)
 - [ ] T469 Add the time-slice rule and its equal-slice assumption to `docs/guarantees.md` and the README's GPU compute sentences, MPS and MIG keeping the measured path, per plan "Item 041" 8 (missing)
 - [ ] T470 Add T456 to `specs/001-contention-modes/native-gates.md` with the two-process runs and their gate, and add the two-process runs to `batch-037`'s harness, per SC-017 (missing)
+- [ ] T471 In T463's and T464's bootstrap, a re-measure window that ends with fewer than 6 entries in own work's share opens the next at once, replacing T463's last clause ("waits the usual 30 s"): one 6-decision window feeds only 4–5 uncapped intervals under the two-decision rule (`/speckit-analyze` I3), per FR-021 (partial)
