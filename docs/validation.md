@@ -431,6 +431,27 @@ Against T445 the old ratio rose from 0.991 to 0.993 (Performance light), from 0.
 saturating). The light user's p99 beside own work fell from 1.13–1.18 ms to 0.94–1.10 ms. Its p50
 and request rate were unchanged.
 
+### T456 after item 043
+
+Run on 2026-11-01 on the same test host at `9467f8a`, with the commands under "Item 043: T456's
+remaining runs under the time-slice duty" in `specs/001-contention-modes/native-gates.md`: two own
+probe processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
+process of either account was left before the first run or after any run. Every managed window
+passed 042's checks: both probes ran together (overlap 39.8–40.1 s), m = 2 in 72–78 decisions,
+and the window lay inside the other user's load. No window paused own work.
+
+| Run | Values | Result |
+|---|---|---|
+| Performance, beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.657 of it, the other user 510 requests a second (0.33 of its 1569 alone). With it: own work 0.522 and 0.477 (bound 0.47); the other user 720.5 and 781.2 (bound ½ × alone × 0.97 = 760.9). The first window's duty was d0 = 750 in all 72 decisions; the second's 750 in 34 and 666 in 44 from the listing path | own work passes; the other user fails in the first window (0.459 of alone) |
+| Neutral, beside the saturating user | Pair alone 1477; without 0.661, the other user 507 (0.33 of 1550). With it: own work 0.495 and 0.515 (bound 0.47); the other user 761.3 and 724.2 (bound 751.5). The duty was 750 in 51 decisions and 666 from the listing path in 27 in the first window, 750 in 76 of the second | own work passes; the other user fails in the second window (0.467 of alone) |
+| Performance, beside the light user | Pair alone 1474; without 0.863, the light user 200 requests a second, p99 2.73 ms. With it: own work 0.813 and 0.806 (bound 0.792, the target 822); the light user 200 and 200, p99 2.727 and 2.728 ms (bound 3.006). No principal was slice-bound in 57 decisions of each window; the listing path set d0 666 in 21, and the duty stepped up to 866 | passes |
+
+At d0 = 750 the duty gave own work 0.515–0.522 of the pair alone rather than the 0.5 that equal
+slices predict, and the saturating user 0.459–0.467 of its rate alone against the 0.485 its gate
+needs. d0 leaves no part of the mode's margin. The windows that passed spent 27–44 decisions at
+666, which the listing path set from an idle context of another principal that the device lists
+throughout. T456 stays open.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
