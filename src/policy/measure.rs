@@ -1460,12 +1460,18 @@ impl<'a> Interval<'a> {
             .get(&gpu.uuid)
             .cloned()
             .unwrap_or_default();
-        // Another set of external processes is another demand.
+        // Another set of external processes is another demand. The owner's unmanaged processes
+        // are listed too, but their usage is already out of the estimate (Q23, Q36).
         if let Some(listed) = &gpu.external_process_ids {
+            let owner: BTreeSet<u32> = gpu
+                .compute_contexts
+                .iter()
+                .flat_map(|contexts| contexts.owner.iter().copied())
+                .collect();
             let mut pids: Vec<u32> = listed
                 .iter()
                 .copied()
-                .filter(|pid| !gpu.background_process_ids.contains(pid))
+                .filter(|pid| !gpu.background_process_ids.contains(pid) && !owner.contains(pid))
                 .collect();
             pids.sort_unstable();
             if demand.pids.as_ref().is_some_and(|before| before != &pids) {

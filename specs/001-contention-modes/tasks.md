@@ -1630,12 +1630,12 @@ The step floor, the per-mille dwell average and the restart set (spec Session 20
 
   Per FR-021 (contradicts)
 - [X] T496 Average the dwell's utilization in per mille, rounded, and step on max(margin, 10) in `slice_duty` in `src/policy/measure.rs`, with the record's `utilization_milli` in `src/model.rs`, until T495 passes. Per FR-021 (contradicts)
-- [ ] T497 [P] Write failing restart-set tests:
+- [X] T497 [P] Write failing restart-set tests:
   - `src/telemetry.rs`: the device's external PID list holds the owner's unmanaged PIDs.
   - `tests/contention.rs`: an owner's unmanaged process that comes or goes keeps the external estimate, and a new external PID still restarts it.
 
   Per FR-022 (contradicts)
-- [ ] T498 Leave the owner's unmanaged PIDs out of `gpu_demand`'s restart set in `src/policy/measure.rs`, until T497 passes. Per FR-022 (contradicts)
+- [X] T498 Leave the owner's unmanaged PIDs out of `gpu_demand`'s restart set in `src/policy/measure.rs`, until T497 passes. Per FR-022 (contradicts)
 - [ ] T499 Replay 044-t456's traces through the step rule, with Aggressive as Performance with no margin. Report per window the recorded rises and falls against the replay's at HEAD. Per plan "Item 045" 3 (missing)
 - [ ] T500 Compare `decision_snapshot` with the code at `b3b426a` and list the snapshots that change and why. Per plan "Item 045" 3 (missing)
 - [ ] T501 State in `docs/guarantees.md` that with a zero margin CedeGrid takes device time only beyond 1% averaged spare, and update the step rule's wording there. Per plan "Item 045" 4 (missing)

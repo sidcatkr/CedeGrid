@@ -7612,6 +7612,48 @@ mod gpu_demand {
             );
         }
 
+        /// The owner's unmanaged processes are listed among the device's external PIDs, but their
+        /// usage is already out of the estimate, so their coming and going keeps the average; a
+        /// new external process still restarts it (FR-022, Q36).
+        #[test]
+        fn the_owners_processes_coming_and_going_keep_the_estimate() {
+            const OWNER_PID: u32 = 300;
+            let config = mode_config(ContentionMode::Performance);
+            let mut engine = PolicyEngine::new();
+            let mut intervals = vec![];
+            for i in 0..120u64 {
+                let mut snap = sliced(None, 490, i + 1, 0, 1);
+                let gpu = &mut snap.gpus[0];
+                if (40..70).contains(&i) {
+                    gpu.external_process_ids.as_mut().unwrap().push(OWNER_PID);
+                    gpu.compute_contexts.as_mut().unwrap().owner.push(OWNER_PID);
+                }
+                if i >= 100 {
+                    gpu.external_process_ids = Some(vec![PEER_PIDS[1]]);
+                    let contexts = gpu.compute_contexts.as_mut().unwrap();
+                    contexts.listed = vec![(PEER_PIDS[1], Some(PEER))];
+                    for (pid, _) in contexts.sampled.iter_mut() {
+                        *pid = PEER_PIDS[1];
+                    }
+                }
+                let decision = engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                    .unwrap();
+                intervals.push(record_of(&decision).intervals);
+            }
+            for i in [40, 70] {
+                assert_eq!(
+                    intervals[i],
+                    intervals[i - 1] + 1,
+                    "the owner's process at interval {i}: {intervals:?}"
+                );
+            }
+            assert_eq!(
+                intervals[100], 1,
+                "a new external process restarts the average"
+            );
+        }
+
         /// An idle context of another principal, listed throughout but never sampled busy, does
         /// not count while the samples are readable, even in intervals whose amounts are
         /// inconsistent: the counts come from the busy contexts, the window's or, while every

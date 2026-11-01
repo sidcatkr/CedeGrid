@@ -676,14 +676,11 @@ impl Collector {
                 }
             };
             let mut accounting_known = memory.is_some_and(|memory| memory.attribution_known);
-            let external_process_ids =
-                merge_process_lists(compute.as_deref().ok(), graphics.as_deref().ok()).map(
-                    |pids| {
-                        pids.into_iter()
-                            .filter(|p| !self.managed_pids.contains(p))
-                            .collect()
-                    },
-                );
+            let external_process_ids = external_process_ids(
+                compute.as_deref().ok(),
+                graphics.as_deref().ok(),
+                &self.managed_pids,
+            );
             // Memory of every enumerated context; unattributed is what remains.
             let mut process_memory: Option<BTreeMap<u32, u64>> = Some(BTreeMap::new());
             if let (Ok(compute), Ok(graphics)) = (&compute_info, &graphics_info) {
@@ -2429,6 +2426,18 @@ mod tests {
             // Item 044: whether the samples were read, so an empty `sampled` is known (Q33).
             assert_eq!(contexts.samples_readable, previous.is_some());
         }
+    }
+
+    /// The device's external PIDs are every listed process less the managed ones, so the owner's
+    /// unmanaged processes are among them, as are other users' (FR-022, Q36).
+    #[test]
+    fn the_owners_unmanaged_processes_are_listed_as_external() {
+        let managed = BTreeSet::from([10]);
+        assert_eq!(
+            external_process_ids(Some(&[10, 20]), Some(&[21]), &managed),
+            Some(vec![20, 21])
+        );
+        assert_eq!(external_process_ids(None, Some(&[20]), &managed), None);
     }
 
     #[test]

@@ -22,6 +22,20 @@ pub(super) fn merge_process_lists(
     (!processes.contains(&0)).then_some(processes)
 }
 
+/// The device's external PIDs: every listed process less own work's verified ones, so the
+/// owner's unmanaged processes are among them (FR-022, Q36). None while the inventory is not.
+pub(super) fn external_process_ids(
+    compute: Option<&[u32]>,
+    graphics: Option<&[u32]>,
+    managed: &BTreeSet<u32>,
+) -> Option<Vec<u32>> {
+    merge_process_lists(compute, graphics).map(|pids| {
+        pids.into_iter()
+            .filter(|pid| !managed.contains(pid))
+            .collect()
+    })
+}
+
 /// Native identity for an independently tracked external Linux process. Requiring
 /// all four UID slots to agree prevents a credential transition from retaining a
 /// stale authorization. Other platforms cannot establish this contract yet.
