@@ -7182,11 +7182,19 @@ mod gpu_demand {
         /// Q27, Q28).
         #[test]
         fn beside_a_partial_user_the_duty_steps_up_to_the_idle_time() {
-            for (mode, margin, d0) in [
-                (ContentionMode::Performance, 20, 720),
-                (ContentionMode::Neutral, 50, 675),
+            // A zero margin settles at the measurement floor, one reading's quantum (Q35).
+            for (mode, config, margin, d0) in [
+                (
+                    "Performance",
+                    mode_config(ContentionMode::Performance),
+                    20,
+                    720,
+                ),
+                ("Neutral", mode_config(ContentionMode::Neutral), 50, 675),
+                ("Aggressive", aggressive_config(), 10, 750),
             ] {
-                let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 400)], 400);
+                let run =
+                    tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 400)], 400, &|_, _| {});
                 assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
                 let first = run
                     .iter()
@@ -7403,7 +7411,7 @@ mod gpu_demand {
                 if utilization.is_none() {
                     assert_eq!(duties, BTreeSet::from([Some(626)]));
                     assert_eq!(
-                        (slice.step, slice.utilization),
+                        (slice.step, slice.utilization_milli),
                         (Some(SliceStep::Holding), None)
                     );
                 } else {
@@ -7516,6 +7524,94 @@ mod gpu_demand {
             assert!(pauses[1].is_some(), "the control never paused");
         }
 
+        /// The dwell's readings average in per mille: 100, 100 and 99 read 997, three per mille of
+        /// spare time, under one reading's quantum. With a zero margin the duty holds at d0
+        /// rather than rising on the floored 99; in Performance, above d0, it falls back rather
+        /// than holding (FR-021, Q35).
+        #[test]
+        fn a_dip_of_one_reading_neither_raises_nor_holds_the_duty() {
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let run = |config: &Config, busy: &dyn Fn(u64) -> u32| {
+                let mut engine = PolicyEngine::new();
+                (0..300u64)
+                    .map(|i| {
+                        let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
+                        snap.gpus[0].utilization_percent = Some(busy(i));
+                        let decision = engine
+                            .evaluate(config, &snap, &input, i * INTERVAL)
+                            .unwrap();
+                        slice_of(&decision)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let dips = |i: u64| if i % 3 == 2 { 99 } else { 100 };
+            let zero = run(&aggressive_config(), &dips);
+            let duties: BTreeSet<u64> = zero[20..].iter().filter_map(|s| s.duty).collect();
+            assert_eq!(
+                duties,
+                BTreeSet::from([750]),
+                "zero margin: duties {duties:?}"
+            );
+            // Performance steps above d0 while the device idles, then the dips set in.
+            let performance = run(&mode_config(ContentionMode::Performance), &|i| {
+                if i < 100 { 50 } else { dips(i) }
+            });
+            let peak = performance[..100].iter().filter_map(|s| s.duty).max();
+            assert!(peak > Some(720), "Performance never stepped up: {peak:?}");
+            let last = performance.last().unwrap();
+            assert_eq!(last.duty, Some(720), "Performance holds above d0: {last:?}");
+            assert!(
+                performance[100..]
+                    .iter()
+                    .any(|s| s.step == Some(SliceStep::Falling)),
+                "no fall"
+            );
+        }
+
+        /// With a zero margin beside a saturating context, while own work's phase switches dip
+        /// one reading in three to 99, the duty stays at d0 = 750: own work holds half the device
+        /// and the saturating context keeps its half (FR-021, Q35). The context's share is read
+        /// outside the re-measure windows, which lift the cap for 6 decisions every 30 s by
+        /// design and give it a third of the device meanwhile.
+        #[test]
+        fn a_zero_margin_beside_a_saturating_user_ignores_phase_switch_dips() {
+            let dips = |i: u64, snap: &mut Snapshot| {
+                if i.is_multiple_of(3) {
+                    snap.gpus[0].utilization_percent = Some(99);
+                }
+            };
+            let run = tick_loop_with(
+                &aggressive_config(),
+                &|_| 2,
+                &|_| vec![(PEER, 1, 1000)],
+                240,
+                &dips,
+            );
+            assert!(run.iter().all(|t| !paused(&t.decision)), "paused");
+            let late = &run[40..];
+            let duties: BTreeSet<u64> = late
+                .iter()
+                .filter(|t| !record_of(&t.decision).window)
+                .map(|t| cap_of(&t.decision))
+                .collect();
+            assert_eq!(duties, BTreeSet::from([750]), "duties {duties:?}");
+            let own = mean(late.iter().map(|t| t.own));
+            assert!(own.abs_diff(500) <= 30, "own work holds {own}");
+            // Each interval runs at the duty the decision before it sent.
+            let capped = late
+                .windows(2)
+                .filter(|pair| !record_of(&pair[0].decision).window)
+                .map(|pair| pair[1].others[0]);
+            let other = mean(capped);
+            assert!(
+                other * 100 >= 97 * 500,
+                "the saturating context gets {other}"
+            );
+        }
+
         /// An idle context of another principal, listed throughout but never sampled busy, does
         /// not count while the samples are readable, even in intervals whose amounts are
         /// inconsistent: the counts come from the busy contexts, the window's or, while every
@@ -7619,7 +7715,7 @@ mod gpu_demand {
             );
             let t = run[60..]
                 .iter()
-                .find(|t| slice_of(&t.decision).utilization.is_some())
+                .find(|t| slice_of(&t.decision).utilization_milli.is_some())
                 .unwrap();
             let slice = slice_of(&t.decision);
             let [bound] = slice.bound.as_slice() else {
@@ -7638,8 +7734,8 @@ mod gpu_demand {
             assert_eq!(slice.source, Some(SliceSource::Window));
             // The device is saturated, so the duty holds at d0.
             assert_eq!(
-                (slice.step, slice.utilization),
-                (Some(SliceStep::Holding), Some(100))
+                (slice.step, slice.utilization_milli),
+                (Some(SliceStep::Holding), Some(1000))
             );
             let reasons = &t.decision.resources[&ResourceKey::GpuCompute(GPU.into())].reasons;
             assert!(

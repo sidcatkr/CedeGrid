@@ -698,9 +698,9 @@ pub struct TimeSliceRecord {
     /// What the step-up did this decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<SliceStep>,
-    /// The device's utilization in percent, averaged over the step dwell.
+    /// The device's utilization averaged over the step dwell, in per mille, rounded (Q35).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utilization: Option<u32>,
+    pub utilization_milli: Option<u64>,
 }
 
 /// A slice-bound external principal (FR-021, Q27): its UID (none for the unattributed one), its

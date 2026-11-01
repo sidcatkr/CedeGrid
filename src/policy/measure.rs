@@ -1728,21 +1728,31 @@ impl<'a> Interval<'a> {
                 state.utilization.pop_front();
             }
         }
-        let average = (state.utilization.len() >= dwell as usize)
-            .then(|| state.utilization.iter().sum::<u32>() / state.utilization.len() as u32);
+        // The dwell's average in per mille, rounded, so one reading's dip is not a whole percent
+        // of spare time (Q35).
+        let average = (state.utilization.len() >= dwell as usize).then(|| {
+            let len = state.utilization.len() as u64;
+            (state
+                .utilization
+                .iter()
+                .map(|busy| u64::from(*busy))
+                .sum::<u64>()
+                * 10
+                + len / 2)
+                / len
+        });
         if let Some(busy) = average {
-            let spare = GPU_COMPUTE_CAPACITY.saturating_sub(u64::from(busy) * 10);
+            let spare = GPU_COMPUTE_CAPACITY.saturating_sub(busy);
             let since = now.saturating_sub(state.since_ms);
             let step_milli = u64::from(thresholds.slice_step_percent) * 10;
             let rise_ms = thresholds
                 .scale_up_interval_ms(mode, config.monitor.interval_ms)
                 .max(dwell_ms);
-            let saturated = if margin == 0 {
-                spare == 0
-            } else {
-                spare * 2 < margin
-            };
-            if spare > margin && state.duty < GPU_COMPUTE_CAPACITY && since >= rise_ms {
+            // Spare time under one reading's quantum can't be told from the dips as own work's
+            // phases switch, whatever the margin (Q35).
+            let floor = margin.max(UTILIZATION_QUANTUM_MILLI);
+            let saturated = spare * 2 < floor;
+            if spare > floor && state.duty < GPU_COMPUTE_CAPACITY && since >= rise_ms {
                 state.duty = (state.duty + step_milli).min(GPU_COMPUTE_CAPACITY);
                 step = SliceStep::Rising;
             } else if saturated && state.duty > state.d0 && since >= dwell_ms {
@@ -1757,7 +1767,7 @@ impl<'a> Interval<'a> {
         record.d0 = Some(d0);
         record.duty = Some(state.duty);
         record.step = Some(step);
-        record.utilization = average;
+        record.utilization_milli = average;
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU
@@ -2079,6 +2089,9 @@ fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
 /// The busy contexts an uncapped interval keeps for the time-slice rule (FR-021, Q22): own
 /// work's and the owner's unmanaged sampled PIDs on one side, every other sampled PID with its
 /// UID on the other.
+/// One device utilization reading's quantum, a whole percent, in per mille (FR-021, Q35).
+const UTILIZATION_QUANTUM_MILLI: u64 = 10;
+
 fn sampled_contexts(gpu: &GpuSnapshot) -> Option<SampledContexts> {
     let contexts = gpu
         .compute_contexts

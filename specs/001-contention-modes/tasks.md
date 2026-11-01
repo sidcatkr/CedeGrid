@@ -1622,14 +1622,14 @@ Aligned GPU duty phases, the margin at d0 and the busy counts (spec Session 2026
 
 The step floor, the per-mille dwell average and the restart set (spec Session 2026-11-01 Q35–Q36; plan "Item 045"; research R53). Each pair is test first: the tests fail on today's code, then the code makes them pass. T117 and T228 are unchanged.
 
-- [ ] T495 [P] Write failing step-rule tests in `tests/contention.rs`:
+- [X] T495 [P] Write failing step-rule tests in `tests/contention.rs`:
   - dwell readings 100, 100, 99 hold the duty at d0 with a zero margin, where today they raise it;
   - Performance above d0 falls on them, where today it holds;
   - zero margin beside the saturating shape with one reading in three at 99 stays at d0, own work within 30 of 500 and the external context at 485 or more;
   - the partial user at 40% with a zero margin settles within 30 of 1000 − 400 − 10, and Performance and Neutral settle as before.
 
   Per FR-021 (contradicts)
-- [ ] T496 Average the dwell's utilization in per mille, rounded, and step on max(margin, 10) in `slice_duty` in `src/policy/measure.rs`, with the record's `utilization_milli` in `src/model.rs`, until T495 passes. Per FR-021 (contradicts)
+- [X] T496 Average the dwell's utilization in per mille, rounded, and step on max(margin, 10) in `slice_duty` in `src/policy/measure.rs`, with the record's `utilization_milli` in `src/model.rs`, until T495 passes. Per FR-021 (contradicts)
 - [ ] T497 [P] Write failing restart-set tests:
   - `src/telemetry.rs`: the device's external PID list holds the owner's unmanaged PIDs.
   - `tests/contention.rs`: an owner's unmanaged process that comes or goes keeps the external estimate, and a new external PID still restarts it.
