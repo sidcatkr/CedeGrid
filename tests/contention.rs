@@ -6496,9 +6496,9 @@ mod gpu_demand {
         }
 
         /// Two own contexts beside one saturating context hold two slices of three, more than
-        /// the fair share: m × k = 2 > E = 1, so 040's duty caps own work to 500. Once one own
-        /// context leaves the device, m counts only the processes still listed, the rule holds and
-        /// the cap is gone at once (FR-021, Q22).
+        /// the fair share: m × k = 2 > E = 1, so the counts duty caps own work to half less
+        /// Neutral's margin, 450. Once one own context leaves the device, m counts only the
+        /// processes still listed, the rule holds and the cap is gone at once (FR-021, Q22, Q32).
         #[test]
         fn two_own_contexts_are_capped_until_one_leaves() {
             const LEAVE: usize = 300;
@@ -6510,7 +6510,7 @@ mod gpu_demand {
             );
             let capped = &run[100..LEAVE];
             let own = median(capped.iter().map(|(_, share)| *share).collect());
-            assert!(own.abs_diff(500) <= 30, "own work holds {own}");
+            assert!(own.abs_diff(450) <= 30, "own work holds {own}");
             for (decision, _) in capped {
                 let slice = slice_of(decision);
                 assert_eq!((slice.own, slice.holds), (2, false));
@@ -6808,8 +6808,9 @@ mod gpu_demand {
 
         /// On the unknown path the rule holds with at most one own process listed, since unseen
         /// external contexts can only add to E and k; with two, the listed external principal
-        /// counts as slice-bound and the duty starts at d0 from the listed counts, (2 + 1) ÷
-        /// (2 × 2), with the share at its part of the busy contexts (FR-021, Q22, Q29).
+        /// counts as slice-bound and the duty starts at d0 from the listed counts, (2 + 1) ÷ 2 ×
+        /// (½ − Neutral's 5%), with the share at its part of the busy contexts (FR-021, Q22, Q29,
+        /// Q32).
         #[test]
         fn the_unknown_path_holds_the_rule_only_for_one_own_process() {
             let key = ResourceKey::GpuCompute(GPU.into());
@@ -6851,10 +6852,10 @@ mod gpu_demand {
                 if own_n == 2 {
                     assert_eq!(
                         capped,
-                        Some((Some(500), Some(750))),
+                        Some((Some(450), Some(675))),
                         "two own processes on the unknown path take d0 from the listed counts"
                     );
-                    assert_eq!((slice.d0, slice.bound.len()), (Some(750), 1));
+                    assert_eq!((slice.d0, slice.bound.len()), (Some(675), 1));
                 }
             }
         }
@@ -7016,7 +7017,29 @@ mod gpu_demand {
             externals: &dyn Fn(u64) -> Vec<(u32, usize, u64)>,
             intervals: u64,
         ) -> Vec<Tick> {
-            let config = mode_config(mode);
+            tick_loop_with(&mode_config(mode), m_of, externals, intervals)
+        }
+
+        /// Aggressive's GPU compute behavior: Performance with no margin, which is how a node
+        /// configures it, `reduced_margin` acknowledged.
+        pub(super) fn aggressive_config() -> Config {
+            let mut config = mode_config(ContentionMode::Performance);
+            config.contention.gpu_compute.performance_margin_percent = Some(0);
+            config
+                .contention
+                .acknowledge_caution
+                .insert("reduced_margin".into());
+            config
+        }
+
+        /// `tick_loop` under a given configuration.
+        pub(super) fn tick_loop_with(
+            config: &Config,
+            m_of: &dyn Fn(u64) -> usize,
+            externals: &dyn Fn(u64) -> Vec<(u32, usize, u64)>,
+            intervals: u64,
+        ) -> Vec<Tick> {
+            let config = config.clone();
             let mut engine = PolicyEngine::new();
             let mut now = 0;
             let mut quantized: BTreeMap<u32, Quantized> = BTreeMap::new();
@@ -7073,22 +7096,32 @@ mod gpu_demand {
         }
 
         /// Two own contexts beside a saturating one hold two slices of three: the time-slice duty
-        /// d0 = (2 + 1) ÷ (2 × 2) = 0.75 gives own work its fair share, 500, with no pause, and
-        /// quantized own readings of 0, 330, 660 and 990 do not move the duty (FR-021, Q27).
+        /// d0 = (2 + 1) ÷ 2 × (½ − the margin) gives own work its fair share less the mode's
+        /// margin, 480 in Performance, 450 in Neutral and 500 in Aggressive, with no pause, and
+        /// quantized own readings of 0, 330, 660 and 990 do not move the duty (FR-021, Q27, Q32).
         #[test]
         fn two_own_contexts_beside_a_saturating_one_take_the_counts_duty() {
-            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
-                let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240);
+            for (mode, config, want, d0) in [
+                (
+                    "Performance",
+                    mode_config(ContentionMode::Performance),
+                    480,
+                    720,
+                ),
+                ("Neutral", mode_config(ContentionMode::Neutral), 450, 675),
+                ("Aggressive", aggressive_config(), 500, 750),
+            ] {
+                let run = tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240);
                 assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
                 let late = &run[40..];
                 let own = mean(late.iter().map(|t| t.own));
-                assert!(own.abs_diff(500) <= 30, "{mode:?}: own work holds {own}");
+                assert!(own.abs_diff(want) <= 30, "{mode:?}: own work holds {own}");
                 let duties: BTreeSet<u64> = late
                     .iter()
                     .filter(|t| !record_of(&t.decision).window)
                     .map(|t| cap_of(&t.decision))
                     .collect();
-                assert_eq!(duties, BTreeSet::from([750]), "{mode:?}: duties {duties:?}");
+                assert_eq!(duties, BTreeSet::from([d0]), "{mode:?}: duties {duties:?}");
             }
         }
 
@@ -7120,9 +7153,9 @@ mod gpu_demand {
         /// Q27, Q28).
         #[test]
         fn beside_a_partial_user_the_duty_steps_up_to_the_idle_time() {
-            for (mode, margin) in [
-                (ContentionMode::Performance, 20),
-                (ContentionMode::Neutral, 50),
+            for (mode, margin, d0) in [
+                (ContentionMode::Performance, 20, 720),
+                (ContentionMode::Neutral, 50, 675),
             ] {
                 let run = tick_loop(mode, &|_| 2, &|_| vec![(PEER, 1, 400)], 400);
                 assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
@@ -7130,7 +7163,7 @@ mod gpu_demand {
                     .iter()
                     .find(|t| cap_of(&t.decision) < 1000)
                     .map(|t| cap_of(&t.decision));
-                assert_eq!(first, Some(750), "{mode:?}: the first duty");
+                assert_eq!(first, Some(d0), "{mode:?}: the first duty");
                 let late = &run[250..];
                 let own = mean(late.iter().map(|t| t.own));
                 assert!(
@@ -7158,10 +7191,10 @@ mod gpu_demand {
         }
 
         /// Shapes of the counts beside saturating and light principals, in Performance and
-        /// Neutral: m = 3 beside one saturating context takes d0 = 4 ÷ 6 and half the device; m =
-        /// 2 beside two saturating principals takes d0 = 4 ÷ 6 and a third; beside a saturating
-        /// and a light principal only the saturating one is slice-bound, so own work holds about
-        /// half of what the light one leaves (FR-021, Q27). Read once the estimate holds its 60
+        /// Neutral, each less the mode's margin: m = 3 beside one saturating context takes half the
+        /// device; m = 2 beside two saturating principals takes a third; beside a saturating and a
+        /// light principal only the saturating one is slice-bound, so own work holds about half of
+        /// what the light one leaves (FR-021, Q27, Q32). Read once the estimate holds its 60
         /// window intervals: from a few windows of 5 readings in 330 steps the light one reads 132
         /// or 198 against its threshold of 187.
         #[test]
@@ -7187,8 +7220,12 @@ mod gpu_demand {
                     1,
                 ),
             ];
-            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
-                for (name, m, externals, want, bound) in &shapes {
+            for (mode, margin) in [
+                (ContentionMode::Performance, 20),
+                (ContentionMode::Neutral, 50),
+            ] {
+                for (name, m, externals, share, bound) in &shapes {
+                    let want = share - margin;
                     let run = tick_loop(mode, &|_| *m, &|_| externals.clone(), 1000);
                     assert!(
                         run.iter().all(|t| !paused(&t.decision)),
@@ -7197,7 +7234,7 @@ mod gpu_demand {
                     let late = &run[700..];
                     let own = mean(late.iter().map(|t| t.own));
                     assert!(
-                        own.abs_diff(*want) <= 30,
+                        own.abs_diff(want) <= 30,
                         "{mode:?} {name}: own work holds {own}"
                     );
                     let slice = slice_of(&late.last().unwrap().decision);
@@ -7219,7 +7256,10 @@ mod gpu_demand {
         #[test]
         fn a_rising_user_returns_own_work_to_d0_within_the_bound() {
             const TURN: u64 = 300;
-            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+            for (mode, margin, d0) in [
+                (ContentionMode::Performance, 20, 720),
+                (ContentionMode::Neutral, 50, 675),
+            ] {
                 for (name, before) in [("light", 158), ("partial", 400)] {
                     let run = tick_loop(
                         mode,
@@ -7231,7 +7271,7 @@ mod gpu_demand {
                     let bound = if name == "light" { 33_000 } else { 30_000 } / INTERVAL;
                     let back = run[TURN as usize..]
                         .iter()
-                        .position(|t| !record_of(&t.decision).window && cap_of(&t.decision) == 750)
+                        .position(|t| !record_of(&t.decision).window && cap_of(&t.decision) == d0)
                         .map(|i| i as u64);
                     assert!(
                         back.is_some_and(|i| i <= bound),
@@ -7240,7 +7280,7 @@ mod gpu_demand {
                     let late = &run[(TURN + 100) as usize..];
                     let own = mean(late.iter().map(|t| t.own));
                     assert!(
-                        own.abs_diff(500) <= 30,
+                        own.abs_diff(500 - margin) <= 30,
                         "{mode:?} {name}: own work holds {own}"
                     );
                 }
@@ -7286,8 +7326,9 @@ mod gpu_demand {
         }
 
         /// With the listing known and the amounts unknown, d0 comes from the listed counts with
-        /// every listed principal slice-bound, (2 + 2) ÷ (2 × 3), and without a utilization
-        /// reading the duty never steps up; with one showing idle time it does (FR-021, Q29).
+        /// every listed principal slice-bound, (2 + 2) ÷ 2 × (⅓ − Performance's 2%), and without
+        /// a utilization reading the duty never steps up; with one showing idle time it does
+        /// (FR-021, Q29, Q32).
         #[test]
         fn unknown_amounts_take_d0_from_the_listed_principals() {
             const SECOND_PID: u32 = 950;
@@ -7326,17 +7367,17 @@ mod gpu_demand {
                     last = Some(decision);
                 }
                 let slice = slice_of(&last.unwrap());
-                assert_eq!(slice.d0, Some(666), "{utilization:?}");
+                assert_eq!(slice.d0, Some(626), "{utilization:?}");
                 let uids: Vec<Option<u32>> = slice.bound.iter().map(|b| b.uid).collect();
                 assert_eq!(uids, vec![Some(PEER), Some(2002)], "{utilization:?}");
                 if utilization.is_none() {
-                    assert_eq!(duties, BTreeSet::from([Some(666)]));
+                    assert_eq!(duties, BTreeSet::from([Some(626)]));
                     assert_eq!(
                         (slice.step, slice.utilization),
                         (Some(SliceStep::Holding), None)
                     );
                 } else {
-                    assert!(duties.iter().any(|d| d > &Some(666)), "{duties:?}");
+                    assert!(duties.iter().any(|d| d > &Some(626)), "{duties:?}");
                 }
             }
         }
@@ -7367,7 +7408,7 @@ mod gpu_demand {
             };
             let run = saturating_with(ContentionMode::Performance, None, &|_| 2, 1, 200, &renamed);
             let before = slice_of(&run[118].0);
-            assert_eq!((before.external, before.d0), (Some(1), Some(750)));
+            assert_eq!((before.external, before.d0), (Some(1), Some(720)));
             let after = slice_of(&run[120].0);
             assert_eq!(
                 (
@@ -7376,7 +7417,7 @@ mod gpu_demand {
                     after.d0,
                     after.bound.len()
                 ),
-                (None, None, Some(750), 1),
+                (None, None, Some(720), 1),
                 "{after:?}"
             );
             assert!(
@@ -7471,7 +7512,7 @@ mod gpu_demand {
                 (slice.own, slice.external, slice.principals, slice.holds),
                 (2, Some(1), Some(1), false)
             );
-            assert_eq!((slice.d0, slice.duty), (Some(750), Some(750)));
+            assert_eq!((slice.d0, slice.duty), (Some(720), Some(720)));
             // The device is saturated, so the duty holds at d0.
             assert_eq!(
                 (slice.step, slice.utilization),

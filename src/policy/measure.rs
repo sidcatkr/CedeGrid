@@ -1679,9 +1679,13 @@ impl<'a> Interval<'a> {
         }
         let bound_contexts: u64 = record.bound.iter().map(|b| u64::from(b.contexts)).sum();
         let bound_principals = record.bound.len() as u64;
-        let d0 = (GPU_COMPUTE_CAPACITY.saturating_mul(own + bound_contexts)
-            / (own * (bound_principals + 1)).max(1))
-        .clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY);
+        // Own work's share at d0 is its part of the slice-bound principals' time less the mode's
+        // margin, held where the mode's target would hold it (Q32).
+        let mode = governing(config, ResourceKind::GpuCompute);
+        let margin = u64::from(thresholds.margin_percent(mode)) * 10;
+        let share = (GPU_COMPUTE_CAPACITY / (bound_principals + 1)).saturating_sub(margin);
+        let d0 = ((own + bound_contexts).saturating_mul(share) / own.max(1))
+            .clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY);
         let now = self.now;
         let state = demand.slice.get_or_insert(SliceDuty {
             d0,
@@ -1700,7 +1704,6 @@ impl<'a> Interval<'a> {
             state.since_ms = now;
             state.utilization.clear();
         }
-        let mode = governing(config, ResourceKind::GpuCompute);
         let dwell = thresholds.min_step_dwell_intervals.max(1);
         let dwell_ms = u64::from(dwell).saturating_mul(config.monitor.interval_ms);
         let mut step = SliceStep::Holding;
@@ -1717,7 +1720,6 @@ impl<'a> Interval<'a> {
             .then(|| state.utilization.iter().sum::<u32>() / state.utilization.len() as u32);
         if let Some(busy) = average {
             let spare = GPU_COMPUTE_CAPACITY.saturating_sub(u64::from(busy) * 10);
-            let margin = u64::from(thresholds.margin_percent(mode)) * 10;
             let since = now.saturating_sub(state.since_ms);
             let step_milli = u64::from(thresholds.slice_step_percent) * 10;
             let rise_ms = thresholds
