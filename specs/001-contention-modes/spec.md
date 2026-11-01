@@ -551,6 +551,36 @@ back more.
 - Q: In SC-017, what is "the mode's target"? → A: The mode's target for the principals actually
   on the device (500 beside one saturating user), not the recorded target, which a phantom
   principal can lower (item 041, Decision 4).
+- Q: At m × k > E on a time-sliced device, how is own work's GPU compute capped in Performance,
+  Aggressive and Neutral? → A: An external principal j with E_j busy contexts is slice-bound
+  when its averaged uncapped reading (the external estimate, from uncapped intervals and
+  re-measure windows only) is at least 0.75 × 1000 × E_j ÷ (m + E). With no slice-bound principal
+  there is no GPU compute cap: the slicer already gives every external principal what it asks
+  for. Otherwise, with E_b and k_b the contexts and principals of the slice-bound ones, the base
+  duty per own context is d0 = (m + E_b) ÷ (m × (k_b + 1)), clamped to the minimum duty and 1,
+  which gives own work 1 ÷ (k_b + 1) of the time the slice-bound principals want; principals that
+  are not slice-bound keep their slices. This path uses no estimate-based target, no ladder
+  excess from one interval's own reading and no pause in any of the three modes; the minimum
+  duty is the floor. The mode semantics don't change: Performance still gives others
+  min(demand, fair share) plus the margin (item 043, Decision 1).
+- Q: When does that duty rise above d0, and when does it fall back? → A: From the device's own
+  utilization only, never per-process readings: while own work is held below duty 1 and the
+  device shows spare time beyond the mode's margin (Aggressive 0, Neutral its own margin), the
+  duty rises one step toward 1; while the device is saturated above d0 it steps down toward d0,
+  since an external principal may want more. It settles without oscillating more than one step
+  and without cap and uncap cycling, with hysteresis or dwell and stated bounds. A non-bound
+  principal that turns slice-bound, or a stepped-up partial user that rises, returns own work to
+  d0 within a stated bound, using the re-measure windows; a slice-bound principal that leaves ends
+  the cap within one averaged window (item 043, Decision 1).
+- Q: What does the time-slice duty do when the amounts are unknown? → A: When the process
+  listing is known but the amounts are unknown or inconsistent, d0 comes from the listed counts
+  with every listed external principal treated as slice-bound, and there is no step-up without a
+  device utilization reading; when the listing itself is unknown, Q25 holds (target ÷ 1000), with
+  no pause (item 043, Decision 1).
+- Q: What does each decision record for the time-slice duty? → A: Which principals are
+  slice-bound, with their readings and thresholds, d0, the current duty and the step-up state,
+  beside 041's m, E, k and whether the rule held. m × k ≤ E (no cap), Yield First, VRAM, CPU, RAM
+  and the MPS and MIG path are unchanged (item 043, Decision 1).
 
 ## Terms
 
@@ -945,7 +975,8 @@ node reports with the expected per-resource values at each step.
   (FR-076).
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
   memory floor covers all of them together. On a time-sliced device their processes together are
-  FR-021's m, so two single-process jobs beside one external process are capped.
+  FR-021's m, so two single-process jobs beside one external process take FR-021's time-slice
+  duty while that process is slice-bound, and run uncapped while it is not.
 - **Caution option chosen non-interactively without its acknowledgement flag.** Setup refuses
   and writes nothing.
 - **Configuration edited by hand to select Performance.** It loads without an acknowledgement
@@ -1187,15 +1218,45 @@ node reports with the expected per-resource values at each step.
   share 1 ÷ (k + 1), and with one own process this always holds. On the unknown path the rule
   holds when m ≤ 1, m counting the processes listed there, since unseen external contexts can only
   add to E and k. VRAM is unaffected,
-  and Yield First keeps its targets and duties. When m × k > E, own work at full duty beside
-  another busy context still holds only its slices, so in Performance, Aggressive and Neutral the
-  duty MUST be the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped
-  intervals in which it ran on the device, at least 6 and at most 60, restarted with the external
-  estimate and when own work's allocations there change), clamped to the minimum duty and 1; while
-  the share has fewer than 6 intervals a re-measure window opens at once rather than 30 s after the
-  last one. Until the share exists, while the device's amount is unknown, for a cap set for unknown
-  activity, and in Yield First, the duty is target ÷ 1000. Each decision's GPU compute status
-  states m, E, k and whether the rule held. External GPU compute MUST be measured, in thousandths of
+  and Yield First keeps its targets and duties. When m × k > E, own work at full duty holds more
+  slices than its fair share, and in Performance, Aggressive and Neutral its GPU compute MUST be
+  capped from the context counts (the time-slice duty):
+  - An external principal j with E_j busy contexts is slice-bound when its reading in the
+    external estimate (uncapped intervals and re-measure windows only) is at least
+    `contention.gpu_compute.slice_bound_percent` (default 75) percent of its slice,
+    1000 × E_j ÷ (m + E). An unattributed principal counts as one with one context.
+  - With no slice-bound principal there is no GPU compute cap. Otherwise each own process runs at
+    the base duty d0 = (m + E_b) ÷ (m × (k_b + 1)), E_b and k_b being the slice-bound principals'
+    contexts and number, clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of
+    the time the slice-bound principals want; principals that are not slice-bound keep their
+    slices.
+  - From the device's own utilization alone, averaged over the step dwell and never from
+    per-process readings, the duty rises by `contention.gpu_compute.slice_step_percent` (default
+    5) points toward 1 while the device's spare time exceeds the mode's margin (Aggressive 0), at
+    most once per the mode's scale-up interval and the step dwell, whichever is longer. It falls by
+    a step toward d0 once per step dwell while the spare time is below half that margin (in
+    Aggressive, while the device is fully busy), and holds between the two. So it settles within
+    one step, and a duty that reaches 1 stays a cap at full duty rather than being lifted and set
+    again.
+  - A principal that turns slice-bound returns own work to d0 within 33 s, the estimate's next
+    window. A stepped-up user that rises returns it within one step dwell per step above d0, at
+    most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
+  - This path uses no estimate-based target, no ladder excess from one interval's own reading and
+    no pause in any mode; the minimum duty is the floor.
+  - When the process listing is known but the amounts are unknown or inconsistent, d0 comes from
+    the listed counts with every listed external principal slice-bound, and the duty steps up only
+    with a device utilization reading. When the listing itself is unknown on a device last read
+    as time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
+  - Each decision's GPU compute status states m, E, k, whether the rule held, the slice-bound
+    principals with their readings and thresholds, d0, the duty and the step-up state.
+
+  On a device not known to be time-sliced, in Performance, Aggressive and Neutral, the duty is
+  the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in
+  which it ran on the device, at least 6 and at most 60, restarted with the external estimate and
+  when own work's allocations there change), clamped to the minimum duty and 1. While the share
+  has fewer than 6 intervals a re-measure window opens at once rather than 30 s after the last
+  one. Until the share exists, while the device's amount is unknown, for a cap set for unknown
+  activity, and in Yield First, the duty is target ÷ 1000. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%: a sample at t, whose process's previous sample was at p, counts in full in the window
@@ -1264,15 +1325,17 @@ node reports with the expected per-resource values at each step.
     minus observed external usage minus the margin: give back what external demand takes, and
     never go below the fair share; on GPU compute, observed external usage is FR-021's average
     over intervals in which own work ran uncapped, and on a time-sliced device own work is not
-    capped while FR-021's time-slice rule holds;
+    capped while FR-021's time-slice rule holds and takes FR-021's time-slice duty, not this
+    target, while it does not;
   - on CPU and GPU compute, in Tracked and Full, never take a step that targets below the fair
     share: a cap that misses its target after the hold window (the step dwell) is recomputed from the measured
     rate and applied again, without escalating to pause; only a cap already at the minimum duty
     with own usage still above the fair share may pause, for at most one monitor interval, before
-    returning to the cap;
+    returning to the cap, and on a time-sliced GPU's time-slice path no GPU compute step pauses
+    (FR-021);
   - while external activity of unknown amount exists, hold own work to Neutral's fair share,
-    counting that activity as one active principal, except on a time-sliced GPU with at most one
-    own process, where FR-021's time-slice rule holds;
+    counting that activity as one active principal, except on a time-sliced GPU, where FR-021's
+    time-slice rule or its time-slice duty applies;
   - while CPU telemetry is unknown, hold own CPU at Neutral's fair share, counting the unknown as
     one active principal, and with no fair share known yet take no new step.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
@@ -1338,6 +1401,7 @@ node reports with the expected per-resource values at each step.
 - **FR-025**: Every threshold that steers yielding MUST be a configuration value, not a
   hard-coded constant. This covers:
   - margins, response times and scale-up rates
+  - the GPU compute time-slice duty's slice-bound share and step (FR-021)
   - tolerances, windows and deadlines, including the Guaranteed hint deadline, the RAM breach
     window, the critical floor share and hint deadline, the principal window,
     `principal_leave_s` and `uid_min`, the memory peak window and the CPU admission usage window
