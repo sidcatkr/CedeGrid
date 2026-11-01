@@ -692,6 +692,13 @@ pub struct TimeSliceRecord {
     /// The base duty from the slice-bound principals' counts, in thousandths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub d0: Option<u64>,
+    /// The re-measure windows' share of the time the duty path caps own work, in per mille, and
+    /// d0' = (d0 − w) ÷ (1 − w), the duty's start and floor, so own work pays for the windows
+    /// (Q37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_share: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d0_windows: Option<u64>,
     /// The duty sent to own work on the device, in thousandths (Q28).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<u64>,

@@ -1648,6 +1648,34 @@ impl<'a> Interval<'a> {
         Some(record)
     }
 
+    /// Whether a re-measure window can open on the device: not while the governing mode or an own
+    /// allocation there is in Yield First, nor while one there holds a CPU step of cap or more
+    /// (FR-021, Q19, Q37).
+    fn windows_can_open(&self, uuid: &str) -> bool {
+        governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst
+            && self
+                .input
+                .allocations
+                .iter()
+                .filter(|a| {
+                    a.phase == AllocationPhase::Running
+                        && a.requested.gpu_memory_mib.contains_key(uuid)
+                })
+                .all(|a| {
+                    let yield_first = self
+                        .allocation_modes
+                        .get(&a.id)
+                        .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
+                        .is_some_and(|mode| *mode == ContentionMode::YieldFirst);
+                    let cpu = self
+                        .prev
+                        .ladder
+                        .get(&(a.id.clone(), ResourceKey::Cpu))
+                        .map_or(YieldStep::None, |state| state.step);
+                    !yield_first && cpu < YieldStep::Cap
+                })
+    }
+
     /// The time-slice duty at m × k > E (FR-021, Q27, Q28): the slice-bound principals from the
     /// external estimate's readings when `read`, else every counted principal, d0 from their
     /// counts, and one step up or down from the device's utilization.
@@ -1662,6 +1690,7 @@ impl<'a> Interval<'a> {
         let thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
         let own = u64::from(record.own);
         let external: u64 = principals.values().map(|n| u64::from(*n)).sum();
+        let windows = self.windows_can_open(&gpu.uuid);
         let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) else {
             return;
         };
@@ -1704,21 +1733,38 @@ impl<'a> Interval<'a> {
         let share = (GPU_COMPUTE_CAPACITY / (bound_principals + 1)).saturating_sub(margin);
         let d0 = ((own + bound_contexts).saturating_mul(share) / own.max(1))
             .clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY);
+        // Own work pays for its re-measure windows, which hold it at full duty for their
+        // decisions in each cycle: the duty starts lower by their share, so its held duty, windows
+        // included, averages d0 (Q37). The window's first interval counts as full duty, since its
+        // decision lifts the cap at once.
+        let (window_share, floor) = if windows {
+            let window = u64::from(GPU_DEMAND_WINDOW_DECISIONS);
+            let gap = GPU_DEMAND_WINDOW_EVERY_MS.div_ceil(config.monitor.interval_ms.max(1));
+            let cycle = window + gap;
+            let floor =
+                ((d0 * cycle).saturating_sub(GPU_COMPUTE_CAPACITY * window) + gap / 2) / gap.max(1);
+            (
+                (GPU_COMPUTE_CAPACITY * window + cycle / 2) / cycle,
+                floor.clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY),
+            )
+        } else {
+            (0, d0)
+        };
         let now = self.now;
         let state = demand.slice.get_or_insert(SliceDuty {
-            d0,
-            duty: d0,
+            d0: floor,
+            duty: floor,
             since_ms: now,
             ..SliceDuty::default()
         });
-        // More slice-bound demand takes own work back to d0 at once; less raises the floor.
-        if d0 != state.d0 {
-            state.duty = if d0 < state.d0 {
-                d0
+        // More slice-bound demand takes own work back to d0' at once; less raises the floor.
+        if floor != state.d0 {
+            state.duty = if floor < state.d0 {
+                floor
             } else {
-                state.duty.max(d0)
+                state.duty.max(floor)
             };
-            state.d0 = d0;
+            state.d0 = floor;
             state.since_ms = now;
             state.utilization.clear();
         }
@@ -1771,6 +1817,8 @@ impl<'a> Interval<'a> {
             }
         }
         record.d0 = Some(d0);
+        record.window_share = Some(window_share);
+        record.d0_windows = Some(floor);
         record.duty = Some(state.duty);
         record.step = Some(step);
         record.utilization_milli = average;
