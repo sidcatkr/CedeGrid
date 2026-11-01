@@ -6886,14 +6886,25 @@ mod gpu_demand {
         }
 
         /// A per-process reading in whole samples (0, 330, 660 or 990), carrying its rounding so
-        /// the readings average to the share, as NVML's do under time-slicing.
-        #[derive(Default)]
-        pub(super) struct Quantized(i64);
+        /// the readings average to the share, as NVML's do under time-slicing. A fixed-seed
+        /// dither on the rounding keeps the pattern from repeating in step with the 30 s windows,
+        /// which real readings do not.
+        pub(super) struct Quantized(i64, u32);
+
+        impl Default for Quantized {
+            fn default() -> Self {
+                Self(0, 0x9e37_79b9)
+            }
+        }
 
         impl Quantized {
             pub(super) fn read(&mut self, share: u64) -> u64 {
+                self.1 ^= self.1 << 13;
+                self.1 ^= self.1 >> 17;
+                self.1 ^= self.1 << 5;
+                let dither = i64::from(self.1 % 330) - 165;
                 let want = share as i64 + self.0;
-                let reading = ((want + 165).div_euclid(330) * 330).clamp(0, 990);
+                let reading = ((want + 165 + dither).div_euclid(330) * 330).clamp(0, 990);
                 self.0 = want - reading;
                 reading as u64
             }
@@ -7096,6 +7107,134 @@ mod gpu_demand {
                     .map(|t| cap_of(&t.decision))
                     .collect();
                 assert!(duties.len() <= 2, "{mode:?}: duties {duties:?}");
+            }
+        }
+
+        /// Shapes of the counts beside saturating and light principals, in Performance and
+        /// Neutral: m = 3 beside one saturating context takes d0 = 4 ÷ 6 and half the device; m =
+        /// 2 beside two saturating principals takes d0 = 4 ÷ 6 and a third; beside a saturating
+        /// and a light principal only the saturating one is slice-bound, so own work holds about
+        /// half of what the light one leaves (FR-021, Q27). Read once the estimate holds its 60
+        /// window intervals: from a few windows of 5 readings in 330 steps the light one reads 132
+        /// or 198 against its threshold of 187.
+        #[test]
+        fn the_counts_duty_follows_the_slice_bound_principals() {
+            const SECOND: u32 = 2002;
+            // Each shape: its name, m, the external principals, own work's share and how many
+            // principals are slice-bound.
+            type Shape = (&'static str, usize, Vec<(u32, usize, u64)>, u64, usize);
+            let shapes: [Shape; 3] = [
+                ("m = 3, one saturating", 3, vec![(PEER, 1, 1000)], 500, 1),
+                (
+                    "m = 2, two saturating",
+                    2,
+                    vec![(PEER, 1, 1000), (SECOND, 1, 1000)],
+                    333,
+                    2,
+                ),
+                (
+                    "m = 2, saturating and light",
+                    2,
+                    vec![(PEER, 1, 1000), (SECOND, 1, 158)],
+                    (1000 - 158) / 2,
+                    1,
+                ),
+            ];
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                for (name, m, externals, want, bound) in &shapes {
+                    let run = tick_loop(mode, &|_| *m, &|_| externals.clone(), 1000);
+                    assert!(
+                        run.iter().all(|t| !paused(&t.decision)),
+                        "{mode:?} {name}: paused"
+                    );
+                    let late = &run[700..];
+                    let own = mean(late.iter().map(|t| t.own));
+                    assert!(
+                        own.abs_diff(*want) <= 30,
+                        "{mode:?} {name}: own work holds {own}"
+                    );
+                    let slice = slice_of(&late.last().unwrap().decision);
+                    assert_eq!(slice.bound.len(), *bound, "{mode:?} {name}: {slice:?}");
+                    assert!(
+                        slice
+                            .bound
+                            .iter()
+                            .all(|b| b.uid == Some(PEER) || *bound == 2),
+                        "{mode:?} {name}: {slice:?}"
+                    );
+                }
+            }
+        }
+
+        /// A light context that turns saturating is slice-bound once the estimate shows it, and
+        /// own work is back at d0 within 33 s; a stepped-up partial user that rises to saturating
+        /// takes own work back to d0 a step per dwell, within 30 s (FR-021, Q28).
+        #[test]
+        fn a_rising_user_returns_own_work_to_d0_within_the_bound() {
+            const TURN: u64 = 300;
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                for (name, before) in [("light", 158), ("partial", 400)] {
+                    let run = tick_loop(
+                        mode,
+                        &|_| 2,
+                        &|i| vec![(PEER, 1, if i < TURN { before } else { 1000 })],
+                        TURN + 160,
+                    );
+                    assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?} {name}");
+                    let bound = if name == "light" { 33_000 } else { 30_000 } / INTERVAL;
+                    let back = run[TURN as usize..]
+                        .iter()
+                        .position(|t| !record_of(&t.decision).window && cap_of(&t.decision) == 750)
+                        .map(|i| i as u64);
+                    assert!(
+                        back.is_some_and(|i| i <= bound),
+                        "{mode:?} {name}: back at d0 after {back:?} intervals"
+                    );
+                    let late = &run[(TURN + 100) as usize..];
+                    let own = mean(late.iter().map(|t| t.own));
+                    assert!(
+                        own.abs_diff(500) <= 30,
+                        "{mode:?} {name}: own work holds {own}"
+                    );
+                }
+            }
+        }
+
+        /// A slice-bound principal that leaves ends the cap within one averaged window, 30 s
+        /// (FR-021, Q28).
+        #[test]
+        fn a_saturating_user_that_leaves_ends_the_cap() {
+            const LEAVE: u64 = 200;
+            for mode in [ContentionMode::Performance, ContentionMode::Neutral] {
+                let run = tick_loop(
+                    mode,
+                    &|_| 2,
+                    &|i| {
+                        if i < LEAVE {
+                            vec![(PEER, 1, 1000)]
+                        } else {
+                            vec![]
+                        }
+                    },
+                    LEAVE + 100,
+                );
+                assert!(
+                    cap_of(&run[LEAVE as usize - 1].decision) < 1000,
+                    "{mode:?}: no cap"
+                );
+                let ended = run[LEAVE as usize..]
+                    .iter()
+                    .position(|t| gpu_steps(&t.decision).is_empty())
+                    .map(|i| i as u64);
+                assert!(
+                    ended.is_some_and(|i| i <= 30_000 / INTERVAL),
+                    "{mode:?}: the cap ended after {ended:?} intervals"
+                );
+                let rest = &run[(LEAVE + 60) as usize..];
+                assert!(
+                    rest.iter().all(|t| gpu_steps(&t.decision).is_empty()),
+                    "{mode:?}: capped again"
+                );
             }
         }
     }
