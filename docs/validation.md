@@ -404,6 +404,30 @@ to 0.609 (Neutral light). Each decision and the agent's state database show thre
 
 The rows keep their values; the causes wait for a decision.
 
+### T456 after item 041
+
+Run on 2026-11-01 on the same test host at `36bfe68`, with the commands under "Item 041: T368
+and two own processes under the time-slice rule (T456)" in
+`specs/001-contention-modes/native-gates.md`. No test process of either account was left before
+the first run or after any run. Own work's bound is SC-017's at the mode's target for the
+principals actually on the device (Q26):
+- 500 beside the saturating user;
+- beside the light user, the device less that user's estimate alone and the mode's margin
+  (Neutral 792, Performance 823).
+
+| Run | Values | Result |
+|---|---|---|
+| T368, Performance beside the light user | The probe alone 1572 units/s; without CedeGrid 1319 and 1303 (0.834 of alone); with it 1306 and 1298 (0.831 and 0.826 against 0.793); the old ratio 0.993. No GPU compute step in either managed window; the time-slice rule held in all 80 decisions of each, mostly at m = 1, E = 1, k = 1. The light user ran 200 requests a second; p50 0.77 ms with and without CedeGrid, p99 0.88–0.89 ms without and 1.08–1.10 ms with | pass |
+| T368, Performance beside the saturating user | The probe alone 1560; without 736 and 731 (0.470); with 736 and 731 (0.472 and 0.469 against 0.44); the old ratio 1.000. No step; the rule held in all 80 decisions of each window, 21 of the first window's on the unknown path with m = 1. The other user 1555 requests a second alone, 749–755 without, 775 and 767 with (bound 729); p50 1.36–1.37 ms and p99 1.37–1.38 ms with and without | pass |
+| T368, Neutral beside the light user | The probe alone 1552; without 1304 and 1295 (0.837); with 1298 and 1290 (0.836 and 0.831 against 0.762); the old ratio 0.996. No step; the rule held in all 80 decisions of each window. The light user 200 requests a second; p50 0.77–0.78 ms, p99 0.88–0.89 ms without and 0.94–0.98 ms with | pass |
+| T368, Neutral beside the saturating user | The probe alone 1557; without 736 and 731 (0.471); with 731 and 731 (0.469 and 0.469 against 0.441); the old ratio 0.997. No step; the rule held in all 80 decisions of each window. The other user 1552 requests a second alone, 749–754 without, 761 and 838 with (bound 729); p50 1.37 ms and p99 1.37–1.38 ms with and without | pass |
+| Performance and Neutral, two own probe processes beside the saturating user | Without CedeGrid the two probes ran 0.660–0.662 of the pair alone (973–977 of 1474–1475 units/s), and the other user 504–507 requests a second, 0.33 of its 1548 alone: each busy context's equal slice. With CedeGrid the harness submitted both probes as tasks of one coordinator job, and the second ran only after the first ended. Each managed window therefore held one own process at a time, at m = 1, and the rule held: no step, the other user 760–761 requests a second, half its rate alone. The late tasks moved the second managed window past the end of the other user's load | not measured: the managed windows never ran two own processes at once |
+
+Against T445 the old ratio rose from 0.991 to 0.993 (Performance light), from 0.761 to 1.000
+(Performance saturating), from 0.609 to 0.996 (Neutral light) and from 0.869 to 0.997 (Neutral
+saturating). The light user's p99 beside own work fell from 1.13–1.18 ms to 0.94–1.10 ms. Its p50
+and request rate were unchanged.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
