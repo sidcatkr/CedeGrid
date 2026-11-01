@@ -2882,8 +2882,14 @@ mod ramp {
         }
         let idle = reached_at(&own_per_interval[..20], target).expect("idle device never reached");
         assert!(idle <= 10_000, "idle ramp at {idle} ms");
+        // The external user gets its 300 throughout; own work keeps the margin back once its
+        // share's bootstrap window has run, at most 6 intervals after the first cap (Q24).
         assert!(
-            own_per_interval[21..40].iter().all(|own| *own < 700),
+            own_per_interval[21..40].iter().all(|own| *own <= 700),
+            "own work took the external user's demand"
+        );
+        assert!(
+            own_per_interval[30..40].iter().all(|own| *own < 700),
             "the external user never held own work back"
         );
         let after = reached_at(&own_per_interval[40..60], target).expect("never regained");
@@ -5491,11 +5497,12 @@ mod gpu_demand {
         let fed = &ALONE[start..];
         let mean = (fed.iter().sum::<u64>() + fed.len() as u64 / 2) / fed.len() as u64;
         assert_eq!(record(&alone[59]).estimate, Some(mean));
-        // The job's first interval is set by decisions that sent no cap.
+        // The job's first interval is set by decisions that sent no cap. Its share's bootstrap
+        // windows come first (Q24); the cap that follows holds until the next window.
         assert!(record(&own[0]).fed);
         let capped = own
             .iter()
-            .position(|d| !record(d).uncapped)
+            .position(|d| !record(d).uncapped && record(d).own_uncapped.is_some())
             .expect("never capped");
         let read = record(&own[capped + 4]);
         assert!(!read.fed && !read.uncapped, "{read:?}");
@@ -5505,9 +5512,8 @@ mod gpu_demand {
             record(&own[capped - 1]).intervals,
             "capped intervals do not feed it"
         );
-        let window = own
-            .iter()
-            .position(|d| record(d).window)
+        let window = (capped..own.len())
+            .find(|&i| record(&own[i]).window)
             .expect("no window recorded");
         assert_eq!(cap_of(&own[window]), 1000, "a window sends no cap");
         let fed = (window..window + 7)
@@ -5659,8 +5665,10 @@ mod gpu_demand {
         );
         let read = record_of(&changed[0]);
         assert_eq!((read.intervals, read.estimate), (1, Some(300)), "{read:?}");
-        // Own work runs and is capped; another process restarts the estimate a few seconds later,
-        // before a window is due, so the interval's amount sets the target.
+        // Own work runs, its share forms through the bootstrap windows (Q24), and it is capped;
+        // another process restarts the estimate a few seconds later, before a 30 s window is due,
+        // so the interval's amount sets the target, and with the share restarted a window opens
+        // at once.
         let pids = [50, 987, 988];
         let running = steps(
             &mut engine,
@@ -5668,7 +5676,7 @@ mod gpu_demand {
             &busy,
             &mut now,
             &mut sample,
-            6,
+            24,
             &|i, cap| {
                 let external = if cap < 1000 { 300 } else { 150 };
                 interval_listing(
@@ -5695,19 +5703,21 @@ mod gpu_demand {
                 interval_listing(Some(cap.min(690)), 300, 95 + i, &[50, 987, 988, 989], &[50])
             },
         );
-        for decision in &restarted[1..] {
-            let read = record_of(decision);
-            assert_eq!(
-                (read.intervals, read.estimate, read.source, read.window),
-                (0, None, GpuDemandSource::Interval, false),
-                "{read:?}"
-            );
-            assert_eq!(
-                target_of(decision),
-                680,
-                "the interval's 300 sets Performance's target"
-            );
-        }
+        let read = record_of(&restarted[1]);
+        assert_eq!(
+            (read.intervals, read.estimate, read.source, read.window),
+            (0, None, GpuDemandSource::Interval, true),
+            "{read:?}"
+        );
+        assert_eq!(
+            target_of(&restarted[1]),
+            680,
+            "the interval's 300 sets Performance's target"
+        );
+        // The window's first uncapped interval feeds the restarted estimate.
+        let read = record_of(&restarted[2]);
+        assert!(read.window && read.fed, "{read:?}");
+        assert_eq!((read.intervals, read.estimate), (1, Some(300)), "{read:?}");
         // Own work idle on the device: the job gone, the next interval feeds the estimate even
         // though the last decision capped it.
         let gone = steps(
@@ -6130,7 +6140,8 @@ mod gpu_demand {
                 .iter()
                 .all(|d| duty_of(d).is_none() && record_of(d).duty.is_none())
         );
-        // A restart while own work is capped leaves no share: the cap goes out at its target.
+        // A restart while own work is capped leaves no share: a window opens at once (Q24), and no
+        // cap goes out with a duty.
         let config = mode_config(ContentionMode::Performance);
         let mut engine = PolicyEngine::new();
         let busy = PolicyInput {
@@ -6153,7 +6164,7 @@ mod gpu_demand {
             &busy,
             &mut now,
             &mut sample,
-            8,
+            30,
             &|i, cap| {
                 let external = if cap < 1000 { 300 } else { 150 };
                 interval_listing(Some(cap.min(990 - external)), external, 61 + i, &[987], &[])
@@ -6170,16 +6181,15 @@ mod gpu_demand {
             &mut now,
             &mut sample,
             3,
-            &|i, cap| interval_listing(Some(cap.min(690)), 300, 69 + i, &[987, 988], &[]),
+            &|i, cap| interval_listing(Some(cap.min(690)), 300, 91 + i, &[987, 988], &[]),
         );
         for decision in &restarted[1..] {
             assert_eq!(record_of(decision).own_uncapped, None);
-            assert_eq!(
-                duty_of(decision),
-                None,
-                "no share: the duty stays the target over 1000"
+            assert_eq!(duty_of(decision), None, "no share: no duty");
+            assert!(
+                record_of(decision).window && cap_of(decision) == 1000,
+                "no share: a window opens at once"
             );
-            assert!(cap_of(decision) < 1000);
         }
         // A new engine has no share.
         let fresh = PolicyEngine::new()
@@ -6476,6 +6486,92 @@ mod gpu_demand {
                 record_of(&last.unwrap()).estimate.unwrap()
             };
             assert_eq!(estimate(740), estimate(0));
+        }
+
+        /// Own work's share needs 6 uncapped intervals (FR-021, Q24, T471): until it has them a
+        /// cap goes out at target ÷ 1000 and opens a re-measure window at once, a window that
+        /// ends short opens the next at once, and once the share exists windows keep their 30 s.
+        #[test]
+        fn own_works_share_bootstraps_through_windows_at_once() {
+            // Not time-sliced, so the rule leaves the caps to the estimate and the duty.
+            let config = mode_config(ContentionMode::Neutral);
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            for i in 0..60u64 {
+                engine
+                    .evaluate(
+                        &config,
+                        &interval(None, 990, i + 1),
+                        &PolicyInput::default(),
+                        now,
+                    )
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let (mut duty, mut fed, mut first_share, mut windows) = (1000u64, 0, None, vec![]);
+            for i in 0..200u64 {
+                // Two own contexts beside one saturating context hold two thirds at full duty.
+                let own = duty * 2 / 3;
+                let decision = engine
+                    .evaluate(
+                        &config,
+                        &interval(Some(own), 990 - own, 61 + i),
+                        &input,
+                        now,
+                    )
+                    .unwrap();
+                let read = record_of(&decision);
+                fed += usize::from(read.fed);
+                let cap = decision
+                    .actions
+                    .iter()
+                    .find(|a| a.resource == key && a.step == YieldStep::Cap);
+                if read.own_uncapped.is_none() {
+                    assert!(
+                        fed < 6 + 1,
+                        "decision {i}: {fed} intervals fed and no share"
+                    );
+                    assert_eq!(cap.and_then(|a| a.duty), None, "decision {i}");
+                } else if first_share.is_none() {
+                    first_share = Some(i);
+                }
+                if read.window {
+                    windows.push(i);
+                }
+                duty = cap_of(&decision);
+                now += INTERVAL;
+            }
+            let share_at = first_share.expect("own work's share never formed");
+            let first_window = windows[0];
+            assert!(
+                first_window <= 2,
+                "the first window opened at decision {first_window}"
+            );
+            // Until the share exists, every decision after the first window is in a window.
+            for i in first_window..share_at {
+                assert!(
+                    windows.contains(&i),
+                    "decision {i} is capped outside a window"
+                );
+            }
+            // Then the usual rhythm: the window running when the share formed ends, and the next
+            // starts 30 s after the last uncapped interval.
+            let starts: Vec<u64> = windows
+                .iter()
+                .copied()
+                .filter(|w| !windows.contains(&(w.wrapping_sub(1))))
+                .collect();
+            let next = starts.iter().find(|w| **w > share_at);
+            assert!(
+                next.is_none_or(|w| w - share_at >= 55),
+                "a window from {next:?} right after the share formed at {share_at}"
+            );
+            assert!(next.is_some(), "no window after the share formed");
         }
     }
 }

@@ -238,11 +238,12 @@ impl GpuDemand {
     }
 
     /// Own work's uncapped share: its amount averaged over the uncapped intervals in which it ran
-    /// on the device (FR-021, Q20).
+    /// on the device, once there are `GPU_OWN_SHARE_INTERVALS` (FR-021, Q20, Q24).
     fn own_share(&self) -> Option<u64> {
         let owns: Vec<u64> = self.uncapped.iter().filter_map(|entry| entry.own).collect();
         let count = owns.len() as u64;
-        (count > 0).then(|| (owns.iter().sum::<u64>() + count / 2) / count)
+        (owns.len() >= crate::contention::GPU_OWN_SHARE_INTERVALS)
+            .then(|| (owns.iter().sum::<u64>() + count / 2) / count)
     }
 
     /// The time-slice rule's counts over the estimate's window (FR-021, Q22): own work's busy

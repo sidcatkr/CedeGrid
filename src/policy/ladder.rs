@@ -150,9 +150,12 @@ impl<'a> Interval<'a> {
             self.remeasured.insert(uuid.to_string());
             return true;
         }
-        let due = demand
-            .last_uncapped_ms
-            .is_none_or(|last| now.saturating_sub(last) >= GPU_DEMAND_WINDOW_EVERY_MS);
+        // Until own work's share exists a window opens at once, and one ending short opens the
+        // next, since a window feeds only 4–5 uncapped intervals (FR-021, Q24).
+        let due = demand.own_share().is_none()
+            || demand
+                .last_uncapped_ms
+                .is_none_or(|last| now.saturating_sub(last) >= GPU_DEMAND_WINDOW_EVERY_MS);
         if !due
             || governing(config, ResourceKind::GpuCompute) == ContentionMode::YieldFirst
             || !remeasure_window_allowed(&facts)
@@ -169,7 +172,8 @@ impl<'a> Interval<'a> {
     }
 
     /// In a re-measure window each GPU compute step on the device holds as it was, so the cap
-    /// returns unchanged after the window, and none is sent meanwhile.
+    /// returns unchanged after the window, and none is sent meanwhile. Its dwell restarts, since
+    /// the window's uncapped intervals do not show whether the cap holds (FR-021, Q24).
     fn hold_remeasured(&mut self, uuid: &str) {
         let compute = ResourceKey::GpuCompute(uuid.to_string());
         for ((id, key), state) in &self.prev.ladder {
@@ -177,9 +181,9 @@ impl<'a> Interval<'a> {
                 && self.input.allocations.iter().any(|a| &a.id == id)
                 && !self.time_slice_exempt(id, uuid)
             {
-                self.next
-                    .ladder
-                    .insert((id.clone(), key.clone()), state.clone());
+                let mut state = state.clone();
+                state.entered_at_ms = self.now;
+                self.next.ladder.insert((id.clone(), key.clone()), state);
             }
         }
     }

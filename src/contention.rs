@@ -1280,6 +1280,10 @@ pub fn plan_step(
 pub const GPU_DEMAND_WINDOW_DECISIONS: u32 = 6;
 /// A window opens when the device's last uncapped interval is this old (FR-021, R48).
 pub const GPU_DEMAND_WINDOW_EVERY_MS: u64 = 30_000;
+
+/// Uncapped intervals of own work from which its uncapped share sets a GPU compute duty
+/// (FR-021, Q24); with fewer, re-measure windows open at once.
+pub const GPU_OWN_SHARE_INTERVALS: usize = 6;
 /// A window whose mean differs from the estimate before it by this much restarts the estimate
 /// from the window, in thousandths of device time (FR-021, R48).
 pub const GPU_DEMAND_RESTART_MILLI: u64 = 200;
