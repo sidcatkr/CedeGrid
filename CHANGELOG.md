@@ -27,8 +27,10 @@
 - **The time-slice duty.** On a time-sliced GPU where own work holds more than its share of
   the busy processes, Neutral, Performance and Aggressive cap it only beside a principal that
   reads at least `contention.gpu_compute.slice_bound_percent` (75) percent of its slices, at a
-  duty from the process counts that rises `contention.gpu_compute.slice_step_percent` (5)
-  points at a time while the device idles, never with a pause.
+  duty from the busy process counts, less the mode's margin, that rises
+  `contention.gpu_compute.slice_step_percent` (5) points at a time while the device idles,
+  never with a pause. Own allocations' GPU duty cycles follow the node's monotonic clock, so
+  they stop and resume together.
 - **Satisfied demand.** Under saturation, a small external demand is probed and a larger one
   is watched for one response window. A user whose usage stays within its demand is recorded
   as satisfied and no longer contends until its usage grows past it. At most 64 records are

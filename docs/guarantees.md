@@ -86,10 +86,15 @@ of yielding fully, so Guaranteed GPU work needs no special contract. Under exter
 compute activity, own GPU work gets a compute share by pausing it for part of each
 period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
 and kernels already submitted keep running, so the effective granularity is the period
-plus the longest kernel. A changed CPU cap starts at its target over the family's last
-measured natural rate, so it holds from its first period. On a delegated cgroup with
-`cgroup.freeze` authorized, the off phase freezes the workload's leaf, confirmed through
-`cgroup.events` within the off phase, and never thaws a freeze a pause holds; otherwise, or
+plus the longest kernel. While a GPU compute cap is part of an allocation's cycle, the cycle
+follows the node's monotonic clock: own work runs while the clock's position in the period is
+below the duty, so every own allocation on the node stops and resumes together, whenever its cap
+began. A stop holds until the period ends, so a duty change mid-period never resumes own work
+inside an off phase; a cycle for a CPU cap alone keeps its own phase. A changed CPU cap starts
+at its target over the family's last measured natural rate, so it holds from its first
+period. On a delegated cgroup with `cgroup.freeze` authorized, the off phase freezes the
+workload's leaf, confirmed through `cgroup.events` within the off phase, and never thaws a
+freeze a pause holds; otherwise, or
 after a refused freeze, it stops the verified processes, as without a delegated cgroup. Where
 the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
 through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. On a
@@ -106,66 +111,70 @@ processes is slice-bound when its uncapped reading, averaged as below, is at lea
 `contention.gpu_compute.slice_bound_percent` (75) percent of their equal slices, 1000 × E_j ÷
 (m + E). With none, own work is not capped, since the driver already gives every other
 principal what it asks for. Otherwise, in Neutral, Performance and Aggressive, each own process
-runs at a duty of d0 = (m + E_b) ÷ (m × (k_b + 1)), at least 50 thousandths, with E_b and k_b
-the slice-bound principals' processes and number, which leaves own work 1 ÷ (k_b + 1) of what
-they want while the others keep their slices. The duty rises
+runs at a duty of d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − the mode's margin), at least 50
+thousandths, with E_b and k_b the slice-bound principals' processes and number, which leaves own
+work 1 ÷ (k_b + 1) of what they want less the margin the mode's target holds (Performance 2%,
+Neutral 5%), while the others keep their slices: at m = 2 beside one saturating process, 720 in
+Performance and 675 in Neutral. The duty rises
 `contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
 dwell, whichever is longer, while the device's utilization over the dwell shows more spare time
 than the mode's margin, falls a step toward d0 once per dwell while it shows less than half
 that margin (in Aggressive, while the device is fully busy), and at 1000 stays a cap at full
-duty. This path reads no per-process amount for the duty and never pauses. While the amounts
-are unknown or the estimate holds no interval, d0 comes from the listed processes, every listed
-principal slice-bound, and the duty rises only with a utilization reading; on a device last
-read as time-sliced whose listing is unknown, the cap is the target over the whole device,
-without a pause. Each decision records the slice-bound principals with their readings and
-thresholds, d0, the duty and its step. On other devices own work at full duty beside another
-busy context holds only its slices, so when it holds more than its share a GPU compute cap's
-duty is its target over own work's uncapped share, its amount averaged over at least 6 uncapped
-intervals in which it ran on the device, with windows to measure it opening at once while it
-has fewer; until then, while the amount is unknown, and in Yield First the duty is the target
-over the whole device. External compute is
-measured when fresh per-process samples, summed over every process on the device, are
-within `contention.gpu_compute.attribution_tolerance_percent` (15) points of device
-utilization. A sample counts its whole span since its process's previous sample, at most one
-interval, in the interval where it arrives, a process's first sample covering from the
-interval's start and time without a sample counting as idle, and each observation records the
-samples (`compute_sampling`). When one interval misses the tolerance, as when a busy process's
-sample is late, the shares and the device summed over it and the 3 intervals before it decide,
-and the amounts are then those 4 intervals' averages. On a time-sliced device another user's
-reading rises when own work leaves gaps, at the same demand, so in Neutral, Performance and
-Aggressive the external amount that sets own work's target, the owner's unmanaged usage left
-out, is the average over the last 60 intervals in which own work ran uncapped on the device (no cap or pause sent by the decision
-that set the interval or the one before it), or had no allocation there. While own work is held
-back by GPU compute caps alone, a 6-decision window lifts them every 30 s to measure again, at
-most 10% of the capped time, and a window 200 thousandths or more from the average restarts it;
-Yield First takes the larger of the interval's amount and the average and takes no window, and
-each decision records how the demand was read (`gpu_demand`). A measured amount takes the CPU paths, with external processes grouped into
-principals by UID as on CPU and device time nobody accounts for counted as external usage
-while an external process is listed, and as one more external principal from the attribution
-tolerance's 15 points, below which it is sampling error, so own work keeps capacity minus
-that amount minus the mode's margin under Performance, and its fair share or a learned
-satisfied demand under Neutral. A device leaves the measured path at once and returns
-only after `quiet_window_intervals` consecutive measured intervals. An interval in which
-both process queries succeed, every listed process is an own verified process checked
-through its pidfd, no MPS is present, device utilization is known and memory attributed
-to no listed process has not grown beyond the last measured, own-only or empty interval
-plus the noise tolerance is measured at once with no external compute, so a new own
-process neither restarts the window nor turns the device Unknown. A context of a user ID
-below `contention.uid_min`, such as a display server's, is background rather than activity
-while per-process utilization is readable for the device (the query succeeds or reports no
-samples) and its own utilization stays below `principal_min_percent`: it is neither
-external compute nor unknown activity, its share of device time is nobody's, and its
-memory still counts as external usage, as `never_share_occupied_gpus` still counts the
-context. Where per-process utilization is not readable it stays unknown activity. Unsupported queries,
-stale samples, an incomplete process list or MPS leave it activity of unknown amount,
-one principal, under which Neutral and Performance hold the fair share: once the
-supervisor reports a duty cycle applied, own work counts as holding at most that duty,
-at the larger of the target the supervisor reports applied and the current one, so the
-cap at the share is met and does not escalate. Unknown activity from a telemetry failure
-or a missing observation, and a duty cycle not reported applied, first hold the steps
-and escalate after the unknown window. Each device's held-back breakdown says which path
-it took and why. An empty-device pass is not evidence of occupied-device sharing. See
-[GPU operation](coordinator-work.md#gpu-modes).
+duty. This path reads no per-process amount for the duty and never pauses. The counts are the
+processes sampled busy, so a listed process that stays idle never counts: over the estimate's
+window, whose readings decide which principals are slice-bound even in an interval whose amounts
+are inconsistent, or over the interval while the window has none. Only while the per-process
+samples are unreadable do the listed processes count. Without a window every counted principal
+is slice-bound, and the duty rises only with a utilization reading; on a device last read as
+time-sliced whose listing is unknown, the cap is the target over the whole device, without a
+pause. Each decision records where its counts came from, the slice-bound principals with their
+readings and thresholds, d0, the duty and its step. On other devices own work at full duty
+beside another busy context holds only its slices, so when it holds more than its share a GPU
+compute cap's duty is its target over own work's uncapped share, its amount averaged over at
+least 6 uncapped intervals in which it ran on the device, with windows to measure it opening at
+once while it has fewer; until then, while the amount is unknown, and in Yield First the duty is
+the target over the whole device. External compute is measured when fresh per-process samples,
+summed over every process on the device, are within
+`contention.gpu_compute.attribution_tolerance_percent` (15) points of device utilization. A
+sample counts its whole span since its process's previous sample, at most one interval, in the
+interval where it arrives, a process's first sample covering from the interval's start and time
+without a sample counting as idle, and each observation records the samples
+(`compute_sampling`). When one interval misses the tolerance, as when a busy process's sample is
+late, the shares and the device summed over it and the 3 intervals before it decide, and the
+amounts are then those 4 intervals' averages. On a time-sliced device another user's reading
+rises when own work leaves gaps, at the same demand, so in Neutral, Performance and Aggressive
+the external amount that sets own work's target, the owner's unmanaged usage left out, is the
+average over the last 60 intervals in which own work ran uncapped on the device (no cap or pause
+sent by the decision that set the interval or the one before it), or had no allocation there.
+While own work is held back by GPU compute caps alone, a 6-decision window lifts them every 30 s
+to measure again, at most 10% of the capped time, and a window 200 thousandths or more from the
+average restarts it; Yield First takes the larger of the interval's amount and the average and
+takes no window, and each decision records how the demand was read (`gpu_demand`). A measured
+amount takes the CPU paths, with external processes grouped into principals by UID as on CPU and
+device time nobody accounts for counted as external usage while an external process is listed,
+and as one more external principal from the attribution tolerance's 15 points, below which it is
+sampling error, so own work keeps capacity minus that amount minus the mode's margin under
+Performance, and its fair share or a learned satisfied demand under Neutral. A device leaves the
+measured path at once and returns only after `quiet_window_intervals` consecutive measured
+intervals. An interval in which both process queries succeed, every listed process is an own
+verified process checked through its pidfd, no MPS is present, device utilization is known and
+memory attributed to no listed process has not grown beyond the last measured, own-only or empty
+interval plus the noise tolerance is measured at once with no external compute, so a new own
+process neither restarts the window nor turns the device Unknown. A context of a user ID below
+`contention.uid_min`, such as a display server's, is background rather than activity while per-
+process utilization is readable for the device (the query succeeds or reports no samples) and
+its own utilization stays below `principal_min_percent`: it is neither external compute nor
+unknown activity, its share of device time is nobody's, and its memory still counts as external
+usage, as `never_share_occupied_gpus` still counts the context. Where per-process utilization is
+not readable it stays unknown activity. Unsupported queries, stale samples, an incomplete
+process list or MPS leave it activity of unknown amount, one principal, under which Neutral and
+Performance hold the fair share: once the supervisor reports a duty cycle applied, own work
+counts as holding at most that duty, at the larger of the target the supervisor reports applied
+and the current one, so the cap at the share is met and does not escalate. Unknown activity from
+a telemetry failure or a missing observation, and a duty cycle not reported applied, first hold
+the steps and escalate after the unknown window. Each device's held-back breakdown says which
+path it took and why. An empty-device pass is not evidence of occupied-device sharing. See [GPU
+operation](coordinator-work.md#gpu-modes).
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.

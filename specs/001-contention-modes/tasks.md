@@ -1613,7 +1613,7 @@ Aligned GPU duty phases, the margin at d0 and the busy counts (spec Session 2026
 
   Per FR-021 (contradicts)
 - [X] T490 Add `GpuComputeContexts.samples_readable` in `src/model.rs` and `src/telemetry/gpu.rs`, the record's `source`, and the count sources in `src/policy/measure.rs`, until T489 passes. Per FR-021 (contradicts)
-- [ ] T491 Replay 043's six managed windows through the policy, reporting each decision's count source and d0. Per plan "Item 044" 4 (missing)
-- [ ] T492 Compare `decision_snapshot` with the code at `c2ae762` and list the snapshots that change and why. Per plan "Item 044" 4 (missing)
-- [ ] T493 Add the aligned phase, the margin at d0 and the busy counts to `docs/guarantees.md`, `README.md` and `CHANGELOG.md`. Per plan "Item 044" 5 (missing)
+- [X] T491 Replay 043's six managed windows through the policy, reporting each decision's count source and d0. Per plan "Item 044" 4 (missing)
+- [X] T492 Compare `decision_snapshot` with the code at `c2ae762` and list the snapshots that change and why. Per plan "Item 044" 4 (missing)
+- [X] T493 Add the aligned phase, the margin at d0 and the busy counts to `docs/guarantees.md`, `README.md` and `CHANGELOG.md`. Per plan "Item 044" 5 (missing)
 - [ ] T494 Add 044's host runs to `specs/001-contention-modes/native-gates.md` with their gates: the targets 480 and 450, Aggressive for the record, and the phase measurement. Add the Aggressive two-process part and the phase measurement to `batch-037`'s harness. Per plan "Item 044" 6–7 (missing)

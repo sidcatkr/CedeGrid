@@ -5904,8 +5904,13 @@ mod gpu_demand {
                 (vec![], vec![], vec![], 0, 0);
             let (mut last, mut own_share) = (None, None);
             let (mut held, mut counts) = (0, vec![]);
-            let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) =
-                (BTreeMap::<(u64, bool), usize>::new(), vec![], vec![], 0, 0);
+            let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) = (
+                BTreeMap::<(Option<u64>, Option<cedegrid::model::SliceSource>), usize>::new(),
+                vec![],
+                vec![],
+                0,
+                0,
+            );
             for (gpu, observation) in gpus.iter_mut().zip(observations) {
                 let key = ResourceKey::GpuCompute(gpu.uuid.clone());
                 // Busy CPU above own work's, so own CPU reads consistent beside it.
@@ -5987,8 +5992,8 @@ mod gpu_demand {
                 if let Some(slice) = &status.time_slice {
                     held += usize::from(slice.holds);
                     counts.push((slice.own, slice.external, slice.principals));
-                    if let Some(d0) = slice.d0 {
-                        *d0s.entry((d0, slice.external.is_some())).or_default() += 1;
+                    if !slice.holds {
+                        *d0s.entry((slice.d0, slice.source)).or_default() += 1;
                     }
                     duties.extend(slice.duty);
                     readings.extend(slice.bound.iter().map(|b| (b.reading, b.threshold)));
@@ -6020,7 +6025,7 @@ mod gpu_demand {
                 counts.last()
             );
             println!(
-                "replay {name}: duty in {} decisions, (d0, counted) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
+                "replay {name}: duty in {} decisions, (d0, source) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
                 duties.len(),
                 (!duties.is_empty()).then(|| median(duties.clone())),
                 duties.iter().min(),
