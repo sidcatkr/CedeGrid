@@ -117,10 +117,13 @@ work 1 ÷ (k_b + 1) of what they want less the margin the mode's target holds (P
 Neutral 5%), while the others keep their slices: at m = 2 beside one saturating process, 720 in
 Performance and 675 in Neutral. The duty rises
 `contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
-dwell, whichever is longer, while the device's utilization over the dwell shows more spare time
-than the mode's margin, falls a step toward d0 once per dwell while it shows less than half
-that margin (in Aggressive, while the device is fully busy), and at 1000 stays a cap at full
-duty. This path reads no per-process amount for the duty and never pauses. The counts are the
+dwell, whichever is longer, while the device's utilization averaged over the dwell, in per
+mille, shows more spare time than the mode's margin or one reading's quantum of 1%, whichever is
+larger. It falls a step toward d0 once per dwell while the spare time is less than half of that,
+and at 1000 stays a cap at full duty. Utilization comes in whole percent, and a dip of one
+reading as own work's phases switch is no idle time, so with a zero margin CedeGrid takes device
+time only beyond 1% averaged spare. This path reads no per-process amount for the duty and never
+pauses. The counts are the
 processes sampled busy, so a listed process that stays idle never counts: over the estimate's
 window, whose readings decide which principals are slice-bound even in an interval whose amounts
 are inconsistent, or over the interval while the window has none. Only while the per-process
@@ -148,7 +151,9 @@ average over the last 60 intervals in which own work ran uncapped on the device 
 sent by the decision that set the interval or the one before it), or had no allocation there.
 While own work is held back by GPU compute caps alone, a 6-decision window lifts them every 30 s
 to measure again, at most 10% of the capped time, and a window 200 thousandths or more from the
-average restarts it; Yield First takes the larger of the interval's amount and the average and
+average restarts it, as does a change in the device's external processes, the background ones
+and the owner's unmanaged ones left out; Yield First takes the larger of the interval's amount
+and the average and
 takes no window, and each decision records how the demand was read (`gpu_demand`). A measured
 amount takes the CPU paths, with external processes grouped into principals by UID as on CPU and
 device time nobody accounts for counted as external usage while an external process is listed,

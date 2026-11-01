@@ -5810,16 +5810,17 @@ mod gpu_demand {
             std::env::var_os("CEDEGRID_GPU_DEMAND_REPLAY")
                 .expect("CEDEGRID_GPU_DEMAND_REPLAY names a run folder"),
         );
-        let mode = match std::env::var("CEDEGRID_GPU_DEMAND_MODE").as_deref() {
-            Ok("neutral") => ContentionMode::Neutral,
-            _ => ContentionMode::Performance,
+        // Item 045: `aggressive` is Performance with no GPU compute margin, as on the host.
+        let config = match std::env::var("CEDEGRID_GPU_DEMAND_MODE").as_deref() {
+            Ok("neutral") => mode_config(ContentionMode::Neutral),
+            Ok("aggressive") => time_slice::aggressive_config(),
+            _ => mode_config(ContentionMode::Performance),
         };
         let read = |name: &str| -> Vec<serde_json::Value> {
             serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
         };
         let (replay, trace) = (read("gpu-replay.json"), read("gpu-trace.json"));
         let own_window = std::env::var("CEDEGRID_GPU_DEMAND_OWN").unwrap_or("managed".into());
-        let config = mode_config(mode);
         let mut engine = PolicyEngine::new();
         let mut now = 0;
         // Item 041: the recordings predate the device's contexts. The other user's processes are
@@ -5904,6 +5905,7 @@ mod gpu_demand {
                 (vec![], vec![], vec![], 0, 0);
             let (mut last, mut own_share) = (None, None);
             let (mut held, mut counts) = (0, vec![]);
+            let mut steps: BTreeMap<String, usize> = BTreeMap::new();
             let (mut d0s, mut duties, mut readings, mut unbound, mut pauses) = (
                 BTreeMap::<(Option<u64>, Option<cedegrid::model::SliceSource>), usize>::new(),
                 vec![],
@@ -5995,6 +5997,12 @@ mod gpu_demand {
                     if !slice.holds {
                         *d0s.entry((slice.d0, slice.source)).or_default() += 1;
                     }
+                    if let Some(step) = slice
+                        .step
+                        .filter(|step| *step != cedegrid::model::SliceStep::Holding)
+                    {
+                        *steps.entry(format!("{step:?}")).or_default() += 1;
+                    }
                     duties.extend(slice.duty);
                     readings.extend(slice.bound.iter().map(|b| (b.reading, b.threshold)));
                     unbound += usize::from(!slice.holds && slice.d0.is_none());
@@ -6025,7 +6033,7 @@ mod gpu_demand {
                 counts.last()
             );
             println!(
-                "replay {name}: duty in {} decisions, (d0, source) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
+                "replay {name}: steps {steps:?}; duty in {} decisions, (d0, source) {d0s:?}, duty median {:?} min {:?}; bound readings {low:?}-{high:?} against {thresholds:?}; no principal bound in {unbound}; pauses {pauses}",
                 duties.len(),
                 (!duties.is_empty()).then(|| median(duties.clone())),
                 duties.iter().min(),
