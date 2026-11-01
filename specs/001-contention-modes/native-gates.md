@@ -643,6 +643,31 @@ E) at that duty. The gap left after alignment is the drain; report it with what 
 would take, without adding compensation. A failed gate changes no product code in that item. If
 every gate passes, T456 is checked off.
 
+## Item 045: the step floor with a zero margin
+
+Runs once on the authorized test host after `045.done`, under the user's standing approval and
+the same host rules, with `batch-037`'s harness: two own probe processes per window, each its
+own job with a 512 MiB VRAM request when managed, submitted 40 s before its window. A zero margin
+runs as Performance with no GPU compute margin (`reduced_margin` acknowledged).
+
+```sh
+bash runs-037.sh <commit> <second account uid> twoaggr twoperf
+$py $H/gpu_trace_035.py <each e037-r5 output>   # read only: each decision's time_slice record
+```
+
+Gates, per valid managed window (042's three checks):
+
+- Zero margin beside the saturating user, now gated:
+  - the saturating user gets at least ½ × its rate alone × 0.97;
+  - own work passes SC-017 at the target 500: managed ÷ pair alone ≥ min(0.5, unmanaged ÷ pair
+    alone) − 0.03.
+- Performance beside the saturating user, as a regression check under T456's gates (target 480,
+  the saturating user at least ½ × its rate alone × 0.97).
+
+Report per window each rise and fall of the duty with the dwell's average and the utilization
+readings before it, and the probes' off-phase overlap. A failed gate changes no product code in
+that item.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
