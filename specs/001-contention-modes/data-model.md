@@ -527,3 +527,12 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   never go below it.
 - A GPU duty cycle's phase: running while (CLOCK_MONOTONIC mod period) < duty × period. A stop
   holds until the period ends. A CPU-only cycle keeps its own phase.
+
+## Item 045 additions
+
+- `TimeSliceRecord.utilization_milli` replaces `utilization`: the device's utilization averaged
+  over the dwell in per mille, rounded to nearest.
+- The step rule: rise while spare > max(margin, 10); saturated while spare × 2 < max(margin, 10).
+- The estimate's restart set: the device's external PIDs less the background contexts and the
+  owner's unmanaged processes.
+

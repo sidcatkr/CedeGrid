@@ -1045,3 +1045,35 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - keeping per-allocation phases and lowering d0 to match: that depends on how far phases happen
     to drift.
 
+## R53. The step floor, the per-mille dwell average and the restart set (item 045)
+
+- **Decision:**
+  - The dwell's utilization average is in per mille, rounded.
+  - The duty rises only beyond max(margin, 10) per mille of spare time, and counts as saturated
+    below half of that.
+  - The owner's unmanaged PIDs leave the estimate's restart set.
+- **The arithmetic:** with a dwell of 3 readings at 100, 100, 99:
+  - **Today** the floored average reads 99, so spare is 10. A zero margin rises, since 10 > 0.
+    Performance doesn't fall, since 10 × 2 = 20 is not below 20.
+  - **Per mille** the average reads 997, so spare is 3. A zero margin holds, since 3 ≤ 10. Both
+    fall above d0, since 6 < 10 and 6 < 20.
+  - A reading of 98 among two 100s reads 993, so spare is 7: still no rise with a zero margin.
+- **Why one reading's quantum:** utilization comes in whole percent, and own work's phase switches
+  dip one reading below 100 without idle time behind it. Below 10 per mille the reading can't tell
+  the two apart.
+- **Why not one step (5%):** that would raise Performance's rise threshold from 2% to 5%. Beside a
+  partial user it would leave up to 5% idle, beyond its margin.
+- **The restart set:**
+  - Telemetry's external PID list is every listed process less the managed ones, so the owner's
+    unmanaged processes are in it.
+  - On the test host each run's unmanaged probes left the device at the end of the unmanaged
+    window, and the estimate restarted there. The 40 s managed lead refilled it before the managed
+    window, which is why 044-t456's managed windows all read from the window.
+  - The owner's usage is already out of the estimate (Q23), so its processes have no reason to
+    restart it.
+- **Alternatives:**
+  - a hysteresis count of dwells: it slows real rises too;
+  - treating 99 as 100: that is the same floor without its reason;
+  - keeping the restart: it costs a window of all-bound counts each time the owner starts or stops
+    a process.
+

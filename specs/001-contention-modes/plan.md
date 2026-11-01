@@ -1823,6 +1823,60 @@ wire, SDK or config change.
 - VI: tests first. Pass.
 - VII: the snapshot and record fields are optional, with defaults. Pass.
 
+## Item 045: the step floor, the per-mille dwell average and the restart set (2026-11-01)
+
+Spec Session 2026-11-01 Q35–Q36 (FR-021's step bullet, FR-022's restart sentence), answering
+044-t456's Decision 1 and 044's Decision 1. With a zero margin the duty rose on dwell averages
+of 99, floored from 99.7 by a dip as phases switched. The same floor kept Performance from
+falling. And the owner's unmanaged processes restarted the external estimate when they came or
+went (research R53).
+
+**Technical Context**: Rust 1.88, no new dependency, no wire, SDK or config change. The
+time-slice record's dwell average becomes per mille: `utilization_milli` replaces `utilization`.
+
+1. **The step rule** (`slice_duty` in `src/policy/measure.rs`):
+   - The dwell's average is (sum × 10 + len ÷ 2) ÷ len per mille, and spare = 1000 − average.
+   - floor = max(margin, 10).
+   - The duty rises while spare > floor, and counts as saturated while spare × 2 < floor.
+   - The step and the dwells are unchanged.
+2. **The restart set** (`gpu_demand` in `src/policy/measure.rs`):
+   - It leaves out the owner's unmanaged PIDs (`compute_contexts.owner`) beside the background
+     ones.
+   - A unit test pins that telemetry's external PID list holds the owner's unmanaged PIDs, so they
+     do reach the set today.
+3. **Tests first:**
+   - **The dwell average:** readings 100, 100, 99 hold the duty with a zero margin, where today
+     they raise it. Performance above d0 falls on them, where today it holds.
+   - **Zero margin beside the saturating shape,** with one reading in three at 99: the duty stays
+     at d0, own work is within 30 of 500, and the external context keeps at least 485.
+   - **The partial user at 40% with a zero margin** settles within 30 of 1000 − 400 − 10.
+     Performance and Neutral stay as before.
+   - **The restart set:** an owner's unmanaged process that comes or goes keeps the estimate, and a
+     new external PID still restarts it.
+   - **Replays of 044-t456's traces:** the recorded steps, from the old rule, against the replay
+     at HEAD.
+   - **Decision snapshots** compared with `b3b426a`.
+4. **Docs:** `docs/guarantees.md` states that with a zero margin CedeGrid takes device time only
+   beyond 1% averaged spare. Also the data model.
+5. **Afterwards:**
+   - the suites, the macOS serial suite and the Docker Linux check;
+   - then the test-host runs: zero margin beside the saturating user, gated (the saturating user
+     at least ½ × alone × 0.97, own work by SC-017 at 500), and Performance as a regression check.
+
+**Constitution Check (7.0.0)**:
+- I: no change to what CedeGrid acts on. Pass.
+- II:
+  - With a zero margin, own work takes device time only where the averaged reading shows it idle
+    beyond its resolution, so others keep min(demand, fair share).
+  - Performance and Neutral keep their margins, and now fall back to d0 where the floor had
+    blocked them.
+  - Pass.
+- III: the owner's processes are own, and their usage is already out of the estimate. Leaving
+  them out of the restart set reads nothing unknown as idle. Pass.
+- IV: the policy stays pure. Pass.
+- VI: tests first. Pass.
+- VII: the record's field is optional. Pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
