@@ -282,6 +282,13 @@ is active.
   with and without the protection, a same-cgroup and a cross-cgroup contender; record results in
   `docs/validation.md`. *Deferred: needs the authorized host and, for the cross-cgroup contender,
   another account or a system slice.*
+- [ ] T049 Before Aggressive ships, measure the GPU time-slice duty's switch cost at a zero
+  margin (feature 001 item 046, Decision C): keep each managed window's raw phase samples and
+  compare the other user's request rate while own work runs with its rate while own work is
+  stopped, beside the saturating user with two own probes, on the authorized test host. If the
+  cost is CedeGrid's, fold it into d0 as item 046 did for the re-measure windows; if it is the
+  time slicer's own, record it as within the gate's tolerance. Record the result in
+  `docs/validation.md`. *Blocks shipping Aggressive; host runs need the user's approval.*
 
 ---
 
@@ -291,6 +298,7 @@ is active.
 
 - Setup (T001–T002) → Foundational (T003–T006) → US1 → US2 → Polish.
 - US2 uses US1's Aggressive target (T019) as its floor, so it starts after T019.
+- T049 needs US1's GPU compute path and comes before Aggressive ships.
 - *(needs 003)* tasks wait for the matching 003 phase: T025–T027 and T042–T044 for `run`, `ps`,
   `top`, per-job entries, profiles and the setup interface; T026 for per-user run-queue wait.
 
@@ -344,5 +352,5 @@ wire, with the ordering and the protection proven by tests. Stop and validate wi
 | Foundational | 4 (T003–T006) |
 | US1 (P1) | 21 (T007–T027; 3 need 003) |
 | US2 (P2) | 17 (T028–T044; 3 need 003) |
-| Polish | 4 (T045–T048; T048 deferred to the test host) |
-| **Total** | **48** |
+| Polish | 5 (T045–T049; T048 and T049 on the test host, T049 before shipping) |
+| **Total** | **49** |
