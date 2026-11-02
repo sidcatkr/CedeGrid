@@ -331,7 +331,11 @@ CPU is never capped below its request, by the policy or by its supervisor.
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
 each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral, and in
-Performance one monitor interval for CPU and 2 s for RAM. Each resource's admission opens on its own, and placement needs every
+Performance one monitor interval for CPU and 2 s for RAM. In Yield First a change that forms a
+principal restarts that count, as in the other modes; the owner's unmanaged processes, and any
+other user's change that stays under `principal_min_percent` or ends within
+`principal_window_intervals`, do not. Such a change still counts in its share and holds admission
+through the headroom while it lasts, and an unreadable principal list restarts the count. Each resource's admission opens on its own, and placement needs every
 requested resource open; every launch reserves CPU and RAM. Own work blocks admission on a
 resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
 holds more than its target, or a step is still moving down. A cap or hint that holds at its

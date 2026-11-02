@@ -153,10 +153,43 @@ impl Interval<'_> {
         } else {
             ram_new_now
         };
+        // In Yield First a change that forms no principal holds admission through the headroom
+        // while it lasts, and the count keeps running. An unreadable list tells no such change
+        // from a principal (FR-034).
+        let window = config.contention.principal_window_intervals;
+        let short = |kind: ResourceKind, key: &ResourceKey, unattributed: u32| {
+            governing(config, kind) == ContentionMode::YieldFirst
+                && !input.explicit_drain
+                && snapshot.principals.is_some()
+                && unattributed < window
+                && !self
+                    .next
+                    .principal_counts
+                    .iter()
+                    .any(|((k, _), count)| k == key && count.admitted)
+        };
+        let cpu_short = short(
+            ResourceKind::Cpu,
+            &ResourceKey::Cpu,
+            self.next.cpu_unattributed_intervals,
+        ) && !self.cpu_unknown
+            && !self.cpu_held
+            && self.cpu_capacity > 0;
+        let ram_short = short(
+            ResourceKind::Ram,
+            &ResourceKey::Ram,
+            self.next
+                .ram_unattributed
+                .map_or(0, |(_, intervals)| intervals),
+        ) && !self.ram_unknown
+            && !self.ram_held
+            && snapshot.total_ram_mib > 0
+            && !self.breached.contains(&ResourceKey::Ram);
         // An enforcement hold of own usage over its target does not restart stability (FR-011).
-        self.next.cpu_stable_since =
-            (cpu_safe || self.cpu_own_hold).then_some(prev.cpu_stable_since.unwrap_or(now));
-        self.next.ram_stable_since = ram_safe.then_some(prev.ram_stable_since.unwrap_or(now));
+        self.next.cpu_stable_since = (cpu_safe || self.cpu_own_hold || cpu_short)
+            .then_some(prev.cpu_stable_since.unwrap_or(now));
+        self.next.ram_stable_since =
+            (ram_safe || ram_short).then_some(prev.ram_stable_since.unwrap_or(now));
         self.cpu_allowed = cooled(
             config,
             now,

@@ -819,6 +819,7 @@ impl<'a> Interval<'a> {
             self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_sub(cedegrid);
             self.next.cpu_view = self.prev.cpu_view.clone();
             self.next.cpu_quiet_intervals = self.prev.cpu_quiet_intervals;
+            self.next.cpu_unattributed_intervals = self.prev.cpu_unattributed_intervals;
             self.carry_principals(&ResourceKey::Cpu);
             if self.cpu_unknown
                 && governing(config, ResourceKind::Cpu) >= ContentionMode::Performance
@@ -973,6 +974,7 @@ impl<'a> Interval<'a> {
         // This interval's estimate, not the window's, beside the larger of the floor and the
         // scope's per-interval measurement band (FR-034).
         let external = self.cpu_interval_external.unwrap_or(view.external);
+        let mut unattributed = external;
         let quiet = match self.snapshot.principals.as_ref() {
             Some(list) => {
                 let mut accounted = 0u64;
@@ -994,14 +996,15 @@ impl<'a> Interval<'a> {
                     }
                     accounted = accounted.saturating_add(usage);
                 }
-                crate::contention::cpu_quiet(
-                    contending,
-                    external.saturating_sub(accounted),
-                    floor,
-                    self.cpu_bound,
-                )
+                unattributed = external.saturating_sub(accounted);
+                crate::contention::cpu_quiet(contending, unattributed, floor, self.cpu_bound)
             }
             None => crate::contention::cpu_quiet([], external, floor, self.cpu_bound),
+        };
+        self.next.cpu_unattributed_intervals = if unattributed >= floor.max(self.cpu_bound) {
+            self.prev.cpu_unattributed_intervals.saturating_add(1)
+        } else {
+            0
         };
         self.next.cpu_quiet_intervals = if quiet {
             self.prev.cpu_quiet_intervals.saturating_add(1)
@@ -1018,6 +1021,7 @@ impl<'a> Interval<'a> {
     pub(super) fn ram_target(&mut self) {
         if self.ram_unknown || self.ram_held {
             self.next.ram_fair_share = self.prev.ram_fair_share;
+            self.next.ram_unattributed = self.prev.ram_unattributed;
             self.carry_principals(&ResourceKey::Ram);
             // While RAM is held its availability is still known, so a floor breach is real
             // and in-share own memory keeps its protection at the last fair share (FR-023).
@@ -1049,12 +1053,42 @@ impl<'a> Interval<'a> {
             probe: None,
         };
         let thresholds = config.contention.thresholds(ResourceKind::Ram);
+        self.note_ram_unattributed(&view, &thresholds);
         self.mode_targets
             .insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
         self.budget.ram_mib = own_allowance(&view, &thresholds);
         let fair = crate::contention::neutral_share(&view, &thresholds);
         self.memory_fair_share.insert(ResourceKey::Ram, fair);
         self.next.ram_fair_share = Some(fair);
+    }
+
+    /// Counts the intervals in which RAM no process lists has stayed `principal_min_percent`
+    /// above its level. Kernel memory sits in it for good, so the level is the baseline, and a
+    /// rise that lasts past the window becomes the next level (FR-034).
+    fn note_ram_unattributed(&mut self, view: &ModeInput, thresholds: &ResourceThresholds) {
+        let floor = (view
+            .capacity
+            .saturating_mul(u64::from(thresholds.principal_min_percent))
+            / 100)
+            .max(1);
+        let listed: u64 = self
+            .snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|p| p.is_owner || p.uid.is_some())
+            .map(|p| p.ram_mib)
+            .sum();
+        let unattributed = view.external.saturating_sub(listed);
+        let (level, intervals) = self.prev.ram_unattributed.unwrap_or((unattributed, 0));
+        let window = self.config.contention.principal_window_intervals;
+        self.next.ram_unattributed = Some(if unattributed < level.saturating_add(floor) {
+            (level.min(unattributed), 0)
+        } else if intervals >= window {
+            (unattributed, 0)
+        } else {
+            (level, intervals + 1)
+        });
     }
 
     /// The operator envelope bounds own work per resource (FR-057). Each floor,

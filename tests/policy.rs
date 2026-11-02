@@ -6506,6 +6506,274 @@ fn decision_snapshot() {
 
 /// Own CPU and host busy over the 8-interval window set the steady-state budget, while the
 /// per-interval estimate decides growth (FR-073).
+/// Yield First's scale-up cooldown keeps running through a change that forms no principal, and
+/// a change that lasts the principal window restarts it, as in every mode (FR-034, item 049).
+mod yield_first_cooldown {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const OWNER: u32 = 1000;
+    const PEER: u32 = 1001;
+    const INTERVAL: u64 = 500;
+    /// A job charged its 5300 m request, of a 5500 m budget beside the owner's 500 m, using far
+    /// less, so 300 m more over-fills the budget with no own usage over its target.
+    const JOB: u64 = 5300;
+    const USE: u64 = 1000;
+
+    struct Run {
+        engine: PolicyEngine,
+        config: Config,
+        now: u64,
+    }
+
+    impl Run {
+        fn new(mode: ContentionMode) -> Self {
+            let mut config = config();
+            config.contention.default_mode = mode;
+            // Each mode's own cooldown, not the zero these accounting tests use.
+            config.contention.cpu.scale_up_cooldown_ms = None;
+            config.contention.ram.scale_up_cooldown_ms = None;
+            Self {
+                engine: PolicyEngine::new(),
+                config,
+                now: 0,
+            }
+        }
+
+        /// One interval: the owner's unmanaged usage and the other account's.
+        fn step(&mut self, owner: u64, peer: u64) -> Decision {
+            self.step_using(USE, owner, peer)
+        }
+
+        fn step_using(&mut self, usage: u64, owner: u64, peer: u64) -> Decision {
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "job",
+                    AllocationPhase::Running,
+                    resources(JOB, 0, 0),
+                    Some(resources(usage, 0, 0)),
+                )],
+                facts: rootless(&["job"]),
+                ..PolicyInput::default()
+            };
+            let mut snap = snapshot();
+            let mut list = vec![cpu_principal(OWNER, true, owner)];
+            if peer > 0 {
+                list.push(cpu_principal(PEER, false, peer));
+            }
+            snap.principals = Some(list);
+            snap.cpu_busy_millicores = Some(usage + owner + peer);
+            let decision = self
+                .engine
+                .evaluate(&self.config, &snap, &input, self.now)
+                .unwrap();
+            self.now += INTERVAL;
+            decision
+        }
+
+        fn until(&mut self, at_ms: u64, owner: u64, peer: u64) -> Decision {
+            let mut last = self.step(owner, peer);
+            while self.now <= at_ms {
+                last = self.step(owner, peer);
+            }
+            last
+        }
+    }
+
+    /// Stable from the start, then a short change at 20 s; the 30 s cooldown is due at 30 s.
+    fn allowed_at_30_s(mode: ContentionMode, owner: u64, peer: u64, intervals: u64) -> bool {
+        let mut run = Run::new(mode);
+        run.until(20_000, 500, 0);
+        for _ in 0..intervals {
+            run.step(owner, peer);
+        }
+        // Past the short change and the 30 s from the first stable interval.
+        let cooldown = run
+            .config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Cpu)
+            .cooldown_ms(mode, run.config.monitor.interval_ms);
+        run.until(cooldown + 500, 500, 0).cpu_ram_expansion_allowed
+    }
+
+    #[test]
+    fn an_owner_login_sized_burst_does_not_restart_it() {
+        assert!(allowed_at_30_s(ContentionMode::YieldFirst, 1500, 0, 2));
+    }
+
+    #[test]
+    fn another_accounts_one_interval_change_does_not_restart_it() {
+        assert!(allowed_at_30_s(ContentionMode::YieldFirst, 500, 300, 1));
+    }
+
+    #[test]
+    fn neutral_keeps_its_rule() {
+        let mut run = Run::new(ContentionMode::Neutral);
+        run.until(9_000, 500, 0);
+        run.step(1500, 0);
+        run.step(1500, 0);
+        assert!(
+            !run.until(10_500, 500, 0).cpu_ram_expansion_allowed,
+            "the burst restarted Neutral's 10 s cooldown"
+        );
+    }
+
+    #[test]
+    fn a_change_that_lasts_the_principal_window_restarts_it() {
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        run.until(30_500, 500, 0);
+        assert!(
+            run.step(500, 0).cpu_ram_expansion_allowed,
+            "cooled down first"
+        );
+        let window = u64::from(run.config.contention.principal_window_intervals);
+        let mut last = run.step(500, 300);
+        for _ in 0..window + 1 {
+            last = run.step(500, 300);
+        }
+        assert!(
+            !last.cpu_ram_expansion_allowed,
+            "a principal formed, so the cooldown restarted"
+        );
+    }
+
+    /// RAM with 2000 MiB no process lists, as kernel memory is, and a job whose request fills the
+    /// budget beside it; a step's own and unlisted amounts come on top.
+    struct RamRun {
+        run: Run,
+        job: u64,
+    }
+
+    impl RamRun {
+        fn new() -> Self {
+            let mut probe = Run::new(ContentionMode::YieldFirst);
+            scale_up_cooldowns(&mut probe.config, 0);
+            let room = probe.step_ram(100, 0, 0).admission_headroom.ram_mib;
+            assert!(room > 1000, "room to fill: {room}");
+            Self {
+                run: Run::new(ContentionMode::YieldFirst),
+                job: 100 + room,
+            }
+        }
+
+        fn step(&mut self, owner: u64, unlisted: u64) -> Decision {
+            self.run.step_ram(self.job, owner, unlisted)
+        }
+
+        fn until(&mut self, at_ms: u64, owner: u64, unlisted: u64) -> Decision {
+            let mut last = self.step(owner, unlisted);
+            while self.run.now <= at_ms {
+                last = self.step(owner, unlisted);
+            }
+            last
+        }
+    }
+
+    impl Run {
+        fn step_ram(&mut self, job: u64, owner: u64, unlisted: u64) -> Decision {
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "job",
+                    AllocationPhase::Running,
+                    resources(100, job, 0),
+                    Some(resources(100, 100, 0)),
+                )],
+                facts: rootless(&["job"]),
+                ..PolicyInput::default()
+            };
+            let mut snap = snapshot();
+            snap.principals = Some(vec![PrincipalUsage {
+                ram_mib: owner,
+                ..cpu_principal(OWNER, true, 500)
+            }]);
+            snap.cpu_busy_millicores = Some(600);
+            snap.available_ram_mib = Some(snap.total_ram_mib - 100 - owner - 2000 - unlisted);
+            let decision = self
+                .engine
+                .evaluate(&self.config, &snap, &input, self.now)
+                .unwrap();
+            self.now += INTERVAL;
+            decision
+        }
+    }
+
+    #[test]
+    fn steady_unlisted_memory_forms_no_principal_for_a_login_on_ram() {
+        let mut run = RamRun::new();
+        run.until(20_000, 0, 0);
+        run.step(400, 0);
+        run.step(400, 0);
+        assert!(
+            run.until(30_500, 0, 0).cpu_ram_expansion_allowed,
+            "the login did not restart RAM's cooldown"
+        );
+    }
+
+    #[test]
+    fn unlisted_memory_that_rises_for_the_principal_window_restarts_ram() {
+        let mut run = RamRun::new();
+        run.until(30_500, 0, 0);
+        assert!(
+            run.step(0, 0).cpu_ram_expansion_allowed,
+            "cooled down first"
+        );
+        let window = u64::from(run.run.config.contention.principal_window_intervals);
+        for _ in 0..window + 1 {
+            run.step(0, 1000);
+        }
+        assert!(
+            !run.step(0, 0).cpu_ram_expansion_allowed,
+            "the rise lasted the window, so RAM's cooldown restarted"
+        );
+    }
+
+    /// An unreadable principal list tells no short change from a principal.
+    #[test]
+    fn an_unreadable_list_restarts_it() {
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        run.until(30_500, 500, 0);
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "job",
+                AllocationPhase::Running,
+                resources(JOB, 0, 0),
+                Some(resources(USE, 0, 0)),
+            )],
+            facts: rootless(&["job"]),
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        snap.principals = None;
+        snap.cpu_busy_millicores = Some(USE + 1500);
+        run.engine
+            .evaluate(&run.config, &snap, &input, run.now)
+            .unwrap();
+        run.now += INTERVAL;
+        assert!(
+            !run.step(500, 0).cpu_ram_expansion_allowed,
+            "the unreadable interval restarted the cooldown"
+        );
+    }
+
+    /// SC-002: Yield First's give-back is unchanged, a step on own work within two intervals of
+    /// the contender's first observed usage.
+    #[test]
+    fn yield_first_still_steps_down_within_sc_002s_bound() {
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        run.until(30_500, 500, 0);
+        let first = run.step_using(JOB, 500, 1500);
+        let second = run.step_using(JOB, 500, 1500);
+        assert!(
+            [&first, &second].iter().any(|d| d
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.step != YieldStep::None)),
+            "Yield First gave back within two intervals: {:?}",
+            second.actions
+        );
+    }
+}
+
 mod measurement_window {
     use super::*;
     use cedegrid::contention::{ContentionMode, ResourceKey};

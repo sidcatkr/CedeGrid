@@ -549,6 +549,7 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   `allocation_unknown_hold` names it. Not a wire field.
 - `PolicyState.cpu_window_external`: the last busy-window external estimate and when it was read;
   used while the window refills, within this interval's bound of it, for at most one window.
-- `PolicyState` unattributed count per resource: consecutive intervals of unattributed usage at or
-  above `principal_min_percent`, for Yield First's cooldown.
+- `PolicyState` unattributed count per resource, for Yield First's cooldown: on CPU, consecutive
+  intervals of unattributed usage at or above `principal_min_percent`; on RAM, consecutive intervals
+  that usage stayed `principal_min_percent` above its level, and that level.
 

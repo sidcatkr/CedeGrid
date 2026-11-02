@@ -339,6 +339,12 @@ pub struct PolicyEngine {
     /// Consecutive intervals in which every external CPU principal, the unattributed
     /// remainder included and background left out, stayed below `principal_min_percent`.
     cpu_quiet_intervals: u32,
+    /// Consecutive intervals in which what no readable principal accounts for stayed at
+    /// `principal_min_percent` or above, for Yield First's cooldown (FR-034).
+    cpu_unattributed_intervals: u32,
+    /// RAM's: the level of what no process lists, kernel memory among it, and the consecutive
+    /// intervals it has stayed `principal_min_percent` above that level.
+    ram_unattributed: Option<(u64, u32)>,
     /// The last known CPU view, carried through unknown and held intervals, for the hold
     /// while CPU is unknown (FR-022).
     cpu_view: Option<CpuView>,

@@ -1967,7 +1967,9 @@ In Yield First, `cpu_fits` going false from a change that forms no principal no 
 the timer keeps running while admission holds, since headroom is computed apart. A principal has
 formed when a user ID other than the owner is an admitted member on the resource, or the unattributed
 usage has stayed at or above `principal_min_percent` for `principal_window_intervals`. An unknown
-measurement or an operator drain restarts it as before. RAM gets the same rule. Neutral, Performance
+measurement, an unreadable principal list or an operator drain restarts it as before. RAM gets the
+same rule, counted from the level of what no process lists, since kernel memory sits in that
+remainder for good; a rise that lasts past the window becomes the next level. Neutral, Performance
 and Aggressive keep theirs. The ladder is unchanged, so give-back and SC-002 hold. Tests first: an
 owner login-sized burst does not restart it; another account's one-interval 300 m change does not;
 another account's change that lasts the principal window does, and Yield First steps down within
