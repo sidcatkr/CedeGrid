@@ -794,6 +794,64 @@ Gates:
 
   Report every process the OOM killer took.
 
+## Item 049: the gates Phase 37 touches, at its HEAD (T520)
+
+Runs once on the authorized test host, each alone, with the leftover check after every run, under
+the user's standing approval and the same host rules, with `batch-037`'s harness at the commit
+that ends Phase 37's product code. Nothing runs on the shared host.
+
+```sh
+# 1. Report 027's run 1, idle, 4 CPUs, after T514, in Tracked and in Full.
+bash runs-037.sh <commit> <second account uid> idle4 idle4full
+# 2. Performance with two own probes beside the saturating user, in Tracked and in Full, after
+#    T509 and T510; then Full with a process of the test's own account joining the first probe's
+#    leaf while it is frozen, 15 s into the last managed window (same_gpu_029.py --join-at 15). The
+#    joining process is the harness's own child, moved from the shell's leaf; it wakes every 5 ms
+#    and writes its largest gap and any SIGCONT or SIGTERM it saw.
+bash runs-037.sh <commit> <second account uid> twoperf twofull twojoin
+# 3. After T519: Yield First, 4 CPUs, 16 steady tasks of 250 m; the second account's own one-core
+#    loop runs 30 s from the harness's epoch.
+bash runs-037.sh <commit> <second account uid> yfpeer
+#   = $py $H/return_033.py --repo $repo --root $root --contender-uid <uid> --mode yield_first
+#     ssh <second account>@<test host> 'T=<epoch> CPUS=<cpu> S=30 sh -s' < peer-contender-027.sh
+# 4. After T512: item 029's run 3, a saturating other user on the probe's core, Performance and
+#    Neutral.
+bash runs-037.sh <commit> <second account uid> core
+#   = $py $H/same_core_029.py --repo $repo --mode <mode> --load saturating --peer-uid <uid>
+# 5. SC-014, as item 047: on the host itself under nohup, with no login until it ends.
+nohup bash $H/sc014-quiet-047.sh <commit> \
+  "performance:1200:0 neutral:2400:300 yield_first:4800:600" > <log> 2>&1 &
+# 6. Yield First once more, with a login from each account every 60 s through its warm-up and
+#    window, from outside the host.
+MARKER=sc014-logins-049.done nohup bash $H/sc014-quiet-047.sh <commit> "yield_first:4800:600" > <log> 2>&1 &
+bash logins-049.sh sc014-logins-049.done 3
+# Read only, from each SC-014 run: held_back per window, and T513's gap.
+$py $H/sc014_held_047.py x <run> ...       # WARMUP=1 for the warm-up
+$py $H/sc014_gap_049.py <run> ...
+```
+
+Gates:
+
+- Idle: the decisions' external estimate at p95 at most 1% of the 4 CPUs' capacity, in each backend.
+- Two probes: T456's gates per valid managed window (042's three checks): own work by SC-017 at 480,
+  the saturating user at least ½ × its rate alone × 0.97. In Full, the duty held, the off-phase
+  overlap, the frozen and `/proc`-stopped shares and the leaves left.
+- The join: the leaf reads frozen when the process joins, and thawed within 200 ms; it stays thawed
+  for the rest of the window; `cpu.max` stays `max`; the process keeps its nice value, sees no
+  SIGCONT or SIGTERM and no gap over 200 ms after the thaw. The window's own-work rate is not gated.
+- Yield First beside the one-core load: own work at the contended target within 2 intervals of the
+  load's first observed usage (SC-002).
+- Item 029's run 3: own work at capacity minus the other user's demand minus the mode's margin, no
+  pause, with the other user's p99 against alone and own throughput, with and without CedeGrid, each
+  against item 029's values.
+- SC-014: own tasks at least 97%, 94% and 84% of capacity in Performance, Neutral and Yield First,
+  and with CedeGrid's own CPU stated apart; Yield First at least 84% with the logins too.
+- T513: tasks' CPU from `/proc` against the decisions' upper bound in each SC-014 run; the code
+  changes only if the tasks' CPU is above that bound.
+
+A miss changes no product code here: report its cause from the decision records, with a fix under
+"Decisions needed", marking which fixes would change a mode's semantics.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
