@@ -283,6 +283,7 @@ fn busy_bounds(
     interval_ms: u64,
     clock_tick_hz: Option<u64>,
     run_time: Option<(&RunTime, &RunTime)>,
+    read_ms: u64,
 ) -> Result<(u64, u64, u64), CpuUsageStatus> {
     let mut busy = 0u64;
     let mut busy_lower = 0u64;
@@ -308,10 +309,13 @@ fn busy_bounds(
             // was free for another task, and own CPU time never includes it (TEL-1).
             let idle_lower = u128::from(idle.saturating_sub(1)) * 1000;
             let elapsed_ticks = u128::from(interval_ms) * u128::from(hz);
-            if idle_lower > elapsed_ticks {
+            // A CPU's counter is read after the read's start, so it can run past the interval
+            // between the starts by this read's length.
+            if idle_lower > u128::from(interval_ms.saturating_add(read_ms)) * u128::from(hz) {
                 return Err(CpuUsageStatus::Unknown);
             }
-            let non_idle = ((elapsed_ticks - idle_lower) * 1000).div_ceil(elapsed_ticks) as u64;
+            let non_idle =
+                (elapsed_ticks.saturating_sub(idle_lower) * 1000).div_ceil(elapsed_ticks) as u64;
             conservative_busy = conservative_busy.max(non_idle);
             lower_denominator = lower_denominator.max(elapsed_ticks);
             // Run time counts a slice when it leaves the CPU, in nanoseconds, so the ticks and
@@ -357,14 +361,23 @@ impl CpuUsageTracker {
         monotonic_ms: u64,
         freshness_ms: u64,
     ) -> CpuUsage {
-        self.observe_with_run_time(input, None, effective_cpu_ids, monotonic_ms, freshness_ms)
+        self.observe_with_run_time(
+            input,
+            None,
+            0,
+            effective_cpu_ids,
+            monotonic_ms,
+            freshness_ms,
+        )
     }
 
-    /// As `observe`, with each CPU's run time in nanoseconds where it is readable.
+    /// As `observe`, with each CPU's run time in nanoseconds where it is readable, and how long
+    /// this read of the counters may have taken.
     pub fn observe_with_run_time(
         &mut self,
         input: Result<&str, io::Error>,
         run_time: Option<RunTime>,
+        read_ms: u64,
         effective_cpu_ids: Option<&[u32]>,
         monotonic_ms: u64,
         freshness_ms: u64,
@@ -423,7 +436,14 @@ impl CpuUsageTracker {
                     result.detail = "CPU interval exceeded freshness limit; baseline reset.".into();
                 }
                 Some(interval) => {
-                    match busy_bounds(previous, &selected, interval, self.clock_tick_hz, None) {
+                    match busy_bounds(
+                        previous,
+                        &selected,
+                        interval,
+                        self.clock_tick_hz,
+                        None,
+                        read_ms,
+                    ) {
                         Ok((busy, busy_lower, max_interval_ticks)) => {
                             result.status = CpuUsageStatus::Available;
                             result.busy_millicores = Some(busy);
@@ -465,6 +485,7 @@ impl CpuUsageTracker {
                 window,
                 self.clock_tick_hz,
                 first_run.as_ref().zip(run_time.as_ref()),
+                read_ms,
             )
         {
             self.window_max_ticks = Some(max_ticks);
@@ -1271,11 +1292,11 @@ impl KernelCollector {
         result.cpu = inspect_cpu(&self.roots, result.hierarchy.as_ref());
         let cpu_read_started = (self.clock)();
         let cpu_stat = read_text(&self.roots.proc.join("stat"));
+        let cpu_read_ended = (self.clock)();
         let run_time = read_text(&self.roots.proc.join("schedstat"))
             .ok()
             .as_deref()
             .and_then(parse_run_time);
-        let cpu_read_ended = (self.clock)();
         // Next to the host counters, the delegated root's CPU time, for own CPU in Full.
         let delegated = self
             .config
@@ -1297,6 +1318,13 @@ impl KernelCollector {
                 .as_deref()
                 .map_err(|error| io::Error::new(error.kind(), error.to_string())),
             run_time,
+            // The read's length, rounded up, and a millisecond for rounding the interval.
+            millis(
+                cpu_read_ended
+                    .saturating_duration_since(cpu_read_started)
+                    .as_millis(),
+            )
+            .saturating_add(2),
             result.cpu.effective_cpu_ids.as_deref(),
             read_at,
             ttl,
@@ -1886,10 +1914,43 @@ mod cpu_alignment_tests {
                     (1, 5_000_000 + run[1] * k / 8),
                 ])
             });
-            last =
-                Some(tracker.observe_with_run_time(Ok(&stat), run, Some(&[0, 1]), k * 500, 1500));
+            last = Some(tracker.observe_with_run_time(
+                Ok(&stat),
+                run,
+                0,
+                Some(&[0, 1]),
+                k * 500,
+                1500,
+            ));
         }
         last.unwrap().busy_window_millicores
+    }
+
+    /// A CPU's counter is read some time after the read's start, so its idle ticks can run past
+    /// the interval between the starts by this read's length. Beyond that it stays unknown.
+    #[test]
+    fn idle_ticks_past_the_interval_by_the_reads_length_are_not_unknown() {
+        let observe = |idle: u64, read_ms: u64| {
+            let mut tracker =
+                CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
+            let stat = |idle: u64| format!("cpu0 100 0 0 {idle} 0 0 0 0\n");
+            tracker.observe(Ok(&stat(1000)), Some(&[0]), 1000, 1500);
+            tracker.observe_with_run_time(
+                Ok(&stat(1000 + idle)),
+                None,
+                read_ms,
+                Some(&[0]),
+                1499,
+                1500,
+            )
+        };
+        // 51 idle ticks in 499 ms, one tick of rounding leaves 50: 500 ms of idle.
+        assert_eq!(observe(51, 0).status, CpuUsageStatus::Unknown);
+        let usage = observe(51, 3);
+        assert_eq!(usage.status, CpuUsageStatus::Available);
+        assert!(usage.busy_millicores.is_some());
+        // 60 ticks are more than any read's length explains.
+        assert_eq!(observe(60, 3).status, CpuUsageStatus::Unknown);
     }
 
     /// An idle CPU's ticks lag elapsed time by a few, which reads as busy in the idle complement.
