@@ -325,10 +325,16 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         })
         .await
         .unwrap();
-    let drained = Instant::now() + Duration::from_secs(60);
+    let drain_started = Instant::now();
+    let drain_started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let drained = drain_started + Duration::from_secs(60);
     while running(&state) > 0 && Instant::now() < drained {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    let drain_ms = drain_started.elapsed().as_millis();
     let left = running(&state);
     agent_service.stop(Duration::from_secs(30));
     coordinator_service.stop(Duration::from_secs(5));
@@ -351,9 +357,17 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .map(|pair| pair[1].saturating_sub(pair[0]))
         .max()
         .unwrap_or(0);
+    // The stop's own iterations: the gaps from the drain's start until the agent's last
+    // observation.
+    let longest_in_stop = times
+        .windows(2)
+        .filter(|pair| pair[1] >= drain_started_unix_ms)
+        .map(|pair| pair[1].saturating_sub(pair[0]))
+        .max()
+        .unwrap_or(0);
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
-        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {left} left running after the drain, {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
+        "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {left} left running after the drain, the drain took {drain_ms} ms with a longest gap of {longest_in_stop} ms, {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
         if all_running.is_some() {
             "all ran"
         } else {
