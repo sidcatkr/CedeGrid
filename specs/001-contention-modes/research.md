@@ -1106,3 +1106,37 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   - rarer or shorter windows: that slows reading external demand;
   - measuring w from the windows seen: it lags, and moves d0' with every window.
 
+## R55. The mean charge when alone (item 049, T515)
+
+- **Decision**: charge running opportunistic work at its window mean while no other principal is
+  active on CPU, at its p95 from the interval one appears, reading the snapshot's principal list
+  directly, without waiting for the principal window. An unreadable list counts as active.
+- **Rationale**: item 047 measured `charge_shortfall` as what holds SC-014's Neutral and Yield First
+  fill below target: 696 m and 609 m of charges above use. With no other principal an
+  over-admission can only cost own work, whose burst raises `own_over_target` on own tasks.
+- **Alternatives**: a lower percentile always (fills less when alone, and charges less under
+  contention, where p95 protects others); lowering SC-014's targets (changes the criterion, not the
+  fill).
+
+## R56. An own task's missing sample and the external estimate (item 049, T518)
+
+- **Decision**: name the failed check in the record, and keep the last window's external estimate
+  through a window's refill, under the window's own bound rule.
+- **Rationale**: item 047's 73 unknown decisions all lacked the aggregate CPU window; `af531c0` fixed
+  that cause. But any reset leaves the estimate on one interval's wide bound for up to a window, so
+  measurement looseness reads as about 250 m of growth, and in Yield First it restarted the cooldown.
+- **Alternatives**: holding the estimate unconditionally (hides real growth, against Principle III);
+  smoothing the interval estimate (delays the response to real growth).
+
+## R57. What forms a principal for Yield First's cooldown (item 049, T519)
+
+- **Decision**: another user ID admitted as a member on the resource, or unattributed usage at or
+  above `principal_min_percent` for `principal_window_intervals`. Anything else that makes own work
+  not fit holds admission while it lasts, and the timer keeps running.
+- **Rationale**: the user's decision of 2026-11-02. On a host where people log in, Yield First
+  barely filled, because every short change restarted a 30 s timer. The owner's unmanaged processes
+  still count in the owner's share, so they still shrink the room.
+- **Alternatives**: applying it to every mode (the user kept their rule; report if the same stall
+  shows there); ignoring short changes in admission too (admission may hold while they last, which
+  is the safe side).
+

@@ -1927,6 +1927,88 @@ time-slice record gains w (per mille) and d0'.
 - VI: tests first. Pass.
 - VII: the record's new fields are optional. Pass.
 
+## Item 049: Phase 37 before the merge (2026-11-03)
+
+**Input**: spec Session 2026-11-03; FR-018, FR-021's clock sentence, FR-034's charge and cooldown
+text, the Principal term; `tasks.md` Phase 37; report 047's and 048's findings.
+
+**Technical Context**: Rust 1.88, no new dependency. No SDK or config change, and no wire change
+unless T511 needs a new cause value. The record gains text in a reason, not a field a client reads. Native reruns on the test host under the standing
+approval.
+
+**Done before this section**: T509 (an interval without a utilization reading clears the dwell's
+readings), T510 (a process that joins a frozen leaf is thawed at once, and the step moves to the
+rootless mechanism), and `af531c0` (the CPU busy interval is measured between the counter reads).
+
+**T515, the charge when alone (R55)**. `charge()` runs first in `evaluate`, before the principal
+phase, so whether another principal is active comes from the snapshot's principal list directly:
+another user ID at or above `uid_min`, or the unattributed usage, at or above
+`principal_min_percent` of capacity in this interval. It does not wait for the principal window, so
+the switch to p95 comes in the interval a principal appears. An unreadable list counts as active
+(Principle III). Only the charge's statistic changes: the startup charge, the held-back charge,
+pending work, Guaranteed work and memory stay as they are. Tests first: a burst while alone
+over-admits by at most what own work then caps on itself; the switch happens in the interval a
+principal appears; running tasks are never drained because of it.
+
+**T518, an own task's missing sample (R56)**. Two parts.
+- *The record.* `sample_records` builds each allocation's bounds through a chain of checks. Each
+  failure now returns a short name (`not_verified`, `not_alive`, `scope_changed`,
+  `resident_unreadable`, `no_baseline`, `first_interval`, `identity_changed`, `no_end_reading`,
+  `counter_went_back`, `no_cpu_window`, `outside_cpu_window`, `ram_unreadable`). `Allocation` carries it,
+  and `allocation_unknown_hold`'s reason names it.
+- *The external estimate.* When the busy window is missing after a reset, `cpu_external` uses this
+  interval's estimate alone, whose bound is wide, so the looseness reads as growth for up to a
+  window. The last window estimate is kept in `PolicyState` and used while the window refills, under
+  the same rule as the window: while this interval's estimate stays within its own bound of it, it
+  applies; beyond that bound, growth applies at once. It ages out after one window.
+
+**T519, Yield First's cooldown (R57)**. `cooldowns()` restarts stability when `cpu_safe` is false.
+In Yield First, `cpu_fits` going false from a change that forms no principal no longer restarts it:
+the timer keeps running while admission holds, since headroom is computed apart. A principal has
+formed when a user ID other than the owner is an admitted member on the resource, or the unattributed
+usage has stayed at or above `principal_min_percent` for `principal_window_intervals`. An unknown
+measurement or an operator drain restarts it as before. RAM gets the same rule. Neutral, Performance
+and Aggressive keep theirs. The ladder is unchanged, so give-back and SC-002 hold. Tests first: an
+owner login-sized burst does not restart it; another account's one-interval 300 m change does not;
+another account's change that lasts the principal window does, and Yield First steps down within
+SC-002's bound.
+
+**T513, supervisor CPU**. CedeGrid's own CPU already counts the agent and its supervisors apart
+(FR-069). T513 measures how much of the 173 m gap of `docs/validation.md` is left at HEAD from the
+SC-014 runs' report (tasks' CPU from `/proc` against the decisions' upper bound), and charges each
+supervisor's CPU to its allocation if the gap is still there. If it is gone, T513 records that and
+changes no code.
+
+**T512, a new victim's excess**. The ladder gives each new victim, in cost order, the whole excess
+left, so a cap can reach 0 and become a pause. New victims share the excess by usage within their
+tier, as held caps already do, so no new victim is capped below its share of it. Tests first in
+`tests/contention.rs`.
+
+**T514, the busy window's bound**. Per-CPU busy nanoseconds from `/proc/schedstat` (the
+`cpuN` run time field), where readable, tighten the window's busy upper bound from a tick per CPU to
+the counter's own resolution. Unreadable or inconsistent values fall back to the ticks. Telemetry
+stays read-only. Report 027's run 1 on 4 CPUs gates it: the external estimate at most 1%.
+
+**T511, a refusal at the barrier**. A refusal reported as `authorization_unavailable` takes the
+existing yield path, so the coordinator requeues a replay-safe task without using an attempt, and
+its status says why. A task that isn't replay-safe keeps today's end. If it needs a new cause value,
+that value lands in Rust, Python and TypeScript with the contract fixture. Test first in
+`tests/coordinator.rs`.
+
+**T516**: the spec sentence, done in clarify.
+
+**Constitution Check (7.0.0)**:
+
+| Principle | How it complies |
+|---|---|
+| I. External processes untouchable | T510 thaws a leaf a process joined and moves the step to the verified family. T519 and T515 only read principals. |
+| II. No harm | T515's mean applies only with no other principal active, and p95 returns in the interval one appears. T519 leaves the ladder and SC-002 alone. Over-admission while alone costs own work only. |
+| III. Unknown is never free | T509 removes a rise on stale readings. An unreadable principal list keeps p95. The kept window estimate ages out, and growth beyond the bound applies at once. Unknown measurement still restarts the cooldown. |
+| IV. Pure policy | The new state is in `PolicyState`; no clock or file reads in `policy/`. T518's names come from telemetry as data. |
+| VII. Compatibility | No SDK or config change. T511 reuses the yield path's report; a new cause value, if one is needed, lands in all three languages with the fixture. |
+
+Result: pass.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

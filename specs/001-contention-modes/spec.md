@@ -621,6 +621,33 @@ back more.
   CedeGrid and stays within the gate's tolerance, so there is no fixed allowance for it
   (item 046).
 
+### Session 2026-11-03
+
+- Q: How is running opportunistic work charged for CPU admission when it is alone? → A: At its
+  mean usage over the window while no other principal is active on the resource, and at its p95
+  once one is, from the interval that principal appears. With no other principal an over-admission
+  can only cost own work: its burst raises `own_over_target` on own tasks and touches no one else.
+  The p95 still protects other users as soon as one is active. Running tasks are never drained
+  because of it. The other charging rules stay. All four modes stay (item 049, T515).
+- Q: What restarts Yield First's scale-up cooldown? → A: A change that forms a principal, as
+  today. It is not restarted by the owner's unmanaged processes (an SSH login, a shell command),
+  which still count in the owner's share and so still shrink own work's room, nor by any user's
+  external change that does not form a principal: one that stays under `principal_min_percent`, or
+  ends within `principal_window_intervals`. While a short change lasts, admission may hold, but
+  the cooldown timer keeps running. Yield First's give-back to other principals is unchanged,
+  SC-002's bounds included. Neutral, Performance and Aggressive keep their rule (the user's
+  decision of 2026-11-02, item 049).
+- Q: What does the record say when an own task's sample is missing, and may that read as external
+  growth? → A: The record says which check of the sampler failed, not the one code
+  `allocation_unknown_hold` alone. Own work's own measurement never counts as external growth, in
+  any mode: an own task's one-interval unknown measurement does not raise the external estimate in
+  the next interval (item 049).
+- Q: Is a refusal at the authorization barrier the task's failure? → A: No. It uses up no attempt:
+  a replay-safe task is requeued without using one, and its status says why (item 049, T511).
+- Q: What do the aligned duty phases assume about clocks? → A: That every supervisor shares the
+  agent's `CLOCK_MONOTONIC` time namespace, which holds today, since supervisors are the agent's
+  children (item 049, T516).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -630,7 +657,8 @@ back more.
 - **Principal**: a user ID at or above `uid_min` whose usage of a resource has stayed above
   `principal_min_percent` for the principal window. The account that runs CedeGrid is always one
   principal, whatever its user ID; its share covers own work plus its unmanaged processes. Usage
-  by lower user IDs is *background* demand, subtracted from capacity.
+  by lower user IDs is *background* demand, subtracted from capacity. A change that forms no
+  principal does not restart Yield First's scale-up cooldown (FR-034).
 - **Fair share**: a work-conserving, equal split of a contended resource among active
   principals. Capacity a principal does not use is available to the others.
 - **Margin**: capacity own work leaves unused for external demand to grow into, justified only
@@ -1193,7 +1221,12 @@ node reports with the expected per-resource values at each step.
 - **FR-018**: Yield decisions MUST carry a cause that is preserved from the per-node authority to
   the coordinator. This lets the coordinator tell a yield from a failure for retry accounting.
   Own usage over its target (`own_over_target`) MUST be recorded apart from external growth
-  (`external_growth`) in decisions, `observe` and `status`.
+  (`external_growth`) in decisions, `observe` and `status`. A refusal at the authorization barrier
+  MUST NOT count as the task's failure: a replay-safe task is requeued without using an attempt,
+  and its status says why. When an own task's sample is missing, the record MUST say which check
+  of the sampler failed, and own work's own measurement MUST NOT count as external growth in any
+  mode: an own task's one-interval unknown measurement does not raise the external estimate in
+  the next interval.
 
 **Modes**
 
@@ -1250,7 +1283,8 @@ node reports with the expected per-resource values at each step.
   the granularity, is documented. While a GPU compute cap sets an allocation's duty, its on- and
   off-phases follow a clock every supervisor on the node shares, CLOCK_MONOTONIC modulo the
   period: own work runs while (now mod period) < duty × period, so all own allocations stop and
-  resume together whatever their start times. A duty change mid-period takes effect within the
+  resume together whatever their start times. The phases assume every supervisor shares the
+  agent's time namespace, which holds since supervisors are the agent's children. A duty change mid-period takes effect within the
   period without a second on-phase or a skipped off-phase. A CPU-only duty cycle keeps its own
   phase. A device is time-sliced when it is neither under MPS (an MPS
   control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
@@ -1538,16 +1572,23 @@ node reports with the expected per-resource values at each step.
   know. Features unsupported by either peer MUST stay off.
 - **FR-033**: Recorded snapshots and policy inputs from 0.2 MUST remain replayable.
 - **FR-034**: Scale-up timing MUST be configured per resource and counted from the time that
-  resource became stable. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
+  resource became stable. In Yield First a change that forms a principal restarts that count, as
+  in the other modes, but the owner's unmanaged processes do not, nor does any user's external
+  change that forms no principal: one that stays under `principal_min_percent` or ends within
+  `principal_window_intervals`. Such a change still counts in its share and may hold admission
+  while it lasts, but the count keeps running. Yield First's give-back to other principals is
+  unchanged. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
   interval: 30 s in Yield First, 10 s in Neutral, and in Performance one monitor interval for CPU
   and GPU compute but 2 s for RAM and GPU memory. GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
   set legacy `gpu.scale_up_cooldown_ms`, else the mode's interval, per device. RAM and GPU
   memory add the reclaim backoff (FR-061). Each resource's admission opens on its own cooldown.
-  For CPU admission, running opportunistic work is charged at its p95 usage, measured over the
-  window of FR-073, over `contention.cpu.admission_usage_window_s` (default 60 s) once it has a
-  full window of samples,
-  and at max(request, observed) before that, so work in its startup phase is never
-  under-charged. While a CPU step holds it back (a pause, or a cap or hint whose target its usage
+  For CPU admission, running opportunistic work is charged, once it has a full window of samples
+  over `contention.cpu.admission_usage_window_s` (default 60 s), measured over the window of
+  FR-073, at its mean usage while no other principal is active on CPU, and at its p95 usage from
+  the interval one appears. Before a full window it is charged at max(request, observed), so work
+  in its startup phase is never under-charged. An over-admission while alone can only cost own
+  work: its burst raises `own_over_target` on own tasks, and running tasks are never drained
+  because of it. While a CPU step holds it back (a pause, or a cap or hint whose target its usage
   reaches) it is charged at the larger of its request and its p95 usage from before the step,
   with no credit, so usage a cap holds back never becomes admission room; that charge closes
   admission but does not count as own usage beyond the budget. Pending work is charged in full, Guaranteed work at max(request, observed), and

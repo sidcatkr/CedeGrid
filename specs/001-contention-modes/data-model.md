@@ -542,3 +542,13 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   the time the duty path caps own work, and d0' = (d0 − w) ÷ (1 − w), clamped to [50, 1000], the
   duty's start and floor. `d0` stays the counts' base duty.
 
+## Item 049 additions
+
+- `Allocation.usage_unknown`: the name of the sampler's check that failed for this allocation this
+  interval (`first_interval`, `no_cpu_window`, `outside_cpu_window` and so on), or absent. The reason
+  `allocation_unknown_hold` names it. Not a wire field.
+- `PolicyState.cpu_window_external`: the last busy-window external estimate and when it was read;
+  used while the window refills, within this interval's bound of it, for at most one window.
+- `PolicyState` unattributed count per resource: consecutive intervals of unattributed usage at or
+  above `principal_min_percent`, for Yield First's cooldown.
+
