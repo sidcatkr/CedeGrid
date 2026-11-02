@@ -1140,3 +1140,15 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   shows there); ignoring short changes in admission too (admission may hold while they last, which
   is the safe side).
 
+## R58. How the coordinator knows a refusal at the barrier (item 049, T511)
+
+- **Decision**: from its own record: a preparation reached it, no lease ever went out
+  (`lease_sequence` 0), and no drain or cause is recorded. The receipt kind `authorization_refused`
+  leaves the attempt out of `counted_attempts`, and it adds no failure.
+- **Rationale**: a lease is the only way to the launch barrier's Authorized, so with none nothing ran,
+  which the coordinator knows without trusting a report. It needs no wire change. A grant whose reply
+  was lost still counts as an attempt, the safe side.
+- **Alternatives**: a new `YieldCause` from the agent (a wire change in three languages, for what the
+  coordinator already knows); any never-granted attempt, preparation or not (a launch that fails
+  before the barrier would requeue for ever). OOM's bound of 3 × `max_attempts` is not applied: FR-018
+  says a refusal uses no attempt, nothing ran, and the yield backoff paces the requeues.

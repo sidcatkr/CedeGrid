@@ -1932,8 +1932,8 @@ time-slice record gains w (per mille) and d0'.
 **Input**: spec Session 2026-11-03; FR-018, FR-021's clock sentence, FR-034's charge and cooldown
 text, the Principal term; `tasks.md` Phase 37; report 047's and 048's findings.
 
-**Technical Context**: Rust 1.88, no new dependency. No SDK or config change, and no wire change
-unless T511 needs a new cause value. The record gains text in a reason, not a field a client reads. Native reruns on the test host under the standing
+**Technical Context**: Rust 1.88, no new dependency. No SDK, config or wire change. The record gains
+text in a reason, not a field a client reads. Native reruns on the test host under the standing
 approval.
 
 **Done before this section**: T509 (an interval without a utilization reading clears the dwell's
@@ -1961,6 +1961,11 @@ principal appears; running tasks are never drained because of it.
   window. The last window estimate is kept in `PolicyState` and used while the window refills, under
   the same rule as the window: while this interval's estimate stays within its own bound of it, it
   applies; beyond that bound, growth applies at once. It ages out after one window.
+- *Found by the idle gate.* The estimate is carried through the unknown reading that reset the
+  window, which returned before carrying it. And idle ticks may run past the interval between the
+  reads' starts by this read's length, since a CPU's counter is read after the read begins; one tick
+  of rounding did not always cover that, and the reading went unknown for an interval. More idle than
+  the read's length explains stays unknown.
 
 **T519, Yield First's cooldown (R57)**. `cooldowns()` restarts stability when `cpu_safe` is false.
 In Yield First, `cpu_fits` going false from a change that forms no principal no longer restarts it:
@@ -2012,7 +2017,7 @@ Test first in `tests/coordinator.rs`.
 | II. No harm | T515's mean applies only with no other principal active, and p95 returns in the interval one appears. T519 leaves the ladder and SC-002 alone. Over-admission while alone costs own work only. |
 | III. Unknown is never free | T509 removes a rise on stale readings. An unreadable principal list keeps p95. The kept window estimate ages out, and growth beyond the bound applies at once. Unknown measurement still restarts the cooldown. |
 | IV. Pure policy | The new state is in `PolicyState`; no clock or file reads in `policy/`. T518's names come from telemetry as data. |
-| VII. Compatibility | No SDK or config change. T511 reuses the yield path's report; a new cause value, if one is needed, lands in all three languages with the fixture. |
+| VII. Compatibility | No SDK, config or wire change. T511 decides from the coordinator's own record, and its receipt kind is not a wire value. |
 
 Result: pass.
 
