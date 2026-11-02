@@ -3422,10 +3422,12 @@ mod tests {
                 .sample_with_descendants(std::slice::from_ref(&record), &[], &workers)
                 .unwrap()
         };
-        sample(&mut collector);
+        let (_, first) = sample(&mut collector);
+        assert_eq!(first[0].usage_unknown.as_deref(), Some("first_interval"));
         let (snapshot, allocations) = sample(&mut collector);
         leader.kill().unwrap();
         leader.wait().unwrap();
+        assert_eq!(allocations[0].usage_unknown, None);
         let observed = allocations[0].observed.clone().expect("a measured family");
         assert!(observed.cpu_millicores >= 2500, "{observed:?}");
         assert!(

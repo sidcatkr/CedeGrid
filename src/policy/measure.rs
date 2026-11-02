@@ -159,8 +159,12 @@ impl<'a> Interval<'a> {
                         self.unknown_new.add_checked(&charge)?;
                     }
                     self.unknown_allocations.insert(allocation.id.clone());
+                    let check = allocation
+                        .usage_unknown
+                        .as_deref()
+                        .map_or(String::new(), |check| format!(" ({check})"));
                     self.reasons.push(ReasonCode::new("allocation_unknown_hold", format!(
-                        "allocation {} has unknown managed usage; charged at max(request, last known), its step holds and affected admission is blocked",
+                        "allocation {} has unknown managed usage{check}; charged at max(request, last known), its step holds and affected admission is blocked",
                         allocation.id
                     )));
                 }
@@ -493,9 +497,25 @@ impl<'a> Interval<'a> {
             let bound = (busy - host_lower).saturating_add(own_upper.saturating_sub(own_lower));
             self.cpu_bound = bound;
             self.cpu_interval_external = Some(interval);
-            match window {
+            // A reset window is refilling, and this interval's estimate alone carries its wide
+            // bound, which is not external growth (FR-018): the last estimate stands, by the
+            // window's rule, for at most one window.
+            let window_ms = (crate::kernel::CPU_WINDOW_INTERVALS as u64)
+                .saturating_mul(self.config.monitor.interval_ms);
+            let kept = self
+                .prev
+                .cpu_window_external
+                .filter(|(_, at)| self.now.saturating_sub(*at) <= window_ms);
+            self.next.cpu_window_external = window.map(|window| (window, self.now)).or(kept);
+            match window.or(kept.map(|(estimate, _)| estimate)) {
                 Some(window) if window.abs_diff(interval) <= bound => window,
-                _ => interval,
+                _ => {
+                    // Real growth beyond the bound ends what was kept.
+                    if window.is_none() {
+                        self.next.cpu_window_external = None;
+                    }
+                    interval
+                }
             }
         };
         self.budget.cpu_millicores = self

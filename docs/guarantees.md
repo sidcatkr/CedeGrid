@@ -235,7 +235,10 @@ holds no process and its children are exactly those leaves, own CPU comes from t
 each carry one bound for the whole window: the window's external estimate sets the
 allowance, the targets, the admission budget and the p95 usage samples while this
 interval's estimate stays within its own bound of it, and an estimate beyond that bound,
-growth or fall, applies at once, so the 2-interval reclaim bound is unchanged.
+growth or fall, applies at once, so the 2-interval reclaim bound is unchanged. While a reset
+window refills, for at most one window, the last window's estimate stands by the same rule, so
+a measurement's wider bound does not read as external growth. When an own task's sample is
+missing, `allocation_unknown_hold`'s reason names the check that failed.
 
 CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
 the owner's side: it comes out of external usage and the owner's unmanaged usage, never

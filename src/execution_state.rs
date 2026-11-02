@@ -109,6 +109,7 @@ impl StateStore {
                 observed: None,
                 observed_upper: None,
                 observed_window_cpu: None,
+                usage_unknown: None,
                 modes: e.modes,
             })
             .collect())

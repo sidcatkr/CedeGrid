@@ -65,6 +65,7 @@ pub fn allocation(
         observed: observed_cpu.map(resources),
         observed_upper: None,
         observed_window_cpu: None,
+        usage_unknown: None,
         modes: Default::default(),
     }
 }
@@ -1219,6 +1220,7 @@ mod guaranteed_policy {
             observed: (phase != AllocationPhase::Pending).then_some(resources),
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: Default::default(),
         }
     }
@@ -2856,6 +2858,7 @@ mod ramp {
                 }),
                 observed_upper: None,
                 observed_window_cpu: None,
+                usage_unknown: None,
                 modes: BTreeMap::new(),
             };
             let input = PolicyInput {
@@ -2997,6 +3000,7 @@ mod hints {
                     observed: Some(resources),
                     observed_upper: None,
                     observed_window_cpu: None,
+                    usage_unknown: None,
                     modes: Default::default(),
                 }],
                 facts: BTreeMap::from([("worker".into(), facts)]),
@@ -3117,6 +3121,7 @@ mod ram_cap {
                 }),
                 observed_upper: None,
                 observed_window_cpu: None,
+                usage_unknown: None,
                 modes: Default::default(),
             }],
             facts: BTreeMap::from([("worker".into(), facts)]),
@@ -5160,6 +5165,7 @@ mod gpu_demand {
             observed: Some(resources),
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: mode
                 .map(|mode| {
                     BTreeMap::from([(cedegrid::contention::ResourceKind::GpuCompute, mode)])

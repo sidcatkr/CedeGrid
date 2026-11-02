@@ -2013,6 +2013,7 @@ mod operator_limits {
             observed: Some(resources(observed)),
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: Default::default(),
         }
     }

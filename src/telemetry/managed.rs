@@ -834,38 +834,46 @@ impl ManagedCollector {
                     })
                 });
             let mut window_cpu = None;
-            let bounds = (|| -> Option<(Resources, Resources)> {
-                let id = record.identity.as_ref()?;
-                if !verified.contains(&id.pid) || !self.handles.alive(id) {
-                    return None;
+            // Each check that can leave the allocation unmeasured names itself for the record
+            // (FR-018).
+            let bounds = (|| -> std::result::Result<(Resources, Resources), &'static str> {
+                let id = record.identity.as_ref().ok_or("no_identity")?;
+                if !verified.contains(&id.pid) {
+                    return Err("not_verified");
+                }
+                if !self.handles.alive(id) {
+                    return Err("not_alive");
                 }
                 if !process_scope_matches(id.pid, &snapshot, self.scoped_cpu) {
-                    return None;
+                    return Err("scope_changed");
                 }
-                let resident = self.resident_bytes(id.pid)?;
+                let resident = self.resident_bytes(id.pid).ok_or("resident_unreadable")?;
                 let Some(baseline) = baseline.clone() else {
                     self.previous.remove(&record.assignment_id);
                     self.window_baselines.remove(&record.assignment_id);
-                    return None;
+                    return Err("no_baseline");
                 };
                 let old = self
                     .previous
-                    .insert(record.assignment_id.clone(), baseline)?;
+                    .insert(record.assignment_id.clone(), baseline)
+                    .ok_or("first_interval")?;
                 if old.identity != *id {
                     self.window_baselines.remove(&record.assignment_id);
-                    return None;
+                    return Err("identity_changed");
                 }
-                let end = end?;
-                let end_at = end_at?;
-                let (delta, quantization) = cpu_delta(old.reading, end)?;
+                let end = end.ok_or("no_end_reading")?;
+                let end_at = end_at.ok_or("no_end_reading")?;
+                let (delta, quantization) =
+                    cpu_delta(old.reading, end).ok_or("counter_went_back")?;
                 let (cpu_millicores, divisor) = own_cpu_lower_bound(
                     delta,
                     old.at,
                     end_at,
-                    cpu_window?,
+                    cpu_window.ok_or("no_cpu_window")?,
                     quantization,
                     old.first,
-                )?;
+                )
+                .ok_or("outside_cpu_window")?;
                 // Own RAM: the leaf's anonymous and shared memory where the leaf was read with only
                 // own members, children it holds included, else the process's anonymous and shared
                 // pages; a child the leaf already counts adds none (TEL-2).
@@ -876,22 +884,21 @@ impl ManagedCollector {
                     0
                 } else {
                     match leaf_path(record).filter(|_| leaf_read) {
-                        Some(leaf) => leaf_memory_mib(leaf)?,
+                        Some(leaf) => leaf_memory_mib(leaf).ok_or("ram_unreadable")?,
                         None => match family_ram.get(&id.pid) {
                             Some(ram) => *ram,
-                            None => own_memory_mib(id.pid)?,
+                            None => own_memory_mib(id.pid).ok_or("ram_unreadable")?,
                         },
                     }
                 };
                 let gpu_memory_mib = self.collector.gpu_usage(id.pid, &record.resources);
                 // Upper bounds: the rate over the process's own interval plus
                 // quantization, and resident memory including shared pages.
-                let upper_cpu = cpu_usage_upper_bound(
-                    delta,
-                    end_at.checked_duration_since(old.at)?,
-                    quantization,
-                )?
-                .max(cpu_millicores);
+                let upper_cpu = end_at
+                    .checked_duration_since(old.at)
+                    .and_then(|interval| cpu_usage_upper_bound(delta, interval, quantization))
+                    .ok_or("outside_cpu_window")?
+                    .max(cpu_millicores);
                 let precise = end
                     .resolution_ns()
                     .map(|resolution| (resolution, old.reading.threads.max(end.threads)));
@@ -940,7 +947,7 @@ impl ManagedCollector {
                     ram_mib: resident.div_ceil(MIB).max(ram_mib),
                     gpu_memory_mib: gpu_memory_mib.clone(),
                 };
-                Some((
+                Ok((
                     Resources {
                         cpu_millicores,
                         ram_mib,
@@ -949,7 +956,8 @@ impl ManagedCollector {
                     upper,
                 ))
             })();
-            let (observed, observed_upper) = bounds.unzip();
+            let usage_unknown = bounds.as_ref().err().map(|check| (*check).to_owned());
+            let (observed, observed_upper) = bounds.ok().unzip();
             if let Some(baseline) = baseline {
                 let history = self
                     .window_baselines
@@ -1001,6 +1009,7 @@ impl ManagedCollector {
                 observed: if pending { None } else { observed },
                 observed_upper: if pending { None } else { observed_upper },
                 observed_window_cpu: if pending { None } else { window_cpu },
+                usage_unknown: if pending { None } else { usage_unknown },
                 modes: record.modes.clone(),
             });
         }

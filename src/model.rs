@@ -130,6 +130,9 @@ pub struct Allocation {
     /// CPU lower bound over the busy-time window, for the admission p95 (FR-073).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_window_cpu: Option<u64>,
+    /// The sampler's check that failed when `observed` is missing (FR-018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_unknown: Option<String>,
     /// Modes the job requested per resource; the node cap still applies (FR-030).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,

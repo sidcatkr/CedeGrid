@@ -195,6 +195,7 @@ fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
                 }),
                 observed_upper: None,
                 observed_window_cpu: None,
+                usage_unknown: None,
                 modes: BTreeMap::new(),
             };
             let input = PolicyInput {
@@ -484,6 +485,7 @@ fn doctor_shows_the_ram_cap_where_the_leaf_allows_it() {
             }),
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: BTreeMap::new(),
         }],
         facts: BTreeMap::from([(
@@ -541,6 +543,7 @@ fn every_code_the_policy_emits_is_in_the_catalog() {
         }),
         observed_upper: None,
         observed_window_cpu: None,
+        usage_unknown: None,
         modes: BTreeMap::from([(
             cedegrid::contention::ResourceKind::Cpu,
             ContentionMode::Performance,

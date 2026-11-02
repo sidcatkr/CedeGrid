@@ -432,6 +432,7 @@ fn allocation(
         observed,
         observed_upper: None,
         observed_window_cpu: None,
+        usage_unknown: None,
         modes: Default::default(),
     }
 }
@@ -6543,6 +6544,67 @@ mod measurement_window {
 
     fn external(decision: &Decision) -> Option<u64> {
         decision.resources[&ResourceKey::Cpu].external
+    }
+
+    /// A window that was reset is refilling: the per-interval estimate alone carries its wide
+    /// bound, which must not read as external growth. The last window's estimate stands, by the
+    /// window's own rule, for at most one window; growth beyond the bound applies at once
+    /// (FR-018, Principle III, item 049).
+    #[test]
+    fn a_refilling_window_keeps_the_last_estimate_within_the_per_interval_bound() {
+        let config = config();
+        let mut engine = PolicyEngine::new();
+        let windowed = reading((3080, 2990), 2950, Some(((2965, 2955), 2955)));
+        let first = engine
+            .evaluate(&config, &windowed, &input(2950, 3000), 0)
+            .unwrap();
+        assert_eq!(external(&first), Some(10));
+        // The window is gone; this interval still reads 130 m within its 140 m bound of 10 m.
+        let plain = reading((3080, 2990), 2950, None);
+        let refilling = engine
+            .evaluate(&config, &plain, &input(2950, 3000), 500)
+            .unwrap();
+        assert_eq!(external(&refilling), Some(10), "looseness is not growth");
+        // Growth beyond that bound applies at once, and the estimate it replaced is not used.
+        let grown = reading((3700, 3610), 2950, None);
+        let grew = engine
+            .evaluate(&config, &grown, &input(2950, 3000), 1000)
+            .unwrap();
+        assert_eq!(external(&grew), Some(750), "real growth applies at once");
+        // After one window with none, the per-interval estimate stands alone.
+        let later = engine
+            .evaluate(&config, &plain, &input(2950, 3000), 5000)
+            .unwrap();
+        assert_eq!(
+            external(&later),
+            Some(130),
+            "the kept estimate has aged out"
+        );
+    }
+
+    /// The record names the sampler's check that failed for an allocation (FR-018, item 049).
+    #[test]
+    fn an_unknown_allocation_names_the_failed_check() {
+        let mut task = allocation("a", AllocationPhase::Running, resources(250, 0, 0), None);
+        task.usage_unknown = Some("no_cpu_window".into());
+        let decision = PolicyEngine::new()
+            .evaluate(
+                &config(),
+                &snapshot(),
+                &PolicyInput {
+                    allocations: vec![task],
+                    facts: rootless(&["a"]),
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        let hold = decision
+            .reason_codes
+            .iter()
+            .find(|reason| reason.code == "allocation_unknown_hold")
+            .expect("the hold is recorded");
+        assert!(hold.text.contains("no_cpu_window"), "{}", hold.text);
     }
 
     #[test]

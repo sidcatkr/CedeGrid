@@ -1673,6 +1673,7 @@ mod agent_transport_tests {
             }),
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: Default::default(),
         };
         let used = allocation_charge(std::slice::from_ref(&allocation));
@@ -1786,6 +1787,7 @@ mod agent_transport_tests {
             observed: None,
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: Default::default(),
         }
     }
@@ -2289,6 +2291,7 @@ mod drain_tests {
             observed: None,
             observed_upper: None,
             observed_window_cpu: None,
+            usage_unknown: None,
             modes: BTreeMap::new(),
         };
         withhold_authorized_pending(&mut facts, std::slice::from_ref(&pending), |_| true);

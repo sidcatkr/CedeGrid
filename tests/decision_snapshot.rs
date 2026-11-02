@@ -359,6 +359,7 @@ fn sequence(seed: u64) -> usize {
                     observed: (!rng.chance(3)).then(|| resources(used.0, used.1, used.2)),
                     observed_upper: None,
                     observed_window_cpu: None,
+                    usage_unknown: None,
                     modes: job.modes.clone(),
                 })
                 .collect(),
