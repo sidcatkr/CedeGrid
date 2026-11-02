@@ -724,6 +724,75 @@ Gates:
   and with CedeGrid's own CPU stated apart. A miss changes no product code in item 047: report
   its cause from the decision records (`held_back`).
 
+## Item 048: native checks nobody had run at HEAD
+
+On the authorized test host only, never the shared host, with `batch-037`'s harness. Part B runs
+under the user's standing approval. Part C runs under the user's typed approval of 2026-11-02,
+which includes a real host-wide OOM caused by the second account. Neither part uses sudo,
+installs, system settings or swap changes.
+
+Runs that need no second account run from a host-side script under nohup, with no login during
+them. A login's processes are the test account's unmanaged usage, and they restart Yield First's
+admission cooldown.
+
+Runs with the second account start its allocator at once. The allocator waits for the harness's
+world-readable trigger file and grows memory only from the trigger's epoch. Before each run the
+host's other processes are counted per account, in the raw evidence only. After it come
+`/proc/vmstat` `oom_kill`, the kernel log where it is readable without sudo, and the leftover check.
+
+```sh
+# Part B
+bash $H/partb-048.sh <commit>    # B1 launch burst, then B2 Yield First on the idle GPU, three times
+#   B1 = CEDEGRID_TEST_LAUNCH_BURST=1 cargo test --locked --release --test launch_burst -- --ignored --nocapture
+#   B2 = $py tools/pressure_comparison.py --root $root --output <dir> --mode gpu --gpu-uuid <GPU-UUID> \
+#          --profile own-efficiency --contention-mode yield_first --execute
+bash $H/partbc-048.sh <commit> b gpufill-performance gpufill-yield_first leafoom   # B3, B5
+bash runs-037.sh <commit> <second account uid> b4                                  # B4
+# Part C
+bash $H/partbc-048.sh <commit> c1 ramfill-performance ramfill-yield_first           # C1
+bash runs-037.sh <commit> <second account uid> c2 c3 c4                            # C2, C3, C4
+#   each = $py $H/mem_048.py --repo $repo --run <ramfill|gpufill|reclaim|order|leafoom|oom> \
+#            --mode <mode> [--class guaranteed] [--sdk] [--peer-mib N] [--all-preferred] \
+#            [--trigger /tmp/cedegrid-048-<name>.json] --output <dir>
+```
+
+Gates:
+
+- **B1, the burst stop.** 150 light tasks in Performance, then a draining stop: an operator drain,
+  then TERM. A signal stop alone leaves running work to the next agent (FR-080). Every task is
+  drained or released, and no gap between observations exceeds 1 s. Report the drain's duration
+  and its longest gap, against the 4236 ms iteration at `fc5e330`.
+- **B2, Yield First on the idle GPU.** Three times: Yield First admits and finishes the probe while
+  nothing is busy on the device. Report the reason codes per interval.
+- **B3, SC-014's GPU memory fill.** Performance: own GPU memory within 1% of capacity minus the
+  floor. Yield First: within 1% of capacity minus the floor and its margin. Report the floor and
+  the device's other contexts.
+- **B4, the OOM order (FR-023).** A 3 GiB capacity. Own tasks of about 2 GiB in all sit beside
+  the second account's 1.5 GiB, with no memory pressure. In-share own tasks keep their launch
+  `oom_score_adj`, only the over-share tasks are at 1000, and a task back in share is lowered back.
+  Then the same with `ram.prefer_own_oom_victim`.
+- **B5, the own-leaf OOM (FR-076).** Full, with `cgroup.memory_max_mib = 256`. An own task asks
+  for 128 MiB and takes 512 MiB, past its leaf's limit. The leaf's `memory.events` `oom_kill`
+  counts. The gate: the node records the kill as specified, counts retries as FR-076 says, and
+  touches nothing outside the leaf.
+- **C1, SC-014's RAM fill.** Performance: own RAM within 1% of capacity minus the floor. Yield
+  First: within 1% of capacity minus the floor and its margin.
+- **C2, SC-012's reclaim.** After a Performance RAM fill the second account grows by 4 GiB. Own
+  work frees the room and the second account gets it. Bounds, from the breach to the floor
+  restored: opportunistic 10.5 s with a hint and 5.5 s without; Guaranteed 15.5 s.
+- **C3, a floor breach others cause.** The second account grows by 16 GiB. In Performance own
+  memory gives way only down to its fair share; in Neutral and Yield First the floor comes first.
+- **C4, a host-wide OOM the second account causes.** Own in-share tasks (Guaranteed, SDK) and one
+  over-share task launched last run in Performance. The second account then allocates until the
+  kernel's OOM killer acts. Gates:
+  - the in-share tasks are not the first victims;
+  - an in-share task that is killed got the save-progress signal before, its kill is classified
+    as caused by others, and it is requeued without using a retry;
+  - the over-share task is the own task the kernel prefers;
+  - CedeGrid takes no action on the second account's processes.
+
+  Report every process the OOM killer took.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
