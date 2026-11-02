@@ -256,6 +256,86 @@ principal's allowed CPUs.
   cross-cgroup contender. If no second account exists, creating one is a host change and needs
   the user's approval first.
 
+## Item 048: root refusal, install channel and contended-CPU placement (2026-11-02)
+
+Spec Session 2026-11-02 adds FR-057, FR-073 and FR-082 and SC-011 to SC-013. No product code
+changes in item 048; these land with the rest of 003 after 001 is merged and the user says to
+start.
+
+**Technical Context delta**: no new crate. The install script is POSIX `sh` and uses
+`sha256sum` or `shasum -a 256`, whichever the host has (research R16). The release workflow
+gains Linux binaries (x86_64 and aarch64, glibc 2.35 floor) with a `SHA256SUMS` file and the
+script as release assets. No wire, SDK, config or contract fixture change.
+
+**Root refusal (FR-082, SC-011, research R18)**:
+- `main.rs` reads the effective UID once, at the top of `main`, before the hidden
+  `__worker-gate` / `__assignment-supervisor` dispatch. A `geteuid` call starts no thread, so
+  the dispatch still runs before clap, Tokio, any thread and the launcher terminal handoff.
+- At UID 0 every command, the hidden ones included, prints one line to stderr (`--json`: the
+  contract's error object, code `ERR_CEDEGRID_ROOT`) and exits 3. The line says to run the same
+  command as the user, without `sudo`. Feature 005's broker will be the only exception.
+- Control level detection reads only the host's state: the user manager, delegation and the
+  authorized controls. It never reads `SUDO_*` variables, the install path or the binary's
+  owner. A test pins that the detection's inputs carry none of them.
+- The check is a pure function of the effective UID, unit-tested. A CI step on the Ubuntu
+  runner, whose user has passwordless `sudo`, runs every subcommand under `sudo -n` and expects
+  the line and exit 3.
+- `doctor` shows `✓ runs as a user other than root`. At UID 0 it refuses before any check runs.
+
+**Install channel (FR-073, SC-012, research R16)**:
+- `tools/install.sh` is published with each release, with its version written in at release
+  time, so the one-line command `curl -fsSL <release URL>/install.sh | sh` installs that
+  version.
+- It refuses at effective UID 0. It downloads the target's tarball and `SHA256SUMS` over HTTPS,
+  verifies the tarball's sha256 before unpacking, and on a mismatch stops with nothing
+  installed. It installs `cedegrid` into `~/.local/bin`, creating it if missing, and says so
+  when that directory is not on `PATH`.
+- Homebrew (a tap) and `cargo install --locked cedegrid` are documented after the script as
+  secondary channels.
+- The README leads with the script. The npm launcher packages keep working (FR-080) and move
+  below the script in the README.
+- The pip wheel stays SDK-only. A packaging test fails if the wheel's file list holds a
+  `cedegrid` binary.
+- The native check runs on a clean account (SC-012): an account with no earlier install. Using
+  an empty home under an existing account approximates it. Creating a new account is a host
+  change and needs the user's approval first (FR-053).
+
+**Contended-CPU placement (FR-057, SC-013, research R17)**:
+- Contended CPUs are found per CPU: host busy per CPU from `/proc/stat`, less own verified
+  threads' per-CPU use from their `stat` (`processor` and CPU times), with each contender's
+  `Cpus_allowed_list` from FR-056's scan. Unknown per-CPU use counts as contended
+  (Principle III).
+- Order:
+  1. When the ladder would cap own work on a contended CPU, the policy first asks for own work's
+     granted cores without that CPU. At the Tracked level the supervisor applies it through
+     FR-043's affinity lever under the thread-ID rule. At the Full level it sets `cpu.weight`
+     on own leaves, never above the default of 100 (Principle II), where `cpu.weight` is
+     authorized and the contender shares the delegated parent.
+  2. The duty cycle applies only when own usage still exceeds its target in the next interval.
+  3. Moving off never takes own work below its fair share in cores. Then the ladder steps as in
+     001.
+- Step churn: a CPU step on own work changes at most once per change in the contender's
+  measured load (001 SC-009). It holds while the contender's demand stays within the
+  measurement band.
+- Native gate (SC-013): report 029 run 4's shape again: 4 CPUs, Performance, the second account
+  saturating two of them 30 s on and 30 s off for 300 s. Own work runs beside it once with
+  CedeGrid and once as a fixed `taskset` allocation on the other two CPUs. It reports the
+  contender's p50 and p99 and own work's step changes. The p99 bound is the user's open
+  decision; the gate records the ratio until it is set.
+
+**Constitution Check (item 048)**:
+
+| Principle | How it complies |
+|---|---|
+| I. External processes untouchable | Placement changes affinity or `cpu.weight` only on own verified threads and leaves, under the thread-ID rule. Contenders' allowed CPUs and per-CPU use are only read. The install script touches only `~/.local/bin` and its own temporary files. |
+| II. No harm | Placement moves own work only and never below its fair share. `cpu.weight` is never raised above the default. The duty cycle stays the fallback, so own work still gives back what the mode requires. |
+| V. Rootless | Root is refused, and the control level comes from the host's state. The install needs no root and changes no host setting. |
+| VII. Compatibility | The npm CLI packages, the pip SDK, config files and the wire are unchanged. The refusal adds one exit-code use (3) and one error code. |
+| VIII. Public docs | The README leads with the script and stays generic, with no host names. |
+
+Result: pass. The p99 bound in SC-013 is the user's open decision (spec marker), and the gate
+records its ratio until it is set.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |

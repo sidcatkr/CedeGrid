@@ -237,3 +237,50 @@ verify every mechanism on the target kernels. The host check records what each f
 - **Alternatives**: treating pinned contenders like others (records them satisfied while they
   wait); stepping own work down globally until the pinned contender grows (gives away capacity
   on cores the contender cannot use).
+
+## R16. Install script verification
+
+- **Decision**: the release publishes per-target tarballs, `SHA256SUMS` and `install.sh` with its
+  version written in. The script refuses at UID 0, downloads over HTTPS, checks the tarball
+  against `SHA256SUMS` with `sha256sum`, or else `shasum -a 256`, before unpacking, and installs
+  into `~/.local/bin`. On a mismatch, a missing checksum or a missing tool it stops with nothing
+  installed.
+- **Rationale**: a pinned version and a checked hash make a reinstall reproducible. A user
+  directory needs no root (Principle V).
+- **Alternatives**:
+  - signatures (minisign, sigstore): stronger, but they need a key or tool on the host; a later
+    item may add them;
+  - an unpinned "latest" URL: a reinstall could change the version silently;
+  - installing into `/usr/local/bin`: needs root.
+- **Limit**: the script itself is trusted through HTTPS from the release. A user who wants more
+  can check it against `SHA256SUMS` first.
+
+## R17. Contended-CPU placement order
+
+- **Decision**: move own threads off a contended CPU before any duty cycle. At the Tracked
+  level this uses affinity. At the Full level it uses `cpu.weight` where it is authorized and
+  the contender shares the delegated parent. The duty cycle applies only when own usage still
+  exceeds its target afterwards. A CPU step changes at most once per change in the contender's
+  measured load.
+- **Rationale**: report 029 run 4 kept the other user's median within 0.02 ms beside duty-capped
+  own work, but its p99 grew from 0.356 ms to 3.33 ms with 188 step changes in 300 s. A duty
+  cycle shares the contended CPU's run queue in time slices; moving off leaves the contender's
+  CPU to it.
+- **Alternatives**:
+  - `cpuset.cpus` on own leaves at the Full level: the per-leaf form of affinity, where the
+    cpuset controller is delegated. FR-057 names `cpu.weight`, so this would need a spec change
+    and the user's decision.
+  - duty cycles alone with a longer period: fewer switches, but the contender still waits behind
+    own threads within each period.
+- **Limit**: `cpu.weight` orders own leaves only against their siblings. Against another user's
+  slice it does nothing, so at the Full level placement helps only same-parent contenders.
+  Cross-slice contention keeps 001's `cpu.max` step.
+
+## R18. Root refusal placement
+
+- **Decision**: one `geteuid` read at the top of `main`, before the hidden dispatch. The hidden
+  supervisor commands refuse too.
+- **Rationale**: the dispatch must come before clap, Tokio and any thread; a syscall starts none.
+  Refusing in the hidden commands keeps user code from running as root even if a parent did.
+- **Alternatives**: a check per subcommand (one can be missed); allowing `doctor` as root (it
+  would describe a level the user's own runs never get).

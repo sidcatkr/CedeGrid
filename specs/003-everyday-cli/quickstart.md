@@ -59,3 +59,23 @@ host; the rest run in CI.
    keeps waiting is not recorded as satisfied, and at the Tracked level own work moves off its
    cores, never below its fair share.
 3. Native: the "Pinned contender" and "Thread-ID calls" gates in `native-gates.md`.
+
+## 10. Root refusal (FR-082, SC-011)
+1. `cargo test --locked --test cli -- root_refusal`, then on a CI runner with passwordless
+   `sudo`: `sudo -n target/debug/cedegrid <command>` for every subcommand.
+2. Expect: one line on stderr saying to run the command as the user without `sudo`, exit 3, and
+   with `--json` the error object with `ERR_CEDEGRID_ROOT`. Nothing starts.
+
+## 11. Install script (FR-073, SC-012)
+1. Locally: run `tools/install.sh` against a local copy of the release assets, once as is and
+   once with one byte of the tarball changed.
+2. Expect: the first installs `~/.local/bin/cedegrid` at the pinned version, and the second
+   stops on the checksum with nothing installed. At UID 0 it refuses.
+3. Native: "Install on a clean account" in `native-gates.md`, then a first `cedegrid run`.
+
+## 12. Contended-CPU placement (FR-057, SC-013)
+1. `cargo test --locked --test contention -- contended_cpu_placement`.
+2. Expect: own work moves off the contended CPU before any duty cycle, stays at or above its fair
+   share, and changes step at most once per change in the contender's load.
+3. Native: "Contended-CPU placement" in `native-gates.md`, with the contender's p99 beside CedeGrid
+   against beside a fixed allocation. The bound is the user's open decision.

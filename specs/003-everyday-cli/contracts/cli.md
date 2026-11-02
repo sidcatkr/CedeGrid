@@ -4,6 +4,10 @@ Every command accepts `--json`. It then prints one JSON object (or one per line 
 and `top --json --follow`) and no other text on stdout. Errors go to stderr as
 `{"error": {"code": "...", "message": "..."}}` with a nonzero exit code.
 
+Every command, the hidden supervisor commands included, refuses at effective UID 0 (FR-082): one
+line on stderr saying to run the same command as the user without `sudo`, or with `--json` the
+error object with code `ERR_CEDEGRID_ROOT`, and exit 3.
+
 ## `cedegrid run [options] <script> [args...]` and `cedegrid run [options] -- <command...>`
 - Options: one flag per task-schema field ([task-schema.md](task-schema.md)), plus:
   - `--from-json <file>`: the existing job JSON; flags override its fields;
@@ -44,4 +48,5 @@ and `top --json --follow`) and no other text on stdout. Errors go to stderr as
 ## `cedegrid doctor`
 - One line per check: `✓` or `✗` (`[ok]` or `[fail]` with `NO_COLOR`), the check, and a fix hint
   on failure. Checks include the control level and its reason, per-user evidence availability,
-  and whether contenders can share the run's CPU cgroup.
+  whether contenders can share the run's CPU cgroup, and that it runs as a user other than root
+  (FR-082).

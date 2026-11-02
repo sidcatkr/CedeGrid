@@ -81,3 +81,28 @@ Floors, the node cap and margins cannot appear in a per-job entry; validation re
 | `delegated` | controllers | `cpu` and `memory` must be present. |
 | `contenders_share_cgroup` | `yes` \| `no` \| `unknown` | Decides whether SCHED_IDLE and autogroup apply. |
 | `forced_tracked` | bool | Test-only switch. |
+
+## Item 048 additions
+
+### Root refusal
+| Field | Type | Rules |
+|---|---|---|
+| `effective_uid` | u32 | Read once at the top of `main`. 0 refuses every command, the hidden ones included, with exit 3 and `ERR_CEDEGRID_ROOT`. |
+
+Control level detection takes no input from `SUDO_*` variables, the install path or the binary's
+owner.
+
+### Release assets (install channel)
+| Asset | Rules |
+|---|---|
+| `cedegrid-<version>-<target>.tar.gz` | One per Linux target (x86_64, aarch64; glibc 2.35 floor). |
+| `SHA256SUMS` | One line per tarball. The script refuses a tarball without a line. |
+| `install.sh` | Version written in at release time; refuses at UID 0; installs into `~/.local/bin`. |
+
+### Contended-CPU placement
+| Field | Type | Rules |
+|---|---|---|
+| `contended_cpus` | CPU set | Per-CPU host busy less own threads' per-CPU use, joined with contenders' `Cpus_allowed_list`; unknown counts as contended. |
+| `placement` | `none` \| `moved_off` \| `weight` | Tried before a duty cycle on a contended CPU. |
+| `duty_after_placement` | bool | True only when own usage still exceeds its target in the interval after placement. |
+| `step_changes` | count | At most one per change in the contender's measured load (001 SC-009). |
