@@ -1319,8 +1319,8 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
     let b = PolicyEngine::new()
         .evaluate(&config(), &snap, &second, 0)
         .unwrap();
-    // The pending reservation is cancelled by its charge; running work is capped by
-    // usage, the equal candidates in ID order.
+    // The pending reservation is cancelled by its charge; the equal running candidates share
+    // the excess at one level (FR-016).
     assert_eq!(a.would_drain, ["z"]);
     assert_eq!(a.actions, b.actions);
     let planned: std::collections::BTreeSet<_> = a
@@ -1333,7 +1333,8 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         planned,
         [
             ("z", YieldStep::Drain, None),
-            ("a", YieldStep::Cap, Some(2000))
+            ("a", YieldStep::Cap, Some(2500)),
+            ("b", YieldStep::Cap, Some(2500))
         ]
         .into()
     );

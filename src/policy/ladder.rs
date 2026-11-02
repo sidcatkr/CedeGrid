@@ -758,7 +758,7 @@ impl<'a> Interval<'a> {
         // Running CPU yields tier by tier (FR-016). Within a tier, caps already held are lowered
         // at one level, as they rise equally (FR-013), and own usage over its target is shared
         // the same way (FR-011), so no single cap falls to the minimum duty and escalates; new
-        // victims follow the cost order for what remains.
+        // victims then share what remains by usage, at one level, so none is capped to 0 for it.
         if !pending_pass && kind == ResourceKind::Cpu {
             let own_cause = frame.cause == YieldCause::OwnOverTarget;
             let held = |v: &VictimFacts| {
@@ -773,25 +773,21 @@ impl<'a> Interval<'a> {
             let mut tiers = Vec::new();
             while let Some(first) = rest.first() {
                 let len = rest.iter().take_while(|v| tier(v) == tier(first)).count();
-                let (level_group, ordered): (Vec<VictimFacts>, Vec<VictimFacts>) = rest[..len]
+                let (held, new): (Vec<VictimFacts>, Vec<VictimFacts>) = rest[..len]
                     .iter()
                     .cloned()
                     .partition(|v| own_cause || held(v));
-                tiers.push((level_group, ordered));
+                tiers.push((held, new));
                 rest = &rest[len..];
             }
-            for (level_group, ordered) in tiers {
-                let total: u64 = level_group.iter().map(|v| v.amount).sum();
-                let level = fill_level(&level_group, remaining.min(total));
-                for victim in level_group {
+            for group in tiers.into_iter().flat_map(|(held, new)| [held, new]) {
+                let total: u64 = group.iter().map(|v| v.amount).sum();
+                let level = fill_level(&group, remaining.min(total));
+                for victim in group {
                     let mut share = victim.amount.saturating_sub(level);
                     remaining = remaining.saturating_sub(share);
                     planned.insert(victim.id.clone());
                     self.plan_victim(frame, victim, pending_pass, &mut share);
-                }
-                for victim in ordered {
-                    planned.insert(victim.id.clone());
-                    self.plan_victim(frame, victim, pending_pass, &mut remaining);
                 }
             }
             return;

@@ -130,8 +130,8 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   (research R26). Each process now counts once. Earlier native results that read principal
   usage, such as T178's contender share and SC-015, ran with the old count.
 - **Victims of an excess.** Caps already held give a contended CPU excess between them at one
-  level within their tier, and own usage over its target is shared the same way; a new victim
-  is still capped by the whole excess left, in cost order, and a cap to zero becomes a pause.
+  level within their tier, and own usage over its target is shared the same way; new victims
+  then share what is left by usage, at one level, so none is capped to zero for it (item 049).
 - **Launch bursts.** A node renews each running assignment's lease every heartbeat (2 s by
   default). Each renewal is a synced coordinator write, about 9 ms on the test host. Without
   lease batches, renewals share half of each monitor interval, so one node keeps about 117

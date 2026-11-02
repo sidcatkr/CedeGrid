@@ -238,7 +238,8 @@ back more.
   target is shared the same way, so no single cap falls to the minimum duty and escalates. A
   lowered cap counts what it frees, so held caps give an increase once between them rather than
   each the whole increase. New victims, with no cap held yet, are still chosen in FR-016's cost
-  order, each capped by the whole excess left (reviewer decision D3 A on report 027-1).
+  order, each capped by the whole excess left (reviewer decision D3 A on report 027-1; Session
+  2026-11-03 has them share it).
 - Q: How does a satisfied principal count while the resource is saturated? → A: A principal whose
   demand is on record as satisfied but who uses less than that demand by more than the contention
   floor counts at the recorded demand in own work's allowance, so a recorded contender that comes
@@ -647,6 +648,11 @@ back more.
 - Q: What do the aligned duty phases assume about clocks? → A: That every supervisor shares the
   agent's `CLOCK_MONOTONIC` time namespace, which holds today, since supervisors are the agent's
   children (item 049, T516).
+- Q: How do new victims of a contended CPU excess share it? → A: By usage within their tier, at one
+  level, as caps already held do: no new victim is capped by the whole excess left, so a cap to 0
+  no longer becomes a pause for its sake. Caps already held in a tier still yield first, and the
+  cost order still picks the tiers. Memory victims keep their order, each capped by the excess
+  left (item 049, T512).
 
 ## Terms
 
@@ -1208,8 +1214,10 @@ node reports with the expected per-resource values at each step.
   4. least progress lost since the last checkpoint
   5. best fit to the amount that must be freed
 
-  Remaining ties MUST break deterministically. This order chooses new victims, each capped by the
-  whole excess left; within a tier, caps already held yield first, at one level (FR-011). Once
+  Remaining ties MUST break deterministically. This order picks the tiers. Within a CPU tier, caps
+  already held yield first, at one level (FR-011), then new victims share what is left by usage,
+  at one level, so a cap to 0 does not become a pause for its sake. Memory victims follow this
+  order, each capped by the excess left. Once
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.

@@ -9,7 +9,6 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 | Source | What | Target | Blocks |
 |---|---|---|---|
 | 026 Decision 5 (A, the first step after the merge) | A refusal at the authorization barrier uses up one of the task's attempts. FR-018 should say such a refusal is not the task's failure, so a replay-safe task is requeued without using an attempt. | 001, after the merge | nothing; a task with `max_attempts = 1` ends in `needs_reconciliation` |
-| 024 Decision 2(c) | A new victim of a contended excess is still capped by the whole excess left, and a cap to 0 becomes a pause; split the excess across victims by usage. Since item 027 caps already held share it at one level within their tier. | 001, after the merge | nothing |
 | 024 Decision 3 (A, after the merge, its own item) | SC-014 attribution: supervisor CPU attributed to its allocation, and the 173 m gap, which is not yet explained. Item 027 measures CedeGrid's CPU apart and dropped the read-pass term. | 001, after the merge | nothing |
 | 024 Decision 5 (research after the merge) | Whether a listed GPU process with no samples and no memory change over the quiet window can count as quiet, without making unknown telemetry free. | new | nothing |
 | 027 Decision 2 B (029 Part 0h-2) | Tighten the window's busy bound with per-CPU nanoseconds from `/proc/schedstat`, then rerun report 027's 4-CPU idle run. | 001, after the merge | nothing |
@@ -85,6 +84,7 @@ item 031.
 
 | Source | Where |
 |---|---|
+| 024 Decision 2(c): new victims of a contended CPU excess share it by usage at one level | item 049 (T512), FR-016 |
 | 027 Decision 5 B: charge running work at its mean while no other principal is active, at its p95 once one is | item 049 (T515), decided apart from any change to the modes |
 | 045 note: the re-measure window's 3 s at full duty raised the held duty 0.015–0.04 above d0 | item 046: d0' = (d0 − w) ÷ (1 − w); the held duty fell to 0.754 against d0 0.75, and the rest is 004 T049 |
 | 028: Full's GPU share, natively | item 047, Performance beside the saturating user (`docs/validation.md`, "Item 047") |

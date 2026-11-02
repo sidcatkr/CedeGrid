@@ -4495,6 +4495,121 @@ mod cap_rises {
 /// CPU returns at once once contention has fully ended (FR-034, item 027 Part 5b): own work
 /// of 16 tasks of 250 m on 4000 m beside a contender of another user. The simulated host
 /// splits CPU by threads, weighted max-min, and honours the caps the policy applies.
+/// New victims of a contended CPU excess share it by usage within their tier, at one level, as
+/// caps already held do (FR-016).
+mod new_victims {
+    use super::*;
+    use crate::snapshot::PolicyEngine;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    const CAPACITY: u64 = 4000;
+    const INTERVAL: u64 = 500;
+
+    /// Tasks with `usage` alone on 4 CPUs, then beside `external` from 5 s on, the caps not yet
+    /// taking effect: each task's step and target 2 s after that.
+    fn steps(
+        mode: ContentionMode,
+        usage: &[u64],
+        external: u64,
+    ) -> BTreeMap<String, (YieldStep, Option<u64>)> {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        let mut engine = PolicyEngine::new();
+        let ids: Vec<String> = (0..usage.len()).map(|i| format!("t{i}")).collect();
+        let own: u64 = usage.iter().sum();
+        let mut last = BTreeMap::new();
+        for tick in 0..=14 {
+            let now = tick * INTERVAL;
+            let beside = if now >= 5000 { external } else { 0 };
+            let mut snap = snapshot(own + beside);
+            snap.cpu_capacity_millicores = CAPACITY;
+            snap.physical_cores = Some(4);
+            let input = PolicyInput {
+                allocations: ids
+                    .iter()
+                    .zip(usage)
+                    .map(|(id, used)| {
+                        allocation(id, AllocationClass::Opportunistic, 250, Some(*used))
+                    })
+                    .collect(),
+                facts: ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            AllocationFacts {
+                                unavailable: BTreeMap::from([(
+                                    ResourceKey::Cpu,
+                                    [YieldStep::LowerShare].into(),
+                                )]),
+                                ..AllocationFacts::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            last = decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Cpu)
+                .map(|a| (a.allocation_id.clone(), (a.step, a.target)))
+                .collect();
+        }
+        last
+    }
+
+    #[test]
+    fn equal_tasks_share_the_excess_at_one_level() {
+        // 3200m beside 800m on a saturated host, over the 2000m fair share by 1200m: 300m each.
+        // Capped by the whole excess left, the first would be paused and the second capped to 400m.
+        let steps = steps(ContentionMode::Neutral, &[800; 4], 800);
+        assert_eq!(steps.len(), 4, "{steps:?}");
+        for (id, (step, target)) in &steps {
+            assert_eq!(*step, YieldStep::Cap, "{id}: {steps:?}");
+            assert!(
+                target.unwrap().abs_diff(500) <= 1,
+                "{id} keeps its share: {steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_new_victim_is_paused_for_an_excess_the_others_can_give() {
+        // 800m beside 2800m, over Yield First's 600m target by 200m. Capped by the whole excess,
+        // the first task would be capped to 0, which becomes a pause.
+        let steps = steps(ContentionMode::YieldFirst, &[200; 4], 2800);
+        assert_eq!(steps.len(), 4, "{steps:?}");
+        for (id, (step, target)) in &steps {
+            assert_eq!(*step, YieldStep::Cap, "{id}: {steps:?}");
+            assert!(
+                target.unwrap().abs_diff(150) <= 1,
+                "{id} keeps its share: {steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_below_the_level_keeps_what_it_uses() {
+        // 2400m beside 1600m on a saturated host, over the 2000m fair share by 400m: the two
+        // large tasks give it between them, down to 900m each, and the two small ones hold no
+        // step.
+        let steps = steps(ContentionMode::Neutral, &[1100, 1100, 100, 100], 1600);
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        for (id, (step, target)) in &steps {
+            assert!(["t0", "t1"].contains(&id.as_str()), "{steps:?}");
+            assert_eq!(*step, YieldStep::Cap, "{steps:?}");
+            assert!(target.unwrap().abs_diff(900) <= 1, "{steps:?}");
+        }
+    }
+}
+
 mod contention_ended {
     use super::*;
     use crate::snapshot::PolicyEngine;
