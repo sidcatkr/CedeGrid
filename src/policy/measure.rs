@@ -1771,14 +1771,16 @@ impl<'a> Interval<'a> {
         let dwell = thresholds.min_step_dwell_intervals.max(1);
         let dwell_ms = u64::from(dwell).saturating_mul(config.monitor.interval_ms);
         let mut step = SliceStep::Holding;
-        // A re-measure window's uncapped intervals say nothing about the duty.
-        if demand.window.is_some() {
-            state.utilization.clear();
-        } else if let Some(busy) = gpu.utilization_percent {
-            state.utilization.push_back(busy.min(100));
-            while state.utilization.len() > dwell as usize {
-                state.utilization.pop_front();
+        // A re-measure window's uncapped intervals say nothing about the duty, and an interval
+        // without a reading leaves the older ones no longer fresh: a whole new dwell follows.
+        match gpu.utilization_percent.filter(|_| demand.window.is_none()) {
+            Some(busy) => {
+                state.utilization.push_back(busy.min(100));
+                while state.utilization.len() > dwell as usize {
+                    state.utilization.pop_front();
+                }
             }
+            None => state.utilization.clear(),
         }
         // The dwell's average in per mille, rounded, so one reading's dip is not a whole percent
         // of spare time (Q35).

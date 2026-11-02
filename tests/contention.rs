@@ -7196,6 +7196,56 @@ mod gpu_demand {
             }
         }
 
+        /// Stale readings never raise the duty: where the scale-up interval is longer than the
+        /// dwell the window fills first, and when readings stop before the rise is due, the
+        /// readings left in it are not fresh evidence (Principle III, FR-021). They resume with a
+        /// whole new dwell.
+        #[test]
+        fn the_duty_does_not_rise_on_readings_older_than_the_interval() {
+            let config = mode_config(ContentionMode::Neutral);
+            let run = |gap: Option<(u64, u64)>| {
+                // The other user's alone part comes first, 60 snapshots, with its readings.
+                let calls = std::cell::Cell::new(0u64);
+                tick_loop_with(
+                    &config,
+                    &|_| 2,
+                    &|_| vec![(PEER, 1, 400)],
+                    200,
+                    &|_, snap: &mut Snapshot| {
+                        let i = calls.get();
+                        calls.set(i + 1);
+                        if let Some((from, to)) = gap
+                            && (60 + from..60 + to).contains(&i)
+                        {
+                            snap.gpus[0].utilization_percent = None;
+                        }
+                    },
+                )
+            };
+            let rises = |ticks: &[Tick]| -> Vec<u64> {
+                ticks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| slice_of(&t.decision).step == Some(SliceStep::Rising))
+                    .map(|(i, _)| i as u64)
+                    .collect()
+            };
+            let first = rises(&run(None))[0];
+            assert!(first > 4, "the first rise comes after the dwell: {first}");
+            // Readings stop two intervals before that rise, with the window already full.
+            let silent = (first - 2, first + 60);
+            let ticks = run(Some(silent));
+            let again = rises(&ticks);
+            assert!(
+                again.iter().all(|i| !(silent.0..silent.1).contains(i)),
+                "the duty rose without a reading: rises at {again:?}, no readings in {silent:?}"
+            );
+            assert!(
+                again.iter().any(|i| *i >= silent.1),
+                "the rises resume once readings do: {again:?}"
+            );
+        }
+
         /// Beside a partial context that wants 40%, more than its slice: slice-bound, so the duty
         /// starts at d0 and steps up while the device idles beyond the margin, until own work
         /// holds the device less that user and the margin, and the user keeps its 400 (FR-021,
