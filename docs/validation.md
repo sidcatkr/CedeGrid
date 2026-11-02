@@ -49,21 +49,30 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - useful work from two nodes
   - loss and rejoin of a node
   - checkpoint transfer between nodes
-- **GPU.** Verified on one consumer device only (see
+- **GPU.** Verified on one consumer device only, with no MPS or MIG (see
   [Native gate results](#native-gate-results-feature-001)). Other devices and drivers are not
-  verified. An interval that lists only own verified processes is measured, but on the test
-  host the display manager always lists a GPU process, so a short GPU job in Neutral ran
-  capped at half the device for about 10 s after it started. Since item 027 an idle context of
-  a user ID below `uid_min` is background while per-process utilization is readable. On the
-  test host per-process utilization is readable, but the greeter runs under a user ID at or above
-  `uid_min`, so its context still counts and GPU activity stays unknown. Since item 028 a
-  delegated cgroup gives own GPU work the same compute share as the rootless backend, with a
-  leaf freeze for the off phase where `cgroup.freeze` is authorized; before, it paused instead.
-  Tested with fixture leaves only; the native GPU confirmation goes with the next approved native
-  batch. The GPU attribution tolerance stays 15 points until a second device is measured;
-  the first device's largest gap was 5.
+  verified. On that device, where own work and another user's busy context share the device in
+  time slices, own work holds the time-slice duty, and T456's gates pass in Performance and
+  Neutral beside a saturating user and in Performance beside a light one. Tracked's duty stops
+  and resumes own processes; Full's freezes each own leaf through `cgroup.freeze`. Full ran only
+  Performance beside the saturating user, at item 047 (see
+  [Item 047: SC-014's fill and Full's GPU path](#item-047-sc-014s-fill-and-fulls-gpu-path)).
+  A zero GPU compute margin, Aggressive's GPU behavior, leaves the saturating user 0.3–6.5
+  requests a second short of half its rate alone. For feature 001 that is a record, not a gate.
+  Since item 027 an idle context of a user ID below `uid_min` is background while per-process
+  utilization is readable. The test host's greeter runs at or above `uid_min`, and at item 029
+  its idle graphics context held Yield First's admission on
+  `gpu_yield_first_activity_unknown`; that path has not run since. The GPU attribution tolerance
+  stays 15 points until a second device is measured; the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
+- **Memory.** No native result exists at HEAD for:
+  - SC-014's RAM and GPU memory fill;
+  - SC-012's memory reclaim bounds;
+  - a floor breach in which Performance gives way only down to its memory fair share;
+  - OOM protection of own work when another user causes the OOM.
+- **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
+  MIG. It has never run on the shared host.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
   compute. A one-core contender started mid-ramp under a second unprivileged account reaches
   0.9 core 2–3 s after it starts, pinned to one scope CPU or not, and holds a median of
@@ -78,15 +87,16 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   accounts for has stayed below `principal_min_percent` for `principal_window_intervals`. The
   8-interval window keeps that estimate up for about 4 s, so on the test host own work was back
   at its uncontended target 7.5 s after the contender stopped.
-- **Idle utilization.** At item 027's commit, on 14 CPUs with 100 m tasks, own tasks reach
-  97.4% of capacity in Performance (98.2% with CedeGrid), 92.3% in Neutral (92.9%) and 81.8% in
-  Yield First (82.4%), against SC-014's 97%, 94% and 84%; on 4 CPUs Performance reaches 97.1%
-  with CedeGrid. The bound on own measurement now takes 16–35 m and CedeGrid 77–104 m. In
-  Neutral and Yield First, admission charges each running task at its p95 usage (FR-034), and
-  the steady tasks' p95 is above their mean, so the charges fill the share while the tasks' mean
-  use stays 242 m and 304 m below the target (`held_back` reports it as `charge_shortfall`); the
-  external estimate, mostly its measurement band, takes another 88 m and 155 m. Before item 027
-  the same scope reached 91.4%, 87.0% and 73.0% (see
+- **Idle utilization.** At item 047's commit, on 14 CPUs with 100 m tasks, own tasks reach
+  96.8% of capacity in Performance (97.6% with CedeGrid), 92.3% in Neutral (93.1%) and 82.7% in
+  Yield First (83.3%), against SC-014's 97%, 94% and 84%. In Neutral and Yield First, admission
+  charges each running task at its p95 usage (FR-034), and the steady tasks' p95 is above their
+  mean, so the charges fill the share 696 m and 609 m above the tasks' use (`held_back` reports it
+  as `charge_shortfall`); charged at their use, own tasks plus CedeGrid would reach 94.3% and
+  84.1%. On 4 CPUs Performance reached 97.1% with CedeGrid at item 027. Item 027 measured
+  92.3% and 81.8% with the same cause, and before it the same scope
+  reached 91.4%, 87.0% and 73.0% (see
+  [Item 047](#item-047-sc-014s-fill-and-fulls-gpu-path) and
   [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
 - **CedeGrid's own cost.** SC-014 counts own tasks plus CedeGrid with a 1% bound for CedeGrid
   at 117 tasks on 14 CPUs (140 m). In the Docker Linux check (6 CPUs, 117 light tasks, release
@@ -517,6 +527,49 @@ of its half by throughput, against 0.98 of its third without CedeGrid.
 
 For feature 001 a zero margin stays a record, not a gate; measuring the duty's switch cost, and
 folding it into d0 if it is CedeGrid's, goes to feature 004's backlog before Aggressive ships.
+
+### Item 047: SC-014's fill and Full's GPU path
+
+Run on 2026-11-02 on the same test host with the code of `a7f472e` (the build of `23e386e`, whose
+Rust code is the same), with the commands under "Item 047" in
+`specs/001-contention-modes/native-gates.md`. No test process of either account was left before
+the first run or after any run.
+
+**Full's GPU path.** The agent records of items 044 and 046 show that every T456 run there ran
+Tracked (`cgroup.enabled = false`), so the leaf freeze had run with fixture leaves only. This run
+put the agent in a delegated user scope with an empty delegated root and `cgroup.freeze`
+authorized: two own probe processes, each its own job with 512 MiB, submitted 40 s before each
+managed window. The harness read each probe's leaf `cgroup.events` `frozen` and its `/proc`
+state about every 10 ms. The first attempt lost the other user's latencies when the harness's
+connection to the host dropped; it ran once more.
+
+| Run | Values | Result |
+|---|---|---|
+| Performance in Full, beside the saturating user | Pair alone 1496 units/s; without CedeGrid 0.657 of it, the other user 510 (0.33 of its 1567 alone). With it: own work 0.480 and 0.470 (bound 0.45); the other user 790.6 and 791.0 (bound 494.4; ½ × alone × 0.97 = 760.2). Both windows pass 042's checks (overlap 39.8 s, m = 2 in 74 and 76 decisions, inside the other user's load), no pause, no step; d0 720, w 91, d0' 692 in every duty decision. Each probe ran in its own leaf under the delegated root; the off phase was the leaf freeze alone (frozen 0.275 and 0.282 of the time, `/proc` stopped 0), the probes' off phases overlapped 0.993 and 0.996, the duty held 0.725 and 0.718, and own work's share matched 2 × the duty held ÷ 3 within 0.009. No leaf was left | passes |
+
+**SC-014 at HEAD.** Report 027's run 3: 14 CPUs, 100 m tasks, the steady loop. Performance is
+the control; Neutral and Yield First get warm-ups long enough for one-worker growth. CedeGrid's
+own processes are stated apart. The counted runs ran from a host-side script with no login to the
+host during them.
+
+A first batch polled the host every 30 s. Each login's processes counted as the test account's
+unmanaged usage, about 300 m for an interval, and in Yield First each one restarted the admission
+cooldown, so it admitted one task. Run again, the harness's stability windows (25 s and 75 s) then
+ended Neutral's and Yield First's warm-ups at 8 tasks and 1 task. The counted Neutral and Yield
+First runs waited 300 s and 600 s of unchanged admission; Yield First's warm-up reached its
+4800 s cap, 300 s after its last admission.
+
+| Run | Values | Result |
+|---|---|---|
+| SC-014, Performance | 128 tasks, all admitted after 14 s; own tasks 96.8% and 96.7% of capacity in two runs, 97.6% and 97.5% with CedeGrid's 111 m and 109 m (0.8%); the share was capacity less the 2% margin, CedeGrid and the external estimate (59 m); no step | pass |
+| SC-014, Neutral | 121 tasks, all admitted after 24 min; own tasks 92.3% of capacity, 93.1% with CedeGrid's 110 m; target share 13095 m against own use of 12921 m, with the charges above usage (`charge_shortfall`) 696 m at the median, so no further task fits; no step | fail (94%) |
+| SC-014, Yield First | 109 tasks, the last admitted after 75 min; own tasks 82.7% of capacity, 83.3% with CedeGrid's 93 m; target share 11676 m against own use of 11549 m, `charge_shortfall` 609 m; no step | fail (84%) |
+
+Item 027 measured 92.3% and 81.8% of capacity (92.9% and 82.4% with CedeGrid) with the same cause.
+Charged at their usage, own tasks plus CedeGrid would fill each share to 94.3% and 84.1%. During
+the warm-ups admission was open in 81% and 70% of the decisions and cooling down in the rest. An
+own task's measurement went unknown in 0.1% and 0.8% of them, mostly while Yield First ran its
+first tasks, and each time the external estimate rose by about 250 m for an interval.
 
 ### Own-work ratios in the protection runs
 

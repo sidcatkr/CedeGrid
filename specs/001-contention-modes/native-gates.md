@@ -689,6 +689,41 @@ Gates, per valid managed window (042's three checks):
 Report per window the duty held, d0, w and d0', and the steps. A failed gate changes no product
 code in that item.
 
+## Item 047: SC-014's fill at HEAD and Full's GPU path
+
+Runs once on the authorized test host after `047.taken`, under the user's standing approval and
+the same host rules, with `batch-037`'s harness. `full-047.sh` runs a harness script inside a
+delegated user scope: the shell joins a leaf of its own, and the agent gets an empty delegated
+root with `cgroup.procs`, `cpu.weight`, `cpu.max` and `cgroup.freeze` authorized.
+
+```sh
+# Full: Performance, two own probe processes beside the saturating user; the harness reads each
+# probe's leaf cgroup.events `frozen` and its /proc state about every 10 ms, read only.
+bash runs-037.sh <commit> <second account uid> twofull
+#   = systemd-run --user --scope -p Delegate=yes --quiet --unit cedegrid-047-<n> \
+#       bash $H/full-047.sh $repo same_gpu_029.py --mode performance --load saturating \
+#       --processes 2 --gpu-mib 512 --peer-uid <uid> --gpu-uuid <GPU-UUID> --output <dir>
+# SC-014: report 027's run 3, 14 CPUs, 100 m tasks, steady loop; Performance as the control.
+# Run on the host itself under nohup, with no login to the host until it ends: a login's
+# processes are the test account's unmanaged usage and restart Yield First's admission cooldown.
+nohup bash $H/sc014-quiet-047.sh <commit> \
+  "performance:1200:0 neutral:2400:300 yield_first:4800:600" > <log> 2>&1 &
+#   each = $py $H/sc014_015.py --repo $repo --root $root --mode <mode> --cpus 14 \
+#       --task-millicores 100 --seconds 90 --external-millicores 0 --warmup-max <s> \
+#       --stable-seconds <s> --task-loop steady
+# Each window's decision records, read only: $py $H/sc014_held_047.py x <run> ... (WARMUP=1 for
+# the warm-up).
+```
+
+Gates:
+
+- Full: T456's gates per valid managed window (042's three checks): own work by SC-017 at 480,
+  the saturating user at least ½ × its rate alone × 0.97. Report the duty held, the off-phase
+  overlap, the frozen and `/proc`-stopped shares, and the leaves left after the run.
+- SC-014: own tasks at least 97%, 94% and 84% of capacity in Performance, Neutral and Yield First,
+  and with CedeGrid's own CPU stated apart. A miss changes no product code in item 047: report
+  its cause from the decision records (`held_back`).
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
