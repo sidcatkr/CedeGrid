@@ -103,6 +103,8 @@ the support boundary. In short:
   interpolation. Jobs, RPC and metadata stay JSON.
 - Wire, worker-context and numeric changes land in Rust, Python and TypeScript together, with
   the contract fixture.
+- Platform: use the newest kernel features when present, detected at run time with a fallback;
+  the floor stays glibc 2.35 / kernel 5.15.
 - Dependencies: add one only with a written justification. Code must build on Rust 1.88.
   `tools/` uses only the standard library plus the in-repo SDK, on Python 3.10.
 - Comments: short and factual. Explain why, not what. Keep each decision reason and error

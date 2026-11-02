@@ -28,6 +28,7 @@ dist/
 /docs/work-log.md
 /.distributed-service-*/
 /.launch-burst-*/
+/.tmp*/
 
 # SDK build dependencies and package archives.
 /npm/node_modules/
