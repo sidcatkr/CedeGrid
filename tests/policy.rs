@@ -3242,6 +3242,89 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
     assert_eq!(headroom(500, now), 5500 - 500 - 1000 - 500);
 }
 
+/// While no other principal is active on CPU, running opportunistic work is charged at its
+/// window mean, and at its p95 from the interval one appears: an over-admission while alone can
+/// only cost own work, and a burst only caps own work, with no drain (FR-034, item 049).
+#[test]
+fn cpu_admission_charges_the_mean_while_alone_and_the_p95_once_a_principal_appears() {
+    const OWNER: u32 = 1000;
+    let mut engine = PolicyEngine::new();
+    let mut decide = |usage: u64, others: &[(u32, u64)], now: u64| {
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "opportunistic",
+                AllocationPhase::Running,
+                resources(4000, 0, 0),
+                Some(resources(usage, 0, 0)),
+            )],
+            ..PolicyInput::default()
+        };
+        let mut snap = snapshot();
+        // The owner's unmanaged 500m on 8000m with a 2000m reserve: a 5500m budget alone.
+        let mut list = vec![cpu_principal(OWNER, true, 500)];
+        list.extend(
+            others
+                .iter()
+                .map(|(uid, cpu)| cpu_principal(*uid, false, *cpu)),
+        );
+        let other: u64 = others.iter().map(|(_, cpu)| cpu).sum();
+        snap.principals = Some(list);
+        snap.cpu_busy_millicores = Some(usage + 500 + other);
+        engine.evaluate(&config(), &snap, &input, now).unwrap()
+    };
+    let mut now = 0;
+    while now < 60_000 {
+        decide(1000, &[], now);
+        now += 500;
+    }
+    // 10 of 120 samples at 3000m set the p95, and barely move the mean.
+    for _ in 0..10 {
+        decide(3000, &[], now);
+        now += 500;
+    }
+    let alone = decide(1000, &[], now).admission_headroom.cpu_millicores;
+    // 109 × 1000 + 10 × 3000 + 1000 over 120 samples, rounded up.
+    assert_eq!(alone, 5500 - 1167, "the mean while alone");
+    now += 500;
+    // A user under `principal_min_percent` (1% of 8000m) changes nothing.
+    let small = decide(1000, &[(1001, 50)], now);
+    assert!(
+        small.admission_headroom.cpu_millicores > 5450 - 3000,
+        "a change that forms no principal keeps the mean: {}",
+        small.admission_headroom.cpu_millicores
+    );
+    now += 500;
+    // The interval a principal appears, the charge is the p95.
+    let joined = decide(1000, &[(1001, 200)], now);
+    assert_eq!(
+        joined.admission_headroom.cpu_millicores,
+        5300 - 3000,
+        "the p95 from the interval a principal appears"
+    );
+    assert!(
+        joined.would_drain.is_empty(),
+        "the switch drains nothing: {:?}",
+        joined.would_drain
+    );
+    now += 500;
+    // Alone again, a burst past the budget caps own work on itself and drains nothing.
+    for _ in 0..4 {
+        decide(1000, &[], now);
+        now += 500;
+    }
+    let burst = decide(6500, &[], now);
+    assert!(
+        burst.would_drain.is_empty(),
+        "a burst drains nothing: {:?}",
+        burst.would_drain
+    );
+    assert!(
+        format!("{:?}", burst.actions).contains("OwnOverTarget"),
+        "the burst shows as own usage over its target: {:?}",
+        burst.actions
+    );
+}
+
 /// While a running allocation has a held CPU step, CPU admission charges it at
 /// the larger of its request and its p95 usage from before the step, with no
 /// credit, so usage a cap holds back never becomes room for more work: report

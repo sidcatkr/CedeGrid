@@ -6,6 +6,33 @@ impl<'a> Interval<'a> {
     /// Charges: running and draining work at max(request, observed), pending
     /// reservations in full, and work of unknown usage at max(request, last
     /// known).
+    /// Whether no principal but the account running CedeGrid is active on CPU: this interval's
+    /// list shows none at `principal_min_percent` of capacity, and the last interval's estimate
+    /// left none unattributed. An unreadable list counts as one (FR-034, Principle III).
+    fn cpu_alone(&self) -> bool {
+        let snapshot = self.snapshot;
+        let Some(list) = snapshot.principals.as_ref() else {
+            return false;
+        };
+        let capacity = self
+            .scoped_kernel()
+            .and_then(|kernel| kernel.cpu.effective_cpu_capacity_millicores)
+            .unwrap_or(snapshot.cpu_capacity_millicores);
+        let percent = self
+            .config
+            .contention
+            .thresholds(ResourceKind::Cpu)
+            .principal_min_percent;
+        let floor = (capacity.saturating_mul(u64::from(percent)) / 100).max(1);
+        let uid_min = self.config.contention.uid_min;
+        self.prev.cpu_quiet_intervals > 0
+            && !list.iter().any(|principal| {
+                !principal.is_owner
+                    && principal.uid.is_none_or(|uid| uid >= uid_min)
+                    && principal.cpu_millicores >= floor
+            })
+    }
+
     pub(super) fn charge(&mut self) -> Result<()> {
         let (input, prev, now) = (self.input, self.prev, self.now);
         let cpu_window_ms = self
@@ -14,6 +41,7 @@ impl<'a> Interval<'a> {
             .thresholds(ResourceKind::Cpu)
             .admission_usage_window_s
             .saturating_mul(1000);
+        let alone = self.cpu_alone();
         for allocation in &input.allocations {
             let mut charge = allocation.requested.clone();
             if allocation.phase != AllocationPhase::Pending {
@@ -69,7 +97,10 @@ impl<'a> Interval<'a> {
                                     .unwrap_or(observed.cpu_millicores),
                             ));
                             if now.saturating_sub(since) >= cpu_window_ms {
-                                let usage = p95(samples.iter().map(|(_, usage)| *usage));
+                                // With no other principal an over-admission can only cost own
+                                // work; its p95 protects others from the interval one appears.
+                                let values = samples.iter().map(|(_, usage)| *usage);
+                                let usage = if alone { mean(values) } else { p95(values) };
                                 self.cpu_credit +=
                                     i128::from(charge.cpu_millicores) - i128::from(usage);
                                 charge.cpu_millicores = usage;

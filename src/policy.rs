@@ -1,7 +1,7 @@
 //! Deterministic, effect-free admission and yielding recommendations.
 //!
 //! For admission, running/draining allocations are charged max(reservation,
-//! observed), dimension by dimension, except running opportunistic CPU at its p95
+//! observed), dimension by dimension, except running opportunistic CPU at its mean or p95
 //! usage over the admission window, and pending reservations in full. Yielding
 //! judges running work on what it holds: CPU and RAM usage, and GPU memory usage
 //! for work that takes a hint. GPU utilization is auxiliary telemetry and is
@@ -1107,6 +1107,17 @@ impl PrincipalCount {
             *self = Self::default();
         }
     }
+}
+
+/// The mean, rounded up; 0 for no values.
+fn mean(values: impl Iterator<Item = u64>) -> u64 {
+    let (sum, count) = values.fold((0u128, 0u128), |(sum, count), value| {
+        (sum + u128::from(value), count + 1)
+    });
+    if count == 0 {
+        return 0;
+    }
+    u64::try_from(sum.div_ceil(count)).unwrap_or(u64::MAX)
 }
 
 /// The 95th percentile by nearest rank; 0 for no values.

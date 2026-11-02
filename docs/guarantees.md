@@ -198,10 +198,12 @@ per UUID; memory is never pooled across devices.
 CPU uses millicores of logical CPU time: 1,000 millicores equals one logical CPU.
 Physical-core reserves are mapped conservatively using available topology.
 For admission, each running or draining allocation is charged the greater of its request
-and observed usage once, except that running opportunistic CPU is charged at its p95
-usage over `contention.cpu.admission_usage_window_s` (60 s) once it has a full window of
-samples, so work in its startup phase is charged its request: CPU is compressible, so
-caps and the kernel share it if everyone spikes. While a pause, or a cap or hint its usage
+and observed usage once, except that running opportunistic CPU, once it has a full window of
+samples over `contention.cpu.admission_usage_window_s` (60 s), is charged at its mean usage
+while no other principal is active on CPU, and at its p95 from the interval one appears, so work
+in its startup phase is charged its request. An over-admission while alone can only cost own
+work: a burst caps own work on itself and drains nothing. CPU is compressible, so caps and the
+kernel share it if everyone spikes. While a pause, or a cap or hint its usage
 reaches, holds an allocation back, it is charged the greater of its request and its p95
 usage from before the step, with no credit, so usage a cap holds back never becomes room
 for more work; that charge closes admission but does not by itself mark own usage as beyond
