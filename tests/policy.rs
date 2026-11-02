@@ -6851,6 +6851,32 @@ mod measurement_window {
         );
     }
 
+    /// One unknown reading resets the window. The estimate kept for the refill lasts through
+    /// that reading too, or the wide per-interval estimate reads as growth for a window.
+    #[test]
+    fn the_kept_estimate_survives_the_unknown_reading_that_reset_the_window() {
+        let config = config();
+        let mut engine = PolicyEngine::new();
+        let windowed = reading((3080, 2990), 2950, Some(((2965, 2955), 2955)));
+        let first = engine
+            .evaluate(&config, &windowed, &input(2950, 3000), 0)
+            .unwrap();
+        assert_eq!(external(&first), Some(10));
+        let mut unknown = reading((3080, 2990), 2950, None);
+        let cpu = &mut unknown.kernel.as_mut().unwrap().cpu;
+        cpu.busy_millicores = None;
+        cpu.busy_lower_millicores = None;
+        let lost = engine
+            .evaluate(&config, &unknown, &input(2950, 3000), 500)
+            .unwrap();
+        assert_eq!(external(&lost), None, "the reading is unknown, not free");
+        let plain = reading((3080, 2990), 2950, None);
+        let refilling = engine
+            .evaluate(&config, &plain, &input(2950, 3000), 1000)
+            .unwrap();
+        assert_eq!(external(&refilling), Some(10), "looseness is not growth");
+    }
+
     /// The record names the sampler's check that failed for an allocation (FR-018, item 049).
     #[test]
     fn an_unknown_allocation_names_the_failed_check() {

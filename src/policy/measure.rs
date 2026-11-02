@@ -397,6 +397,8 @@ impl<'a> Interval<'a> {
     /// Own usage beyond host busy time holds the CPU.
     pub(super) fn cpu_external(&mut self) {
         let (snapshot, input) = (self.snapshot, self.input);
+        // The reading that resets the window leaves the estimate kept for its refill as it was.
+        self.next.cpu_window_external = self.prev.cpu_window_external;
         let Some(busy) = self.cpu_busy else {
             self.cpu_unknown = true;
             self.reasons.push(ReasonCode::new(
