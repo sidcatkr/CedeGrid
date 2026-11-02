@@ -232,7 +232,9 @@ has any; the sum stays between the sums of the per-allocation bounds. With the c
 backend, while every own allocation is a leaf directly under the delegated root, the root
 holds no process and its children are exactly those leaves, own CPU comes from the root's
 `cpu.stat` read beside `/proc/stat`. Over the last 8 intervals, host busy time and own CPU
-each carry one bound for the whole window: the window's external estimate sets the
+each carry one bound for the whole window, and where `/proc/schedstat` gives a run time that
+fits the window, each CPU's busy upper bound is the larger of its busy ticks and its run time,
+plus one tick, never above what its idle ticks allow: the window's external estimate sets the
 allowance, the targets, the admission budget and the p95 usage samples while this
 interval's estimate stays within its own bound of it, and an estimate beyond that bound,
 growth or fall, applies at once, so the 2-interval reclaim bound is unchanged. While a reset

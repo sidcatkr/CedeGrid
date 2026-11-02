@@ -11,7 +11,6 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 | 026 Decision 5 (A, the first step after the merge) | A refusal at the authorization barrier uses up one of the task's attempts. FR-018 should say such a refusal is not the task's failure, so a replay-safe task is requeued without using an attempt. | 001, after the merge | nothing; a task with `max_attempts = 1` ends in `needs_reconciliation` |
 | 024 Decision 3 (A, after the merge, its own item) | SC-014 attribution: supervisor CPU attributed to its allocation, and the 173 m gap, which is not yet explained. Item 027 measures CedeGrid's CPU apart and dropped the read-pass term. | 001, after the merge | nothing |
 | 024 Decision 5 (research after the merge) | Whether a listed GPU process with no samples and no memory change over the quiet window can count as quiet, without making unknown telemetry free. | new | nothing |
-| 027 Decision 2 B (029 Part 0h-2) | Tighten the window's busy bound with per-CPU nanoseconds from `/proc/schedstat`, then rerun report 027's 4-CPU idle run. | 001, after the merge | nothing |
 | 019 analyze C1 | Full moves cores too: since item 031 Full verifies its leaf members, so it can verify them per thread through `cgroup.procs` plus a pidfd and take the core move. 003's plan still says Full makes no per-thread call. | 003 | nothing |
 | 019 analyze A1 | The numeric default of the wait level that marks a principal as contending. | 003 | T043, FR-056 |
 | 015, 019 Part 2 | A pinned contender is not recorded as satisfied, and Tracked moves own cores off it. Tasked as 003 FR-056, T079–T085. | 003 | nothing |
@@ -84,6 +83,7 @@ item 031.
 
 | Source | Where |
 |---|---|
+| 027 Decision 2 B: the window's busy bound tightened with per-CPU run time from `/proc/schedstat` | item 049 (T514); the idle rerun is T520 |
 | 024 Decision 2(c): new victims of a contended CPU excess share it by usage at one level | item 049 (T512), FR-016 |
 | 027 Decision 5 B: charge running work at its mean while no other principal is active, at its p95 once one is | item 049 (T515), decided apart from any change to the modes |
 | 045 note: the re-measure window's 3 s at full duty raised the held duty 0.015–0.04 above d0 | item 046: d0' = (d0 − w) ÷ (1 − w); the held duty fell to 0.754 against d0 0.75, and the rest is 004 T049 |

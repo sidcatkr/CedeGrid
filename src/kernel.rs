@@ -96,7 +96,8 @@ pub struct CpuTopology {
     pub busy_status: CpuUsageStatus,
     pub busy_interval_ms: Option<u64>,
     /// Busy time over the last 8 intervals with one tick of rounding for the whole window:
-    /// upper and lower bounds and the window's length (FR-073).
+    /// upper and lower bounds and the window's length (FR-073). Each CPU's run time from
+    /// `/proc/schedstat`, where it applies, tightens the upper bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_window_millicores: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,13 +222,16 @@ pub(crate) fn parse_usage_usec(stat: &str) -> Option<u64> {
 /// Intervals in the busy-time window the steady-state budget uses (FR-073).
 pub const CPU_WINDOW_INTERVALS: usize = 8;
 
+/// Each CPU's run time in nanoseconds.
+type RunTime = BTreeMap<u32, u64>;
+
 #[derive(Default)]
 pub struct CpuUsageTracker {
     previous: Option<(u64, BTreeMap<u32, CpuTicks>)>,
     max_interval_ticks: Option<u64>,
     clock_tick_hz: Option<u64>,
     /// Consecutive valid samples, oldest first, at most one more than the window's intervals.
-    history: std::collections::VecDeque<(u64, BTreeMap<u32, CpuTicks>)>,
+    history: std::collections::VecDeque<(u64, BTreeMap<u32, CpuTicks>, Option<RunTime>)>,
     window_max_ticks: Option<u64>,
 }
 
@@ -248,6 +252,29 @@ impl CpuAccountingWindow {
     }
 }
 
+/// Each CPU's run time in nanoseconds from `/proc/schedstat`, in the formats whose per-CPU line
+/// is known; anything else leaves the ticks as the only measure.
+pub(crate) fn parse_run_time(input: &str) -> Option<RunTime> {
+    let mut lines = input.lines();
+    let version = lines.next()?.strip_prefix("version ")?.trim();
+    if !matches!(version, "15" | "16" | "17") {
+        return None;
+    }
+    let mut result = BTreeMap::new();
+    for line in lines {
+        let mut columns = line.split_whitespace();
+        let Some(id) = columns.next().and_then(|name| name.strip_prefix("cpu")) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let run_ns = columns.nth(6)?.parse::<u64>().ok()?;
+        result.insert(id.parse::<u32>().ok()?, run_ns);
+    }
+    (!result.is_empty()).then_some(result)
+}
+
 /// Busy upper and lower bounds and the largest selected tick total between two samples of the
 /// same CPUs over `interval_ms`, or the status that makes them unknown.
 fn busy_bounds(
@@ -255,6 +282,7 @@ fn busy_bounds(
     current: &BTreeMap<u32, CpuTicks>,
     interval_ms: u64,
     clock_tick_hz: Option<u64>,
+    run_time: Option<(&RunTime, &RunTime)>,
 ) -> Result<(u64, u64, u64), CpuUsageStatus> {
     let mut busy = 0u64;
     let mut busy_lower = 0u64;
@@ -286,6 +314,18 @@ fn busy_bounds(
             let non_idle = ((elapsed_ticks - idle_lower) * 1000).div_ceil(elapsed_ticks) as u64;
             conservative_busy = conservative_busy.max(non_idle);
             lower_denominator = lower_denominator.max(elapsed_ticks);
+            // Run time counts a slice when it leaves the CPU, in nanoseconds, so the ticks and
+            // one more cover a slice still on it. Zero, or more than the elapsed time, says it
+            // does not apply, and the idle complement stands (FR-073).
+            let elapsed_ns = u128::from(interval_ms) * 1_000_000;
+            if let Some(ran_ns) = run_time
+                .and_then(|(first, last)| last.get(id)?.checked_sub(*first.get(id)?))
+                .filter(|ran_ns| *ran_ns > 0 && u128::from(*ran_ns) <= elapsed_ns)
+            {
+                let ran = (u128::from(ran_ns) * 1000).div_ceil(elapsed_ns) as u64;
+                let tick = 1_000_000u128.div_ceil(elapsed_ticks) as u64;
+                conservative_busy = conservative_busy.min(tick_busy.max(ran).saturating_add(tick));
+            }
         }
         let lower =
             (u128::from((total - idle).saturating_sub(1)) * 1_000_000 / lower_denominator) as u64;
@@ -313,6 +353,18 @@ impl CpuUsageTracker {
     pub fn observe(
         &mut self,
         input: Result<&str, io::Error>,
+        effective_cpu_ids: Option<&[u32]>,
+        monotonic_ms: u64,
+        freshness_ms: u64,
+    ) -> CpuUsage {
+        self.observe_with_run_time(input, None, effective_cpu_ids, monotonic_ms, freshness_ms)
+    }
+
+    /// As `observe`, with each CPU's run time in nanoseconds where it is readable.
+    pub fn observe_with_run_time(
+        &mut self,
+        input: Result<&str, io::Error>,
+        run_time: Option<RunTime>,
         effective_cpu_ids: Option<&[u32]>,
         monotonic_ms: u64,
         freshness_ms: u64,
@@ -371,7 +423,7 @@ impl CpuUsageTracker {
                     result.detail = "CPU interval exceeded freshness limit; baseline reset.".into();
                 }
                 Some(interval) => {
-                    match busy_bounds(previous, &selected, interval, self.clock_tick_hz) {
+                    match busy_bounds(previous, &selected, interval, self.clock_tick_hz, None) {
                         Ok((busy, busy_lower, max_interval_ticks)) => {
                             result.status = CpuUsageStatus::Available;
                             result.busy_millicores = Some(busy);
@@ -399,15 +451,21 @@ impl CpuUsageTracker {
         if result.status != CpuUsageStatus::Available {
             self.history.clear();
         }
-        self.history.push_back((monotonic_ms, selected.clone()));
+        self.history
+            .push_back((monotonic_ms, selected.clone(), run_time.clone()));
         while self.history.len() > CPU_WINDOW_INTERVALS + 1 {
             self.history.pop_front();
         }
         if self.history.len() == CPU_WINDOW_INTERVALS + 1
-            && let Some((first_time, first)) = self.history.front()
+            && let Some((first_time, first, first_run)) = self.history.front()
             && let Some(window) = monotonic_ms.checked_sub(*first_time)
-            && let Ok((busy, busy_lower, max_ticks)) =
-                busy_bounds(first, &selected, window, self.clock_tick_hz)
+            && let Ok((busy, busy_lower, max_ticks)) = busy_bounds(
+                first,
+                &selected,
+                window,
+                self.clock_tick_hz,
+                first_run.as_ref().zip(run_time.as_ref()),
+            )
         {
             self.window_max_ticks = Some(max_ticks);
             result.busy_window_millicores = Some(busy);
@@ -1213,6 +1271,10 @@ impl KernelCollector {
         result.cpu = inspect_cpu(&self.roots, result.hierarchy.as_ref());
         let cpu_read_started = (self.clock)();
         let cpu_stat = read_text(&self.roots.proc.join("stat"));
+        let run_time = read_text(&self.roots.proc.join("schedstat"))
+            .ok()
+            .as_deref()
+            .and_then(parse_run_time);
         let cpu_read_ended = (self.clock)();
         // Next to the host counters, the delegated root's CPU time, for own CPU in Full.
         let delegated = self
@@ -1230,10 +1292,11 @@ impl KernelCollector {
                 .saturating_duration_since(self.started)
                 .as_millis(),
         );
-        let usage = self.cpu_usage.observe(
+        let usage = self.cpu_usage.observe_with_run_time(
             cpu_stat
                 .as_deref()
                 .map_err(|error| io::Error::new(error.kind(), error.to_string())),
+            run_time,
             result.cpu.effective_cpu_ids.as_deref(),
             read_at,
             ttl,
@@ -1800,6 +1863,143 @@ mod cpu_alignment_tests {
         // A counter reset starts the window again.
         let reset = tracker.observe(Ok(&stat(0)), Some(&[0, 1]), 4500, 1500);
         assert_eq!(reset.busy_window_millicores, None);
+    }
+
+    /// Two CPUs at 100 ticks a second over 9 samples 500 ms apart, with `idle` and `busy` ticks
+    /// on each CPU over the 4 s window, and the bound the window then reads.
+    fn window_with_run_time(idle: u64, busy: u64, run_ns: Option<[u64; 2]>) -> Option<u64> {
+        let mut tracker =
+            CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
+        let mut last = None;
+        for k in 0..=8u64 {
+            let line = |id: u64| {
+                format!(
+                    "cpu{id} {} 0 0 {} 0 0 0 0\n",
+                    1000 + busy * k / 8,
+                    1000 + idle * k / 8
+                )
+            };
+            let stat = format!("{}{}", line(0), line(1));
+            let run = run_ns.map(|run| {
+                BTreeMap::from([
+                    (0, 5_000_000 + run[0] * k / 8),
+                    (1, 5_000_000 + run[1] * k / 8),
+                ])
+            });
+            last =
+                Some(tracker.observe_with_run_time(Ok(&stat), run, Some(&[0, 1]), k * 500, 1500));
+        }
+        last.unwrap().busy_window_millicores
+    }
+
+    /// An idle CPU's ticks lag elapsed time by a few, which reads as busy in the idle complement.
+    /// Its run time says what ran, and one tick stays for a slice still on the CPU (FR-073).
+    #[test]
+    fn run_time_tightens_the_windows_upper_bound() {
+        // 396 idle ticks of 400 elapsed: the complement allows 13m a CPU. One busy tick is 3m,
+        // and 2 ms of run time 1m, with a tick of 3m on top.
+        assert_eq!(window_with_run_time(396, 1, None), Some(26));
+        assert_eq!(
+            window_with_run_time(396, 1, Some([2_000_000, 2_000_000])),
+            Some(12)
+        );
+    }
+
+    /// Run time counts a slice when it leaves the CPU, so a task that has not left shows only in
+    /// the ticks: unknown is never free.
+    #[test]
+    fn a_task_still_on_the_cpu_keeps_the_bound_high() {
+        let bound = window_with_run_time(0, 400, Some([1_000_000, 1_000_000])).unwrap();
+        assert!(bound >= 2000, "{bound}");
+    }
+
+    #[test]
+    fn run_time_that_cannot_be_right_leaves_the_ticks() {
+        let ticks = window_with_run_time(396, 1, None);
+        // Zero: the counter is switched off. More than the elapsed 4 s: a slice from before the
+        // window, or a counter that does not apply.
+        assert_eq!(window_with_run_time(396, 1, Some([0, 0])), ticks);
+        assert_eq!(
+            window_with_run_time(396, 1, Some([5_000_000_000, 5_000_000_000])),
+            ticks
+        );
+    }
+
+    #[test]
+    fn run_time_is_read_only_from_a_known_format() {
+        let line = "cpu0 0 0 0 0 0 0 43133045425834 7734812993764 81482387\n";
+        let domain = "domain0 0000,00000002 0 0 0 0\n";
+        for version in [15, 16, 17] {
+            let text = format!("version {version}\ntimestamp 5\n{line}{domain}");
+            assert_eq!(
+                parse_run_time(&text),
+                Some(BTreeMap::from([(0, 43_133_045_425_834)])),
+                "version {version}"
+            );
+        }
+        for text in [
+            format!("version 14\ntimestamp 5\n{line}"),
+            line.to_string(),
+            "version 17\ntimestamp 5\n".to_string(),
+            "version 17\ncpu0 0 0 0 0 0 0\n".to_string(),
+            "version 17\ncpu0 0 0 0 0 0 0 x 0 0\n".to_string(),
+            "version 17\ncpux 0 0 0 0 0 0 1 0 0\n".to_string(),
+        ] {
+            assert_eq!(parse_run_time(&text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_collector_reads_run_time_beside_the_ticks() {
+        let root = tempfile::tempdir().unwrap();
+        let (proc, sys) = (root.path().join("proc"), root.path().join("sys"));
+        let write = |dir: &Path, name: &str, text: &str| {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(name), text).unwrap();
+        };
+        write(
+            &proc.join("self"),
+            "status",
+            "Name:\tfixture\nCpus_allowed_list:\t0\n",
+        );
+        write(&proc.join("sys/kernel"), "osrelease", "6.6.fixture");
+        write(&sys.join("devices/system/cpu"), "online", "0\n");
+        write(&proc, "stat", "cpu0 1000 0 0 1000 0 0 0 0\n");
+        let start = Instant::now();
+        let times: Vec<u64> = (0..=8u64)
+            .flat_map(|k| [k * 500, k * 500 + 1, k * 500 + 2])
+            .collect();
+        FAKE.with(|fake| *fake.borrow_mut() = (Some(start), times.into()));
+        let mut collector = KernelCollector {
+            started: start,
+            clock: fake_clock,
+            cpu_usage: CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap()),
+            ..KernelCollector::inspect_at(
+                KernelConfig::default(),
+                ProbeRoots {
+                    proc: proc.clone(),
+                    sys,
+                },
+            )
+        };
+        let mut last = None;
+        for k in 0..=8u64 {
+            write(
+                &proc,
+                "stat",
+                &format!("cpu0 {} 0 0 {} 0 0 0 0\n", 1000 + k / 8, 1000 + 396 * k / 8),
+            );
+            write(
+                &proc,
+                "schedstat",
+                &format!(
+                    "version 17\ntimestamp 5\ncpu0 0 0 0 0 0 0 {} 0 0\n",
+                    5_000_000 + 250_000 * k
+                ),
+            );
+            last = Some(collector.sample());
+        }
+        assert_eq!(last.unwrap().cpu.busy_window_millicores, Some(6));
     }
 
     #[test]

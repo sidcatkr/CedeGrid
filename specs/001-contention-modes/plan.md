@@ -1987,8 +1987,11 @@ tier, as held caps already do, so no new victim is capped below its share of it.
 `tests/contention.rs`.
 
 **T514, the busy window's bound**. Per-CPU busy nanoseconds from `/proc/schedstat` (the
-`cpuN` run time field), where readable, tighten the window's busy upper bound from a tick per CPU to
-the counter's own resolution. Unreadable or inconsistent values fall back to the ticks. Telemetry
+`cpuN` run time field), where readable, tighten the window's busy upper bound below the idle
+complement, whose ticks lag elapsed time on an idle CPU. The counter adds a slice only when it leaves
+the CPU, so a task still running shows only in the ticks: each CPU's bound is the larger of its busy
+ticks and its run time, plus one tick, and never above the complement. Unreadable, zero or
+inconsistent values, and formats other than versions 15 to 17, fall back to the ticks. Telemetry
 stays read-only. Report 027's run 1 on 4 CPUs gates it: the external estimate at most 1%.
 
 **T511, a refusal at the barrier**. A refusal reported as `authorization_unavailable` takes the
