@@ -4425,6 +4425,153 @@ mod lease_batches {
     }
 }
 
+/// Submits one task with one allowed attempt and returns its offer.
+fn single_attempt(c: &mut Coordinator, replay_safe: bool) -> Assignment {
+    c.handle_at(&Principal::Operator, Request::PutPool { pool: pool() }, 100)
+        .unwrap();
+    let mut t = task("barrier");
+    t.max_attempts = Some(1);
+    t.replay_safe = replay_safe;
+    c.handle_at(
+        &Principal::Operator,
+        Request::Submit {
+            job: JobSpec {
+                job_id: "barrier-job".into(),
+                pool_id: "pool".into(),
+                priority: 0,
+                tasks: vec![t],
+            },
+        },
+        100,
+    )
+    .unwrap();
+    offers(c, 100).assignments.remove(0)
+}
+
+/// The node's budget closes, so the coordinator refuses the first authorization.
+fn refuse_at_the_barrier(c: &mut Coordinator, a: &Assignment, now: u64) {
+    let mut r = report(now);
+    r.launch_slots = 0;
+    r.managed_budget.cpu_millicores = 0;
+    c.handle_at(&node(), Request::Heartbeat { report: r }, now)
+        .unwrap();
+    assert!(
+        c.handle_at(
+            &node(),
+            Request::Prepared {
+                assignment_id: a.request.assignment_id.clone(),
+                generation: a.generation,
+                coordinator_epoch: a.coordinator_epoch,
+                record: prepared(a),
+            },
+            now,
+        )
+        .is_err(),
+        "the coordinator refuses"
+    );
+}
+
+fn status_of(
+    c: &mut Coordinator,
+    now: u64,
+) -> (cedegrid::state::TaskStatus, Vec<serde_json::Value>) {
+    let Response::Status {
+        tasks, allocations, ..
+    } = c
+        .handle_at(&Principal::Operator, Request::Status { job_id: None }, now)
+        .unwrap()
+    else {
+        panic!()
+    };
+    (tasks[0].status, allocations)
+}
+
+/// A refusal at the authorization barrier is not the task's failure: nothing ran, so a
+/// replay-safe task is requeued without using an attempt, and its status says why (FR-018).
+#[test]
+fn a_refusal_at_the_barrier_uses_no_attempt() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let first = single_attempt(&mut c, true);
+    refuse_at_the_barrier(&mut c, &first, 100);
+    released_failure(&mut c, &first, 101, FailureKind::ExecutionFailure);
+    let (status, allocations) = status_of(&mut c, 102);
+    assert_eq!(status, cedegrid::state::TaskStatus::Queued);
+    assert!(
+        allocations.iter().any(|a| a["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("refused at the authorization barrier"))),
+        "{allocations:?}"
+    );
+    // The one allowed attempt is still there, and a failure after a grant uses it.
+    let second = offers(&mut c, 100_000).assignments.remove(0);
+    assert_eq!(second.generation, 2);
+    authorize(&mut c, &second, 100_000);
+    released_failure(&mut c, &second, 100_001, FailureKind::ExecutionFailure);
+    assert_eq!(
+        status_of(&mut c, 100_002).0,
+        cedegrid::state::TaskStatus::NeedsReconciliation
+    );
+}
+
+/// Refusals add no failures either, so they never reach `retry_limit`.
+#[test]
+fn repeated_refusals_stay_queued() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let mut next = single_attempt(&mut c, true);
+    let mut now = 100;
+    for _ in 0..6 {
+        refuse_at_the_barrier(&mut c, &next, now);
+        released_failure(&mut c, &next, now + 1, FailureKind::ExecutionFailure);
+        assert_eq!(
+            status_of(&mut c, now + 2).0,
+            cedegrid::state::TaskStatus::Queued
+        );
+        now += 1_000_000;
+        next = offers(&mut c, now).assignments.remove(0);
+    }
+}
+
+/// A task that isn't replay-safe keeps its reconciliation flag.
+#[test]
+fn a_refused_task_that_is_not_replay_safe_needs_reconciliation() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let first = single_attempt(&mut c, false);
+    refuse_at_the_barrier(&mut c, &first, 100);
+    released_failure(&mut c, &first, 101, FailureKind::ExecutionFailure);
+    assert_eq!(
+        status_of(&mut c, 102).0,
+        cedegrid::state::TaskStatus::NeedsReconciliation
+    );
+}
+
+/// A launch that failed before it reached the barrier is still the attempt's failure, and so is
+/// one after a grant whose reply was lost.
+#[test]
+fn only_a_refused_first_authorization_goes_uncounted() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let first = single_attempt(&mut c, true);
+    released_failure(&mut c, &first, 101, FailureKind::ExecutionFailure);
+    assert_eq!(
+        status_of(&mut c, 102).0,
+        cedegrid::state::TaskStatus::NeedsReconciliation,
+        "no preparation reached the coordinator"
+    );
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let first = single_attempt(&mut c, true);
+    authorize(&mut c, &first, 100);
+    released_failure(&mut c, &first, 101, FailureKind::ExecutionFailure);
+    assert_eq!(
+        status_of(&mut c, 102).0,
+        cedegrid::state::TaskStatus::NeedsReconciliation,
+        "the grant went out"
+    );
+}
+
 /// An out-of-memory kill own work did not cause is requeued without a failure or an
 /// attempt; a later own failure still ends the attempt budget (FR-076).
 #[test]

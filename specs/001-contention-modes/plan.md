@@ -1994,11 +1994,13 @@ ticks and its run time, plus one tick, and never above the complement. Unreadabl
 inconsistent values, and formats other than versions 15 to 17, fall back to the ticks. Telemetry
 stays read-only. Report 027's run 1 on 4 CPUs gates it: the external estimate at most 1%.
 
-**T511, a refusal at the barrier**. A refusal reported as `authorization_unavailable` takes the
-existing yield path, so the coordinator requeues a replay-safe task without using an attempt, and
-its status says why. A task that isn't replay-safe keeps today's end. If it needs a new cause value,
-that value lands in Rust, Python and TypeScript with the contract fixture. Test first in
-`tests/coordinator.rs`.
+**T511, a refusal at the barrier**. The coordinator decides from its own record, so no cause value
+or wire change is needed: a preparation reached it and no lease ever went out (`lease_sequence` 0),
+with no drain or cause recorded. That attempt takes the yield path, adds no failure and leaves a
+receipt `authorization_refused`, which `counted_attempts` leaves out, so a replay-safe task is
+requeued without using an attempt, and the allocation's detail says why. A launch that failed before
+the barrier, or one after a grant, still counts. A task that isn't replay-safe keeps today's end.
+Test first in `tests/coordinator.rs`.
 
 **T516**: the spec sentence, done in clarify.
 

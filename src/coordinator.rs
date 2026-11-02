@@ -1679,8 +1679,19 @@ impl Coordinator {
                 [id],
                 |r| r.get(0),
             )?;
-        let yielded =
-            not_own_fault || kind == FailureKind::Yielded || recorded || self.should_drain(id)?;
+        // A preparation reached the coordinator and no lease ever went out: it refused the first
+        // authorization, so nothing ran. That costs no failure and no attempt (FR-018).
+        let refused = !recorded
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM reservations r JOIN preparations p USING(assignment_id) WHERE r.assignment_id=?1 AND r.lease_sequence=0)",
+                [id],
+                |r| r.get(0),
+            )?;
+        let yielded = not_own_fault
+            || refused
+            || kind == FailureKind::Yielded
+            || recorded
+            || self.should_drain(id)?;
         let previous: u32 = tx
             .query_row(
                 "SELECT failures FROM retry_state WHERE task_id=?1",
@@ -1731,11 +1742,12 @@ impl Coordinator {
         let request = self.assignment_request(id)?;
         // Kills own work did not cause go uncounted up to 3 × max_attempts times, then count as
         // attempts, so others' growth cannot requeue a task forever (R6).
-        let before = uncounted_attempts(&tx, &task)?;
-        let uncounted = not_own_fault
+        let before = oom_requeues(&tx, &task)?;
+        let oom_uncounted = not_own_fault
             && request
                 .max_attempts
                 .is_none_or(|limit| before < 3 * u64::from(limit));
+        let uncounted = oom_uncounted || refused;
         // This receipt is not written yet.
         let counted =
             counted_attempts(&tx, &task, generation)?.saturating_sub(u64::from(uncounted));
@@ -1771,7 +1783,9 @@ impl Coordinator {
             "INSERT INTO failure_receipts(assignment_id,failure_kind) VALUES (?1,?2)",
             params![
                 id,
-                if uncounted {
+                if refused {
+                    "authorization_refused"
+                } else if uncounted {
                     "oom_not_own_fault"
                 } else if yielded {
                     "yielded"
@@ -1785,8 +1799,14 @@ impl Coordinator {
             params![
                 id,
                 format!(
-                    "{detail}; execution failures={failures}/{}, consecutive yields={yield_count}, attempt={generation}/{:?}, retry delay={delay}ms",
-                    self.config.retry_limit, request.max_attempts
+                    "{detail}{}; execution failures={failures}/{}, consecutive yields={yield_count}, attempt={generation}/{:?}, retry delay={delay}ms",
+                    if refused {
+                        "; refused at the authorization barrier, so no attempt was used"
+                    } else {
+                        ""
+                    },
+                    self.config.retry_limit,
+                    request.max_attempts
                 )
             ],
         )?;
@@ -2540,13 +2560,24 @@ fn db(value: u64) -> Result<i64> {
     i64::try_from(value).context("integer exceeds durable SQLite range")
 }
 /// Attempts that count against `max_attempts`: every generation but those an
-/// out-of-memory kill own work did not cause ended (FR-076).
+/// out-of-memory kill own work did not cause ended (FR-076) or the coordinator refused at the
+/// authorization barrier (FR-018).
 fn counted_attempts(connection: &rusqlite::Connection, task: &str, generation: u64) -> Result<u64> {
     Ok(generation.saturating_sub(uncounted_attempts(connection, task)?))
 }
 
-/// The task's generations that an out-of-memory kill own work did not cause ended, uncounted.
+/// The task's generations that ended uncounted: an out-of-memory kill own work did not cause, or
+/// a refusal at the authorization barrier.
 fn uncounted_attempts(connection: &rusqlite::Connection, task: &str) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM failure_receipts f JOIN assignments a USING(assignment_id) WHERE a.task_id=?1 AND f.failure_kind IN ('oom_not_own_fault','authorization_refused')",
+        [task],
+        |r| row_u64(r, 0),
+    )?)
+}
+
+/// The task's generations that an out-of-memory kill own work did not cause ended, uncounted.
+fn oom_requeues(connection: &rusqlite::Connection, task: &str) -> Result<u64> {
     Ok(connection.query_row(
         "SELECT COUNT(*) FROM failure_receipts f JOIN assignments a USING(assignment_id) WHERE a.task_id=?1 AND f.failure_kind='oom_not_own_fault'",
         [task],

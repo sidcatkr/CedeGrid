@@ -847,6 +847,9 @@ newest 256 released ones; observations are kept for 24 hours and at most 200,000
 attempt's directory is removed once its outcome is receipted and its spool reclaimed, outside
 the reported window. Each interval reads only unreleased and not yet settled runs (FR-081).
 
+A first authorization the coordinator refuses is not the task's failure: nothing ran, so a
+replay-safe task is requeued with the yield backoff, without a failure or an attempt, and the
+allocation's detail says so; a task that isn't replay-safe needs reconciliation as before.
 A task killed by an out-of-memory condition it did not cause is requeued without an attempt
 up to three times `max_attempts`; later such kills count as attempts. A known leaf
 `oom_kill` count decides whether a kill was the OOM killer's, whatever the host count shows
