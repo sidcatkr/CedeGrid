@@ -1125,7 +1125,13 @@ mod runtime_steps {
             .unwrap();
         let (frozen, _) = off_shares(&mut actuator, &mut family, &dir, 3);
         assert!(frozen > 0.97, "frozen {frozen}");
-        assert_eq!(actuator.next_deadline(), None, "the cycle waits");
+        // The duty waits; the only deadline is the frozen leaf's member check (T510).
+        assert!(
+            actuator
+                .next_deadline()
+                .is_some_and(|at| at <= std::time::Instant::now() + Duration::from_millis(60)),
+            "the cycle waits"
+        );
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
             .unwrap();
@@ -1616,8 +1622,104 @@ mod runtime_steps {
         );
     }
 
-    /// A thaw refused at release, while a foreign process was in the leaf, is retried on the
-    /// next tick once the leaf holds only the family again (030, SUP-4).
+    /// A process that joins a leaf during its duty's off phase is thawed at the next tick, not
+    /// at the phase's end, and the share moves to the rootless duty, which reaches only the
+    /// verified family, so the leaf is never frozen again (Principle I, T510).
+    #[test]
+    fn a_process_that_joins_a_frozen_duty_leaf_is_thawed_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "81\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = timed(81);
+        actuator
+            .apply(
+                &mut family,
+                ResourceKind::GpuCompute,
+                YieldStep::Cap,
+                Some(500),
+            )
+            .unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(2);
+        while read(&dir, "cgroup.freeze") != "1" {
+            assert!(std::time::Instant::now() < end, "the off phase came");
+            actuator.tick(&mut family).unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let deadline = actuator.next_deadline().unwrap();
+        assert!(
+            deadline <= std::time::Instant::now() + Duration::from_millis(60),
+            "a frozen leaf's members are read again soon"
+        );
+        fs::write(dir.join("cgroup.procs"), "81\n99\n").unwrap();
+        actuator.tick(&mut family).unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0", "thawed at once");
+        // The leaf stays thawed while the rootless duty stops only the family.
+        let end = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            actuator.tick(&mut family).unwrap();
+            assert_eq!(read(&dir, "cgroup.freeze"), "0", "never frozen again");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            family.signals.iter().any(|s| s.0 == libc::SIGSTOP),
+            "the rootless duty took over: {:?}",
+            family.signals
+        );
+    }
+
+    /// A process that joins between the membership check and the freeze write is not left
+    /// frozen: the members are read again after the write, and the pause moves to the rootless
+    /// step (Principle I, T510).
+    #[test]
+    fn a_process_that_joins_during_the_freeze_write_is_thawed() {
+        struct JoinsAtFreeze(DirectoryLeaf, std::path::PathBuf);
+        impl LeafIo for JoinsAtFreeze {
+            fn same_leaf(&self) -> anyhow::Result<bool> {
+                self.0.same_leaf()
+            }
+            fn read(&self, control: &str) -> anyhow::Result<String> {
+                self.0.read(control)
+            }
+            fn write(&self, control: &str, value: &str) -> anyhow::Result<()> {
+                if control == "cgroup.freeze" && value == "1" {
+                    fs::write(self.1.join("cgroup.procs"), "41\n77\n")?;
+                }
+                self.0.write(control, value)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "41\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            JoinsAtFreeze(DirectoryLeaf::open(&dir).unwrap(), dir.clone()),
+            &config(&["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = Recorder {
+            pids: vec![41],
+            signals: vec![],
+        };
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0", "thawed after the write");
+        assert!(
+            family.signals.contains(&libc::SIGSTOP),
+            "the pause moved to the family: {:?}",
+            family.signals
+        );
+    }
+
+    /// A thaw refused at release, while a foreign process was in the leaf, is reported; the next
+    /// tick thaws the leaf at once, since a freeze must not hold a process it never verified
+    /// (030 SUP-4, Principle I, T510).
     #[test]
     fn a_refused_thaw_is_retried_on_later_ticks() {
         let temp = tempfile::tempdir().unwrap();
@@ -1644,13 +1746,10 @@ mod runtime_steps {
         );
         assert_eq!(read(&dir, "cgroup.freeze"), "1");
         actuator.tick(&mut family).unwrap();
-        assert_eq!(read(&dir, "cgroup.freeze"), "1", "still refused, quietly");
-        fs::write(dir.join("cgroup.procs"), "41\n").unwrap();
-        actuator.tick(&mut family).unwrap();
         assert_eq!(
             read(&dir, "cgroup.freeze"),
             "0",
-            "retried once the leaf is the family's"
+            "thawed though the other process stays"
         );
     }
 

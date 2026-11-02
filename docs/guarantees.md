@@ -184,6 +184,9 @@ a telemetry failure or a missing observation, and a duty cycle not reported appl
 the steps and escalate after the unknown window. Each device's held-back breakdown says which
 path it took and why. An empty-device pass is not evidence of occupied-device sharing. See [GPU
 operation](coordinator-work.md#gpu-modes).
+A process that joins a frozen leaf, between the check and the write or during the off phase, is
+thawed at once, within 50 ms, and the step moves to the rootless mechanism, which reaches only
+the verified family.
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.

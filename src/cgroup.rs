@@ -34,6 +34,8 @@ const WRITABLE_CONTROLS: &[&str] = &[
 /// RAM cap is `memory.high` only; `memory.max`, `memory.low` and `memory.min` are
 /// never runtime steps.
 const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cpu.max", "cgroup.freeze", "memory.high"];
+/// How often a frozen leaf's members are read, so a process that joins is thawed within this.
+const FROZEN_MEMBER_CHECK: Duration = Duration::from_millis(50);
 
 /// CPU bandwidth is a quota per period, unlike the relative `cpu.weight`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,16 +365,20 @@ fn verify_runtime_target(io: &dyn LeafIo, verified: &BTreeSet<u32>, control: &st
         io.same_leaf()?,
         "workload leaf was replaced; refuse runtime write"
     );
-    let members = io
-        .read("cgroup.procs")?
-        .split_whitespace()
-        .map(str::parse::<u32>)
-        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    let members = leaf_members(io)?;
     ensure!(
         !verified.is_empty() && members == *verified,
         "leaf membership differs from the verified processes; refuse runtime write"
     );
     Ok(())
+}
+
+fn leaf_members(io: &dyn LeafIo) -> Result<BTreeSet<u32>> {
+    Ok(io
+        .read("cgroup.procs")?
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?)
 }
 
 fn write_checked(io: &dyn LeafIo, control: &str, value: &str) -> Result<String> {
@@ -672,9 +678,19 @@ impl<L: LeafIo> CgroupActuator<L> {
         Ok(())
     }
 
-    /// Freeze and confirm through `cgroup.events` within `bound`.
-    fn freeze(&mut self, family: &dyn Family, kind: ResourceKind, bound: Duration) -> Result<()> {
+    /// Freeze and confirm through `cgroup.events` within `bound`. A process that joined between
+    /// the membership check and the write is not left frozen: the members are read again.
+    fn freeze(
+        &mut self,
+        family: &mut dyn Family,
+        kind: ResourceKind,
+        bound: Duration,
+    ) -> Result<()> {
         self.write(family, kind, "cgroup.freeze", "1")?;
+        if let Some(refusal) = self.changed_members(family) {
+            self.thaw_for_members(family, Some(kind), anyhow::anyhow!("{refusal}"))?;
+            return Err(refusal);
+        }
         let deadline = std::time::Instant::now() + bound;
         loop {
             let events = self.leaf.read("cgroup.events")?;
@@ -693,6 +709,58 @@ impl<L: LeafIo> CgroupActuator<L> {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// Why the leaf's members are no longer the verified family; an unreadable leaf says
+    /// nothing, and the next read decides.
+    fn changed_members(&self, family: &dyn Family) -> Option<anyhow::Error> {
+        let verified: BTreeSet<u32> = family.identities().iter().map(|id| id.pid).collect();
+        let members = leaf_members(&self.leaf).ok()?;
+        (members != verified)
+            .then(|| anyhow::anyhow!("a process joined the frozen leaf; thawed at once"))
+    }
+
+    /// Thaw a leaf whose members changed: the freeze must not hold a process CedeGrid never
+    /// verified, and lifting it acts on nothing it did not freeze. Each resource's step moves
+    /// to the rootless mechanism, which reaches only the verified family (Principle I).
+    fn thaw_for_members(
+        &mut self,
+        family: &mut dyn Family,
+        except: Option<ResourceKind>,
+        refusal: anyhow::Error,
+    ) -> Result<()> {
+        ensure!(
+            self.leaf.same_leaf()?,
+            "workload leaf was replaced; refuse thaw"
+        );
+        write_checked(&self.leaf, "cgroup.freeze", "0")?;
+        let held: Vec<ResourceKind> = self
+            .written
+            .iter()
+            .filter(|(_, controls)| controls.contains("cgroup.freeze"))
+            .map(|(kind, _)| *kind)
+            .collect();
+        for kind in held {
+            if let Some(controls) = self.written.get_mut(&kind) {
+                controls.remove("cgroup.freeze");
+            }
+            if except == Some(kind) {
+                continue;
+            }
+            let (step, target) = match self.gpu_duty.take_if(|_| kind == ResourceKind::GpuCompute) {
+                Some(duty) => (YieldStep::Cap, duty.target),
+                None => (YieldStep::Pause, None),
+            };
+            self.fall_back(family, kind, step, target, anyhow::anyhow!("{refusal}"))?;
+        }
+        Ok(())
+    }
+
+    /// A resource holds the leaf frozen.
+    fn frozen_here(&self) -> bool {
+        self.written
+            .values()
+            .any(|controls| controls.contains("cgroup.freeze"))
     }
 
     /// Another resource holds the leaf frozen.
@@ -895,8 +963,12 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     }
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
-        // A refused restore, such as a thaw while another process was in the leaf, goes again
-        // until it lands; the release already reported the refusal.
+        if self.frozen_here()
+            && let Some(refusal) = self.changed_members(family)
+        {
+            self.thaw_for_members(family, None, refusal)?;
+        }
+        // A refused restore goes again until it lands; the release already reported the refusal.
         for kind in std::mem::take(&mut self.retry_restore) {
             if self.restore(family, kind).is_err() {
                 self.retry_restore.insert(kind);
@@ -907,7 +979,8 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         self.check_ram_cap(family)
     }
 
-    /// The duty cycles' next phase switch and, while a RAM cap holds, its next check.
+    /// The duty cycles' next phase switch and, while a RAM cap holds, its next check. While the
+    /// leaf is frozen its members are read every `FROZEN_MEMBER_CHECK`.
     fn next_deadline(&self) -> Option<Instant> {
         let ram = (self.ram_cap.is_some() && self.ram_refused.is_none())
             .then(|| Instant::now() + RAM_CAP_CHECK);
@@ -920,7 +993,10 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 let at = duty.phase.next_switch(now, period, duty.duty, !duty.frozen);
                 Instant::now() + at.saturating_sub(now)
             });
-        [self.fallback.next_deadline(), duty, ram]
+        let frozen = self
+            .frozen_here()
+            .then(|| Instant::now() + FROZEN_MEMBER_CHECK);
+        [self.fallback.next_deadline(), duty, ram, frozen]
             .into_iter()
             .flatten()
             .min()
