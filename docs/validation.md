@@ -515,6 +515,9 @@ held 0.773, and the other user rose from 0.468–0.472 to 0.481–0.485 of its r
 and the other user then split the device's time evenly, and the other user still holds 0.962–0.970
 of its half by throughput, against 0.98 of its third without CedeGrid.
 
+For feature 001 a zero margin stays a record, not a gate; measuring the duty's switch cost, and
+folding it into d0 if it is CedeGrid's, goes to feature 004's backlog before Aggressive ships.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
