@@ -59,6 +59,28 @@ Principle V's Tracked control level.
 - Q: Does that per-core rule also apply to 001's PSI-only probe? → A: Yes. The plan says whether
   that part lands in 003 or needs a 001 follow-up.
 
+### Session 2026-11-02
+
+- Q: How does CedeGrid treat a command run as root, and where does the control level come from?
+  → A: Every `cedegrid` command run with effective UID 0 refuses with one line that says why and
+  what to run instead: the same command as the user, without `sudo`. The only exception is the
+  System broker of feature 005, not yet specified. The control level (Tracked or Full, later
+  System) comes from the host's state, never from `sudo` or from how CedeGrid was installed. A
+  test covers the refusal, and `doctor` shows a line for it.
+- Q: What is the CLI's install channel? → A: The GitHub Release binaries with a one-line install
+  script that installs into `~/.local/bin`, needs no root, pins the version and verifies the
+  sha256 before installing. Homebrew and `cargo install` are secondary channels. The README leads
+  with the script, not with `npm install --global`. pip carries the Python SDK only and npm the
+  TypeScript SDK; the CLI is never bundled into the pip wheel. The existing npm CLI packages keep
+  working under FR-080. A native check installs on a clean account.
+- Q: How does own work avoid raising a contender's tail latency when CPU caps are duty cycles,
+  as in 001's Tracked level (report 029 run 4: the other user's p99 rose from 0.356 ms to
+  3.33 ms beside capped own work, with 188 step changes in 300 s)? → A: Before a duty cycle caps
+  own work on a CPU a contender also uses, own threads move off that CPU: affinity at the Tracked
+  level, under FR-043's thread-ID rule, or `cpu.weight` where the Full level allows it. Step
+  changes stay within 001's SC-009 bound. A native gate checks it; the contender's p99 bound is
+  the user's decision and is not set yet.
+
 ## Terms
 
 - **Run**: one piece of work started with `cedegrid run`, an SDK task or a cluster assignment,
@@ -264,6 +286,8 @@ without delegation, and check the output and `--json`.
    `cedegrid run` works with no further step.
 2. **Given** a host without delegation, **When** the user runs `cedegrid doctor`, **Then** it
    shows the Tracked level, what it means, and which evidence is available.
+3. **Given** any `cedegrid` command, **When** the user runs it with `sudo`, **Then** it refuses
+   with one line that says why and to run it as the user (FR-082).
 
 ---
 
@@ -283,6 +307,10 @@ without delegation, and check the output and `--json`.
 - A contender is pinned to cores own work also uses and keeps waiting after a global step: it is
   not recorded as satisfied, and own work moves off those cores, never below its fair share
   (FR-056).
+- Own work would be capped by a duty cycle on a CPU a contender also uses: its threads move off
+  that CPU first (FR-057).
+- A user runs a `cedegrid` command with `sudo`: it refuses and says to run it as the user
+  (FR-082).
 - Work started through another daemon (for example a terminal multiplexer server) is outside
   the run's tree and is not tracked (FR-054).
 - Other users' process details are hidden from the user.
@@ -446,6 +474,14 @@ without delegation, and check the output and `--json`.
   At the Tracked level, own work's affinity MUST then move off a known overlap, on own processes
   only and under FR-043's thread-ID rule, never below own work's fair share. At the Full level,
   no per-thread call is made; own work yields through its cgroup's CPU limit as in 001.
+- **FR-057**: Before a duty cycle caps own work on a CPU a contender also uses, own threads MUST
+  move off that CPU: through affinity at the Tracked level, on own processes only and under
+  FR-043's thread-ID rule, or through `cpu.weight` where the Full level authorizes it. Duty
+  cycles are 001's rootless CPU caps on SDK and cluster tasks and the Full level's `cpu.max`;
+  `run`'s Tracked path has none (FR-043), so affinity is its only lever. Moving off MUST NOT take own work below its fair share. Own work's CPU step
+  changes MUST stay within 001's SC-009 bound, at most one per change in the contender's load.
+  A native gate MUST measure the contender's p99 latency beside own work under this rule
+  (SC-013).
 
 **Single-core bottlenecks (user story 7)**
 
@@ -464,7 +500,14 @@ without delegation, and check the output and `--json`.
 - **FR-070**: The install guide MUST lead to a working first `cedegrid run` with no further
   step.
 - **FR-071**: `cedegrid doctor` MUST show each check as passed (✓) or failed (✗) with a
-  one-line fix hint, including the control level and which contention evidence is available.
+  one-line fix hint, including the control level, which contention evidence is available, and
+  that it runs as a user other than root (FR-082).
+- **FR-073**: The CLI's main install channel MUST be the GitHub Release binaries with a one-line
+  install script. The script MUST install into `~/.local/bin`, need no root, pin the version and
+  verify the binary's sha256 before installing it. Homebrew and `cargo install` are secondary
+  channels. The README MUST lead with the script, not with `npm install --global`. The pip
+  package MUST carry the Python SDK only and the npm SDK package the TypeScript SDK; the CLI MUST
+  NOT be bundled into the pip wheel. The existing npm CLI packages keep working (FR-080).
 
 **Compatibility and safety**
 
@@ -472,6 +515,10 @@ without delegation, and check the output and `--json`.
   files MUST stay compatible or ship with an explicit migration.
 - **FR-081**: No command in this feature MAY act on a process outside the run's verified set,
   raise own priority, or change a host setting.
+- **FR-082**: Every `cedegrid` command run with effective UID 0 MUST refuse with one line that
+  says why and what to run instead: the same command as the user, without `sudo`. The only
+  exception is the System broker of feature 005. The control level (Tracked or Full) MUST come
+  from the host's state, never from `sudo` or from how CedeGrid was installed.
 
 ### Key Entities
 
@@ -510,6 +557,15 @@ without delegation, and check the output and `--json`.
   the host.
 - **SC-010**: `doctor` shows ✓ or ✗ with a fix hint for every check, and a new user can name
   their control level from one `doctor` run.
+- **SC-011**: Run with effective UID 0, every `cedegrid` command refuses with the one-line
+  message, as a test shows, and `doctor` shows the check.
+- **SC-012**: On a clean account without root, the install script installs the pinned,
+  sha256-verified CLI into `~/.local/bin`, and a first `cedegrid run` works with no further step,
+  as a native check shows; a checksum mismatch stops the install with nothing installed.
+- **SC-013**: In a native gate with a contender on a CPU own work uses, own threads leave that
+  CPU before any duty cycle caps them, own work's CPU step changes stay within 001's SC-009
+  bound, and the contender's p99 latency stays within a bound the user sets
+  [NEEDS CLARIFICATION: the p99 bound is the user's decision].
 
 ## Assumptions
 
