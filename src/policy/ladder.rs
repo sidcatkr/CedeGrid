@@ -1801,16 +1801,17 @@ fn compute_unavailable(
 /// above the level is at least `needed`, at the highest such level.
 fn fill_level(victims: &[VictimFacts], needed: u64) -> u64 {
     let mut amounts: Vec<u64> = victims.iter().map(|v| v.amount).collect();
-    amounts.sort_unstable_by(|a, b| b.cmp(a));
+    amounts.sort_unstable();
     let total: u64 = amounts.iter().sum();
     let keep = total.saturating_sub(needed);
-    // Water-fill from the smallest amounts up: those below the level keep all they use.
+    // Water-fill from the smallest amounts up: those below the level keep all they use. Compared
+    // before dividing, so with nothing needed the level is the largest amount and no one gives.
     let mut below = 0u64;
-    for (count, amount) in amounts.iter().rev().enumerate() {
+    for (count, amount) in amounts.iter().enumerate() {
         let open = (amounts.len() - count) as u64;
-        let level = keep.saturating_sub(below) / open;
-        if *amount >= level {
-            return level;
+        let left = keep.saturating_sub(below);
+        if amount.saturating_mul(open) >= left {
+            return left / open;
         }
         below += amount;
     }

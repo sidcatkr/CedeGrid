@@ -4565,6 +4565,25 @@ mod new_victims {
         last
     }
 
+    /// With no excess no task gives anything, however uneven their usage. Nearly equal tasks are
+    /// the case that rounding could cap: 403 m over four is 100 m after rounding down.
+    #[test]
+    fn uneven_tasks_with_no_excess_hold_no_step() {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
+            for usage in [
+                &[100, 100, 100, 103][..],
+                &[100, 101, 103, 107, 110, 98, 99],
+            ] {
+                let steps = steps(mode, usage, 0);
+                assert!(steps.is_empty(), "{mode:?}: {steps:?}");
+            }
+        }
+    }
+
     #[test]
     fn equal_tasks_share_the_excess_at_one_level() {
         // 3200m beside 800m on a saturated host, over the 2000m fair share by 1200m: 300m each.
