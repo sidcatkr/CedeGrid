@@ -62,9 +62,9 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   Since item 027 an idle context of a user ID below `uid_min` is background while per-process
   utilization is readable. The test host's greeter runs at or above `uid_min`, and at item 029
   its idle graphics context held Yield First's admission on
-  `gpu_yield_first_activity_unknown`. At item 048 Yield First still missed the comparison's 60 s
-  readiness after the harness's own unmanaged probe: admission opened 65–101 s after the agent
-  started. The GPU attribution tolerance
+  `gpu_yield_first_activity_unknown`. At item 048 three of six managed probes in Yield First
+  missed the comparison's 60 s readiness: activity read unknown for 18–55 s after the device's last
+  busy phase. The GPU attribution tolerance
   stays 15 points until a second device is measured; the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
@@ -591,7 +591,7 @@ process of either account was left after any run.
 | Run | Values | Result |
 |---|---|---|
 | B1, a 150-task burst, then a draining stop (operator drain, then TERM) | All 150 ran; every task drained or released; the drain took 9.3 s; no lease expired, no refusal, no supervisor error. The longest gap between observations was 1135 ms, against one 4236 ms iteration at `fc5e330`. Nine gaps were over 1 s, eight of them during the drain. | fail: 1135 ms against 1 s |
-| B2, Yield First on the idle GPU (report 029 run 5's idle row), three times | The probe never became ready within the harness's 60 s. The comparison's own unmanaged probe kept the device busy first (`gpu_yield_first_needs_quiet_device`), then activity read unknown for 18–55 s (`gpu_yield_first_activity_unknown`) although GPU compute read measured. Admission opened 65, 101 and 74 s after the agent started. | fail |
+| B2, Yield First on the idle GPU (report 029 run 5's idle row), three comparisons | Three managed probes finished and three missed the harness's 60 s readiness; each comparison stops at its first miss. The comparison's own earlier phases kept the device busy (`gpu_yield_first_needs_quiet_device`), then activity read unknown for 18.5, 55 and 27.5 s (`gpu_yield_first_activity_unknown`) although GPU compute read measured, before admission opened. | fail, intermittent |
 | B3, SC-014's GPU memory fill (capacity less the floor: 2048 MiB) | Performance: own GPU memory 1856 MiB (90.6%). Yield First: 1454 MiB against 1638 MiB less its margin (88.8%). Both are held back by `noise_tolerance` (381–383 MiB), which SC-014 does not subtract. The device's only other context was the greeter's, 2 MiB. | fail |
 | B4, the OOM order without an OOM (a 3 GiB capacity) | The second account's 1.5 GiB took the fair share from 1139 MiB to 558 MiB. Only the task launched last went to `oom_score_adj` 1000; the in-share task kept its launch value 0. When the second account released 3 s later, the share was back at 1038 MiB, and the same process went back to 0 before any drain. With `ram.prefer_own_oom_victim` every own task was at 1000 from launch. | pass |
 | B5, an own task past its leaf's `memory.max` (Full, 256 MiB) | With host swap, the kernel swapped the excess, and the task ran at 262 MiB resident to its end. With `memory.swap.max = 0` on the test's own delegated root it was killed three times in its leaf (host `oom_kill` +3). Each kill was recorded as `oom_kill` with `own_fault`, the fair share being unknown before its first memory reading, and counted as a failure. After three attempts the task stood at `needs_reconciliation`. No leaf was left. | pass |
@@ -601,8 +601,8 @@ process of either account was left after any run.
 | C4, a host-wide OOM the second account causes, beside six in-share tasks and one over-share task, three runs | The kernel took one process in each run, the second account's allocator (24–28 GB resident), and no own task. CedeGrid gave the excess back 7–9 s before each OOM. With SDK tasks, all seven got the save-progress signal at the breach, while own memory was within its share, and the task over share was marked and freed on its hint. With an over-share task that ignores hints, the in-share SDK tasks freed instead, so own memory came back within its share and the mark ended while that task still held 3 GB. With no SDK task, the over-share task, marked at `oom_score` 1385 against the allocator's 756, was drained 2.4 s later and started again after the OOM. The second account's processes kept `oom_score_adj` 0. | in-share work pass; no own task was killed, so the kernel's preference and the requeue after a kill were not exercised |
 
 B1's stop spreads its drains over iterations, but iterations during it still run just over 1 s. B2
-holds because Yield First waits for a quiet device and then reads activity as unknown after own
-work has just used it. In C4 hint-ready tasks pay first, whichever task holds the excess: the
+misses when Yield First's wait for a quiet device, and the unknown activity reading after the device's
+last use, run past the harness's limit. In C4 hint-ready tasks pay first, whichever task holds the excess: the
 ladder hints the tasks that can hear hints, in victim order, and skips the rest.
 
 ### Own-work ratios in the protection runs
