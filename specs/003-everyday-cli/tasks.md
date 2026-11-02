@@ -256,6 +256,42 @@ per-core contention. Tests first; T039 and T040 build on T074–T078.
 - [ ] T084 [US6] Gate, at the Tracked level: a contender pinned with `taskset` to two of own work's cores reaches its demand after own work moves off them and is never recorded as satisfied while it waits; record the evidence in native-gates.md. Per FR-056, SC-006 (missing)
 - [ ] T085 [US6] Gate: on a kernel with thread pidfds and again with `CEDEGRID_TEST_FORCE_PROC_THREADS=1`, a Tracked run's affinity changes reach only verified threads, and no change is reported as possibly misdirected in a normal run; record the evidence in native-gates.md. Per FR-043, SC-006 (missing)
 
+## Phase 12: Item 048 (root refusal, install channel and contended-CPU placement)
+
+Spec Session 2026-11-02 (FR-057, FR-073, FR-082; SC-011 to SC-013); plan "Item 048". Each pair: a
+failing test first, then the code.
+
+**Independent test**: quickstart scenarios 10, 11 and 12, and the two gates below.
+
+Root refusal (FR-082, SC-011):
+- [ ] T086 [P] [US5] Test first in tests/cli.rs (`root_refusal_*`) and a unit test of the refusal function in src/main.rs: at effective UID 0 every subcommand, the hidden `__worker-gate` and `__assignment-supervisor` included, prints one stderr line saying to run the same command as the user without `sudo` and exits 3; with `--json` it prints `{"error": {"code": "ERR_CEDEGRID_ROOT", ...}}`; at any other UID nothing changes. The refusal is a pure function of the effective UID. Per FR-082, SC-011 (missing)
+- [ ] T087 [US5] Implement one `geteuid` read at the top of `main` in src/main.rs, before the hidden dispatch, which still runs before clap, Tokio, any thread and the launcher terminal handoff, and add `ERR_CEDEGRID_ROOT` to the CLI's error codes, until T086 passes. Per FR-082, research R18 (missing)
+- [ ] T088 [P] [US5] Test first in tests/control_level.rs (`control_level_ignores_sudo`): detection gives the same level with and without `SUDO_UID`, `SUDO_USER` and `SUDO_COMMAND` set and for any install path, and its recorded inputs hold none of them. Per FR-082 (missing)
+- [ ] T089 [US5] Make src/control_level.rs (T011) take only the user manager, delegation and the authorized controls, until T088 passes. Per FR-082 (missing)
+- [ ] T090 [US5] Add a step to .github/workflows/ci.yml on the Ubuntu runner: `sudo -n target/debug/cedegrid <command>` for every subcommand, expecting the one line and exit 3. Per SC-011 (missing)
+- [ ] T091 [US5] Extend T067's test in tests/cli.rs with `✓ runs as a user other than root`, then add the check in src/explain.rs. Per FR-071, FR-082 (missing)
+
+Install channel (FR-073, SC-012):
+- [ ] T092 [P] [US5] Test first in tests/test_install_script.py (standard library only): tools/install.sh against local release assets served on loopback, with `HOME` set to an empty temporary directory. It installs `~/.local/bin/cedegrid` at the pinned version. A changed tarball byte, a tarball with no `SHA256SUMS` line, or no `sha256sum` or `shasum` on `PATH` stops it with nothing installed. With an `id -u` stub that prints 0 it refuses. It says when `~/.local/bin` is not on `PATH`. Per FR-073, SC-012 (missing)
+- [ ] T093 [US5] Write tools/install.sh (POSIX `sh`, research R16) until T092 passes, and add it to `ALLOWLIST` in tools/pack_source_review.py. Per FR-073 (missing)
+- [ ] T094 [US5] In .github/workflows/release.yml and release-candidate.yml, build Linux x86_64 and aarch64 binaries at the glibc 2.35 floor and publish `cedegrid-<version>-<target>.tar.gz`, `SHA256SUMS` and `install.sh` with the version written in; the candidate checks the sums before publishing. Per FR-073 (missing)
+- [ ] T095 [P] [US5] Test first in tests/test_packaging.py: the wheel built from python/ holds the SDK only, with no `cedegrid` binary or launcher. Per FR-073 (missing)
+- [ ] T096 [US5] Lead README.md's install section with the one-line script. Homebrew and `cargo install --locked cedegrid` follow as secondary channels, then the npm launcher packages with a line that they keep working. Update T069's guide to match. Per FR-073, FR-080 (missing)
+- [ ] T097 [US5] Add "Install on a clean account" to specs/003-everyday-cli/native-gates.md with exact commands: an empty `HOME` under an existing account (a new account only with the user's approval, FR-053), the one-line install, the checksum stop with a changed tarball, and a first `cedegrid run`. Per SC-012 (missing)
+- [ ] T098 [US5] Gate: run "Install on a clean account" on the test host and record the evidence in native-gates.md and docs/validation.md. Per SC-012 (missing)
+
+Contended-CPU placement (FR-057, SC-013):
+- [ ] T099 [P] [US6] Test first in tests/telemetry.rs (`contended_cpus_*`): the contended set is per-CPU host busy from `/proc/stat` less own verified threads' per-CPU use, joined with contenders' `Cpus_allowed_list`; unknown per-CPU use counts as contended. Per FR-057, Principle III (missing)
+- [ ] T100 [P] [US6] Test first in tests/contention.rs (`contended_cpu_placement_*`): when the ladder would cap own work on a contended CPU, the decision first moves own work's granted cores off it (Tracked), or lowers own leaves' `cpu.weight`, never above 100 (Full, where authorized and the contender shares the delegated parent). The duty cycle applies only when own usage still exceeds its target in the next interval, and own work never goes below its fair share in cores. Per FR-057 (missing)
+- [ ] T101 [P] [US6] Test first in tests/contention.rs: with placement, a contender that switches on and off every 4 intervals (001 SC-009's shape) changes own work's CPU step at most once per switch, and so does report 029 run 4's shape (two of four CPUs saturated 30 s on and 30 s off). Per FR-057 (missing)
+- [ ] T102 [US6] Implement the contended set in src/telemetry/runqueue.rs and `contended_cpus` in src/model.rs, until T099 passes. Per FR-057 (missing)
+- [ ] T103 [US6] Implement placement in src/policy/ladder.rs and src/contention.rs, with the record fields `placement` (`none` \| `moved_off` \| `weight`) and `duty_after_placement`, applied through the Tracked affinity lever (src/supervision/tracked.rs, T078) and `cpu.weight` in src/cgroup.rs, until T100 and T101 pass. Per FR-057 (missing)
+- [ ] T104 [US6] Add "Contended-CPU placement" to specs/003-everyday-cli/native-gates.md with exact commands: report 029 run 4's shape beside CedeGrid and beside a fixed `taskset` allocation, recording the contender's p50 and p99 and own work's step changes. The p99 bound is left to the user's decision. Per SC-013 (missing)
+- [ ] T105 [US6] Gate: run "Contended-CPU placement" on the test host and record the p99 ratio and the step changes in native-gates.md and docs/validation.md; its pass waits on the user's bound. Per SC-013 (missing)
+
+- [ ] T107 [US5] Add the secondary channels: a Homebrew formula kept in packaging/homebrew/cedegrid.rb that installs the release tarball by its sha256, and a crates.io publish step in .github/workflows/release.yml for `cargo install --locked cedegrid`. Both publish only on the user's release go. Per FR-073 (missing)
+- [ ] T106 Update docs/guarantees.md, README.md, the CLAUDE.md layout map, `ALLOWLIST` and Cargo `include` for FR-057, FR-073 and FR-082. Per Constitution VIII (missing)
+
 ## Dependencies and execution order
 
 - Setup (T001–T003), then Foundational (T004–T013), then the user stories.
@@ -264,6 +300,9 @@ per-core contention. Tests first; T039 and T040 build on T074–T078.
   rule of constitution 5.0.0. T081 (per-core contention) needs T042, T043 and T078.
 - US3 needs T005 and T017. US4 needs T001. US7 needs T017 and T050. US5 needs T011.
 - Polish follows the stories it measures.
+- Phase 12: T087 needs T086 and T089 needs T011 and T088. T091 needs T067 and T068, and T096
+  needs T069. T094 needs T093, and T098 needs T094 and T097. T102 needs T042 and T081, and T103
+  needs T040, T078, T100 and T101. T105 needs T103 and T104. T107 needs T094. T106 comes last.
 
 ## Parallel examples
 
