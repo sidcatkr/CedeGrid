@@ -15,7 +15,6 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 | 015, 019 Part 2 | A pinned contender is not recorded as satisfied, and Tracked moves own cores off it. Tasked as 003 FR-056, T079–T085. | 003 | nothing |
 | 029 Decision 3 B (report 029 run 4) | Keep own threads off a contended CPU before a duty cycle, and bound the step churn. Tasked as 003 FR-057, T099–T105, with SC-013's bound at 1.2× the p99 beside a fixed allocation. | 003 | nothing |
 | 035 Part 3 | `cedegrid state purge` removes a state directory together with its control directory (003 tasks, "Backlog"). | 003 | nothing |
-| 044 Q31 | `CLOCK_MONOTONIC` is per time namespace. The aligned GPU duty phases assume every supervisor shares the agent's namespace, which holds today; `node_clock` states it, and no spec does. | 001, after the merge | nothing |
 | 046 runs Decision 1 A (047: C for 001) | Measure the duty cycle's switch cost and fold it into d0 if it is CedeGrid's. Tasked as 004 T049. | 004 | shipping Aggressive |
 | 018, 022 | Build 004 after 001 merges, in the agreed order against 003, then run its native gate T048. | 004 | nothing |
 | 010 item 6 and later reports | T117: validate the provisional thresholds, on the user's server, by the user. | 001 | closing 001's thresholds |
@@ -82,6 +81,7 @@ item 031.
 
 | Source | Where |
 |---|---|
+| 044 Q31: the aligned duty phases assume every supervisor shares the agent's `CLOCK_MONOTONIC` time namespace | item 049 (T516), FR-021 and spec Session 2026-11-03 |
 | 026 Decision 5 A: a refusal at the authorization barrier uses no attempt | item 049 (T511), FR-018 |
 | 027 Decision 2 B: the window's busy bound tightened with per-CPU run time from `/proc/schedstat` | item 049 (T514); the idle rerun is T520 |
 | 024 Decision 2(c): new victims of a contended CPU excess share it by usage at one level | item 049 (T512), FR-016 |
