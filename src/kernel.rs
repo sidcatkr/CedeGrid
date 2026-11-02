@@ -1030,6 +1030,8 @@ pub struct KernelCollector {
     delegated_history: std::collections::VecDeque<Option<u64>>,
     cpu_window_span: Option<(CpuAccountingWindow, u64)>,
     fixture: bool,
+    /// The monotonic clock; tests replace it.
+    clock: fn() -> Instant,
 }
 
 impl KernelCollector {
@@ -1076,6 +1078,7 @@ impl KernelCollector {
             delegated_history: std::collections::VecDeque::new(),
             cpu_window_span: None,
             fixture: false,
+            clock: Instant::now,
         }
     }
 
@@ -1092,7 +1095,11 @@ impl KernelCollector {
     pub fn sample(&mut self) -> KernelSnapshot {
         self.cpu_window = None;
         self.cpu_window_span = None;
-        let now = millis(self.started.elapsed().as_millis());
+        let now = millis(
+            (self.clock)()
+                .saturating_duration_since(self.started)
+                .as_millis(),
+        );
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| millis(value.as_millis()))
@@ -1204,9 +1211,9 @@ impl KernelCollector {
             )),
         }
         result.cpu = inspect_cpu(&self.roots, result.hierarchy.as_ref());
-        let cpu_read_started = Instant::now();
+        let cpu_read_started = (self.clock)();
         let cpu_stat = read_text(&self.roots.proc.join("stat"));
-        let cpu_read_ended = Instant::now();
+        let cpu_read_ended = (self.clock)();
         // Next to the host counters, the delegated root's CPU time, for own CPU in Full.
         let delegated = self
             .config
@@ -1215,12 +1222,20 @@ impl KernelCollector {
             .and_then(|root| read_text(&root.join("cpu.stat")).ok())
             .as_deref()
             .and_then(parse_usage_usec);
+        // The interval between the counter reads themselves: the inspection before the read
+        // takes a varying time, and an idle CPU's ticks over a longer gap than the samples'
+        // starts show would read as idle beyond elapsed time.
+        let read_at = millis(
+            cpu_read_started
+                .saturating_duration_since(self.started)
+                .as_millis(),
+        );
         let usage = self.cpu_usage.observe(
             cpu_stat
                 .as_deref()
                 .map_err(|error| io::Error::new(error.kind(), error.to_string())),
             result.cpu.effective_cpu_ids.as_deref(),
-            now,
+            read_at,
             ttl,
         );
         result.cpu.busy_millicores = usage.busy_millicores;
@@ -1693,6 +1708,62 @@ fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTo
 #[cfg(test)]
 mod cpu_alignment_tests {
     use super::*;
+
+    thread_local! {
+        /// The fake clock's base and the offsets, in milliseconds, its next calls return.
+        static FAKE: std::cell::RefCell<(Option<Instant>, std::collections::VecDeque<u64>)> =
+            const { std::cell::RefCell::new((None, std::collections::VecDeque::new())) };
+    }
+
+    fn fake_clock() -> Instant {
+        FAKE.with(|fake| {
+            let mut fake = fake.borrow_mut();
+            let offset = fake.1.pop_front().expect("a scripted clock reading");
+            fake.0.unwrap() + Duration::from_millis(offset)
+        })
+    }
+
+    /// The busy interval is the time between the two `/proc/stat` reads, not between the two
+    /// samples' starts: the inspection before the read takes 5 ms in one sample and 55 ms in the
+    /// next, and an idle CPU's 55 ticks over the 550 ms between the reads are no overshoot.
+    #[test]
+    fn the_busy_interval_is_measured_between_the_counter_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (proc, sys) = (base.join("proc"), base.join("sys"));
+        let write = |dir: &Path, name: &str, text: &str| {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(name), text).unwrap();
+        };
+        write(
+            &proc.join("self"),
+            "status",
+            "Name:\tfixture\nCpus_allowed_list:\t0\n",
+        );
+        write(&proc.join("sys/kernel"), "osrelease", "6.6.fixture");
+        write(&sys.join("devices/system/cpu"), "online", "0\n");
+        write(&proc, "stat", "cpu0 100 0 0 1000 0 0 0 0\n");
+        let start = Instant::now();
+        FAKE.with(|fake| *fake.borrow_mut() = (Some(start), [0, 5, 6, 500, 555, 556].into()));
+        let mut collector = KernelCollector {
+            started: start,
+            clock: fake_clock,
+            cpu_usage: CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap()),
+            ..KernelCollector::inspect_at(
+                KernelConfig::default(),
+                ProbeRoots {
+                    proc: proc.clone(),
+                    sys,
+                },
+            )
+        };
+        collector.sample();
+        write(&proc, "stat", "cpu0 100 0 0 1055 0 0 0 0\n");
+        let snapshot = collector.sample();
+        assert_eq!(snapshot.cpu.busy_interval_ms, Some(550));
+        assert_eq!(snapshot.cpu.busy_status, CpuUsageStatus::Available);
+        assert!(collector.cpu_accounting_window().is_some());
+    }
 
     /// Two CPUs at 100 ticks a second, CPU 0 busy half of every 500 ms interval and CPU 1 idle,
     /// sampled 9 times: one interval carries a tick of rounding per CPU, the 8-interval window
