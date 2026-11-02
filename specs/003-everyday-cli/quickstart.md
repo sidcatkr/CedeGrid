@@ -77,5 +77,5 @@ host; the rest run in CI.
 1. `cargo test --locked --test contention -- contended_cpu_placement`.
 2. Expect: own work moves off the contended CPU before any duty cycle, stays at or above its fair
    share, and changes step at most once per change in the contender's load.
-3. Native: "Contended-CPU placement" in `native-gates.md`, with the contender's p99 beside CedeGrid
-   against beside a fixed allocation. The bound is the user's open decision.
+3. Native: "Contended-CPU placement" in `native-gates.md`. The contender's p99 beside Tracked
+   caps is at most 1.2× its p99 beside a fixed allocation of the same own share, in the same run.

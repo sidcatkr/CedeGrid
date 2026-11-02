@@ -78,8 +78,11 @@ Principle V's Tracked control level.
   3.33 ms beside capped own work, with 188 step changes in 300 s)? → A: Before a duty cycle caps
   own work on a CPU a contender also uses, own threads move off that CPU: affinity at the Tracked
   level, under FR-043's thread-ID rule, or `cpu.weight` where the Full level allows it. Step
-  changes stay within 001's SC-009 bound. A native gate checks it; the contender's p99 bound is
-  the user's decision and is not set yet.
+  changes stay within 001's SC-009 bound. A native gate checks it, with the contender's p99
+  bound set by the next answer.
+- Q: What bound must the contender's p99 latency meet in SC-013's native gate? → A: The other
+  user's p99 beside Tracked caps is at most 1.2× its p99 beside a fixed allocation of the same
+  own share, measured in the same run.
 
 ## Terms
 
@@ -564,8 +567,8 @@ without delegation, and check the output and `--json`.
   as a native check shows; a checksum mismatch stops the install with nothing installed.
 - **SC-013**: In a native gate with a contender on a CPU own work uses, own threads leave that
   CPU before any duty cycle caps them, own work's CPU step changes stay within 001's SC-009
-  bound, and the contender's p99 latency stays within a bound the user sets
-  [NEEDS CLARIFICATION: the p99 bound is the user's decision].
+  bound, and the contender's p99 latency beside Tracked caps is at most 1.2× its p99 beside a
+  fixed allocation of the same own share, measured in the same run.
 
 ## Assumptions
 

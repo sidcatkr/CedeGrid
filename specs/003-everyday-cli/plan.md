@@ -319,9 +319,9 @@ script as release assets. No wire, SDK, config or contract fixture change.
   measurement band.
 - Native gate (SC-013): report 029 run 4's shape again: 4 CPUs, Performance, the second account
   saturating two of them 30 s on and 30 s off for 300 s. Own work runs beside it once with
-  CedeGrid and once as a fixed `taskset` allocation on the other two CPUs. It reports the
-  contender's p50 and p99 and own work's step changes. The p99 bound is the user's open
-  decision; the gate records the ratio until it is set.
+  CedeGrid and once as a fixed `taskset` allocation of the same own share, in the same run. It
+  reports the contender's p50 and p99 and own work's step changes. It passes when the
+  contender's p99 beside Tracked caps is at most 1.2× its p99 beside the fixed allocation.
 
 **Constitution Check (item 048)**:
 
@@ -333,8 +333,8 @@ script as release assets. No wire, SDK, config or contract fixture change.
 | VII. Compatibility | The npm CLI packages, the pip SDK, config files and the wire are unchanged. The refusal adds one exit-code use (3) and one error code. |
 | VIII. Public docs | The README leads with the script and stays generic, with no host names. |
 
-Result: pass. The p99 bound in SC-013 is the user's open decision (spec marker), and the gate
-records its ratio until it is set.
+Result: pass. The user set SC-013's p99 bound on 2026-11-02: at most 1.2× the p99 beside a
+fixed allocation of the same own share, in the same run.
 
 ## Complexity Tracking
 
