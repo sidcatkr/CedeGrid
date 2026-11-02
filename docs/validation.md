@@ -62,15 +62,25 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   Since item 027 an idle context of a user ID below `uid_min` is background while per-process
   utilization is readable. The test host's greeter runs at or above `uid_min`, and at item 029
   its idle graphics context held Yield First's admission on
-  `gpu_yield_first_activity_unknown`; that path has not run since. The GPU attribution tolerance
+  `gpu_yield_first_activity_unknown`. At item 048 Yield First still missed the comparison's 60 s
+  readiness after the harness's own unmanaged probe: admission opened 65–101 s after the agent
+  started. The GPU attribution tolerance
   stays 15 points until a second device is measured; the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
-- **Memory.** No native result exists at HEAD for:
-  - SC-014's RAM and GPU memory fill;
-  - SC-012's memory reclaim bounds;
-  - a floor breach in which Performance gives way only down to its memory fair share;
-  - OOM protection of own work when another user causes the OOM.
+- **Memory.** Item 048 ran the memory paths natively for the first time (see
+  [Item 048](#item-048-native-checks-at-head)).
+  - SC-012's RAM reclaim and the floor breach by mode pass.
+  - The OOM order passes: in-share own work keeps its launch value, and only the marked task is
+    at 1000.
+  - In three host-wide OOMs the second account caused, the kernel took only its allocator.
+  - SC-014's RAM and GPU memory fill miss as written. The host's own 1.9 GiB at idle and the GPU
+    memory `noise_tolerance` (about 380 MiB) count against the fill; SC-014 subtracts neither.
+  - No native result exists for SC-012's GPU memory reclaim, or for a kernel OOM kill of an own
+    task caused by others, since CedeGrid gave the excess back first each time.
+- **Burst stop.** At item 048 a draining stop of 150 tasks takes 9.3 s and spreads its drains, with
+  a longest gap of 1135 ms between observations against the 1 s bound; at `fc5e330` one iteration
+  took 4236 ms.
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
@@ -570,6 +580,30 @@ Charged at their usage, own tasks plus CedeGrid would fill each share to 94.3% a
 the warm-ups admission was open in 81% and 70% of the decisions and cooling down in the rest. An
 own task's measurement went unknown in 0.1% and 0.8% of them, mostly while Yield First ran its
 first tasks, and each time the external estimate rose by about 250 m for an interval.
+
+### Item 048: native checks at HEAD
+
+Run on 2026-11-02 on the same test host at `9c01943`, with the commands under "Item 048" in
+`specs/001-contention-modes/native-gates.md`. The test deployment's floors are 16 GiB of RAM and
+4096 MiB of GPU memory, and the host's own processes hold about 1.9 GiB of RAM at idle. No test
+process of either account was left after any run.
+
+| Run | Values | Result |
+|---|---|---|
+| B1, a 150-task burst, then a draining stop (operator drain, then TERM) | All 150 ran; every task drained or released; the drain took 9.3 s; no lease expired, no refusal, no supervisor error. The longest gap between observations was 1135 ms, against one 4236 ms iteration at `fc5e330`. Nine gaps were over 1 s, eight of them during the drain. | fail: 1135 ms against 1 s |
+| B2, Yield First on the idle GPU (report 029 run 5's idle row), three times | The probe never became ready within the harness's 60 s. The comparison's own unmanaged probe kept the device busy first (`gpu_yield_first_needs_quiet_device`), then activity read unknown for 18–55 s (`gpu_yield_first_activity_unknown`) although GPU compute read measured. Admission opened 65, 101 and 74 s after the agent started. | fail |
+| B3, SC-014's GPU memory fill (capacity less the floor: 2048 MiB) | Performance: own GPU memory 1856 MiB (90.6%). Yield First: 1454 MiB against 1638 MiB less its margin (88.8%). Both are held back by `noise_tolerance` (381–383 MiB), which SC-014 does not subtract. The device's only other context was the greeter's, 2 MiB. | fail |
+| B4, the OOM order without an OOM (a 3 GiB capacity) | The second account's 1.5 GiB took the fair share from 1139 MiB to 558 MiB. Only the task launched last went to `oom_score_adj` 1000; the in-share task kept its launch value 0. When the second account released 3 s later, the share was back at 1038 MiB, and the same process went back to 0 before any drain. With `ram.prefer_own_oom_victim` every own task was at 1000 from launch. | pass |
+| B5, an own task past its leaf's `memory.max` (Full, 256 MiB) | With host swap, the kernel swapped the excess, and the task ran at 262 MiB resident to its end. With `memory.swap.max = 0` on the test's own delegated root it was killed three times in its leaf (host `oom_kill` +3). Each kill was recorded as `oom_kill` with `own_fault`, the fair share being unknown before its first memory reading, and counted as a failure. After three attempts the task stood at `needs_reconciliation`. No leaf was left. | pass |
+| C1, SC-014's RAM fill | Performance: own RAM 12763 MiB, 85.8% of capacity less the floor, 98.3% of its target of 12982 MiB (capacity less the floor and the host's own use), held back by `peak` 175 MiB. Yield First: 9990 MiB, 83.9% of capacity less the floor and margin, 99.9% of its 10001 MiB target. | fail as written; Yield First within 1% of its target |
+| C2, SC-012's RAM reclaim: after a Performance fill the second account grows by 4 GiB in about 1.1 s | From the breach to the floor restored: 4.43 s with plain tasks (bound 5.5 s), 5.99 s with hint-ready tasks (bound 10.5 s), 1.04 s with Guaranteed hint-ready tasks (bound 15.5 s). The second account got all its memory each time. | pass |
+| C3, a floor breach the second account causes, growing by 10 GiB | Performance: own RAM fell from 12764 MiB to 6172 MiB in 2.3 s and stopped at its fair share of about 6370 MiB, with the floor breached until the second account released 90 s later. Neutral: from 12701 MiB to 2012 MiB in 4.1 s, below its fair share of about 6360 MiB, and the floor restored in 3.1 s. Yield First: from 9912 MiB to 760 MiB in 3.2 s and then 0; free memory stayed 1318 MiB above the floor. | pass |
+| C4, a host-wide OOM the second account causes, beside six in-share tasks and one over-share task, three runs | The kernel took one process in each run, the second account's allocator (24–28 GB resident), and no own task. CedeGrid gave the excess back 7–9 s before each OOM. With SDK tasks, all seven got the save-progress signal at the breach, while own memory was within its share, and the task over share was marked and freed on its hint. With an over-share task that ignores hints, the in-share SDK tasks freed instead, so own memory came back within its share and the mark ended while that task still held 3 GB. With no SDK task, the over-share task, marked at `oom_score` 1385 against the allocator's 756, was drained 2.4 s later and started again after the OOM. The second account's processes kept `oom_score_adj` 0. | in-share work pass; no own task was killed, so the kernel's preference and the requeue after a kill were not exercised |
+
+B1's stop spreads its drains over iterations, but iterations during it still run just over 1 s. B2
+holds because Yield First waits for a quiet device and then reads activity as unknown after own
+work has just used it. In C4 hint-ready tasks pay first, whichever task holds the excess: the
+ladder hints the tasks that can hear hints, in victim order, and skips the rest.
 
 ### Own-work ratios in the protection runs
 
