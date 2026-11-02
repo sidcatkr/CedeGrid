@@ -780,10 +780,11 @@ Gates:
 - **C2, SC-012's reclaim.** After a Performance RAM fill the second account grows by 4 GiB. Own
   work frees the room and the second account gets it. Bounds, from the breach to the floor
   restored: opportunistic 10.5 s with a hint and 5.5 s without; Guaranteed 15.5 s.
-- **C3, a floor breach others cause.** The second account grows by 16 GiB. In Performance own
+- **C3, a floor breach others cause.** The second account grows by 10 GiB, about 0.7 of own
+  capacity under the deployment's 16 GiB RAM floor. In Performance own
   memory gives way only down to its fair share; in Neutral and Yield First the floor comes first.
-- **C4, a host-wide OOM the second account causes.** Own in-share tasks (Guaranteed, SDK) and one
-  over-share task launched last run in Performance. The second account then allocates until the
+- **C4, a host-wide OOM the second account causes.** Own in-share tasks (Guaranteed, SDK; six of
+  1 GiB) and one over-share task of 3 GiB launched last run in Performance. The second account then allocates until the
   kernel's OOM killer acts. Gates:
   - the in-share tasks are not the first victims;
   - an in-share task that is killed got the save-progress signal before, its kill is classified
