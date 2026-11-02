@@ -1231,7 +1231,7 @@ T098 src/setup.rs caution mapping tests    T099 tests/cli.rs flag tests
 - [X] T225 Implement the contention-ended count (`PolicyState`, `src/policy/measure.rs`) and the one-move raise of held CPU caps and the CPU allowance in Yield First and Neutral (`src/contention.rs`, `src/policy/ladder.rs`, `src/policy/admission.rs`), until T224 passes, per FR-034 (missing)
 - [X] T226 Update `docs/guarantees.md` for every changed behavior (the measurement window, lease batches, cancelled reservations, `own_over_target`, CedeGrid's usage, background GPU contexts, the CPU return) and the known limits in `docs/validation.md`, per Constitution VIII (missing)
 - [X] T227 Compare the decision snapshot with item 026's (T205) and explain each changed decision class, per plan "Item 027" (missing)
-- [ ] T228 Native gates for item 027 (Part 6, runs 1–7) on the authorized test host, with exact commands in `native-gates.md`. *Deferred: needs the user's typed approval for item 027 in the session.* Per FR-073, FR-074, SC-014, SC-015 and SC-004 (missing)
+- [X] T228 Native gates for item 027 (Part 6, runs 1–7) on the authorized test host, with exact commands in `native-gates.md`. *Deferred: needs the user's typed approval for item 027 in the session.* Ran at `9916e59`, recorded in `docs/validation.md` "Reruns after item 027"; the gates that missed there are followed in "Item 029 runs", T339 and "Item 047: SC-014's fill and Full's GPU path". Per FR-073, FR-074, SC-014, SC-015 and SC-004 (missing)
 
 ## Phase 21: Convergence (item 027 decisions on report 027-1)
 
@@ -1659,3 +1659,17 @@ Own work pays for the re-measure windows (spec Session 2026-11-01 Q37; plan "Ite
 - [X] T506 Compare `decision_snapshot` with the code at `f56e179`, listing which snapshots change and why. Per plan "Item 046" 2 (missing)
 - [X] T507 State in `docs/guarantees.md` that own work pays for CedeGrid's re-measure windows on a time-sliced device, so others keep their share over time. Per plan "Item 046" 3 (missing)
 - [X] T508 Add 046's host runs to `specs/001-contention-modes/native-gates.md` with their gates: zero margin gated as in 045, Performance and Neutral under T456's gates. Have `batch-037`'s analyzer report d0, w and d0' per window. Per plan "Item 046" 4 (missing)
+
+## Phase 37: Convergence (item 048)
+
+Item 048's converge, scoped to `follow-ups.md`'s open rows for 001 and the code paths items 044 to 047 touched. Each code task: a failing test first, then the code. The follow-up rows stay after the merge unless a later item says otherwise.
+
+- [ ] T509 CRITICAL: In `slice_duty` (`src/policy/measure.rs`), clear the stored readings, or hold the step, in any interval without a device utilization reading, so the duty never rises on readings an interval without one left behind; first a failing test in `tests/contention.rs` where readings stop after the dwell fills and `rise_ms` then passes. Per Constitution III, FR-021 (contradicts)
+- [ ] T510 Bound the check-then-write window in the cgroup freeze duty (`src/cgroup.rs`, `verify_runtime_target` then `write_checked`, taken every period since T486): re-read `cgroup.procs` after each freeze write and thaw at once if the members changed, or close the window; first a failing test in `tests/cgroup.rs` with a member that joins between the check and the write. Per Constitution I, item 030 SUP-11 (contradicts)
+- [ ] T511 Say in FR-018 (through `/speckit-clarify`) that a refusal at the authorization barrier is not the task's failure, then requeue a replay-safe task after one without using an attempt (`src/coordinator.rs`, `src/supervision.rs`), test first. Per FR-018, follow-ups "026 Decision 5" (missing)
+- [ ] T512 Split a contended excess across new victims by usage, so no new victim is capped by the whole excess left and a cap to 0 does not become a pause (`src/policy/ladder.rs`), test first in `tests/contention.rs`. Per follow-ups "024 Decision 2(c)" (missing)
+- [ ] T513 Charge each supervisor's CPU to its allocation and measure the 173 m SC-014 gap (`src/telemetry/managed.rs`, `docs/validation.md`). Per SC-014, follow-ups "024 Decision 3" (missing)
+- [ ] T514 Tighten the window's busy bound with per-CPU nanoseconds from `/proc/schedstat` (`src/kernel.rs`, `src/telemetry.rs`), test first, then rerun report 027's 4-CPU idle run on the test host. Per follow-ups "027 Decision 2 B" (missing)
+- [ ] T515 Charge running work at its mean while no other principal is active and at its p95 once one is (`src/policy/measure.rs`, FR-034), decided together with merging Neutral into Performance; needs the user's decision first. Per SC-014, follow-ups "027 Decision 5 B" (missing)
+- [ ] T516 State in FR-021 (through `/speckit-clarify`) that the aligned duty phases assume every supervisor shares the agent's `CLOCK_MONOTONIC` time namespace. Per FR-021, follow-ups "044 Q31" (missing)
+- [ ] T517 Give each of item 030's 31 low findings for 001 (SUP-8 to SUP-14, AGT-13 to AGT-17, POL-6, GPU-6, TEL-6 to TEL-10, EFF-6 to EFF-10, SDK-3 to SDK-9) a test-first pair, or move it to a later feature by name in `follow-ups.md`. Per follow-ups "030 Deferred low findings" (missing)

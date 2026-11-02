@@ -321,3 +321,18 @@ Contended-CPU placement (FR-057, SC-013):
 - `cedegrid state purge`: remove a stopped node's or coordinator's state directory together with the
   control directory beside it (`.<name>.cedegrid-control`). Until then `docs/guarantees.md` names
   the control directory, and removing state means removing both (feature 001, T418).
+
+## Phase 13: Convergence (item 048)
+
+Item 048's converge against constitution 7.0.0 and `specs/001-contention-modes/follow-ups.md`. Spec changes go through `/speckit-clarify` first; each code task starts with a failing test.
+
+- [ ] T108 CRITICAL: Bring FR-052 and research R9 in line with Principle II's OOM order by fault: a Tracked member within own memory's fair share keeps the `oom_score_adj` it launched with, and only the members that make up own memory above its fair share are marked as preferred victims, as 001 FR-023 does; then a failing test beside T048 in tests/tracked.rs. Per Constitution II, FR-052 (contradicts)
+- [ ] T109 Make Performance `run`'s default mode in FR-025 and US1 scenario 1 (now "Neutral"), and make T014 and T058 assert it. Per Constitution II, 001 FR-030 (contradicts)
+- [ ] T110 Make US6 scenario 6 and FR-052 depend on the mode and the memory fair share, as 001's ladder does: in Performance and Aggressive own memory within its fair share is not given up for a floor breach others caused; add that case to T048. Per Constitution II (contradicts)
+- [ ] T111 Re-run plan.md's Constitution Check against 7.0.0 (row II: the OOM order and the memory fair share at the floors), and update the version references in spec.md, research.md R3 and R4, and T039. Per Constitution II, plan: Constitution Check (contradicts)
+- [ ] T112 Plan the follow-up "Full moves cores too": whether Full verifies its leaf members per thread through `cgroup.procs` plus a pidfd and takes the core move, through `/speckit-clarify` (FR-056, R15, R17, T080, T081 say Full makes no per-thread call). Per follow-ups "019 analyze C1" (partial)
+- [ ] T113 Set and validate the numeric default of the wait level that marks a principal as contending (T003, T043; src/config.rs, research R7), test first in tests/contention.rs. Per FR-050, FR-056, follow-ups "019 analyze A1" (missing)
+- [ ] T114 Add a Full-level same-cgroup contender case to T052 and native-gates.md, or record in plan.md why Full cannot have one and amend FR-053. Per FR-053 (partial)
+- [ ] T115 Add a failing test in tests/run_cli.rs before T038 for the one-line Tracked notice and the `--require-containment` refusal (exit 3). Per FR-040, US6 scenarios 2 and 3 (partial)
+- [ ] T116 Add to T058 (tests/run_cli.rs) the `[run."<script>"]` write, the kept comments, the read-only floors and the one-line notice naming the file. Per FR-020, FR-021, FR-026, US3 scenarios 1, 2 and 5 (partial)
+- [ ] T117 Add to T039 (tests/tracked.rs) a case showing the Tracked actuator never grants fewer than one core under cross-cgroup contention. Per FR-048, edge case "Every core is granted away except one" (partial)

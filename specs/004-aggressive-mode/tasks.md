@@ -354,3 +354,19 @@ wire, with the ordering and the protection proven by tests. Stop and validate wi
 | US2 (P2) | 17 (T028–T044; 3 need 003) |
 | Polish | 5 (T045–T049; T048 and T049 on the test host, T049 before shipping) |
 | **Total** | **49** |
+
+## Phase 6: Convergence (item 048)
+
+Item 048's converge against constitution 7.0.0 and feature 001's GPU time-slice duty. Spec changes go through `/speckit-clarify` first; each code task starts with a failing test.
+
+- [ ] T050 CRITICAL: Rewrite plan.md's Constitution Check row II and research R2 against 7.0.0: the OOM order by fault, the memory floors down to the fair share, and the loss rule by mode (Aggressive: a 0% margin plus CedeGrid's measured overhead). Per Constitution II (contradicts)
+- [ ] T051 CRITICAL: Change T016 and T042 to check FR-006's confirmation sentence (the kernel may take another workload's process, or own work as the largest process, before own work checkpoints), not "own work stays the preferred OOM victim". Per Constitution II, FR-006 (contradicts)
+- [ ] T052 CRITICAL: In data-model.md, mark Performance as the default mode with no caution acknowledgement (`performance_mode`); Aggressive stays the caution option. Per Constitution II (contradicts)
+- [ ] T053 Specify in spec.md and plan.md how unprotected Aggressive treats 001's time-slice duty, which today replaces every mode's GPU compute target but Yield First's with the duty share (`src/policy/measure.rs`), from FR-010's unprotected rule and with the user's decision where FR-010 does not settle it; then test-first tasks in tests/policy.rs. Per FR-010, SC-004 (missing)
+- [ ] T054 State Aggressive's zero-margin duty (d0 750, d0' 725 at m = 2, E = 1) in FR-018 and plan.md, add T049 to "Order against 003", and add a test-first task after T049 that folds the measured switch cost into d0 if it is CedeGrid's. Per FR-002, FR-003, FR-018, SC-001, 001 FR-021 (partial)
+- [ ] T055 Make 001's time-slice duty an exception to FR-002's "rises straight to what the mode allows once calm", or state its step rule, in spec.md, contracts/policy-protection.md P8 and T011. Per FR-002, 001 FR-021 (contradicts)
+- [ ] T056 Add GPU compute light and saturating contender runs to T048 and quickstart.md §6. Per SC-001, SC-002, Constitution VI (partial)
+- [ ] T057 Add to T031 or T042 a case where an interactive start succeeds with the allowance off. Per FR-015 (partial)
+- [ ] T058 Extend T010 and T029 with the OOM order by fault, the VRAM floors and the operator envelope under Aggressive. Per FR-010, FR-018 (partial)
+- [ ] T059 Add an absence check for the `[Aggressive]` label to T014 and T025 when the run is not in that mode. Per SC-006 (partial)
+- [ ] T060 Limit T026 to shared-cgroup hosts, or add a per-user-cgroup case in tests/policy.rs where the contender's demand comes from its usage plus the probe. Per FR-004 (partial)
