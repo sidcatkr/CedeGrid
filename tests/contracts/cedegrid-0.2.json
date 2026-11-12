@@ -933,6 +933,41 @@
       },
       "allowance": null,
       "save_progress": 0
+    },
+    {
+      "id": "TF-08",
+      "description": "An amount given as null is unset, in a target and in an allowance; the supervisor never writes one.",
+      "file": {
+        "version": 1,
+        "sequence": 8,
+        "deadline_unix_ms": 1793000000000,
+        "step": "hint",
+        "targets": {
+          "cpu_millicores": null,
+          "ram_mib": 2048
+        },
+        "allowance": {
+          "cpu_millicores": 7000,
+          "ram_mib": null
+        },
+        "allowance_sequence": 3,
+        "save_progress_sequence": 2
+      },
+      "targets": {
+        "sequence": 8,
+        "deadline_unix_ms": 1793000000000,
+        "step": "hint",
+        "cpu_millicores": null,
+        "ram_mib": 2048,
+        "gpu_memory_mib": {}
+      },
+      "allowance": {
+        "sequence": 3,
+        "cpu_millicores": 7000,
+        "ram_mib": null,
+        "gpu_memory_mib": {}
+      },
+      "save_progress": 2
     }
   ],
   "worker_context_cases": [

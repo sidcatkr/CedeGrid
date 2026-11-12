@@ -190,11 +190,13 @@ export interface ResourceAllowance {
     gpuMemoryMib: Record<string, bigint>;
 }
 const amount = (v: unknown): v is bigint => typeof v === 'bigint' && v >= 0n;
-/** The per-resource amounts of a target or allowance object, or null. */
+/** The per-resource amounts of a target or allowance object, or null. A null CPU or RAM
+ * amount is unset, as in the Python SDK. */
 function amounts(value: any): { cpu?: bigint; ram?: bigint; gpu: Record<string, bigint> } | null {
     if (!value || typeof value !== 'object' || Array.isArray(value))
         return null;
-    const { cpu_millicores: cpu, ram_mib: ram, gpu_memory_mib: gpu = {} } = value;
+    const { gpu_memory_mib: gpu = {} } = value;
+    const cpu = value.cpu_millicores ?? undefined, ram = value.ram_mib ?? undefined;
     if ((cpu !== undefined && !amount(cpu)) || (ram !== undefined && !amount(ram)) || !gpu || typeof gpu !== 'object' || Array.isArray(gpu) || !Object.values(gpu).every(amount))
         return null;
     return { cpu, ram, gpu: { ...gpu } };
