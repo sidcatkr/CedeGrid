@@ -1477,6 +1477,57 @@ mod runtime_steps {
         assert_eq!(actuator.applied_target(ResourceKind::Ram), None);
     }
 
+    /// A cap write that took effect, then a failed readback and a failed restore, leaves
+    /// `memory.high` at the cap: the step's error says so, and the next tick restores it (SUP-12).
+    #[test]
+    fn a_ram_cap_left_by_a_failed_restore_is_reported_and_restored_on_the_next_tick() {
+        use std::cell::Cell;
+        struct Flaky {
+            leaf: DirectoryLeaf,
+            fail_read: Cell<bool>,
+            fail_write: Cell<bool>,
+        }
+        impl LeafIo for Flaky {
+            fn same_leaf(&self) -> anyhow::Result<bool> {
+                self.leaf.same_leaf()
+            }
+            fn read(&self, control: &str) -> anyhow::Result<String> {
+                if control == "memory.high" && self.fail_read.take() {
+                    anyhow::bail!("readback failed");
+                }
+                self.leaf.read(control)
+            }
+            fn write(&self, control: &str, value: &str) -> anyhow::Result<()> {
+                if control == "memory.high" && value == "max" && self.fail_write.take() {
+                    anyhow::bail!("restore failed");
+                }
+                self.leaf.write(control, value)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        memory_leaf(&dir, "76\n", "max");
+        let mut settings = settings(AllocationClass::Opportunistic);
+        settings.requested.ram_mib = 4096;
+        let leaf = Flaky {
+            leaf: DirectoryLeaf::open(&dir).unwrap(),
+            fail_read: Cell::new(true),
+            fail_write: Cell::new(true),
+        };
+        let mut actuator = CgroupActuator::new(leaf, &ram_config(), &settings);
+        let mut family = family(76);
+        let error = actuator
+            .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(3500))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("memory.high could not be restored"),
+            "{error:#}"
+        );
+        assert_eq!(read(&dir, "memory.high"), (3500 * MIB).to_string());
+        actuator.tick(&mut family).unwrap();
+        assert_eq!(read(&dir, "memory.high"), "max");
+    }
+
     /// After an agent restart, a recorded RAM cap is adopted as the current step
     /// and an unrecorded `memory.high` is reset: no cap stays without a step.
     #[test]

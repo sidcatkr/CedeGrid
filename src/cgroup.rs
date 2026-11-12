@@ -627,7 +627,14 @@ impl<L: LeafIo> CgroupActuator<L> {
         });
         if let Err(error) = result {
             self.ram_refused = Some("ram_cap_refused");
-            let _ = self.restore(family, ResourceKind::Ram);
+            // A write that took effect before its readback failed must not stay: a restore
+            // that fails too is reported and goes again on each tick (SUP-12).
+            if let Err(restore) = self.restore(family, ResourceKind::Ram) {
+                self.retry_restore.insert(ResourceKind::Ram);
+                return Err(error.context(format!(
+                    "memory.high could not be restored and is retried: {restore:#}"
+                )));
+            }
             return Err(error);
         }
         Ok(())
