@@ -74,7 +74,7 @@ item 031.
 | 030 AGT-16: a failed policy Drain or Terminate send was never retried | item 050 (`8e0531e`): sent again until delivered, the slot counting as draining meanwhile |
 | 030 GPU-6: the GPU compute margin switches on at the smallest external amount | closed in item 050: on a time-sliced device Neutral and Performance are set back to the whole device (`src/policy/measure.rs`, the time-slice rule of items 041–046); elsewhere it is SC-015's target, capacity minus the user minus the margin |
 | 030 TEL-7: the busy interval used a timestamp taken before discovery | closed in item 050: fixed by `af531c0` (047 Decision 2) |
-| 030 TEL-9: guest time counted twice; a failed `/proc` read gave a known empty list | item 050 (`bd4c735`, `0618858`): eight fields in the total; an unreadable table is unknown, and admitted principals and per-process peaks stand through it |
+| 030 TEL-9: guest time counted twice; a failed `/proc` read gave a known empty list | item 050 (`bd4c735`, `0618858`, `62e555e`): eight fields in the total; an unreadable table is unknown, and admitted principals and per-process peaks stand through it, a GPU memory peak only while the device still lists its process |
 | 030 SDK-3: an error on the drain path hid the drain (TypeScript) or raised (Python) | item 050 (`89de57d`): no drain for that call, logged once, checked again |
 | 030 SDK-4: an oversize request was reported as uncertain in TypeScript | item 050 (`665a998`) |
 | 030 SDK-5: `request_digest` key order differed between the SDKs | item 050 (`6c8d2e3`): sorted keys in both, one pinned value |
