@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Socket } from 'node:net';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -69,6 +69,29 @@ test('a raising drain hook is isolated', (t) => {
         assert.deepEqual(calls, [2]);
     }
     finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('an unreadable drain path is checked again', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+    // An error other than not-found is no drain for now, logged once (SDK-3).
+    const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
+    const directory = join(root, 'private');
+    try {
+        const warn = t.mock.method(console, 'warn', () => { });
+        mkdirSync(directory);
+        const context = new WorkerContext({ ...descriptor, drain_file: join(directory, 'drain') }, new FakeTransport([]));
+        writeFileSync(join(directory, 'drain'), '');
+        chmodSync(directory, 0);
+        assert.equal(context.draining(), false);
+        assert.equal(context.draining(), false);
+        context.safePoint();
+        assert.equal(warn.mock.callCount(), 1);
+        chmodSync(directory, 0o700);
+        assert.throws(() => context.safePoint(), DrainRequested);
+    }
+    finally {
+        chmodSync(directory, 0o700);
         rmSync(root, { recursive: true, force: true });
     }
 });

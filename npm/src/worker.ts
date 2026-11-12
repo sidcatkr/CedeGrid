@@ -1,5 +1,5 @@
 import { createConnection } from 'node:net';
-import { readFileSync, existsSync, writeFileSync, renameSync, statSync, promises as fs } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync, promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -355,7 +355,29 @@ export class ResourceSignals {
             console.warn('resource-target hook failed', error);
         }
     }
-    draining(): boolean { this.poll(); return !!this.drainFile && existsSync(this.drainFile); }
+    private drainUnreadable = false;
+    /** Whether the drain file exists. An error other than not-found is no drain for now: it is
+     * logged once and the path is checked again on the next call (SDK-3). */
+    private drainRequested(): boolean {
+        if (!this.drainFile)
+            return false;
+        try {
+            const found = statSync(this.drainFile, { throwIfNoEntry: false }) !== undefined;
+            this.drainUnreadable = false;
+            return found;
+        }
+        catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') {
+                this.drainUnreadable = false;
+                return false;
+            }
+            if (!this.drainUnreadable)
+                console.warn('drain file could not be checked; it is checked again', error);
+            this.drainUnreadable = true;
+            return false;
+        }
+    }
+    draining(): boolean { this.poll(); return this.drainRequested(); }
     /** Record the highest sequence seen; it shows the worker reads targets. */
     private acknowledge(sequence: bigint): void {
         if (!this.targetFile || (this.acked !== undefined && sequence <= this.acked))
@@ -403,7 +425,7 @@ export class WorkerContext {
     onResourceAllowance(callback: (allowance: ResourceAllowance) => void): void { this.signals.onResourceAllowance(callback); }
     /** Call `callback(sequence)` once per new save-progress request, during drain polls (FR-075). */
     onSaveProgress(callback: (sequence: bigint) => void): void { this.signals.onSaveProgress(callback); }
-    draining(): boolean { this.signals.poll(); const path = this.context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE; const requested = !!path && existsSync(path); if (requested && !this.drainNotified) {
+    draining(): boolean { const requested = this.signals.draining(); if (requested && !this.drainNotified) {
         this.drainNotified = true;
         // A failing hook is logged like a resource hook; the rest run and the drain stands.
         for (const callback of [...this.drainHooks]) {

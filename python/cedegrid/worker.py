@@ -161,11 +161,30 @@ class ResourceSignals:
         self._allowance_hooks, self._allowance_notified = [], None
         self._save_hooks, self._save_notified = [], 0
         self._identity, self._cached = (), (None, None, 0)
+        self._drain_unreadable = False
 
     @classmethod
     def from_env(cls):
         return cls(os.environ.get("CEDEGRID_DRAIN_FILE") or None,
                    os.environ.get("CEDEGRID_RESOURCE_TARGET_FILE") or None)
+
+    def _drain_requested(self) -> bool:
+        """Whether the drain file exists. An error other than not-found is no drain for now:
+        it is logged once and the path is checked again on the next call (SDK-3)."""
+        if self.drain_file is None:
+            return False
+        try:
+            os.stat(self.drain_file)
+        except (FileNotFoundError, NotADirectoryError):
+            self._drain_unreadable = False
+            return False
+        except OSError:
+            if not self._drain_unreadable:
+                _log.warning("drain file could not be checked; it is checked again", exc_info=True)
+            self._drain_unreadable = True
+            return False
+        self._drain_unreadable = False
+        return True
 
     def _read(self):
         """Parse the file again when its stat identity changed or its mtime is within 50 ms
@@ -255,7 +274,7 @@ class ResourceSignals:
 
     def draining(self) -> bool:
         self.poll()
-        return self.drain_file is not None and self.drain_file.exists()
+        return self._drain_requested()
 
     @staticmethod
     def _call(callback, targets):
@@ -349,8 +368,7 @@ class WorkerContext:
         self._signals.on_save_progress(callback)
 
     def draining(self):
-        self._signals.poll()
-        requested = self.drain_file is not None and self.drain_file.exists()
+        requested = self._signals.draining()
         if requested and not self._drain_notified:
             self._drain_notified = True
             # A failing hook is logged like a resource hook; the rest run and the drain stands.

@@ -1,5 +1,6 @@
 """SDK protocol unit tests. Native durability is tested by the Rust integration suite."""
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -86,6 +87,20 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.context.draining());(self.root/'drain').touch()
         with self.assertRaises(DrainRequested):self.context.safe_point()
         self.assertTrue(self.context.draining());self.assertEqual(calls,[1])
+    @unittest.skipIf(not hasattr(os, 'geteuid') or os.geteuid() == 0, 'needs an unprivileged POSIX account')
+    def test_an_unreadable_drain_path_is_checked_again(self):
+        """An error other than not-found is no drain for now, logged once (SDK-3)."""
+        private = self.root/'private'; private.mkdir()
+        context = WorkerContext(self.context.context, private/'drain', client=SupervisorFixture())
+        (private/'drain').touch(); private.chmod(0)
+        try:
+            with self.assertLogs('cedegrid', level='WARNING') as logs:
+                self.assertFalse(context.draining()); self.assertFalse(context.draining())
+                context.safe_point()
+            self.assertEqual(len(logs.records), 1)
+        finally:
+            private.chmod(0o700)
+        with self.assertRaises(DrainRequested): context.safe_point()
     def test_a_raising_drain_hook_is_isolated(self):
         calls=[]
         def broken(_): raise RuntimeError('drain hook failed')
