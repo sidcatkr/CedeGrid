@@ -87,6 +87,18 @@ pub struct ExecutionOutcome {
     pub members_ended: u64,
 }
 
+impl ExecutionOutcome {
+    /// Read an attempt's outcome file. A missing or unparsable file is no outcome. Any other
+    /// read failure is an error: it decides nothing, and the caller reads the file again (AGT-14).
+    pub fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 /// Why a process is outside a run's verified family (FR-082).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -744,6 +756,20 @@ mod unix;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing or unparsable outcome file is no outcome; a read that fails for another reason
+    /// decides nothing, so the caller reads it again instead of reporting a failure (AGT-14).
+    #[test]
+    fn an_unreadable_outcome_file_is_not_an_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("execution-outcome.json");
+        assert!(ExecutionOutcome::read(&path).unwrap().is_none());
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(ExecutionOutcome::read(&path).unwrap().is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(ExecutionOutcome::read(&path).is_err());
+    }
 
     /// Setting affinity acts on the calling thread only: another thread's mask is
     /// unchanged (constitution I, calls that take only a thread ID).

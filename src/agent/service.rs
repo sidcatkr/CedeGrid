@@ -786,9 +786,12 @@ impl AgentLoop<'_> {
                     {
                         continue;
                     }
-                    let outcome = fs::read(slot.output_dir.join("execution-outcome.json"))
-                        .ok()
-                        .and_then(|b| serde_json::from_slice::<ExecutionOutcome>(&b).ok());
+                    // A read that failed decides no outcome; it is read again (AGT-14).
+                    let Ok(outcome) =
+                        ExecutionOutcome::read(&slot.output_dir.join("execution-outcome.json"))
+                    else {
+                        continue;
+                    };
                     if outcome.is_none() && !supervisor_exited {
                         continue;
                     }
@@ -1009,10 +1012,11 @@ impl AgentLoop<'_> {
                         && spec.assignment.generation == record.generation,
                     "outbox identity mismatch"
                 );
-                let normal_exit = fs::read(output.join("execution-outcome.json"))
-                    .ok()
-                    .and_then(|v| serde_json::from_slice::<ExecutionOutcome>(&v).ok())
-                    .is_some_and(|o| o.exit_code == Some(0) && !o.yielded);
+                let Ok(outcome) = ExecutionOutcome::read(&output.join("execution-outcome.json"))
+                else {
+                    continue;
+                };
+                let normal_exit = outcome.is_some_and(|o| o.exit_code == Some(0) && !o.yielded);
                 let publication_pin = crate::publication_gc::pin_attempt(&self.store, &output)?;
                 let descriptor_bytes = match crate::publication::read_head(
                     &self.store,
@@ -1637,16 +1641,16 @@ impl AgentLoop<'_> {
                     if !lease_turn(reported, reports_started.elapsed(), budget) {
                         break;
                     }
-                    let yielded = fs::read(
-                        config
+                    let Ok(outcome) = ExecutionOutcome::read(
+                        &config
                             .state_dir
                             .join("attempts")
                             .join(id)
                             .join("execution-outcome.json"),
-                    )
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<ExecutionOutcome>(&b).ok())
-                    .is_some_and(|o| o.yielded);
+                    ) else {
+                        continue;
+                    };
+                    let yielded = outcome.is_some_and(|o| o.yielded);
                     if matches!(
                         bounded(
                             self.rpc_budget,
