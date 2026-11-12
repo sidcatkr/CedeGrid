@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .codec import parse_json, stringify_json, integer, I64_MAX
-from .errors import SpawnUncertain, RemoteError, ValidationError, CedeGridError
+from .errors import SpawnUncertain, RemoteError, ValidationError, CedeGridError, DeadlineExceeded
 from .transport import remaining
 import os
 from pathlib import Path
@@ -129,9 +129,10 @@ class ManagedChild:
             if result["state"] == "released":
                 return result
             if result["state"] == "needs_reconciliation":
-                raise RuntimeError("child remains reserved and requires reconciliation")
+                raise RemoteError("child remains reserved and requires reconciliation",
+                                  code="ERR_CEDEGRID_RECONCILIATION_REQUIRED")
             if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("child wait expired; the child was not signaled")
+                raise DeadlineExceeded("child wait expired; the child was not signaled")
             time.sleep(poll_interval if deadline is None else min(poll_interval, max(0, deadline - time.monotonic())))
 
 

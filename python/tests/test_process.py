@@ -161,6 +161,16 @@ class ManagedChildTests(unittest.TestCase):
                 ManagedChild(fake, 'c').wait(timeout=0)
             self.assertEqual([op for op, _ in fake.calls], ['status'])
 
+    def test_wait_errors_carry_the_documented_codes(self):
+        """SDK-7: the same codes as the TypeScript SDK, still catchable as the builtin errors."""
+        from cedegrid import DeadlineExceeded, RemoteError, is_cedegrid_error
+        for reply, expected, code in [({'state': 'running'}, DeadlineExceeded, 'ERR_CEDEGRID_TIMEOUT'),
+                                      ({'state': 'needs_reconciliation'}, RemoteError, 'ERR_CEDEGRID_RECONCILIATION_REQUIRED')]:
+            with self.assertRaises(expected) as caught:
+                ManagedChild(_FakeClient([reply]), 'c').wait(timeout=0)
+            self.assertEqual(caught.exception.code, code)
+            self.assertTrue(is_cedegrid_error(caught.exception))
+
     def test_stop_is_request_and_wait_requires_release(self):
         fake = _FakeClient([{'state': 'draining'}, {'state': 'released', 'exit_code': 0}])
         child = ManagedChild(fake, 'c')
