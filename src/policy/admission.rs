@@ -247,8 +247,23 @@ impl Interval<'_> {
             }
             // An unreadable list is not an exit: each tracked process keeps its peak and counts
             // at its last sample, so remembered demand is not admitted against (TEL-9, FR-077).
+            // On a device, its own process list is known evidence: a process it no longer lists
+            // has exited.
             if snapshot.external_processes.is_none() {
-                for (id, samples) in prev.process_peaks.iter().filter(|(id, _)| &id.0 == key) {
+                let on_device = |pid: u32| match key {
+                    ResourceKey::GpuMemory(uuid) => snapshot
+                        .gpus
+                        .iter()
+                        .find(|gpu| &gpu.uuid == uuid)
+                        .and_then(|gpu| gpu.external_process_ids.as_ref())
+                        .is_none_or(|listed| listed.contains(&pid)),
+                    _ => true,
+                };
+                for (id, samples) in prev
+                    .process_peaks
+                    .iter()
+                    .filter(|(id, _)| &id.0 == key && on_device(id.1))
+                {
                     let usage = samples.back().map_or(0, |(_, usage)| *usage);
                     listed_total = listed_total.saturating_add(usage);
                     let mut samples = samples.clone();

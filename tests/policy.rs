@@ -3950,6 +3950,39 @@ fn an_unreadable_process_list_keeps_each_external_peak() {
     assert_eq!(headroom(1000, true, 1500), 21_000);
 }
 
+/// On a device, an unreadable process list keeps a tracked process's peak while the device's
+/// own list still shows the process, and drops it once that list shows it gone: the device's
+/// list is known evidence of the exit (TEL-9, FR-060).
+#[test]
+fn an_unreadable_process_list_keeps_a_gpu_peak_while_the_device_lists_the_process() {
+    let mut engine = PolicyEngine::new();
+    let mut peak = |used: u64, on_device: bool, listed: bool, now: u64| {
+        let mut snap = gpu_snapshot();
+        snap.gpus[0].used_memory_mib = Some(used);
+        snap.gpus[0].external_process_ids = Some(if on_device { vec![500] } else { vec![] });
+        snap.external_processes = listed.then(|| {
+            vec![ExternalProcessMemory {
+                pid: 500,
+                start_time: 1,
+                ram_mib: 0,
+                gpu_memory_mib: BTreeMap::from([("GPU-test".to_string(), used)]),
+            }]
+        });
+        let decision = engine
+            .evaluate(&config(), &snap, &PolicyInput::default(), now)
+            .unwrap();
+        serde_json::to_value(&decision).unwrap()["resources"]["gpu_memory:GPU-test"]["held_back"]
+            ["peak"]
+            .as_u64()
+    };
+    assert_eq!(peak(10_000, true, true, 0), None);
+    assert_eq!(peak(2000, true, true, 500), Some(8000));
+    // The list cannot be read, and the device still lists the process: its peak stands.
+    assert_eq!(peak(2000, true, false, 1000), Some(8000));
+    // The device no longer lists it: it has exited, whatever the unreadable list would say.
+    assert_eq!(peak(0, false, false, 1500), None);
+}
+
 /// External usage beyond the listed processes, such as processes past the
 /// collector's 64, shares one peak over the window and is never dropped (FR-060).
 #[test]
