@@ -777,6 +777,36 @@ fn existing_drain_does_not_trigger_unnecessary_additional_drain() {
     assert_eq!(decision.admission_headroom.cpu_millicores, 0);
 }
 
+/// On a device with no other user, own work's GPU memory budget is the capacity less the floor
+/// and less the memory the device reports used that no process accounts for. The noise tolerance
+/// is a growth threshold and withholds nothing (SC-014, item 051).
+#[test]
+fn an_idle_device_withholds_no_noise_tolerance_from_gpu_memory() {
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "gpu-worker",
+            AllocationPhase::Running,
+            resources(1000, 1000, 6000),
+            Some(resources(500, 1000, 5873)),
+        )],
+        ..PolicyInput::default()
+    };
+    let mut snap = gpu_snapshot();
+    snap.gpus[0].unattributed_memory_mib = Some(127);
+    let decision = PolicyEngine::new()
+        .evaluate(&config(), &snap, &input, 0)
+        .unwrap();
+    // 16000 MiB with a 1000 MiB floor; 6000 used, of which own work accounts for 5873.
+    assert_eq!(
+        decision.managed_budget.gpu_memory_mib["GPU-test"],
+        16_000 - 1000 - 127
+    );
+    assert_eq!(
+        decision.admission_headroom.gpu_memory_mib["GPU-test"],
+        16_000 - 1000 - 127 - 6000
+    );
+}
+
 #[test]
 fn gpu_accounting_does_not_double_subtract_owned_usage() {
     let input = PolicyInput {
