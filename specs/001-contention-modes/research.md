@@ -1152,3 +1152,55 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   coordinator already knows); any never-granted attempt, preparation or not (a launch that fails
   before the barrier would requeue for ever). OOM's bound of 3 × `max_attempts` is not applied: FR-018
   says a refusal uses no attempt, nothing ran, and the yield backoff paces the requeues.
+
+## R59. What one drain of a draining stop costs the journal (item 051)
+
+- **Decision**: two synced writes, the run's Draining and Released transitions; the stop's share per
+  iteration is its 250 ms budget over twice the agent's last synced write.
+- **Rationale**: item 048's kept burst run has six journal events a run, two after the stop. At one
+  write a drain the stop sent 16 an iteration at a 15.6 ms write, and its iterations ran 1.0 to
+  1.135 s against a median of 520 ms.
+- **Alternatives**: a cap on runs draining at once (the cost follows the writes, not the count
+  held); feedback on the last iteration's length (it needs a native run to tune, and a fixed count of
+  writes is what the journal shows).
+
+## R60. Why GPU activity read unknown after the last busy phase (item 051)
+
+- **Decision**: the policy reads the collector's activity class as it is. Its own check, unknown
+  whenever a listed context that is not background has no newer driver timestamp, is removed, and
+  the record names why activity is unknown.
+- **Rationale**: an idle context returns no per-process sample, so the check overrode the
+  collector's Quiet until some process produced a timestamp. In item 048's three comparisons every
+  change from unknown to open lands on the first reports after a wall-clock minute, seven of seven,
+  and an earlier per-interval record on the same host shows the collector quiet at 9.7 s while the
+  policy still read unknown. The check predates the Quiet class (R8), any process's timestamp
+  satisfied it, own work's included, and the launch recheck never applied it.
+- **Alternatives**: keep the check and give it a memory of the last fresh timestamp (it still asks
+  for evidence the driver does not produce for an idle context); shorten Yield First's quiet
+  requirement (a change to what the mode means, and not the cause).
+
+## R61. How over-share tasks give memory back first (item 051)
+
+- **Decision**: the over-share set is the victim-order prefix that covers own memory above its fair
+  share. Its members come first and keep counting toward the excess while their wait runs; a decided
+  drain counts in full; in-share tasks receive only the remainder.
+- **Rationale**: the ladder already asks each victim in order for the excess left, but a step that
+  holds counted nothing, so a deaf task's excess moved to the next victim after one interval. The
+  OOM mark already names the same prefix, so the ladder and the mark agree on who is over its share.
+- **Alternatives**: a per-task share (the constitution defines the excess over own work's share as a
+  whole, so it needs an amendment); skipping the Guaranteed breach window for an over-share task (it
+  costs Guaranteed progress on short spikes and changes FR-024); asking in-share tasks strictly after
+  the over-share ones in Yield First and Neutral (the floor would wait past SC-012's bound).
+
+## R62. Whose GPU activity holds Yield First's admission (item 051)
+
+- **Decision**: from the device's compute contexts, which list the owner's unmanaged processes apart
+  from other accounts' and name the busy ones. Activity from the owner's processes alone does not
+  hold admission; another account's does; an unreadable owner or list keeps it unknown. Both callers
+  of `gpu_admission` take the same reading.
+- **Rationale**: the owner's use is already out of the external estimate and inside the owner's share
+  (FR-059), as on CPU since item 049. The contexts are already collected for the time-slice rule.
+- **Alternatives**: a new activity field on the snapshot (a schema change for what the contexts
+  already say); leaving the launch recheck on the device's class (the policy and the recheck would
+  disagree, as they did for R60).
+

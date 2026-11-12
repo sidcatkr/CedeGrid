@@ -2021,6 +2021,102 @@ Test first in `tests/coordinator.rs`.
 
 Result: pass.
 
+## Item 051: report 048's follow-ups and the user's answers of 2026-11-03 (2026-11-13)
+
+**Input**: spec Session 2026-11-13; the Over-share task term, FR-016, FR-023, FR-027, FR-037,
+FR-063 and SC-014; report 048's Decisions 1, 2 and 5; the analyses saved with item 051's report.
+
+**Technical Context**: Rust 1.88, no new dependency. No SDK, wire or config change. The record
+gains one optional field on a resource's status, which no client reads. `tools/pressure_comparison.py`
+gains an option. Native reruns are listed in `native-gates.md`; they wait for disk space on the
+test host.
+
+**Constitution Check**: Principle II (floors, the memory fair share, loss by mode) for the ladder's
+order; Principle III for the GPU activity reading; Principle I is untouched, since every step still
+goes to verified own processes only.
+- *The ladder's order.* Own memory above its fair share still gives way first in every mode, and
+  the OOM mark and the ladder use the same set. The cost is own work's only. One trade-off: while a
+  hint-deaf over-share task waits out its hint, the floor can stay breached for up to that wait,
+  5 s plus the drain for Opportunistic work and the 10 s breach window for plain Guaranteed RAM
+  work off the critical path, where in-share tasks were hinted within an interval before. Each
+  over-share task is still stepped at the first observation, and what the floor needs beyond the
+  over-share tasks is hinted in the same interval, so SC-012's bounds hold.
+- *The activity reading.* The collector still needs a newer driver timestamp for Active, a complete
+  empty list for Idle and the quiet window of healthy observation for Quiet, and its Unknown stays
+  Unknown. The policy stops turning the collector's Quiet into Unknown, so unknown is never read as
+  quiet and quiet is no longer read as unknown.
+- *The owner's GPU use.* It still counts in the owner's share, so no other principal gets less.
+  Activity whose owner cannot be read stays unknown.
+
+**Done before this section**: the draining stop's share (`df9f4c6`), the open OOM gates and the
+tests behind them (`46c2418`), `--readiness-seconds` (`c6f4a3c`), and the test that pins the GPU
+memory budget (`cd7d09a`).
+
+**The draining stop's share (R59)**. `stop_drain_quota` sized a stop's drains per iteration at one
+synced journal write each. A drained run writes two, Draining and Released: item 048's kept burst
+run shows six journal events a run, two of them after the stop, 16 drains an iteration at a 15.6 ms
+write, and iterations of 1.0 to 1.135 s. The share now counts both writes, 8 an iteration there.
+
+**The GPU activity reading (R60)**. Two steps.
+- *The record.* A GPU compute status carries a short name for why activity reads unknown:
+  the collector's own reason, or `no_fresh_sample` for the policy's check. The catalog code
+  `gpu_yield_first_activity_unknown` stays.
+- *The cause.* `gpu_admission` in `src/policy/measure.rs` read activity as unknown whenever a listed
+  context that is not background had no newer driver timestamp in the interval, whatever the
+  collector had classified. An idle context returns no sample, so the collector's Quiet, reached
+  after 20 healthy intervals, was overridden until some process produced a timestamp: on the test
+  host the greeter's context, at the top of each minute, which is the 18.5 s, 55 s and 27.5 s of
+  report 048. The launch recheck never applied that check, so the two disagreed. The check goes;
+  both callers read the collector's class. Tests first: a listed context that is Quiet with no
+  sample admits in Yield First and the recheck agrees; the collector's Unknown still holds
+  admission, and Active still needs a quiet device. The test that claimed to cover "no samples"
+  set a sample in both variants and is corrected.
+- *Reach.* The check only ever turned Quiet into Unknown, so in Neutral and Performance a quiet
+  listed context is no longer counted as one more principal of unknown amount.
+
+**The memory ladder's order (R61)**. All in `src/policy/ladder.rs`; `plan_step`, the victim order,
+the Performance cap to the fair share, `guaranteed_may_drain` and the OOM mark are unchanged.
+- *The over-share set* is the shortest prefix of the pass's victims, in victim order, whose judged
+  memory covers own memory above the fair share: the OOM mark's computation. It is empty when the
+  share is unknown or own memory is within it, and then nothing changes.
+- *Order.* Over-share victims come first, in that order; the rest keep theirs.
+- *Counting.* Today a held step counts nothing toward the excess, so a task that has not freed
+  after one interval, or that gets no step at all, passes its excess to the next victim. An
+  over-share victim now keeps counting what it was asked for while its hint is within its deadline,
+  or while a Guaranteed victim's drain only waits for time. A decided Drain or Terminate counts its
+  whole amount, also while the task still runs, so no further task is drained once own memory fits.
+  It counts nothing only when it cannot be stepped further: Guaranteed work that may not be drained
+  for this cause, or while controllable Opportunistic work is left.
+- *In-share tasks* receive only the remainder: nothing in Performance; in Yield First and Neutral
+  what the floor needs beyond all the over-share tasks hold, hinted in the same interval.
+- *Rule 4* follows: once the over-share tasks are draining they leave own memory, and if it is
+  still above the share the next tasks in order are the new set.
+- GPU memory follows the same rule per device. FR-024 and FR-075 keep their text.
+- Tests first, in `tests/policy.rs`: a hint-deaf over-share task is drained and in-share tasks keep
+  their memory (item 048's C4 run 2); one that ignores its hint is drained at the deadline, in all
+  three modes; a hint-ready one that frees in time is not drained; no more are drained than bring
+  own memory within its share; in-share tasks are asked only after the over-share tasks were
+  handled; nothing changes with no task over its share; a drained task is admitted again once its
+  memory fits.
+
+**SC-014's memory fill**. No code. On a device, the budget is the capacity less the floor and less
+what the device reports used beyond own work, memory no process accounts for included. The GPU
+noise tolerance is a growth threshold and withholds nothing, which `cd7d09a` pins; report 048 read
+its record field as withheld capacity.
+
+**The owner's GPU use and Yield First (R62)**. `contention::gpu_admission` has two callers, the
+policy and the launch recheck, and both must apply one rule. With the device's compute contexts
+known, activity that comes only from the owner's unmanaged processes does not hold Yield First's
+admission: a busy context of another account does, and a busy context whose owner cannot be read
+keeps the reading unknown. Without the contexts the rule is today's. The owner's use stays in the
+owner's share (FR-059), and Neutral and Performance are unchanged. Tests first: the owner's
+unmanaged process on the device does not hold Yield First's GPU admission; another account's does;
+the owner's use still counts in the owner's share; the recheck agrees in each case.
+
+**Native reruns** (`native-gates.md`, "Item 051"): B1; B2's three comparisons with the longer
+readiness wait, once after the activity fix and once after the owner rule, so the two effects can be
+told apart; B3 and C1 against SC-014's restated fill; C4 with the hint-deaf over-share task.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
