@@ -689,8 +689,11 @@ struct ChildSlot {
     /// Readiness as the supervisor last reported it (FR-062).
     hint_ready: bool,
     observes_drain: bool,
-    /// When the first Drain was sent, by local policy or for the coordinator.
+    /// When the first Drain was decided and its send tried, by local policy or for the
+    /// coordinator.
     drain_sent_at: Option<Instant>,
+    /// The last drain or terminate did not reach the supervisor; it is sent again.
+    drain_unsent: bool,
     /// Why it was drained, reported to the coordinator once negotiated.
     drain_cause: Option<crate::contention::YieldCause>,
     started_at: Instant,
@@ -906,7 +909,8 @@ fn dispatch_drains(
         let Some(slot) = slots.get_mut(id) else {
             continue;
         };
-        if slot.drain_sent_at.is_some()
+        // A drain that reached its supervisor is not sent again; one whose send failed is.
+        if (slot.drain_sent_at.is_some() && !slot.drain_unsent)
             || !(draining_stop
                 || slot.assignment.request.class == AllocationClass::Opportunistic
                 || matches!(
@@ -920,12 +924,15 @@ fn dispatch_drains(
         if draining_stop && stop_only && *quota == 0 {
             continue;
         }
-        *quota = quota.saturating_sub(1);
-        match terminations.get(id.as_str()) {
+        let delivered = match terminations.get(id.as_str()) {
             Some(key) => terminate(slot, key.clone(), cause),
             None => drain(slot, cause),
+        };
+        // A send that failed used none of the iteration's share and is tried again (AGT-16).
+        if delivered {
+            *quota = quota.saturating_sub(1);
+            sent += 1;
         }
-        sent += 1;
     }
     sent
 }
@@ -955,14 +962,33 @@ fn apply_coordinator_drains(
     sent
 }
 
-/// Send Drain and record it for the admission back-off.
-fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) {
+/// Send Drain and record it for the admission back-off. The drain counts as decided from the
+/// first call, whether or not the send reached the supervisor; returns whether it did.
+fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) -> bool {
     slot.drain_sent_at.get_or_insert_with(Instant::now);
     if slot.drain_cause.is_none() {
         slot.drain_cause = cause;
     }
-    // A closed pipe already means agent loss for this supervisor.
-    let _ = send(slot, &Control::Drain { cause });
+    let sent = send(slot, &Control::Drain { cause });
+    note_drain_send(slot, sent)
+}
+
+/// Record whether a drain or terminate reached its supervisor. A closed pipe means the
+/// supervisor is gone or already handles agent loss; any other failure leaves decided work
+/// running, so the policy's drains are sent again until one lands (AGT-16).
+fn note_drain_send(slot: &mut ChildSlot, sent: Result<()>) -> bool {
+    if let Err(error) = &sent
+        && !slot.drain_unsent
+    {
+        // Reported once per failure; a failed report must not stop the loop.
+        let _ = emit(&serde_json::json!({
+            "event": "drain_unsent",
+            "assignment_id": slot.assignment.request.assignment_id,
+            "detail": format!("{error:#}"),
+        }));
+    }
+    slot.drain_unsent = sent.is_err();
+    sent.is_ok()
 }
 /// Ask for TERM without the drain-file wait (FR-063); a supervisor that does not
 /// know the step drains instead.
@@ -970,7 +996,7 @@ fn terminate(
     slot: &mut ChildSlot,
     key: crate::contention::ResourceKey,
     cause: Option<crate::contention::YieldCause>,
-) {
+) -> bool {
     slot.drain_sent_at.get_or_insert_with(Instant::now);
     if slot.drain_cause.is_none() {
         slot.drain_cause = cause;
@@ -988,8 +1014,8 @@ fn terminate(
             },
         )]),
     };
-    // A closed pipe already means agent loss for this supervisor.
-    let _ = send(slot, &message);
+    let sent = send(slot, &message);
+    note_drain_send(slot, sent)
 }
 /// Drains sent since the last call, local or for the coordinator, each counted once.
 fn new_drains<'a>(
@@ -2173,6 +2199,97 @@ mod drain_tests {
         assert_eq!(writes.len(), 1, "{writes:?}");
     }
 
+    /// A policy drain whose send failed is sent again on the next pass, as what the policy
+    /// asks then. Until it is delivered the slot still counts as draining, and a failed send
+    /// takes none of a stop's quota (AGT-16).
+    #[test]
+    fn a_drain_that_failed_to_send_is_sent_again() {
+        use crate::contention::{ResourceKey, YieldCause, YieldStep};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        struct Flaky(Arc<AtomicBool>, Arc<Mutex<Vec<String>>>);
+        impl Write for Flaky {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(std::io::Error::other("no buffer space"));
+                }
+                self.1
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(buf).into());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let slot = |fail: &Arc<AtomicBool>, lines: &Arc<Mutex<Vec<String>>>| {
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("cat >/dev/null")
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = child.stdin.take().unwrap();
+            let mut slot = slot_with(child, input);
+            slot.sequence = 1;
+            slot.assignment.request.class = AllocationClass::Opportunistic;
+            slot.input = Some(Box::new(Flaky(fail.clone(), lines.clone())));
+            slot
+        };
+        let action = |id: &str, step: YieldStep, cause: YieldCause| crate::model::YieldAction {
+            allocation_id: id.into(),
+            resource: ResourceKey::Ram,
+            step,
+            target: None,
+            cause,
+            code: "yield_step_drain".into(),
+            deadline_ms: None,
+            duty: None,
+        };
+        let (fail, lines) = (
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let ids = vec!["a".to_string()];
+        let mut slots = BTreeMap::from([("a".to_string(), slot(&fail, &lines))]);
+        let drain = [action("a", YieldStep::Drain, YieldCause::FloorBreach)];
+        assert_eq!(dispatch_drains(&mut slots, &ids, &drain, false, &mut 0), 0);
+        assert!(slots["a"].drain_sent_at.is_some(), "the drain is decided");
+        assert!(lines.lock().unwrap().is_empty());
+        fail.store(false, Ordering::SeqCst);
+        // The policy now asks for a terminate: that is what goes out.
+        let terminate = [action("a", YieldStep::Terminate, YieldCause::FloorBreach)];
+        assert_eq!(
+            dispatch_drains(&mut slots, &ids, &terminate, false, &mut 0),
+            1
+        );
+        assert_eq!(
+            dispatch_drains(&mut slots, &ids, &terminate, false, &mut 0),
+            0
+        );
+        let sent = lines.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("terminate"), "{sent:?}");
+        // In a draining stop a failed send does not use the iteration's share.
+        let (broken, working) = (
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let ids = vec!["s0".to_string(), "s1".to_string()];
+        let mut slots = BTreeMap::from([
+            ("s0".to_string(), slot(&broken, &lines)),
+            ("s1".to_string(), slot(&working, &written)),
+        ]);
+        let stop = [
+            action("s0", YieldStep::Drain, YieldCause::OperatorDrain),
+            action("s1", YieldStep::Drain, YieldCause::OperatorDrain),
+        ];
+        assert_eq!(dispatch_drains(&mut slots, &ids, &stop, true, &mut 1), 1);
+        assert_eq!(written.lock().unwrap().len(), 1);
+    }
+
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {
         let (_tx, events) = mpsc::channel();
         let request = crate::execution_model::LaunchRequest {
@@ -2220,6 +2337,7 @@ mod drain_tests {
             hint_ready: false,
             observes_drain: false,
             drain_sent_at: None,
+            drain_unsent: false,
             drain_cause: None,
             started_at: Instant::now(),
             last_checkpoint_at: None,

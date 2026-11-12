@@ -275,6 +275,7 @@ fn reattach_supervisor(config: &Config, record: &ExecutionRecord) -> Result<Chil
         hint_ready: false,
         observes_drain: false,
         drain_sent_at: None,
+        drain_unsent: false,
         drain_cause: None,
         started_at,
         last_checkpoint_at: checkpoint.as_ref().map(|(at, _)| *at),
