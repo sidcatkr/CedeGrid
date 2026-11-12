@@ -112,20 +112,18 @@ impl ProcessTable {
     }
 
     /// One entry per readable `/proc/<pid>` directory. A process first seen, or one whose start
-    /// time changed, has no CPU yet.
-    pub(super) fn sample(&mut self) -> Vec<ProcessSample> {
-        let Some((total, cpus, boot)) = global_ticks() else {
-            return Vec::new();
-        };
+    /// time changed, has no CPU yet. `None` when the table itself cannot be read: `/proc/stat`,
+    /// the `/proc` listing, or a process's `stat` for want of a descriptor. The table then
+    /// keeps its state, the MPS flag included, so the next sample's CPU spans the gap (TEL-9).
+    pub(super) fn sample(&mut self) -> Option<Vec<ProcessSample>> {
+        let (total, cpus, boot) = global_ticks()?;
         let delta_total = self.last_total.map(|last| total.saturating_sub(last));
-        self.last_total = Some(total);
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
-        };
+        let entries = std::fs::read_dir("/proc").ok()?;
         let mut next = BTreeMap::new();
         let mut samples = Vec::new();
         let mut mps = false;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.ok()?;
             let Some(pid) = entry
                 .file_name()
                 .to_str()
@@ -133,8 +131,14 @@ impl ProcessTable {
             else {
                 continue;
             };
-            let Ok(line) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                continue;
+            let line = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(line) => line,
+                // Out of descriptors: the rest of the table would read as gone.
+                Err(error) if matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) => {
+                    return None;
+                }
+                // The process exited, or its entry is hidden from this account.
+                Err(_) => continue,
             };
             let Some(fields) = parse_stat(&line) else {
                 continue;
@@ -171,8 +175,9 @@ impl ProcessTable {
         self.uids
             .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _)| s == start));
         self.previous = next;
+        self.last_total = Some(total);
         self.mps = mps;
-        samples
+        Some(samples)
     }
 
     #[cfg(test)]

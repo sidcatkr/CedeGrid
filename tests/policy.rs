@@ -2804,6 +2804,51 @@ fn cpu_principal(uid: u32, is_owner: bool, cpu_millicores: u64) -> PrincipalUsag
     }
 }
 
+/// An unreadable principal list is not a departure: admitted users stand through it and count
+/// at once when the list reads again, instead of qualifying over the window anew (TEL-9, FR-059).
+#[test]
+fn admitted_principals_stand_through_an_unreadable_list() {
+    let own = PolicyInput {
+        allocations: vec![allocation(
+            "own",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["own"]),
+        ..Default::default()
+    };
+    let mut cfg = config();
+    cfg.cpu.reserve_physical_cores = 0;
+    let mut engine = PolicyEngine::new();
+    let mut share = |readable: bool, now: u64| {
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(8000);
+        snap.principals = readable.then(|| {
+            vec![
+                cpu_principal(1000, true, 0),
+                cpu_principal(0, false, 1000),
+                cpu_principal(2001, false, 1500),
+                cpu_principal(2002, false, 1500),
+            ]
+        });
+        engine.evaluate(&cfg, &snap, &own, now).unwrap().resources
+            [&cedegrid::contention::ResourceKey::Cpu]
+            .target_share
+            .unwrap()
+    };
+    for now in [0, 500, 1000] {
+        assert_eq!(share(true, now), 3500, "at {now}");
+    }
+    assert_eq!(share(true, 1500), 2334);
+    share(false, 2000);
+    assert_eq!(
+        share(true, 2500),
+        2334,
+        "the users did not have to join again"
+    );
+}
+
 /// Principals (FR-059): system accounts are background demand; a new user joins
 /// only after the principal window and leaves only after `principal_leave_s`
 /// below the threshold. Until it joins, its usage counts toward the unattributed
@@ -3872,6 +3917,37 @@ fn external_memory_peaks_follow_each_external_process() {
     assert_eq!(headroom(Some(1000), 60_000), 21_000);
     // It exits: its peak goes at once.
     assert_eq!(headroom(None, 60_500), 31_000);
+}
+
+/// An unreadable process list is not an exit: each tracked external process keeps its peak
+/// through it, so remembered demand does not turn into admission room (TEL-9, FR-060, FR-077).
+#[test]
+fn an_unreadable_process_list_keeps_each_external_peak() {
+    let mut engine = PolicyEngine::new();
+    // `held` is what the external job holds; `listed` is false while the list cannot be read.
+    let mut headroom = |held: u64, listed: bool, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(32_000 - held);
+        snap.external_processes = listed.then(|| {
+            vec![ExternalProcessMemory {
+                pid: 100,
+                start_time: 1,
+                ram_mib: held,
+                gpu_memory_mib: BTreeMap::new(),
+            }]
+        });
+        engine
+            .evaluate(&config(), &snap, &PolicyInput::default(), now)
+            .unwrap()
+            .admission_headroom
+            .ram_mib
+    };
+    // 32000 MiB with a 1000 MiB floor; an external job holds 10000 MiB, then 1000.
+    assert_eq!(headroom(10_000, true, 0), 21_000);
+    assert_eq!(headroom(1000, true, 500), 21_000);
+    // The list cannot be read for one interval: the job's peak stands.
+    assert_eq!(headroom(1000, false, 1000), 21_000);
+    assert_eq!(headroom(1000, true, 1500), 21_000);
 }
 
 /// External usage beyond the listed processes, such as processes past the

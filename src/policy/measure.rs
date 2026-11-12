@@ -626,6 +626,15 @@ impl<'a> Interval<'a> {
     ) -> (Option<Vec<(Principal, u64)>>, u64) {
         let (config, snapshot, prev, now) = (self.config, self.snapshot, self.prev, self.now);
         let Some(list) = snapshot.principals.as_ref() else {
+            // An unreadable list is not a departure: the counts stand as they were, so an
+            // admitted user still counts when the list reads again (TEL-9, FR-077).
+            for ((k, uid), count) in &prev.principal_counts {
+                if k == &key {
+                    self.next
+                        .principal_counts
+                        .insert((key.clone(), *uid), *count);
+                }
+            }
             return (None, 0);
         };
         let floor = (capacity.saturating_mul(u64::from(

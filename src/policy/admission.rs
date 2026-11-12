@@ -245,6 +245,17 @@ impl Interval<'_> {
                 peak = peak.saturating_add(window_peak(&mut samples, now, usage, window_ms));
                 self.next.process_peaks.insert(id, samples);
             }
+            // An unreadable list is not an exit: each tracked process keeps its peak and counts
+            // at its last sample, so remembered demand is not admitted against (TEL-9, FR-077).
+            if snapshot.external_processes.is_none() {
+                for (id, samples) in prev.process_peaks.iter().filter(|(id, _)| &id.0 == key) {
+                    let usage = samples.back().map_or(0, |(_, usage)| *usage);
+                    listed_total = listed_total.saturating_add(usage);
+                    let mut samples = samples.clone();
+                    peak = peak.saturating_add(window_peak(&mut samples, now, usage, window_ms));
+                    self.next.process_peaks.insert(id.clone(), samples);
+                }
+            }
             let mut samples = prev.external_peaks.get(key).cloned().unwrap_or_default();
             peak = peak.saturating_add(window_peak(
                 &mut samples,

@@ -312,7 +312,9 @@ impl Collector {
     )> {
         #[cfg(target_os = "linux")]
         if let Some(table) = self.process_table.as_mut() {
-            let samples = table.sample();
+            // A table that could not be read is unknown, not a host without processes: no
+            // list is reported and the tracked external processes stay tracked (TEL-9).
+            let samples = table.sample()?;
             return Some(self.principals_from(&samples));
         }
         if !sysinfo::IS_SUPPORTED_SYSTEM {
@@ -4144,6 +4146,33 @@ mod tests {
         assert_eq!(processes::cpu_millicores(5, 0, 4), 4000);
     }
 
+    /// A process table that cannot be read is no sample, not an empty host: the table keeps
+    /// its state, and the next readable sample lists the processes again (TEL-9, FR-077).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unreadable_process_table_is_not_an_empty_one() {
+        let mut table = processes::ProcessTable::new().unwrap();
+        assert!(table.sample().is_some_and(|samples| !samples.is_empty()));
+        // With no descriptor left, every open fails as on a host out of them.
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let none = libc::rlimit {
+            rlim_cur: 0,
+            ..limit
+        };
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none) }, 0);
+        let unreadable = table.sample();
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        assert!(unreadable.is_none());
+        assert!(table.sample().is_some_and(|samples| !samples.is_empty()));
+    }
+
     /// The process table lists processes, never their threads, reads each process's UID once,
     /// and gives a busy process its CPU from the second sample on (research R26, FR-059).
     #[cfg(target_os = "linux")]
@@ -4155,7 +4184,7 @@ mod tests {
             .spawn()
             .unwrap();
         let mut table = processes::ProcessTable::new().unwrap();
-        let first = table.sample();
+        let first = table.sample().unwrap();
         let me = std::process::id();
         let busy = child.id();
         assert!(first.iter().all(|p| p.cpu_millicores == 0));
@@ -4171,7 +4200,7 @@ mod tests {
         assert_eq!(pids.len(), first.len(), "one entry per process");
         let reads = table.uid_reads();
         std::thread::sleep(Duration::from_millis(500));
-        let second = table.sample();
+        let second = table.sample().unwrap();
         let child_cpu = second
             .iter()
             .find(|p| p.pid == busy)
