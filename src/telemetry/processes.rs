@@ -38,14 +38,20 @@ pub(super) fn cpu_millicores(delta_ticks: u64, delta_total: u64, cpus: u64) -> u
 
 /// The global CPU ticks and the online CPU count from `/proc/stat`, and the boot time.
 fn global_ticks() -> Option<(u64, u64, u64)> {
-    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    parse_global(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
+/// The total CPU ticks, the online CPU count and the boot time of a `/proc/stat` text.
+pub(super) fn parse_global(stat: &str) -> Option<(u64, u64, u64)> {
     let mut total = None;
     let mut cpus = 0u64;
     let mut boot = None;
     for line in stat.lines() {
         if let Some(rest) = line.strip_prefix("cpu ") {
+            // User through steal: guest and guest_nice are already inside user and nice.
             total = Some(
                 rest.split_whitespace()
+                    .take(8)
                     .filter_map(|v| v.parse::<u64>().ok())
                     .fold(0u64, u64::saturating_add),
             );

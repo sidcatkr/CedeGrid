@@ -4122,6 +4122,17 @@ mod tests {
         assert!(processes::parse_stat("4242 (truncated").is_none());
     }
 
+    /// The total takes the first eight fields of the `cpu` line: user and nice already hold
+    /// guest and guest_nice, so adding those counts guest time twice and every process's CPU
+    /// reads low on a host running guests (TEL-9).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_global_cpu_total_counts_guest_time_once() {
+        let stat = "cpu  100 20 30 800 10 5 5 0 40 10\ncpu0 50 10 15 400 5 3 2 0 20 5\n\
+                    cpu1 50 10 15 400 5 2 3 0 20 5\nbtime 1700000000\n";
+        assert_eq!(processes::parse_global(stat), Some((970, 2, 1_700_000_000)));
+    }
+
     /// Per-process CPU is computed as sysinfo computes it: CPU ticks over the global ticks per
     /// CPU, at most the CPU count (research R26).
     #[cfg(target_os = "linux")]
