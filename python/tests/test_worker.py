@@ -77,6 +77,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(error.request_digest),64)
         self.assertIsNotNone(error.cause)
         self.assertFalse(self.context.output.exists())
+    def test_the_request_digest_is_the_same_in_both_sdks(self):
+        """SDK-5: the digest covers the request with sorted keys; the TypeScript test pins the same value."""
+        self.supervisor.fail_commit=True
+        with self.assertRaises(PublicationUncertain) as caught:
+            self.context.complete({'b':1,'a':{'d':2,'c':3},'é':'x'},publication_id='digest')
+        self.assertEqual(caught.exception.request_digest,'89c18b6d97dbeb74ce169b7a15200133f26a15b32a65ecac20312e8753464f31')
     def test_worker_rejects_unsealed_and_tampered_artifact_handles(self):
         source=self.root/'data';source.write_bytes(b'original')
         artifact=self.context.artifact('payload',source)

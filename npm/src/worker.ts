@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
-import { parseJson, stringifyJson, integer, I64_MAX, JsonValue } from './codec';
+import { parseJson, stringifyJson, canonicalJson, integer, I64_MAX, JsonValue } from './codec';
 import { argvField, textField, RpcReply } from './client';
 import { CedeGridError, RemoteError, ValidationError, DeadlineExceeded, PublicationUncertain, SpawnUncertain, DrainRequested } from './errors';
 export interface AttemptIdentity {
@@ -490,7 +490,7 @@ export class WorkerContext {
             if (stringifyJson(this.artifacts.get(artifact.artifact_id) ?? null) !== stringifyJson(artifact))
                 throw new ValidationError('artifact is not sealed by this context');
         const fields = { publication_id: publicationId, kind, metadata, artifact_ids: artifacts.map(a => a.artifact_id) };
-        const digest = createHash('sha256').update(stringifyJson(fields)).digest('hex');
+        const digest = createHash('sha256').update(canonicalJson(fields)).digest('hex');
         let knownDigest: string | undefined;
         try {
             const reply = await this.client.request('publication_commit', { request_id: publicationId, ...fields });

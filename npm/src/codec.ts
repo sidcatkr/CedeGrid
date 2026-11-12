@@ -113,6 +113,26 @@ export function stringifyJson(value: unknown): string {
                 return /[.eE]/.test(text) ? text : `${text}.0`;
             } }])!;
 }
+/** JSON with object keys sorted by code point, as the Python SDK's `sort_keys` writes it, so
+ * a digest over it is the same in both SDKs. */
+export function canonicalJson(value: unknown): string {
+    validateJson(value);
+    const byCodePoint = (a: string, b: string): number => {
+        const x = Array.from(a, c => c.codePointAt(0)!), y = Array.from(b, c => c.codePointAt(0)!);
+        for (let i = 0; i < x.length && i < y.length; i++)
+            if (x[i] !== y[i])
+                return x[i] - y[i];
+        return x.length - y.length;
+    };
+    const write = (item: unknown): string => {
+        if (Array.isArray(item))
+            return `[${item.map(write).join(',')}]`;
+        if (item !== null && typeof item === 'object')
+            return `{${Object.keys(item).sort(byCodePoint).map(key => `${stringifyJson(key)}:${write((item as Record<string, unknown>)[key])}`).join(',')}}`;
+        return stringifyJson(item);
+    };
+    return write(value);
+}
 /** Normalize declared wire integers without changing arbitrary metadata values. */
 export function protocolValue(value: unknown, field = ''): unknown {
     if (field === 'metadata' || field === 'result') {
