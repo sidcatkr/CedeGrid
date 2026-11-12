@@ -2140,6 +2140,35 @@ fn d2_vram_changes_below_the_noise_tolerance_are_not_growth() {
     assert_eq!(growth.managed_budget.gpu_memory_mib["GPU-test"], 23_276);
 }
 
+/// When GPU activity reads unknown, the reason that blocks admission names the check that
+/// failed: the collector's freshness decision, as T518 did for an own task's sample (item 051).
+#[test]
+fn the_reason_for_unknown_gpu_activity_names_the_failed_check() {
+    let mut cfg = config();
+    cfg.gpu.execution_mode = GpuExecutionMode::Auto;
+    cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
+    let mut snap = large_gpu_snapshot(2048, vec![4242]);
+    snap.gpus[0].external_compute = ComputeActivity::Unknown;
+    let mut observation = gpu_observation(&snap, GpuExecutionCapability::ContentionAware);
+    observation.freshness_decision = "no_recent_baseline_buffered_history_not_activity".into();
+    snap.gpus[0].observation = Some(observation);
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
+        .unwrap();
+    let reason = decision
+        .reason_codes
+        .iter()
+        .find(|r| r.code == "gpu_yield_first_activity_unknown")
+        .expect("unknown activity holds Yield First");
+    assert!(
+        reason
+            .text
+            .contains("no_recent_baseline_buffered_history_not_activity"),
+        "{}",
+        reason.text
+    );
+}
+
 #[test]
 fn d3_a_quiet_external_context_admits_gpu_work() {
     let mut cfg = config();

@@ -1460,13 +1460,30 @@ impl<'a> Interval<'a> {
         if let Some(code) = &block_code {
             self.blocked_gpus.insert(gpu.uuid.clone());
             self.unsafe_now = true;
+            // Unknown activity names the check that failed (item 051): the policy's own, or
+            // the collector's freshness decision.
+            let check = (code == "gpu_yield_first_activity_unknown").then(|| {
+                if gpu.external_compute != ComputeActivity::Unknown {
+                    "no_fresh_sample"
+                } else {
+                    gpu.observation
+                        .as_ref()
+                        .map(|observation| observation.freshness_decision.as_str())
+                        .filter(|decision| !decision.is_empty())
+                        .unwrap_or("not_recorded")
+                }
+            });
+            let text = crate::contention::reason_text(code).unwrap_or(code);
             self.reasons.push(ReasonCode::new(
                 code,
-                format!(
-                    "GPU {}: {} GPU admission is blocked.",
-                    gpu.uuid,
-                    crate::contention::reason_text(code).unwrap_or(code)
-                ),
+                match check {
+                    Some(check) => format!(
+                        "GPU {}: {} (failed check: {check}). GPU admission is blocked.",
+                        gpu.uuid,
+                        text.trim_end_matches('.')
+                    ),
+                    None => format!("GPU {}: {text} GPU admission is blocked.", gpu.uuid),
+                },
             ));
             self.gpu_block_reasons
                 .insert(gpu.uuid.clone(), code.clone());
