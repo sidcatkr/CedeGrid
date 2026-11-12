@@ -154,8 +154,20 @@ class GateRunnerTests(unittest.TestCase):
         usage=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),'--help'],
             capture_output=True,text=True,check=True).stdout
         for option in ['--contention-mode','{yield_first,neutral,performance}','--ram-floor-mib',
-                '--profile','{protection,own-efficiency}']:
+                '--profile','{protection,own-efficiency}','--readiness-seconds']:
             self.assertIn(option,usage)
+
+    def test_the_readiness_wait_is_an_option_with_the_old_default(self):
+        """Yield First waits for a quiet device before it admits, which can pass 60 s (item 051)."""
+        plan=lambda *extra:json.loads(subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),
+            '--root','/unused','--output','/unused','--mode','gpu','--gpu-uuid','GPU-test',*extra],
+            capture_output=True,text=True,check=True).stdout)['configuration']['readiness_seconds']
+        self.assertEqual(plan(),60)
+        self.assertEqual(plan('--readiness-seconds','180'),180)
+        refused=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),
+            '--root','/unused','--output','/unused','--mode','gpu','--gpu-uuid','GPU-test','--readiness-seconds','0'],
+            capture_output=True,text=True)
+        self.assertNotEqual(refused.returncode,0)
 
     def test_both_probes_check_for_a_drain_every_50_ms(self):
         import pressure_probe

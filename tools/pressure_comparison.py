@@ -326,7 +326,7 @@ def run(args):
                         task=probe_task(task_id,argv,manager,worker_env,args.mode,args.gpu_uuid)
                         client.submit(task_id,run_id,[task]);case['task_id']=task_id
                     else:children['probe']=OwnedProcess(on_scope(argv,cpus),manager,folder/'probe.log',env)
-                    deadline=time.monotonic()+60
+                    deadline=time.monotonic()+args.readiness_seconds
                     while not (probe/'ready.json').exists():
                         if time.monotonic()>deadline:raise TimeoutError('probe readiness was not achieved')
                         if 'probe' in children and children['probe'].poll() is not None:raise RuntimeError('unmanaged probe failed before readiness')
@@ -455,7 +455,10 @@ if __name__=='__main__':
         help='protection reserves one physical core and sets the mode; own-efficiency keeps every default and runs the coordinator outside the probe scope')
     parser.add_argument('--ram-floor-mib',type=int,
         help=f'RAM floor of exactly this many MiB (reserve_percent 0), at least {MIN_RAM_FLOOR_MIB}; below twice that, small_floor is acknowledged')
+    parser.add_argument('--readiness-seconds',type=int,default=60,
+        help='how long a probe may take to report ready; Yield First waits for a quiet device first, so give it more than that wait')
     parser.add_argument('--execute',action='store_true');args=parser.parse_args()
+    if args.readiness_seconds<1:parser.error('--readiness-seconds must be at least 1')
     try:profile_settings(args.profile,{'cpu':{},'gpu':{}},{},args.contention_mode,args.ram_floor_mib,[0,1],[0,1,2],args.mode,args.gpu_uuid)
     except ValueError as error:parser.error(str(error))
     if not args.execute:print(json.dumps({'mode':'plan_only','configuration':vars(args),'targets':TARGETS}));sys.exit(0)
