@@ -654,6 +654,32 @@ back more.
   cost order still picks the tiers. Memory victims keep their order, each capped by the excess
   left (item 049, T512).
 
+### Session 2026-11-13
+
+- Q: Which own tasks give memory back first when own memory is above its fair share? → A: The
+  over-share tasks, in every mode, so that in-share own work does not lose for another own task's
+  excess (the user's decision of 2026-11-03, item 051).
+  - While an own task over its share still holds the excess, in-share own tasks get no memory
+    hint for it.
+  - The over-share task gives back first: it gets the save-progress request and the hint, as
+    today.
+  - If it has not freed its excess within the ladder's existing wait, that task is drained. No
+    more over-share tasks are drained than it takes to bring own memory within its share, and a
+    drained task starts again as soon as its memory fits.
+  - Only if own memory is still over its share after every over-share task has been handled do
+    in-share tasks get hints.
+  - When Guaranteed work may be drained (FR-024) and who gets the save-progress request (FR-075)
+    stay as they are.
+- Q: Against what is SC-014's RAM and GPU memory fill stated? → A: Against what CedeGrid targets:
+  capacity less the floor, less others' use and their peak, and less Yield First's margin. On a
+  device, others' use includes memory the device reports used that no process accounts for. The
+  CPU numbers stay (the user's decision of 2026-11-03, item 051).
+- Q: Does the owner's own unmanaged GPU use make a device "not quiet" for Yield First? → A: No.
+  GPU use by the account CedeGrid runs as, outside CedeGrid, no longer holds Yield First's GPU
+  admission. It still counts in the owner's own share, as on CPU since 2026-11-02. Other accounts'
+  GPU use keeps today's rule, and Yield First still yields to it. Activity that is unknown is
+  still never quiet (the user's decision of 2026-11-03, item 051).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -701,6 +727,8 @@ back more.
   On RAM it is the share RAM targets use (FR-021); on GPU memory, where principals are not
   formed, it is the equal split of the device among own work and the active external
   principals that GPU compute uses.
+- **Over-share task**: an own task among those that make up own memory above its fair share, in
+  the memory victim order (FR-023). The other own tasks on the resource are in-share.
 - **Save-progress signal**: an SDK event that asks own work to save its progress now. It is not
   a drain and asks for no memory back (FR-075).
 - **Floor policy A**: the only floor policy. Floors restore by releasing opportunistic work
@@ -852,6 +880,9 @@ the target is drained after the bounded wait.
    contention hints it first.
 5. **Given** a current target, **When** a handler subscribes or a managed child starts, **Then**
    the handler or child receives that target at once.
+6. **Given** own memory above its fair share and an over-share task that does not free its
+   excess, **When** its hint wait passes, **Then** that task is drained, in-share tasks receive
+   no hint, and the task starts again once its memory fits.
 
 ---
 
@@ -871,8 +902,9 @@ GPU job is admitted and runs to completion under Neutral and under Performance.
 1. **Given** a device with external contexts whose memory leaves enough room above the floor,
    **When** a GPU job requests memory that fits under Neutral or Performance, **Then** the job is
    admitted even though the device is occupied.
-2. **Given** Yield First, **When** a device has external compute activity, or unknown activity,
-   **Then** no new own GPU work is admitted to that device.
+2. **Given** Yield First, **When** a device has another account's compute activity, or unknown
+   activity, **Then** no new own GPU work is admitted to that device; the owner's own unmanaged
+   compute alone does not hold it.
 3. **Given** a device with an external context that has shown no compute activity for a
    sustained window while observation was healthy, **When** the policy classifies the device,
    **Then** the context counts as quiet. Activity is reported as quiet, active or unknown, never
@@ -1030,7 +1062,7 @@ node reports with the expected per-resource values at each step.
 - **The coordinator is unreachable.** The existing lease rules apply. Local graduated yielding
   continues.
 - **A worker ignores hints.** After the bounded wait, the ladder escalates to drain, then to
-  termination.
+  termination. If it is an over-share task, in-share tasks are not hinted in its place.
 - **A job is a plain command, not SDK-based.** It is never hint-ready. Memory contention
   escalates from the steps that do not free memory straight to drain. On the critical floor
   path, a worker that does not observe the drain file is sent TERM without the drain-file
@@ -1217,7 +1249,9 @@ node reports with the expected per-resource values at each step.
   Remaining ties MUST break deterministically. This order picks the tiers. Within a CPU tier, caps
   already held yield first, at one level (FR-011), then new victims share what is left by usage,
   at one level, so a cap to 0 does not become a pause for its sake. Memory victims follow this
-  order, each capped by the excess left. Once
+  order, each capped by the excess left; while own memory is above its fair share the over-share
+  tasks come first, and an in-share task is asked only for what the floor needs beyond all memory
+  the over-share tasks hold. Once
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
@@ -1478,7 +1512,10 @@ node reports with the expected per-resource values at each step.
   Guaranteed memory (FR-024) too. It gets the save-progress signal (FR-075) instead, and the
   kernel's out-of-memory killer may then take another workload's process, as it would without
   CedeGrid. Own memory above its fair share is stepped as in the other modes, and the operator's
-  envelope (FR-057) applies in every mode.
+  envelope (FR-057) applies in every mode. In every mode an over-share task gives back first: it
+  is hinted, and drained when its wait passes without the excess freed. No more over-share tasks
+  are drained than bring own memory within its share, counting drains already decided, and
+  in-share tasks are not capped, hinted or drained for that excess.
 
   Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 512 MiB
   per GPU device, provisional). The GPU floor is also at least `gpu.reserve_vram_percent` (5%) of
@@ -1531,7 +1568,10 @@ node reports with the expected per-resource values at each step.
   allows it and the requested memory fits above the device's floor. An empty device MUST NOT be
   required under Neutral or Performance.
 - **FR-027**: Under Yield First, new own GPU work MUST NOT be admitted to a device with active or
-  unknown external compute activity.
+  unknown external compute activity. Compute by the account CedeGrid runs as, outside CedeGrid,
+  does not hold this admission: it counts in the owner's own share (FR-059), not as activity
+  here. Other accounts' activity holds it as before, and activity whose owner or amount cannot be
+  read stays unknown.
 - **FR-028**: Node reports MUST state admission per resource. Coordinator placement MUST honor it.
   Placement is blocked while own work on that resource is being reclaimed, meaning above its
   target or with a step still moving down. A step holding at its target does not block. A move
@@ -1759,7 +1799,8 @@ node reports with the expected per-resource values at each step.
 - **FR-037**: A hint MUST carry the deadline the policy enforces for it: the resource's hint
   deadline, the Guaranteed hint deadline for Guaranteed work, or the critical hint deadline on the
   critical path. When the deadline passes without compliance, the ladder escalates; a memory hint
-  waits for its deadline in every mode.
+  waits for its deadline in every mode. While an over-share task's hint or drain wait runs, its
+  excess is not passed to in-share tasks.
 - **FR-062**: Each supervisor MUST report, per allocation, whether the worker has acknowledged its
   target file (`hint_ready`) and whether it observes the drain file (`observes_drain`), in its
   `adjusted` and `state` events and when either changes. The agent MUST include both in the
@@ -1776,7 +1817,8 @@ node reports with the expected per-resource values at each step.
 
   In Performance and Aggressive the critical path acts only on own memory above its fair share
   when others' growth caused the breach; in-share allocations get the save-progress signal
-  (FR-075). Out-of-memory order by fault (FR-023) stays the final backstop.
+  (FR-075). The over-share order (FR-016) holds on the critical path. Out-of-memory order by fault
+  (FR-023) stays the final backstop.
 
 **Observability**
 
@@ -2047,7 +2089,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   Yield First ≤ Neutral ≤ Performance in 100% of cases.
 - **SC-014**: On an idle host, own CPU utilization, own tasks plus CedeGrid's own processes, is at
   least 97% in Performance, 94% in Neutral and 84% in Yield First, and own RAM and GPU memory are
-  within 1% of capacity minus the floor, minus Yield First's margin too. Both CPU numbers are
+  within 1% of what CedeGrid targets: capacity minus the floor, minus others' use and their peak,
+  and minus Yield First's margin too. On a device, others' use includes memory the device reports
+  used that no process accounts for. Both CPU numbers are
   stated; with 117 tasks on 14 CPUs, CedeGrid's own processes use at most 1% of capacity.
 - **SC-015**: Beside a steady external user of 1–2%, own work's 5-minute average is at least 90%
   of capacity minus that user and the margin, with no cap or pause cycling.
