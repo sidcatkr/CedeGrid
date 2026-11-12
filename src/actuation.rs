@@ -259,8 +259,13 @@ impl Actuator for RootlessActuator {
                 self.gpu_duty = gpu_compute_duty(target);
             }
             YieldStep::Cap => {
-                self.paused.remove(&kind);
                 let target = target.unwrap_or(self.requested_cpu / 2);
+                // The same cap on a cycle already running keeps its phase: an adjust must not
+                // start the on phase again or continue the family inside an off phase (SUP-8).
+                if self.cap == Some(target) && self.paused.is_empty() && !self.aligned() {
+                    return Ok(step);
+                }
+                self.paused.remove(&kind);
                 self.cap = Some(target);
                 // Against the measured rate, a changed cap holds from its first period;
                 // against the request, one above it would run uncapped for a period
@@ -658,6 +663,35 @@ mod tests {
         cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
             .unwrap();
         assert_eq!(cap.next_deadline(), None);
+    }
+
+    /// An adjust that leaves the CPU cap where it is keeps the running cycle's phase: it neither
+    /// starts the on phase again nor continues the family inside an off phase, so the cap holds
+    /// through adjusts (SUP-8). A changed cap still takes effect at once.
+    #[test]
+    fn an_unchanged_cpu_cap_keeps_the_cycles_phase() {
+        let mut family = Recorder::default();
+        let mut cap = actuator(AllocationClass::Opportunistic);
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        cap.phase_started = Instant::now() - Duration::from_millis(10);
+        let on = cap.phase_started;
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        assert_eq!(cap.phase_started, on, "the on phase is not started again");
+        cap.phase_started = Instant::now() - Duration::from_millis(30);
+        cap.tick(&mut family).unwrap();
+        assert!(cap.stopped);
+        let (off, signals) = (cap.phase_started, family.signals.len());
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .unwrap();
+        assert!(cap.stopped, "the off phase is not cut short");
+        assert_eq!(family.signals.len(), signals);
+        assert_eq!(cap.phase_started, off);
+        cap.apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500))
+            .unwrap();
+        assert!(!cap.stopped);
+        assert_eq!(family.signals.last(), Some(&signal::CONT));
     }
 
     /// A GPU compute cap is a pause duty cycle at the target's share of the device;
