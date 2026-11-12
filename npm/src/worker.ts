@@ -168,7 +168,8 @@ export async function spawnManaged(argv: string[], options: SpawnOptions): Promi
         return new ManagedChild(client, reply.child_id);
     }
     catch (cause) {
-        if (cause instanceof RemoteError)
+        // A request refused before sending was never spawned: its outcome is known (SDK-4).
+        if (cause instanceof RemoteError || cause instanceof ValidationError)
             throw cause;
         throw new SpawnUncertain(requestId, { cause });
     }
@@ -503,7 +504,8 @@ export class WorkerContext {
             return reply as PublicationHandle;
         }
         catch (cause) {
-            if (cause instanceof RemoteError && cause.code !== 'ERR_CEDEGRID_PUBLICATION_UNCERTAIN')
+            // A request refused before sending published nothing (SDK-4).
+            if (cause instanceof ValidationError || (cause instanceof RemoteError && cause.code !== 'ERR_CEDEGRID_PUBLICATION_UNCERTAIN'))
                 throw cause;
             if (cause instanceof RemoteError && 'details' in cause)
                 knownDigest = (cause.details as any)?.sha256;

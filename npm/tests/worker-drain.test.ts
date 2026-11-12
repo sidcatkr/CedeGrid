@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { WorkerContext, ManagedChild, spawnManaged, DrainRequested, SpawnUncertain, RemoteError, DeadlineExceeded, ValidationError, parseJson, stringifyJson } from 'cedegrid';
+import { WorkerContext, ManagedChild, spawnManaged, DrainRequested, SpawnUncertain, PublicationUncertain, RemoteError, DeadlineExceeded, ValidationError, parseJson, stringifyJson } from 'cedegrid';
 import type { RpcReply, SupervisorTransport } from 'cedegrid';
 
 const descriptor = { schema_version: 2n, namespace_id: 'namespace', session_id: 'session', task_id: 'task', assignment_id: 'assignment', generation: 2n };
@@ -177,6 +177,17 @@ test('a spawn reply without a child ID is uncertain and a rejection stays defini
     await withSupervisor([{ ok: true, state: 'running' }, { ok: false, message: 'supervisor rejected request', code: 'ERR_CEDEGRID_REJECTED' }], async () => {
         await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true }), SpawnUncertain);
         await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true }), (error: unknown) => error instanceof RemoteError && !(error instanceof SpawnUncertain));
+    });
+});
+
+test('a request over the size limit is rejected before sending, not reported as uncertain', async () => {
+    // SDK-4: nothing was sent, so the outcome is known.
+    const big = 'x'.repeat(3 * 1024 * 1024 + 1);
+    await withSupervisor([], async requests => {
+        await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true, env: { BIG: big } }), (error: unknown) => error instanceof ValidationError && !(error instanceof SpawnUncertain));
+        const worker = new WorkerContext(descriptor);
+        await assert.rejects(worker.complete({ blob: big }), (error: unknown) => error instanceof ValidationError && !(error instanceof PublicationUncertain));
+        assert.equal(requests.length, 0);
     });
 });
 

@@ -143,6 +143,17 @@ class ManagedChildTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 spawn_managed(['child'], single_process=True, no_escape=True)
 
+    def test_an_oversize_request_is_rejected_before_sending(self):
+        """SDK-4: nothing was sent, so the outcome is known, not uncertain."""
+        from cedegrid.errors import ValidationError
+        environment = {'CEDEGRID_SUPERVISOR_SOCKET': '/nonexistent/supervisor.sock', 'CEDEGRID_SUPERVISOR_TOKEN': 'token',
+                       'CEDEGRID_NAMESPACE_ID': 'namespace', 'CEDEGRID_SESSION_ID': 'session',
+                       'CEDEGRID_ASSIGNMENT_ID': 'assignment', 'CEDEGRID_ATTEMPT_GENERATION': '1'}
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaises(ValidationError) as caught:
+                spawn_managed(['child'], no_escape=True, single_process=True, env={'BIG': 'x' * (3 * 1024 * 1024 + 1)})
+        self.assertNotIsInstance(caught.exception, SpawnUncertain)
+
     def test_timeout_and_reconciliation_never_signal(self):
         for reply, expected in [({'state': 'running'}, TimeoutError), ({'state': 'needs_reconciliation'}, RuntimeError)]:
             fake = _FakeClient([reply])
