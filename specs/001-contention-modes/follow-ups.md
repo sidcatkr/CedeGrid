@@ -20,7 +20,7 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 | 029 Part 0f | Score each System-mode task's OOM risk only by what exceeds its fair share. | 005 | nothing |
 | 048 | A CI leg on the latest Ubuntu image next to `ubuntu-22.04`. | new | nothing |
 | 048 | Remove the leftover test directories at the repository root once deletion is allowed: 2935 `..*.cedegrid-control` directories, none newer than 2026-11-01, and 7 `.tmp*` directories. `.tmp*/` is ignored since item 048. | new | nothing |
-| 030 "Deferred low findings" | Item 030's 32 low findings, listed below. POL-7 belongs to 004. | 001, after the merge | nothing |
+| 030 "Deferred low findings", item 050 | The 15 low findings item 050 moved to later features, POL-7, and SUP-11's remaining half, each listed below with its target. | 003, 004, 005, item 053 | nothing |
 
 ### Feature 005, System mode (not yet specified)
 
@@ -38,48 +38,50 @@ Decided so far:
 
 ### Item 030's low findings
 
-None was fixed by a later item. The reviewer's lows R5 and R6 were fixed in item 030, and R7 in
+Item 050 went through the 31 low findings for 001 at `93fe984`. It fixed 12 and closed 3, which
+are under "Done". The rest are here: none takes anything from another workload, and each cost
+named falls on own work only. The reviewer's lows R5 and R6 were fixed in item 030, and R7 in
 item 031.
 
-| ID | Finding |
-|---|---|
-| SUP-8 | An adjust during an off phase cuts the phase short. Since item 044 a cycle with a GPU cap follows the node clock; CPU-only duty still restarts. |
-| SUP-9 | A busy journal can block the supervisor for about 20 s in an off phase. |
-| SUP-10 | A task launched at nice 10 in Yield First keeps it in Performance (by design, 029 Part 0b). |
-| SUP-11 | A same-UID process that joins the leaf between the check and the write could be capped or frozen. |
-| SUP-12 | A failed readback plus a failed restore leaves `memory.high` at the cap. |
-| SUP-13 | A GPU cap without a target after a pause-to-cap reversal gets a fixed 500 duty. |
-| SUP-14 | Errors removing the target, ack or drain files are discarded. |
-| AGT-13 | A `drain_timeout_ms` longer than the lease expires the reservation mid-drain. |
-| AGT-14 | A transient failure reading `execution-outcome.json` reports a success or yield as a failure. |
-| AGT-15 | A failed Authorize or renewal send is ignored and never resent. |
-| AGT-16 | A failed policy Drain or Terminate send is never retried. |
-| AGT-17 | In replay mode, a revoked offer with no journal row stops the agent without `shutdown()`. |
-| POL-6 | With some rise-rate settings, a more yielding mode's allowance can rise faster than Performance's. |
-| POL-7 | Aggressive exists only in comments (004). |
-| GPU-6 | The GPU margin switches on at once at the smallest external amount; recheck it against the time-slice rule of items 041–046. |
-| TEL-6 | `freshness_intervals = 1`, or an interval under one tick, is accepted. |
-| TEL-7 | The busy interval uses a timestamp taken before discovery. |
-| TEL-8 | With `/boot/config-*` unreadable, the 10 ms tick fallback over-subtracts own CPU. |
-| TEL-9 | Guest time is counted twice, and a failed `/proc` read gives a known empty list. |
-| TEL-10 | PSI `avg10` keeps PSI-only probing on for about 8 s after pressure ends. |
-| EFF-6 | About 7 `/proc` reads per task per interval. |
-| EFF-7 | Static discovery is read again every interval. |
-| EFF-8 | No prepared-statement cache, and the schema is queried on every call. |
-| EFF-9 | Lookups are quadratic (about 117² at 117 tasks). |
-| EFF-10 | Every heartbeat reopens the state store, rebuilds the backend and repeats the probes. |
-| SDK-3 | EACCES or EIO on the drain path hides the drain (TypeScript) or raises (Python 3.10–3.12). |
-| SDK-4 | An oversize request is reported as uncertain in TypeScript. |
-| SDK-5 | `request_digest` key order differs between the SDKs. |
-| SDK-6 | An explicit null amount makes TypeScript drop the whole file. |
-| SDK-7 | Python's `ManagedChild.wait` raises builtin errors, not the `ERR_CEDEGRID_*` codes. |
-| SDK-8 | A failed ack write is retried and logged on every read. |
-| SDK-9 | The SDKs disagree on drain-path precedence for a hand-built context. |
+| ID | Finding | Target | Why 001's guarantees hold without it |
+|---|---|---|---|
+| SUP-9 | A busy journal can block the supervisor for about 20 s in an off phase. | 005 | It needs a journal lock held for 5 s; own work stays stopped longer, and nothing else changes. |
+| SUP-11 | A same-UID process that joins the leaf between the check and the write could be capped or frozen. | item 053 | T510 (item 049) covers the freeze; item 053 decides the caps. |
+| SUP-13 | A pause relaxed to a cap after calm, on work that is no longer a victim, gets a cap with no target: half the request on CPU, a 500 duty on GPU compute. | 004 | No other principal contends then. It costs own work one scale-up interval, in Neutral and Yield First; Performance's pause returns to a cap with a target at its one-interval bound. |
+| SUP-14 | Errors removing the target, ack or drain files, or their directory, are discarded. | 003 | Each attempt creates its own private directory, so a leftover file is never read as a drain. Listing leftovers belongs with `doctor`. |
+| AGT-13 | A `drain_timeout_ms` longer than the lease expires the reservation mid-drain. | 003 | Not with the defaults. The reservation then ends uncertain and stays charged, the fail-safe outcome; a config check belongs with `doctor` and `validate`. |
+| AGT-15 | A failed Authorize or renewal send is ignored and never resent. | 005 | The task stays unauthorized, so nothing runs; it ends at the prepare timeout and is requeued without an attempt (FR-018, item 049). |
+| AGT-17 | In replay mode, a revoked offer with no journal row stops the agent without `shutdown()`. | 005 | The stop is deliberate: without a journal row, absence is not proof of release. The supervisors then follow the agent-loss rules and the reservations stay charged. |
+| POL-6 | With `scale_up_step_interval_s` set, or `monitor.interval_ms` above 4 s, a more yielding mode's allowance can rise faster than Performance's. | 004 | The allowance never exceeds its own mode's target and is advisory, so mode order holds (FR-065) and only the pace of invited regrowth differs. Ordering the rates changes the documented step sizes, and 004 redefines the step for a 0% margin anyway. |
+| POL-7 | Aggressive exists only in comments. | 004 | It is feature 004. |
+| TEL-6 | `freshness_intervals = 1`, or an interval under one tick, is accepted. | 003 | Readings then go stale, which reads as unknown and holds own work back. A lower bound changes the config contract. |
+| TEL-8 | With `/boot/config-*` unreadable, the 10 ms tick fallback over-subtracts own CPU. | 003 | The fallback assumes the slowest tick, so own CPU's lower bound is lower and own work holds back more. `/proc/config.gz` needs a gzip decoder, a new dependency; `doctor` can report the assumed tick. |
+| TEL-10 | PSI `avg10` keeps PSI-only probing on for about 8 s after pressure ends. | 003 | It delays own work's return by seconds and gives others nothing less; 003 already specifies the PSI-only probe further. |
+| EFF-6 | About 7 `/proc` reads per task per interval. | 005 | With these five, CedeGrid's own CPU measured 111 m at 128 tasks on 14 CPUs (item 049), inside SC-014's 1% bound of 140 m. |
+| EFF-7 | Static discovery is read again every interval. | 005 | As EFF-6. |
+| EFF-8 | No prepared-statement cache, and the schema is queried on every call. | 005 | As EFF-6. |
+| EFF-9 | Lookups are quadratic (about 117² at 117 tasks). | 005 | As EFF-6. |
+| EFF-10 | Every heartbeat reopens the state store, rebuilds the backend and repeats the probes. | 005 | As EFF-6. |
 
 ## Done
 
 | Source | Where |
 |---|---|
+| 030 SUP-8: an adjust restarted a CPU-only duty cycle's phase | item 050 (`4cc5761`): the same cap on a running cycle keeps its phase |
+| 030 SUP-10: a task launched at nice 10 keeps it in Performance | closed in item 050: by design (029 Part 0b, `launch_nice_kept`) |
+| 030 SUP-12: a failed readback plus a failed restore left `memory.high` at the cap | item 050 (`062348b`): the restore's failure is reported and retried each tick |
+| 030 AGT-14: a failed read of `execution-outcome.json` reported a success or yield as a failure | item 050 (`23a965d`): a read error other than a missing file is read again |
+| 030 AGT-16: a failed policy Drain or Terminate send was never retried | item 050 (`8e0531e`): sent again until delivered, the slot counting as draining meanwhile |
+| 030 GPU-6: the GPU compute margin switches on at the smallest external amount | closed in item 050: on a time-sliced device Neutral and Performance are set back to the whole device (`src/policy/measure.rs`, the time-slice rule of items 041–046); elsewhere it is SC-015's target, capacity minus the user minus the margin |
+| 030 TEL-7: the busy interval used a timestamp taken before discovery | closed in item 050: fixed by `af531c0` (047 Decision 2) |
+| 030 TEL-9: guest time counted twice; a failed `/proc` read gave a known empty list | item 050 (`bd4c735`, `0618858`): eight fields in the total; an unreadable table is unknown, and admitted principals and per-process peaks stand through it |
+| 030 SDK-3: an error on the drain path hid the drain (TypeScript) or raised (Python) | item 050 (`89de57d`): no drain for that call, logged once, checked again |
+| 030 SDK-4: an oversize request was reported as uncertain in TypeScript | item 050 (`665a998`) |
+| 030 SDK-5: `request_digest` key order differed between the SDKs | item 050 (`6c8d2e3`): sorted keys in both, one pinned value |
+| 030 SDK-6: an explicit null amount made TypeScript drop the whole file | item 050 (`41fa664`), contract fixture TF-08 |
+| 030 SDK-7: Python's `ManagedChild.wait` raised builtin errors | item 050 (`ba564e3`): the `ERR_CEDEGRID_*` codes |
+| 030 SDK-8: a failed ack write was retried and logged on every read | item 050 (`c385ae3`): logged once, retried no sooner than a second later |
+| 030 SDK-9: the SDKs disagreed on drain-path precedence | item 050 (`6e7e614`): the context's value, then the environment |
 | 044 Q31: the aligned duty phases assume every supervisor shares the agent's `CLOCK_MONOTONIC` time namespace | item 049 (T516), FR-021 and spec Session 2026-11-03 |
 | 026 Decision 5 A: a refusal at the authorization barrier uses no attempt | item 049 (T511), FR-018 |
 | 027 Decision 2 B: the window's busy bound tightened with per-CPU run time from `/proc/schedstat` | item 049 (T514); the idle rerun is T520 |
