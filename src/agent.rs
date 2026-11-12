@@ -872,10 +872,14 @@ fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
 /// writes, so the stop's iterations stay within the 1 s cadence (FR-080).
 const STOP_DRAIN_BUDGET: Duration = Duration::from_millis(250);
 
+/// The synced journal writes one drained run costs: its Draining and its Released transition.
+const STOP_DRAIN_WRITES: u128 = 2;
+
 /// How many of a draining stop's Drain lines one iteration sends: as many as fit in
-/// `STOP_DRAIN_BUDGET` at the agent's last synced journal write each, and at least one.
+/// `STOP_DRAIN_BUDGET` at `STOP_DRAIN_WRITES` of the agent's last synced journal write each,
+/// and at least one.
 fn stop_drain_quota(write: Duration) -> usize {
-    let each = write.max(Duration::from_millis(1)).as_micros();
+    let each = write.max(Duration::from_millis(1)).as_micros() * STOP_DRAIN_WRITES;
     usize::try_from((STOP_DRAIN_BUDGET.as_micros() / each).max(1)).unwrap_or(usize::MAX)
 }
 
@@ -2039,15 +2043,28 @@ mod drain_tests {
     }
 
     /// A draining stop sends its drains a share per iteration, sized so the supervisors'
-    /// journal writes fit in 250 ms at the host's synced-write cost (run 7: about 28 ms, so 8
-    /// of 150 per iteration); a drain the policy decides for a breach goes out at once
+    /// journal writes fit in 250 ms at the host's synced-write cost, two writes a drain (item
+    /// 048: about 16 ms, so 8 of 150 per iteration); a drain the policy decides for a breach
+    /// goes out at once
     /// (FR-080, report 029 Decision 1).
     #[test]
     fn a_draining_stop_spreads_its_drains_over_iterations() {
         use crate::contention::{ResourceKey, YieldCause, YieldStep};
-        assert_eq!(stop_drain_quota(Duration::from_millis(28)), 8);
-        assert_eq!(stop_drain_quota(Duration::ZERO), 250);
+        // Each drain costs the journal two synced writes, the run's Draining and Released
+        // transitions. Item 048's burst sent 16 a iteration at a 15.6 ms write and its
+        // iterations ran 1.0 to 1.135 s; 8 fit the budget.
+        assert_eq!(stop_drain_quota(Duration::from_micros(15_600)), 8);
+        assert_eq!(stop_drain_quota(Duration::from_millis(28)), 4);
+        assert_eq!(stop_drain_quota(Duration::ZERO), 125);
         assert_eq!(stop_drain_quota(Duration::from_secs(1)), 1);
+        for micros in [500, 5_000, 15_600, 28_000, 60_000, 125_000] {
+            let write = Duration::from_micros(micros);
+            let cost = write * 2 * stop_drain_quota(write) as u32;
+            assert!(
+                cost <= STOP_DRAIN_BUDGET,
+                "{micros} us: one iteration's drains cost {cost:?}"
+            );
+        }
         let mut slots = BTreeMap::new();
         let mut children = Vec::new();
         for i in 0..20 {
