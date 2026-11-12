@@ -400,6 +400,24 @@ class ResourceTargetTests(unittest.TestCase):
         for bad in ['{', '[]', '{"version":1}', '{"version":1,"sequence":-1,"deadline_unix_ms":0,"step":"hint","targets":{}}']:
             self.target_file.write_text(bad)
             self.assertIsNone(self.context.resource_targets(), bad)
+    @unittest.skipIf(not hasattr(os, 'geteuid') or os.geteuid() == 0, 'needs an unprivileged POSIX account')
+    def test_a_failed_ack_write_is_logged_once_and_retried_later(self):
+        """SDK-8: one warning per failure, and the next attempt waits for the retry interval."""
+        from unittest.mock import patch
+        self.write(3, ram_mib=100)
+        self.root.chmod(0o500)
+        try:
+            with self.assertLogs('cedegrid', level='WARNING') as logs:
+                for _ in range(3): self.assertEqual(self.context.resource_targets().sequence, 3)
+            self.assertEqual(len(logs.records), 1)
+        finally:
+            self.root.chmod(0o700)
+        # Writable again, but inside the retry interval: no attempt yet.
+        self.context.resource_targets()
+        self.assertFalse(self.ack.exists())
+        with patch('cedegrid.worker._ACK_RETRY_S', 0):
+            self.context.resource_targets()
+        self.assertEqual(self.ack.read_text().strip(), '3')
     def test_the_ack_records_the_highest_sequence_seen(self):
         self.context.draining()
         self.assertEqual(self.ack.read_text().strip(), '0')

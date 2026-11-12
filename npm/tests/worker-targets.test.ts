@@ -137,6 +137,31 @@ test('the ack records the highest sequence seen', () => {
     finally { f.done(); }
 });
 
+test('a failed ack write is logged once and retried later', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
+    // SDK-8: one warning per failure, and the next attempt waits for the retry interval.
+    const f = fixture();
+    try {
+        const warn = t.mock.method(console, 'warn', () => { });
+        t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+        f.write(3, { ram_mib: 100 });
+        nodeFs.chmodSync(f.root, 0o500);
+        for (let i = 0; i < 3; i++)
+            assert.equal(f.context.resourceTargets()!.sequence, 3n);
+        assert.equal(warn.mock.callCount(), 1);
+        nodeFs.chmodSync(f.root, 0o700);
+        // Writable again, but inside the retry interval: no attempt yet.
+        f.context.resourceTargets();
+        assert.equal(nodeFs.existsSync(join(f.root, 'resource-target.ack')), false);
+        t.mock.timers.tick(1001);
+        f.context.resourceTargets();
+        assert.equal(f.ack(), '3');
+    }
+    finally {
+        nodeFs.chmodSync(f.root, 0o700);
+        f.done();
+    }
+});
+
 test('allowance hooks fire now and on each change, apart from targets', () => {
     const f = fixture();
     try {

@@ -205,6 +205,9 @@ function amounts(value: any): { cpu?: bigint; ram?: bigint; gpu: Record<string, 
 type Signals = [ResourceTargets | null, ResourceAllowance | null, bigint];
 /** A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5). */
 const RECENT_NS = 50_000_000n;
+/** After a failed ack write the next attempt waits this long, so a full disk is not retried
+ * and logged on every read (SDK-8). */
+const ACK_RETRY_MS = 1000;
 /** Parse a target file into targets, allowance and the save-progress sequence, or null when it
  * could not be read, so the caller reads it again. An invalid or newer-version file is none of
  * them; sequence 0 means no target was published yet, and an invalid allowance or
@@ -249,6 +252,7 @@ export class ResourceSignals {
     private allowanceNotified?: bigint;
     private saveNotified = 0n;
     private acked?: bigint;
+    private ackFailedAt?: number;
     private identity?: string | null;
     private cached: Signals = [null, null, 0n];
     constructor(readonly drainFile?: string, readonly targetFile?: string) { }
@@ -383,6 +387,8 @@ export class ResourceSignals {
     private acknowledge(sequence: bigint): void {
         if (!this.targetFile || (this.acked !== undefined && sequence <= this.acked))
             return;
+        if (this.ackFailedAt !== undefined && Date.now() - this.ackFailedAt < ACK_RETRY_MS)
+            return;
         const ack = join(dirname(this.targetFile), 'resource-target.ack');
         const temporary = join(dirname(this.targetFile), `.resource-target.ack.${process.pid}`);
         try {
@@ -390,10 +396,14 @@ export class ResourceSignals {
             renameSync(temporary, ack);
         }
         catch (error) {
-            console.warn('resource-target ack could not be written; hints stay unavailable', error);
+            // Logged once per failure; later attempts are spaced and stay quiet until one succeeds.
+            if (this.ackFailedAt === undefined)
+                console.warn('resource-target ack could not be written; hints stay unavailable', error);
+            this.ackFailedAt = Date.now();
             return;
         }
         this.acked = sequence;
+        this.ackFailedAt = undefined;
     }
 }
 export class WorkerContext {

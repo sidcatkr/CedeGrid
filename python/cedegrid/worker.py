@@ -118,6 +118,9 @@ def _amounts(value):
 
 # A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5).
 _RECENT_NS = 50_000_000
+# After a failed ack write the next attempt waits this long, so a full disk is not retried and
+# logged on every read (SDK-8).
+_ACK_RETRY_S = 1.0
 
 
 def _read_signals(path: Path):
@@ -162,6 +165,7 @@ class ResourceSignals:
         self._save_hooks, self._save_notified = [], 0
         self._identity, self._cached = (), (None, None, 0)
         self._drain_unreadable = False
+        self._ack_failed_at = None
 
     @classmethod
     def from_env(cls):
@@ -288,15 +292,20 @@ class ResourceSignals:
         """Record the highest sequence seen; it shows the worker reads targets."""
         if self.target_file is None or (self._acked is not None and sequence <= self._acked):
             return
+        if self._ack_failed_at is not None and time.monotonic() - self._ack_failed_at < _ACK_RETRY_S:
+            return
         ack = self.target_file.parent / "resource-target.ack"
         temporary = ack.with_name(f".resource-target.ack.{os.getpid()}")
         try:
             temporary.write_text(f"{sequence}\n", encoding="utf-8")
             os.replace(temporary, ack)
         except OSError:
-            _log.warning("resource-target ack could not be written; hints stay unavailable", exc_info=True)
+            # Logged once per failure; later attempts are spaced and stay quiet until one succeeds.
+            if self._ack_failed_at is None:
+                _log.warning("resource-target ack could not be written; hints stay unavailable", exc_info=True)
+            self._ack_failed_at = time.monotonic()
             return
-        self._acked = sequence
+        self._acked, self._ack_failed_at = sequence, None
 
 
 class WorkerContext:
