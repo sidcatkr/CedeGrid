@@ -8,7 +8,6 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 
 | Source | What | Target | Blocks |
 |---|---|---|---|
-| 024 Decision 3 (A, after the merge, its own item) | SC-014 attribution: supervisor CPU attributed to its allocation, and the 173 m gap, which is not yet explained. Item 027 measures CedeGrid's CPU apart and dropped the read-pass term. | 001, after the merge | nothing |
 | 024 Decision 5 (research after the merge) | Whether a listed GPU process with no samples and no memory change over the quiet window can count as quiet, without making unknown telemetry free. | new | nothing |
 | 019 analyze C1 | Full moves cores too: since item 031 Full verifies its leaf members, so it can verify them per thread through `cgroup.procs` plus a pidfd and take the core move. 003's plan still says Full makes no per-thread call. | 003 | nothing |
 | 019 analyze A1 | The numeric default of the wait level that marks a principal as contending. | 003 | T043, FR-056 |
@@ -86,6 +85,7 @@ item 031.
 | 027 Decision 2 B: the window's busy bound tightened with per-CPU run time from `/proc/schedstat` | item 049 (T514); the idle rerun is T520 |
 | 024 Decision 2(c): new victims of a contended CPU excess share it by usage at one level | item 049 (T512), FR-016 |
 | 027 Decision 5 B: charge running work at its mean while no other principal is active, at its p95 once one is | item 049 (T515), decided apart from any change to the modes |
+| 024 Decision 3: SC-014 attribution, the supervisor's CPU and the 173 m gap | item 049 (T513): at `743312b` the tasks' CPU from `/proc` is 176–244 m below the decisions' upper bound in all three SC-014 runs, so the gap is gone and no code changed (`docs/validation.md`, "Item 049") |
 | 045 note: the re-measure window's 3 s at full duty raised the held duty 0.015–0.04 above d0 | item 046: d0' = (d0 − w) ÷ (1 − w); the held duty fell to 0.754 against d0 0.75, and the rest is 004 T049 |
 | 028: Full's GPU share, natively | item 047, Performance beside the saturating user (`docs/validation.md`, "Item 047") |
 | 028 Decision 1: a leaf left frozen | item 030 (T286–T287) |
