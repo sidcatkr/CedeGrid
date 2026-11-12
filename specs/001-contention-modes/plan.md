@@ -2027,8 +2027,8 @@ Result: pass.
 FR-063 and SC-014; report 048's Decisions 1, 2 and 5; the analyses saved with item 051's report.
 
 **Technical Context**: Rust 1.88, no new dependency. No SDK, wire or config change. The record
-gains one optional field on a resource's status, which no client reads. `tools/pressure_comparison.py`
-gains an option. Native reruns are listed in `native-gates.md`; they wait for disk space on the
+gains text in a reason, not a field: a resource's status is part of node reports, so a field would be
+a wire change. `tools/pressure_comparison.py` gains an option. Native reruns are listed in `native-gates.md`; they wait for disk space on the
 test host.
 
 **Constitution Check**: Principle II (floors, the memory fair share, loss by mode) for the ladder's
@@ -2058,9 +2058,9 @@ run shows six journal events a run, two of them after the stop, 16 drains an ite
 write, and iterations of 1.0 to 1.135 s. The share now counts both writes, 8 an iteration there.
 
 **The GPU activity reading (R60)**. Two steps.
-- *The record.* A GPU compute status carries a short name for why activity reads unknown:
-  the collector's own reason, or `no_fresh_sample` for the policy's check. The catalog code
-  `gpu_yield_first_activity_unknown` stays.
+- *The record.* The reason that blocks GPU admission for unknown activity names the check in its
+  text: the collector's freshness decision, or `no_fresh_sample` for the policy's own check. The
+  catalog code `gpu_yield_first_activity_unknown` stays, and no field is added.
 - *The cause.* `gpu_admission` in `src/policy/measure.rs` read activity as unknown whenever a listed
   context that is not background had no newer driver timestamp in the interval, whatever the
   collector had classified. An idle context returns no sample, so the collector's Quiet, reached

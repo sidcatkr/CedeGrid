@@ -661,8 +661,8 @@ back more.
   excess (the user's decision of 2026-11-03, item 051).
   - While an own task over its share still holds the excess, in-share own tasks get no memory
     hint for it.
-  - The over-share task gives back first: it gets the save-progress request and the hint, as
-    today.
+  - The over-share task gives back first: it is hinted, as today. Whether it also gets the
+    save-progress request, which FR-075 sends to in-share tasks only, is not settled here.
   - If it has not freed its excess within the ladder's existing wait, that task is drained. No
     more over-share tasks are drained than it takes to bring own memory within its share, and a
     drained task starts again as soon as its memory fits.
@@ -1515,7 +1515,9 @@ node reports with the expected per-resource values at each step.
   envelope (FR-057) applies in every mode. In every mode an over-share task gives back first: it
   is hinted, and drained when its wait passes without the excess freed. No more over-share tasks
   are drained than bring own memory within its share, counting drains already decided, and
-  in-share tasks are not capped, hinted or drained for that excess.
+  in-share tasks are not capped, hinted or drained for that excess. The one exception is FR-024's
+  class rule: an over-share Guaranteed task that may not be drained yet passes its excess on once
+  its hint wait is over.
 
   Floor sizes are configurable, but never below an enforced minimum (512 MiB of host RAM, 512 MiB
   per GPU device, provisional). The GPU floor is also at least `gpu.reserve_vram_percent` (5%) of
