@@ -419,7 +419,9 @@ export class WorkerContext {
             textField(context[key], key, true);
         integer(context.generation, 'generation', 1n, I64_MAX);
         this.client = client ?? SupervisorClient.fromEnv(context);
-        this.signals = new ResourceSignals(context.drain_file ?? process.env.CEDEGRID_DRAIN_FILE, context.resource_target_file ?? process.env.CEDEGRID_RESOURCE_TARGET_FILE);
+        // One precedence in both SDKs: the context's value, then the environment the supervisor
+        // set; an empty value is unset (SDK-9).
+        this.signals = new ResourceSignals(context.drain_file || process.env.CEDEGRID_DRAIN_FILE || undefined, context.resource_target_file || process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined);
     }
     static fromEnv(): WorkerContext { return new WorkerContext(readContext()); }
     get identity(): AttemptIdentity & {

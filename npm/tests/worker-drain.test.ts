@@ -96,6 +96,28 @@ test('an unreadable drain path is checked again', { skip: process.platform === '
     }
 });
 
+test('the drain path has one precedence', () => {
+    // SDK-9: the context's drain_file, then the environment; an empty value is unset. The
+    // Python SDK follows the same order.
+    const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
+    const named = join(root, 'named-drain'), ambient = join(root, 'ambient-drain');
+    const previous = process.env.CEDEGRID_DRAIN_FILE;
+    try {
+        process.env.CEDEGRID_DRAIN_FILE = ambient;
+        const build = (shape: Record<string, unknown>) => new WorkerContext({ ...descriptor, ...shape }, new FakeTransport([]));
+        const both = build({ drain_file: named }), fallback = [build({}), build({ drain_file: '' })];
+        writeFileSync(ambient, '');
+        assert.equal(both.draining(), false);
+        assert.deepEqual(fallback.map(context => context.draining()), [true, true]);
+        writeFileSync(named, '');
+        assert.equal(both.draining(), true);
+    }
+    finally {
+        previous === undefined ? delete process.env.CEDEGRID_DRAIN_FILE : process.env.CEDEGRID_DRAIN_FILE = previous;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('drain hooks run once', () => {
     const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
     try {

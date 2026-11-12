@@ -323,7 +323,10 @@ class WorkerContext:
                 raise ValidationError(f"worker context missing {key}")
         self._client = client or _SupervisorClient.from_env(context)
         self.output = Path(context["output_dir"]) if context.get("output_dir") else None
-        self.drain_file = drain_file or (Path(context["drain_file"]) if context.get("drain_file") else None)
+        # One precedence in both SDKs: an explicit argument, the context's value, then the
+        # environment the supervisor set; an empty value is unset (SDK-9).
+        drain_file = drain_file or context.get("drain_file") or os.environ.get("CEDEGRID_DRAIN_FILE")
+        self.drain_file = Path(drain_file) if drain_file else None
         self._drain_hooks, self._drain_notified = [], False
         self._artifacts = {}
         self._signals = ResourceSignals(self.drain_file, context.get("resource_target_file")
@@ -336,7 +339,7 @@ class WorkerContext:
         raw = os.environ.get("CEDEGRID_CONTEXT")
         if not raw:
             raise ValidationError("CEDEGRID_CONTEXT is required")
-        return cls(parse_json(Path(raw).read_bytes()), Path(os.environ["CEDEGRID_DRAIN_FILE"]) if os.environ.get("CEDEGRID_DRAIN_FILE") else None)
+        return cls(parse_json(Path(raw).read_bytes()))
 
     @property
     def identity(self):

@@ -107,6 +107,28 @@ class WorkerTests(unittest.TestCase):
         finally:
             private.chmod(0o700)
         with self.assertRaises(DrainRequested): context.safe_point()
+    def test_the_drain_path_has_one_precedence(self):
+        """SDK-9: an explicit argument, then the context's `drain_file`, then the environment;
+        an empty value is unset. The TypeScript SDK follows the same order."""
+        import json
+        from unittest.mock import patch
+        named, ambient = self.root/'named-drain', self.root/'ambient-drain'
+        descriptor = dict(self.context.context)
+        context_file = self.root/'context.json'
+        environment = {'CEDEGRID_DRAIN_FILE': str(ambient), 'CEDEGRID_CONTEXT': str(context_file)}
+        def build(drain_file, from_env=False):
+            value = {**descriptor, **({} if drain_file is None else {'drain_file': drain_file})}
+            context_file.write_text(json.dumps(value))
+            with patch.dict('os.environ', environment):
+                return WorkerContext.from_env() if from_env else WorkerContext(value, client=SupervisorFixture())
+        with patch('cedegrid.process._SupervisorClient.from_env', return_value=SupervisorFixture()):
+            both = [build(str(named)), build(str(named), from_env=True)]
+            fallback = [build(None), build(''), build(None, from_env=True)]
+        ambient.touch()
+        self.assertEqual([c.draining() for c in both], [False, False])
+        self.assertEqual([c.draining() for c in fallback], [True, True, True])
+        named.touch()
+        self.assertEqual([c.draining() for c in both], [True, True])
     def test_a_raising_drain_hook_is_isolated(self):
         calls=[]
         def broken(_): raise RuntimeError('drain hook failed')
