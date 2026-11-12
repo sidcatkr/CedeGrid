@@ -80,11 +80,20 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - In three host-wide OOMs the second account caused, the kernel took only its allocator.
   - SC-014's RAM and GPU memory fill miss as written. The host's own 1.9 GiB at idle and the GPU
     memory `noise_tolerance` (about 380 MiB) count against the fill; SC-014 subtracts neither.
-  - No native result exists for SC-012's GPU memory reclaim, or for a kernel OOM kill of an own
-    task caused by others, since CedeGrid gave the excess back first each time.
+  - No native result exists for SC-012's GPU memory reclaim.
+  - The kernel's preference for the marked task is shown by `oom_score` only (1343–1385 against
+    the allocator's 746–756): no own task was killed, since CedeGrid gave the excess back first
+    each time. Not passed natively.
+  - An in-share own task killed by an OOM that others caused has not happened natively either. Its
+    classification as not own fault and its requeue without an attempt are covered by tests only:
+    `a_kill_in_an_interval_where_oom_kill_rose_is_an_oom_kill` (`src/agent/oom.rs`),
+    `an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt` and
+    `uncounted_oom_requeues_stop_at_three_times_max_attempts` (`tests/coordinator.rs`).
 - **Burst stop.** At item 048 a draining stop of 150 tasks takes 9.3 s and spreads its drains, with
   a longest gap of 1135 ms between observations against the 1 s bound; at `fc5e330` one iteration
-  took 4236 ms.
+  took 4236 ms. That run sent 16 drains an iteration, sized at one journal write each, where each
+  drained run writes two. Since item 051 the share counts both, 8 an iteration at that host's
+  write time; the gate has not run natively since.
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
