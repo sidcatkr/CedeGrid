@@ -295,8 +295,10 @@ this path for other accounts. Usage by lower UIDs is background demand: it comes
 capacity and never contends. A principal's usage sums its processes, each counted once: a
 process's threads are part of it, not processes of their own. A process list that cannot be
 read in an interval, for want of a file descriptor for example, is unknown, not empty: users
-already counted as principals stay counted, and each external process keeps its memory peak,
-until the list reads again.
+already counted as principals keep their counts, own work's fair share on each resource is at
+most the last one a readable list gave (`fair_share_held` when that holds it down), and each
+external process keeps its memory peak, until the list reads again. With no readable list before
+it, the share is computed as for one unattributed principal.
 
 Under saturation, a contending principal whose unknown demand is below one margin step
 is probed: own work steps down by the mode's margin per response window, and a principal
