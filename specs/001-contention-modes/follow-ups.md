@@ -8,7 +8,9 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 
 | Source | What | Target | Blocks |
 |---|---|---|---|
-| 024 Decision 5 (research after the merge) | Whether a listed GPU process with no samples and no memory change over the quiet window can count as quiet, without making unknown telemetry free. | new | nothing |
+| 054 Part D (report 051) | An owner's GPU process whose per-process samples have gaps reads unknown, and each time admission reopens it waits the GPU memory cooldown again. | 001, after the merge | nothing |
+| 054 Part D (report 051) | An open device reads unknown for one interval when a listed context has no sample newer than the cursor and the collector has not yet called it quiet. | 001, after the merge | nothing |
+| 054 Part F (report 053 F2) | Beside formed unattributed CPU usage, as on a host that hides other accounts' processes (`hidepid=2`), an owner's login lands in the unattributed estimate and still restarts Yield First's cooldown. | 001, after the merge | nothing |
 | 019 analyze C1 | Full moves cores too: since item 031 Full verifies its leaf members, so it can verify them per thread through `cgroup.procs` plus a pidfd and take the core move. 003's plan still says Full makes no per-thread call. | 003 | nothing |
 | 019 analyze A1 | The numeric default of the wait level that marks a principal as contending. | 003 | T043, FR-056 |
 | 015, 019 Part 2 | A pinned contender is not recorded as satisfied, and Tracked moves own cores off it. Tasked as 003 FR-056, T079–T085. | 003 | nothing |
@@ -87,6 +89,7 @@ item 031.
 | 030 SDK-7: Python's `ManagedChild.wait` raised builtin errors | item 050 (`ba564e3`): the `ERR_CEDEGRID_*` codes |
 | 030 SDK-8: a failed ack write was retried and logged on every read | item 050 (`c385ae3`): logged once, retried no sooner than a second later |
 | 030 SDK-9: the SDKs disagreed on drain-path precedence | item 050 (`6e7e614`): the context's value, then the environment |
+| 024 Decision 5: whether a listed GPU process with no samples over the quiet window can count as quiet, without making unknown telemetry free | item 051 (T526, `8884d80`): the collector already counts a listed context with no sample, on a healthy query, as a quiet tick, and a failed query restarts the window, so unknown telemetry stays unknown; the policy and the launch recheck now admit on the collector's Quiet without a new sample. Memory change is not part of the quiet evidence: GPU memory growth beyond the noise tolerance is judged on its own path and closes admission there |
 | 030 SUP-11: a same-UID process that joins the leaf between the check and the write could be capped or frozen | item 053 (`85ba4be`): a new restriction still verifies the members first; lifting one the supervisor wrote needs only the leaf, in every phase, and a recorded freeze thaws within 50 ms of a join in every phase (native join runs at `a0a7bea`). A cap held while such a process joins stays until the step ends; report 053 puts that under Decisions needed |
 | 044 Q31: the aligned duty phases assume every supervisor shares the agent's `CLOCK_MONOTONIC` time namespace | item 049 (T516), FR-021 and spec Session 2026-11-03 |
 | 026 Decision 5 A: a refusal at the authorization barrier uses no attempt | item 049 (T511), FR-018 |
