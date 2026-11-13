@@ -682,6 +682,22 @@ back more.
 - Q: How does a reader take an amount that is given as null in a resource-target file's
   `targets` or `allowance`? → A: As unset, as if the key were absent. The supervisor never
   writes a null amount (item 052; `contracts/resource-target-file.md`, fixture case TF-08).
+- Q: When does a process own work launched count toward m on a time-sliced device? → A: From the
+  interval the device first lists it, sampled or not. It stops counting once one counting window
+  has passed with no sample for it, from its first listing or its last sample, and counts again
+  from its next sample. The owner's unmanaged processes and external processes count only while
+  sampled. The counts come from every interval whose samples are readable, capped or not; the
+  amounts still come only from uncapped intervals and re-measure windows. An own task that holds a
+  context without computing costs the other own tasks on that device up to one counting window at
+  d0', and no other workload (item 053 Part A, report 049 Decision 2).
+- Q: What does it take to lift a restriction the supervisor itself wrote on its cgroup leaf, and
+  in which phases? → A: Only that the leaf is the one it created, in every phase; returning a
+  recorded control to its launch value never tightens it. A new restriction, and a freeze with no
+  record, still need the leaf's members verified first. While a recorded freeze holds, the
+  members are read every 50 ms in every phase, and a member list unreadable twice running counts
+  as changed. Lifting a held cap while running when an unverified member joins is not decided
+  here: it cannot be done without lifting caps on ordinary own processes (item 053 Part B, report
+  049 Decision 3).
 
 ## Terms
 
@@ -732,6 +748,9 @@ back more.
   principals that GPU compute uses.
 - **Over-share task**: an own task among those that make up own memory above its fair share, in
   the memory victim order (FR-023). The other own tasks on the resource are in-share.
+- **Counting window**: the last 60 intervals whose per-process GPU samples were readable on a
+  device, 30 s at the default interval. It has the external estimate's length but not its
+  intervals, which are uncapped only (FR-021).
 - **Save-progress signal**: an SDK event that asks own work to save its progress now. It is not
   a drain and asks for no memory back (FR-075).
 - **Floor policy A**: the only floor policy. Floors restore by releasing opportunistic work
@@ -1337,8 +1356,11 @@ node reports with the expected per-resource values at each step.
   each busy context its slice, so in Performance, Aggressive and Neutral own work MUST NOT be
   capped on GPU compute while m × k ≤ E (the time-slice rule), m being own work's processes with
   the owner's unmanaged ones (the owner is one principal, FR-059), E the external processes and k
-  the external principals with compute samples on the device over the external estimate's averaged
-  window and still listed there, background contexts left out and an unattributed principal
+  the external principals, each counted while it is still listed on the device and has a compute
+  sample there within the counting window; a process CedeGrid launched and verified also counts
+  toward m from the interval the device first lists it, sampled or not, stops counting once one
+  counting window has passed with no sample for it, from that listing or from its last sample, and
+  counts again from its next sample; background contexts left out and an unattributed principal
   counted as one principal with one process: own work's share m ÷ (m + E) is then at most its fair
   share 1 ÷ (k + 1), and with one own process this always holds. While the amounts are unknown or
   inconsistent but the per-process samples are readable, the counts are the same busy contexts.
@@ -1385,16 +1407,21 @@ node reports with the expected per-resource values at each step.
     most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
   - This path uses no estimate-based target, no ladder excess from one interval's own reading and
     no pause in any mode; d0', at least the minimum duty, is the floor.
-  - While the per-process samples are readable the counts are the contexts sampled busy over
-    the averaged window, and while the window holds intervals its readings decide which
-    principals are slice-bound, even in an interval whose amounts are unknown or inconsistent.
-    When the estimate has no uncapped interval since it restarted, the counts are the interval's
-    busy contexts; when the samples themselves are unreadable, the listed ones. In both cases
-    every counted external principal is slice-bound, and the duty steps up only with a device
-    utilization reading. When the listing itself is unknown on a device last read as
+  - While the per-process samples are readable the counts are those of the counting window, from
+    every interval whose samples are readable, whether own work is capped or not; the amounts,
+    which decide slice-bound and own work's uncapped share, come only from uncapped intervals and
+    re-measure windows. While the estimate holds intervals its readings decide which principals
+    are slice-bound, even in an interval whose amounts are unknown or inconsistent. When the
+    estimate has no uncapped interval since it restarted, or when the samples themselves are
+    unreadable and the counts are the listed processes, every counted external principal is
+    slice-bound, and the duty steps up only with a device utilization reading. An own process
+    that holds a context without computing counts for at most one counting window after its
+    listing; for that time the other own processes on the device may run at d0' beside a
+    slice-bound principal, and no other workload pays. When the listing itself is unknown on a device last read as
     time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
   - Each decision's GPU compute status states m, E, k, whether the rule held, the source of its
-    counts, the slice-bound principals with their readings and thresholds, d0, w and d0', the duty
+    counts, for each own process counted whether it counts by its listing or by a sample, the
+    slice-bound principals with their readings and thresholds, d0, w and d0', the duty
     and the step-up state.
 
   On a device not known to be time-sliced, in Performance, Aggressive and Neutral, the duty is
@@ -1697,8 +1724,18 @@ node reports with the expected per-resource values at each step.
   Opportunistic work and SIGCONT for Guaranteed work, so no own work stays stopped or frozen, and
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
   supervisor MUST handle SIGTERM, SIGINT and SIGHUP by releasing its runtime steps and draining
-  first. Under the cgroup backend, a reattaching supervisor MUST thaw a leaf whose journal records
-  no Pause, after verifying the leaf's membership against the family. The gate MUST start the
+  first. Under the cgroup backend, a restriction on a leaf (a freeze, a lower CPU quota or weight,
+  a memory cap) MUST be written only after the leaf's members are verified to be exactly the
+  run's family, and MUST be refused when they differ. Returning a control the supervisor recorded
+  writing to its launch value MUST need only that the leaf is the one it created, in every phase:
+  while running, through a drain, after the leader's exit, after an error and when an agent
+  reattaches; it MUST NOT write a value tighter than the one in place, and one that fails MUST be
+  retried every 50 ms while the supervisor lives. While a recorded freeze holds, the members MUST
+  be read every 50 ms in every phase, and a difference MUST thaw the leaf at once; a member list
+  that cannot be read on two consecutive checks counts as changed. A freeze the supervisor has no
+  record of (a reattaching supervisor whose journal records no Pause) MUST be thawed only after
+  the leaf's membership is verified against the family, and refused when it differs. A supervisor
+  that is killed lifts nothing: its leaf keeps what it wrote. The gate MUST start the
   workload in a session of its own (`setsid`), for the leader and SDK children, so that no exit
   orphans its process group into SIGHUP. The parent-death signal reaches only the leader and SDK
   children: in Full a dead supervisor's other members stay in the leaf, kept for reconciliation;
