@@ -8463,9 +8463,11 @@ mod floors_by_mode {
     }
 
     /// Own work holds 16 000 MiB with 700 MiB free: 300 MiB over its fair share, all of it in
-    /// `z`, which lost the least progress. `z` takes hints but never frees. It alone is asked,
-    /// and it is drained when its hint deadline passes; the in-share tasks get no step, where
-    /// they were hinted one interval later before (FR-016, FR-023, FR-037, item 051).
+    /// `z`, which lost the least progress. `z` takes hints but never frees. It alone is asked
+    /// for the excess, and it is drained when its hint deadline passes; the in-share tasks get
+    /// no step for it, where they were hinted one interval later before. In Yield First they are
+    /// asked for the margin beyond it from the next interval (FR-016, FR-023, FR-037, items 051
+    /// and 054).
     #[test]
     fn an_over_share_task_that_ignores_its_hint_is_drained_at_the_deadline() {
         let class = AllocationClass::Opportunistic;
@@ -8483,8 +8485,12 @@ mod floors_by_mode {
         ] {
             let run = scripted(&config_in(mode), &facts, 6_000, |_| (jobs.clone(), 700));
             for interval in &run {
+                // In Yield First the 6 200 MiB of margin beyond the excess are asked by the cost
+                // order, which `z` leads at first; once its hint holds, the in-share tasks are
+                // asked for them (item 054).
+                let margin = mode == ContentionMode::YieldFirst && interval.now >= 500;
                 assert!(
-                    interval.steps.keys().all(|id| id == "z"),
+                    margin || interval.steps.keys().all(|id| id == "z"),
                     "{mode:?} at {}: {:?}",
                     interval.now,
                     interval.steps
@@ -8513,9 +8519,62 @@ mod floors_by_mode {
         }
     }
 
+    /// `random::46`'s shape in Yield First: own work 16 000 MiB with 600 MiB free, 400 MiB over
+    /// its fair share, all in `p`, and the margin lowers own work's target to 9 400 MiB. `p` is
+    /// asked for its excess and the 6 200 MiB beyond it go by the cost order, so `p` is not
+    /// emptied while `q` keeps the whole target (FR-016, FR-023, item 054).
+    #[test]
+    fn an_over_share_task_is_asked_for_its_excess_and_the_margin_goes_by_the_cost_order() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![ram_job("p", class, 2_000), ram_job("q", class, 14_000)];
+        let facts = over_share_facts(&["p", "q"], &[], &[]);
+        let run = scripted(&config_in(ContentionMode::YieldFirst), &facts, 0, |_| {
+            (jobs.clone(), 600)
+        });
+        assert_eq!(
+            run[0].steps,
+            BTreeMap::from([
+                ("p".to_string(), (YieldStep::Hint, Some(1_600))),
+                ("q".to_string(), (YieldStep::Hint, Some(7_800))),
+            ])
+        );
+    }
+
+    /// Neutral, when the floor needs more than the excess: 400 MiB to free, 300 MiB of it over
+    /// the fair share, in `z`. `z` is asked for its 300 MiB and `a` for the 100 MiB beyond it in
+    /// the same interval; nobody pays any part of `z`'s excess. In Performance in-share memory is
+    /// kept for a breach others caused, so only `z` is asked (FR-016, FR-023, item 054).
+    #[test]
+    fn the_floor_beyond_the_excess_is_asked_in_the_same_interval_where_in_share_memory_gives_way() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![
+            ram_job("z", class, 350),
+            ram_job("a", class, 7_700),
+            ram_job("b", class, 7_750),
+        ];
+        let facts = over_share_facts(&["z", "a", "b"], &[], &[]);
+        for (mode, expected) in [
+            (
+                ContentionMode::Neutral,
+                BTreeMap::from([
+                    ("z".to_string(), (YieldStep::Hint, Some(50))),
+                    ("a".to_string(), (YieldStep::Hint, Some(7_600))),
+                ]),
+            ),
+            (
+                ContentionMode::Performance,
+                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(50)))]),
+            ),
+        ] {
+            let run = scripted(&config_in(mode), &facts, 0, |_| (jobs.clone(), 600));
+            assert_eq!(run[0].steps, expected, "{mode:?}");
+        }
+    }
+
     /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
     /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
-    /// the in-share tasks were never asked (FR-023, item 051).
+    /// the in-share tasks were never asked for its excess; in Yield First they are asked for the
+    /// margin once its hint holds (FR-023, items 051 and 054).
     #[test]
     fn a_hint_ready_over_share_task_that_frees_in_time_is_not_drained() {
         let class = AllocationClass::Opportunistic;
@@ -8545,8 +8604,11 @@ mod floors_by_mode {
             );
             for interval in &run {
                 assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
+                // In Yield First the in-share tasks give way for the margin once `z`'s hint
+                // holds (item 054).
+                let margin = mode == ContentionMode::YieldFirst && interval.now >= 500;
                 assert!(
-                    interval.steps.keys().all(|id| id == "z"),
+                    margin || interval.steps.keys().all(|id| id == "z"),
                     "{mode:?} at {}: {:?}",
                     interval.now,
                     interval.steps

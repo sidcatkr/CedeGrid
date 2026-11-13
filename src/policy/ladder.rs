@@ -794,24 +794,139 @@ impl<'a> Interval<'a> {
             }
             return;
         }
-        // Over-share tasks give memory back first (FR-016, FR-023): they lead the order, and
-        // in-share tasks are asked only for what is left after them.
+        // Over-share tasks give memory back first (FR-016, FR-023): they are asked together for
+        // own memory above its fair share and no more, and what the floor or the mode's target
+        // needs beyond it is asked in the same interval by the cost order.
         let over = if pending_pass {
             Vec::new()
         } else {
             self.over_share(key, &victims, frame.own_usage)
         };
-        victims.sort_by_key(|victim| {
-            over.iter()
-                .position(|id| id == &victim.id)
-                .unwrap_or(usize::MAX)
-        });
-        let mut remaining = needed;
-        for victim in victims {
-            planned.insert(victim.id.clone());
-            let over_share = over.contains(&victim.id);
-            self.plan_victim(frame, victim, pending_pass, over_share, &mut remaining);
+        if over.is_empty() {
+            let mut remaining = needed;
+            for victim in victims {
+                planned.insert(victim.id.clone());
+                self.plan_victim(frame, victim, pending_pass, false, &mut remaining);
+            }
+            return;
         }
+        let excess = self
+            .memory_fair_share
+            .get(key)
+            .map_or(0, |fair| frame.own_usage.saturating_sub(*fair));
+        let mut first = needed.min(excess);
+        let mut rest = needed - first;
+        // The over-share part, in their order, as built: each task's ask and what it counts.
+        let mut parts: BTreeMap<String, OverSharePart> = BTreeMap::new();
+        for id in &over {
+            let Some(victim) = victims.iter().find(|v| &v.id == id).cloned() else {
+                continue;
+            };
+            let at_turn = first;
+            let (counted, step) = self.dry_plan(frame, victim.clone(), first);
+            let asked = victim.amount.min(at_turn);
+            let settled = step.is_some_and(|step| step >= YieldStep::Drain);
+            if settled {
+                // A decided drain frees all the task holds, the rest of it for the remainder.
+                rest = rest.saturating_sub(victim.amount.saturating_sub(asked));
+            }
+            first = first.saturating_sub(counted);
+            parts.insert(
+                id.clone(),
+                OverSharePart {
+                    at_turn,
+                    asked,
+                    counted,
+                    settled,
+                },
+            );
+        }
+        // What no over-share task could be stepped for passes on (FR-024's class rule).
+        rest = rest.saturating_add(first);
+        // The remainder by the cost order as before over-share tasks led it: each over-share
+        // task counted at what it holds less what it was asked, and a drained one at nothing.
+        let mut left: Vec<VictimFacts> = victims
+            .iter()
+            .map(|victim| {
+                let mut view = victim.clone();
+                if let Some(part) = parts.get(&victim.id) {
+                    view.amount = if part.settled {
+                        0
+                    } else {
+                        view.amount.saturating_sub(part.asked)
+                    };
+                    view.frees = view.amount > 0;
+                }
+                view
+            })
+            .collect();
+        victim_order(&mut left, rest);
+        for view in left {
+            let Some(victim) = victims.iter().find(|v| v.id == view.id).cloned() else {
+                continue;
+            };
+            planned.insert(victim.id.clone());
+            let Some(part) = parts.get(&victim.id).copied() else {
+                self.plan_victim(frame, victim, false, false, &mut rest);
+                continue;
+            };
+            if part.settled || rest == 0 || view.amount == 0 {
+                self.plan_victim(frame, victim, false, true, &mut part.at_turn.clone());
+                continue;
+            }
+            // One step for both parts: its share of the excess and what it is asked beyond it.
+            let before = self
+                .prev
+                .ladder
+                .get(&(victim.id.clone(), key.clone()))
+                .map_or(YieldStep::None, |s| s.step);
+            let mut both = part.at_turn.saturating_add(rest);
+            self.plan_victim(frame, victim.clone(), false, true, &mut both);
+            let freed = match self.next.ladder.get(&(victim.id.clone(), key.clone())) {
+                Some(next) if next.step == YieldStep::Cap => victim
+                    .amount
+                    .saturating_sub(next.target.unwrap_or(victim.amount))
+                    .saturating_sub(part.counted),
+                Some(next) if next.step <= before => 0,
+                Some(next)
+                    if matches!(
+                        next.step,
+                        YieldStep::Pause | YieldStep::Drain | YieldStep::Terminate
+                    ) =>
+                {
+                    view.amount
+                }
+                Some(_) => view.amount.min(rest),
+                None => 0,
+            };
+            rest = rest.saturating_sub(freed);
+        }
+    }
+
+    /// One over-share task's step and what it counts against `remaining`, without recording
+    /// anything: its effects are taken back.
+    fn dry_plan(
+        &mut self,
+        frame: &Frame,
+        victim: VictimFacts,
+        remaining: u64,
+    ) -> (u64, Option<YieldStep>) {
+        let id = (victim.id.clone(), frame.key.clone());
+        let saved = (
+            self.statuses.clone(),
+            self.over_target.clone(),
+            self.hint_deadlines.clone(),
+            self.next.ladder.get(&id).cloned(),
+        );
+        let mut left = remaining;
+        self.plan_victim(frame, victim, false, true, &mut left);
+        let step = self.next.ladder.get(&id).map(|next| next.step);
+        (self.statuses, self.over_target, self.hint_deadlines) = (saved.0, saved.1, saved.2);
+        match saved.3 {
+            Some(state) => self.next.ladder.insert(id, state),
+            None => self.next.ladder.remove(&id),
+        };
+        (remaining.saturating_sub(left), step)
     }
 
     /// The over-share tasks on a memory resource: the shortest prefix of the victims, in victim
@@ -1964,4 +2079,14 @@ mod tests {
             );
         }
     }
+}
+
+/// An over-share task's part of the excess in one memory pass (FR-016, FR-023): the excess left
+/// at its turn, what it was asked, what it counts as built, and whether its drain is decided.
+#[derive(Debug, Clone, Copy)]
+struct OverSharePart {
+    at_turn: u64,
+    asked: u64,
+    counted: u64,
+    settled: bool,
 }

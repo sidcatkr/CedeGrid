@@ -496,12 +496,16 @@ those modes and not an option; the operator envelope applies in every mode.
 
 Own tasks give memory back by fault as well. While own memory is above its fair share, the
 over-share tasks, those that make up the excess in the memory victim order, come first in every
-mode. Each is hinted if it takes hints and drained when its hint deadline passes with the excess
-still held, or drained without the hint if it takes none. A drain already decided counts in
-full while the task still runs, and a hint within its deadline, or a Guaranteed task whose drain
-waits for the breach window, counts what was asked. So no more over-share tasks are drained than
-bring own memory within its share, and in-share tasks are asked only for what the floor still
-needs after them; in Yield First that includes its margin. A drained task is admitted again once
+mode. They are asked together for the excess and no more, the last only for the part that
+completes it. Each is hinted if it takes hints and drained when its hint deadline passes with the
+excess still held, or drained without the hint if it takes none. A drain already decided counts
+in full while the task still runs, and a hint within its deadline, or a Guaranteed task whose
+drain waits for the breach window, counts what was asked, so the excess is passed to nobody
+meanwhile. So no more over-share tasks are drained than bring own memory within its share. What
+the floor, or the mode's target, needs beyond the excess (in Yield First its margin) is asked in
+the same interval by the victim order, each over-share task counted at what it holds less what
+it was already asked, and in-share tasks give it only where in-share memory gives way: in Yield
+First and Neutral, and in Performance and Aggressive for a breach own work caused. A drained task is admitted again once
 its memory fits. The cost is time: free memory can stay below the floor for the over-share
 task's wait, the hint deadline plus the drain for a task that ignores its hint and the breach
 window for a Guaranteed RAM task off the critical path, where the in-share tasks were hinted
