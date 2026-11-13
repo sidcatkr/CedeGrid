@@ -24,6 +24,9 @@ these declarations for its verified in-process actor/learner structure.
 
 Workers receive no operator credentials. `WorkerContext.from_env()` reads the
 agent's private `CEDEGRID_CONTEXT`, `CEDEGRID_OUTPUT_DIR`, and `CEDEGRID_DRAIN_FILE`.
+A context built by hand takes its drain path from the constructor's `drain_file`
+argument, then from the context's `drain_file`, then from `CEDEGRID_DRAIN_FILE`; an
+empty value counts as unset.
 `safe_point()` raises `DrainRequested`; `draining()` permits an application to
 finish its own bounded safe operation; `on_drain()` runs callbacks once.
 `artifact()`, `checkpoint()`, and `complete()` publish synced immutable blobs and

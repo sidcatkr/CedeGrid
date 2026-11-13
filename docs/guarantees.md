@@ -196,8 +196,11 @@ the verified family.
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.
-Replay accepts synthetic observations purely for testing. GPU memory is accounted
-per UUID; memory is never pooled across devices.
+Replay accepts synthetic observations purely for testing, and reads them as the live agent
+reads its own: a frame that omits `external_processes` means the process list was not
+observed, so peaks and principals stand through it, and an external process's exit is
+written as an empty list. GPU memory is accounted per UUID; memory is never pooled across
+devices.
 
 ## Resource accounting
 
