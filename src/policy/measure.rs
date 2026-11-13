@@ -1012,6 +1012,7 @@ impl<'a> Interval<'a> {
             }
             None => crate::contention::cpu_quiet([], external, floor, self.cpu_bound),
         };
+        self.cpu_unattributed = unattributed;
         self.next.cpu_unattributed_intervals = if unattributed >= floor.max(self.cpu_bound) {
             self.prev.cpu_unattributed_intervals.saturating_add(1)
         } else {

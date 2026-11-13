@@ -6913,6 +6913,17 @@ mod yield_first_cooldown {
         }
 
         fn step_using(&mut self, usage: u64, owner: u64, peer: u64) -> Decision {
+            self.step_with(usage, owner, &[(PEER, peer)], 0)
+        }
+
+        /// One interval with other accounts' listed CPU and `hidden` CPU no process lists.
+        fn step_with(
+            &mut self,
+            usage: u64,
+            owner: u64,
+            others: &[(u32, u64)],
+            hidden: u64,
+        ) -> Decision {
             let input = PolicyInput {
                 allocations: vec![allocation(
                     "job",
@@ -6925,11 +6936,12 @@ mod yield_first_cooldown {
             };
             let mut snap = snapshot();
             let mut list = vec![cpu_principal(OWNER, true, owner)];
-            if peer > 0 {
-                list.push(cpu_principal(PEER, false, peer));
+            for (uid, cpu) in others.iter().filter(|(_, cpu)| *cpu > 0) {
+                list.push(cpu_principal(*uid, false, *cpu));
             }
             snap.principals = Some(list);
-            snap.cpu_busy_millicores = Some(usage + owner + peer);
+            let listed: u64 = others.iter().map(|(_, cpu)| cpu).sum();
+            snap.cpu_busy_millicores = Some(usage + owner + listed + hidden);
             let decision = self
                 .engine
                 .evaluate(&self.config, &snap, &input, self.now)
@@ -7038,6 +7050,16 @@ mod yield_first_cooldown {
 
     impl Run {
         fn step_ram(&mut self, job: u64, owner: u64, unlisted: u64) -> Decision {
+            self.step_ram_with(job, owner, unlisted, &[])
+        }
+
+        fn step_ram_with(
+            &mut self,
+            job: u64,
+            owner: u64,
+            unlisted: u64,
+            others: &[(u32, u64)],
+        ) -> Decision {
             let input = PolicyInput {
                 allocations: vec![allocation(
                     "job",
@@ -7049,12 +7071,21 @@ mod yield_first_cooldown {
                 ..PolicyInput::default()
             };
             let mut snap = snapshot();
-            snap.principals = Some(vec![PrincipalUsage {
+            let mut list = vec![PrincipalUsage {
                 ram_mib: owner,
                 ..cpu_principal(OWNER, true, 500)
-            }]);
+            }];
+            for (uid, mib) in others.iter().filter(|(_, mib)| *mib > 0) {
+                list.push(PrincipalUsage {
+                    ram_mib: *mib,
+                    ..cpu_principal(*uid, false, 0)
+                });
+            }
+            snap.principals = Some(list);
             snap.cpu_busy_millicores = Some(600);
-            snap.available_ram_mib = Some(snap.total_ram_mib - 100 - owner - 2000 - unlisted);
+            let listed: u64 = others.iter().map(|(_, mib)| mib).sum();
+            snap.available_ram_mib =
+                Some(snap.total_ram_mib - 100 - owner - 2000 - unlisted - listed);
             let decision = self
                 .engine
                 .evaluate(&self.config, &snap, &input, self.now)
@@ -7092,6 +7123,146 @@ mod yield_first_cooldown {
             !run.step(0, 0).cpu_ram_expansion_allowed,
             "the rise lasted the window, so RAM's cooldown restarted"
         );
+    }
+
+    const THIRD: u32 = 1002;
+
+    /// Beside another account steady at `peer` CPU and admitted as a principal, stable from the
+    /// start; then `change` for `intervals` at 20 s, each interval's (owner, others, hidden).
+    fn allowed_beside_a_principal(
+        peer: u64,
+        hidden: u64,
+        change: (u64, &[(u32, u64)], u64),
+        intervals: u64,
+    ) -> bool {
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        let owner = 500 - hidden.min(300);
+        while run.now <= 20_000 {
+            run.step_with(USE, owner, &[(PEER, peer)], hidden);
+        }
+        for _ in 0..intervals {
+            run.step_with(USE, change.0, change.1, change.2);
+        }
+        let mut last = run.step_with(USE, owner, &[(PEER, peer)], hidden);
+        while run.now <= 30_500 {
+            last = run.step_with(USE, owner, &[(PEER, peer)], hidden);
+        }
+        last.cpu_ram_expansion_allowed
+    }
+
+    /// Beside an admitted principal, an owner's login-sized burst does not restart Yield
+    /// First's cooldown: only a principal's cause does (FR-034, item 053).
+    #[test]
+    fn an_owner_login_beside_an_admitted_principal_does_not_restart_it() {
+        assert!(allowed_beside_a_principal(
+            200,
+            0,
+            (1500, &[(PEER, 200)], 0),
+            2
+        ));
+    }
+
+    #[test]
+    fn a_third_accounts_one_interval_change_beside_an_admitted_principal_does_not_restart_it() {
+        assert!(allowed_beside_a_principal(
+            200,
+            0,
+            (500, &[(PEER, 200), (THIRD, 300)], 0),
+            1
+        ));
+    }
+
+    #[test]
+    fn an_admitted_principals_change_within_the_tolerance_does_not_restart_it() {
+        assert!(allowed_beside_a_principal(
+            200,
+            0,
+            (500, &[(PEER, 260)], 0),
+            2
+        ));
+    }
+
+    /// The admitted principal's own rise is a principal's cause: it restarts the count (pin).
+    #[test]
+    fn an_admitted_principals_rise_restarts_it() {
+        assert!(!allowed_beside_a_principal(
+            200,
+            0,
+            (500, &[(PEER, 600)], 0),
+            2
+        ));
+    }
+
+    /// Unattributed CPU already past the principal window: an owner's login listed under the
+    /// owner does not restart it, and that usage's own rise does (FR-034, item 053).
+    #[test]
+    fn an_owner_login_beside_unattributed_usage_past_the_window_does_not_restart_it() {
+        assert!(allowed_beside_a_principal(0, 300, (1200, &[], 300), 2));
+        assert!(!allowed_beside_a_principal(0, 300, (200, &[], 700), 2));
+    }
+
+    /// SC-002 beside an admitted principal: when it wants more, Yield First steps own work down
+    /// within two intervals (pin).
+    #[test]
+    fn yield_first_still_steps_down_for_an_admitted_principal_within_sc_002s_bound() {
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        while run.now <= 30_500 {
+            run.step_with(USE, 500, &[(PEER, 200)], 0);
+        }
+        let first = run.step_with(JOB, 500, &[(PEER, 1500)], 0);
+        let second = run.step_with(JOB, 500, &[(PEER, 1500)], 0);
+        assert!(
+            [&first, &second].iter().any(|d| d
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Cpu && a.step != YieldStep::None)),
+            "{:?}",
+            second.actions
+        );
+    }
+
+    /// RAM beside another account steady at 1000 MiB and admitted, the job's request filling the
+    /// budget beside it; then `change` for `intervals` at 20 s: (owner, others).
+    fn ram_allowed_beside_a_principal(change: (u64, &[(u32, u64)]), intervals: u64) -> bool {
+        let steady: &[(u32, u64)] = &[(PEER, 1000)];
+        let mut probe = Run::new(ContentionMode::YieldFirst);
+        scale_up_cooldowns(&mut probe.config, 0);
+        let room = probe
+            .step_ram_with(100, 0, 0, steady)
+            .admission_headroom
+            .ram_mib;
+        let job = 100 + room;
+        let mut run = Run::new(ContentionMode::YieldFirst);
+        while run.now <= 20_000 {
+            run.step_ram_with(job, 0, 0, steady);
+        }
+        for _ in 0..intervals {
+            run.step_ram_with(job, change.0, 0, change.1);
+        }
+        let mut last = run.step_ram_with(job, 0, 0, steady);
+        while run.now <= 30_500 {
+            last = run.step_ram_with(job, 0, 0, steady);
+        }
+        last.cpu_ram_expansion_allowed
+    }
+
+    #[test]
+    fn an_owner_login_beside_an_admitted_principal_does_not_restart_ram() {
+        assert!(ram_allowed_beside_a_principal((400, &[(PEER, 1000)]), 2));
+    }
+
+    #[test]
+    fn a_third_accounts_one_interval_change_beside_an_admitted_principal_does_not_restart_ram() {
+        assert!(ram_allowed_beside_a_principal(
+            (0, &[(PEER, 1000), (THIRD, 400)]),
+            1
+        ));
+    }
+
+    #[test]
+    fn an_admitted_principals_change_on_ram_restarts_it_only_beyond_the_tolerance() {
+        assert!(ram_allowed_beside_a_principal((0, &[(PEER, 1200)]), 2));
+        assert!(!ram_allowed_beside_a_principal((0, &[(PEER, 1400)]), 2));
     }
 
     /// An unreadable principal list tells no short change from a principal.

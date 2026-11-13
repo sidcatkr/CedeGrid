@@ -304,6 +304,12 @@ pub struct PolicyEngine {
     /// RAM's: the level of what no process lists, kernel memory among it, and the consecutive
     /// intervals it has stayed `principal_min_percent` above that level.
     ram_unattributed: Option<(u64, u32)>,
+    /// Each principal's usage on CPU and RAM, and on CPU what no listed principal accounts for
+    /// under `None`, at the last interval in which own work fit beside a readable list; `None`
+    /// when that interval's list was unreadable. Yield First's cooldown restarts only for a
+    /// principal's rise beyond it (FR-034, item 053).
+    cpu_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
+    ram_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
     /// The last known CPU view, carried through unknown and held intervals, for the hold
     /// while CPU is unknown (FR-022).
     cpu_view: Option<CpuView>,
@@ -507,6 +513,8 @@ struct Interval<'a> {
     /// The per-interval external estimate's own bound: host busy upper less lower, plus own
     /// upper less lower (FR-073).
     cpu_bound: u64,
+    /// This interval's external CPU that no listed principal accounts for.
+    cpu_unattributed: u64,
     /// This interval's external CPU estimate, beside the window's that sets the budget.
     cpu_interval_external: Option<u64>,
     /// Own CPU usage is over its target without the budget falling, within the dwell: held
@@ -635,6 +643,7 @@ impl<'a> Interval<'a> {
             cpu_held: false,
             cpu_held_inconsistent: false,
             cpu_bound: 0,
+            cpu_unattributed: 0,
             cpu_interval_external: None,
             cpu_own_hold: false,
             cedegrid_cpu: 0,

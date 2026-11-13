@@ -153,38 +153,70 @@ impl Interval<'_> {
         } else {
             ram_new_now
         };
-        // In Yield First a change that forms no principal holds admission through the headroom
-        // while it lasts, and the count keeps running. An unreadable list tells no such change
-        // from a principal (FR-034).
+        // In Yield First an interval in which own work does not fit restarts the count only for a
+        // principal's cause; anything else holds admission through the headroom while it lasts,
+        // and the count keeps running. An unreadable list tells no such change from a
+        // principal (FR-034, item 053).
         let window = config.contention.principal_window_intervals;
-        let short = |kind: ResourceKind, key: &ResourceKey, unattributed: u32| {
+        let floor = (self.cpu_capacity.saturating_mul(u64::from(
+            config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .principal_min_percent,
+        )) / 100)
+            .max(1);
+        let cpu_cause = self.principal_cause(
+            &ResourceKey::Cpu,
+            prev.cpu_fit_usage.as_ref(),
+            floor.max(self.cpu_bound),
+            |p| p.cpu_millicores,
+        ) || (self.next.cpu_unattributed_intervals >= window
+            && (prev.cpu_unattributed_intervals < window
+                || prev.cpu_fit_usage.as_ref().is_none_or(|fit| {
+                    self.cpu_unattributed
+                        > fit
+                            .get(&None)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(floor.max(self.cpu_bound))
+                })));
+        let ram_cause = self.principal_cause(
+            &ResourceKey::Ram,
+            prev.ram_fit_usage.as_ref(),
+            jitter_tolerance(config, ladder, &ResourceKey::Ram),
+            |p| p.ram_mib,
+        ) || self
+            .next
+            .ram_unattributed
+            .is_some_and(|(_, intervals)| intervals >= window);
+        let short = |kind: ResourceKind, cause: bool| {
             governing(config, kind) == ContentionMode::YieldFirst
                 && !input.explicit_drain
                 && snapshot.principals.is_some()
-                && unattributed < window
-                && !self
-                    .next
-                    .principal_counts
-                    .iter()
-                    .any(|((k, _), count)| k == key && count.admitted)
+                && !cause
         };
-        let cpu_short = short(
-            ResourceKind::Cpu,
-            &ResourceKey::Cpu,
-            self.next.cpu_unattributed_intervals,
-        ) && !self.cpu_unknown
+        let cpu_short = short(ResourceKind::Cpu, cpu_cause)
+            && !self.cpu_unknown
             && !self.cpu_held
             && self.cpu_capacity > 0;
-        let ram_short = short(
-            ResourceKind::Ram,
-            &ResourceKey::Ram,
-            self.next
-                .ram_unattributed
-                .map_or(0, |(_, intervals)| intervals),
-        ) && !self.ram_unknown
+        let ram_short = short(ResourceKind::Ram, ram_cause)
+            && !self.ram_unknown
             && !self.ram_held
             && snapshot.total_ram_mib > 0
             && !self.breached.contains(&ResourceKey::Ram);
+        // What each principal used at the last interval own work fit, for the next cause.
+        self.next.cpu_fit_usage = if cpu_safe {
+            self.fit_usage(&ResourceKey::Cpu, Some(self.cpu_unattributed), |p| {
+                p.cpu_millicores
+            })
+        } else {
+            prev.cpu_fit_usage.clone()
+        };
+        self.next.ram_fit_usage = if ram_safe {
+            self.fit_usage(&ResourceKey::Ram, None, |p| p.ram_mib)
+        } else {
+            prev.ram_fit_usage.clone()
+        };
         // An enforcement hold of own usage over its target does not restart stability (FR-011).
         self.next.cpu_stable_since = (cpu_safe || self.cpu_own_hold || cpu_short)
             .then_some(prev.cpu_stable_since.unwrap_or(now));
@@ -207,6 +239,72 @@ impl Interval<'_> {
         // The 0.2 report has one flag for both; every launch reserves CPU and RAM.
         self.cpu_ram_expansion_allowed = self.cpu_allowed && self.ram_allowed;
         self.moving_down = moving_down;
+    }
+
+    /// A listed user's usage on a resource this interval; 0 when it is not listed.
+    fn listed_usage(&self, uid: u32, pick: &dyn Fn(&PrincipalUsage) -> u64) -> u64 {
+        self.snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_owner && p.uid == Some(uid))
+            .map(pick)
+            .sum()
+    }
+
+    /// Whether a principal caused this interval's change on a resource (FR-034, item 053): a user
+    /// became a principal in it, or the principals admitted before and now rose together by
+    /// more than `tolerance` since the last interval in which own work fit. With no usage on
+    /// record for that interval, an admitted principal counts as risen (Principle III).
+    fn principal_cause(
+        &self,
+        key: &ResourceKey,
+        fit: Option<&BTreeMap<Option<u32>, u64>>,
+        tolerance: u64,
+        pick: impl Fn(&PrincipalUsage) -> u64,
+    ) -> bool {
+        let admitted = |counts: &BTreeMap<(ResourceKey, u32), PrincipalCount>, uid: u32| {
+            counts
+                .get(&(key.clone(), uid))
+                .is_some_and(|count| count.admitted)
+        };
+        let mut rise = 0u64;
+        for ((k, uid), count) in &self.next.principal_counts {
+            if k != key || !count.admitted {
+                continue;
+            }
+            if !admitted(&self.prev.principal_counts, *uid) {
+                return true;
+            }
+            let Some(fit) = fit else {
+                return true;
+            };
+            let before = fit.get(&Some(*uid)).copied().unwrap_or(0);
+            rise = rise.saturating_add(self.listed_usage(*uid, &pick).saturating_sub(before));
+        }
+        rise > tolerance
+    }
+
+    /// Each counted user's usage on a resource this interval, and `unattributed` under `None`;
+    /// `None` while the list is unreadable.
+    fn fit_usage(
+        &self,
+        key: &ResourceKey,
+        unattributed: Option<u64>,
+        pick: impl Fn(&PrincipalUsage) -> u64,
+    ) -> Option<BTreeMap<Option<u32>, u64>> {
+        self.snapshot.principals.as_ref()?;
+        let mut usage: BTreeMap<Option<u32>, u64> = self
+            .next
+            .principal_counts
+            .keys()
+            .filter(|(k, _)| k == key)
+            .map(|(_, uid)| (Some(*uid), self.listed_usage(*uid, &pick)))
+            .collect();
+        if let Some(unattributed) = unattributed {
+            usage.insert(None, unattributed);
+        }
+        Some(usage)
     }
 
     /// Memory admission uses the external peak over its window; yielding uses
