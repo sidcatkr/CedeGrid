@@ -10,6 +10,47 @@ from validation_runtime import atomic_json,inside_home,local_guard
 
 # Both probes look for a drain this often, so the check costs them the same.
 CHECK_SECONDS=.05
+# The largest even-against-odd difference in a unit's CPU cost a probe may carry into a window,
+# and how many blocks it may hold to remove a larger one.
+BIAS_LIMIT=.01
+BIAS_HOLDS=8
+
+
+def cpu_unit():
+    hashlib.pbkdf2_hmac('sha256',b'cedegrid-matched-probe',b'fixed-seed',1500)
+
+
+def self_check(unit,clock=time.thread_time,hold=None,units=200,holds=BIAS_HOLDS):
+    """Times even against odd units by the thread's CPU time. The allocator can hand the same
+    blocks back every other call, so a unit's working data alternates between two placements and
+    one of them can be dearer; holding a block shifts the placements. Holds one more block while
+    the difference is over BIAS_LIMIT, at most `holds` times, and says what it found."""
+    held=[]
+    def ratio():
+        costs=[]
+        for _ in range(units):
+            began=clock();unit();costs.append(clock()-began)
+        even=sum(costs[0::2])/len(costs[0::2]);odd=sum(costs[1::2])/len(costs[1::2])
+        return max(even,odd)/max(min(even,odd),1e-12)
+    if hold is None:
+        import ctypes
+        libc=ctypes.CDLL(None);libc.malloc.restype=ctypes.c_void_p;libc.malloc.argtypes=[ctypes.c_size_t]
+        hold=lambda:held.append(libc.malloc(112))
+    initial=current=ratio();count=0
+    while current>1+BIAS_LIMIT and count<holds:
+        hold();count+=1;current=ratio()
+    return {'units':units,'initial_ratio':round(initial,4),'ratio':round(current,4),'held':count,
+            'biased':current>1+BIAS_LIMIT}
+
+
+def window_verdict(result):
+    """Whether a same-core window's probe result can be judged: refused when the probe recorded
+    no self-check or carried an even-against-odd difference over BIAS_LIMIT into the window."""
+    check=result.get('self_check')
+    if not check:return 'refused: no even/odd self-check recorded'
+    if check.get('biased') or check.get('ratio',0)>1+BIAS_LIMIT:
+        return f"refused: even/odd units differ by {check.get('ratio',0)-1:.1%}, over {BIAS_LIMIT:.0%}"
+    return 'measured'
 
 
 class NoContext:
@@ -62,7 +103,9 @@ def run(args):
         torch.cuda.synchronize()
         from pressure import Nvml
         gpu=Nvml(os.environ['CUDA_VISIBLE_DEVICES'])
-    atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic()})
+    # Before it is ready, the CPU probe checks that its units cost the same on even and odd calls.
+    check=self_check(cpu_unit,holds=args.self_check_holds) if args.mode=='cpu' and not args.no_self_check else None
+    atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic(),'self_check':check})
     deadline=time.monotonic()+args.seconds;started=time.monotonic();units=0;drained=False;next_guard=0
     period=args.period_ms/1000;phase=started;busy=0.
     while time.monotonic()<deadline:
@@ -82,7 +125,7 @@ def run(args):
             time.sleep(min(idle,CHECK_SECONDS));continue
         began=time.monotonic()
         if args.mode=='cpu':
-            hashlib.pbkdf2_hmac('sha256',b'cedegrid-matched-probe',b'fixed-seed',1500)
+            cpu_unit()
             # A bounded half-core producer leaves meaningful CPU room before
             # pressure; this is identical under unmanaged and managed execution.
             time.sleep(time.monotonic()-began)
@@ -91,7 +134,8 @@ def run(args):
         units+=1;busy+=time.monotonic()-began
     result={'mode':args.mode,'completed_units':units,'elapsed_seconds':time.monotonic()-started,
         'drained':drained,'finished_monotonic':time.monotonic(),'managed':not isinstance(context,NoContext),
-        'check_seconds':CHECK_SECONDS,'duty':args.duty,'period_seconds':period,'busy_seconds':busy}
+        'check_seconds':CHECK_SECONDS,'duty':args.duty,'period_seconds':period,'busy_seconds':busy,
+        'self_check':check}
     atomic_json(output/'result.json',result)
     context.complete(result)
     if gpu is not None:gpu.close()
@@ -105,4 +149,7 @@ if __name__=='__main__':
     parser.add_argument('--output',required=True)
     parser.add_argument('--duty',type=float,default=1.,help='busy fraction of each period (default 1)')
     parser.add_argument('--period-ms',type=float,default=500.,help="duty period in ms (default 500, the agent's duty-cycle period)")
+    parser.add_argument('--no-self-check',action='store_true',help='skip the even/odd self-check (its window is then refused)')
+    parser.add_argument('--self-check-holds',type=int,default=BIAS_HOLDS,
+        help=f'blocks the self-check may hold to remove a bias (default {BIAS_HOLDS}; 0 only measures)')
     print(json.dumps(run(parser.parse_args())))

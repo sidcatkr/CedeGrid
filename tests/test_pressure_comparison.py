@@ -190,6 +190,39 @@ class GateRunnerTests(unittest.TestCase):
             clock[0]=1.
             self.assertTrue(pressure_probe.checker(pressure_probe.NoContext(),Path(temporary),clock=lambda:clock[0])())
 
+    def test_the_probe_times_even_against_odd_units_and_records_what_it_did(self):
+        import pressure_probe
+        # Even units cost 10% more than odd ones until two blocks are held, as when the
+        # allocator hands the same block back every other call.
+        held=[0];calls=[0];clock=[0.]
+        def unit():
+            calls[0]+=1
+            clock[0]+=1.1e-3 if calls[0]%2==0 and held[0]<2 else 1e-3
+        def hold():held[0]+=1
+        check=pressure_probe.self_check(unit,clock=lambda:clock[0],hold=hold,units=200)
+        self.assertGreater(check['initial_ratio'],1.09)
+        self.assertLessEqual(check['ratio'],1+pressure_probe.BIAS_LIMIT)
+        self.assertEqual(check['held'],2)
+        self.assertFalse(check['biased'])
+        # A bias that holding cannot remove is recorded as such, after a bounded number of tries.
+        held[0]=-10**6
+        stuck=pressure_probe.self_check(unit,clock=lambda:clock[0],hold=hold,units=200)
+        self.assertTrue(stuck['biased'])
+        self.assertLessEqual(stuck['held'],pressure_probe.BIAS_HOLDS)
+        # With no holds allowed it only measures.
+        held[0]=0
+        measured=pressure_probe.self_check(unit,clock=lambda:clock[0],hold=hold,units=200,holds=0)
+        self.assertEqual(measured['held'],0);self.assertTrue(measured['biased'])
+
+    def test_the_same_core_gate_refuses_a_biased_or_unchecked_window(self):
+        import pressure_probe
+        verdict=pressure_probe.window_verdict
+        self.assertEqual(verdict({'completed_units':10}),'refused: no even/odd self-check recorded')
+        self.assertEqual(verdict({'self_check':{'ratio':1.004,'biased':False}}),'measured')
+        self.assertTrue(verdict({'self_check':{'ratio':1.05,'biased':True}}).startswith('refused'))
+        # A ratio over the limit is refused even if the probe did not mark it.
+        self.assertTrue(verdict({'self_check':{'ratio':1.02,'biased':False}}).startswith('refused'))
+
     def test_a_duty_probe_is_busy_for_its_duty_of_each_period(self):
         import argparse,pressure_probe
         pause=pressure_probe.duty_pause
