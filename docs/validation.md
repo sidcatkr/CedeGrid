@@ -108,9 +108,15 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
-  got its CPU; each unit cost the probe more CPU. The evidence points to the probe's heap layout,
-  which the run directory's name moves, and no run has confirmed that on the host (see
-  [Item 049](#item-049-the-gates-phase-37-touches)).
+  got its CPU; each unit cost the probe more CPU. Item 052 ran the pair again: the run
+  directory's name is not the cause, and Performance's loss rule is not shown on a shared core
+  by a gate of its own. At `0da6118` four runs read 0.994–0.998, in both modes and under either
+  name length. At `743312b` Performance still read 0.945 on the same day, with the same
+  environment and argument sizes, and the same build with the later commit's two Python SDK
+  files read 0.988. So the extra CPU came from SDK code that runs inside the managed probe, its
+  drain check, which item 050 changed; how that code slowed the probe's units is not
+  established. Open until the probe measures and reports such an effect itself (see
+  [Item 052](#item-052-the-same-core-loss-again)).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
@@ -711,6 +717,37 @@ lease expiry, which the test's count of expired leases, taken before the drain, 
 
 **B2.** The comparison records node reports, whose admission carries the catalog reason. The
 named failed check of item 051 is in the decision's reason only and is not in this evidence.
+
+### Item 052: the same-core loss again
+
+Run on 2026-11-13 on the same test host, each run alone: item 029's run 3 (a saturating other
+user on the probe's core, five windows of 40 s) with the harness reading each probe's CPU ticks,
+minor faults and the sizes of its environment and arguments from `/proc`. No step was taken in
+any window, and no test process of either account was left after any run.
+
+| Run | Commit | Own throughput, managed against unmanaged | Probe CPU per unit, managed and unmanaged | Result |
+|---|---|---|---|---|
+| Performance under a 16-character name (Neutral's length) | `0da6118` | 0.997 | 161.3–161.5 µs and 161.2 µs | no loss |
+| Neutral under a 20-character name (Performance's length) | `0da6118` | 0.998 | 162.0–163.5 µs and 161.2–162.3 µs | no loss |
+| Performance under its usual name | `0da6118` | 0.994 | 162.1 µs and 161.0 µs | no loss |
+| Neutral under its usual name | `0da6118` | 0.995 | 161.3–161.4 µs and 161.2–161.3 µs | no loss |
+| Performance under its usual name | `743312b` | 0.945 | 171.9–173.3 µs and 161.4–162.5 µs | the loss of item 049 |
+| The same, with `0da6118`'s `python/cedegrid/worker.py` and `process.py` in a test-only copy of the build | `743312b` | 0.988 | 162.2–163.2 µs and 161.0 µs | no loss in CPU per unit |
+
+- The managed probe's environment is 2741 bytes under a 16-character name and 2765 under a
+  20-character one; its arguments are 278–282 bytes. The unmanaged probe's environment is 719
+  bytes. The lossy run at `743312b` and the loss-free Performance run under the same name at
+  `0da6118` both have 2765 and 282.
+- In the lossy windows the extra time is all user time (system time 1–2 ticks, one minor fault),
+  and the other user's median latency is 0.50 ms where it is 0.64 ms in every other window
+  beside a probe. Its one-preemption latencies have one mode in every window of every run.
+- `tools/pressure_probe.py` is the same at both commits. Of the code that runs inside the probe,
+  only the Python SDK's drain check changed between them (item 050), and the managed probe calls
+  it 20 times a second.
+- Item 050's rerun at `0da6118`, Yield First beside the second account's one-core load: own
+  work at the contended target in the interval that first shows the load, no drain, 273 pause
+  samples, the target back after 1.5 s and own work after 3.0 s. In the 22 intervals in which
+  all 13 tasks were capped, own usage was 1.002 of the caps' sum on average and at most 1.069.
 
 ### Own-work ratios in the protection runs
 

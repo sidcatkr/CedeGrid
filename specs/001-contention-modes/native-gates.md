@@ -904,6 +904,35 @@ Gates:
 A miss changes no product code here: report its cause from the decision records, with a fix under
 "Decisions needed".
 
+## Item 052: the same-core loss again
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness. Each run is item 029's run 3 alone, with the leftover check after it;
+`same_core_029.py` records, per window and read-only from `/proc`, the probe's user and system
+ticks, minor faults, run time and the byte lengths of its environment and arguments.
+
+```sh
+# Item 049's two repeats of run 3, kept here for the record (report 049's analyze C1):
+bash runs-037.sh <commit> <second account uid> corep    # Performance alone, as e049-r3b-performance
+bash runs-037.sh <commit> <second account uid> corec    # Performance, then Neutral, as e049-r3c-<mode>
+# Item 052: the names' lengths swapped. Performance runs as e052-r3-perf-16c (16 characters, Neutral's
+# length), Neutral as e052-r3-neutral-20ch (20 characters, Performance's length).
+bash runs-037.sh <commit> <second account uid> coreswap
+#   each = $py $H/same_core_029.py --repo $repo --mode <mode> --load saturating --peer-uid <uid>
+#     ssh <second account>@<test host> 'T=<epoch> S=230 CPUS=<cpu> KIND=saturating RATE=100 sh -s' < peer-load-029.sh
+# Controls made on 2026-11-13: `corec` at HEAD, `corep` at 743312b, and `corep` at a test-only
+# copy of 743312b's build tree with HEAD's python/cedegrid/worker.py and process.py.
+# Item 050's owed rerun, with the caps read from the report's per-interval detail:
+bash runs-037.sh <commit> <second account uid> yfpeer
+# Read only: per window, CPU per unit and the other user's one-preemption latency modes.
+python3 $H/peer_modes.py <run directory> <second account's latencies>
+```
+
+Gates: none of its own. The runs decide between causes: the loss follows the name's length, the
+mode, or the commit. Report, per window, the managed-to-unmanaged ratio, the probe's CPU per unit
+and the other user's one-preemption latency modes. Item 029's own gate for run 3 stays as stated
+under "Item 049".
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
