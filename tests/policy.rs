@@ -7999,7 +7999,11 @@ mod floors_by_mode {
             ram_job("z", class, 7_000),
         ];
         let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
-        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
             let run = scripted(&config_in(mode), &facts, 6_000, |_| (jobs.clone(), 700));
             for interval in &run {
                 assert!(
@@ -8032,26 +8036,36 @@ mod floors_by_mode {
         }
     }
 
-    /// The same over-share task frees its 300 MiB at 2 s: it is not drained, and the in-share
-    /// tasks were never asked (FR-023, item 051).
+    /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
+    /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
+    /// the in-share tasks were never asked (FR-023, item 051).
     #[test]
     fn a_hint_ready_over_share_task_that_frees_in_time_is_not_drained() {
         let class = AllocationClass::Opportunistic;
         let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
-        let at = |now: u64| {
-            let freed = now >= 2_000;
-            (
-                vec![
-                    ram_job("a", class, 3_000),
-                    ram_job("b", class, 3_000),
-                    ram_job("c", class, 3_000),
-                    ram_job("z", class, if freed { 6_700 } else { 7_000 }),
-                ],
-                if freed { 1_000 } else { 700 },
-            )
-        };
-        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+        for (mode, asked) in [
+            (ContentionMode::YieldFirst, 6_500),
+            (ContentionMode::Neutral, 300),
+            (ContentionMode::Performance, 300),
+        ] {
+            let at = |now: u64| {
+                let freed = if now >= 2_000 { asked } else { 0 };
+                (
+                    vec![
+                        ram_job("a", class, 3_000),
+                        ram_job("b", class, 3_000),
+                        ram_job("c", class, 3_000),
+                        ram_job("z", class, 7_000 - freed),
+                    ],
+                    700 + freed,
+                )
+            };
             let run = scripted(&config_in(mode), &facts, 12_000, at);
+            assert_eq!(
+                run[0].steps.get("z"),
+                Some(&(YieldStep::Hint, Some(7_000 - asked))),
+                "{mode:?}"
+            );
             for interval in &run {
                 assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
                 assert!(
@@ -8064,20 +8078,25 @@ mod floors_by_mode {
         }
     }
 
-    /// Two plain tasks could each cover the 300 MiB over the share. Only the first in victim
-    /// order is drained, also while it still runs: a drain already decided counts in full, so
-    /// no second task is drained for the same excess (FR-023, item 051).
+    /// Two plain tasks could each cover what own work holds over its target: 300 MiB, or
+    /// 6 500 MiB in Yield First. Only the first in victim order is drained, also while it still
+    /// runs: a drain already decided counts in full, so no second task is drained for the same
+    /// excess (FR-023, item 051).
     #[test]
     fn no_more_over_share_tasks_are_drained_than_bring_own_memory_within_its_share() {
         let class = AllocationClass::Opportunistic;
         let jobs = vec![
-            ram_job("a", class, 3_000),
-            ram_job("b", class, 3_000),
-            ram_job("z1", class, 5_000),
-            ram_job("z2", class, 5_000),
+            ram_job("a", class, 1_000),
+            ram_job("b", class, 1_000),
+            ram_job("z1", class, 7_000),
+            ram_job("z2", class, 7_000),
         ];
         let facts = over_share_facts(&["a", "b"], &["z1", "z2"], &[("z1", 1_000), ("z2", 2_000)]);
-        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
             let run = scripted(&config_in(mode), &facts, 1_500, |_| (jobs.clone(), 700));
             assert_eq!(run[0].drains, ["z1"], "{mode:?}");
             for interval in &run {
