@@ -391,6 +391,42 @@ fn write_checked(io: &dyn LeafIo, control: &str, value: &str) -> Result<String> 
     Ok(actual)
 }
 
+/// Whether `a` restricts more than `b` on a control: a freeze over none, a smaller CPU quota
+/// per period or weight, a lower memory limit; `max` is the loosest (FR-078).
+fn tighter(control: &str, a: &str, b: &str) -> Result<bool> {
+    let (a, b) = (
+        canonical_control(control, a)?,
+        canonical_control(control, b)?,
+    );
+    let limit = |value: &str| -> Result<Option<u128>> {
+        Ok(match value {
+            "max" => None,
+            bytes => Some(bytes.parse()?),
+        })
+    };
+    Ok(match control {
+        "cgroup.freeze" => a == "1" && b == "0",
+        "cpu.weight" => a.parse::<u16>()? < b.parse::<u16>()?,
+        "memory.high" | "memory.max" => match (limit(&a)?, limit(&b)?) {
+            (Some(a), Some(b)) => a < b,
+            (Some(_), None) => true,
+            _ => false,
+        },
+        "cpu.max" => {
+            let share = |value: &str| -> Result<Option<(u128, u128)>> {
+                let (quota, period) = value.split_once(' ').context("invalid cpu.max")?;
+                Ok(limit(quota)?.map(|quota| (quota, period.parse().unwrap_or(1))))
+            };
+            match (share(&a)?, share(&b)?) {
+                (Some((qa, pa)), Some((qb, pb))) => qa * pb < qb * pa,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        }
+        _ => bail!("{control} is not a runtime step control"),
+    })
+}
+
 /// A plain directory standing in for a leaf in non-native tests. It performs
 /// no cgroup v2 checks and is never used for a real allocation.
 #[cfg(unix)]
@@ -493,8 +529,10 @@ pub struct CgroupActuator<L: LeafIo> {
     ram_refused: Option<&'static str>,
     /// The GPU compute share, while it runs as a freeze duty.
     gpu_duty: Option<FreezeDuty>,
-    /// Resources a release could not restore, retried each tick (030, SUP-4).
+    /// Resources a release could not restore, retried in every phase (030, SUP-4, FR-078).
     retry_restore: BTreeSet<ResourceKind>,
+    /// Consecutive unreadable member lists while a recorded freeze holds (FR-078).
+    members_unreadable: u8,
 }
 
 impl<L: LeafIo> CgroupActuator<L> {
@@ -528,6 +566,7 @@ impl<L: LeafIo> CgroupActuator<L> {
             ram_refused: None,
             gpu_duty: None,
             retry_restore: BTreeSet::new(),
+            members_unreadable: 0,
         }
     }
 
@@ -564,7 +603,7 @@ impl<L: LeafIo> CgroupActuator<L> {
     /// Return this resource's controls to their launch values. A freeze another
     /// resource still holds stays; a refused restore stays recorded for a retry.
     fn restore(&mut self, family: &dyn Family, kind: ResourceKind) -> Result<()> {
-        let verified = family.identities().iter().map(|id| id.pid).collect();
+        let verified: BTreeSet<u32> = family.identities().iter().map(|id| id.pid).collect();
         let mut kept = BTreeSet::new();
         let mut result = Ok(());
         for control in self.written.remove(&kind).unwrap_or_default() {
@@ -577,7 +616,7 @@ impl<L: LeafIo> CgroupActuator<L> {
                 "memory.high" => self.memory_high.clone(),
                 _ => "0".into(),
             };
-            if let Err(error) = runtime_write(&self.leaf, &verified, control, &value) {
+            if let Err(error) = self.restore_control(&verified, control, &value) {
                 kept.insert(control);
                 result = Err(error);
             }
@@ -588,6 +627,32 @@ impl<L: LeafIo> CgroupActuator<L> {
             self.ram_cap = None;
         }
         result
+    }
+
+    /// Return one control this actuator wrote to its launch value. Lifting what it restricted
+    /// itself acts on nothing it did not restrict, so it needs only the same leaf, whatever its
+    /// members; a launch value tighter than the one in place is a new restriction, which the
+    /// members must be verified for (FR-078, Principle I).
+    fn restore_control(
+        &self,
+        verified: &BTreeSet<u32>,
+        control: &'static str,
+        launch: &str,
+    ) -> Result<()> {
+        ensure!(
+            self.leaf.same_leaf()?,
+            "workload leaf was replaced; refuse restore"
+        );
+        let current = canonical_control(control, &self.leaf.read(control)?)?;
+        if current == canonical_control(control, launch)? {
+            return Ok(());
+        }
+        if tighter(control, launch, &current)? {
+            runtime_write(&self.leaf, verified, control, launch)?;
+        } else {
+            write_checked(&self.leaf, control, launch)?;
+        }
+        Ok(())
     }
 
     /// Cap RAM through `memory.high`, never below what the leaf can reclaim, below
@@ -694,6 +759,7 @@ impl<L: LeafIo> CgroupActuator<L> {
         bound: Duration,
     ) -> Result<()> {
         self.write(family, kind, "cgroup.freeze", "1")?;
+        self.members_unreadable = 0;
         if let Some(refusal) = self.changed_members(family) {
             self.thaw_for_members(family, Some(kind), anyhow::anyhow!("{refusal}"))?;
             return Err(refusal);
@@ -718,11 +784,18 @@ impl<L: LeafIo> CgroupActuator<L> {
         }
     }
 
-    /// Why the leaf's members are no longer the verified family; an unreadable leaf says
-    /// nothing, and the next read decides.
-    fn changed_members(&self, family: &dyn Family) -> Option<anyhow::Error> {
+    /// Why the leaf's members are no longer the verified family. One unreadable list says
+    /// nothing and the next read decides; a second in a row counts as changed, since unknown
+    /// members are not a verified family (FR-078, Principle III).
+    fn changed_members(&mut self, family: &dyn Family) -> Option<anyhow::Error> {
         let verified: BTreeSet<u32> = family.identities().iter().map(|id| id.pid).collect();
-        let members = leaf_members(&self.leaf).ok()?;
+        let Ok(members) = leaf_members(&self.leaf) else {
+            self.members_unreadable = self.members_unreadable.saturating_add(1);
+            return (self.members_unreadable >= 2).then(|| {
+                anyhow::anyhow!("the frozen leaf's members could not be read twice; thawed at once")
+            });
+        };
+        self.members_unreadable = 0;
         (members != verified)
             .then(|| anyhow::anyhow!("a process joined the frozen leaf; thawed at once"))
     }
@@ -970,24 +1043,31 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
     }
 
     fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
-        if self.frozen_here()
-            && let Some(refusal) = self.changed_members(family)
-        {
-            self.thaw_for_members(family, None, refusal)?;
-        }
-        // A refused restore goes again until it lands; the release already reported the refusal.
-        for kind in std::mem::take(&mut self.retry_restore) {
-            if self.restore(family, kind).is_err() {
-                self.retry_restore.insert(kind);
-            }
-        }
+        self.watch(family)?;
         self.fallback.tick(family)?;
         self.tick_gpu_duty(family)?;
         self.check_ram_cap(family)
     }
 
+    /// A refused restore goes again until it lands; the release already reported it. Then, while
+    /// a step holds the freeze, a leaf that no longer holds only the verified family thaws. Both
+    /// run in every phase (FR-078).
+    fn watch(&mut self, family: &mut dyn Family) -> Result<()> {
+        for kind in std::mem::take(&mut self.retry_restore) {
+            if self.restore(family, kind).is_err() {
+                self.retry_restore.insert(kind);
+            }
+        }
+        if self.frozen_here()
+            && let Some(refusal) = self.changed_members(family)
+        {
+            self.thaw_for_members(family, None, refusal)?;
+        }
+        Ok(())
+    }
+
     /// The duty cycles' next phase switch and, while a RAM cap holds, its next check. While the
-    /// leaf is frozen its members are read every `FROZEN_MEMBER_CHECK`.
+    /// leaf is frozen, or a restore waits for a retry, it is due every `FROZEN_MEMBER_CHECK`.
     fn next_deadline(&self) -> Option<Instant> {
         let ram = (self.ram_cap.is_some() && self.ram_refused.is_none())
             .then(|| Instant::now() + RAM_CAP_CHECK);
@@ -1000,8 +1080,7 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
                 let at = duty.phase.next_switch(now, period, duty.duty, !duty.frozen);
                 Instant::now() + at.saturating_sub(now)
             });
-        let frozen = self
-            .frozen_here()
+        let frozen = (self.frozen_here() || !self.retry_restore.is_empty())
             .then(|| Instant::now() + FROZEN_MEMBER_CHECK);
         [self.fallback.next_deadline(), duty, ram, frozen]
             .into_iter()
@@ -1052,9 +1131,25 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         family: &mut dyn Family,
         applied: &BTreeMap<ResourceKey, StepRequest>,
     ) -> Result<()> {
+        self.watch(family)?;
+        // A freeze this actuator recorded is its own to lift, on the same leaf only; one with no
+        // record is lifted only with the members verified (FR-078).
+        let paused = applied.values().any(|step| step.step == YieldStep::Pause);
+        if !paused && self.gpu_duty.is_none() {
+            let held: Vec<ResourceKind> = self
+                .written
+                .iter()
+                .filter(|(_, controls)| controls.contains("cgroup.freeze"))
+                .map(|(kind, _)| *kind)
+                .collect();
+            for kind in held {
+                self.restore(family, kind)?;
+            }
+        }
         // A leaf left frozen by an interrupted duty's off phase thaws when no step records a
         // pause; a recorded Pause keeps it frozen (FR-078).
         if self.authorized("cgroup.freeze")
+            && !self.frozen_here()
             && self.gpu_duty.is_none()
             && self.leaf.read("cgroup.freeze")?.trim() == "1"
             && !applied.values().any(|step| step.step == YieldStep::Pause)

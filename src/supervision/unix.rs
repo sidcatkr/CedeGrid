@@ -1010,6 +1010,10 @@ fn apply_runtime_commands(
 
 /// Bounded attempts for a journal transition after EXEC (research R3).
 const JOURNAL_ATTEMPTS: u32 = 4;
+/// How often, and how many times, the error path tries again to undo a restriction a failed
+/// release left (FR-078).
+const RELEASE_RETRY_EVERY: Duration = Duration::from_millis(50);
+const RELEASE_RETRIES: u32 = 20;
 /// The running loop's pass while a source it watches has no event to wait on.
 const PASS: Duration = Duration::from_millis(5);
 /// The longest wait for an event before the running loop passes anyway; every source it
@@ -1755,6 +1759,17 @@ pub(super) fn supervise(
                         });
                     }
                 }
+                // Outside a running step, what this supervisor restricted is still lifted: a refused
+                // restore is retried and a frozen leaf whose members changed thaws (FR-078).
+                if (lifecycle.phase != LifecyclePhase::Running || leader_status.is_some())
+                    && let Err(error) = actuator.watch(&mut family)
+                {
+                    report(
+                        "step_release_failed",
+                        &request.assignment_id,
+                        format!("{error:#}"),
+                    );
+                }
                 if lifecycle.phase == LifecyclePhase::Running
                     && leader_status.is_none()
                     && let Err(error) = actuator.tick(&mut family)
@@ -1997,6 +2012,13 @@ pub(super) fn supervise(
                         &request.assignment_id,
                         format!("{release_error:#}"),
                     );
+                    // The error path does not tick again, so it retries here, bounded.
+                    for _ in 0..RELEASE_RETRIES {
+                        std::thread::sleep(RELEASE_RETRY_EVERY);
+                        if actuator.release(&mut family).is_ok() {
+                            break;
+                        }
+                    }
                 }
             }
             let guaranteed_running = exec_sent

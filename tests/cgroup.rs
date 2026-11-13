@@ -697,8 +697,12 @@ mod runtime_steps {
         assert_eq!(read(&dir, "cpu.weight"), "10");
     }
 
+    /// Undoing a cap this actuator wrote needs only its leaf, whatever its members: lifting acts
+    /// on nothing CedeGrid did not restrict itself. A new restriction on that leaf is still
+    /// refused and moves to the rootless mechanism, which reaches only the verified family
+    /// (FR-078, Principle I, item 053; before item 053 the undo was refused too).
     #[test]
-    fn a_refused_restore_holds_the_step_until_it_can_be_undone() {
+    fn a_restore_on_a_joined_leaf_needs_only_the_leaf_and_a_new_cap_still_verifies() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_owned();
         leaf(&dir, "51\n");
@@ -715,18 +719,40 @@ mod runtime_steps {
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
             .unwrap();
         fs::write(dir.join("cgroup.procs"), "51\n52\n").unwrap();
-        assert!(
-            actuator
-                .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
-                .is_err()
-        );
-        assert_eq!(read(&dir, "cpu.max"), "25000 100000");
-        fs::write(dir.join("cgroup.procs"), "51\n").unwrap();
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
             .unwrap();
         assert_eq!(read(&dir, "cpu.max"), "max 100000");
         assert!(family.signals.is_empty());
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
+            .unwrap();
+        assert_eq!(
+            read(&dir, "cpu.max"),
+            "max 100000",
+            "the new cap is refused"
+        );
+        assert!(
+            actuator
+                .take_detail()
+                .is_some_and(|detail| detail.contains("cgroup write refused")),
+            "and moves to the rootless duty"
+        );
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(
+            read(&dir, "cgroup.freeze"),
+            "0",
+            "a new freeze is refused too"
+        );
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
+                .is_err(),
+            "a lower share has no rootless mechanism"
+        );
+        assert_eq!(read(&dir, "cpu.weight"), "10");
     }
 
     #[test]
@@ -1768,11 +1794,11 @@ mod runtime_steps {
         );
     }
 
-    /// A thaw refused at release, while a foreign process was in the leaf, is reported; the next
-    /// tick thaws the leaf at once, since a freeze must not hold a process it never verified
-    /// (030 SUP-4, Principle I, T510).
+    /// A release thaws a leaf a foreign process joined, at once: the freeze is this actuator's
+    /// own, and lifting it acts on nothing it did not restrict (FR-078, Principle I, item 053;
+    /// before item 053 the release was refused and only a later tick thawed it).
     #[test]
-    fn a_refused_thaw_is_retried_on_later_ticks() {
+    fn a_release_thaws_a_leaf_a_process_joined() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_owned();
         leaf(&dir, "41\n");
@@ -1791,17 +1817,247 @@ mod runtime_steps {
             .unwrap();
         assert_eq!(read(&dir, "cgroup.freeze"), "1");
         fs::write(dir.join("cgroup.procs"), "41\n77\n").unwrap();
-        assert!(
-            actuator.release(&mut family).is_err(),
-            "the thaw is refused"
-        );
-        assert_eq!(read(&dir, "cgroup.freeze"), "1");
-        actuator.tick(&mut family).unwrap();
+        actuator.release(&mut family).unwrap();
         assert_eq!(
             read(&dir, "cgroup.freeze"),
             "0",
             "thawed though the other process stays"
         );
+        assert!(family.signals.is_empty(), "{:?}", family.signals);
+    }
+
+    /// A release returns every control this actuator wrote to its launch value whatever the
+    /// leaf's members, an empty leaf included, after the leader's exit (FR-078, item 053).
+    #[test]
+    fn a_release_restores_caps_whatever_the_members() {
+        for members in ["81\n99\n", ""] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_owned();
+            memory_leaf(&dir, "81\n", "max");
+            let mut settings = settings(AllocationClass::Opportunistic);
+            settings.requested.ram_mib = 4096;
+            let mut actuator = CgroupActuator::new(
+                DirectoryLeaf::open(&dir).unwrap(),
+                &config(&["cgroup.procs", "cpu.weight", "cpu.max", "memory.high"]),
+                &settings,
+            );
+            let mut family = family(81);
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+                .unwrap();
+            actuator
+                .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(3500))
+                .unwrap();
+            assert_ne!(read(&dir, "memory.high"), "max");
+            fs::write(dir.join("cgroup.procs"), members).unwrap();
+            if members.is_empty() {
+                family.pids.clear();
+            }
+            actuator.release(&mut family).unwrap();
+            assert_eq!(read(&dir, "cpu.max"), "max 100000", "{members:?}");
+            assert_eq!(read(&dir, "memory.high"), "max", "{members:?}");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "82\n");
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = family(82);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cpu.weight"), "1");
+        fs::write(dir.join("cgroup.procs"), "82\n99\n").unwrap();
+        actuator.release(&mut family).unwrap();
+        assert_eq!(read(&dir, "cpu.weight"), "10");
+    }
+
+    /// A restore never tightens a control: where the value in place is looser than the launch
+    /// value, it stays, and only a write that verifies the members brings the launch value back
+    /// (FR-078, item 053).
+    #[test]
+    fn a_restore_never_tightens() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "83\n");
+        fs::write(dir.join("cpu.max"), "20000 100000\n").unwrap();
+        let mut config = all_controls();
+        config.cpu_max = Some(cedegrid::cgroup::CpuMax {
+            quota_us: 20_000,
+            period_us: 100_000,
+        });
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &config,
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = family(83);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
+            .unwrap();
+        assert_eq!(read(&dir, "cpu.max"), "10000 100000");
+        // Something loosened it meanwhile, and a foreign process joined.
+        fs::write(dir.join("cpu.max"), "max 100000\n").unwrap();
+        fs::write(dir.join("cgroup.procs"), "83\n99\n").unwrap();
+        assert!(actuator.release(&mut family).is_err(), "no verified write");
+        assert_eq!(read(&dir, "cpu.max"), "max 100000", "not tightened");
+        fs::write(dir.join("cgroup.procs"), "83\n").unwrap();
+        actuator.watch(&mut family).unwrap();
+        assert_eq!(read(&dir, "cpu.max"), "20000 100000");
+    }
+
+    /// A thaw whose write failed at release is retried by the watch that runs in every phase,
+    /// without a tick and without a rootless pause (FR-078, item 053).
+    #[test]
+    fn a_failed_thaw_is_retried_without_a_tick() {
+        use std::cell::Cell;
+        struct FailThaw {
+            leaf: DirectoryLeaf,
+            fail: std::rc::Rc<Cell<u32>>,
+        }
+        impl LeafIo for FailThaw {
+            fn same_leaf(&self) -> anyhow::Result<bool> {
+                self.leaf.same_leaf()
+            }
+            fn read(&self, control: &str) -> anyhow::Result<String> {
+                self.leaf.read(control)
+            }
+            fn write(&self, control: &str, value: &str) -> anyhow::Result<()> {
+                if control == "cgroup.freeze" && value == "0" && self.fail.get() > 0 {
+                    self.fail.set(self.fail.get() - 1);
+                    anyhow::bail!("thaw write failed");
+                }
+                self.leaf.write(control, value)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "84\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let fail = std::rc::Rc::new(Cell::new(0));
+        let mut actuator = CgroupActuator::new(
+            FailThaw {
+                leaf: DirectoryLeaf::open(&dir).unwrap(),
+                fail: fail.clone(),
+            },
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = family(84);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "1");
+        fail.set(1);
+        assert!(actuator.release(&mut family).is_err());
+        assert_eq!(read(&dir, "cgroup.freeze"), "1");
+        assert!(
+            actuator
+                .next_deadline()
+                .is_some_and(|at| at <= std::time::Instant::now() + Duration::from_millis(60)),
+            "retried within 50 ms"
+        );
+        actuator.watch(&mut family).unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
+        assert!(family.signals.is_empty(), "{:?}", family.signals);
+    }
+
+    /// While a recorded freeze holds, a member list that cannot be read twice running counts as
+    /// changed and thaws the leaf; one unreadable read followed by a matching one does not
+    /// (FR-078, Principle III, item 053).
+    #[test]
+    fn unreadable_members_twice_thaw_a_frozen_leaf() {
+        use std::cell::Cell;
+        struct Unreadable {
+            leaf: DirectoryLeaf,
+            fail: std::rc::Rc<Cell<bool>>,
+        }
+        impl LeafIo for Unreadable {
+            fn same_leaf(&self) -> anyhow::Result<bool> {
+                self.leaf.same_leaf()
+            }
+            fn read(&self, control: &str) -> anyhow::Result<String> {
+                if control == "cgroup.procs" && self.fail.get() {
+                    anyhow::bail!("members unreadable");
+                }
+                self.leaf.read(control)
+            }
+            fn write(&self, control: &str, value: &str) -> anyhow::Result<()> {
+                self.leaf.write(control, value)
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "85\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let fail = std::rc::Rc::new(Cell::new(false));
+        let mut actuator = CgroupActuator::new(
+            Unreadable {
+                leaf: DirectoryLeaf::open(&dir).unwrap(),
+                fail: fail.clone(),
+            },
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = family(85);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        fail.set(true);
+        actuator.watch(&mut family).unwrap();
+        assert_eq!(
+            read(&dir, "cgroup.freeze"),
+            "1",
+            "one unreadable read holds"
+        );
+        fail.set(false);
+        actuator.watch(&mut family).unwrap();
+        assert_eq!(
+            read(&dir, "cgroup.freeze"),
+            "1",
+            "a matching read resets it"
+        );
+        fail.set(true);
+        actuator.watch(&mut family).unwrap();
+        actuator.watch(&mut family).unwrap();
+        assert_eq!(
+            read(&dir, "cgroup.freeze"),
+            "0",
+            "the second in a row thaws"
+        );
+        assert_eq!(
+            family.signals,
+            [libc::SIGSTOP],
+            "the pause moves to the family"
+        );
+    }
+
+    /// A reattaching supervisor's actuator thaws a freeze it recorded itself whatever the
+    /// leaf's members; a freeze it has no record of still needs the members verified (FR-078,
+    /// item 053).
+    #[test]
+    fn a_reconcile_thaws_its_own_freeze_whatever_the_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_owned();
+        leaf(&dir, "86\n");
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let mut actuator = CgroupActuator::new(
+            DirectoryLeaf::open(&dir).unwrap(),
+            &all_controls(),
+            &settings(AllocationClass::Opportunistic),
+        );
+        let mut family = family(86);
+        actuator
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
+            .unwrap();
+        fs::write(dir.join("cgroup.procs"), "86\n99\n").unwrap();
+        actuator
+            .reconcile(&mut family, &std::collections::BTreeMap::new())
+            .unwrap();
+        assert_eq!(read(&dir, "cgroup.freeze"), "0");
     }
 
     /// A leaf left frozen by a duty's off phase is thawed when an agent reattaches and the

@@ -225,6 +225,11 @@ pub trait Actuator {
     ) -> Result<crate::contention::YieldStep>;
     /// Advance time-driven mechanisms such as a duty cycle.
     fn tick(&mut self, family: &mut dyn Family) -> Result<()>;
+    /// What runs in every phase, running or not: retry undoing a restriction this mechanism
+    /// wrote, and lift a freeze whose leaf no longer holds only the verified family (FR-078).
+    fn watch(&mut self, _family: &mut dyn Family) -> Result<()> {
+        Ok(())
+    }
     /// When `tick` next has work to do, such as a duty cycle's phase switch; `None` when
     /// nothing is time-driven.
     fn next_deadline(&self) -> Option<std::time::Instant> {
