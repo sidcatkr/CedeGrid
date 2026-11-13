@@ -394,12 +394,13 @@ impl<'a> Interval<'a> {
         // (FR-075). The memory pass lists them once it knows the over-share tasks.
         let save_progress =
             kind.is_memory() && floor_breach && self.memory_fair_share.contains_key(&key);
-        if kind.is_memory() && floor_breach {
-            if let Some(asked) = self.prev.save_progress_decided.get(&key) {
-                self.next
-                    .save_progress_decided
-                    .insert(key.clone(), asked.clone());
-            }
+        if kind.is_memory()
+            && floor_breach
+            && let Some(asked) = self.prev.save_progress_decided.get(&key)
+        {
+            self.next
+                .save_progress_decided
+                .insert(key.clone(), asked.clone());
         }
         let mut cause = if held || gpu_unknown {
             YieldCause::UnknownMeasurement
