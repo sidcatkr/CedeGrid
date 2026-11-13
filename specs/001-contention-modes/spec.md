@@ -747,6 +747,21 @@ back more.
   interval it reaches the principal window; the rise rule for unattributed usage past the window
   is CPU's only (item 054 Part F, report 053 Decision 2). FR-034 already says so.
 
+- Q: Does the agent's loop wait for its own pacing of coordinator requests? → A: No. The loop
+  never sleeps to pay a control request's charge, and its observation cadence does not depend on
+  `max_transfer_bytes_per_second`. Control requests are still charged to the control lane, so
+  artifact transfer cannot starve them, and artifact transfer paces as before. When the lane is
+  behind, the requests that keep work alive still go out on time: a heartbeat once per heartbeat
+  interval, each lease renewal (and each waiting initial authorization, which shares its batch)
+  before its deadline, and failure reports at no fewer than 16 a second, so a full node's 256
+  reports clear inside the 20 s a default stop leaves them. One coordinator request holds the
+  loop for at most one monitor interval. No wire change (item 054 Part A, report 051
+  Decision 1).
+- Q: How often does a stopping agent heartbeat, and when is the request budget checked for a
+  failure report? → A: A stopping agent keeps its heartbeat interval. The request budget is
+  checked before an attempt is pinned for a failure report; the pin still comes before every read
+  that leads to a publication (item 054 Part A).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1749,6 +1764,11 @@ node reports with the expected per-resource values at each step.
   the allowance, up to 32 new assignments; in the other modes the agent adds one worker per CPU
   and RAM cooldown. Launches and lease requests MUST NOT hold the node's observation, heartbeat or
   telemetry past the monitor interval; lease requests go as one batch per iteration (FR-074).
+  The loop MUST NOT sleep to pay a coordinator request's charge on the control lane, and its
+  cadence MUST NOT depend on `max_transfer_bytes_per_second`; one coordinator request holds it
+  for at most one monitor interval. While the lane is behind, a heartbeat still goes once per
+  heartbeat interval, each lease renewal and waiting initial authorization before its deadline,
+  and failure reports at no fewer than 16 a second.
   On CPU in every mode, once every contending external principal (background does not count)
   has stayed below `principal_min_percent` for `principal_window_intervals`, the next scale-up is
   one move to the uncontended target, without waiting for the mode's interval, for the allowance
@@ -1824,7 +1844,9 @@ node reports with the expected per-resource values at each step.
   a restart. It MUST retry re-adoption
   on later iterations while a supervisor lives, in replay mode too. A stop that drains MUST
   spread its drains over iterations so that no iteration exceeds the 1 s cadence, and leases and
-  heartbeats keep their pace.
+  heartbeats keep their pace: a stopping agent heartbeats at its heartbeat interval, not every
+  iteration. The request budget MUST be checked before an attempt is pinned for a failure
+  report, and the pin MUST still come before every read that leads to a publication.
 - **FR-081**: Node history MUST be bounded by fixed constants: a heartbeat reports unreleased
   executions plus the last 256 released ones; observations keep the last 24 h, with a row cap;
   an attempt's directory is removed after its outcome receipt and publication garbage
