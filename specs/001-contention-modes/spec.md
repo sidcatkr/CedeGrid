@@ -762,6 +762,13 @@ back more.
   checked before an attempt is pinned for a failure report; the pin still comes before every read
   that leads to a publication (item 054 Part A).
 
+- Q: When does the estimate kept for a CPU window's refill give way to another user's usage? →
+  A: In the interval in which the other principals' measured usage, from the readable principal
+  list, has risen by `principal_min_percent` of capacity since the estimate was taken. Where
+  other accounts' usage cannot be read per process, or the list is unreadable, no estimate is
+  kept and the interval's own estimate applies. Own measurement's looseness is still not another
+  user's usage (item 055 Part B, report 052 Decision 3).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1362,7 +1369,10 @@ node reports with the expected per-resource values at each step.
   and its status says why. When an own task's sample is missing, the record MUST say which check
   of the sampler failed, and own work's own measurement MUST NOT count as external growth in any
   mode: an own task's one-interval unknown measurement does not raise the external estimate in
-  the next interval.
+  the next interval. The estimate kept for a window's refill MUST give way in the interval in
+  which the other principals' measured usage, from the readable principal list, has risen by
+  `principal_min_percent` of capacity since it was taken; where other accounts' usage cannot be
+  read per process, or the list is unreadable, no estimate is kept.
 
 **Modes**
 
