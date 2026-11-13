@@ -1829,19 +1829,13 @@ mod agent_transport_tests {
             modes: Default::default(),
         }
     }
-    #[tokio::test]
-    async fn concurrent_transfers_share_one_budget() {
-        let limiter = std::sync::Arc::new(RateLimiter::new(10_000));
-        let begin = Instant::now();
-        let mut tasks = vec![];
-        for _ in 0..3 {
-            let limiter = limiter.clone();
-            tasks.push(tokio::spawn(async move { limiter.acquire(1000).await }));
-        }
-        for task in tasks {
-            task.await.unwrap();
-        }
-        assert!(begin.elapsed() >= Duration::from_millis(195));
+    #[test]
+    fn concurrent_transfers_share_one_budget() {
+        let limiter = RateLimiter::new(10_000);
+        let now = tokio::time::Instant::now() + Duration::from_millis(10);
+        let waits: Vec<_> = (0..3).map(|_| limiter.book_at(1000, now)).collect();
+        assert_eq!(waits[0], Duration::ZERO);
+        assert_eq!(waits[2], Duration::from_millis(200));
         assert!(wire_charge(256 * 1024) > 256 * 1024);
     }
 }
@@ -2772,6 +2766,145 @@ mod pacing_tests {
         assert!(needs_pin(true, false, Some(Some("b")), Some("a")));
         assert!(needs_pin(true, false, Some(Some("a")), None));
         assert!(needs_pin(true, false, None, Some("a")));
+    }
+
+    fn lanes(budget: u64, cap: Duration) -> super::Lanes {
+        let control = budget / 10;
+        super::Lanes {
+            control: super::RateLimiter::new(control),
+            artifacts: super::RateLimiter::new(budget - control),
+            cap,
+        }
+    }
+
+    /// With 150 allocations at the test's 1 MiB/s, the lease batch and its reply before the
+    /// sample and the heartbeat and its reply after it are charged to the control lane, and the
+    /// loop waits for none of them: the time on either side of the sample is the same as with no
+    /// allocation. The lane is behind afterwards, and an artifact request still waits its turn.
+    #[test]
+    fn a_control_request_charges_its_lane_and_never_waits() {
+        use super::wire_charge;
+        let mut waited = Vec::new();
+        for allocations in [0u64, 150] {
+            let lanes = lanes(1_048_576, Duration::from_secs(2));
+            let now = tokio::time::Instant::now();
+            let mut before = Duration::ZERO;
+            // Renewals: about 120 B a lease out and 160 B back, two batches at 128.
+            for batch in [allocations.min(128), allocations.saturating_sub(128)] {
+                before += lanes.wait_at(false, wire_charge(200 + batch * 120), now + before);
+                before += lanes.wait_at(false, wire_charge(200 + batch * 160), now + before);
+            }
+            let mut after = Duration::ZERO;
+            // The heartbeat: about 285 B an allocation's report, and its reply.
+            after += lanes.wait_at(false, wire_charge(600 + allocations * 285), now + after);
+            after += lanes.wait_at(false, wire_charge(400 + allocations * 40), now + after);
+            waited.push((before, after));
+            if allocations == 150 {
+                assert!(lanes.control.behind_at(now) > Duration::ZERO);
+                assert_eq!(lanes.wait_at(true, 512 * 1024, now), Duration::ZERO);
+                assert!(lanes.wait_at(true, 512 * 1024, now) > Duration::ZERO);
+            }
+        }
+        assert_eq!(waited[0], (Duration::ZERO, Duration::ZERO));
+        assert_eq!(
+            waited[1], waited[0],
+            "the loop waited for its own control charge"
+        );
+    }
+
+    /// The control lane keeps at most one heartbeat interval owed, so it does not read behind
+    /// long after the load is gone.
+    #[test]
+    fn the_control_lane_owes_at_most_one_heartbeat_interval() {
+        let now = tokio::time::Instant::now();
+        let cap = Duration::from_secs(2);
+        let lanes = lanes(1_048_576, cap);
+        for _ in 0..50 {
+            lanes.wait_at(false, 1 << 20, now);
+        }
+        assert_eq!(lanes.control.behind_at(now), cap);
+        assert_eq!(lanes.control.behind_at(now + cap), Duration::ZERO);
+    }
+
+    /// A heartbeat goes once per heartbeat interval and every renewal in the iteration it falls
+    /// due, though the control lane is behind at every heartbeat: an integer clock of 500 ms
+    /// iterations, 150 allocations renewed every 2 s, a budget of 200 kB/s and 9 ms of transport
+    /// a request. A request whose wait and transport pass the 500 ms budget is cut.
+    #[test]
+    fn heartbeats_and_due_renewals_keep_their_schedule_while_the_lane_is_behind() {
+        use super::wire_charge;
+        let start = tokio::time::Instant::now();
+        let budget = Duration::from_millis(500);
+        let transport = Duration::from_millis(9);
+        let lanes = lanes(200_000, Duration::from_secs(2));
+        let (mut renewals_cut, mut heartbeats_cut, mut heartbeats, mut behind) = (0, 0, 0, 0);
+        for iteration in 0..120u32 {
+            let now = start + budget * iteration;
+            let due = (0..150).filter(|slot| slot % 4 == iteration % 4).count() as u64;
+            let mut spent = lanes.wait_at(false, wire_charge(200 + due * 120), now) + transport;
+            spent += lanes.wait_at(false, wire_charge(200 + due * 160), now + spent);
+            if spent > budget {
+                renewals_cut += 1;
+            }
+            if iteration % 4 == 0 {
+                heartbeats += 1;
+                if lanes.control.behind_at(now) > Duration::ZERO {
+                    behind += 1;
+                }
+                let mut spent = lanes.wait_at(false, wire_charge(600 + 150 * 285), now) + transport;
+                spent += lanes.wait_at(false, wire_charge(400 + 150 * 40), now + spent);
+                if spent > budget {
+                    heartbeats_cut += 1;
+                }
+            }
+        }
+        assert_eq!(heartbeats, 30);
+        assert!(
+            behind >= 25,
+            "the lane was behind at only {behind} heartbeats"
+        );
+        assert_eq!((renewals_cut, heartbeats_cut), (0, 0));
+    }
+
+    /// While the control lane is behind, failure reports keep 16 a second; caught up, the loop's
+    /// share alone decides, and the share always ends an iteration.
+    #[test]
+    fn failure_reports_keep_sixteen_a_second_while_the_lane_is_behind() {
+        use super::service::{failure_floor, failure_turn};
+        assert_eq!(failure_floor(Duration::from_millis(500)), 8);
+        assert_eq!(failure_floor(Duration::from_millis(400)), 7);
+        assert_eq!(failure_floor(Duration::from_millis(10)), 1);
+        let budget = Duration::from_millis(250);
+        let behind = Duration::from_millis(800);
+        let early = Duration::from_millis(20);
+        assert!(failure_turn(3, early, budget, 3, 8, behind));
+        assert!(!failure_turn(8, early, budget, 8, 8, behind));
+        assert!(failure_turn(8, early, budget, 8, 8, Duration::ZERO));
+        assert!(!failure_turn(3, budget, budget, 3, 8, Duration::ZERO));
+        assert!(failure_turn(0, budget, budget, 0, 8, behind));
+    }
+
+    /// A stopping agent heartbeats at its interval, not every iteration.
+    #[test]
+    fn a_stopping_agent_keeps_the_heartbeat_interval() {
+        use super::service::heartbeat_due;
+        let interval = Duration::from_secs(2);
+        assert!(!heartbeat_due(Duration::from_millis(100), interval));
+        assert!(heartbeat_due(interval, interval));
+    }
+
+    /// A released run's failure report checks its turn before the attempt pin: a failure with
+    /// no result descriptor and no turn takes no pin. A success, a descriptor, a head or an
+    /// outcome that could not be read, or a turn, does, and every read is made again under it.
+    #[test]
+    fn a_failure_report_checks_its_turn_before_the_attempt_pin() {
+        use super::service::pins_result;
+        assert!(!pins_result(Some(true), Some(false), false));
+        assert!(pins_result(Some(true), Some(false), true));
+        assert!(pins_result(Some(false), Some(false), false));
+        assert!(pins_result(Some(true), Some(true), false));
+        assert!(pins_result(Some(true), None, false));
+        assert!(pins_result(None, Some(false), false));
     }
 }
 

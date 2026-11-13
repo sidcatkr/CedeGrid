@@ -203,6 +203,72 @@ pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bo
     sent == 0 || elapsed < budget
 }
 
+/// Whether a heartbeat is due: once per heartbeat interval, stopping or not.
+pub(super) fn heartbeat_due(since_last: Duration, interval: Duration) -> bool {
+    since_last >= interval
+}
+
+/// The failure reports an iteration sends while the control lane is behind: 16 a second.
+pub(super) fn failure_floor(monitor: Duration) -> usize {
+    usize::try_from((u128::from(monitor.as_millis() as u64) * 16).div_ceil(1000))
+        .unwrap_or(usize::MAX)
+        .max(1)
+}
+
+/// Whether one more failure report goes this iteration: the loop's share allows it, and the
+/// control lane has caught up or fewer than the floor went (FR-034).
+pub(super) fn failure_turn(
+    sent: usize,
+    elapsed: Duration,
+    budget: Duration,
+    failures: usize,
+    floor: usize,
+    behind: Duration,
+) -> bool {
+    lease_turn(sent, elapsed, budget) && (failures < floor || behind.is_zero())
+}
+
+/// Whether a released slot's result pass takes its attempt pin. `failure` is whether the
+/// outcome ends in failure, `None` when it could not be read; `descriptor` whether a result
+/// descriptor is committed, `None` when the head could not be read.
+pub(super) fn pins_result(failure: Option<bool>, descriptor: Option<bool>, turn: bool) -> bool {
+    turn || failure != Some(true) || descriptor != Some(false)
+}
+
+/// Takes a released run's out-of-memory verdict at the first read of its outcome: the host's
+/// count is judged over its last samples, so a later read could miss the kill (FR-076).
+fn take_oom_verdict(
+    oom_kills: &std::collections::VecDeque<Option<u64>>,
+    slot: &mut ChildSlot,
+    outcome: &ExecutionOutcome,
+) -> Result<()> {
+    if slot.oom_verdict.is_some() {
+        return Ok(());
+    }
+    let host: Vec<Option<u64>> = oom_kills.iter().copied().collect();
+    let verdict = oom::classify(&oom::Ending {
+        termination_signal: outcome.termination_signal,
+        supervisor_terminated: outcome.termination_started_ms.is_some(),
+        leaf_oom_kills: outcome.leaf_oom_kills,
+        host_oom_kills: &host,
+        view: slot.ram_view.as_ref(),
+    });
+    if let oom::OomVerdict::NotOwnFault(detail) | oom::OomVerdict::OwnFault(detail) = &verdict {
+        emit(&serde_json::json!({
+            "event": "oom_kill",
+            "task_id": slot.assignment.request.task_id,
+            "assignment_id": slot.assignment.request.assignment_id,
+            "own_fault": matches!(verdict, oom::OomVerdict::OwnFault(_)),
+            "detail": detail,
+        }))?;
+    }
+    if matches!(verdict, oom::OomVerdict::NotOwnFault(_)) {
+        slot.drain_cause = Some(crate::contention::YieldCause::OomNotOwnFault);
+    }
+    slot.oom_verdict = Some(verdict);
+    Ok(())
+}
+
 /// Whether a slot's publication check takes an attempt pin, which costs a state connection
 /// and two synced writes: for a released result, or for a checkpoint head that is unreadable
 /// (the pinned path reports it) or not yet published. `head` is the head's hash, `None` when
@@ -540,6 +606,9 @@ impl AgentLoop<'_> {
         let started = Instant::now();
         let budget = Duration::from_millis(config.monitor.interval_ms / 2);
         let mut sent = 0;
+        // Failure reports keep a floor against the control lane (FR-034).
+        let mut failures = 0;
+        let floor = failure_floor(Duration::from_millis(config.monitor.interval_ms));
         if self.negotiated.lease_batch {
             // One request per batch, served in one coordinator transaction (FR-074).
             let mut renewals = Vec::new();
@@ -738,6 +807,41 @@ impl AgentLoop<'_> {
                 ) {
                     continue;
                 }
+                // A failure with nothing to publish waits for its turn unpinned; its verdict is
+                // taken at the first read all the same. Every read that can lead to a
+                // publication is made again under the pin (FR-080).
+                if !checkpoint
+                    && !failure_turn(
+                        sent,
+                        started.elapsed(),
+                        budget,
+                        failures,
+                        floor,
+                        self.client
+                            .lanes
+                            .control
+                            .behind_at(tokio::time::Instant::now()),
+                    )
+                {
+                    let outcome =
+                        ExecutionOutcome::read(&slot.output_dir.join("execution-outcome.json"))
+                            .ok();
+                    if let Some(Some(outcome)) = outcome.as_ref() {
+                        take_oom_verdict(&self.oom_kills, slot, outcome)?;
+                    }
+                    let failure = match &outcome {
+                        Some(Some(o)) => Some(o.exit_code != Some(0) || o.yielded),
+                        Some(None) => Some(supervisor_exited),
+                        None => None,
+                    };
+                    let descriptor =
+                        crate::publication::read_head(&self.store, &slot.output_dir, "result")
+                            .ok()
+                            .map(|bytes| bytes.is_some());
+                    if !pins_result(failure, descriptor, false) {
+                        continue;
+                    }
+                }
                 let publication_pin =
                     crate::publication_gc::pin_attempt(&self.store, &slot.output_dir)?;
                 let descriptor_bytes = match crate::publication::read_head(
@@ -795,32 +899,8 @@ impl AgentLoop<'_> {
                     if outcome.is_none() && !supervisor_exited {
                         continue;
                     }
-                    if let Some(outcome) = outcome.as_ref()
-                        && slot.oom_verdict.is_none()
-                    {
-                        let host: Vec<Option<u64>> = self.oom_kills.iter().copied().collect();
-                        let verdict = oom::classify(&oom::Ending {
-                            termination_signal: outcome.termination_signal,
-                            supervisor_terminated: outcome.termination_started_ms.is_some(),
-                            leaf_oom_kills: outcome.leaf_oom_kills,
-                            host_oom_kills: &host,
-                            view: slot.ram_view.as_ref(),
-                        });
-                        if let oom::OomVerdict::NotOwnFault(detail)
-                        | oom::OomVerdict::OwnFault(detail) = &verdict
-                        {
-                            emit(&serde_json::json!({
-                                "event": "oom_kill",
-                                "task_id": slot.assignment.request.task_id,
-                                "assignment_id": id,
-                                "own_fault": matches!(verdict, oom::OomVerdict::OwnFault(_)),
-                                "detail": detail,
-                            }))?;
-                        }
-                        if matches!(verdict, oom::OomVerdict::NotOwnFault(_)) {
-                            slot.drain_cause = Some(crate::contention::YieldCause::OomNotOwnFault);
-                        }
-                        slot.oom_verdict = Some(verdict);
+                    if let Some(outcome) = outcome.as_ref() {
+                        take_oom_verdict(&self.oom_kills, slot, outcome)?;
                     }
                     if outcome
                         .as_ref()
@@ -833,10 +913,21 @@ impl AgentLoop<'_> {
                         } else {
                             // A failure report is a synced coordinator write too; it waits
                             // for the next iteration once the budget is spent.
-                            if !lease_turn(sent, started.elapsed(), budget) {
+                            if !failure_turn(
+                                sent,
+                                started.elapsed(),
+                                budget,
+                                failures,
+                                floor,
+                                self.client
+                                    .lanes
+                                    .control
+                                    .behind_at(tokio::time::Instant::now()),
+                            ) {
                                 continue;
                             }
                             sent += 1;
+                            failures += 1;
                             let released = &record
                                 .as_ref()
                                 .expect("record was checked released above")
@@ -1446,10 +1537,11 @@ impl AgentLoop<'_> {
         let config = &*config;
         let agent = self.agent;
         let executable = self.executable;
-        if self.stopping.is_none()
-            && self.last_heartbeat.elapsed()
-                < Duration::from_millis(self.config.lifecycle.heartbeat_interval_ms)
-        {
+        // A stopping agent keeps the heartbeat interval too (FR-080).
+        if !heartbeat_due(
+            self.last_heartbeat.elapsed(),
+            Duration::from_millis(self.config.lifecycle.heartbeat_interval_ms),
+        ) {
             return Ok(());
         }
         let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
@@ -1637,8 +1729,19 @@ impl AgentLoop<'_> {
                 // rest are reported at the next heartbeat (research R19).
                 let reports_started = Instant::now();
                 let budget = Duration::from_millis(config.monitor.interval_ms / 2);
+                let floor = failure_floor(Duration::from_millis(config.monitor.interval_ms));
                 for (reported, (id, (assignment, detail))) in self.refusals.iter().enumerate() {
-                    if !lease_turn(reported, reports_started.elapsed(), budget) {
+                    if !failure_turn(
+                        reported,
+                        reports_started.elapsed(),
+                        budget,
+                        reported,
+                        floor,
+                        self.client
+                            .lanes
+                            .control
+                            .behind_at(tokio::time::Instant::now()),
+                    ) {
                         break;
                     }
                     let Ok(outcome) = ExecutionOutcome::read(
@@ -2055,6 +2158,9 @@ pub async fn run(
         config.storage_profile,
         namespace_guard.clone(),
     )?;
+    // The control lane keeps at most one heartbeat interval owed.
+    client.lanes.cap = Duration::from_millis(config.lifecycle.heartbeat_interval_ms)
+        .max(Duration::from_millis(config.monitor.interval_ms));
     client.replay_session = replay
         .as_ref()
         .map(|(_, _, snapshot)| snapshot.session_id.clone());

@@ -7,8 +7,7 @@ use super::*;
 pub(super) struct NodeClient {
     pub(super) rpc: RpcClient,
     pub(super) replay_session: Option<String>,
-    pub(super) control: RateLimiter,
-    pub(super) artifacts: RateLimiter,
+    pub(super) lanes: Lanes,
     pub(super) cache_dir: PathBuf,
     pub(super) cache_lock: tokio::sync::Mutex<()>,
     pub(super) spool_root: PathBuf,
@@ -34,8 +33,11 @@ impl NodeClient {
         Ok(Self {
             rpc: RpcClient::with_settings(&config.coordinator_url, &config.tls, 15.0, 0)?,
             replay_session: None,
-            control: RateLimiter::new(control),
-            artifacts: RateLimiter::new(config.max_transfer_bytes_per_second - control),
+            lanes: Lanes {
+                control: RateLimiter::new(control),
+                artifacts: RateLimiter::new(config.max_transfer_bytes_per_second - control),
+                cap: Duration::from_secs(2),
+            },
             cache_dir,
             cache_lock: tokio::sync::Mutex::new(()),
             spool_root: state_dir.join("attempts"),
@@ -161,11 +163,6 @@ impl NodeClient {
                 | Request::PublishCheckpoint { .. }
                 | Request::Complete { .. }
         );
-        let limiter = if artifact {
-            &self.artifacts
-        } else {
-            &self.control
-        };
         let wrapped;
         let wire_request = if let Some(session_id) = &self.replay_session {
             wrapped = Request::NodeSession {
@@ -182,14 +179,24 @@ impl NodeClient {
         } else {
             0
         };
-        limiter
-            .acquire(wire_charge(upload.saturating_add(estimated_reply)))
-            .await;
+        let wait = self.lanes.wait_at(
+            artifact,
+            wire_charge(upload.saturating_add(estimated_reply)),
+            tokio::time::Instant::now(),
+        );
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
         let response = self.rpc.request(wire_request).await?;
         if estimated_reply == 0 {
-            limiter
-                .acquire(wire_charge(serde_json::to_vec(&response)?.len() as u64))
-                .await;
+            let wait = self.lanes.wait_at(
+                artifact,
+                wire_charge(serde_json::to_vec(&response)?.len() as u64),
+                tokio::time::Instant::now(),
+            );
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
         }
         Ok(response)
     }
@@ -237,23 +244,65 @@ pub(super) fn wire_charge(json_bytes: u64) -> u64 {
         .saturating_add(4096)
 }
 
+/// The agent's two transfer lanes: control requests and artifact transfer.
+pub(super) struct Lanes {
+    pub(super) control: RateLimiter,
+    pub(super) artifacts: RateLimiter,
+    /// The most the control lane keeps owed: one heartbeat interval.
+    pub(super) cap: Duration,
+}
+
+impl Lanes {
+    /// How long a request waits for its lane at `now`, having booked `bytes` on it.
+    pub(super) fn wait_at(
+        &self,
+        artifact: bool,
+        bytes: u64,
+        now: tokio::time::Instant,
+    ) -> Duration {
+        if artifact {
+            self.artifacts.book_at(bytes, now)
+        } else {
+            // Control requests never wait for their lane: the loop's cadence must not depend on
+            // the transfer budget (FR-034). They are still charged, so artifacts cannot starve them.
+            self.control.charge_at(bytes, now, self.cap);
+            Duration::ZERO
+        }
+    }
+}
+
 pub(super) struct RateLimiter {
     pub(super) rate: u64,
-    pub(super) next: tokio::sync::Mutex<tokio::time::Instant>,
+    next: std::sync::Mutex<tokio::time::Instant>,
 }
 
 impl RateLimiter {
     pub(super) fn new(rate: u64) -> Self {
         Self {
             rate,
-            next: tokio::sync::Mutex::new(tokio::time::Instant::now()),
+            next: std::sync::Mutex::new(tokio::time::Instant::now()),
         }
     }
-    pub(super) async fn acquire(&self, bytes: u64) {
-        let mut next = self.next.lock().await;
-        let start = (*next).max(tokio::time::Instant::now());
-        *next = start + Duration::from_secs_f64(bytes as f64 / self.rate as f64);
-        drop(next);
-        tokio::time::sleep_until(start).await;
+    fn span(&self, bytes: u64) -> Duration {
+        Duration::from_secs_f64(bytes as f64 / self.rate.max(1) as f64)
+    }
+    /// Books `bytes` from `now` and returns how far away their turn is.
+    pub(super) fn book_at(&self, bytes: u64, now: tokio::time::Instant) -> Duration {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        let start = (*next).max(now);
+        *next = start + self.span(bytes);
+        start.saturating_duration_since(now)
+    }
+    /// Books `bytes` from `now` with no wait, keeping at most `cap` owed.
+    pub(super) fn charge_at(&self, bytes: u64, now: tokio::time::Instant, cap: Duration) {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        *next = ((*next).max(now) + self.span(bytes)).min(now + cap);
+    }
+    /// How far the lane's booked bytes reach past `now`.
+    pub(super) fn behind_at(&self, now: tokio::time::Instant) -> Duration {
+        self.next
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .saturating_duration_since(now)
     }
 }
