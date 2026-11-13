@@ -7595,6 +7595,69 @@ mod measurement_window {
         );
     }
 
+    /// Another user's measured usage is not looseness: a new user at 40 m (1% of capacity, the
+    /// default `principal_min_percent`) while the window refills, inside a wide own bound, ends
+    /// the kept estimate in the interval its measured usage shows it, in every mode, and own
+    /// work's target falls in that interval (FR-018, SC-002, item 055).
+    #[test]
+    fn a_measured_rise_of_another_user_ends_the_kept_estimate() {
+        for mode in [
+            ContentionMode::YieldFirst,
+            ContentionMode::Neutral,
+            ContentionMode::Performance,
+        ] {
+            let mut config = config();
+            config.contention.default_mode = mode;
+            let mut engine = PolicyEngine::new();
+            let listed = |mut snap: Snapshot, other: u64| {
+                snap.principals = Some(vec![
+                    super::cpu_principal(1000, true, 0),
+                    super::cpu_principal(2000, false, other),
+                ]);
+                snap
+            };
+            let windowed = listed(reading((3080, 2990), 2950, Some(((2965, 2955), 2955))), 0);
+            let first = engine
+                .evaluate(&config, &windowed, &input(2950, 3050), 0)
+                .unwrap();
+            assert_eq!(external(&first), Some(10), "{mode:?}");
+            let quiet = engine
+                .evaluate(
+                    &config,
+                    &listed(reading((3080, 2990), 2950, None), 0),
+                    &input(2950, 3050),
+                    500,
+                )
+                .unwrap();
+            assert_eq!(
+                external(&quiet),
+                Some(10),
+                "{mode:?}: looseness is not growth"
+            );
+            let target = |d: &Decision| d.resources[&ResourceKey::Cpu].target_share;
+            // The new user's 40 m sit inside the interval's 190 m bound, but it was measured.
+            let joined = engine
+                .evaluate(
+                    &config,
+                    &listed(reading((3120, 3030), 2950, None), 40),
+                    &input(2950, 3050),
+                    1000,
+                )
+                .unwrap();
+            assert_eq!(
+                external(&joined),
+                Some(170),
+                "{mode:?}: the rise is seen at once"
+            );
+            assert!(
+                target(&joined) < target(&quiet),
+                "{mode:?}: {:?} against {:?}",
+                target(&joined),
+                target(&quiet)
+            );
+        }
+    }
+
     /// One unknown reading resets the window. The estimate kept for the refill lasts through
     /// that reading too, or the wide per-interval estimate reads as growth for a window.
     #[test]

@@ -282,8 +282,9 @@ pub struct PolicyEngine {
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
     ram_stable_since: Option<u64>,
-    /// The last busy-window external estimate and when it was read, for a window's refill.
-    cpu_window_external: Option<(u64, u64)>,
+    /// The last busy-window external estimate, when it was read, and the other principals'
+    /// measured CPU then (none while the list was unreadable), for a window's refill.
+    cpu_window_external: Option<(u64, u64, Option<u64>)>,
     /// Whether the last reset of CPU's and RAM's stability had no cause but own
     /// allocations without a first measurement (FR-028).
     cpu_reset_by_new: bool,

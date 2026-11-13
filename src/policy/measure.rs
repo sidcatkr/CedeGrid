@@ -504,12 +504,33 @@ impl<'a> Interval<'a> {
             // window's rule, for at most one window.
             let window_ms = (crate::kernel::CPU_WINDOW_INTERVALS as u64)
                 .saturating_mul(self.config.monitor.interval_ms);
+            // Another user's measured usage is not looseness: the kept estimate gives way once
+            // the other principals' measured CPU has risen by `principal_min_percent` of
+            // capacity since it was taken (FR-018).
+            let others = snapshot.principals.as_ref().map(|list| {
+                list.iter()
+                    .filter(|p| !p.is_owner)
+                    .map(|p| p.cpu_millicores)
+                    .fold(0u64, u64::saturating_add)
+            });
+            let rise = (self.cpu_capacity.saturating_mul(u64::from(
+                self.config
+                    .contention
+                    .thresholds(crate::contention::ResourceKind::Cpu)
+                    .principal_min_percent,
+            )) / 100)
+                .max(1);
             let kept = self
                 .prev
                 .cpu_window_external
-                .filter(|(_, at)| self.now.saturating_sub(*at) <= window_ms);
-            self.next.cpu_window_external = window.map(|window| (window, self.now)).or(kept);
-            match window.or(kept.map(|(estimate, _)| estimate)) {
+                .filter(|(_, at, _)| self.now.saturating_sub(*at) <= window_ms)
+                .filter(|(_, _, then)| match (then, others) {
+                    (Some(then), Some(now)) => now < then.saturating_add(rise),
+                    _ => true,
+                });
+            self.next.cpu_window_external =
+                window.map(|window| (window, self.now, others)).or(kept);
+            match window.or(kept.map(|(estimate, _, _)| estimate)) {
                 Some(window) if window.abs_diff(interval) <= bound => window,
                 _ => {
                     // Real growth beyond the bound ends what was kept.

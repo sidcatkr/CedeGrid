@@ -267,7 +267,10 @@ allowance, the targets, the admission budget and the p95 usage samples while thi
 interval's estimate stays within its own bound of it, and an estimate beyond that bound,
 growth or fall, applies at once, so the 2-interval reclaim bound is unchanged. While a reset
 window refills, for at most one window, the last window's estimate stands by the same rule, so
-a measurement's wider bound does not read as external growth. When an own task's sample is
+a measurement's wider bound does not read as external growth. Another user's measured usage is
+not that looseness: the kept estimate gives way in the interval in which the other principals'
+CPU, read from the principal list, has risen by `principal_min_percent` of capacity since it was
+taken. When an own task's sample is
 missing, `allocation_unknown_hold`'s reason names the check that failed.
 
 CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
