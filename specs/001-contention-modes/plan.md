@@ -2145,8 +2145,10 @@ or the contract fixture. One reason code is added to the catalog. Native reruns 
   as before. The item's answer 5 (lift a held cap while running when an unverified member joins)
   is not taken: every form of it found lifts caps on ordinary own processes.
 - *Principle II.* Part A gives another user its fair share from the interval an own process is
-  listed; the cost is own work's, at most one counting window at d0' per listing, which in
-  Performance is beyond the loss rule for that time. Part C keeps Yield First's give-back
+  listed. Its cost is own work's: a listed own context with no sample yet has unknown activity,
+  which Principle III does not read as idle, so it counts as a busy context, for at most one
+  counting window at d0' per listing. Whether Performance's loss rule allows that window is put to
+  the review with the report. Part C keeps Yield First's give-back
   unchanged. Part D only lowers own work's share in an interval whose list cannot be read.
 - *Principle III.* Part A does not read an unsampled own context as idle. Part D does not read an
   unknown list as a larger share. Part B counts a member list unreadable twice as changed.
