@@ -872,9 +872,13 @@ exits during a drain leaves its members to the drain's deadline, with no second 
 
 SIGTERM, SIGINT and a restart stop the agent and leave its supervisors running; the next
 agent re-adopts them, retrying on later intervals while a supervisor lives, in replay
-mode too. An explicit operator drain and the end of `max_runtime_seconds` drain every
-allocation, spread over intervals so each one's journal writes fit in 250 ms and leases
-and heartbeats keep their pace. SIGHUP reloads the configuration: contention settings,
+mode too. The end of `max_runtime_seconds` drains every allocation a share at a time: each
+interval as many as the agent's last synced journal write fits in 250 ms, and at least one. An
+explicit operator drain reaches each allocation with its next lease renewal or heartbeat reply,
+within one heartbeat interval and not spread, and its lease is not extended from then on. The
+agent's loop never waits for its own pacing of coordinator requests: heartbeats go at their
+interval, renewals before their deadlines and failure reports at least 16 a second, whatever
+`max_transfer_bytes_per_second` is, stopping or not. SIGHUP reloads the configuration: contention settings,
 modes included, apply from the next interval (`config_reloaded`); a change to a setting
 that needs a restart keeps the running configuration (`config_reload_refused`) (FR-080).
 

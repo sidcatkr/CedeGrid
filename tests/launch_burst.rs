@@ -240,7 +240,11 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         coordinator_url: endpoint.clone(),
         tls: tls("node-0"),
         cpu_affinity: None,
-        max_transfer_bytes_per_second: 1024 * 1024,
+        // The transfer budget, 1 MiB/s unless the run sets another (item 054's two B1 runs).
+        max_transfer_bytes_per_second: std::env::var("CEDEGRID_TEST_BURST_TRANSFER_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1024 * 1024),
         capacity: Resources {
             cpu_millicores: 2000,
             ram_mib: 4096,
@@ -312,9 +316,9 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // Two more heartbeats after the last launch, then a draining stop: an operator drain of
-    // the node, whose drains the agent spreads over iterations (FR-080), then TERM, which
-    // leaves no supervisor once every run is released.
+    // Two more heartbeats after the last launch, then an operator drain of the node, which
+    // reaches each run with its next lease renewal or heartbeat reply, then TERM, which leaves
+    // no supervisor once every run is released.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let ran = running(&state);
     let expired = lease_expiries(&root.join("coordinator"));
@@ -336,7 +340,16 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
     }
     let drain_ms = drain_started.elapsed().as_millis();
     let left = running(&state);
+    // The coordinator fences an expired lease only when a request advances its clock.
+    client.request(&Request::Status { job_id: None }).await.ok();
+    let expired_in_drain = lease_expiries(&root.join("coordinator")).saturating_sub(expired);
+    let term_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
     agent_service.stop(Duration::from_secs(30));
+    client.request(&Request::Status { job_id: None }).await.ok();
+    let expired_after_drain = lease_expiries(&root.join("coordinator")).saturating_sub(expired);
     coordinator_service.stop(Duration::from_secs(5));
     let log = fs::read_to_string(root.join("agent.stdout.log")).unwrap();
     let stale = log
@@ -365,6 +378,33 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .map(|pair| pair[1].saturating_sub(pair[0]))
         .max()
         .unwrap_or(0);
+    // Each phase's longest gap: before the drain, from the drain to TERM, and after TERM.
+    let phase = |from: u64, to: u64| {
+        times
+            .windows(2)
+            .filter(|pair| pair[1] > from && pair[1] <= to)
+            .map(|pair| pair[1].saturating_sub(pair[0]))
+            .max()
+            .unwrap_or(0)
+    };
+    let first = times.first().copied().unwrap_or(drain_started_unix_ms);
+    let count = |event: &str| {
+        log.lines()
+            .filter(|line| line.contains(&format!("\"event\":\"{event}\"")))
+            .count()
+    };
+    eprintln!(
+        "burst phases: drain at {} ms and TERM at {} ms after the first observation; longest gap {} ms before the drain, {} ms from the drain to TERM, {} ms after TERM; leases expired {expired} before the drain, {expired_in_drain} during it and {expired_after_drain} after it in all; events: lease_unavailable {}, coordinator_disconnected {}, drain_unsent {}, stop_uncertain {}",
+        drain_started_unix_ms.saturating_sub(first),
+        term_unix_ms.saturating_sub(first),
+        phase(0, drain_started_unix_ms),
+        phase(drain_started_unix_ms, term_unix_ms),
+        phase(term_unix_ms, u64::MAX),
+        count("lease_unavailable"),
+        count("coordinator_disconnected"),
+        count("drain_unsent"),
+        count("stop_uncertain"),
+    );
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
         "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {left} left running after the drain, the drain took {drain_ms} ms with a longest gap of {longest_in_stop} ms, {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
