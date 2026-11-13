@@ -527,6 +527,7 @@ impl<'a> Interval<'a> {
                     .saturating_mul(1000)
             },
         );
+        let guaranteed_waits = guaranteed_may_drain(kind, cause, opportunistic_left, u64::MAX, 0);
         // What the mode allows beyond current usage, shared by the caps,
         // pauses and hints on this resource so they can rise again while calm.
         let held_back = self
@@ -568,6 +569,7 @@ impl<'a> Interval<'a> {
             admission_excess,
             usage_excess,
             guaranteed_drain,
+            guaranteed_waits,
             spare_share,
             own_usage: if kind == ResourceKind::Cpu {
                 cpu_usage
@@ -750,7 +752,7 @@ impl<'a> Interval<'a> {
                 });
                 if above_own_target {
                     planned.insert(victim.id.clone());
-                    self.plan_victim(frame, victim, pending_pass, &mut 0);
+                    self.plan_victim(frame, victim, pending_pass, false, &mut 0);
                 }
             }
             return;
@@ -787,16 +789,57 @@ impl<'a> Interval<'a> {
                     let mut share = victim.amount.saturating_sub(level);
                     remaining = remaining.saturating_sub(share);
                     planned.insert(victim.id.clone());
-                    self.plan_victim(frame, victim, pending_pass, &mut share);
+                    self.plan_victim(frame, victim, pending_pass, false, &mut share);
                 }
             }
             return;
         }
+        // Over-share tasks give memory back first (FR-016, FR-023): they lead the order, and
+        // in-share tasks are asked only for what is left after them.
+        let over = if pending_pass {
+            Vec::new()
+        } else {
+            self.over_share(key, &victims, frame.own_usage)
+        };
+        victims.sort_by_key(|victim| {
+            over.iter()
+                .position(|id| id == &victim.id)
+                .unwrap_or(usize::MAX)
+        });
         let mut remaining = needed;
         for victim in victims {
             planned.insert(victim.id.clone());
-            self.plan_victim(frame, victim, pending_pass, &mut remaining);
+            let over_share = over.contains(&victim.id);
+            self.plan_victim(frame, victim, pending_pass, over_share, &mut remaining);
         }
+    }
+
+    /// The over-share tasks on a memory resource: the shortest prefix of the victims, in victim
+    /// order, whose memory covers own memory above its fair share, as the OOM mark picks them
+    /// (FR-023). None while the share is unknown or own memory is within it.
+    fn over_share(&self, key: &ResourceKey, victims: &[VictimFacts], own: u64) -> Vec<String> {
+        let Some(excess) = key
+            .kind()
+            .is_memory()
+            .then(|| self.memory_fair_share.get(key))
+            .flatten()
+            .map(|fair| own.saturating_sub(*fair))
+            .filter(|excess| *excess > 0)
+        else {
+            return Vec::new();
+        };
+        let mut ordered = victims.to_vec();
+        victim_order(&mut ordered, excess);
+        let mut covered = 0u64;
+        let mut over = Vec::new();
+        for victim in ordered {
+            if covered >= excess {
+                break;
+            }
+            covered = covered.saturating_add(victim.amount);
+            over.push(victim.id);
+        }
+        over
     }
 
     /// Performance and Aggressive CPU: the Neutral target, which under contention is own
@@ -847,6 +890,7 @@ impl<'a> Interval<'a> {
         frame: &Frame,
         victim: VictimFacts,
         pending_pass: bool,
+        over_share: bool,
         remaining: &mut u64,
     ) {
         let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
@@ -1003,7 +1047,26 @@ impl<'a> Interval<'a> {
         if pending_pass && let Some(next) = decision.state.as_mut() {
             next.pending = true;
         }
-        if let Some(next) = &decision.state {
+        // An over-share task keeps counting toward the excess while it is being handled, so
+        // the excess is not passed to in-share tasks (FR-023, FR-037): a drain decided counts
+        // in full, also while the task still runs, and a hint within its deadline, or a
+        // Guaranteed task whose drain only waits for the breach window, counts what was asked.
+        let step = decision.state.as_ref().map(|next| next.step);
+        let waiting = over_share
+            && kind.is_memory()
+            && match &decision.state {
+                Some(next) if next.step >= YieldStep::Drain => false,
+                Some(next) if next.step == YieldStep::Hint => {
+                    now.saturating_sub(next.entered_at_ms) < victim_timing.hint_deadline_ms
+                        || (victim.guaranteed && frame.guaranteed_waits)
+                }
+                _ => victim.guaranteed && frame.guaranteed_waits,
+            };
+        if over_share && kind.is_memory() && step.is_some_and(|step| step >= YieldStep::Drain) {
+            *remaining = remaining.saturating_sub(victim.amount);
+        } else if waiting {
+            *remaining = remaining.saturating_sub(victim.amount.min(*remaining));
+        } else if let Some(next) = &decision.state {
             // A newly applied step, or a cap lowered below usage, is expected to release its
             // share; the next observation shows whether it did. Without counting a lowered
             // cap, every held cap would be lowered by the whole excess.
@@ -1015,6 +1078,8 @@ impl<'a> Interval<'a> {
                 _ => victim.amount.min(*remaining),
             };
             *remaining = remaining.saturating_sub(freed);
+        }
+        if let Some(next) = &decision.state {
             self.next
                 .ladder
                 .insert((victim.id.clone(), key.clone()), next.clone());
@@ -1621,6 +1686,9 @@ struct Frame {
     admission_excess: u64,
     usage_excess: u64,
     guaranteed_drain: bool,
+    /// A Guaranteed victim's drain is allowed for this cause and only waits for the breach
+    /// window, so an over-share one keeps counting toward the excess meanwhile (FR-024).
+    guaranteed_waits: bool,
     spare_share: u64,
     /// Own usage on the resource: CPU in use, or memory as judged.
     own_usage: u64,

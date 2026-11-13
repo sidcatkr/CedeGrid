@@ -7920,6 +7920,288 @@ mod floors_by_mode {
         actions
     }
 
+    /// One interval of a scripted RAM run: each task's RAM step, the drains decided and the
+    /// tasks marked as preferred OOM victims.
+    struct Interval {
+        now: u64,
+        steps: BTreeMap<String, (YieldStep, Option<u64>)>,
+        drains: Vec<String>,
+        marked: Vec<String>,
+        headroom: u64,
+    }
+
+    /// Run the policy every 500 ms to `until_ms`; `at` gives each interval's jobs and the free
+    /// RAM external usage leaves, on 32 000 MiB with a 1 000 MiB floor.
+    fn scripted(
+        cfg: &Config,
+        facts: &BTreeMap<String, AllocationFacts>,
+        until_ms: u64,
+        at: impl Fn(u64) -> (Vec<Allocation>, u64),
+    ) -> Vec<Interval> {
+        let mut engine = PolicyEngine::new();
+        (0..=until_ms)
+            .step_by(500)
+            .map(|now| {
+                let (jobs, available) = at(now);
+                let mut snap = snapshot();
+                snap.available_ram_mib = Some(available);
+                let input = PolicyInput {
+                    allocations: jobs,
+                    facts: facts.clone(),
+                    ..PolicyInput::default()
+                };
+                let decision = engine.evaluate(cfg, &snap, &input, now).unwrap();
+                Interval {
+                    now,
+                    steps: decision
+                        .actions
+                        .iter()
+                        .filter(|a| a.resource == ResourceKey::Ram)
+                        .map(|a| (a.allocation_id.clone(), (a.step, a.target)))
+                        .collect(),
+                    drains: decision.would_drain.clone(),
+                    marked: decision.oom_preferred.iter().cloned().collect(),
+                    headroom: decision.admission_headroom.ram_mib,
+                }
+            })
+            .collect()
+    }
+
+    /// Facts for an over-share run: `ready` tasks take hints, `plain` ones do not, and `first`
+    /// have lost the least progress, so the victim order starts with them.
+    fn over_share_facts(
+        ready: &[&str],
+        plain: &[&str],
+        first: &[(&str, u64)],
+    ) -> BTreeMap<String, AllocationFacts> {
+        let mut facts = hinted(ready);
+        facts.extend(rootless(plain));
+        for fact in facts.values_mut() {
+            fact.progress_lost_ms = 60_000;
+        }
+        for (id, lost) in first {
+            facts.get_mut(*id).unwrap().progress_lost_ms = *lost;
+        }
+        facts
+    }
+
+    /// Own work holds 16 000 MiB with 700 MiB free: 300 MiB over its fair share, all of it in
+    /// `z`, which lost the least progress. `z` takes hints but never frees. It alone is asked,
+    /// and it is drained when its hint deadline passes; the in-share tasks get no step, where
+    /// they were hinted one interval later before (FR-016, FR-023, FR-037, item 051).
+    #[test]
+    fn an_over_share_task_that_ignores_its_hint_is_drained_at_the_deadline() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("c", class, 3_000),
+            ram_job("z", class, 7_000),
+        ];
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+            let run = scripted(&config_in(mode), &facts, 6_000, |_| (jobs.clone(), 700));
+            for interval in &run {
+                assert!(
+                    interval.steps.keys().all(|id| id == "z"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.steps
+                );
+                assert!(
+                    interval.drains.iter().all(|id| id == "z"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.drains
+                );
+            }
+            assert_eq!(
+                run[0].steps.get("z").map(|(step, _)| *step),
+                Some(YieldStep::Hint),
+                "{mode:?}"
+            );
+            let drained = run
+                .iter()
+                .find(|interval| interval.drains.contains(&"z".to_string()))
+                .map(|interval| interval.now);
+            assert_eq!(
+                drained,
+                Some(5_000),
+                "{mode:?}: drained at the hint deadline"
+            );
+        }
+    }
+
+    /// The same over-share task frees its 300 MiB at 2 s: it is not drained, and the in-share
+    /// tasks were never asked (FR-023, item 051).
+    #[test]
+    fn a_hint_ready_over_share_task_that_frees_in_time_is_not_drained() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        let at = |now: u64| {
+            let freed = now >= 2_000;
+            (
+                vec![
+                    ram_job("a", class, 3_000),
+                    ram_job("b", class, 3_000),
+                    ram_job("c", class, 3_000),
+                    ram_job("z", class, if freed { 6_700 } else { 7_000 }),
+                ],
+                if freed { 1_000 } else { 700 },
+            )
+        };
+        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+            let run = scripted(&config_in(mode), &facts, 12_000, at);
+            for interval in &run {
+                assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
+                assert!(
+                    interval.steps.keys().all(|id| id == "z"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.steps
+                );
+            }
+        }
+    }
+
+    /// Two plain tasks could each cover the 300 MiB over the share. Only the first in victim
+    /// order is drained, also while it still runs: a drain already decided counts in full, so
+    /// no second task is drained for the same excess (FR-023, item 051).
+    #[test]
+    fn no_more_over_share_tasks_are_drained_than_bring_own_memory_within_its_share() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("z1", class, 5_000),
+            ram_job("z2", class, 5_000),
+        ];
+        let facts = over_share_facts(&["a", "b"], &["z1", "z2"], &[("z1", 1_000), ("z2", 2_000)]);
+        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+            let run = scripted(&config_in(mode), &facts, 1_500, |_| (jobs.clone(), 700));
+            assert_eq!(run[0].drains, ["z1"], "{mode:?}");
+            for interval in &run {
+                assert!(
+                    interval.drains.iter().all(|id| id == "z1"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.drains
+                );
+                assert!(
+                    interval.steps.keys().all(|id| id == "z1"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.steps
+                );
+            }
+        }
+    }
+
+    /// A small plain task holds the whole 300 MiB over the share and is drained. While it still
+    /// runs, the in-share tasks get nothing. Once it is draining, free memory is 400 MiB short
+    /// of the floor and the drain frees 300, so the next task in order is asked for the 100 MiB
+    /// left, and no other task is asked (item 051, rule 4).
+    #[test]
+    fn in_share_tasks_are_asked_only_after_every_over_share_task_was_handled() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
+        let at = |now: u64| {
+            let mut z = ram_job("z", class, 300);
+            if now >= 1_000 {
+                z.phase = AllocationPhase::Draining;
+            }
+            (
+                vec![
+                    ram_job("a", class, 5_200),
+                    ram_job("b", class, 5_200),
+                    ram_job("c", class, 5_300),
+                    z,
+                ],
+                if now >= 1_000 { 600 } else { 700 },
+            )
+        };
+        for (mode, asked) in [
+            (ContentionMode::Performance, 5_100),
+            (ContentionMode::Neutral, 5_100),
+        ] {
+            let run = scripted(&config_in(mode), &facts, 1_000, at);
+            assert_eq!(run[0].drains, ["z"], "{mode:?}");
+            assert!(
+                run[1].steps.keys().all(|id| id == "z"),
+                "{mode:?} at 500: {:?}",
+                run[1].steps
+            );
+            let steps: Vec<_> = run[2].steps.iter().filter(|(id, _)| *id != "z").collect();
+            assert_eq!(steps.len(), 1, "{mode:?} at 1000: {steps:?}");
+            assert_eq!(
+                steps[0].1,
+                &(YieldStep::Hint, Some(asked)),
+                "{mode:?}: {steps:?}"
+            );
+        }
+    }
+
+    /// Item 048's C4 run 2: Performance, every task Guaranteed, the over-share task plain. It
+    /// cannot be hinted, and its drain waits for the breach window, so until the breach turns
+    /// critical nothing is stepped; then it is sent TERM. The in-share tasks, which take hints,
+    /// get none, and only the over-share task is marked (FR-023, FR-024, FR-063, item 051).
+    #[test]
+    fn a_hint_deaf_over_share_task_is_drained_and_in_share_tasks_keep_their_memory() {
+        let class = AllocationClass::Guaranteed;
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("c", class, 3_000),
+            ram_job("z", class, 7_000),
+        ];
+        let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
+        let run = scripted(
+            &config_in(ContentionMode::Performance),
+            &facts,
+            2_000,
+            |now| (jobs.clone(), if now >= 2_000 { 0 } else { 700 }),
+        );
+        for interval in &run {
+            assert!(
+                interval.steps.keys().all(|id| id == "z"),
+                "at {}: {:?}",
+                interval.now,
+                interval.steps
+            );
+            assert_eq!(interval.marked, ["z"], "at {}", interval.now);
+        }
+        assert_eq!(
+            run.last().unwrap().steps.get("z").map(|(step, _)| *step),
+            Some(YieldStep::Terminate)
+        );
+    }
+
+    /// Once the drained over-share task is gone and free memory is back, admission has room for
+    /// it again (item 051, rule 3; FR-061's backoff applies as before).
+    #[test]
+    fn a_drained_over_share_task_is_admitted_again_once_its_memory_fits() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
+        let at = |now: u64| {
+            let mut jobs = vec![
+                ram_job("a", class, 3_000),
+                ram_job("b", class, 3_000),
+                ram_job("c", class, 3_000),
+            ];
+            if now < 1_000 {
+                jobs.push(ram_job("z", class, 7_000));
+            }
+            // The other user leaves as the drain completes.
+            (jobs, if now < 1_000 { 700 } else { 22_000 })
+        };
+        let run = scripted(&config_in(ContentionMode::Performance), &facts, 400_000, at);
+        assert_eq!(run[0].drains, ["z"]);
+        assert!(
+            run.iter().any(|interval| interval.headroom >= 7_000),
+            "admission reopened with room for the task"
+        );
+    }
+
     /// Own work holds 14 000 MiB, within its 15 500 MiB fair share, and external growth to
     /// 17 500 MiB or more breaches the floor. In Performance nothing of own work is hinted,
     /// drained or sent TERM, Guaranteed or not, on the critical path too; Yield First and
