@@ -1166,18 +1166,20 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 
 ## R60. Why GPU activity read unknown after the last busy phase (item 051)
 
-- **Decision**: the policy reads the collector's activity class as it is. Its own check, unknown
-  whenever a listed context that is not background has no newer driver timestamp, is removed, and
-  the record names why activity is unknown.
+- **Decision**: the policy's own check, unknown whenever a listed context that is not background
+  has no newer driver timestamp, no longer applies to a device the collector found Quiet, and the
+  record names why activity is unknown. The check stays for a listed context read Idle or Active.
 - **Rationale**: an idle context returns no per-process sample, so the check overrode the
   collector's Quiet until some process produced a timestamp. In item 048's three comparisons every
   change from unknown to open lands on the first reports after a wall-clock minute, seven of seven,
   and an earlier per-interval record on the same host shows the collector quiet at 9.7 s while the
   policy still read unknown. The check predates the Quiet class (R8), any process's timestamp
   satisfied it, own work's included, and the launch recheck never applied it.
-- **Alternatives**: keep the check and give it a memory of the last fresh timestamp (it still asks
-  for evidence the driver does not produce for an idle context); shorten Yield First's quiet
-  requirement (a change to what the mode means, and not the cause).
+- **Alternatives**: remove the check whole (three existing tests pin that a repeated or
+  out-of-order sample cannot prove a listed context idle, and they would have to change); keep the
+  check and give it a memory of the last fresh timestamp (it still asks for evidence the driver
+  does not produce for an idle context); shorten Yield First's quiet requirement (a change to what
+  the mode means, and not the cause).
 
 ## R61. How over-share tasks give memory back first (item 051)
 

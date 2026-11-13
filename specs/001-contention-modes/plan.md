@@ -2066,13 +2066,16 @@ write, and iterations of 1.0 to 1.135 s. The share now counts both writes, 8 an 
   collector had classified. An idle context returns no sample, so the collector's Quiet, reached
   after 20 healthy intervals, was overridden until some process produced a timestamp: on the test
   host the greeter's context, at the top of each minute, which is the 18.5 s, 55 s and 27.5 s of
-  report 048. The launch recheck never applied that check, so the two disagreed. The check goes;
-  both callers read the collector's class. Tests first: a listed context that is Quiet with no
-  sample admits in Yield First and the recheck agrees; the collector's Unknown still holds
-  admission, and Active still needs a quiet device. The test that claimed to cover "no samples"
-  set a sample in both variants and is corrected.
-- *Reach.* The check only ever turned Quiet into Unknown, so in Neutral and Performance a quiet
-  listed context is no longer counted as one more principal of unknown amount.
+  report 048. The launch recheck never applied that check, so the two disagreed. The check no
+  longer applies to a device the collector found Quiet, which is its own evidence over the quiet
+  window. It stays for a listed context read Idle or Active without a newer timestamp: three
+  existing tests pin that a repeated or out-of-order sample cannot prove a device idle, so the
+  check is not removed whole. Tests first: a listed context that is Quiet with no sample admits in
+  Yield First and the recheck agrees; the collector's Unknown still holds admission, and Active
+  still needs a quiet device. The test that claimed to cover "no samples" set a sample in both
+  variants and is corrected.
+- *Reach.* In Neutral and Performance a quiet listed context is no longer counted as one more
+  principal of unknown amount.
 
 **The memory ladder's order (R61)**. All in `src/policy/ladder.rs`; `plan_step`, the victim order,
 the Performance cap to the fair share, `guaranteed_may_drain` and the OOM mark are unchanged.

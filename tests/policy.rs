@@ -2169,6 +2169,82 @@ fn the_reason_for_unknown_gpu_activity_names_the_failed_check() {
     );
 }
 
+/// A device the collector found Quiet admits in Yield First without a new driver sample, as at
+/// the launch recheck: an idle listed context returns no per-process sample, so asking for one
+/// kept the device unknown until some process produced a timestamp. The collector's Unknown
+/// still holds admission and Active still needs a quiet device (FR-010, FR-027, item 051).
+#[test]
+fn a_quiet_device_without_a_new_sample_admits_in_yield_first() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let mut cfg = config();
+    cfg.gpu.execution_mode = GpuExecutionMode::Auto;
+    cfg.gpu.scale_up_cooldown_ms = Some(60_000);
+    cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
+    // Another account's context holds 2 GiB and has been quiet over the window; the driver
+    // returns nothing for it.
+    let mut snap = large_gpu_snapshot(2048, vec![4242]);
+    snap.gpus[0].external_compute = ComputeActivity::Quiet;
+    snap.gpus[0].external_compute_milli = Some(0);
+    snap.gpus[0].compute_sample_id = None;
+    snap.gpus[0].observation = Some(gpu_observation(
+        &snap,
+        GpuExecutionCapability::ContentionAware,
+    ));
+    let compute: ResourceKey = "gpu_compute:GPU-test".parse().unwrap();
+    let mut engine = PolicyEngine::new();
+    for (now, offered) in [(0, false), (30_000, false), (60_000, true), (120_000, true)] {
+        let decision = engine
+            .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+            .unwrap();
+        let status = &decision.resources[&compute];
+        assert_eq!(status.activity, Some(ComputeActivity::Quiet), "at {now}");
+        assert_eq!(status.admission, Some(Admission::Open), "at {now}");
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .all(|r| r.code != "gpu_yield_first_activity_unknown"),
+            "at {now}"
+        );
+        assert_eq!(
+            decision
+                .admission_headroom
+                .gpu_memory_mib
+                .contains_key("GPU-test"),
+            offered,
+            "at {now}"
+        );
+    }
+    let recheck = |snap: &Snapshot| {
+        cedegrid::policy::validate_gpu_launch_contract(
+            &cfg,
+            snap,
+            &resources(0, 0, 4000),
+            AllocationClass::Opportunistic,
+        )
+    };
+    recheck(&snap).unwrap();
+    for (activity, code) in [
+        (ComputeActivity::Unknown, "gpu_yield_first_activity_unknown"),
+        (
+            ComputeActivity::Active,
+            "gpu_yield_first_needs_quiet_device",
+        ),
+    ] {
+        snap.gpus[0].external_compute = activity;
+        // The collector reads Active only from a newer driver timestamp.
+        snap.gpus[0].compute_sample_id = (activity == ComputeActivity::Active).then_some(1);
+        let decision = PolicyEngine::new()
+            .evaluate(&cfg, &snap, &PolicyInput::default(), 0)
+            .unwrap();
+        assert!(
+            decision.reason_codes.iter().any(|r| r.code == code),
+            "{activity:?}"
+        );
+        assert!(recheck(&snap).is_err(), "{activity:?}");
+    }
+}
+
 #[test]
 fn d3_a_quiet_external_context_admits_gpu_work() {
     let mut cfg = config();
@@ -2185,11 +2261,12 @@ fn d3_a_quiet_external_context_admits_gpu_work() {
     fresh.newest_sample_timestamp_us = Some(200);
     fresh.samples_returned = 1;
     fresh.fresh_after_baseline = true;
-    for observation in [stale, fresh] {
+    for (observation, sampled) in [(stale, false), (fresh, true)] {
         snap.gpus[0].observation = Some(observation);
         let mut engine = PolicyEngine::new();
         for (now, offered) in [(0, false), (30_000, false), (60_000, true), (120_000, true)] {
-            snap.gpus[0].compute_sample_id = Some(now + 1);
+            // No sample means no driver timestamp at all, not a newer one each interval.
+            snap.gpus[0].compute_sample_id = sampled.then_some(now + 1);
             let decision = engine
                 .evaluate(&cfg, &snap, &PolicyInput::default(), now)
                 .unwrap();

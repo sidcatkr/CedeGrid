@@ -1422,12 +1422,16 @@ impl<'a> Interval<'a> {
         let fresh_sample = gpu
             .compute_sample_id
             .is_some_and(|sample| previous.sample_id.is_none_or(|previous| sample > previous));
-        // A background context listed without a fresh sample is no activity (FR-021).
+        // A listed context without a fresh sample is unknown, unless the collector found it
+        // background (FR-021) or quiet: an idle context returns no sample, and Quiet is the
+        // collector's own evidence over its window, so asking for a sample turned it into
+        // Unknown until some process produced one (FR-010, item 051).
         let activity_unknown = gpu.external_compute == ComputeActivity::Unknown
-            || (memory
-                .pids
-                .iter()
-                .any(|pid| !gpu.background_process_ids.contains(pid))
+            || (gpu.external_compute != ComputeActivity::Quiet
+                && memory
+                    .pids
+                    .iter()
+                    .any(|pid| !gpu.background_process_ids.contains(pid))
                 && !fresh_sample);
         let telemetry_unknown = !gpu_observable(self.snapshot.observed_at_unix_ms, gpu)
             || memory.unknown_own > 0
