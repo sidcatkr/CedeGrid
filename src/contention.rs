@@ -339,6 +339,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own work steps down by one margin step to learn whether a small external demand is satisfied.",
     ),
     (
+        "fair_share_held",
+        "The principal list cannot be read, so own work's fair share stays at the last one a readable list gave.",
+    ),
+    (
         "launch_nice_kept",
         "A task launched at the Yield First nice keeps it in another CPU mode, since it cannot be lowered again; its caps do the yielding.",
     ),
@@ -1436,6 +1440,9 @@ pub struct ModeInput {
     /// While a small external demand is probed, the allowance stepping down by the
     /// mode's margin per response window (FR-021).
     pub probe: Option<u64>,
+    /// While the principal list cannot be read, the last fair share a readable list gave,
+    /// which the share never exceeds (FR-059).
+    pub fair_share_limit: Option<u64>,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -1927,6 +1934,7 @@ pub fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
     }
     max_min_shares(input.capacity.saturating_sub(input.background), &demands)[0]
         .saturating_sub(owner_unmanaged)
+        .min(input.fair_share_limit.unwrap_or(u64::MAX))
 }
 
 /// Whether CPU was quiet this interval for the return after contention (FR-034): every

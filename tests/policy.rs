@@ -3106,6 +3106,191 @@ fn admitted_principals_stand_through_an_unreadable_list() {
     );
 }
 
+/// While the principal list cannot be read, own work's CPU share is at most the last one a
+/// readable list gave: unknown is no reason for a larger share. It stays held over many such
+/// intervals, and the first readable list replaces it (FR-059, Principle III, item 053).
+#[test]
+fn the_cpu_share_under_an_unreadable_list_is_the_last_readable_one() {
+    let own = PolicyInput {
+        allocations: vec![allocation(
+            "own",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["own"]),
+        ..Default::default()
+    };
+    let mut cfg = config();
+    cfg.cpu.reserve_physical_cores = 0;
+    let key = cedegrid::contention::ResourceKey::Cpu;
+    let mut engine = PolicyEngine::new();
+    let mut share = |list: Option<[u64; 2]>, busy: u64, now: u64| {
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(busy);
+        snap.principals = list.map(|[a, b]| {
+            vec![
+                cpu_principal(1000, true, 0),
+                cpu_principal(0, false, 1000),
+                cpu_principal(2001, false, a),
+                cpu_principal(2002, false, b),
+            ]
+        });
+        let decision = engine.evaluate(&cfg, &snap, &own, now).unwrap();
+        let status = &decision.resources[&key];
+        (
+            status.target_share.unwrap(),
+            status.reasons.iter().any(|r| r.code == "fair_share_held"),
+        )
+    };
+    for now in [0, 500, 1000] {
+        assert_eq!(share(Some([1500, 1500]), 8000, now).0, 3500, "at {now}");
+    }
+    assert_eq!(share(Some([1500, 1500]), 8000, 1500), (2334, false));
+    for i in 0..20u64 {
+        assert_eq!(
+            share(None, 8000, 2000 + i * 500),
+            (2334, true),
+            "unreadable interval {i}"
+        );
+    }
+    let replaced = share(Some([3000, 0]), 8000, 12_000);
+    assert!(replaced.0 > 2334 && !replaced.1, "replaced: {replaced:?}");
+}
+
+/// The share kept for an unreadable list is the one under contention, so a list that goes
+/// unreadable as the CPU saturates still counts the admitted users (FR-059, item 053).
+#[test]
+fn a_list_that_goes_unreadable_as_the_cpu_saturates_still_counts_its_principals() {
+    let own = PolicyInput {
+        allocations: vec![allocation(
+            "own",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["own"]),
+        ..Default::default()
+    };
+    let mut cfg = config();
+    cfg.cpu.reserve_physical_cores = 0;
+    let mut engine = PolicyEngine::new();
+    let mut share = |readable: bool, busy: u64, now: u64| {
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(busy);
+        snap.principals = readable.then(|| {
+            vec![
+                cpu_principal(1000, true, 0),
+                cpu_principal(0, false, 1000),
+                cpu_principal(2001, false, 1300),
+                cpu_principal(2002, false, 1300),
+            ]
+        });
+        engine.evaluate(&cfg, &snap, &own, now).unwrap().resources
+            [&cedegrid::contention::ResourceKey::Cpu]
+            .target_share
+            .unwrap()
+    };
+    for now in [0, 500, 1000, 1500, 2000] {
+        share(true, 7600, now);
+    }
+    assert_eq!(share(false, 8000, 2500), 2334);
+}
+
+/// With no readable list before, an unreadable one keeps today's rule (FR-059, item 053).
+#[test]
+fn an_unreadable_list_with_no_readable_one_before_it_is_unchanged() {
+    let own = PolicyInput {
+        allocations: vec![allocation(
+            "own",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(4000, 0, 0)),
+        )],
+        facts: rootless(&["own"]),
+        ..Default::default()
+    };
+    let mut cfg = config();
+    cfg.cpu.reserve_physical_cores = 0;
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(8000);
+    snap.principals = None;
+    let decision = PolicyEngine::new().evaluate(&cfg, &snap, &own, 0).unwrap();
+    assert_eq!(
+        decision.resources[&cedegrid::contention::ResourceKey::Cpu].target_share,
+        Some(4000)
+    );
+}
+
+/// RAM: own work's fair share under an unreadable list is the last readable one, so in
+/// Performance own memory above it gives way at a floor breach in that interval, as it would
+/// with the list read (FR-059, FR-023, Principle II, item 053).
+#[test]
+fn own_memory_above_the_last_readable_share_gives_way_under_an_unreadable_list() {
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+    let mut cfg = config();
+    cfg.contention.default_mode = ContentionMode::Performance;
+    cfg.contention
+        .acknowledge_caution
+        .insert("performance_mode".into());
+    let mut engine = PolicyEngine::new();
+    let mut evaluate = |own: u64, readable: bool, now: u64| {
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(32_000 - own - 20_800);
+        snap.principals = readable.then(|| {
+            vec![
+                cpu_principal(1000, true, 0),
+                PrincipalUsage {
+                    ram_mib: 10_400,
+                    ..cpu_principal(2001, false, 0)
+                },
+                PrincipalUsage {
+                    ram_mib: 10_400,
+                    ..cpu_principal(2002, false, 0)
+                },
+            ]
+        });
+        engine
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![allocation(
+                        "job",
+                        AllocationPhase::Running,
+                        resources(100, own, 0),
+                        Some(resources(100, own, 0)),
+                    )],
+                    facts: rootless(&["job"]),
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap()
+    };
+    for now in [0, 500, 1000] {
+        assert_eq!(evaluate(10_000, true, now).ram_fair_share_mib, Some(15_500));
+    }
+    let readable = evaluate(10_000, true, 1500);
+    let share = readable.ram_fair_share_mib.unwrap();
+    assert!(share < 10_600, "three-way share once admitted: {share}");
+    let breach = evaluate(10_600, false, 2000);
+    assert_eq!(breach.ram_fair_share_mib, Some(share), "held");
+    assert!(
+        breach
+            .actions
+            .iter()
+            .any(|a| a.resource == ResourceKey::Ram && a.allocation_id == "job"),
+        "own memory above the share gives way: {:?}",
+        breach.actions
+    );
+    assert!(
+        breach.oom_preferred.contains("job"),
+        "{:?}",
+        breach.oom_preferred
+    );
+}
+
 /// Principals (FR-059): system accounts are background demand; a new user joins
 /// only after the principal window and leaves only after `principal_leave_s`
 /// below the threshold. Until it joins, its usage counts toward the unattributed

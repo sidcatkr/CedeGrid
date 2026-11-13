@@ -736,6 +736,7 @@ mod modes {
             unknown_activity: false,
             satisfied: vec![],
             probe: None,
+            fair_share_limit: None,
         }
     }
 
@@ -2145,6 +2146,7 @@ mod scenarios {
                         unknown_activity: false,
                         satisfied: vec![],
                         probe: None,
+                        fair_share_limit: None,
                     },
                     &config.contention.thresholds(ResourceKind::GpuMemory),
                 );

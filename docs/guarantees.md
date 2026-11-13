@@ -638,6 +638,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `vram_noise_below_tolerance` | External GPU memory grew within the noise tolerance. |
 | `mode_capped` | A job's requested mode is above the node cap, so it runs at the cap. |
 | `probing_demand` | Own work steps down by one margin step to learn whether a small external demand is satisfied. |
+| `fair_share_held` | The principal list cannot be read, so own work's fair share stays at the last one a readable list gave. |
 | `launch_nice_kept` | A task launched at the Yield First nice keeps it in another CPU mode, since it cannot be lowered again; its caps do the yielding. |
 | `watching_larger_demand` | Own work holds the fair share while a larger external demand is watched for one response window. |
 | `satisfied_demand` | An external user's demand is recorded as satisfied, so it no longer contends below that demand. |

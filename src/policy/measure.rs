@@ -875,6 +875,7 @@ impl<'a> Interval<'a> {
                 .cloned()
                 .unwrap_or_default(),
             probe: None,
+            fair_share_limit: self.fair_share_limit(&ResourceKey::Cpu),
         };
         // In Performance and Aggressive own work above its Neutral share can saturate the CPU
         // itself, which is no evidence of hidden external demand: utilization is judged with
@@ -883,6 +884,7 @@ impl<'a> Interval<'a> {
             let share = crate::contention::neutral_share(
                 &ModeInput {
                     saturated: true,
+                    fair_share_limit: None,
                     ..view.clone()
                 },
                 &thresholds,
@@ -895,6 +897,7 @@ impl<'a> Interval<'a> {
             view.saturated = judged.saturating_mul(100)
                 >= total.saturating_mul(u64::from(thresholds.saturation_percent));
         }
+        self.note_fair_share(&ResourceKey::Cpu, &view, &thresholds);
         self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
         self.next.cpu_view = Some(CpuView {
@@ -1063,8 +1066,10 @@ impl<'a> Interval<'a> {
             unknown_activity: false,
             satisfied: vec![],
             probe: None,
+            fair_share_limit: self.fair_share_limit(&ResourceKey::Ram),
         };
         let thresholds = config.contention.thresholds(ResourceKind::Ram);
+        self.note_fair_share(&ResourceKey::Ram, &view, &thresholds);
         self.note_ram_unattributed(&view, &thresholds);
         self.mode_targets
             .insert(ResourceKey::Ram, targets_of(&view, &thresholds, u64::MAX));
@@ -1072,6 +1077,54 @@ impl<'a> Interval<'a> {
         let fair = crate::contention::neutral_share(&view, &thresholds);
         self.memory_fair_share.insert(ResourceKey::Ram, fair);
         self.next.ram_fair_share = Some(fair);
+    }
+
+    /// The cap on own work's fair share while the principal list cannot be read: the last one a
+    /// readable list gave, if any (FR-059, item 053).
+    fn fair_share_limit(&self, key: &ResourceKey) -> Option<u64> {
+        self.snapshot
+            .principals
+            .is_none()
+            .then(|| self.prev.fair_share_readable.get(key).copied())
+            .flatten()
+    }
+
+    /// A readable list's share is kept for a later unreadable one, on compute the share under
+    /// contention, since only that one is read there; an unreadable list notes when it holds the
+    /// share down (FR-059, item 053).
+    fn note_fair_share(
+        &mut self,
+        key: &ResourceKey,
+        view: &ModeInput,
+        thresholds: &ResourceThresholds,
+    ) {
+        let uncapped = |saturated: bool| {
+            crate::contention::neutral_share(
+                &ModeInput {
+                    saturated,
+                    fair_share_limit: None,
+                    ..view.clone()
+                },
+                thresholds,
+            )
+        };
+        if self.snapshot.principals.is_some() {
+            let compute = matches!(key.kind(), ResourceKind::Cpu | ResourceKind::GpuCompute);
+            self.next
+                .fair_share_readable
+                .insert(key.clone(), uncapped(view.saturated || compute));
+        } else if let Some(limit) = view.fair_share_limit
+            && uncapped(view.saturated) > limit
+        {
+            note(
+                &mut self.statuses,
+                key.clone(),
+                "fair_share_held",
+                format!(
+                    "the principal list cannot be read; own work's fair share stays at {limit}"
+                ),
+            );
+        }
     }
 
     /// Counts the intervals in which RAM no process lists has stayed `principal_min_percent`
@@ -2048,6 +2101,7 @@ impl<'a> Interval<'a> {
                     .get(&compute_key)
                     .cloned()
                     .unwrap_or_default();
+                let fair_share_limit = self.fair_share_limit(&compute_key);
                 let view = |external, principals, background| ModeInput {
                     kind: ResourceKind::GpuCompute,
                     mode,
@@ -2063,8 +2117,10 @@ impl<'a> Interval<'a> {
                     unknown_activity: false,
                     satisfied: satisfied.clone(),
                     probe: None,
+                    fair_share_limit,
                 };
                 let mut averaged_view = view(averaged_total, averaged_members, averaged_background);
+                self.note_fair_share(&compute_key, &averaged_view, &compute_thresholds);
                 let mut larger_view = view(
                     external.max(averaged_total),
                     larger_members,
@@ -2119,6 +2175,7 @@ impl<'a> Interval<'a> {
                     unknown_activity: true,
                     satisfied: vec![],
                     probe: None,
+                    fair_share_limit: None,
                 };
                 GpuComputeBudget {
                     share: own_allowance(&view, &compute_thresholds),
@@ -2204,8 +2261,10 @@ impl<'a> Interval<'a> {
                 unknown_activity: false,
                 satisfied: vec![],
                 probe: None,
+                fair_share_limit: self.fair_share_limit(&key),
             };
             let thresholds = config.contention.thresholds(ResourceKind::GpuMemory);
+            self.note_fair_share(&key, &view, &thresholds);
             self.mode_targets.insert(
                 key.clone(),
                 targets_of(&view, &thresholds, envelope_gpu.unwrap_or(u64::MAX)),

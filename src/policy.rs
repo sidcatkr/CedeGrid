@@ -310,6 +310,10 @@ pub struct PolicyEngine {
     /// principal's rise beyond it (FR-034, item 053).
     cpu_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
     ram_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
+    /// Own work's fair share on each resource as last computed from a readable principal list,
+    /// on CPU and GPU compute the one under contention; it caps the share while the list cannot
+    /// be read (FR-059, item 053).
+    fair_share_readable: BTreeMap<ResourceKey, u64>,
     /// The last known CPU view, carried through unknown and held intervals, for the hold
     /// while CPU is unknown (FR-022).
     cpu_view: Option<CpuView>,
@@ -622,6 +626,7 @@ impl<'a> Interval<'a> {
                 previous_gpus,
                 gpu_demand: prev.gpu_demand.clone(),
                 last_kernel_cpu_sample: prev.last_kernel_cpu_sample,
+                fair_share_readable: prev.fair_share_readable.clone(),
                 ..PolicyEngine::default()
             },
             reasons: Vec::new(),
