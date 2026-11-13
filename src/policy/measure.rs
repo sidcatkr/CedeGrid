@@ -1448,6 +1448,7 @@ impl<'a> Interval<'a> {
         let compute_admission = crate::contention::gpu_admission(
             governing(config, ResourceKind::GpuCompute),
             activity,
+            gpu.compute_contexts.as_ref(),
             gpu.external_process_ids.as_ref().map(Vec::len),
             !telemetry_unknown,
             config.contention.never_share_occupied_gpus,

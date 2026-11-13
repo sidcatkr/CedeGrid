@@ -1616,10 +1616,12 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
 
 /// Whether own GPU work may be admitted to a device now (FR-026, FR-027, FR-064).
 /// The policy and the launch recheck both call it, so they cannot disagree.
-/// `external_contexts` is `None` when the process list is unknown.
+/// `external_contexts` is `None` when the process list is unknown, and `contexts` when the
+/// device's compute contexts are.
 pub fn gpu_admission(
     mode: ContentionMode,
     activity: crate::model::ComputeActivity,
+    contexts: Option<&crate::model::GpuComputeContexts>,
     external_contexts: Option<usize>,
     memory_known: bool,
     never_share: bool,
@@ -1632,6 +1634,8 @@ pub fn gpu_admission(
         return Admission::blocked("gpu_never_share_occupied");
     }
     match (mode, activity) {
+        // The owner's own compute is the owner's share, not activity to wait out (FR-027).
+        (ContentionMode::YieldFirst, Active) if owners_compute_only(contexts) => Admission::Open,
         (ContentionMode::YieldFirst, Active) => {
             Admission::held("gpu_yield_first_needs_quiet_device")
         }
@@ -1641,6 +1645,25 @@ pub fn gpu_admission(
         // Neutral and Performance count activity of unknown amount as one principal.
         _ => Admission::Open,
     }
+}
+
+/// Whether the device's compute activity this interval is only the owner's unmanaged processes:
+/// the samples were read, each busy context that is not own work is the owner's, and no other
+/// account's context is listed. One that is listed but not busy this interval has no quiet
+/// window behind it, since the owner's activity restarts the device's, so it holds admission
+/// too; so does a context whose owner cannot be read, which is listed with no user ID.
+fn owners_compute_only(contexts: Option<&crate::model::GpuComputeContexts>) -> bool {
+    contexts.is_some_and(|contexts| {
+        let mut busy = contexts
+            .sampled
+            .iter()
+            .filter(|(pid, _)| !contexts.own.contains(pid))
+            .peekable();
+        contexts.samples_readable
+            && contexts.listed.is_empty()
+            && busy.peek().is_some()
+            && busy.all(|(pid, _)| contexts.owner.contains(pid))
+    })
 }
 
 /// A probe of small external demand on one compute resource (FR-021).

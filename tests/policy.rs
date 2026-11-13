@@ -2245,6 +2245,127 @@ fn a_quiet_device_without_a_new_sample_admits_in_yield_first() {
     }
 }
 
+/// Compute by the account CedeGrid runs as, outside CedeGrid, does not hold Yield First's GPU
+/// admission: with the device's contexts read, activity that is only the owner's admits, in the
+/// policy and at the launch recheck alike. Another account's context holds it, busy or not this
+/// interval, as does a context whose owner cannot be read, and without the contexts or their
+/// samples the device's class decides as before. The owner's memory still counts as usage beside
+/// own work (FR-027, FR-059, item 051).
+#[test]
+fn the_owners_unmanaged_gpu_compute_does_not_hold_yield_first() {
+    use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
+    use cedegrid::model::GpuComputeContexts;
+    const OWNER_PID: u32 = 4242;
+    const OTHER_PID: u32 = 5151;
+    let owner = (OWNER_PID, Some(1000));
+    let contexts = |listed: &[(u32, Option<u32>)], busy: &[(u32, Option<u32>)], readable| {
+        Some(GpuComputeContexts {
+            own: vec![],
+            owner: vec![OWNER_PID],
+            sampled: busy.to_vec(),
+            listed: listed.to_vec(),
+            samples_readable: readable,
+        })
+    };
+    let other = (OTHER_PID, Some(2000));
+    let unread = (OTHER_PID, None);
+    let cases = [
+        ("the owner alone", contexts(&[], &[owner], true), true),
+        (
+            "another account busy",
+            contexts(&[other], &[owner, other], true),
+            false,
+        ),
+        (
+            "another account listed",
+            contexts(&[other], &[owner], true),
+            false,
+        ),
+        (
+            "an unreadable owner",
+            contexts(&[unread], &[owner, unread], true),
+            false,
+        ),
+        ("unreadable samples", contexts(&[], &[], false), false),
+        ("no contexts", None, false),
+    ];
+    let compute: ResourceKey = "gpu_compute:GPU-test".parse().unwrap();
+    for mode in [
+        ContentionMode::YieldFirst,
+        ContentionMode::Neutral,
+        ContentionMode::Performance,
+    ] {
+        let mut cfg = config();
+        cfg.gpu.execution_mode = GpuExecutionMode::Auto;
+        cfg.gpu.scale_up_cooldown_ms = Some(60_000);
+        cfg.contention.default_mode = mode;
+        for (name, contexts, admits) in &cases {
+            let admits = *admits || mode != ContentionMode::YieldFirst;
+            let listed_other = contexts
+                .as_ref()
+                .is_some_and(|contexts| !contexts.listed.is_empty());
+            let mut pids = vec![OWNER_PID];
+            if listed_other {
+                pids.push(OTHER_PID);
+            }
+            let mut snap = large_gpu_snapshot(2048, pids);
+            snap.gpus[0].external_compute = ComputeActivity::Active;
+            snap.gpus[0].compute_contexts = contexts.clone();
+            snap.gpus[0].observation = Some(gpu_observation(
+                &snap,
+                GpuExecutionCapability::ContentionAware,
+            ));
+            let mut engine = PolicyEngine::new();
+            let mut offered = None;
+            for now in [0u64, 30_000, 60_000, 120_000] {
+                // The collector reads Active only from a newer driver timestamp.
+                snap.gpus[0].compute_sample_id = Some(now + 1);
+                let decision = engine
+                    .evaluate(&cfg, &snap, &PolicyInput::default(), now)
+                    .unwrap();
+                let status = &decision.resources[&compute];
+                assert_eq!(
+                    status.activity,
+                    Some(ComputeActivity::Active),
+                    "{mode:?}, {name}, at {now}"
+                );
+                assert_eq!(
+                    status.admission == Some(Admission::Open),
+                    admits,
+                    "{mode:?}, {name}, at {now}: {:?}",
+                    status.admission
+                );
+                assert_eq!(
+                    decision
+                        .reason_codes
+                        .iter()
+                        .any(|r| r.code == "gpu_yield_first_needs_quiet_device"),
+                    !admits,
+                    "{mode:?}, {name}, at {now}"
+                );
+                offered = decision
+                    .admission_headroom
+                    .gpu_memory_mib
+                    .get("GPU-test")
+                    .copied();
+            }
+            assert_eq!(offered.is_some(), admits, "{mode:?}, {name}");
+            // The owner's 2 GiB stay counted: no more is offered than the device has left.
+            assert!(
+                offered.is_none_or(|offered| offered <= 24_576 - 2048),
+                "{mode:?}, {name}: {offered:?}"
+            );
+            let recheck = cedegrid::policy::validate_gpu_launch_contract(
+                &cfg,
+                &snap,
+                &resources(0, 0, 4000),
+                AllocationClass::Opportunistic,
+            );
+            assert_eq!(recheck.is_ok(), admits, "{mode:?}, {name}: {recheck:?}");
+        }
+    }
+}
+
 #[test]
 fn d3_a_quiet_external_context_admits_gpu_work() {
     let mut cfg = config();

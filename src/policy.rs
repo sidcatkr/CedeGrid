@@ -64,6 +64,7 @@ pub fn validate_gpu_launch_contract(
         let admission = crate::contention::gpu_admission(
             mode,
             gpu.external_compute,
+            gpu.compute_contexts.as_ref(),
             gpu.external_process_ids.as_ref().map(Vec::len),
             gpu_observable(snapshot.observed_at_unix_ms, gpu),
             config.contention.never_share_occupied_gpus,
