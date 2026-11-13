@@ -582,3 +582,10 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - `GpuComputeContexts.others_quiet`: the other accounts' listed contexts, each with a readable UID,
   have been quiet for the window. In the snapshot only, not a wire field (FR-027).
 
+## Item 055 additions
+
+- Policy state: the refill's kept CPU estimate carries the other principals' measured CPU usage
+  when it was taken; none is kept while the principal list is unreadable (FR-018).
+- Probe records (tools): `self_check` in `ready.json` and `result.json`: `units`, `initial_ratio`,
+  `ratio`, `held`, `biased`. Not a product field.
+

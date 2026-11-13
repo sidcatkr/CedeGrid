@@ -2284,3 +2284,43 @@ holds, without an item number. `follow-ups.md` gains the rows of Parts D and F. 
 `watch` call outside Running and its error path's bounded release retry get tests of their own,
 through `tests/managed_supervision.rs`'s injected actuator.
 
+## Item 055: the same-core probe checks itself, and the refill's kept estimate yields to a measured rise (2026-11-14)
+
+**Input**: spec Session 2026-11-14's last answer and FR-018; report 052's Decisions 1 and 3 as the
+review decided them; report 049's analysis of the same-core loss (the allocator's blocks swapping
+roles with period 2).
+
+**Technical Context**: Rust 1.88, Python 3.10 for the tools; no new dependency, no config key and no
+wire change. Part A changes tools and the validation harness only. Part B changes one policy state
+field. Native runs are listed in `native-gates.md`, "Item 055".
+
+**Constitution Check**: Principles II and III.
+- *Principle II.* Part A makes the same-core gate say when a window is biased by the probe itself,
+  so a cost in the probe is not read as a loss of the mode, and measures the SDK's own cost inside
+  a task, which is the only overhead Performance's loss rule allows. Part B lets another user's
+  measured rise end the kept estimate in the interval it shows, so SC-002's bound holds beside a
+  wide own-measurement bound.
+- *Principle III.* Part B keeps no estimate while the principal list is unreadable: an unknown list
+  is not read as no rise.
+
+**The probe checks itself (R71)**. Before `ready.json` the CPU probe times even against odd units by
+the thread's CPU time; while they differ by more than 1% it holds one more 112-byte block, at most
+8 times, so the allocator's placements shift, and it records the first and last ratio, the blocks
+held and whether it is still biased, in `ready.json` and `result.json`. `--self-check-holds 0` only
+measures; `--no-self-check` skips the check. `window_verdict` refuses a window with no self-check
+or a ratio over 1%, so it neither passes nor fails. The batch harness's same-core script takes
+the probe file and extra environment, and reports refused windows and the ratio over the measured
+ones. The mechanism is named by one run on the kept `743312b` build with the allocator's
+per-thread cache off in both probes (`GLIBC_TUNABLES=glibc.malloc.tcache_count=0`), the new probe
+only measuring. The SDK's own cost is measured in both SDKs: one drain check, one target-file
+read, and the CPU per second at the default poll rate.
+
+**The kept estimate yields (R72)**. The engine keeps, beside the refill's estimate and its time, the
+other principals' measured CPU usage when it was taken, from the readable list. While the list is
+unreadable no estimate is kept. A kept estimate is dropped in the interval in which the others'
+usage has risen by `principal_min_percent` of capacity since. An own task's unknown measurement
+still raises nothing. The snapshot says nothing about whether other accounts' processes are
+hidden from the agent, so that half of the answer is reported with what it would take.
+
+**The rest**. The clean macOS serial run waits for a quiet Mac; Part D waits for the user's answer.
+

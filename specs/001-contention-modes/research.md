@@ -1306,3 +1306,27 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: a per-context quiet count in the policy (duplicates the collector's window);
   ignoring other accounts' idle contexts (they can start computing at any time; FR-027 keeps them).
 
+## R71. How the same-core probe tells its own bias from a loss (item 055)
+
+- **Decision**: the probe times even against odd units before it is ready, holds up to 8 blocks
+  while they differ by more than 1%, and records what it found; the gate refuses a window without
+  the record or over the limit.
+- **Rationale**: at `743312b` the managed probe's units cost 172–173 µs against 161 µs, all user
+  time, and a later SDK change removed it; report 049 traced an alternating cost to the allocator
+  handing the same blocks back every other call. A gate that cannot see that reads the next change
+  to the SDK's hot path as a loss of the mode.
+- **Alternatives**: pinning the allocator for every probe (hides the effect, does not detect it);
+  comparing only managed against unmanaged (the bias can sit in either).
+
+## R72. When the refill's kept estimate gives way (item 055)
+
+- **Decision**: keep the other principals' measured CPU usage beside the kept estimate; drop the
+  estimate when it has risen by `principal_min_percent` of capacity; keep nothing while the list is
+  unreadable.
+- **Rationale**: report 052 derived that while a reset window refills, a rise smaller than the
+  interval's bound can go unseen for up to 8 intervals beside a wide own bound, against SC-002's 2.
+  Own measurement's looseness is not another user's usage, but another user's measured usage is
+  not looseness.
+- **Alternatives**: keeping the estimate only within one margin step (undoes T518 where bounds are
+  wide); accepting one window (the user's SC-002 bound is two intervals).
+
