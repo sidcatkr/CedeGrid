@@ -62,6 +62,12 @@ item 031.
 | EFF-8 | No prepared-statement cache, and the schema is queried on every call. | 005 | As EFF-6. |
 | EFF-9 | Lookups are quadratic (about 117² at 117 tasks). | 005 | As EFF-6. |
 | EFF-10 | Every heartbeat reopens the state store, rebuilds the backend and repeats the probes. | 005 | As EFF-6. |
+| 049 Decision 4 A (item 052) | A task whose launch is never authorized is requeued without an attempt, with no bound of its own: show the count of such requeues in status or cap them, and prune their coordinator rows. | 001 after the merge | nothing |
+| 049 Decision 5 B and C (item 052) | Yield First pauses own work for the whole pause bound after one saturated interval. The user's decision of 2026-11-13: keep it for the merge and revisit it afterwards. | after the merge | nothing |
+| 049 Decision 5, the ladder (item 052) | A lone held cap takes the whole excess and can become a pause while new victims keep their usage (`src/policy/ladder.rs`, the held group before the new one). Let held and new victims of a tier share at one level. | 001 after the merge | nothing |
+| 049 Decision 3 C (item 052) | A Full leaf stays frozen when its supervisor is killed in an off phase or a Pause; nothing thaws it. | 001 after the merge | nothing |
+| 050, last review pointer (item 052) | A failed `/proc/<pid>/status` read is kept as "owner unreadable" for the process's lifetime, so one transient failure counts that process toward the unattributed principal until it exits. | 001 after the merge | nothing |
+| 050, last review pointer (item 052) | A Drain already delivered is not raised to Terminate when the breach turns critical. SC-012's critical bound still holds: a delivered Drain ends at most the drain timeout plus the termination grace (5 s by default) after its delivery, inside the 6.5 s counted from the critical moment. What is lost is up to the drain timeout (3 s) for a worker that does not poll the drain file. | 001 after the merge | nothing |
 
 ## Done
 
