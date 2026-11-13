@@ -786,6 +786,14 @@ any run.
 | The same while the second account computes | GPU compute and memory admission held on `gpu_yield_first_needs_quiet_device` from the start, and the managed probe was not admitted within 60 s | pass (held) |
 | Part F: SC-015's shape in Yield First (4 CPUs, 250 m steady tasks, a 150 s window) beside the second account's steady light load (101 m at the median), with a one-core CPU burst of 1.5 s on the owner's account every 60 s, and the second account's load raised to about 400 m 90 s into the window | 12 tasks, the last admitted 373.9 s after submission. Before the raise own work held 3006 m, 91.2% of capacity less the second account's 103 m and the margin (target 90%). The bursts read 950–1060 m. Five of them, once tasks were admitted, left own work outside its target for one or two decisions each, with a cap for the burst's length and no pause; none restarted the cooldown: CPU and RAM admission stayed allowed through every burst. The only closed stretch before the raise was the agent's start cooldown. The second account's rise read 407 m 0.56 s after it began; in that decision the cooldown restarted (closed for 30.5 s) and own work's target fell from about 3110 m to 2897 m, with own work's caps lowered in the same decision (SC-002 allows two intervals) | pass |
 
+### Item 055: the same-core probe checks itself, and CedeGrid's own cost inside a task
+
+**CedeGrid's own cost inside a task.** Measured on the Mac at `6d1e871` by the process's CPU time
+(`python/tests/test_own_cost.py`, `npm/tests/own-cost.test.ts`): a drain check, which also
+checks the target file's identity, costs 3.5 µs in the Python SDK and 6.8 µs in the TypeScript
+one; reading and parsing a changed target file costs 36 µs and 47 µs. At 20 checks a second, the
+matched probe's rate, that is 0.007% and 0.014% of one core. Both tests fail at 1%.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
