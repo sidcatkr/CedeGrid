@@ -1206,3 +1206,52 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   already say); leaving the launch recheck on the device's class (the policy and the recheck would
   disagree, as they did for R60).
 
+## R63. When an own GPU process counts in the time-slice rule (item 053)
+
+- **Decision**: from the interval the device first lists it, sampled or not, until one counting window
+  of readable intervals passes with no sample for it; the owner's and other users' processes count
+  only while sampled. The counts come from every readable interval, capped or not.
+- **Rationale**: a context CedeGrid launched and can see listed is not idle because the driver has not
+  sampled it (Principle III); until it counts, another user is under its fair share (Principle II).
+  The cost of counting early falls on own work only and is bounded by one window.
+- **Alternatives**: wait for a sample, as before (the other user lost 42 requests/s for 13 s in Full
+  at `743312b`); count every listed process, external ones included (an idle external context would
+  shrink own work for nothing).
+
+## R64. What lifting a restriction CedeGrid wrote needs (item 053)
+
+- **Decision**: the same leaf only, in every phase; never a value tighter than the one in place. New
+  restrictions and freezes with no record still verify the members. A recorded freeze's members are
+  read every 50 ms in every phase; a list unreadable twice counts as changed. Lifting a held cap while
+  running when an unverified member joins is not taken.
+- **Rationale**: lifting acts on nothing CedeGrid did not restrict itself; a refusal that nothing
+  retries kept a freeze or a cap for good. Every lift rule found for a running cap also lifts caps on
+  ordinary own processes.
+- **Alternatives**: lift on one failed verification (lifts on ordinary forks); lift after two failed
+  refreshes (still lifts in three cases); a persisted record (not needed: the writer is the restorer).
+
+## R65. What restarts Yield First's cooldown beside a principal (item 053)
+
+- **Decision**: in Yield First, only a principal's cause: a user admitted in that interval,
+  unattributed usage reaching the window, an admitted user's rise beyond the tolerance since the last
+  fitting interval, or on CPU unattributed usage past the window rising beyond it. The tolerance is
+  `noise_tolerance_mib` on RAM and on CPU the larger of `principal_min_percent` of capacity and the
+  measurement band, FR-034's quiet threshold.
+- **Rationale**: the user's decision of 2026-11-02 carries no condition on other principals being
+  present; the reference is each user's usage at the last fitting interval, so a change that is not a
+  principal's holds admission without restarting the count.
+- **Alternatives**: the reversal hysteresis as the tolerance (it is 0 with no step held, which is the
+  login case); the literal unattributed rule on RAM (RAM's unattributed usage is one level, so it
+  would remove the "shorter than the window" case; left to the report).
+
+## R66. Own work's fair share while the list cannot be read (item 053)
+
+- **Decision**: at most the last share a readable list gave, per resource; lower when that interval's
+  own computation gives less; on CPU and GPU compute the share under contention is the one kept. The
+  first readable list replaces it.
+- **Rationale**: an unknown list is not a reason for a larger share (Principle III), and own memory
+  above its fair share gives way at the floors in every mode (Principle II). The counts already stood
+  through such an interval (TEL-9); the share did not, on any resource.
+- **Alternatives**: carry the whole principal list (more state for the same bound); keep the
+  as-computed share of an uncontended interval (capacity less everyone's usage, which does not hold
+  the admitted users once the CPU saturates).

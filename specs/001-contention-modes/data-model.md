@@ -559,3 +559,15 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   intervals of unattributed usage at or above `principal_min_percent`; on RAM, consecutive intervals
   that usage stayed `principal_min_percent` above its level, and that level.
 
+## Item 053 additions
+
+- GPU demand state per device: per listed PID, its first listing, its last sample and a quiet count
+  of readable intervals; an own PID counts while the count is below the counting window (FR-021).
+  `TimeSliceRecord.own_counted`: each own PID counted and whether by listing or by sample. Not a
+  wire field.
+- Cgroup actuator (in memory, per supervisor): the controls it recorded writing and the count of
+  consecutive unreadable member lists while a recorded freeze holds (FR-078).
+- Policy state per resource, for Yield First's cooldown: each counted user's usage, and on CPU
+  unattributed usage, at the last interval in which own work fit beside a readable list (FR-034).
+- Policy state per resource key: the last fair share computed from a readable principal list,
+  which caps the share while the list cannot be read (FR-059). Reason code `fair_share_held`.

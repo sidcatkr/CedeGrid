@@ -2126,3 +2126,80 @@ told apart; B3 and C1 against SC-014's restated fill; C4 with the hint-deaf over
 |---|---|---|
 | Re-attachable supervisor `control.sock` | Steps must reach supervisors that outlive an agent restart (FR-015). Without it the new agent cannot release capacity without draining. | The stdin pipe cannot be reopened. Re-seeding supervisor engines keeps N+1 authorities. |
 | `toml_edit` as a direct dependency | Setup must preserve comments and unmanaged settings (FR-053). | Re-serializing with `toml` loses comments. `toml_edit` is already in `Cargo.lock`, so no new crate is added. |
+
+## Item 053: own GPU processes in the counts, CedeGrid's own cgroup writes lifted in every phase, Yield First's cooldown beside a principal, and the share under an unreadable list (2026-11-13)
+
+**Input**: spec Session 2026-11-13 (its last four answers); the Counting window term, FR-021,
+FR-034, FR-059 and FR-078; report 049's Decisions 2 and 3, report 050's Decision 3; the four
+designs saved with item 053's report.
+
+**Technical Context**: Rust 1.88, no new dependency, no config key and no wire change. The time-slice
+record gains a field, which is in the decision only: `time_slice` is not in node reports, the SDKs
+or the contract fixture. One reason code is added to the catalog. Native reruns are listed in
+`native-gates.md`, "Item 053".
+
+**Constitution Check**: all three principles.
+- *Principle I (Part B).* Lifting a restriction acts only on a leaf the supervisor itself
+  restricted, and never tightens a control; putting a restriction on still needs the leaf's
+  members verified, and a freeze with no record keeps that rule. A killed supervisor lifts nothing,
+  as before. The item's answer 5 (lift a held cap while running when an unverified member joins)
+  is not taken: every form of it found lifts caps on ordinary own processes.
+- *Principle II.* Part A gives another user its fair share from the interval an own process is
+  listed; the cost is own work's, at most one counting window at d0' per listing, which in
+  Performance is beyond the loss rule for that time. Part C keeps Yield First's give-back
+  unchanged. Part D only lowers own work's share in an interval whose list cannot be read.
+- *Principle III.* Part A does not read an unsampled own context as idle. Part D does not read an
+  unknown list as a larger share. Part B counts a member list unreadable twice as changed.
+
+**Own GPU processes in the counts (R63)**. The time-slice rule's counts m, E and k came only from the
+estimate's uncapped intervals, and an own process counted only once the driver sampled it. While a
+CPU cap held own work, no re-measure window could open, so the counts stood still. The policy
+engine's GPU demand state now keeps, per listed PID on each device, a quiet count of readable
+intervals since its first listing or last sample. An own PID enters at its first listing and counts
+until the count reaches the counting window; the owner's and other users' PIDs count only while
+sampled within it. Unlisted PIDs drop. Every interval whose samples are readable feeds the counts,
+capped or not; the amounts that decide slice-bound and own work's uncapped share still come from
+uncapped intervals and re-measure windows only. The contexts the estimate's entries kept for the
+counts are removed. The record names, for each own PID counted, whether it counts by listing or by
+sample. No collector change: `compute_contexts.own` lists every verified own PID on the device,
+sampled or not.
+
+**CedeGrid's own cgroup writes lifted in every phase (R64)**. In Full, `restore`, `release` and
+`reconcile` went through the verified write, which refuses while the leaf's members differ from the
+family, and the supervisor ticked the actuator only while Running. Restoring a control the
+supervisor recorded writing now checks the same leaf only, and writes the launch value when it is
+looser than the value in place; a tighter launch value goes through the verified write. An actuator
+step run every 50 ms in every phase, the error path included, retries a refused restore and checks
+a recorded freeze's members, with a member list unreadable twice counting as changed. No persisted
+record is needed: every caller is the supervisor that wrote. Two existing tests asserted the refused
+restore and change with the rule. Answer 5 goes to the report's decisions: a cap lifted when a member
+fails verification once lifts caps on ordinary forks, and a two-refresh rule still does for a member
+past the 256 bound, an SDK child gate whose preparation spans two refreshes, and a descendant the
+discovery fails twice.
+
+**Yield First's cooldown beside a principal (R65)**. T519's exemption held only while no principal was
+admitted. The policy now keeps, per resource, each counted user's usage (on CPU also unattributed
+usage) at the last interval in which own work fit beside a readable list. In Yield First an interval
+in which own work does not fit restarts the count only for a user admitted in that interval,
+unattributed usage reaching the window in it, a rise of the admitted users' usage beyond the
+tolerance (RAM `noise_tolerance_mib`; CPU the larger of `principal_min_percent` of capacity and the
+per-interval measurement band), or on CPU a rise of unattributed usage already past the window.
+On RAM unattributed usage keeps T519's level rule; whether a rise of it past the window restarts is
+left to the report. Short-lived login processes fall into the unattributed estimate, so beside
+unattributed CPU usage already past the window, as on a host that hides other accounts' processes,
+a login can still restart the count.
+
+**The share under an unreadable list (R66)**. With no list, `principals` carries the counts but returns
+no list, so each resource's fair share was computed for own work and one unattributed principal, on
+every resource, CPU included. The policy engine now keeps the last fair share a readable list gave,
+per resource; the mode input caps the share by it while the list cannot be read, and every consumer
+reads the capped value. On CPU and GPU compute the share kept is the one under contention.
+Performance's saturation judgement keeps no limit, so a lower share cannot turn it off and raise a
+target. A reason code says when the limit acts. GPU compute had the same hole and is covered with the
+others.
+
+**Native reruns** (`native-gates.md`, "Item 053"): two probes beside the saturating user in Performance
+in Tracked and in Full and in Neutral in Tracked, with the time from the second probe's first listing
+to the first duty; the join run in Full, and a join followed by a cancel if the harness can time it;
+SC-015's shape in Yield First with the second account as a steady principal and owner logins every
+60 s. Part D has no native run: it needs a failed `/proc` read.
