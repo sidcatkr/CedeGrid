@@ -389,30 +389,17 @@ impl<'a> Interval<'a> {
             .map(|a| judged(input, &self.charges, &key, a))
             .fold(0u64, u64::saturating_add);
         let (floor_breach, envelope_breach) = self.breaches(&key, judged_total);
-        // A breach episode in which own memory is within its fair share when that share is
-        // first known is others' growth: its in-share tasks are asked once to save their
-        // progress (FR-075).
-        let decided = self.prev.save_progress_decided.contains(&key);
-        let fair = self.memory_fair_share.get(&key).copied();
-        if kind.is_memory() && floor_breach && (decided || fair.is_some()) {
-            self.next.save_progress_decided.insert(key.clone());
-        }
-        if kind.is_memory()
-            && floor_breach
-            && !decided
-            && fair.is_some_and(|fair| judged_total <= fair)
-        {
-            self.save_progress.extend(
-                input
-                    .allocations
-                    .iter()
-                    .filter(|a| {
-                        a.phase != AllocationPhase::Pending
-                            && a.phase != AllocationPhase::Draining
-                            && judged(input, &self.charges, &key, a) > 0
-                    })
-                    .map(|a| a.id.clone()),
-            );
+        // A breach episode asks each in-share task once to save its progress, whoever caused
+        // it; the episode's record of who was asked lasts while the floor stays breached
+        // (FR-075). The memory pass lists them once it knows the over-share tasks.
+        let save_progress =
+            kind.is_memory() && floor_breach && self.memory_fair_share.contains_key(&key);
+        if kind.is_memory() && floor_breach {
+            if let Some(asked) = self.prev.save_progress_decided.get(&key) {
+                self.next
+                    .save_progress_decided
+                    .insert(key.clone(), asked.clone());
+            }
         }
         let mut cause = if held || gpu_unknown {
             YieldCause::UnknownMeasurement
@@ -578,6 +565,7 @@ impl<'a> Interval<'a> {
             },
             contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
             return_level,
+            save_progress,
         }
     }
 
@@ -802,6 +790,9 @@ impl<'a> Interval<'a> {
         } else {
             self.over_share(key, &victims, frame.own_usage)
         };
+        if !pending_pass && frame.save_progress {
+            self.list_save_progress(key, &over);
+        }
         if over.is_empty() {
             let mut remaining = needed;
             for victim in victims {
@@ -900,6 +891,33 @@ impl<'a> Interval<'a> {
                 None => 0,
             };
             rest = rest.saturating_sub(freed);
+        }
+    }
+
+    /// The in-share own tasks on a breached memory resource not yet asked in the episode: they
+    /// get the save-progress signal, each once (FR-075). Over-share tasks get their hint instead.
+    fn list_save_progress(&mut self, key: &ResourceKey, over: &[String]) {
+        let input = self.input;
+        let population: Vec<String> = input
+            .allocations
+            .iter()
+            .filter(|a| {
+                a.phase != AllocationPhase::Pending
+                    && a.phase != AllocationPhase::Draining
+                    && !over.contains(&a.id)
+                    && judged(input, &self.charges, key, a) > 0
+            })
+            .map(|a| a.id.clone())
+            .collect();
+        let asked = self
+            .next
+            .save_progress_decided
+            .entry(key.clone())
+            .or_default();
+        for id in population {
+            if asked.insert(id.clone()) {
+                self.save_progress.insert(id);
+            }
         }
     }
 
@@ -1811,6 +1829,9 @@ struct Frame {
     contention_ended: bool,
     /// The first interval it has: the level held CPU steps rise to in one move (R44).
     return_level: Option<u64>,
+    /// A memory floor is breached with a known fair share: in-share tasks not yet asked in the
+    /// episode get the save-progress signal (FR-075).
+    save_progress: bool,
 }
 
 impl Frame {

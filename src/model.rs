@@ -529,7 +529,7 @@ pub struct Decision {
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub oom_preferred: std::collections::BTreeSet<String>,
     /// Allocations asked to save their progress: the in-share own tasks on a memory resource
-    /// whose floor breach others' growth caused, once per episode (FR-075).
+    /// whose floor is breached, each once per episode, whoever caused the breach (FR-075).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub save_progress: std::collections::BTreeSet<String>,
     /// Own work's RAM fair share beside the RAM principals.

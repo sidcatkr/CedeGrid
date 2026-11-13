@@ -8405,6 +8405,7 @@ mod floors_by_mode {
         drains: Vec<String>,
         marked: Vec<String>,
         headroom: u64,
+        saved: Vec<String>,
     }
 
     /// Run the policy every 500 ms to `until_ms`; `at` gives each interval's jobs and the free
@@ -8439,6 +8440,7 @@ mod floors_by_mode {
                     drains: decision.would_drain.clone(),
                     marked: decision.oom_preferred.iter().cloned().collect(),
                     headroom: decision.admission_headroom.ram_mib,
+                    saved: decision.save_progress.iter().cloned().collect(),
                 }
             })
             .collect()
@@ -8732,6 +8734,34 @@ mod floors_by_mode {
             run.last().unwrap().steps.get("z").map(|(step, _)| *step),
             Some(YieldStep::Terminate)
         );
+        // The in-share tasks are asked once to save their progress; `z` gets its hint and its
+        // drain (FR-075, item 054).
+        assert_eq!(run[0].saved, ["a", "b", "c"]);
+        assert!(run[1..].iter().all(|interval| interval.saved.is_empty()));
+    }
+
+    /// One breach episode asks each in-share task once to save its progress, and a second
+    /// episode asks again (FR-075, item 054).
+    #[test]
+    fn each_breach_episode_asks_the_in_share_tasks_once() {
+        let class = AllocationClass::Guaranteed;
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("c", class, 3_000),
+            ram_job("z", class, 7_000),
+        ];
+        let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
+        let free = [700, 700, 10_000, 700, 700];
+        let run = scripted(
+            &config_in(ContentionMode::Performance),
+            &facts,
+            2_000,
+            |now| (jobs.clone(), free[(now / 500) as usize]),
+        );
+        let saved: Vec<_> = run.iter().map(|interval| interval.saved.clone()).collect();
+        let abc = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(saved, [abc.clone(), vec![], vec![], abc, vec![]]);
     }
 
     /// Once the drained over-share task is gone and free memory is back, admission has room for
@@ -9074,12 +9104,17 @@ mod save_progress {
         }
     }
 
+    /// A breach own memory caused lists the in-share task too, once: 16 000 MiB own is above its
+    /// 15 500 MiB share beside 16 000 MiB external, the excess is `b`'s (the best fit), and `a`
+    /// is asked to save its progress; `b` gets its hint (FR-075, item 054).
     #[test]
-    fn an_own_fault_breach_lists_nobody() {
-        // 16 000 MiB own is above its 15 500 MiB share beside 16 000 MiB external.
-        for listed in listed(ContentionMode::Performance, [10_000, 6_000], &[0, 0, 0]) {
-            assert!(listed.is_empty(), "{listed:?}");
-        }
+    fn an_own_fault_breach_lists_the_in_share_tasks() {
+        let a = BTreeSet::from(["a".to_string()]);
+        let none = BTreeSet::new();
+        assert_eq!(
+            listed(ContentionMode::Performance, [10_000, 6_000], &[0, 0, 0]),
+            [&a, &none, &none].map(Clone::clone)
+        );
     }
 }
 

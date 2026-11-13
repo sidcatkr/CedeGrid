@@ -51,8 +51,8 @@ Serialization contracts are in [contracts/](contracts/).
 - `ram.prefer_own_oom_victim` (bool, default false, risk to own work): every own task at
   `oom_score_adj` 1000 from launch instead of OOM order by fault (FR-023).
 - Decision additions (item 029): per allocation `oom_preferred` (RAM, own memory above its fair
-  share, in victim order) and `save_progress` (in-share tasks at a floor breach others' growth
-  caused, once per episode). Execution evidence: the launch `oom_score_adj` baseline and every
+  share, in victim order) and `save_progress` (in-share tasks at a floor breach, each once per
+  episode, whoever caused it; since item 054). Execution evidence: the launch `oom_score_adj` baseline and every
   change (task, from, to, cause, own memory and fair share). Task outcome cause
   `oom_not_own_fault`: a requeue that counts no failure or attempt (FR-076).
 

@@ -118,8 +118,9 @@ starts. `WorkerContext.resource_allowance()` and
 `on_resource_allowance(callback)` do the same for the allowance, once per new
 `allowance_sequence`; an allowance-only change never calls `on_resource_target`.
 `on_save_progress(callback)` calls `callback(sequence)` once per new
-`save_progress_sequence`: free memory fell below a floor through others' growth while
-own work was within its fair share, so save progress now. It is not a drain and asks
+`save_progress_sequence`: free memory fell below a floor and this task is within own
+work's fair share, so save progress now. It comes once per breach episode, whoever caused
+the breach; a task above the share gets a memory hint instead. It is not a drain and asks
 for no memory back, and a hook registered after a request was handled is not called
 for it. `ResourceSignals.from_env()` needs only the two environment variables, so
 managed children can use it. The TypeScript names are `resourceTargets()`,

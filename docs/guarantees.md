@@ -488,9 +488,10 @@ RAM principals, or beside the device's GPU memory principals) gives way at the f
 mode, and in Yield First and Neutral all own memory does. In Performance and Aggressive a
 floor breach that others' growth caused steps own memory only down to its fair share: memory
 within it is not hinted, drained or sent TERM, on the critical path and for Guaranteed work
-too. Those in-share tasks get one save-progress request per breach episode instead: the
-target file's `save_progress_sequence` rises and both SDKs call `on_save_progress`, which is
-no drain and asks for no memory back. The kernel's out-of-memory killer may then take another
+too. In every mode, each in-share task gets one save-progress request per breach episode,
+whoever caused the breach: the target file's `save_progress_sequence` rises and both SDKs call
+`on_save_progress`, which is no drain and asks for no memory back. An over-share task gets its
+hint instead. The kernel's out-of-memory killer may then take another
 workload's process, as it would without CedeGrid. This is the one memory exception, a rule of
 those modes and not an option; the operator envelope applies in every mode.
 
