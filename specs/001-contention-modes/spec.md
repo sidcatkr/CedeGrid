@@ -662,7 +662,8 @@ back more.
   - While an own task over its share still holds the excess, in-share own tasks get no memory
     hint for it.
   - The over-share task gives back first: it is hinted, as today. Whether it also gets the
-    save-progress request, which FR-075 sends to in-share tasks only, is not settled here.
+    save-progress request, which FR-075 sends to in-share tasks only, is settled in Session
+    2026-11-14: it gets its hint and no signal.
   - If it has not freed its excess within the ladder's existing wait, that task is drained. No
     more over-share tasks are drained than it takes to bring own memory within its share, and a
     drained task starts again as soon as its memory fits.
@@ -695,9 +696,9 @@ back more.
   recorded control to its launch value never tightens it. A new restriction, and a freeze with no
   record, still need the leaf's members verified first. While a recorded freeze holds, the
   members are read every 50 ms in every phase, and a member list unreadable twice running counts
-  as changed. Lifting a held cap while running when an unverified member joins is not decided
-  here: it cannot be done without lifting caps on ordinary own processes (item 053 Part B, report
-  049 Decision 3).
+  as changed. Lifting a held cap while running when an unverified member joins is not done: it
+  cannot be done without lifting caps on ordinary own processes, and Session 2026-11-14 settles
+  that the cap stays while its step holds (item 053 Part B, report 049 Decision 3).
 - Q: In Yield First, beside a principal that is already admitted, which intervals in which own
   work does not fit restart the scale-up cooldown? → A: Only those a principal causes: a user
   became a principal in that interval, or unattributed usage reached the principal window; or an
@@ -706,11 +707,45 @@ back more.
   admission while it lasts and the count keeps running, whether or not other principals are
   admitted. An unreadable list restarts it, as before. Give-back and the other modes are
   unchanged. On RAM, unattributed usage counts from one level, so its "already past the window"
-  half is not settled here (item 053 Part C).
+  half is CPU's only, as Session 2026-11-14 settles (item 053 Part C).
 - Q: What is own work's fair share while the principal list cannot be read? → A: At most the last
   one computed from a readable list, on each resource; lower when that interval's own computation
   gives less. The first readable list replaces it. With no earlier readable list the present rule
   stands (item 053 Part D, report 050 Decision 3).
+
+### Session 2026-11-14
+
+- Q: How much is each over-share task asked for, and who pays what the floor needs beyond the
+  excess? → A: The over-share tasks, in victim order, are asked together for own memory above its
+  fair share and no more, the last of them only for the part that completes it; they are asked
+  first, and while their hint or drain wait runs that part is not passed to anyone. What the
+  floor, or the mode's target, needs beyond that excess is asked in the same interval by the
+  victim order, each capped by the excess left, counting each over-share task at what it holds
+  less what it was already asked. In-share tasks are asked for this part where FR-023 gives
+  in-share memory up, and not otherwise. No in-share task pays any part of another task's
+  excess, and no over-share task is emptied for the margin while another task keeps more (item
+  054 Part C, report 051 Decision 5).
+- Q: Which own tasks get the save-progress signal when a memory floor is breached? → A: The
+  in-share own tasks on that resource, once per episode, whoever caused the breach. An over-share
+  task gets its hint, and a drain gives it its drain time (item 054 Part D, report 051
+  Decision 4).
+- Q: Does the owner's own GPU compute keep another account's idle context from reading quiet in
+  Yield First? → A: No. The quiet evidence is other accounts' contexts only: the owner's
+  unmanaged compute neither counts as their activity nor restarts their quiet window. A context
+  of another account quiet for the window does not hold admission while the owner computes; one
+  that is active, or whose activity or owner is unknown, holds it; a new one starts its own
+  window. Neutral and Performance are unchanged, and the policy and the launch recheck read the
+  same evidence (item 054 Part E).
+- Q: What happens to a cap when a process the verification refuses joins its leaf? → A: The cap
+  stays while its step holds. It was written only to a leaf read as holding exactly the verified
+  family; a process that enters afterwards comes under a limit already there. CedeGrid writes
+  nothing for it, thaws a freeze within 50 ms, and lifts every control it wrote when the step
+  changes or ends, in every phase (item 054 Part F, report 053 Decision 1; replaces item 053's
+  open answer 5).
+- Q: Does RAM's unattributed usage restart Yield First's cooldown by its level or by its rise? →
+  A: By its level, as T519 set: RAM usage no process accounts for restarts the count in the
+  interval it reaches the principal window; the rise rule for unattributed usage past the window
+  is CPU's only (item 054 Part F, report 053 Decision 2). FR-034 already says so.
 
 ## Terms
 
@@ -1290,8 +1325,12 @@ node reports with the expected per-resource values at each step.
   already held yield first, at one level (FR-011), then new victims share what is left by usage,
   at one level, so a cap to 0 does not become a pause for its sake. Memory victims follow this
   order, each capped by the excess left; while own memory is above its fair share the over-share
-  tasks come first, and an in-share task is asked only for what the floor needs beyond all memory
-  the over-share tasks hold. Once
+  tasks come first, asked together for the excess and no more, the last of them only for the part
+  that completes it. What the floor, or the mode's target, needs beyond the excess is asked in the
+  same interval by this order, counting each over-share task at what it holds less what it was
+  already asked, and an in-share task is asked for it only where FR-023 gives in-share memory up.
+  No in-share task pays any part of another task's excess, and no over-share task is emptied for
+  the margin while another task keeps more. Once
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
@@ -1563,7 +1602,10 @@ node reports with the expected per-resource values at each step.
   envelope (FR-057) applies in every mode. In every mode an over-share task gives back first: it
   is hinted, and drained when its wait passes without the excess freed. No more over-share tasks
   are drained than bring own memory within its share, counting drains already decided, and
-  in-share tasks are not capped, hinted or drained for that excess. The one exception is FR-024's
+  in-share tasks are not capped, hinted or drained for that excess. The over-share tasks are asked
+  for the excess and no more, the last of them only for the part that completes it, and while
+  their hint or drain wait runs that part is not passed to anyone. What the floor or the mode's
+  target needs beyond the excess is asked in the same interval as FR-016 says. The one exception is FR-024's
   class rule: an over-share Guaranteed task that may not be drained yet passes its excess on once
   its hint wait is over.
 
@@ -1621,7 +1663,11 @@ node reports with the expected per-resource values at each step.
   unknown external compute activity. Compute by the account CedeGrid runs as, outside CedeGrid,
   does not hold this admission: it counts in the owner's own share (FR-059), not as activity
   here. Other accounts' activity holds it as before, and activity whose owner or amount cannot be
-  read stays unknown.
+  read stays unknown. The quiet evidence Yield First waits for is other accounts' contexts only:
+  the owner's unmanaged compute neither counts as their activity nor restarts their quiet window.
+  Another account's context that has been quiet for the window does not hold admission while the
+  owner computes; one that is active, or whose activity or owner is unknown, holds it, and a new
+  one starts its own window. The policy and the launch recheck MUST read the same evidence.
 - **FR-028**: Node reports MUST state admission per resource. Coordinator placement MUST honor it.
   Placement is blocked while own work on that resource is being reclaimed, meaning above its
   target or with a step still moving down. A step holding at its target does not block. A move
@@ -1725,11 +1771,10 @@ node reports with the expected per-resource values at each step.
   fixed number of items under the request size limit, larger sets split, and a retried batch MUST
   be idempotent per item. Per-item events MUST be the same as for single requests. Against a peer
   without the feature, the node MUST send single requests (FR-032).
-- **FR-075**: When free memory on a resource falls below its floor while own memory is within
-  its fair share, so that others' growth caused the breach, the node MUST send the in-share own
-  tasks on that resource a save-progress signal through both SDKs, once per episode. It is not a
-  drain and asks for no memory back. Tasks above the fair share, and breaches own memory above
-  its fair share caused, get no signal.
+- **FR-075**: When free memory on a resource falls below its floor, the node MUST send the
+  in-share own tasks on that resource a save-progress signal through both SDKs, once per episode,
+  whoever caused the breach. It is not a drain and asks for no memory back. Tasks above the fair
+  share get no signal: they get their hint, and a drain gives them their drain time.
 - **FR-076**: An own task MUST count as killed by the out-of-memory killer when it ended by
   SIGKILL in an interval in which the host's `/proc/vmstat` `oom_kill` count rose, or, in Full,
   its leaf's `memory.events` `oom_kill` count rose. The node MUST record whether own memory was
@@ -1759,7 +1804,11 @@ node reports with the expected per-resource values at each step.
   be read every 50 ms in every phase, and a difference MUST thaw the leaf at once; a member list
   that cannot be read on two consecutive checks counts as changed. A freeze the supervisor has no
   record of (a reattaching supervisor whose journal records no Pause) MUST be thawed only after
-  the leaf's membership is verified against the family, and refused when it differs. A supervisor
+  the leaf's membership is verified against the family, and refused when it differs. A cap stays
+  while its step holds, even when a process the verification would refuse joins the leaf: it was
+  written to the verified family, and a process that enters afterwards comes under a limit
+  already there. CedeGrid writes nothing for that process, thaws a freeze within 50 ms, and lifts
+  every control it wrote when the step changes or ends. A supervisor
   that is killed lifts nothing: its leaf keeps what it wrote. The gate MUST start the
   workload in a session of its own (`setsid`), for the leader and SDK children, so that no exit
   orphans its process group into SIGHUP. The parent-death signal reaches only the leader and SDK
