@@ -103,9 +103,13 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
     `uncounted_oom_requeues_stop_at_three_times_max_attempts` (`tests/coordinator.rs`).
 - **Burst stop.** With 150 tasks the longest gap between observations is still over the 1 s
   bound: 1135 ms at item 048 and 1041 ms at item 051; at `fc5e330` one iteration took 4236 ms.
-  The gap is not the drains. At the test's transfer budget of 1 MiB/s the agent's own pacing
-  stretches a 150-allocation heartbeat to 420–491 ms inside the loop, so one gap is over the
-  bound before anything drains. Open (see [Item 051](#item-051-reruns-after-report-048s-fixes)).
+  Since item 054 the agent's loop no longer waits for its own pacing of coordinator requests,
+  and the longest gap before the drain is 518–521 ms at either budget. During the drain it is
+  still over the bound, 1805 ms at 1 MiB/s and 1297 ms at the default budget: about 20
+  supervisors' journal commits retry in step under SQLite's default busy handler, the agent's
+  own journal write waits behind them, and at the default budget 25 leases were fenced and two
+  Released commits waited the full 5 s. Open until both B1 runs pass (see
+  [Item 054](#item-054-the-loop-without-pacing-waits-the-over-share-ask-the-owners-gpu-use)).
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
@@ -764,6 +768,23 @@ any run, and no leaf was left under a run's delegated scope once the scope ended
 | Full, a process of the test's own account joins the first probe's frozen leaf | The leaf read frozen at the join and thawed 49.8 ms later and stayed thawed; `cpu.max` stayed `max 100000`; the process kept nice 0, saw no signal, and its largest gap was 35.7 ms | pass |
 | Full, the same join, and the first probe's task cancelled 19.5 ms after it | The probe was gone 1.52 s after the join. 3 s later the leaf held only the joined process, with `cgroup.freeze` 0 and `frozen` 0; the process was running (`S`) and `cpu.max` read `max 100000`. The leaf, kept by that process, went with the run's scope | pass |
 | SC-015's shape in Yield First: 4 CPUs, 250 m steady tasks, beside the second account's steady light load on the same CPUs (80–143 m in every interval, an admitted principal throughout), with an owner login every 60 s and no other login | 12 tasks, the last admitted 374.6 s after submission. Own work 3026 m: 91.8% of capacity less the second account's 103 m and the 600 m margin (target 90%); no step and no pause. 12 owner logins, the longest gap 61 s; at a login the owner read 43–105 m. CPU admission was closed only for the agent's first 30 s, its start cooldown; no cooldown restarted in the warm-up or the window, and admission was open in 96.6% of decisions from submission to the window's end. No login made own work exceed its target in any interval, so the run does not reach the path where a login is told from a principal's rise; the tests in `tests/policy.rs` `yield_first_cooldown` carry it. Held back in the window (medians): the margin 600 m, others' use 126 m, `charge_shortfall` 80 m; the target 3260 m, so a thirteenth task of 250 m did not fit | pass |
+
+### Item 054: the loop without pacing waits, the over-share ask, the owner's GPU use
+
+Run on 2026-11-13 on the same test host at `44f8257`, with the commands under "Item 054" in
+`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
+any run.
+
+| Run | Values | Result |
+|---|---|---|
+| B1, 150 tasks, an operator drain, then TERM, at the test's 1 MiB/s | Longest gap 518 ms before the drain (1041 ms at item 051), 1805 ms from the drain to TERM, 505 ms after TERM; the drain took 8676 ms. No lease expired before or during the drain; 5 were fenced after it. One iteration in the drain held the agent's attempt pin 1.33 s on the journal's write lock, beside about 20 supervisors' Released commits retrying in step under SQLite's default busy handler | fail |
+| The same at the default 10 MiB/s | Longest gap 521 ms before the drain, 1297 ms in it, 505 ms after TERM; the drain took 10485 ms. 25 leases were fenced during the drain: 11 runs released after the last heartbeat before their deadline, 12 committed Draining after it (12 `lease_unavailable`), and 2 supervisors' Released commits waited the full 5 s for the lock and ended in a supervisor error, still recorded Released | fail |
+| The same at 1 MiB/s with each control request timed (a record) | Longest gap 547 ms; the drain took 8674 ms; 1 lease fenced after it. Its pass is chance: the agent's first journal write landed outside the supervisors' commit groups | record |
+| C4 run 2, as at item 051 | The over-share task was sent TERM 3.8 s after the breach, once it turned critical, and the next task in victim order, then over its share, was drained at 3.9 s. The six in-share tasks got the save-progress signal at 1.3 to 1.4 s, which item 051's run did not send. The floor stayed breached until the second account released at about 37 s; the OOM killer took one process | pass for the order |
+| C3, the second account's 10 GiB growth breaches the floor, Neutral | Own RAM fell from 12432 MiB to 1616 MiB in 4.2 s; the floor was restored 3.14 s after the breach (3.1 s at item 048); each fill task got one save-progress signal | pass |
+| Part E: B2's comparison in Yield First while the second account holds an idle context on the device | All 15 cases completed. GPU compute admission was open in every sample, also while the owner's unmanaged probe was busy; the managed probes were ready 2.1 to 9.2 s after their start, the longer waits being the GPU memory cooldown | pass |
+| The same while the second account computes | GPU compute and memory admission held on `gpu_yield_first_needs_quiet_device` from the start, and the managed probe was not admitted within 60 s | pass (held) |
+| Part F: SC-015's shape in Yield First (4 CPUs, 250 m steady tasks, a 150 s window) beside the second account's steady light load (101 m at the median), with a one-core CPU burst of 1.5 s on the owner's account every 60 s, and the second account's load raised to about 400 m 90 s into the window | 12 tasks, the last admitted 373.9 s after submission. Before the raise own work held 3006 m, 91.2% of capacity less the second account's 103 m and the margin (target 90%). The bursts read 950–1060 m. Five of them, once tasks were admitted, left own work outside its target for one or two decisions each, with a cap for the burst's length and no pause; none restarted the cooldown: CPU and RAM admission stayed allowed through every burst. The only closed stretch before the raise was the agent's start cooldown. The second account's rise read 407 m 0.56 s after it began; in that decision the cooldown restarted (closed for 30.5 s) and own work's target fell from about 3110 m to 2897 m, with own work's caps lowered in the same decision (SC-002 allows two intervals) | pass |
 
 ### Own-work ratios in the protection runs
 

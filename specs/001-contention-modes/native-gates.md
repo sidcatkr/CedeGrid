@@ -969,6 +969,47 @@ Gates:
   Report every cooldown restart in the warm-up with its cause, and the share of decisions with
   admission open. A restart whose cause is a login is a miss.
 
+## Item 054: the loop without pacing waits, the over-share ask, the owner's GPU use (T556)
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness at the item's last product commit. A leftover check of both accounts
+follows each run; the B1 runs start from a host-side script with no login during them.
+
+```sh
+# B1, the burst stop, at the test's 1 MiB/s and at the default 10 MiB/s, then once more at 1 MiB/s
+# with each control request timed (CEDEGRID_RPC_EVIDENCE=1 gives control requests a 10 s
+# deadline, so that run is a record, not a gate).
+ITEM=054 nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+ITEM=054 BURST_BYTES=10485760 nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+ITEM=054 RPC=1 nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+#   each = CEDEGRID_TEST_LAUNCH_BURST=1 CEDEGRID_TEST_BURST_TRANSFER_BYTES=<bytes> \
+#            cargo test --locked --release --test launch_burst -- --ignored --nocapture
+# C4 run 2 and C3's floor breach in Neutral.
+bash runs-037.sh <commit> <second account uid> c4b c3n
+# Part E: one of B2's comparisons in Yield First while the second account holds a context on the
+# device: idle (one multiply, then nothing), then computing.
+bash parte-mac-054.sh <commit> idle light 0.001 600 180 <local dir>
+bash parte-mac-054.sh <commit> computing saturating 200 300 60 <local dir>
+#   host side: parte-054.sh, which runs tools/pressure_comparison.py --mode gpu \
+#     --profile own-efficiency --contention-mode yield_first --readiness-seconds <s> --execute
+# Part F: SC-015's shape in Yield First (4 CPUs, 250 m steady tasks, a 150 s window) beside the
+# second account's steady light load; each minute the owner's account runs a one-core CPU burst for
+# 1.5 s on the run's first CPU, and 90 s into the window the second account adds a second load
+# beyond the tolerance for 60 s. Host side: sc015-peer-054.sh.
+bash peer-run-054.sh <commit> 0,2,4,6 300 2400 900 <local dir>
+```
+
+Gates:
+- B1, both runs: every gap between observations within 1 s, every task drained or released, and
+  no run ended by lease expiry after the drain. Report each phase's longest gap and the
+  heartbeat's time with 150 allocations (from the timed run).
+- C4 run 2: as in item 051. C3 in Neutral: the floor restored within item 048's time.
+- Part E: beside the idle context, admission opens after the quiet window while the owner's probe
+  is busy; beside the computing one, it holds.
+- Part F: no cooldown restart whose cause is the owner's burst, with each interval own work did not
+  fit and its cause listed; after the raise the cooldown restarts and Yield First steps within
+  SC-002's two intervals.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
