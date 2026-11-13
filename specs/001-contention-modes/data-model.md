@@ -173,6 +173,12 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
     allocation that does not observe the drain file goes to `terminate` instead of `drain`
     (FR-063). A Guaranteed hint waits `guaranteed_hint_deadline_s` off that path.
   - A hint waits for its deadline, never only the response time.
+  - Memory victims: while own memory is above its fair share, the over-share tasks (the
+    victim-order prefix that covers the excess, as the OOM mark picks them) lead the order. An
+    over-share task keeps counting toward the excess while it is handled: a decided drain in
+    full, a hint within its deadline or a Guaranteed task's wait for its drain at what was
+    asked. In-share tasks get only the remainder (FR-016, FR-023, FR-037). The floor can stay
+    breached for that wait. Off while the share is unknown; per device for GPU memory.
   - A pause ends at `pause_bound_s` even when nothing is contended: at the next step, else as a
     cap at the minimum duty marked `after_pause`, which does not escalate again while the
     contention lasts (FR-014).

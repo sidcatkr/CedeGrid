@@ -461,6 +461,20 @@ no drain and asks for no memory back. The kernel's out-of-memory killer may then
 workload's process, as it would without CedeGrid. This is the one memory exception, a rule of
 those modes and not an option; the operator envelope applies in every mode.
 
+Own tasks give memory back by fault as well. While own memory is above its fair share, the
+over-share tasks, those that make up the excess in the memory victim order, come first in every
+mode. Each is hinted if it takes hints and drained when its hint deadline passes with the excess
+still held, or drained without the hint if it takes none. A drain already decided counts in
+full while the task still runs, and a hint within its deadline, or a Guaranteed task whose drain
+waits for the breach window, counts what was asked. So no more over-share tasks are drained than
+bring own memory within its share, and in-share tasks are asked only for what the floor still
+needs after them; in Yield First that includes its margin. A drained task is admitted again once
+its memory fits. The cost is time: free memory can stay below the floor for the over-share
+task's wait, the hint deadline plus the drain for a task that ignores its hint and the breach
+window for a Guaranteed RAM task off the critical path, where the in-share tasks were hinted
+one interval later before. The reclaim targets above do not change. The order applies per
+device for GPU memory and not while the fair share is unknown.
+
 Out-of-memory order follows fault. On Linux each own task's `oom_score_adj` at launch is its
 baseline, the same as every other process's, and is never set below it. While own RAM is above
 its fair share, the tasks that make up the excess, in the memory victim order, are raised to

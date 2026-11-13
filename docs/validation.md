@@ -78,8 +78,16 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - The OOM order passes: in-share own work keeps its launch value, and only the marked task is
     at 1000.
   - In three host-wide OOMs the second account caused, the kernel took only its allocator.
-  - SC-014's RAM and GPU memory fill miss as written. The host's own 1.9 GiB at idle and the GPU
-    memory `noise_tolerance` (about 380 MiB) count against the fill; SC-014 subtracts neither.
+  - SC-014's RAM and GPU memory fill missed as SC-014 was written then, against capacity less the
+    floor. The host's own 1.9 GiB of RAM at idle and, on the device, 129 MiB of others' use (2 MiB
+    of the greeter's context and 127 MiB the device reports used that no process accounts for)
+    count against the fill. The GPU memory `noise_tolerance` withholds nothing: it is a growth
+    threshold and a reported field, pinned by
+    `an_idle_device_withholds_no_noise_tolerance_from_gpu_memory` (`tests/policy.rs`). Against
+    SC-014 as restated on 2026-11-13, which subtracts others' use, the same GPU run reads 96.7%
+    in Performance (1856 of 1919 MiB) and 96.4% in Yield First (1454 of 1509 MiB): still outside
+    1%, by the harness's 32 MiB slack and the gap between the memory the tasks requested and
+    what the device shows for them. Not rerun since.
   - No native result exists for SC-012's GPU memory reclaim.
   - The kernel's preference for the marked task is shown by `oom_score` only (1343–1385 against
     the allocator's 746–756): no own task was killed, since CedeGrid gave the excess back first
@@ -615,7 +623,7 @@ process of either account was left after any run.
 |---|---|---|
 | B1, a 150-task burst, then a draining stop (operator drain, then TERM) | All 150 ran; every task drained or released; the drain took 9.3 s; no lease expired, no refusal, no supervisor error. The longest gap between observations was 1135 ms, against one 4236 ms iteration at `fc5e330`. Nine gaps were over 1 s, seven of them in a 9.4 s span that matches the drain, though the records do not mark its start. | fail: 1135 ms against 1 s |
 | B2, Yield First on the idle GPU (report 029 run 5's idle row), three comparisons | Three managed probes finished and three missed the harness's 60 s readiness; each comparison stops at its first miss. The comparison's own earlier phases kept the device busy (`gpu_yield_first_needs_quiet_device`), then activity read unknown for 18.5, 55 and 27.5 s (`gpu_yield_first_activity_unknown`) although GPU compute read measured, before admission opened. | fail, intermittent |
-| B3, SC-014's GPU memory fill (capacity less the floor: 2048 MiB) | Performance: own GPU memory 1856 MiB (90.6%). Yield First: 1454 MiB against 1638 MiB less its margin (88.8%). Both are held back by `noise_tolerance` (381–383 MiB), which SC-014 does not subtract. The device's only other context was the greeter's, 2 MiB. | fail |
+| B3, SC-014's GPU memory fill (capacity less the floor: 2048 MiB) | Performance: own GPU memory 1856 MiB (90.6%). Yield First: 1454 MiB against 1638 MiB less its margin (88.8%). What is left is the device's other use (129 MiB, 127 of it used memory that no process accounts for), the harness's 32 MiB slack and the gap between requested and observed memory; the report first put it on `noise_tolerance`, which withholds nothing. The device's only other context was the greeter's, 2 MiB. | fail |
 | B4, the OOM order without an OOM (a 3 GiB capacity) | The second account's 1.5 GiB took the fair share from 1139 MiB to 558 MiB. Only the task launched last went to `oom_score_adj` 1000; the in-share task kept its launch value 0. When the second account released 3 s later, the share was back at 1038 MiB, and the same process went back to 0 before any drain. With `ram.prefer_own_oom_victim` every own task was at 1000 from launch. | pass |
 | B5, an own task past its leaf's `memory.max` (Full, 256 MiB) | With host swap, the kernel swapped the excess, and the task ran at 262 MiB resident to its end. With `memory.swap.max = 0` on the test's own delegated root it was killed three times in its leaf (host `oom_kill` +3). Each kill was recorded as `oom_kill` with `own_fault`, the fair share being unknown before its first memory reading, and counted as a failure. After three attempts the task stood at `needs_reconciliation`. No leaf was left. | pass |
 | C1, SC-014's RAM fill | Performance: own RAM 12763 MiB, 85.8% of capacity less the floor, 98.3% of its target of 12982 MiB (capacity less the floor and the host's own use), held back by `peak` 175 MiB. Yield First: 9990 MiB, 83.9% of capacity less the floor and margin, 99.9% of its 10001 MiB target. | fail as written; Yield First within 1% of its target |
