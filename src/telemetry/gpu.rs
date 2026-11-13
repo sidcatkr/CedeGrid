@@ -209,6 +209,7 @@ pub(super) fn quiet_tick(
     processes: Option<&[u32]>,
     previous: Option<u64>,
     samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
+    owner: &BTreeSet<u32>,
 ) -> bool {
     let Some(pids) = processes.filter(|pids| !pids.is_empty()) else {
         return false;
@@ -218,8 +219,22 @@ pub(super) fn quiet_tick(
         Err(NvmlError::NotFound) => &[],
         Err(_) => return false,
     };
+    // The owner's own compute is the owner's share, not other accounts' activity (FR-027).
     !samples.iter().any(|sample| {
-        pids.contains(&sample.pid) && sample.timestamp > previous.unwrap_or(0) && sample.sm_util > 0
+        pids.contains(&sample.pid)
+            && !owner.contains(&sample.pid)
+            && sample.timestamp > previous.unwrap_or(0)
+            && sample.sm_util > 0
+    })
+}
+
+/// The listed contexts that are not the owner's: those whose quiet the window waits for.
+pub(super) fn others_of(processes: Option<&[u32]>, owner: &BTreeSet<u32>) -> Option<Vec<u32>> {
+    processes.map(|pids| {
+        pids.iter()
+            .copied()
+            .filter(|pid| !owner.contains(pid))
+            .collect()
     })
 }
 

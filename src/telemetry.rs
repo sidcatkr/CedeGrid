@@ -826,11 +826,23 @@ impl Collector {
                                 .is_some_and(own_process_verified)
                     },
                 );
+            // The quiet window counts other accounts' contexts only: the owner's, with a readable
+            // user ID, neither break a quiet tick nor restart the window (FR-027).
+            let owner_pids: BTreeSet<u32> = owner_uid()
+                .map(|owner| {
+                    active_external
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .filter(|pid| context_uid(*pid) == Some(owner))
+                        .collect()
+                })
+                .unwrap_or_default();
             let quiet = self.gpu_quiet.entry(uuid.clone()).or_default();
             let quiet_ticks = advance_quiet(
                 quiet,
-                active_external.as_deref(),
-                own_only || quiet_tick(active_external.as_deref(), previous, &samples),
+                others_of(active_external.as_deref(), &owner_pids).as_deref(),
+                own_only || quiet_tick(active_external.as_deref(), previous, &samples, &owner_pids),
             );
             let external_compute =
                 quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
@@ -872,7 +884,7 @@ impl Collector {
             // NVML_DEVICE_MIG_ENABLE is 1; a device without MIG reports NotSupported.
             let mig_enabled = device.mig_mode().map(|mode| mode.current == 1);
             let time_sliced = time_sliced(queries_ok, mps, &mig_enabled);
-            let compute_contexts = compute_contexts(
+            let mut compute_contexts = compute_contexts(
                 listed.as_deref().filter(|_| queries_ok),
                 &self.managed_pids,
                 &background,
@@ -881,6 +893,10 @@ impl Collector {
                 context_uid,
                 owner_uid(),
             );
+            if let Some(contexts) = compute_contexts.as_mut() {
+                contexts.others_quiet =
+                    self.quiet_window_intervals > 0 && quiet_ticks >= self.quiet_window_intervals;
+            }
             // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
             if let (Some(previous), Ok(fresh)) = (activity_baseline, &samples) {
                 self.gpu_samples.entry(uuid.clone()).or_default().remember(
@@ -2578,6 +2594,37 @@ mod tests {
         assert!(!failed_second_read.attribution_known);
     }
 
+    /// The quiet window counts other accounts' contexts only: the owner's busy samples neither
+    /// break a quiet tick nor restart the window, and an owner's new context starts nothing,
+    /// while another account's busy sample or new context does (FR-027, item 054).
+    #[test]
+    fn the_owners_compute_neither_breaks_nor_restarts_other_accounts_quiet_window() {
+        type Samples = std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>;
+        const OWNER: u32 = 42;
+        const OTHER: u32 = 7;
+        // The owner's processes: one computing from the start and one that starts later.
+        let owner = BTreeSet::from([OWNER, 43]);
+        let tick = |state: &mut QuietState, pids: &[u32], samples: &Samples| {
+            let others = others_of(Some(pids), &owner);
+            let healthy = quiet_tick(Some(pids), Some(100), samples, &owner);
+            advance_quiet(state, others.as_deref(), healthy)
+        };
+        let owner_busy: Samples = Ok(vec![gpu_sample(OWNER, 101, 60)]);
+        let mut state = QuietState::default();
+        for expected in 1..=20 {
+            assert_eq!(tick(&mut state, &[OWNER, OTHER], &owner_busy), expected);
+        }
+        // An owner's new context starts nothing.
+        assert_eq!(tick(&mut state, &[OWNER, OTHER, 43], &owner_busy), 21);
+        // Another account's busy sample resets the window, and its new context restarts it.
+        let other_busy: Samples = Ok(vec![gpu_sample(OTHER, 101, 30)]);
+        assert_eq!(tick(&mut state, &[OWNER, OTHER], &other_busy), 0);
+        for _ in 0..5 {
+            tick(&mut state, &[OWNER, OTHER], &owner_busy);
+        }
+        assert_eq!(tick(&mut state, &[OWNER, OTHER, 9], &owner_busy), 1);
+    }
+
     #[test]
     fn quiet_requires_a_window_of_healthy_samples_over_a_complete_inventory() {
         type Samples = std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>;
@@ -2587,7 +2634,7 @@ mod tests {
             pids: Option<&[u32]>,
             samples: &Samples,
         ) -> ComputeActivity {
-            let healthy = quiet_tick(pids, Some(100), samples);
+            let healthy = quiet_tick(pids, Some(100), samples, &BTreeSet::new());
             quiet_activity(
                 ComputeActivity::Unknown,
                 advance_quiet(state, pids, healthy),

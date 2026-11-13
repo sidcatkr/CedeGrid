@@ -81,10 +81,12 @@ one principal; unknown GPU memory blocks; and `contention.never_share_occupied_g
 refuses new work on a device with external contexts or an unknown process list. For Yield
 First, compute by the account CedeGrid runs as, outside CedeGrid, is not activity to wait
 out: it is the owner's own share. A device whose busy contexts are all the owner's admits
-when the driver's per-process samples were read and no other account's context is listed.
-Another account's context holds admission as before, also in an interval in which it is
-not busy, and so does a context whose owner cannot be read, activity the collector reads
-as unknown, and a driver that does not report the contexts. Own work
+when the driver's per-process samples were read and every other account's listed context has
+been quiet for the quiet window. The owner's compute neither counts as their activity nor
+restarts that window; another account's new context starts its own. Another account's context
+that is busy or not yet quiet for the window holds admission as before, and so does a context
+whose owner cannot be read, activity the collector reads as unknown, and a driver that does not
+report the contexts. Own work
 already running on a device that becomes occupied is not drained for that alone. The
 launch recheck also refuses a request that would leave less than the device's floor
 free. Missing GPU observation holds the current steps as an unknown measurement instead

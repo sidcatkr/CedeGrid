@@ -6040,6 +6040,7 @@ mod gpu_demand {
                         .compute_sampling
                         .as_ref()
                         .is_some_and(|sampling| !sampling.processes.is_empty()),
+                    others_quiet: false,
                 });
             }
             let observations = recorded["observations"].as_array().unwrap();
@@ -6647,6 +6648,7 @@ mod gpu_demand {
                 sampled,
                 listed: peer.iter().map(|pid| (*pid, Some(PEER))).collect(),
                 samples_readable: true,
+                others_quiet: false,
             });
             snap
         }
@@ -7413,6 +7415,7 @@ mod gpu_demand {
                     .flat_map(|e| pids(e.0, e.1).map(move |pid| (pid, Some(e.0))))
                     .collect(),
                 samples_readable: true,
+                others_quiet: false,
             });
             let mut principals = vec![PrincipalUsage {
                 uid: Some(1000),

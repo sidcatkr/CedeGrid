@@ -283,6 +283,10 @@ pub struct GpuComputeContexts {
     /// context rather than an unknown (FR-021, Q33).
     #[serde(default)]
     pub samples_readable: bool,
+    /// Whether every other account's listed context has been quiet for the quiet window, which
+    /// the owner's own compute neither breaks nor restarts (FR-027).
+    #[serde(default)]
+    pub others_quiet: bool,
 }
 
 /// What a replay of one interval's GPU measurement needs, in driver microseconds: the device's

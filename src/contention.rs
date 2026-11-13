@@ -1655,10 +1655,10 @@ pub fn gpu_admission(
 }
 
 /// Whether the device's compute activity this interval is only the owner's unmanaged processes:
-/// the samples were read, each busy context that is not own work is the owner's, and no other
-/// account's context is listed. One that is listed but not busy this interval has no quiet
-/// window behind it, since the owner's activity restarts the device's, so it holds admission
-/// too; so does a context whose owner cannot be read, which is listed with no user ID.
+/// the samples were read, each busy context that is not own work is the owner's, and every other
+/// account's listed context has been quiet for the window, which the owner's activity neither
+/// breaks nor restarts. A context whose owner cannot be read, listed with no user ID, holds
+/// admission (FR-027).
 fn owners_compute_only(contexts: Option<&crate::model::GpuComputeContexts>) -> bool {
     contexts.is_some_and(|contexts| {
         let mut busy = contexts
@@ -1666,8 +1666,10 @@ fn owners_compute_only(contexts: Option<&crate::model::GpuComputeContexts>) -> b
             .iter()
             .filter(|(pid, _)| !contexts.own.contains(pid))
             .peekable();
+        let others_quiet = contexts.listed.is_empty()
+            || (contexts.others_quiet && contexts.listed.iter().all(|(_, uid)| uid.is_some()));
         contexts.samples_readable
-            && contexts.listed.is_empty()
+            && others_quiet
             && busy.peek().is_some()
             && busy.all(|(pid, _)| contexts.owner.contains(pid))
     })

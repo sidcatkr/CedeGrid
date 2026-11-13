@@ -2258,14 +2258,19 @@ fn the_owners_unmanaged_gpu_compute_does_not_hold_yield_first() {
     const OWNER_PID: u32 = 4242;
     const OTHER_PID: u32 = 5151;
     let owner = (OWNER_PID, Some(1000));
+    let quiet_contexts =
+        |listed: &[(u32, Option<u32>)], busy: &[(u32, Option<u32>)], readable, quiet| {
+            Some(GpuComputeContexts {
+                own: vec![],
+                owner: vec![OWNER_PID],
+                sampled: busy.to_vec(),
+                listed: listed.to_vec(),
+                samples_readable: readable,
+                others_quiet: quiet,
+            })
+        };
     let contexts = |listed: &[(u32, Option<u32>)], busy: &[(u32, Option<u32>)], readable| {
-        Some(GpuComputeContexts {
-            own: vec![],
-            owner: vec![OWNER_PID],
-            sampled: busy.to_vec(),
-            listed: listed.to_vec(),
-            samples_readable: readable,
-        })
+        quiet_contexts(listed, busy, readable, false)
     };
     let other = (OTHER_PID, Some(2000));
     let unread = (OTHER_PID, None);
@@ -2284,6 +2289,23 @@ fn the_owners_unmanaged_gpu_compute_does_not_hold_yield_first() {
         (
             "an unreadable owner",
             contexts(&[unread], &[owner, unread], true),
+            false,
+        ),
+        // Item 054: another account's context quiet for the window does not hold the owner's
+        // use; one whose owner cannot be read, or that is busy, still does.
+        (
+            "another account quiet for the window",
+            quiet_contexts(&[other], &[owner], true, true),
+            true,
+        ),
+        (
+            "an unreadable owner, quiet for the window",
+            quiet_contexts(&[unread], &[owner], true, true),
+            false,
+        ),
+        (
+            "another account busy again",
+            quiet_contexts(&[other], &[owner, other], true, true),
             false,
         ),
         ("unreadable samples", contexts(&[], &[], false), false),
