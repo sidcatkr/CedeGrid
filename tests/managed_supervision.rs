@@ -2965,3 +2965,176 @@ time.sleep(3)
         (libc::getuid(), libc::getgid())
     });
 }
+
+/// What the lift-counting actuator saw, shared with the test.
+#[derive(Default)]
+struct Lifts {
+    /// `release` calls, and how many of them fail before one succeeds.
+    releases: usize,
+    failing_releases: usize,
+    /// `watch` calls after the first `release`, which the leader's exit makes.
+    watches_after_release: usize,
+    /// `confirm_release` fails, which sends the supervisor down its error path.
+    failing_confirm: bool,
+}
+
+/// The rootless actuator, counting the supervisor's lifts.
+struct LiftActuator {
+    inner: Box<dyn Actuator>,
+    state: std::sync::Arc<std::sync::Mutex<Lifts>>,
+}
+impl Actuator for LiftActuator {
+    fn unavailable(
+        &self,
+        kind: cedegrid::contention::ResourceKind,
+    ) -> std::collections::BTreeSet<cedegrid::contention::YieldStep> {
+        self.inner.unavailable(kind)
+    }
+    fn apply(
+        &mut self,
+        family: &mut dyn Family,
+        kind: cedegrid::contention::ResourceKind,
+        step: cedegrid::contention::YieldStep,
+        target: Option<u64>,
+    ) -> anyhow::Result<cedegrid::contention::YieldStep> {
+        self.inner.apply(family, kind, step, target)
+    }
+    fn tick(&mut self, family: &mut dyn Family) -> anyhow::Result<()> {
+        self.inner.tick(family)
+    }
+    fn watch(&mut self, family: &mut dyn Family) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.releases > 0 {
+            state.watches_after_release += 1;
+        }
+        drop(state);
+        self.inner.watch(family)
+    }
+    fn release(&mut self, family: &mut dyn Family) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.releases += 1;
+        if state.failing_releases > 0 {
+            state.failing_releases -= 1;
+            anyhow::bail!("the fake backend refuses this lift");
+        }
+        drop(state);
+        self.inner.release(family)
+    }
+}
+
+struct LiftBackend {
+    inner: RootlessBackend,
+    state: std::sync::Arc<std::sync::Mutex<Lifts>>,
+}
+impl LaunchBackend for LiftBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn actuator(&self, settings: &ActuatorSettings) -> Box<dyn Actuator> {
+        Box::new(LiftActuator {
+            inner: self.inner.actuator(settings),
+            state: self.state.clone(),
+        })
+    }
+    fn prepare(&mut self, request: &LaunchRequest) -> anyhow::Result<GateSetup> {
+        self.inner.prepare(request)
+    }
+    fn preparation_evidence(&self) -> Vec<ControlEvidence> {
+        self.inner.preparation_evidence()
+    }
+    fn verify(&mut self, identity: &ProcessIdentity) -> anyhow::Result<Vec<ControlEvidence>> {
+        self.inner.verify(identity)
+    }
+    fn confirm_release(&mut self) -> anyhow::Result<()> {
+        if self.state.lock().unwrap().failing_confirm {
+            anyhow::bail!("the fake backend cannot confirm the release");
+        }
+        self.inner.confirm_release()
+    }
+}
+
+/// A control that authorizes and records nothing.
+struct Quiet;
+impl supervision::SupervisorControl for Quiet {}
+
+/// A leader that leaves a child behind for a moment, so the supervisor runs at least one pass
+/// after the leader's exit with a family member still alive.
+fn supervise_lifts(dir: &Path, lifts: Lifts) -> (anyhow::Result<()>, Lifts) {
+    let store = StateStore::open(&dir.join("state")).unwrap();
+    let request = request(
+        dir,
+        "import subprocess, time; subprocess.Popen(['sleep', '1']); time.sleep(0.3)",
+    );
+    let state = std::sync::Arc::new(std::sync::Mutex::new(lifts));
+    let result = supervision::supervise_controlled(
+        &request,
+        &request.resources,
+        &options(),
+        &store,
+        &mut LiftBackend {
+            inner: RootlessBackend::new(10),
+            state: state.clone(),
+        },
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+        &mut Quiet,
+    )
+    .map(|_| ());
+    let lifts = std::mem::take(&mut *state.lock().unwrap());
+    (result, lifts)
+}
+
+/// After the leader's exit the supervisor still lifts what it restricted: it keeps watching
+/// its actuator while a family member lives, so a restore the backend refused at the exit is
+/// retried and a frozen leaf whose members changed thaws (FR-078, item 053). Linux only: the
+/// child that outlives the leader is a family member through `/proc` discovery.
+#[cfg(target_os = "linux")]
+#[test]
+fn after_the_leaders_exit_the_supervisor_keeps_lifting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (result, lifts) = supervise_lifts(
+        dir.path(),
+        Lifts {
+            failing_releases: 1,
+            ..Lifts::default()
+        },
+    );
+    result.unwrap();
+    assert!(lifts.releases >= 1);
+    assert!(
+        lifts.watches_after_release >= 1,
+        "no watch after the leader's exit"
+    );
+}
+
+/// On the error path a release the backend refuses is retried, bounded, every 50 ms, since
+/// that path does not tick again (FR-078, item 053).
+#[test]
+fn on_the_error_path_a_refused_release_is_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let (result, lifts) = supervise_lifts(
+        dir.path(),
+        Lifts {
+            failing_confirm: true,
+            ..Lifts::default()
+        },
+    );
+    assert!(
+        result.is_err(),
+        "the confirmation failed, so supervision fails"
+    );
+    // The leader's exit lifts once, and the error path once.
+    assert_eq!(lifts.releases, 2);
+    let dir = tempfile::tempdir().unwrap();
+    let (result, lifts) = supervise_lifts(
+        dir.path(),
+        Lifts {
+            failing_confirm: true,
+            failing_releases: 3,
+            ..Lifts::default()
+        },
+    );
+    assert!(result.is_err());
+    // Refused at the leader's exit, on the error path and on its first retry; the second retry
+    // lands.
+    assert_eq!(lifts.releases, 4);
+}
