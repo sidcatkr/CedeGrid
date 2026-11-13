@@ -208,8 +208,10 @@ wrote needs only its own leaf, whatever its members, and never tightens a contro
 leader's exit, a supervisor error and a stop signal return every control it wrote to its launch
 value, and a restore that fails is reported and retried every 50 ms while the supervisor lives.
 A `cpu.max`, `cpu.weight` or `memory.high` cap stays on a leaf a foreign process joined while the
-step holds, until the step changes or ends; lifting it at once is not decided (item 053). A
-supervisor that is killed lifts nothing: its leaf keeps what it wrote.
+step holds, until the step changes or ends. The cap was written only to a leaf read as holding
+exactly the verified family; a process that enters afterwards comes under a limit already there,
+and CedeGrid writes nothing for it. A supervisor that is killed lifts nothing: its leaf keeps
+what it wrote.
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.
