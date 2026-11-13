@@ -57,10 +57,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   and resumes own processes; Full's freezes each own leaf through `cgroup.freeze`. Full ran only
   Performance beside the saturating user, at item 047 (see
   [Item 047: SC-014's fill and Full's GPU path](#item-047-sc-014s-fill-and-fulls-gpu-path)).
-  A new own process counts toward the time-slice share only once the driver first samples it:
-  at item 049 one Full window's second probe went unsampled for 13.0 s, own work ran at full duty
-  until then, and the other user got 709.8 requests/s over the window against 751.8 (see
-  [Item 049](#item-049-the-gates-phase-37-touches)).
+  Since item 053 a process CedeGrid launched counts toward the time-slice share from the
+  interval the device first lists it, sampled or not: at item 049 one Full window's second probe
+  went unsampled for 13.0 s and the other user got 709.8 requests/s against 751.8; at item 053
+  every window sent its first duty in its first decision, and both Full windows passed (see
+  [Item 053](#item-053-own-gpu-processes-in-the-counts-lifts-in-every-phase-yield-first-beside-a-principal)).
   A zero GPU compute margin, Aggressive's GPU behavior, leaves the saturating user 0.3–6.5
   requests a second short of half its rate alone. For feature 001 that is a record, not a gate.
   Since item 027 an idle context of a user ID below `uid_min` is background while per-process
@@ -748,6 +749,21 @@ any window, and no test process of either account was left after any run.
   work at the contended target in the interval that first shows the load, no drain, 273 pause
   samples, the target back after 1.5 s and own work after 3.0 s. In the 22 intervals in which
   all 13 tasks were capped, own usage was 1.002 of the caps' sum on average and at most 1.069.
+
+### Item 053: own GPU processes in the counts, lifts in every phase, Yield First beside a principal
+
+Run on 2026-11-13 on the same test host at `a0a7bea`, with the commands under "Item 053" in
+`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
+any run, and no leaf was left under a run's delegated scope once the scope ended.
+
+| Run | Values | Result |
+|---|---|---|
+| Performance, two own probes beside the saturating user, Tracked | Pair alone 1496 units/s; without CedeGrid 0.660 of it, the other user 512 requests/s of its 1571 alone. With it: own work 0.486 and 0.475 (bound 0.45); the other user 785.1 and 797.0 (½ × alone × 0.97 = 761.8). Both windows pass 042's checks (overlap 39.8 s, m = 2 in 78 decisions of 80 each); no pause; the duty held 0.734 and 0.718; the probes' off phases overlapped 0.998 and 0.997. Both probes counted, and the first duty sent, in each window's first decision (1.1 s and 1.3 s in) | pass |
+| The same in Full | Pair alone 1479 units/s; without CedeGrid 0.664, the other user 509 of its 1555. Own work 0.480 and 0.477; the other user 792.5 and 794.2 (bound 754.2); m = 2 in 78 and 79 decisions; frozen 0.28 of the time in each window; both probes counted and the first duty sent at 1.2 s and 1.0 s. At item 049 the second window waited 13.9 s for its first duty and the other user got 709.8 | pass |
+| Neutral, two own probes beside the saturating user, Tracked | Pair alone 1480 units/s; without CedeGrid 0.663, the other user 509 of its 1554. Own work 0.447 and 0.447 (bound 0.42); the other user 840.0 and 840.4 (bound 753.4); m = 2 in 79 and 78 decisions; the duty held 0.672 and 0.673; the first duty at 1.0 s and 1.2 s | pass |
+| Full, a process of the test's own account joins the first probe's frozen leaf | The leaf read frozen at the join and thawed 49.8 ms later and stayed thawed; `cpu.max` stayed `max 100000`; the process kept nice 0, saw no signal, and its largest gap was 35.7 ms | pass |
+| Full, the same join, and the first probe's task cancelled 19.5 ms after it | The probe was gone 1.52 s after the join. 3 s later the leaf held only the joined process, with `cgroup.freeze` 0 and `frozen` 0; the process was running (`S`) and `cpu.max` read `max 100000`. The leaf, kept by that process, went with the run's scope | pass |
+| SC-015's shape in Yield First: 4 CPUs, 250 m steady tasks, beside the second account's steady light load on the same CPUs (80–143 m in every interval, an admitted principal throughout), with an owner login every 60 s and no other login | 12 tasks, the last admitted 374.6 s after submission. Own work 3026 m: 91.8% of capacity less the second account's 103 m and the 600 m margin (target 90%); no step and no pause. 12 owner logins, the longest gap 61 s; at a login the owner read 43–105 m. CPU admission was closed only for the agent's first 30 s, its start cooldown; no cooldown restarted in the warm-up or the window, and admission was open in 96.6% of decisions from submission to the window's end. No login made own work exceed its target in any interval, so the run does not reach the path where a login is told from a principal's rise; the tests in `tests/policy.rs` `yield_first_cooldown` carry it. Held back in the window (medians): the margin 600 m, others' use 126 m, `charge_shortfall` 80 m; the target 3260 m, so a thirteenth task of 250 m did not fit | pass |
 
 ### Own-work ratios in the protection runs
 

@@ -933,6 +933,42 @@ mode, or the commit. Report, per window, the managed-to-unmanaged ratio, the pro
 and the other user's one-preemption latency modes. Item 029's own gate for run 3 stays as stated
 under "Item 049".
 
+## Item 053: own GPU processes in the counts, lifts in every phase, Yield First beside a principal (T542)
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness, at the item's final commit. A leftover check of both accounts follows
+each run.
+
+```sh
+# Part A: two probes beside the saturating user. Performance in Tracked, Performance in Full,
+# Neutral in Tracked; each has two managed windows.
+bash runs-037.sh <commit> <second account uid> twoperf twofull twoneutral
+# Part B: the join run in Full. A process of the test's own account joins the first probe's
+# leaf while it is frozen.
+bash runs-037.sh <commit> <second account uid> twojoin
+# Part B, then: the same join, and the first probe's task cancelled at once after it
+# (--join-cancel); the leaf is read 3 s after the probe has gone.
+bash runs-037.sh <commit> <second account uid> twojoincancel
+# Part C: SC-015's shape in Yield First on 4 CPUs (250 m steady tasks) beside the second account's
+# steady light load on the same CPUs (300 requests/s for 2400 s), with an owner login every 60 s
+# through the warm-up and the window and no other login. The host side is sc015-peer-053.sh,
+# which writes each decision's CPU admission and the listed users' usage to timeline.jsonl.
+bash peer-run-053.sh <commit> 0,2,4,6 300 2400 <local dir>
+```
+
+Gates:
+- Part A: T456's, with 042's validity checks (`m2_decisions` at least 75 of 80) and 047's
+  off-phase measure. Report `m2_decisions` and the time from the second probe's first listing to
+  the first duty.
+- Part B: as in item 049: thawed within 50 ms, no signal, `cpu.max` unchanged. Join then cancel:
+  after the supervisor exits, `cgroup.freeze` reads 0 or the leaf is gone, and no process is left
+  frozen. The cancel goes through the coordinator, so where in the drain the join lands is not
+  chosen; `tests/cgroup.rs` carries the lift after a drain, after the leader's exit and on the
+  error path.
+- Part C: SC-015's 90% of capacity less that user and the margin, with no cap or pause cycling.
+  Report every cooldown restart in the warm-up with its cause, and the share of decisions with
+  admission open. A restart whose cause is a login is a miss.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

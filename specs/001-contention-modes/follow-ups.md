@@ -46,7 +46,6 @@ item 031.
 | ID | Finding | Target | Why 001's guarantees hold without it |
 |---|---|---|---|
 | SUP-9 | A busy journal can block the supervisor for about 20 s in an off phase. | 005 | It needs a journal lock held for 5 s; own work stays stopped longer, and nothing else changes. |
-| SUP-11 | A same-UID process that joins the leaf between the check and the write could be capped or frozen. | item 053 | T510 (item 049) covers the freeze; item 053 decides the caps. |
 | SUP-13 | A pause relaxed to a cap after calm, on work that is no longer a victim, gets a cap with no target: half the request on CPU, a 500 duty on GPU compute. | 004 | No other principal contends then. It costs own work one scale-up interval, in Neutral and Yield First; Performance's pause returns to a cap with a target at its one-interval bound. |
 | SUP-14 | Errors removing the target, ack or drain files, or their directory, are discarded. | 003 | Each attempt creates its own private directory, so a leftover file is never read as a drain. Listing leftovers belongs with `doctor`. |
 | AGT-13 | A `drain_timeout_ms` longer than the lease expires the reservation mid-drain. | 003 | Not with the defaults. The reservation then ends uncertain and stays charged, the fail-safe outcome; a config check belongs with `doctor` and `validate`. |
@@ -88,6 +87,7 @@ item 031.
 | 030 SDK-7: Python's `ManagedChild.wait` raised builtin errors | item 050 (`ba564e3`): the `ERR_CEDEGRID_*` codes |
 | 030 SDK-8: a failed ack write was retried and logged on every read | item 050 (`c385ae3`): logged once, retried no sooner than a second later |
 | 030 SDK-9: the SDKs disagreed on drain-path precedence | item 050 (`6e7e614`): the context's value, then the environment |
+| 030 SUP-11: a same-UID process that joins the leaf between the check and the write could be capped or frozen | item 053 (`85ba4be`): a new restriction still verifies the members first; lifting one the supervisor wrote needs only the leaf, in every phase, and a recorded freeze thaws within 50 ms of a join in every phase (native join runs at `a0a7bea`). A cap held while such a process joins stays until the step ends; report 053 puts that under Decisions needed |
 | 044 Q31: the aligned duty phases assume every supervisor shares the agent's `CLOCK_MONOTONIC` time namespace | item 049 (T516), FR-021 and spec Session 2026-11-03 |
 | 026 Decision 5 A: a refusal at the authorization barrier uses no attempt | item 049 (T511), FR-018 |
 | 027 Decision 2 B: the window's busy bound tightened with per-CPU run time from `/proc/schedstat` | item 049 (T514); the idle rerun is T520 |
