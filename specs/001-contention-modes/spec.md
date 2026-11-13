@@ -768,6 +768,17 @@ back more.
   other accounts' usage cannot be read per process, or the list is unreadable, no estimate is
   kept and the interval's own estimate applies. Own measurement's looseness is still not another
   user's usage (item 055 Part B, report 052 Decision 3).
+- Q: Does `held_back` show the GPU memory noise tolerance? → A: No. The noise tolerance is a
+  growth threshold that withholds nothing, so it is not a held-back part and is never shown.
+  Every part `held_back` names is an amount withheld; others' use is shown as `external` and
+  `unattributed`, not as a part (item 056 Part B, report 054 Decision 1).
+- Q: Beyond its excess, how much of what the floor or the mode's target still needs is an
+  over-share task asked? → A: Only what FR-016's cost order asks of it, as before item 051: the
+  task with the least progress to lose is asked first whoever caused the excess, so an over-share
+  task that leads the order may be emptied for the margin while another task keeps more. No
+  in-share task pays any part of another task's excess. This replaces item 054's wording "no
+  over-share task is emptied for the margin while another task keeps more" (item 056 Part C,
+  report 054 Decision 4).
 
 ## Terms
 
@@ -1351,8 +1362,8 @@ node reports with the expected per-resource values at each step.
   that completes it. What the floor, or the mode's target, needs beyond the excess is asked in the
   same interval by this order, counting each over-share task at what it holds less what it was
   already asked, and an in-share task is asked for it only where FR-023 gives in-share memory up.
-  No in-share task pays any part of another task's excess, and no over-share task is emptied for
-  the margin while another task keeps more. Once
+  No in-share task pays any part of another task's excess, and beyond its excess an over-share
+  task is asked only what this order asks of it. Once
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
@@ -2245,7 +2256,7 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   of capacity minus that user and the margin, with no cap or pause cycling.
 - **SC-016**: `doctor` and `status` show, per resource, how much is held back and why: floor,
   reserve, margin, an ancestor CPU ceiling (never as contention), contention, contention by PSI
-  alone, peak, noise tolerance, unknown, cooldown, backoff and charge shortfall.
+  alone, peak, unknown, cooldown, backoff and charge shortfall.
 - **SC-017**: Beside one other GPU user, measured in the same run with "alone" the same probe or
   user with nothing else on the device: own work with CedeGrid ÷ own work alone is at least
   min(the mode's target ÷ 1000, own work without CedeGrid ÷ alone) − 0.03, the target being the
