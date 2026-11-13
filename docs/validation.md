@@ -119,9 +119,12 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   name length. At `743312b` Performance still read 0.945 on the same day, with the same
   environment and argument sizes, and the same build with the later commit's two Python SDK
   files read 0.988. So the extra CPU came from SDK code that runs inside the managed probe, its
-  drain check, which item 050 changed; how that code slowed the probe's units is not
-  established. Open until the probe measures and reports such an effect itself (see
-  [Item 052](#item-052-the-same-core-loss-again)).
+  drain check, which item 050 changed. Item 055 named the mechanism: with the allocator's
+  per-thread cache off in both probes, the same `743312b` build read 1.004. The probe now times
+  its even against its odd units before it is ready and refuses a biased window, but at
+  `7cc09c8` Neutral read 0.929 with no window refused: the managed probe's units cost 9% more,
+  evenly, which that check does not see. Open (see
+  [Item 055](#item-055-the-same-core-probe-checks-itself-and-cedegrids-own-cost-inside-a-task)).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
 - **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
@@ -793,6 +796,18 @@ any run.
 checks the target file's identity, costs 3.5 µs in the Python SDK and 6.8 µs in the TypeScript
 one; reading and parsing a changed target file costs 36 µs and 47 µs. At 20 checks a second, the
 matched probe's rate, that is 0.007% and 0.014% of one core. Both tests fail at 1%.
+
+Run on 2026-11-13 on the test host, each run item 029's run 3 (a saturating other user on the
+probe's core, two unmanaged and two managed windows of 40 s), alone, with the leftover check
+after it. No CPU step was taken in any window. CPU per unit is the probe's user ticks over its
+units.
+
+| Run | Commit | Own throughput, managed against unmanaged | Probe CPU per unit, unmanaged and managed | Even/odd self-check | Result |
+|---|---|---|---|---|---|
+| Performance, the allocator's per-thread cache off in both probes (`GLIBC_TUNABLES=glibc.malloc.tcache_count=0`), item 055's probe only measuring | `743312b` | 1.004 (0.945 at item 052 with the cache on) | 136.7 and 136.3–137.3 µs | 1.000–1.002 in every window | the mechanism: the per-thread cache |
+| Performance, item 055's probe | `743312b` | 0.995 | 136.4–137.1 and 136.4–136.8 µs | 1.001–1.008, no block held, none refused | no loss, nothing refused |
+| Performance, the commit's probe | `7cc09c8` | 1.004 | 136.3–136.4 and 135.6–136.4 µs | the unmanaged probe held one block in both windows (1.012–1.013 to 1.000–1.002) | pass |
+| Neutral, the commit's probe | `7cc09c8` | 0.929 | 136.5–137.6 and 148.6–148.7 µs | 1.001–1.002, none refused | fail: the managed units cost 9% more, not alternately |
 
 ### Own-work ratios in the protection runs
 

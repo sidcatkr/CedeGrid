@@ -1010,6 +1010,32 @@ Gates:
   fit and its cause listed; after the raise the cooldown restarts and Yield First steps within
   SC-002's two intervals.
 
+## Item 055: the same-core probe checks itself (T560)
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness. Each run is item 029's run 3 alone, with the leftover check after it.
+`same_core_029.py` takes `--probe` (a probe file other than the build's own), `--probe-env
+KEY=VALUE` (added to both probes' environments) and `--probe-holds N` (the probe's
+`--self-check-holds`), and reports each window's verdict, the refused windows and the ratio over
+the measured ones.
+
+```sh
+# Step 1, the mechanism: the kept 743312b build, the allocator's per-thread cache off in both
+# probes, item 055's probe only measuring its even/odd units.
+bash runs-037.sh 743312b <second account uid> coretc
+#   = $py $H/same_core_029.py --repo $repo --mode performance --load saturating --peer-uid <uid> \
+#       --probe $H/probe055/pressure_probe.py --probe-env GLIBC_TUNABLES=glibc.malloc.tcache_count=0 --probe-holds 0
+# Step 4, the gate: run 3 in Performance and in Neutral at the item's commit (its own probe).
+bash runs-037.sh <commit> <second account uid> corec
+# And once in Performance on 743312b with item 055's probe, which removes or refuses a bias.
+bash runs-037.sh 743312b <second account uid> corep055
+```
+
+Gates: at the item's commit, own throughput with CedeGrid at least the mode's bound of without it
+(item 029's run 3), with no refused window. On `743312b` the new probe must either pass or refuse
+the windows as biased; a clean-looking 0.945 means the self-check misses the case it was built
+for.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |
