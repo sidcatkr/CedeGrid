@@ -68,7 +68,9 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   its idle graphics context held Yield First's admission on
   `gpu_yield_first_activity_unknown`. At item 048 three of six managed probes in Yield First
   missed the comparison's 60 s readiness: activity read unknown for 18–55 s after the device's last
-  busy phase. The GPU attribution tolerance
+  busy phase. Since item 051 a device the collector finds quiet admits without a new driver
+  sample, and all 36 managed probes of six comparisons were admitted, 37–39 s after their
+  submission (see [Item 051](#item-051-reruns-after-report-048s-fixes)). The GPU attribution tolerance
   stays 15 points until a second device is measured; the first device's largest gap was 5.
 
   Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
@@ -78,16 +80,17 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   - The OOM order passes: in-share own work keeps its launch value, and only the marked task is
     at 1000.
   - In three host-wide OOMs the second account caused, the kernel took only its allocator.
-  - SC-014's RAM and GPU memory fill missed as SC-014 was written then, against capacity less the
-    floor. The host's own 1.9 GiB of RAM at idle and, on the device, 129 MiB of others' use (2 MiB
-    of the greeter's context and 127 MiB the device reports used that no process accounts for)
-    count against the fill. The GPU memory `noise_tolerance` withholds nothing: it is a growth
-    threshold and a reported field, pinned by
-    `an_idle_device_withholds_no_noise_tolerance_from_gpu_memory` (`tests/policy.rs`). Against
-    SC-014 as restated on 2026-11-13, which subtracts others' use, the same GPU run reads 96.7%
-    in Performance (1856 of 1919 MiB) and 96.4% in Yield First (1454 of 1509 MiB): still outside
-    1%, by the harness's 32 MiB slack and the gap between the memory the tasks requested and
-    what the device shows for them. Not rerun since.
+  - SC-014's RAM and GPU memory fill missed at item 048 as SC-014 was written then, against
+    capacity less the floor: the host's own RAM at idle and others' use of the device count
+    against it. The GPU memory `noise_tolerance` withholds nothing: it is a growth threshold and
+    a reported field, pinned by `an_idle_device_withholds_no_noise_tolerance_from_gpu_memory`
+    (`tests/policy.rs`). Against SC-014 as restated on 2026-11-13, less others' use and their
+    peak, the fill passes at item 051: own RAM 99.7% in Performance and in Yield First, own GPU
+    memory 99.6% and 99.4% (see [Item 051](#item-051-reruns-after-report-048s-fixes)).
+  - Since item 051 an own task over its share gives memory back first. In one host-wide OOM the
+    second account caused, that task was asked first and alone and was stopped when the breach
+    turned critical; three of six in-share tasks were never stepped, and the other three had
+    become over-share as the second account's growth cut own work's fair share.
   - No native result exists for SC-012's GPU memory reclaim.
   - The kernel's preference for the marked task is shown by `oom_score` only (1343–1385 against
     the allocator's 746–756): no own task was killed, since CedeGrid gave the excess back first
@@ -97,11 +100,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
     `a_kill_in_an_interval_where_oom_kill_rose_is_an_oom_kill` (`src/agent/oom.rs`),
     `an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt` and
     `uncounted_oom_requeues_stop_at_three_times_max_attempts` (`tests/coordinator.rs`).
-- **Burst stop.** At item 048 a draining stop of 150 tasks takes 9.3 s and spreads its drains, with
-  a longest gap of 1135 ms between observations against the 1 s bound; at `fc5e330` one iteration
-  took 4236 ms. That run sent 16 drains an iteration, sized at one journal write each, where each
-  drained run writes two. Since item 051 the share counts both, 8 an iteration at that host's
-  write time; the gate has not run natively since.
+- **Burst stop.** With 150 tasks the longest gap between observations is still over the 1 s
+  bound: 1135 ms at item 048 and 1041 ms at item 051; at `fc5e330` one iteration took 4236 ms.
+  The gap is not the drains. At the test's transfer budget of 1 MiB/s the agent's own pacing
+  stretches a 150-allocation heartbeat to 420–491 ms inside the loop, so one gap is over the
+  bound before anything drains. Open (see [Item 051](#item-051-reruns-after-report-048s-fixes)).
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
@@ -678,16 +681,36 @@ the length of the run directory's name, which moves its heap layout. The test ho
 not observed, so the cause is not confirmed. One run in Performance under a name of Neutral's
 length would settle it; that run's reruns were used up.
 
-### Item 051: reruns still to run
+### Item 051: reruns after report 048's fixes
 
-Item 051 changed four things that item 048 measured: the draining stop's share per iteration, how
-Yield First reads a quiet device and the owner's own GPU use, the order in which own tasks give
-memory back, and what SC-014's memory fill is measured against. None of these has a native result
-yet. The test host had no disk space on 2026-11-12, so the reruns under "Item 051" in
-`specs/001-contention-modes/native-gates.md` have not run: the burst stop (B1), Yield First on the
-idle GPU with a longer readiness wait at two commits (B2), the GPU memory and RAM fill (B3, C1),
-and the host-wide OOM beside an over-share task that ignores hints (C4). Until they run, these
-changes are covered by tests only, and item 048's results above stand for the code before them.
+Run on 2026-11-13 on the same test host with the commands under "Item 051" in
+`specs/001-contention-modes/native-gates.md`, at `6e3fb89` unless a row names another commit; its
+product code is `3db0c2e`'s. The device's other use was 285 MiB (129 MiB at item 048). No test
+process of either account was left after any run.
+
+| Run | Values | Result |
+|---|---|---|
+| B1, a 150-task burst, then an operator drain and TERM | All 150 ran and every task was released; the drain took 12.3 s (9.3 s at item 048). The longest gap between observations was 1041 ms (1135 ms at item 048), against the 1 s bound. Six gaps were over 1 s: one with all 150 tasks running and nothing draining, two during the drain and three after TERM. A second run, with the agent's control requests timed, had a longest gap of 1074 ms: a heartbeat took 45 ms with no allocation and 420–491 ms with 150 | fail |
+| B2, Yield First on the idle GPU, three comparisons with a 180 s readiness wait, at `8884d80` (the quiet-device fix) | All 18 managed probes were admitted and finished, 37.1–39.3 s after their submission: activity read unknown for 5.5–7.4 s after the preceding busy phase, then GPU memory admission cooled down for 30 s. While the owner's own unmanaged probe was busy, GPU admission read `gpu_yield_first_needs_quiet_device` in every sample | pass |
+| B2 again at `6e3fb89` (with the owner rule) | All 18 managed probes were admitted and finished, 37.3–38.8 s after their submission. While the owner's own unmanaged probe was busy, GPU admission read open in every sample | pass |
+| B3, SC-014's GPU memory fill as restated (capacity 6144 MiB less the 4096 MiB floor and 285 MiB of others' use: 1763 MiB; 1354 MiB less Yield First's margin) | What CedeGrid offered before the last task matched the target to the MiB in both modes. First run: own GPU memory 1724 MiB (97.8%) and 1322 MiB (97.6%), each harness task holding 8 MiB less than it requested. Rerun with tasks that hold their request: 1756 MiB (99.6%) in Performance, 1346 MiB (99.4%) in Yield First | pass on the rerun |
+| C1, SC-014's RAM fill as restated (capacity less the 16 GiB floor, others' use and their peak) | Performance: own RAM 11540 MiB of 11569 (99.7%), with 264 MiB of others' peak kept back. Yield First: 8831 MiB of 8859 (99.7%), less its 2976 MiB margin. Own RAM was constant over each 60 s window | pass |
+| C4 run 2: a host-wide OOM the second account causes, beside a 3 GiB over-share task that ignores hints and six 1 GiB in-share tasks that read them (Performance, Guaranteed) | Own memory was within its share until the second account's growth, 3.5 GiB a second, cut the share from 11.0 GiB to 4.0 GiB in 2.4 s. The over-share task was marked first and alone at +0.9 s. From +1.9 s own memory above the share was more than that task holds, so the next three tasks in victim order were over-share too, were hinted and freed. At +4.0 s the breach was critical: the over-share task was sent TERM and those three were drained. The other three in-share tasks were never stepped. The OOM killer took one process, the second account's allocator, at +35.5 s. Admission reopened 4.4 s later and the four stopped tasks ran again within 1.5 s. No save-progress request was sent | pass for the order; three of six in-share tasks kept their memory |
+| Item 050's rerun: Yield First, 4 CPUs, 16 steady tasks of 250 m, the second account's one-core load for 30 s | 13 tasks admitted, own work 3271 m. Own work was at the contended target in the first interval that shows the load; the target was back 1.0 s after the load stopped and own work 3.0 s after; 210 pause samples (252 at item 049); no drain | pass |
+
+**B1.** The drains are not what fills an iteration. The agent paces its coordinator requests,
+inside its loop, to a tenth of `max_transfer_bytes_per_second`, and the test sets that budget to
+1 MiB/s where the default is 10 MiB/s. A heartbeat for 150 allocations is about 43 KB, which that
+pace stretches by 2.8 ms an allocation to almost one monitor interval; the lease renewals before
+the next sample add to it, and once the agent is stopping it sends a heartbeat every iteration.
+A drain costs a pipe write. Item 051's smaller share of drains an iteration, sized from the
+agent's observation write, therefore changed nothing the gate measures, and this test's stop
+never uses it: an operator drain reaches the supervisors through heartbeat and renewal replies.
+In the same run 20 tasks were still running 8 to 10 s after the drain was asked and ended by
+lease expiry, which the test's count of expired leases, taken before the drain, does not show.
+
+**B2.** The comparison records node reports, whose admission carries the catalog reason. The
+named failed check of item 051 is in the decision's reason only and is not in this evidence.
 
 ### Own-work ratios in the protection runs
 

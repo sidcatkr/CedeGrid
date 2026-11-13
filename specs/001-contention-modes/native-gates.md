@@ -855,10 +855,10 @@ A miss changes no product code here: report its cause from the decision records,
 ## Item 051: reruns after report 048's fixes and the 2026-11-03 answers (T532)
 
 On the authorized test host only, never the shared host, under the user's standing approval and
-item 048's host rules, with `batch-037`'s harness at item 051's last product commit. Not run
-yet: on 2026-11-12 the host's disk was full, and nothing is deleted there without the user's
-word. Each run is alone, with the leftover check after it; runs without the second account
-start from a host-side script under nohup, with no login during them.
+item 048's host rules, with `batch-037`'s harness at item 051's last product commit. Run on
+2026-11-13, after the user allowed old build trees on the host to be deleted; results are in
+`docs/validation.md`, "Item 051". Each run is alone, with the leftover check after it; runs
+without the second account start from a host-side script under nohup, with no login during them.
 
 ```sh
 # B1, the burst stop, after the draining stop's share counts two journal writes (T521).
@@ -870,7 +870,8 @@ TAG=b READINESS=180 nohup bash $H/partb-051.sh <commit of T530> b2 > <log> 2>&1 
 #   each = $py tools/pressure_comparison.py --root $root --output <dir> --mode gpu --gpu-uuid <GPU-UUID> \
 #            --profile own-efficiency --contention-mode yield_first --readiness-seconds 180 --execute
 # B3 and C1, SC-014's memory fill as restated on 2026-11-13. SLACK is what the last fill task
-# leaves, below 1% of the smallest target.
+# leaves, below 1% of the smallest target. A GPU fill task allocates its request less the 72 MiB
+# its CUDA context takes on this device; with 80 MiB less, B3's first run fell 8 MiB a task short.
 SLACK=8 bash $H/partbc-048.sh <commit> b gpufill-performance gpufill-yield_first
 SLACK=8 bash $H/partbc-048.sh <commit> c1 ramfill-performance ramfill-yield_first
 # C4 run 2: the over-share task ignores hints, the in-share tasks read them.
