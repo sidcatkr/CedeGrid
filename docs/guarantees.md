@@ -107,8 +107,9 @@ through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU comput
 time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
 time-slicing: in Neutral, Performance and Aggressive own work is not capped while it holds no
 more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the
-owner's unmanaged ones, E the external busy processes and k their principals over the
-estimate's window. A single-process job always meets it, and on an amount of unknown size it
+owner's unmanaged ones, E the external busy processes and k their principals, each counted while
+it has a sample within the counting window: the last 60 intervals whose per-process samples
+were readable, 30 s at the default interval, own work capped or not. A single-process job always meets it, and on an amount of unknown size it
 holds with at most one own process listed. This rests on the driver giving busy contexts equal
 slices, so MPS, a MIG parent and a device whose MPS or MIG state cannot be read keep the
 measured path, and Yield First is unchanged; each decision records the counts (`time_slice`).
@@ -134,14 +135,20 @@ and at 1000 stays a cap at full duty. Utilization comes in whole percent, and a 
 reading as own work's phases switch is no idle time, so with a zero margin CedeGrid takes device
 time only beyond 1% averaged spare. This path reads no per-process amount for the duty and never
 pauses. The counts are the
-processes sampled busy, so a listed process that stays idle never counts: over the estimate's
-window, whose readings decide which principals are slice-bound even in an interval whose amounts
-are inconsistent, or over the interval while the window has none. Only while the per-process
-samples are unreadable do the listed processes count. Without a window every counted principal
-is slice-bound, and the duty rises only with a utilization reading; on a device last read as
+processes sampled busy within the counting window, and own work's processes also from the
+interval the device first lists them, before their first sample. An own process stops counting
+once 60 intervals with readable samples (30 s at the default interval) pass without a sample for
+it, from its listing or its last sample. So an own task that holds a GPU context without computing
+can hold the other own tasks on that device at d0' beside a slice-bound user for at most that long
+after its listing or an agent restart; no other workload pays. The owner's unmanaged processes and
+other users' processes count only while sampled busy in that window, so an idle one never counts.
+The estimate's readings decide which principals are slice-bound even in an interval whose amounts
+are inconsistent. Only while the per-process samples are unreadable do the listed processes
+count. Without an uncapped interval in the estimate every counted principal is slice-bound, and the duty rises only with a utilization reading; on a device last read as
 time-sliced whose listing is unknown, the cap is the target over the whole device, without a
-pause. Each decision records where its counts came from, the slice-bound principals with their
-readings and thresholds, d0, the duty and its step. On other devices own work at full duty
+pause. Each decision records where its counts came from, for each own process counted whether
+by its listing or by a sample, the slice-bound principals with their readings and thresholds,
+d0, the duty and its step. On other devices own work at full duty
 beside another busy context holds only its slices, so when it holds more than its share a GPU
 compute cap's duty is its target over own work's uncapped share, its amount averaged over at
 least 6 uncapped intervals in which it ran on the device, with windows to measure it opening at
