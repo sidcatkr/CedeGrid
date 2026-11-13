@@ -939,9 +939,10 @@ fn dispatch_drains(
     sent
 }
 
-/// Apply the coordinator's drains. One not sent before takes one of the iteration's `quota`
-/// and waits for a later heartbeat, which asks again, once it is used up (FR-080). Returns
-/// how many were sent for the first time.
+/// Apply the coordinator's drains from a heartbeat reply. A supervisor that has exited has
+/// nothing left to drain and is skipped. One not sent before waits for a later heartbeat, which
+/// asks again, once the iteration's `quota` is used up, and takes one of it only when it reaches
+/// its supervisor (FR-080). Returns how many reached their supervisor for the first time.
 fn apply_coordinator_drains(
     slots: &mut BTreeMap<String, ChildSlot>,
     ids: &[String],
@@ -952,14 +953,17 @@ fn apply_coordinator_drains(
         let Some(slot) = slots.get_mut(id) else {
             continue;
         };
-        if slot.drain_sent_at.is_none() {
-            if *quota == 0 {
-                continue;
-            }
+        if slot.exited {
+            continue;
+        }
+        let first = slot.drain_sent_at.is_none();
+        if first && *quota == 0 {
+            continue;
+        }
+        if drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain)) && first {
             *quota -= 1;
             sent += 1;
         }
-        drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain));
     }
     sent
 }
@@ -2360,6 +2364,102 @@ mod drain_tests {
         ];
         assert_eq!(dispatch_drains(&mut slots, &ids, &stop, true, &mut 1), 1);
         assert_eq!(written.lock().unwrap().len(), 1);
+    }
+
+    /// A writer that counts its lines and fails with the given error kind, or succeeds.
+    struct Counting(
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        Option<std::io::ErrorKind>,
+    );
+    impl Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.1 {
+                Some(kind) => Err(kind.into()),
+                None => Ok(bytes.len()),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn counted_slot(
+        fail: Option<std::io::ErrorKind>,
+    ) -> (ChildSlot, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut slot = slot_with(child, input);
+        slot.sequence = 1;
+        slot.input = Some(Box::new(Counting(writes.clone(), fail)));
+        (slot, writes)
+    }
+
+    /// A coordinator drain is not sent to a slot whose supervisor has exited: nothing is written,
+    /// no share is taken and no drain is recorded for the run (report 051 Decision 2).
+    #[test]
+    fn a_coordinator_drain_skips_a_supervisor_that_exited() {
+        use std::sync::atomic::Ordering;
+        let (mut slot, writes) = counted_slot(None);
+        slot.exited = true;
+        let mut slots = BTreeMap::from([("a".to_string(), slot)]);
+        let mut quota = 1;
+        assert_eq!(
+            apply_coordinator_drains(&mut slots, &["a".to_string()], &mut quota),
+            0
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(quota, 1);
+        assert!(slots["a"].drain_sent_at.is_none());
+        assert!(slots["a"].drain_cause.is_none());
+    }
+
+    /// The stop's deadline names what is left: unanswered reports with every run released do
+    /// not read as retained allocations, and unreleased allocations still say they stay charged.
+    #[test]
+    fn the_stop_deadline_names_what_is_left() {
+        use super::service::stop_uncertain_detail;
+        let reports = stop_uncertain_detail(0, 0, 11, 0);
+        assert!(
+            reports.contains("11 failure reports or results unanswered"),
+            "{reports}"
+        );
+        assert!(!reports.contains("allocation"), "{reports}");
+        let held = stop_uncertain_detail(2, 1, 0, 1);
+        assert!(
+            held.contains("2 allocations not released, which stay charged"),
+            "{held}"
+        );
+        assert!(held.contains("1 supervisor still running"), "{held}");
+        assert!(
+            held.contains("1 publication or preparation in flight"),
+            "{held}"
+        );
+    }
+
+    /// A coordinator drain takes one of the iteration's share only when it reaches its
+    /// supervisor: a closed pipe and a failed write take none (report 051 Decision 2).
+    #[test]
+    fn a_coordinator_drain_takes_a_share_only_when_delivered() {
+        use std::io::ErrorKind;
+        let ids: Vec<String> = ["closed", "failing", "live"].map(String::from).to_vec();
+        let mut slots = BTreeMap::new();
+        for (id, fail) in
+            ids.iter()
+                .zip([Some(ErrorKind::BrokenPipe), Some(ErrorKind::Other), None])
+        {
+            slots.insert(id.clone(), counted_slot(fail).0);
+        }
+        let mut quota = 3;
+        assert_eq!(apply_coordinator_drains(&mut slots, &ids, &mut quota), 1);
+        assert_eq!(quota, 2, "only the delivered drain takes a share");
+        assert!(slots["failing"].drain_unsent);
     }
 
     fn slot_with(child: Child, input: std::process::ChildStdin) -> ChildSlot {

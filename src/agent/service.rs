@@ -228,6 +228,47 @@ pub(super) fn failure_turn(
     lease_turn(sent, elapsed, budget) && (failures < floor || behind.is_zero())
 }
 
+/// What a stop left when its deadline passed, in one sentence.
+pub(super) fn stop_uncertain_detail(
+    unreleased: usize,
+    live: usize,
+    unanswered: usize,
+    in_flight: usize,
+) -> String {
+    let count = |n: usize, one: &str, many: &str, rest: &str| {
+        (n > 0).then(|| format!("{n} {}{rest}", if n == 1 { one } else { many }))
+    };
+    let parts: Vec<String> = [
+        count(
+            unreleased,
+            "allocation",
+            "allocations",
+            " not released, which stay charged until reconciliation",
+        ),
+        count(live, "supervisor", "supervisors", " still running"),
+        count(
+            unanswered,
+            "failure report or result",
+            "failure reports or results",
+            " unanswered, which the next agent sends again",
+        ),
+        count(
+            in_flight,
+            "publication or preparation",
+            "publications or preparations",
+            " in flight",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        "release deadline elapsed".into()
+    } else {
+        format!("release deadline elapsed with {}", parts.join("; "))
+    }
+}
+
 /// Whether a released slot's result pass takes its attempt pin. `failure` is whether the
 /// outcome ends in failure, `None` when it could not be read; `descriptor` whether a result
 /// descriptor is committed, `None` when the head could not be read.
@@ -1978,9 +2019,23 @@ impl AgentLoop<'_> {
                 .filter_map(|slot| slot.drain_sent_at)
                 .fold(stop, Instant::max);
             if last_drain.elapsed() >= Duration::from_millis(limit) {
-                emit(
-                    &serde_json::json!({"event":"stop_uncertain","detail":"release deadline elapsed; retained allocations require reconciliation"}),
-                )?;
+                let unreleased = records
+                    .iter()
+                    .filter(|r| r.phase != ExecutionPhase::Released)
+                    .count();
+                let live = self.slots.values().filter(|slot| !slot.exited).count();
+                let unanswered = self
+                    .slots
+                    .values()
+                    .filter(|slot| slot.exited && !slot.reported)
+                    .count();
+                let detail = stop_uncertain_detail(
+                    unreleased,
+                    live,
+                    unanswered,
+                    self.publications.len() + self.preparations.len(),
+                );
+                emit(&serde_json::json!({"event":"stop_uncertain","detail":detail}))?;
                 return Ok(true);
             }
         }
