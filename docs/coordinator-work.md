@@ -793,8 +793,11 @@ Linux kernel-control evidence, or the 24-hour soak.
 The later real application trial exposed repeated cooperative yields, which do
 not consume the execution-failure budget. This invalidated deriving a hard start
 ceiling from `retry_limit` alone. `LaunchRequest.max_attempts` is now an optional
-positive immutable cap on top-level task attempt reservations, counting yields and
-preparation failures conservatively as well as executions. Coordinator scheduling
+positive immutable cap on a task's attempts, counting yields and preparation failures
+conservatively as well as executions. Two requeues use no attempt: one after a launch
+that was never authorized, since nothing ran (its allocation's detail says "never
+authorized"), and one after an out-of-memory kill that own work did not cause, up to
+three times the cap. Coordinator scheduling
 and the local/remote execution journal enforce it. Exhaustion retains uncertain
 capacity and enters `needs_reconciliation` after release/failure; operator `Retry`
 cannot increase or bypass the declared cap. A new explicitly authorized task is

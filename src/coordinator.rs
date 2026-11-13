@@ -1800,8 +1800,9 @@ impl Coordinator {
                 id,
                 format!(
                     "{detail}{}; execution failures={failures}/{}, consecutive yields={yield_count}, attempt={generation}/{:?}, retry delay={delay}ms",
+                    // No lease went out: the coordinator refused, or the gate never asked again.
                     if refused {
-                        "; refused at the authorization barrier, so no attempt was used"
+                        "; never authorized, so no attempt was used"
                     } else {
                         ""
                     },

@@ -4488,6 +4488,8 @@ fn status_of(
 
 /// A refusal at the authorization barrier is not the task's failure: nothing ran, so a
 /// replay-safe task is requeued without using an attempt, and its status says why (FR-018).
+/// The status says "never authorized": the coordinator knows that no lease went out, not
+/// whether it refused or the launch gate never asked again (item 052).
 #[test]
 fn a_refusal_at_the_barrier_uses_no_attempt() {
     let d = dir();
@@ -4498,9 +4500,11 @@ fn a_refusal_at_the_barrier_uses_no_attempt() {
     let (status, allocations) = status_of(&mut c, 102);
     assert_eq!(status, cedegrid::state::TaskStatus::Queued);
     assert!(
-        allocations.iter().any(|a| a["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("refused at the authorization barrier"))),
+        allocations
+            .iter()
+            .any(|a| a["detail"].as_str().is_some_and(|detail| detail
+                .contains("never authorized, so no attempt was used")
+                && !detail.contains("refused"))),
         "{allocations:?}"
     );
     // The one allowed attempt is still there, and a failure after a grant uses it.
