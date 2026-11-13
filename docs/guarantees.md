@@ -197,9 +197,17 @@ a telemetry failure or a missing observation, and a duty cycle not reported appl
 the steps and escalate after the unknown window. Each device's held-back breakdown says which
 path it took and why. An empty-device pass is not evidence of occupied-device sharing. See [GPU
 operation](coordinator-work.md#gpu-modes).
-A process that joins a frozen leaf, between the check and the write or during the off phase, is
-thawed at once, within 50 ms, and the step moves to the rootless mechanism, which reaches only
-the verified family.
+In Full a restriction (a freeze, a lower `cpu.max` or `cpu.weight`, a `memory.high` cap) is
+written only while the leaf's members are exactly the verified family. A process that joins a
+frozen leaf, between the check and the write or during the off phase, is thawed at once, within
+50 ms, and the step moves to the rootless mechanism, which reaches only the verified family; a
+member list that cannot be read twice in a row counts as changed. Lifting what the supervisor
+wrote needs only its own leaf, whatever its members, and never tightens a control: a drain, the
+leader's exit, a supervisor error and a stop signal return every control it wrote to its launch
+value, and a restore that fails is reported and retried every 50 ms while the supervisor lives.
+A `cpu.max`, `cpu.weight` or `memory.high` cap stays on a leaf a foreign process joined while the
+step holds, until the step changes or ends; lifting it at once is not decided (item 053). A
+supervisor that is killed lifts nothing: its leaf keeps what it wrote.
 
 All process snapshots and attributed allocation usage are trusted observations from
 a collector/registry, not arbitrary workload assertions in the execution path.
