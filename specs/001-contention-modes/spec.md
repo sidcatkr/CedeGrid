@@ -698,6 +698,19 @@ back more.
   as changed. Lifting a held cap while running when an unverified member joins is not decided
   here: it cannot be done without lifting caps on ordinary own processes (item 053 Part B, report
   049 Decision 3).
+- Q: In Yield First, beside a principal that is already admitted, which intervals in which own
+  work does not fit restart the scale-up cooldown? → A: Only those a principal causes: a user
+  became a principal in that interval, or unattributed usage reached the principal window; or an
+  admitted principal's usage, or on CPU unattributed usage already past the window, rose beyond
+  the jitter tolerance since the last interval in which own work fit. Anything else holds
+  admission while it lasts and the count keeps running, whether or not other principals are
+  admitted. An unreadable list restarts it, as before. Give-back and the other modes are
+  unchanged. On RAM, unattributed usage counts from one level, so its "already past the window"
+  half is not settled here (item 053 Part C).
+- Q: What is own work's fair share while the principal list cannot be read? → A: At most the last
+  one computed from a readable list, on each resource; lower when that interval's own computation
+  gives less. The first readable list replaces it. With no earlier readable list the present rule
+  stands (item 053 Part D, report 050 Decision 3).
 
 ## Terms
 
@@ -1194,7 +1207,12 @@ node reports with the expected per-resource values at each step.
   that threshold for `principal_leave_s` (default 60 s). Usage by user IDs below `uid_min` MUST
   count as background external demand: it is subtracted from capacity and never forms a
   principal. CedeGrid's own processes (the agent and supervisors) count toward the CedeGrid
-  account, never toward the unattributed principal.
+  account, never toward the unattributed principal. While the principal list cannot be read
+  (FR-077), users already counted as principals keep their counts, and own work's fair share on
+  each resource MUST NOT exceed the last one computed from a readable list; it is lower when that
+  interval's own computation gives less. On CPU and GPU compute the share kept is the one under
+  contention. The first readable list replaces it. Before any readable list, the present rule
+  applies.
 - **FR-060**: Admission headroom for RAM and GPU memory MUST use the peak of external usage over
   `memory_peak_window_s` (default 300 s), including the memory of quiet GPU contexts. Peaks are
   kept per external process, identified by PID and start time: a live process keeps its peak for
@@ -1652,11 +1670,18 @@ node reports with the expected per-resource values at each step.
   know. Features unsupported by either peer MUST stay off.
 - **FR-033**: Recorded snapshots and policy inputs from 0.2 MUST remain replayable.
 - **FR-034**: Scale-up timing MUST be configured per resource and counted from the time that
-  resource became stable. In Yield First a change that forms a principal restarts that count, as
-  in the other modes, but the owner's unmanaged processes do not, nor does any user's external
-  change that forms no principal: one that stays under `principal_min_percent` or ends within
-  `principal_window_intervals`. Such a change still counts in its share and may hold admission
-  while it lasts, but the count keeps running. Yield First's give-back to other principals is
+  resource became stable. In Yield First an interval in which own work does not fit restarts
+  that count only when a principal is the cause: a user became a principal in that interval, or
+  unattributed usage reached `principal_window_intervals` in it; or the usage of a user that is
+  already a principal, or on CPU of unattributed usage already past the window, has risen by more
+  than the jitter tolerance since the last interval in which own work fit. The tolerance is
+  `noise_tolerance_mib` on RAM, and on CPU the larger of `principal_min_percent` of capacity and
+  the scope's per-interval measurement band. Anything else holds admission while it lasts and
+  the count keeps running, whether or not other principals are present: the owner's unmanaged
+  processes, a change by a user that is not a principal, and unattributed usage shorter than the
+  window. On RAM, unattributed usage counts from its level, so a rise restarts the count in the
+  interval it reaches the window. An unreadable principal list, an unknown measurement or a drain
+  restarts it. Yield First's give-back to other principals is
   unchanged. CPU and RAM use `scale_up_cooldown_ms`, by default the mode's scale-up
   interval: 30 s in Yield First, 10 s in Neutral, and in Performance one monitor interval for CPU
   and GPU compute but 2 s for RAM and GPU memory. GPU memory uses `contention.gpu_memory.scale_up_cooldown_ms`, else a
