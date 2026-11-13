@@ -360,11 +360,18 @@ CPU is never capped below its request, by the policy or by its supervisor.
 CPU and RAM each wait for their own cooldown, counted from the time each became stable:
 `contention.cpu.scale_up_cooldown_ms` and `contention.ram.scale_up_cooldown_ms`. Unset,
 each is its mode's scale-up interval: 30 s in Yield First, 10 s in Neutral, and in
-Performance one monitor interval for CPU and 2 s for RAM. In Yield First a change that forms a
-principal restarts that count, as in the other modes; the owner's unmanaged processes, and any
-other user's change that stays under `principal_min_percent` or ends within
-`principal_window_intervals`, do not. Such a change still counts in its share and holds admission
-through the headroom while it lasts, and an unreadable principal list restarts the count. Each resource's admission opens on its own, and placement needs every
+Performance one monitor interval for CPU and 2 s for RAM. In Yield First an interval in which own
+work does not fit restarts that count only when a principal is the cause: a user became a
+principal in it, or unattributed usage reached `principal_window_intervals`; or the principals
+already admitted rose together, or on CPU unattributed usage already past the window rose, by more
+than `noise_tolerance_mib` on RAM or, on CPU, the larger of `principal_min_percent` of capacity and
+the per-interval measurement band, since the last interval in which own work fit. Anything else
+does not, whether or not other principals are admitted: the owner's unmanaged processes, a change
+by a user that is not a principal, and unattributed usage shorter than the window. Such a change
+still counts in its share and holds admission through the headroom while it lasts, and an
+unreadable principal list restarts the count. A process that starts and ends between two samples
+is in no user's usage, so on a host that hides other accounts' processes, where their usage is
+unattributed and past the window, an owner's login can still restart the count on CPU. Each resource's admission opens on its own, and placement needs every
 requested resource open; every launch reserves CPU and RAM. Own work blocks admission on a
 resource (`admission_own_work_yielding`) only while it is being reclaimed there: while it
 holds more than its target, or a step is still moving down. A cap or hint that holds at its
