@@ -852,6 +852,57 @@ Gates:
 A miss changes no product code here: report its cause from the decision records, with a fix under
 "Decisions needed", marking which fixes would change a mode's semantics.
 
+## Item 051: reruns after report 048's fixes and the 2026-11-03 answers (T532)
+
+On the authorized test host only, never the shared host, under the user's standing approval and
+item 048's host rules, with `batch-037`'s harness at item 051's last product commit. Not run
+yet: on 2026-11-12 the host's disk was full, and nothing is deleted there without the user's
+word. Each run is alone, with the leftover check after it; runs without the second account
+start from a host-side script under nohup, with no login during them.
+
+```sh
+# B1, the burst stop, after the draining stop's share counts two journal writes (T521).
+nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+# B2, Yield First on the idle GPU, three comparisons with a 180 s readiness wait: once at the
+# commit of T526, once at the commit of T530, so the two effects can be told apart.
+TAG=a READINESS=180 nohup bash $H/partb-051.sh <commit of T526> b2 > <log> 2>&1 &
+TAG=b READINESS=180 nohup bash $H/partb-051.sh <commit of T530> b2 > <log> 2>&1 &
+#   each = $py tools/pressure_comparison.py --root $root --output <dir> --mode gpu --gpu-uuid <GPU-UUID> \
+#            --profile own-efficiency --contention-mode yield_first --readiness-seconds 180 --execute
+# B3 and C1, SC-014's memory fill as restated on 2026-11-13. SLACK is what the last fill task
+# leaves, below 1% of the smallest target.
+SLACK=8 bash $H/partbc-048.sh <commit> b gpufill-performance gpufill-yield_first
+SLACK=8 bash $H/partbc-048.sh <commit> c1 ramfill-performance ramfill-yield_first
+# C4 run 2: the over-share task ignores hints, the in-share tasks read them.
+bash runs-037.sh <commit> <second account uid> c4b
+#   = $py $H/mem_048.py --repo $repo --run oom --mode performance --class guaranteed \
+#       --over-no-sdk --in-sdk --trigger /tmp/cedegrid-048-<name>.json --output <dir>
+```
+
+Gates:
+
+- **B1.** As item 048's: every task drained or released, and no gap between observations over
+  1 s. Report the drain's duration, its longest iteration and the drains per iteration, against
+  9.3 s and 1.135 s at `9c01943`.
+- **B2.** Each of the three managed probes is admitted and finishes while nothing but the
+  greeter's context is on the device. Report, per comparison, the time from the probe's
+  submission to its admission, the reason codes per interval and the named failed check wherever
+  activity reads unknown (T525). At T526's commit a device the collector found quiet admits
+  without waiting for a driver sample; the 30 s GPU memory cooldown after the compute admission
+  opens is expected and is reported apart.
+- **B3 and C1.** Own GPU memory and own RAM within 1% of capacity less the floor, less others'
+  use and their peak, and less Yield First's margin in that mode; on the device, others' use
+  includes used memory that no process accounts for. Report the target's terms from the decision
+  records, the fill as charged and as observed, and the harness's slack apart.
+- **C4 run 2.** The over-share task is asked first and alone. Being Guaranteed and deaf to
+  hints, it is drained when the breach window ends or sent TERM when the breach turns critical.
+  The in-share tasks get no hint for its excess and keep their memory, and the task is admitted
+  again once its memory fits. Report the time the floor stays breached, against item 048's run,
+  every step by task, and every process the OOM killer took.
+
+A miss changes no product code here: report its cause from the decision records, with a fix under
+"Decisions needed".
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

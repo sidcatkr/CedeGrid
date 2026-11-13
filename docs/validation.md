@@ -678,6 +678,17 @@ the length of the run directory's name, which moves its heap layout. The test ho
 not observed, so the cause is not confirmed. One run in Performance under a name of Neutral's
 length would settle it; that run's reruns were used up.
 
+### Item 051: reruns still to run
+
+Item 051 changed four things that item 048 measured: the draining stop's share per iteration, how
+Yield First reads a quiet device and the owner's own GPU use, the order in which own tasks give
+memory back, and what SC-014's memory fill is measured against. None of these has a native result
+yet. The test host had no disk space on 2026-11-12, so the reruns under "Item 051" in
+`specs/001-contention-modes/native-gates.md` have not run: the burst stop (B1), Yield First on the
+idle GPU with a longer readiness wait at two commits (B2), the GPU memory and RAM fill (B3, C1),
+and the host-wide OOM beside an over-share task that ignores hints (C4). Until they run, these
+changes are covered by tests only, and item 048's results above stand for the code before them.
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
