@@ -857,10 +857,12 @@ impl Drop for ChildSlot {
     }
 }
 fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
-    let input = slot
-        .input
-        .as_mut()
-        .context("supervisor control pipe closed")?;
+    let input = slot.input.as_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "supervisor control pipe closed",
+        )
+    })?;
     // One write for the whole line: the pipe is unbuffered (EFF-4).
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
@@ -978,9 +980,19 @@ fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) -> 
 }
 
 /// Record whether a drain or terminate reached its supervisor. A closed pipe means the
-/// supervisor is gone or already handles agent loss; any other failure leaves decided work
-/// running, so the policy's drains are sent again until one lands (AGT-16).
+/// supervisor is gone or already handles agent loss, so that drain is left alone: not sent
+/// again and not reported. Any other failure leaves decided work running, so the policy's
+/// drains are sent again until one lands (AGT-16).
 fn note_drain_send(slot: &mut ChildSlot, sent: Result<()>) -> bool {
+    let closed = sent.as_ref().err().is_some_and(|error| {
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+    });
+    if closed {
+        slot.drain_unsent = false;
+        return false;
+    }
     if let Err(error) = &sent
         && !slot.drain_unsent
     {
@@ -2214,6 +2226,72 @@ mod drain_tests {
         .unwrap();
         let writes = writes.lock().unwrap();
         assert_eq!(writes.len(), 1, "{writes:?}");
+    }
+
+    /// A drain to a closed pipe is left alone: the supervisor is gone or handles agent loss
+    /// itself, so nothing is sent again and no failed send is reported (AGT-16, item 052; item
+    /// 051's burst reported 40 such drains).
+    #[test]
+    fn a_drain_to_a_closed_pipe_is_not_sent_again() {
+        use crate::contention::{ResourceKey, YieldCause, YieldStep};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Closed(Arc<AtomicUsize>);
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut slot = slot_with(child, input);
+        slot.sequence = 1;
+        slot.assignment.request.class = AllocationClass::Opportunistic;
+        slot.input = Some(Box::new(Closed(writes.clone())));
+        let ids = vec!["a".to_string()];
+        let mut slots = BTreeMap::from([("a".to_string(), slot)]);
+        let drain = [crate::model::YieldAction {
+            allocation_id: "a".into(),
+            resource: ResourceKey::Ram,
+            step: YieldStep::Drain,
+            target: None,
+            cause: YieldCause::FloorBreach,
+            code: "yield_step_drain".into(),
+            deadline_ms: None,
+            duty: None,
+        }];
+        // In a draining stop it takes none of the iteration's share either.
+        let mut quota = 1;
+        assert_eq!(
+            dispatch_drains(&mut slots, &ids, &drain, true, &mut quota),
+            0
+        );
+        assert_eq!(quota, 1);
+        assert!(slots["a"].drain_sent_at.is_some(), "the drain is decided");
+        assert!(!slots["a"].drain_unsent, "nothing is left to send");
+        assert_eq!(
+            dispatch_drains(&mut slots, &ids, &drain, true, &mut quota),
+            0
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "not sent again");
+        // The same without a pipe at all.
+        slots.get_mut("a").unwrap().input = None;
+        slots.get_mut("a").unwrap().drain_sent_at = None;
+        assert_eq!(
+            dispatch_drains(&mut slots, &ids, &drain, true, &mut quota),
+            0
+        );
+        assert!(!slots["a"].drain_unsent);
     }
 
     /// A policy drain whose send failed is sent again on the next pass, as what the policy
