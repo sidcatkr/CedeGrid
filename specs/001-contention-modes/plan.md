@@ -1015,8 +1015,8 @@ macOS. No NEEDS CLARIFICATION remains.
      report, and no drain because of it.
    - Reconciliation checks a NeedsReconciliation record's GPU release with one NVML read per
      heartbeat, never a sleep loop, and backs off to every 10th heartbeat after 3 checks.
-   - Each coordinator RPC in the loop runs under `tokio::time::timeout` of half the monitor
-     interval; on timeout the iteration goes on to sampling and yielding and the request is
+   - Each coordinator RPC in the loop runs under `tokio::time::timeout` of one monitor
+     interval (corrected at item 054; the code and FR-034 say one); on timeout the iteration goes on to sampling and yielding and the request is
      retried next iteration (lease items are idempotent per item, FR-074).
    - Transient iteration errors (`EPIPE` on stdout, `NotFound` while walking the spool, a
      panicked preparation or publication task, `ENOSPC` on a refusal proof) are reported and
@@ -2205,3 +2205,82 @@ in Tracked and in Full and in Neutral in Tracked, with the time from the second 
 to the first duty; the join run in Full, and a join followed by a cancel if the harness can time it;
 SC-015's shape in Yield First with the second account as a steady principal and owner logins every
 60 s. Part D has no native run: it needs a failed `/proc` read.
+
+## Item 054: the loop without control pacing waits, the over-share ask, save-progress for in-share tasks, the owner's GPU use beside other accounts, and held caps (2026-11-14)
+
+**Input**: spec Session 2026-11-14 (all its answers); FR-016, FR-023, FR-027, FR-034, FR-075,
+FR-078 and FR-080; report 051's Decisions 1 to 7 and report 053's Decisions 1 to 3 as the review
+decided them; the designs and the B1 diagnosis saved with item 054's report.
+
+**Technical Context**: Rust 1.88, no new dependency and no wire change. One config key changes
+meaning for control traffic: `max_transfer_bytes_per_second` no longer slows the agent's loop.
+`GpuComputeContexts` gains an additive field, which is in the snapshot only. Native reruns are
+listed in `native-gates.md`, "Item 054".
+
+**Constitution Check**: all three principles.
+- *Principle I.* Part F keeps a cap while its step holds when a process the verification would
+  refuse enters the leaf: the cap was written to the verified family, CedeGrid writes nothing for
+  the newcomer, thaws a freeze within 50 ms and lifts what it wrote when the step ends. Part A's
+  drain fixes send nothing to an exited supervisor. Nothing new acts on another process.
+- *Principle II.* Part C asks the over-share tasks for their excess only, so no in-share task pays
+  another task's excess, and asks the floor's remaining need by the cost order in the same
+  interval, so Yield First and Neutral still put the floors first. Part D sends save-progress to
+  in-share tasks whoever caused a breach. Part E stops the owner's own GPU use from holding Yield
+  First's admission beside another account's quiet context, while that account's activity holds it
+  as before. Part A keeps heartbeats and renewals on time, so leases are not lost to the agent's
+  own limiter.
+- *Principle III.* Part E keeps a context whose owner or activity is unknown as holding admission.
+  Part A takes the out-of-memory verdict at its first read, so a waiting failure report never reads
+  a later window as the kill's.
+
+**The loop without control pacing waits (R67)**. Every control request today waits twice in
+`request_paced` (`src/agent/client.rs`), inside the loop's budget: heartbeats, lease batches,
+single renewals and authorizations, and failure reports. A control request now books its charge on
+the control lane and takes no wait; the lane's debt is capped at one heartbeat interval. Artifact
+transfer keeps `acquire` and paces as before. Heartbeats and lease batches keep their schedule.
+A failure report goes when the loop's share allows it and either the lane has caught up or fewer
+than the floor went this iteration: 16 a second, 8 at 500 ms, so a node's 256 reports clear inside
+the 20 s a default stop leaves them. A stopping agent heartbeats at its interval, not every
+iteration. The budget is checked by an unpinned read before an attempt is pinned, every read that
+leads to a publication is repeated under the pin, and the out-of-memory verdict is taken at the
+first read (`oom.rs` reads the host's last three samples). A clock seam, `_at(now)` functions and
+`Lanes::wait_at`, makes the limiter testable without a real sleep. Report 051's Decision 2: `df9f4c6`
+is reverted with a new commit; the guarantees' sentence on spreading an operator drain says what
+the code does (such a drain reaches supervisors on renewal replies, unspread);
+`apply_coordinator_drains` sends nothing to an exited slot and takes no share for a slot it fails
+to send to; `stop_uncertain` names what is left. The kept B1 run shows the drain was committed
+late, not reached late: supervisors that read Drain together wait on the journal's SQLite write
+lock under the default busy handler, and "lease expired" there is the coordinator fencing a release
+it had not heard of. This part does not change that path; the native B1 runs decide whether it
+needs one, and if so the report puts it to the review. A failure-report guard after an accepted
+heartbeat is not taken: it is beyond the answers.
+
+**The held-back breakdown (Part B)**. Stopped for a decision. `held_back.noise_tolerance` is the
+GPU memory growth threshold, and the device's unattributed memory is already in external usage. On
+every resource the parts kept from own work add to capacity less others' use less the budget, so
+the item's test cannot pass without a new part, which the item says to stop on. No code.
+
+**The over-share ask (R68)**. In `src/policy/ladder.rs`'s memory pass, `first = min(N, E)` is asked
+of the over-share tasks in their order, as built, and that part is not passed on while their wait
+runs; `rest = N - first` is asked in the same interval by the loop as it was before item 051
+(`14ebea2`), each over-share task counted at what it holds less what it was asked. An over-share
+task asked in both parts gets one step, so the victim plan is split into a pure decision and its
+effects; a decided drain counts all the task holds. Performance does not change, since its cap
+leaves no `rest`. `random::46` goes from caps 0 and 4282 to 1040 and 3242.
+
+**Save-progress for in-share tasks (R69)**. The signal is listed for the in-share tasks on the
+breached resource, per task once per episode, whoever caused the breach. Over-share tasks get their
+hint. The per-resource `save_progress_decided` becomes the set of tasks already asked.
+
+**The owner's GPU use beside other accounts (R70)**. The collector's quiet window counts only other
+accounts' contexts: the owner's PIDs with a readable UID neither break a quiet tick nor restart the
+window. `GpuComputeContexts.others_quiet` says the other accounts' listed contexts, each with a
+readable UID, have been quiet for the window. `contention::gpu_admission`'s owner rule opens when
+the busy contexts that are not own work are all the owner's and the other accounts' are quiet;
+the policy and the launch recheck read it the same way.
+
+**Held caps and the rest (Part F)**. `docs/guarantees.md` states that a cap stays while its step
+holds, without an item number. `follow-ups.md` gains the rows of Parts D and F. The supervisor's
+`watch` call outside Running and its error path's bounded release retry get tests of their own,
+through `tests/managed_supervision.rs`'s injected actuator.
+

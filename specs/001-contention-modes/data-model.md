@@ -571,3 +571,14 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   unattributed usage, at the last interval in which own work fit beside a readable list (FR-034).
 - Policy state per resource key: the last fair share computed from a readable principal list,
   which caps the share while the list cannot be read (FR-059). Reason code `fair_share_held`.
+
+## Item 054 additions
+
+- Control lane: control requests book their charge without waiting; the lane's debt is capped at
+  one heartbeat interval; a failure-report floor of 16 a second (FR-034, FR-080).
+- Ladder: the memory pass's two parts, the excess asked of the over-share tasks and the rest by the
+  cost order, with what each over-share task was asked counted against what it holds (FR-016).
+  Save-progress: the set of tasks already asked in the episode, per resource (FR-075).
+- `GpuComputeContexts.others_quiet`: the other accounts' listed contexts, each with a readable UID,
+  have been quiet for the window. In the snapshot only, not a wire field (FR-027).
+

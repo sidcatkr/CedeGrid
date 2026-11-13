@@ -1163,6 +1163,9 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: a cap on runs draining at once (the cost follows the writes, not the count
   held); feedback on the last iteration's length (it needs a native run to tune, and a fixed count of
   writes is what the journal shows).
+- **Outcome (item 054)**: reverted. The burst it was sized from was an operator drain, which reaches
+  supervisors on renewal replies and never used this share; the iterations it was meant to shorten
+  were slowed by the control lane's pacing (R67).
 
 ## R60. Why GPU activity read unknown after the last busy phase (item 051)
 
@@ -1255,3 +1258,51 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: carry the whole principal list (more state for the same bound); keep the
   as-computed share of an uncontended interval (capacity less everyone's usage, which does not hold
   the admitted users once the CPU saturates).
+
+## R67. The agent's loop and the control lane (item 054)
+
+- **Decision**: a control request books its charge on the control lane and does not wait; the
+  lane's debt is capped at one heartbeat interval. Heartbeats and lease batches keep their
+  schedule; failure reports keep a floor of 16 a second against the lane. Artifacts pace as before.
+- **Rationale**: at 1 MiB/s a heartbeat for 150 allocations took 420–491 ms, about 2.8 ms an
+  allocation, all of it the limiter's wait, and near 156 allocations every heartbeat would be cut at
+  the loop's budget. The reclaim bounds are counted in monitor intervals, so the loop cannot wait on
+  its own limiter. The floor is in requests, not bytes: the deadlines are in time, and a heartbeat's
+  size grows with the node.
+- **Alternatives**: a larger control share (still ties the cadence to a budget the docs let be
+  small); failure reports bounded by the loop's share only (one constant fewer, but the lane then
+  has no say over them at all).
+
+## R68. How much each over-share task is asked for (item 054)
+
+- **Decision**: two parts in the memory pass: the over-share tasks are asked for the excess, the
+  last only for what completes it; the rest of the need is asked in the same interval by the cost
+  order as before item 051, counting each over-share task at what it holds less what it was asked.
+- **Rationale**: item 051 asked the first over-share task for the whole need, so in `random::46`
+  (Yield First, 11482 MiB against a 4282 MiB target) a task holding 1000 MiB of excess was capped to
+  0 while another kept 4282 MiB. The floors still come first in Yield First and Neutral.
+- **Alternatives**: asking the over-share tasks last for the remainder (overrides FR-016's cost
+  order); leaving item 051's single pool (the user's rule says own work does not lose for another
+  task's excess, and the item calls that excess the task's own).
+
+## R69. Who gets the save-progress signal (item 054)
+
+- **Decision**: the in-share tasks on the breached resource, once each per episode, whoever caused
+  the breach; over-share tasks get their hint and, if drained, their drain time.
+- **Rationale**: an in-share task loses nothing by saving; an over-share task is being asked for
+  memory, which the hint already says.
+- **Alternatives**: per resource once per episode (a task in share later in the episode would get
+  nothing); only for breaches others caused (FR-075 as before; the review's error).
+
+## R70. The owner's GPU use and other accounts' quiet window (item 054)
+
+- **Decision**: the collector's quiet window counts other accounts' contexts only; a context whose
+  UID cannot be read stays in it. The owner rule opens Yield First's GPU admission when the busy
+  non-own contexts are all the owner's and the other accounts' contexts have been quiet for the
+  window.
+- **Rationale**: the owner's activity restarted the device's one quiet window, so another account's
+  idle context could never read quiet while the owner computed, and the owner's use held admission
+  on any shared device, against the user's answer of 2026-11-03.
+- **Alternatives**: a per-context quiet count in the policy (duplicates the collector's window);
+  ignoring other accounts' idle contexts (they can start computing at any time; FR-027 keeps them).
+
