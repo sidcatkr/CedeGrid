@@ -191,38 +191,25 @@ struct GpuDemand {
     /// Whether the device was last read as time-sliced, for an interval whose listing is
     /// unknown (FR-021, Q29).
     last_time_sliced: bool,
+    /// Each listed context's readable intervals since its first listing or last sample, for the
+    /// time-slice rule's counts (FR-021, item 053).
+    seen: BTreeMap<u32, SeenContext>,
 }
 
-/// The busy contexts over some intervals' samples: own work's still listed as own, and the
-/// external ones still listed, UIDs below `uid_min` left out, grouped into principals (FR-021, Q22,
-/// Q33). None without an interval whose samples were read.
-fn count_contexts<'a>(
-    intervals: impl IntoIterator<Item = &'a SampledContexts>,
-    own_listed: &BTreeSet<u32>,
-    external_listed: &BTreeSet<u32>,
-    uid_min: u32,
-) -> Option<(u32, BTreeMap<Option<u32>, u32>)> {
-    let (mut known, mut own, mut external) = (
-        false,
-        BTreeSet::<u32>::new(),
-        BTreeMap::<u32, Option<u32>>::new(),
-    );
-    for contexts in intervals {
-        known = true;
-        own.extend(contexts.own.intersection(own_listed));
-        for (pid, uid) in &contexts.external {
-            if external_listed.contains(pid) && uid.is_none_or(|uid| uid >= uid_min) {
-                external.insert(*pid, *uid);
-            }
-        }
+/// A context in a device's counts: readable intervals since own work's first listing of it or its
+/// last sample, whether it was ever sampled, and the UID of its last sample (FR-021, item 053).
+#[derive(Debug, Clone, Default)]
+struct SeenContext {
+    quiet: usize,
+    sampled: bool,
+    uid: Option<u32>,
+}
+
+impl SeenContext {
+    /// Whether it counts: within one counting window of its listing or last sample.
+    fn counts(&self) -> bool {
+        self.quiet < GPU_DEMAND_INTERVALS
     }
-    known.then(|| {
-        let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
-        for uid in external.into_values() {
-            *principals.entry(uid).or_default() += 1;
-        }
-        (own.len() as u32, principals)
-    })
 }
 
 /// The time-slice duty's state: the base duty it started from, the duty sent, when it last
@@ -235,22 +222,13 @@ struct SliceDuty {
     utilization: std::collections::VecDeque<u32>,
 }
 
-/// One uncapped interval on a device: the external total, each principal UID's, own work's
-/// amount where it ran there, and the busy contexts sampled (FR-021, Q19, Q20, Q22).
+/// One uncapped interval on a device: the external total, each principal UID's and own work's
+/// amount where it ran there (FR-021, Q19, Q20).
 #[derive(Debug, Clone, Default)]
 struct UncappedInterval {
     external: u64,
     by_uid: BTreeMap<u32, u64>,
     own: Option<u64>,
-    contexts: Option<SampledContexts>,
-}
-
-/// An interval's busy contexts: own work's and the owner's unmanaged ones, and each external
-/// one with its UID when readable (FR-021, Q22).
-#[derive(Debug, Clone, Default)]
-struct SampledContexts {
-    own: BTreeSet<u32>,
-    external: BTreeMap<u32, Option<u32>>,
 }
 
 /// A re-measure window: the decisions still to send own work no GPU compute cap on the device,
@@ -292,26 +270,6 @@ impl GpuDemand {
         let count = owns.len() as u64;
         (owns.len() >= crate::contention::GPU_OWN_SHARE_INTERVALS)
             .then(|| (owns.iter().sum::<u64>() + count / 2) / count)
-    }
-
-    /// The time-slice rule's counts over the estimate's window (FR-021, Q22): own work's busy
-    /// contexts and the external ones still listed, UIDs below `uid_min` left out, and the
-    /// external principals among them, a PID whose UID cannot be read standing for the
-    /// unattributed principal. None before an interval with its contexts known.
-    fn contexts(
-        &self,
-        own_listed: &BTreeSet<u32>,
-        external_listed: &BTreeSet<u32>,
-        uid_min: u32,
-    ) -> Option<(u32, BTreeMap<Option<u32>, u32>)> {
-        count_contexts(
-            self.uncapped
-                .iter()
-                .filter_map(|entry| entry.contexts.as_ref()),
-            own_listed,
-            external_listed,
-            uid_min,
-        )
     }
 }
 

@@ -6189,6 +6189,130 @@ mod gpu_demand {
         }
     }
 
+    /// Replays one recorded window with its recorded contexts through the policy, open loop
+    /// (item 053): `CEDEGRID_TIME_SLICE_REPLAY` names a run folder with `gpu-replay.json` and
+    /// `gpu-trace.json`, `CEDEGRID_TIME_SLICE_WINDOW` the window's index (5 for the Full run, 3
+    /// for the Tracked one). The run's `alone` window feeds the estimate first; then two own
+    /// allocations run in Performance. From the first decision whose device lists both own
+    /// processes, m reads 2 and own work gets the time-slice duty, whether the processes were
+    /// sampled yet or the estimate's feed is shut (FR-021).
+    #[test]
+    #[ignore = "replay: needs CEDEGRID_TIME_SLICE_REPLAY"]
+    fn replay_time_slice_counts() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("CEDEGRID_TIME_SLICE_REPLAY")
+                .expect("CEDEGRID_TIME_SLICE_REPLAY names a run folder"),
+        );
+        let index: usize = std::env::var("CEDEGRID_TIME_SLICE_WINDOW")
+            .expect("CEDEGRID_TIME_SLICE_WINDOW names a window")
+            .parse()
+            .unwrap();
+        let read = |name: &str| -> Vec<serde_json::Value> {
+            serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+        };
+        let (replay, trace) = (read("gpu-replay.json"), read("gpu-trace.json"));
+        let snapshots = |window: &serde_json::Value| -> Vec<GpuSnapshot> {
+            serde_json::from_value(window["snapshots"].clone()).unwrap()
+        };
+        let alone = replay
+            .iter()
+            .position(|window| window["name"] == "alone")
+            .expect("an alone window");
+        let config = mode_config(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        let mut now = 0;
+        let feed = |gpu: &GpuSnapshot, observation: &serde_json::Value| {
+            let mut snap = snapshot(1000);
+            snap.gpu_inventory = CapabilityStatus::Available;
+            if let Some(observation) = &gpu.observation {
+                snap.observed_at_unix_ms = observation.observed_at_unix_ms;
+            }
+            let mut principals = vec![PrincipalUsage {
+                uid: Some(1000),
+                is_owner: true,
+                ..PrincipalUsage::default()
+            }];
+            for entry in observation["principals"].as_array().into_iter().flatten() {
+                let uid = entry[0].as_u64().map(|uid| uid as u32);
+                let milli = entry[1]
+                    .as_object()
+                    .and_then(|m| m.values().next())
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if uid == Some(1000) {
+                    continue;
+                }
+                principals.push(PrincipalUsage {
+                    uid,
+                    gpu_compute_milli: BTreeMap::from([(gpu.uuid.clone(), milli)]),
+                    ..PrincipalUsage::default()
+                });
+            }
+            snap.principals = Some(principals);
+            snap.gpus = vec![gpu.clone()];
+            snap
+        };
+        let observations = |i: usize| trace[i]["observations"].as_array().unwrap().clone();
+        for (gpu, observation) in snapshots(&replay[alone]).iter().zip(observations(alone)) {
+            let snap = feed(gpu, &observation);
+            engine
+                .evaluate(&config, &snap, &PolicyInput::default(), now)
+                .unwrap();
+            now += INTERVAL;
+        }
+        let gpus = snapshots(&replay[index]);
+        let uuid = gpus[0].uuid.clone();
+        let allocations: Vec<Allocation> = ["probe-1", "probe-2"]
+            .iter()
+            .map(|id| {
+                let mut allocation = job(None);
+                allocation.id = (*id).into();
+                allocation.requested.gpu_memory_mib = BTreeMap::from([(uuid.clone(), 1000)]);
+                let mut observed = allocation.requested.clone();
+                observed.gpu_memory_mib = BTreeMap::from([(uuid.clone(), 100)]);
+                allocation.observed = Some(observed);
+                allocation
+            })
+            .collect();
+        let input = PolicyInput {
+            allocations,
+            ..PolicyInput::default()
+        };
+        let key = ResourceKey::GpuCompute(uuid.clone());
+        let (mut both, mut two, mut capped_shut, mut first_duty) = (None, 0, 0, None);
+        let total = gpus.len();
+        for (i, (gpu, observation)) in gpus.iter().zip(observations(index)).enumerate() {
+            let listed = gpu.compute_contexts.as_ref().map_or(0, |c| c.own.len());
+            let snap = feed(gpu, &observation);
+            let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            now += INTERVAL;
+            let status = &decision.resources[&key];
+            let slice = status.time_slice.clone().expect("a time-sliced device");
+            let shut = !status.gpu_demand.clone().unwrap_or_default().uncapped;
+            if listed >= 2 {
+                both.get_or_insert(i);
+                assert_eq!(slice.own, 2, "decision {i}: {slice:?}");
+                two += 1;
+                capped_shut += usize::from(shut);
+            }
+            if first_duty.is_none()
+                && decision
+                    .actions
+                    .iter()
+                    .any(|a| a.resource == key && a.step == YieldStep::Cap)
+            {
+                first_duty = Some(i);
+            }
+        }
+        println!(
+            "replay window {index}: both own processes listed from decision {both:?}; m = 2 in {two} of {total} decisions, {capped_shut} of them with the feed shut; first duty at {first_duty:?}"
+        );
+        assert_eq!(
+            first_duty, both,
+            "the duty goes out from the first decision listing both"
+        );
+    }
+
     /// T368's Performance saturating run (036's evidence): the probe's reading per interval beside
     /// the saturating user without CedeGrid, 419 on average. Its slices come in whole samples, so
     /// one interval reads 0 and the next 990 at the same share.
@@ -6626,6 +6750,126 @@ mod gpu_demand {
                 .time_slice
                 .clone()
                 .expect("a time-sliced device records the rule")
+        }
+
+        /// Own process 101 is listed from the first own interval but never sampled. It counts by
+        /// its listing from that interval, so m = 2 at once and the other user gets its fair share
+        /// (Principles II and III), for one counting window of readable intervals; then it stops
+        /// counting, the rule holds and the cap ends, as for a principal that leaves (FR-021, item
+        /// 053).
+        #[test]
+        fn a_listed_own_process_counts_from_its_listing_and_stops_after_one_window() {
+            use cedegrid::model::{CountedBy, OwnCounted};
+            let unsampled = |mut snap: Snapshot| {
+                if let Some(contexts) = snap.gpus[0].compute_contexts.as_mut() {
+                    contexts.sampled.retain(|(pid, _)| *pid != OWN_PIDS[1]);
+                }
+                snap
+            };
+            let run = saturating_with(ContentionMode::Performance, None, &|_| 2, 1, 80, &unsampled);
+            for (i, (decision, _)) in run.iter().enumerate() {
+                let slice = slice_of(decision);
+                if i < 60 {
+                    assert_eq!(slice.own, 2, "interval {i}");
+                    assert!(!slice.holds, "interval {i}");
+                    assert_eq!(
+                        slice.own_counted,
+                        [
+                            OwnCounted {
+                                pid: OWN_PIDS[0],
+                                by: CountedBy::Sample
+                            },
+                            OwnCounted {
+                                pid: OWN_PIDS[1],
+                                by: CountedBy::Listing
+                            },
+                        ],
+                        "interval {i}"
+                    );
+                    assert!(!gpu_steps(decision).is_empty(), "interval {i}: capped");
+                } else {
+                    assert_eq!(slice.own, 1, "interval {i}");
+                    assert!(slice.holds, "interval {i}");
+                    assert!(
+                        gpu_steps(decision).is_empty(),
+                        "interval {i}: {:?}",
+                        gpu_steps(decision)
+                    );
+                }
+                assert!(
+                    gpu_steps(decision)
+                        .iter()
+                        .all(|a| a.step != YieldStep::Pause),
+                    "interval {i}: no pause"
+                );
+            }
+            assert_eq!(
+                slice_of(&run[0].0).duty,
+                Some(692),
+                "d0' from the first own interval"
+            );
+        }
+
+        /// The counts come from every interval whose samples are readable, also while own work is
+        /// capped and no uncapped interval feeds the estimate: a second own process that starts
+        /// computing under the cap counts at once (FR-021, item 053).
+        #[test]
+        fn the_counts_update_while_own_work_is_capped() {
+            let run = saturating_with(
+                ContentionMode::Neutral,
+                Some(ContentionMode::YieldFirst),
+                &|i| if i < 20 { 1 } else { 2 },
+                1,
+                40,
+                &|snap| snap,
+            );
+            for (i, (decision, _)) in run.iter().enumerate().skip(5) {
+                assert!(
+                    !record_of(decision).uncapped,
+                    "interval {i}: the feed is shut"
+                );
+                let want = if i < 20 { 1 } else { 2 };
+                assert_eq!(slice_of(decision).own, want, "interval {i}");
+            }
+        }
+
+        /// A listed context that is not own work, the owner's unmanaged one or another user's,
+        /// counts only while sampled: unchanged (FR-021, item 053).
+        #[test]
+        fn a_listed_context_that_is_not_own_work_counts_only_when_sampled() {
+            use cedegrid::model::{CountedBy, OwnCounted};
+            const OWNER_PID: u32 = 300;
+            const OTHER: u32 = 2002;
+            let listed = |mut snap: Snapshot| {
+                let gpu = &mut snap.gpus[0];
+                gpu.external_process_ids
+                    .as_mut()
+                    .unwrap()
+                    .extend([OWNER_PID, 950]);
+                let contexts = gpu.compute_contexts.as_mut().unwrap();
+                contexts.owner.push(OWNER_PID);
+                contexts.listed.push((950, Some(OTHER)));
+                snap
+            };
+            let run = saturating_with(ContentionMode::Performance, None, &|_| 1, 1, 200, &listed);
+            for (i, (decision, _)) in run.iter().enumerate() {
+                let slice = slice_of(decision);
+                assert_eq!(
+                    (slice.own, slice.external, slice.principals),
+                    (1, Some(1), Some(1)),
+                    "interval {i}"
+                );
+                assert!(slice.holds, "interval {i}");
+                assert!(gpu_steps(decision).is_empty(), "interval {i}");
+                assert_eq!(
+                    slice.own_counted,
+                    [OwnCounted {
+                        pid: OWN_PIDS[0],
+                        by: CountedBy::Sample
+                    }],
+                    "interval {i}"
+                );
+            }
         }
 
         /// One own context beside a saturating user already holds its slice, the fair share, so

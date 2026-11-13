@@ -711,6 +711,25 @@ pub struct TimeSliceRecord {
     /// The device's utilization averaged over the step dwell, in per mille, rounded (Q35).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utilization_milli: Option<u64>,
+    /// Each own process counted in m, and whether by its listing or by a sample (item 053).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_counted: Vec<OwnCounted>,
+}
+
+/// An own process counted in the time-slice rule's m (FR-021, item 053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnCounted {
+    pub pid: u32,
+    pub by: CountedBy,
+}
+
+/// Why an own process counts: the device lists it, or the driver sampled it within the counting
+/// window (FR-021, item 053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountedBy {
+    Listing,
+    Sample,
 }
 
 /// A slice-bound external principal (FR-021, Q27): its UID (none for the unattributed one), its

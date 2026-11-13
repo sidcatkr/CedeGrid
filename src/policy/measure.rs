@@ -1597,6 +1597,7 @@ impl<'a> Interval<'a> {
             }
             demand.pids = Some(pids);
         }
+        note_contexts(&mut demand.seen, gpu);
         let mut running: Vec<String> = self
             .input
             .allocations
@@ -1643,7 +1644,6 @@ impl<'a> Interval<'a> {
                 external,
                 by_uid: amounts,
                 own: own_ran.then_some(own),
-                contexts: sampled_contexts(gpu),
             });
             while demand.uncapped.len() > GPU_DEMAND_INTERVALS {
                 demand.uncapped.pop_front();
@@ -1714,19 +1714,52 @@ impl<'a> Interval<'a> {
             .copied()
             .collect();
         let demand = self.next.gpu_demand.get(&gpu.uuid)?;
-        // Busy contexts while the samples are readable, the window's or else the interval's; the
-        // listing only while they are not (Q33).
-        let window = demand.contexts(&own_listed, &external_listed, uid_min);
-        let interval = count_contexts(
-            sampled_contexts(gpu).as_ref(),
-            &own_listed,
-            &external_listed,
-            uid_min,
-        );
-        let (own, mut principals, source) = match (contexts.samples_readable, window, interval) {
-            (true, Some((own, principals)), _) => (own, principals, SliceSource::Window),
-            (true, None, Some((own, principals))) => (own, principals, SliceSource::Interval),
-            _ => {
+        // While the samples are readable the counts are the contexts within one counting window
+        // of their last sample, and own work's also of their first listing, capped intervals
+        // included; the listing only while the samples are not readable (Q33, item 053).
+        let mut own_counted = Vec::new();
+        let (own, mut principals, source) = if contexts.samples_readable {
+            let seen = |pid: &u32| demand.seen.get(pid).filter(|context| context.counts());
+            for pid in &contexts.own {
+                if let Some(context) = seen(pid) {
+                    own_counted.push(OwnCounted {
+                        pid: *pid,
+                        by: if context.sampled {
+                            CountedBy::Sample
+                        } else {
+                            CountedBy::Listing
+                        },
+                    });
+                }
+            }
+            let owner = contexts
+                .owner
+                .iter()
+                .filter(|pid| !contexts.own.contains(pid))
+                .filter(|pid| seen(pid).is_some_and(|context| context.sampled))
+                .count();
+            let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
+            for pid in &external_listed {
+                if let Some(context) = seen(pid).filter(|context| context.sampled)
+                    && context.uid.is_none_or(|uid| uid >= uid_min)
+                {
+                    *principals.entry(context.uid).or_default() += 1;
+                }
+            }
+            // The estimate's readings decide which principals are slice-bound; without an
+            // uncapped interval every counted one is (Q29).
+            let source = if demand.uncapped.is_empty() {
+                SliceSource::Interval
+            } else {
+                SliceSource::Window
+            };
+            ((own_counted.len() + owner) as u32, principals, source)
+        } else {
+            own_counted.extend(contexts.own.iter().map(|pid| OwnCounted {
+                pid: *pid,
+                by: CountedBy::Listing,
+            }));
+            {
                 let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
                 for (_, uid) in contexts
                     .listed
@@ -1738,6 +1771,7 @@ impl<'a> Interval<'a> {
                 (own_listed.len() as u32, principals, SliceSource::Listing)
             }
         };
+        own_counted.sort_by_key(|counted| counted.pid);
         // The window's readings decide which principals are slice-bound, even in an interval
         // whose amounts are inconsistent; without a window every counted principal is (Q29).
         let read = source == SliceSource::Window;
@@ -1758,6 +1792,7 @@ impl<'a> Interval<'a> {
             principals: counted.then_some(count),
             source: Some(source),
             holds,
+            own_counted,
             ..TimeSliceRecord::default()
         };
         if !holds {
@@ -2266,20 +2301,39 @@ fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
 /// One device utilization reading's quantum, a whole percent, in per mille (FR-021, Q35).
 const UTILIZATION_QUANTUM_MILLI: u64 = 10;
 
-fn sampled_contexts(gpu: &GpuSnapshot) -> Option<SampledContexts> {
-    let contexts = gpu
-        .compute_contexts
-        .as_ref()
-        .filter(|contexts| contexts.samples_readable)?;
-    let mut sampled = SampledContexts::default();
-    for (pid, uid) in &contexts.sampled {
-        if contexts.own.contains(pid) || contexts.owner.contains(pid) {
-            sampled.own.insert(*pid);
-        } else {
-            sampled.external.insert(*pid, *uid);
+/// Advance a device's contexts by one interval (FR-021, item 053): a context no longer listed
+/// goes; with the samples readable each one's quiet count rises, own work's newly listed ones enter
+/// at their listing and every sampled one restarts at its sample. An interval with no listing
+/// changes nothing.
+fn note_contexts(seen: &mut BTreeMap<u32, SeenContext>, gpu: &GpuSnapshot) {
+    let Some(contexts) = gpu.compute_contexts.as_ref() else {
+        return;
+    };
+    if let Some(external) = &gpu.external_process_ids {
+        seen.retain(|pid, _| {
+            contexts.own.contains(pid) || contexts.owner.contains(pid) || external.contains(pid)
+        });
+    }
+    if contexts.samples_readable {
+        for context in seen.values_mut() {
+            context.quiet = context.quiet.saturating_add(1);
         }
     }
-    Some(sampled)
+    for pid in &contexts.own {
+        seen.entry(*pid).or_default();
+    }
+    if contexts.samples_readable {
+        for (pid, uid) in &contexts.sampled {
+            seen.insert(
+                *pid,
+                SeenContext {
+                    quiet: 0,
+                    sampled: true,
+                    uid: *uid,
+                },
+            );
+        }
+    }
 }
 
 /// The owner's unmanaged GPU compute on a device this interval: its own-account processes that
