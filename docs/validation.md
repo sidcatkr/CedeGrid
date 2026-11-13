@@ -119,11 +119,13 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   name length. At `743312b` Performance still read 0.945 on the same day, with the same
   environment and argument sizes, and the same build with the later commit's two Python SDK
   files read 0.988. So the extra CPU came from SDK code that runs inside the managed probe, its
-  drain check, which item 050 changed. Item 055 named the mechanism: with the allocator's
-  per-thread cache off in both probes, the same `743312b` build read 1.004. The probe now times
-  its even against its odd units before it is ready and refuses a biased window, but at
-  `7cc09c8` Neutral read 0.929 with no window refused: the managed probe's units cost 9% more,
-  evenly, which that check does not see. Open (see
+  drain check, which item 050 changed. At item 055 the same `743312b` build read 1.004 with the
+  allocator's per-thread cache off, but also 0.995 with it on and item 055's probe, so that run
+  has no control and the mechanism is not shown. The probe now times its even against its odd
+  units before it is ready and refuses a biased window, but at `7cc09c8` Neutral read 0.929 with
+  no window refused: in the window the managed probe's units alternated (the other user's
+  latencies show its bursts at 162 and 191 µs in strict turn), which a check made once before
+  `ready.json` does not see. Open (see
   [Item 055](#item-055-the-same-core-probe-checks-itself-and-cedegrids-own-cost-inside-a-task)).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
@@ -799,15 +801,15 @@ matched probe's rate, that is 0.007% and 0.014% of one core. Both tests fail at 
 
 Run on 2026-11-13 on the test host, each run item 029's run 3 (a saturating other user on the
 probe's core, two unmanaged and two managed windows of 40 s), alone, with the leftover check
-after it. No CPU step was taken in any window. CPU per unit is the probe's user ticks over its
-units.
+after it. No CPU step was taken in any window. CPU per unit is the probe's user ticks over the
+units in the span they were sampled (about 34 s of each 40 s window).
 
 | Run | Commit | Own throughput, managed against unmanaged | Probe CPU per unit, unmanaged and managed | Even/odd self-check | Result |
 |---|---|---|---|---|---|
-| Performance, the allocator's per-thread cache off in both probes (`GLIBC_TUNABLES=glibc.malloc.tcache_count=0`), item 055's probe only measuring | `743312b` | 1.004 (0.945 at item 052 with the cache on) | 136.7 and 136.3–137.3 µs | 1.000–1.002 in every window | the mechanism: the per-thread cache |
-| Performance, item 055's probe | `743312b` | 0.995 | 136.4–137.1 and 136.4–136.8 µs | 1.001–1.008, no block held, none refused | no loss, nothing refused |
-| Performance, the commit's probe | `7cc09c8` | 1.004 | 136.3–136.4 and 135.6–136.4 µs | the unmanaged probe held one block in both windows (1.012–1.013 to 1.000–1.002) | pass |
-| Neutral, the commit's probe | `7cc09c8` | 0.929 | 136.5–137.6 and 148.6–148.7 µs | 1.001–1.002, none refused | fail: the managed units cost 9% more, not alternately |
+| Performance, the allocator's per-thread cache off in both probes (`GLIBC_TUNABLES=glibc.malloc.tcache_count=0`), item 055's probe only measuring | `743312b` | 1.004 (0.945 at item 052 with the cache on and the old probe) | 161.3–161.4 and 161.8–162.1 µs | 1.000–1.002 in every window | no loss; no control (next row) |
+| Performance, item 055's probe, the cache on | `743312b` | 0.995 | 161.0–161.9 and 161.0–161.5 µs | 1.001–1.008, no block held, none refused | no loss: the new probe alone moved it |
+| Performance, the commit's probe | `7cc09c8` | 1.004 | 160.9–161.1 and 161.0–161.1 µs | the unmanaged probe held one block in both windows (1.012–1.013 to 1.000–1.002) | pass |
+| Neutral, the commit's probe | `7cc09c8` | 0.929 | 161.1–162.5 and 175.4–175.5 µs | 1.001–1.002 before `ready.json`, none refused | fail: alternating units in the window, not caught |
 
 ### Own-work ratios in the protection runs
 
