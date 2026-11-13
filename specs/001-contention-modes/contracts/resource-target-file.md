@@ -56,6 +56,8 @@ fsync, and renaming it over the target.
   (the mode's margin of capacity on CPU; on memory a mechanism constant of 20%, 5% or 2% of
   capacity per mode, since Neutral and Performance keep only the floor there), and only beyond
   one threshold.
+- **Null amounts.** A reader takes an amount given as `null`, in `targets` or in `allowance`,
+  as unset, as if the key were absent. The supervisor never writes one (fixture case TF-08).
 - **Save progress (item 029, FR-075).** Optional `save_progress_sequence`, published also without
   a target: it rises once per floor-breach episode that others' growth caused while the
   allocation's memory was within its fair share. A rise asks the worker to save its progress now;

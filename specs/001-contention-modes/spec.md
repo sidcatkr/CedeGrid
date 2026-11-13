@@ -679,6 +679,9 @@ back more.
   admission. It still counts in the owner's own share, as on CPU since 2026-11-02. Other accounts'
   GPU use keeps today's rule, and Yield First still yields to it. Activity that is unknown is
   still never quiet (the user's decision of 2026-11-03, item 051).
+- Q: How does a reader take an amount that is given as null in a resource-target file's
+  `targets` or `allowance`? → A: As unset, as if the key were absent. The supervisor never
+  writes a null amount (item 052; `contracts/resource-target-file.md`, fixture case TF-08).
 
 ## Terms
 
