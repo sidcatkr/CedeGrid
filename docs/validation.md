@@ -108,8 +108,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   still over the bound, 1805 ms at 1 MiB/s and 1297 ms at the default budget: about 20
   supervisors' journal commits retry in step under SQLite's default busy handler, the agent's
   own journal write waits behind them, and at the default budget 25 leases were fenced and two
-  Released commits waited the full 5 s. Open until both B1 runs pass (see
-  [Item 054](#item-054-the-loop-without-pacing-waits-the-over-share-ask-the-owners-gpu-use)).
+  Released commits waited the full 5 s. Since item 056 every process that writes the node
+  journal retries a locked journal after jittered sleeps of at most 16 ms, and at `1eaa287` both
+  B1 runs pass every gate: the longest gap is 547 ms and 516 ms, 503 ms in the drain, with no
+  lease fenced and no supervisor error (see
+  [Item 056](#item-056-the-journals-lock-wait-and-the-over-share-wait)). Closed.
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
@@ -810,6 +813,25 @@ units in the span they were sampled (about 34 s of each 40 s window).
 | Performance, item 055's probe, the cache on | `743312b` | 0.995 | 161.0–161.9 and 161.0–161.5 µs | 1.001–1.008, no block held, none refused | no loss: the new probe alone moved it |
 | Performance, the commit's probe | `7cc09c8` | 1.004 | 160.9–161.1 and 161.0–161.1 µs | the unmanaged probe held one block in both windows (1.012–1.013 to 1.000–1.002) | pass |
 | Neutral, the commit's probe | `7cc09c8` | 0.929 | 161.1–162.5 and 175.4–175.5 µs | 1.001–1.002 before `ready.json`, none refused | fail: alternating units in the window, not caught |
+
+### Item 056: the journal's lock wait, and the over-share wait
+
+Run on 2026-11-14 on the same test host, with the commands under "Item 056" in
+`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
+any run.
+
+| Run | Commit | Values | Result |
+|---|---|---|---|
+| B1, 150 tasks, an operator drain, then TERM, at the test's 1 MiB/s | `bf29bcc` | 0 of 150 ran: 53 supervisors failed to start their publisher, whose attempt pin found the journal busy within its 50 ms bound | fail; fixed in `1eaa287` |
+| The same at the default 10 MiB/s | `bf29bcc` | 91 supervisors failed the same way | fail |
+| B1 at 1 MiB/s | `1eaa287` | 150 of 150 ran. Longest gap 547 ms before the drain, 503 ms from the drain to TERM, 382 ms after TERM; the drain took 2019 ms (8676 ms at item 054). No lease expired, no supervisor error, no `journal_busy` event | pass |
+| B1 at the default 10 MiB/s | `1eaa287` | 150 of 150 ran. Longest gap 516 ms, 503 ms in the drain, 363 ms after TERM; the drain took 2220 ms (10485 ms at item 054). No lease expired, no supervisor error | pass |
+| C4 run 2, as at item 054 | `1eaa287` | The six in-share tasks got the save-progress signal at 1.5 s; the over-share task was sent TERM at 3.5 s and the next task in victim order drained at 3.5 s. The floor stayed breached until the second account released at about 30 s; the OOM killer took one process, the second account's allocator | pass for the order |
+| C3, the second account's 10 GiB growth breaches the floor, Neutral | `1eaa287` | First run: own RAM fell from 12702 MiB to 2588 MiB in 3.3 s and held there; the floor was restored 5.74 s after the breach. Rerun: from 12701 MiB to 2588 MiB in 4.0 s, the floor restored 2.88 s after the breach (3.1 s at item 048) | pass on the rerun. Both runs ended in the same own state and took the same steps; in the first, about 150 MiB was missing from the host's `MemAvailable` from 2.0 s and came back over 30 s, so the floor read 27 MiB short until a held hint's drain freed 89 MiB at 5.9 s |
+
+The journal's lock waits are written to `supervisor-usage.json` and to the agent's `loop_cost`,
+but the burst test read neither: the attempt directories were gone and no `loop_cost` period
+ended in a 30 s run, so no longest commit wait is recorded for B1.
 
 ### Own-work ratios in the protection runs
 
