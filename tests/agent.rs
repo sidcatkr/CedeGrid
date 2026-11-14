@@ -2656,6 +2656,45 @@ async fn a_drain_reaches_guaranteed_work_while_renewals_are_withheld() {
     eprintln!("the Guaranteed workload stopped {stopped_after:?} after the cancel");
 }
 
+/// Renewals of Opportunistic work withheld behind a locked journal are asked again once the
+/// lock is released and an interval acts on a sample. The lock is released as soon as the
+/// stretch is named, while the task's supervisor still holds its last 8 s grant; released after
+/// that grant ends, the supervisor drains the task and nothing is left to renew (FR-079, R80).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withheld_renewals_are_asked_again_after_the_next_acted_on_sample() {
+    let run = WithheldRenewals::start("returned").await;
+    run.until(8.0).await;
+    let early = run.service.lease_sequence("opportunistic");
+    let end = run.started + Duration::from_secs(16);
+    while run.withheld_events() == 0 && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let withheld = run.service.lease_sequence("opportunistic");
+    let events = run.withheld_events();
+    run.release();
+    let released = Instant::now();
+    let end = released + Duration::from_secs(5);
+    while run.service.lease_sequence("opportunistic") == withheld && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let returned = run.service.lease_sequence("opportunistic");
+    let after = released.elapsed();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let running = run
+        .service
+        .record_of("opportunistic")
+        .is_some_and(|r| r.phase == ExecutionPhase::Running);
+    let (alive, log) = run.finish();
+    assert!(alive, "the agent ended: {log}");
+    assert_eq!(events, 1, "renewals were not withheld once: {log}");
+    assert_eq!(withheld, early, "renewals went on with no sample: {log}");
+    assert!(
+        returned > withheld,
+        "no renewal in the {after:?} after the lock was released: {log}"
+    );
+    assert!(running, "the Opportunistic task was not running: {log}");
+}
+
 /// An interval that ends at the observation write has acted on its sample, so an agent whose
 /// observation write stays locked keeps asking for renewals: an 8 s lease outlived by a 16.5 s
 /// hold is renewed, and the job ends with exit 0, not drained (FR-079, R80).
