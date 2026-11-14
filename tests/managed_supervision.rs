@@ -757,6 +757,8 @@ struct InjectJournal {
 thread_local! {
     /// Stage 4: how many child release transitions still fail.
     static RELEASE_FAILURES: std::cell::Cell<u8> = const { std::cell::Cell::new(2) };
+    /// Stage 5: how many child Running and Draining transitions are still refused as busy.
+    static BUSY_RECORDS: std::cell::Cell<u8> = const { std::cell::Cell::new(6) };
 }
 impl ExecutionJournal for InjectJournal {
     fn reserve(&self, r: &LaunchRequest, c: &Resources) -> anyhow::Result<ExecutionRecord> {
@@ -823,6 +825,18 @@ impl ExecutionJournal for InjectJournal {
             !(self.stage == 2 && p == ManagedChildPhase::Authorized),
             "injected child authorization persistence failure"
         );
+        if self.stage == 5 && matches!(p, ManagedChildPhase::Running | ManagedChildPhase::Draining)
+        {
+            let left = BUSY_RECORDS.with(|left| left.get());
+            if left > 0 {
+                BUSY_RECORDS.with(|busy| busy.set(left - 1));
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    None,
+                )
+                .into());
+            }
+        }
         if self.stage == 4 && p == ManagedChildPhase::Released {
             let left = RELEASE_FAILURES.with(|left| left.get());
             if left > 0 {
@@ -867,6 +881,61 @@ except RuntimeError: pass
         assert!(journal.store.execution_allocations().unwrap().is_empty());
     }
 }
+/// A mediated child whose Running and Draining records are refused for a locked journal is
+/// never killed for it: it runs, and once stopped it ends by its drain file, not by a signal
+/// (R84, Principle III).
+#[test]
+fn a_childs_records_refused_for_the_lock_never_kill_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = InjectJournal {
+        store: StateStore::open(&dir.path().join("state")).unwrap(),
+        stage: 5,
+        pause: None,
+    };
+    let request = request(
+        dir.path(),
+        r#"
+import sys,time
+from pathlib import Path
+from cedegrid import spawn_managed
+script = "import os,time\nd=os.environ.get('CEDEGRID_DRAIN_FILE')\nopen('child-ran','w').close()\nwhile not (d and os.path.exists(d)): time.sleep(0.02)\n"
+child=spawn_managed([sys.executable,'-c',script],single_process=True,no_escape=True)
+end=time.monotonic()+5
+while not Path('child-ran').exists() and time.monotonic()<end: time.sleep(0.02)
+time.sleep(0.5)
+child.stop()
+child.wait(timeout=10,poll_interval=.02)
+Path('leader-done').write_text('1')
+"#,
+    );
+    let outcome = supervision::supervise(
+        &request,
+        &request.resources,
+        &SupervisorOptions {
+            drain_timeout_ms: 3_000,
+            term_grace_ms: 1_000,
+            ..options()
+        },
+        &journal,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+    )
+    .unwrap();
+    assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+    assert!(dir.path().join("child-ran").exists(), "the child never ran");
+    assert!(
+        dir.path().join("leader-done").exists(),
+        "the leader did not see the child end"
+    );
+    let child = &journal.store.managed_children("family-attempt").unwrap()[0];
+    assert_eq!(child.phase, ManagedChildPhase::Released, "{child:?}");
+    assert_eq!(
+        (child.exit_code, child.signal),
+        (Some(0), None),
+        "{child:?}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "launched only by the bounded supervisor-loss harness"]

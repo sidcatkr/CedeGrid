@@ -33,6 +33,10 @@ struct MediatedChild {
     capture: Option<OutputCapture>,
     log_dir: Option<PathBuf>,
     exit: Option<(ExitStatus, Instant)>,
+    /// Its Running or Draining record has not landed; it is written from `phase` (R84).
+    owes_record: bool,
+    /// Refusals of that record for a reason other than the lock.
+    record_refusals: u32,
 }
 struct ChildServer {
     listener: UnixListener,
@@ -52,6 +56,8 @@ struct ChildServer {
     served: bool,
     /// The leader's private directory, whose current target a new child copies.
     leader_directory: Option<PathBuf>,
+    /// After a child record was refused for the lock, none is tried before this (R84).
+    records_retry_at: Option<Instant>,
 }
 impl ChildServer {
     fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup, journal: &dyn ExecutionJournal) -> Result<Option<Self>> {
@@ -93,6 +99,7 @@ impl ChildServer {
             publisher, namespace_id, session_id,
             served: false,
             leader_directory: None,
+            records_retry_at: None,
         }))
     }
     fn expose(&self, request: &mut LaunchRequest) {
@@ -167,6 +174,49 @@ impl ChildServer {
         self.children
             .values()
             .all(|c| c.phase == ChildPhase::Released)
+    }
+    /// Write the children's owed Running or Draining records from their current phase, each
+    /// waiting at most `RECORD_WAIT`; after a refusal for the lock none is tried for
+    /// `RECORD_RETRY`, and a record refused four times for another reason is dropped and
+    /// reported. A refusal never stops a child (R84).
+    fn settle_records(&mut self, journal: &dyn ExecutionJournal) {
+        let now = Instant::now();
+        if self.records_retry_at.is_some_and(|at| now < at) {
+            return;
+        }
+        self.records_retry_at = None;
+        for child in self.children.values_mut().filter(|c| c.owes_record) {
+            let phase = child.phase;
+            let detail = match phase {
+                ChildPhase::Running => "EXEC sent after durable child authorization",
+                _ => "Parent allocation or explicit child stop requested drain",
+            };
+            let written = journal.within(RECORD_WAIT, &mut || {
+                journal.transition_managed_child(&child.id, phase, None, None, detail)
+            });
+            match written {
+                Ok(()) => {
+                    child.owes_record = false;
+                    child.record_refusals = 0;
+                }
+                Err(error) if crate::state::journal_busy(&error) => {
+                    self.records_retry_at = Some(now + RECORD_RETRY);
+                    return;
+                }
+                Err(error) => {
+                    child.record_refusals += 1;
+                    if child.record_refusals >= JOURNAL_ATTEMPTS {
+                        child.owes_record = false;
+                        child.record_refusals = 0;
+                        report(
+                            "journal_unavailable",
+                            &child.id,
+                            format!("{error:#}; the child's record is not written"),
+                        );
+                    }
+                }
+            }
+        }
     }
     fn request_stop(&mut self) {
         for child in self.children.values_mut() {
@@ -410,14 +460,13 @@ impl ChildServer {
                 } else {
                     ChildPhase::NeedsReconciliation
                 };
-                journal.transition_managed_child(
-                    &child.id,
-                    phase,
-                    None,
-                    None,
-                    &format!("Child launch/lifecycle failed: {error:#}; {cleanup:?}"),
-                )?;
+                // Bounded: a locked journal holds this pass and the next comes back (R84).
+                let detail = format!("Child launch/lifecycle failed: {error:#}; {cleanup:?}");
+                journal.within(RECORD_WAIT, &mut || {
+                    journal.transition_managed_child(&child.id, phase, None, None, &detail)
+                })?;
                 child.phase = phase;
+                child.owes_record = false;
                 if child.phase != ChildPhase::Released {
                     return Err(error);
                 }
@@ -496,6 +545,8 @@ impl ChildServer {
             capture: None,
             log_dir,
             exit: None,
+            owes_record: false,
+            record_refusals: 0,
         })
     }
     fn cleanup(
@@ -680,14 +731,22 @@ impl MediatedChild {
             {
                 report("log_capture_failed", &self.id, error);
             }
-            journal.transition_managed_child(
-                &self.id,
-                ChildPhase::Released,
-                status.code(),
-                status.signal(),
-                "Owned mediated child reaped and GPU absence confirmed",
-            )?;
+            // A locked journal means "not yet": the next pass tries again (R84).
+            match journal.within(RECORD_WAIT, &mut || {
+                journal.transition_managed_child(
+                    &self.id,
+                    ChildPhase::Released,
+                    status.code(),
+                    status.signal(),
+                    "Owned mediated child reaped and GPU absence confirmed",
+                )
+            }) {
+                Ok(()) => {}
+                Err(error) if crate::state::journal_busy(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            }
             self.phase = ChildPhase::Released;
+            self.owes_record = false;
             return Ok(());
         }
         if !accepting {
@@ -855,26 +914,15 @@ impl MediatedChild {
             }
             self.input.take();
             self.output.take();
-            journal.transition_managed_child(
-                &self.id,
-                ChildPhase::Running,
-                None,
-                None,
-                "EXEC sent after durable child authorization",
-            )?;
+            // Recorded after the effect, bounded and retried; a refusal never kills the child.
             self.phase = ChildPhase::Running;
+            self.owes_record = true;
         }
         if let Some(start) = self.stop_at {
             if self.phase == ChildPhase::Running {
                 self.drain.notify()?;
-                journal.transition_managed_child(
-                    &self.id,
-                    ChildPhase::Draining,
-                    None,
-                    None,
-                    "Parent allocation or explicit child stop requested drain",
-                )?;
                 self.phase = ChildPhase::Draining;
+                self.owes_record = true;
             }
             if start.elapsed() >= Duration::from_millis(options.drain_timeout_ms) && !self.term_sent
             {

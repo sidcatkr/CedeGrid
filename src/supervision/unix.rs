@@ -2060,6 +2060,12 @@ pub(super) fn supervise(
             {
                 record_refused(request, &mut lifecycle, elapsed, refused, drains);
             }
+            // The children's records follow, unless the lock was just found held.
+            if let Some(server) = children.as_mut()
+                && outstanding.retry_at().is_none_or(|at| at <= Instant::now())
+            {
+                server.settle_records(journal);
+            }
             // Wait for a control line, the leader's exit or a new SDK connection until the
             // next deadline; a source without an event keeps the short pass.
             let mut fds = Vec::new();
