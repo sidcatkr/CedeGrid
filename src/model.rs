@@ -793,7 +793,8 @@ pub struct HeldBack {
     /// External memory peak above current external usage (admission).
     #[serde(skip_serializing_if = "is_zero")]
     pub peak: u64,
-    /// External GPU memory growth tolerated as noise.
+    /// Never set: the GPU memory noise tolerance is a growth threshold that withholds nothing
+    /// (SC-016). Kept so older readers of the field still parse.
     #[serde(skip_serializing_if = "is_zero")]
     pub noise_tolerance: u64,
     /// Capacity withheld while the measurement is unknown or held.

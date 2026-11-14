@@ -807,6 +807,58 @@ fn an_idle_device_withholds_no_noise_tolerance_from_gpu_memory() {
     );
 }
 
+/// The parts `held_back` keeps from own work add up to capacity less others' use (shown as
+/// `external`, with `unattributed` inside it) less the budget, on GPU memory and on RAM, with
+/// another user and without; the noise tolerance withholds nothing, so it is not a part
+/// (SC-016, item 056).
+#[test]
+fn the_held_back_parts_kept_from_own_work_are_capacity_less_others_use_less_the_budget() {
+    use cedegrid::contention::ResourceKey;
+    for other in [0u64, 3000] {
+        let input = PolicyInput {
+            allocations: vec![allocation(
+                "worker",
+                AllocationPhase::Running,
+                resources(1000, 6000, 6000),
+                Some(resources(500, 5000, 5873)),
+            )],
+            ..PolicyInput::default()
+        };
+        let mut snap = gpu_snapshot();
+        snap.gpus[0].unattributed_memory_mib = Some(127);
+        snap.gpus[0].used_memory_mib = Some(5873 + 127 + other);
+        snap.available_ram_mib = Some(32_000 - 5000 - other);
+        let decision = PolicyEngine::new()
+            .evaluate(&config(), &snap, &input, 0)
+            .unwrap();
+        let budgets = [
+            (
+                ResourceKey::GpuMemory("GPU-test".into()),
+                decision.managed_budget.gpu_memory_mib["GPU-test"],
+            ),
+            (ResourceKey::Ram, decision.managed_budget.ram_mib),
+        ];
+        for (key, budget) in budgets {
+            let status = &decision.resources[&key];
+            let held = status.held_back.clone().unwrap();
+            let kept = held.floor + held.reserve + held.margin + held.ceiling + held.contention;
+            let external = status.external.unwrap();
+            assert_eq!(
+                kept,
+                held.capacity - external - budget,
+                "{key} with {other} MiB of another user's: {held:?}, external {external}"
+            );
+            assert!(
+                held.causes()
+                    .iter()
+                    .all(|(cause, _)| *cause != "noise_tolerance"),
+                "{key}: {held:?}"
+            );
+            assert!(!held.percent.contains_key("noise_tolerance"), "{key}");
+        }
+    }
+}
+
 #[test]
 fn gpu_accounting_does_not_double_subtract_owned_usage() {
     let input = PolicyInput {

@@ -569,7 +569,7 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     (
         "held_back_noise_tolerance",
-        "External GPU memory growth tolerated as noise.",
+        "Never shown: the GPU memory noise tolerance is a growth threshold that withholds nothing.",
     ),
     (
         "held_back_unknown",

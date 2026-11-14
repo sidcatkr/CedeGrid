@@ -607,8 +607,9 @@ impl Interval<'_> {
         held
     }
 
-    /// A device's memory held back: the floor, the noise tolerance, the mode's
-    /// margin, the external peak, and the cooldown or reclaim backoff.
+    /// A device's memory held back: the floor, the mode's margin, the external peak, and the
+    /// cooldown or reclaim backoff. The noise tolerance is a growth threshold that withholds
+    /// nothing, so it is not a part (SC-016).
     fn gpu_memory_held_back(&self, gpu: &GpuSnapshot) -> HeldBack {
         let (config, now) = (self.config, self.now);
         let key = ResourceKey::GpuMemory(gpu.uuid.clone());
@@ -625,11 +626,6 @@ impl Interval<'_> {
             .unwrap_or(0);
         let mut held = HeldBack {
             floor,
-            noise_tolerance: config
-                .contention
-                .thresholds(ResourceKind::GpuMemory)
-                .noise_tolerance_mib
-                .saturating_add(gpu.unattributed_memory_mib.unwrap_or(0)),
             ..HeldBack::default()
         };
         if self

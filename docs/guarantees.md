@@ -610,8 +610,10 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
   negotiate `contention/1` shows `"not negotiated"`.
 - `held_back` gives each cause in the resource's units and, under `percent`, as a percent
   of `capacity`: `floor`, `reserve`, `margin`, `ceiling` and `contention` are kept from own
-  work, `unknown` while a measurement is unknown or held, and `peak`, `noise_tolerance`,
-  `cooldown`, `backoff` and `charge_shortfall` from admission. `ceiling` is what a visible
+  work, `unknown` while a measurement is unknown or held, and `peak`, `cooldown`, `backoff`
+  and `charge_shortfall` from admission. The parts kept from own work add up to capacity less
+  others' use (`external`, which includes `unattributed`) less the budget. The GPU memory noise
+  tolerance is a growth threshold and withholds nothing, so it is not a part. `ceiling` is what a visible
   ancestor CPU limit keeps from the budget beyond the reserve and margin; `doctor` shows it on
   its own line, and it never counts as contention.
 
@@ -710,7 +712,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `held_back_contention` | Capacity left to contending external demand. |
 | `held_back_contention_psi` | CPU left to external demand while only external pressure (PSI) shows the CPU saturated. |
 | `held_back_peak` | Admission headroom kept for the external memory peak. |
-| `held_back_noise_tolerance` | External GPU memory growth tolerated as noise. |
+| `held_back_noise_tolerance` | Never shown: the GPU memory noise tolerance is a growth threshold that withholds nothing. |
 | `held_back_unknown` | Capacity withheld while the measurement is unknown or held. |
 | `held_back_cooldown` | Admission headroom withheld until the resource has cooled down. |
 | `held_back_backoff` | Admission headroom withheld by the reclaim backoff. |
