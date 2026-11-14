@@ -1447,3 +1447,25 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   pipe. The capacity stays charged until the release either way.
 - **Alternatives**: keep it and document it; also move the dead supervisor's record out of the
   interval (changes which write ends an interval; not taken).
+
+## R84. Effects before records after EXEC (item 062)
+
+- **Decision**: after EXEC a supervisor's records wait at most 50 ms for the journal's lock in a
+  pass and are tried again every 250 ms; its drain notice and signals never wait for them. This
+  replaces R3's journal row for records after EXEC; the launch barrier's records and Released
+  keep R3's handling.
+- **Rationale**: a drain takes authority away, so holding it for its own record failed in the
+  unsafe direction: behind a locked journal the notice came about 20 s late and spent the
+  worker's drain window, and a critical TERM waited behind two records.
+- **Alternatives**: one 5 s try (still longer than the default 3 s window); keep the order and
+  document it.
+
+## R85. A drain in a renewal reply needs no time left (item 062)
+
+- **Decision**: the agent hands a renewal reply's drain to the supervisor as a drain line, with or
+  without time left, and the supervisor takes a renewal that says drain whatever time is left.
+- **Rationale**: a drain grants nothing; the lease's time bounds only how long a grant keeps work
+  running. The two sides computed the time left on two clocks, so a drain with a few milliseconds
+  left could be dropped with no event.
+- **Alternatives**: drop only the time test for a lease that says drain, on both sides (leaves an
+  older supervisor's gap).

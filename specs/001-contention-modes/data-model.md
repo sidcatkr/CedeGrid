@@ -612,3 +612,13 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   connection first. Not on disk, not the wire.
 - Agent loop state: `acted_sample_at`, set when an interval's steps have been sent. Agent event
   `renewals_withheld`, once per stretch. Local, not the wire.
+
+## Item 062 additions
+
+- **Outstanding records (supervisor, in memory)**: an ordered queue of at most one phase record
+  and one contention record taken after EXEC and not yet landed; `since` (start of a stretch of
+  refusals), `refusals` (non-lock refusals of the head, at most four), `retry_at`, `reported`
+  (`journal_unavailable` sent for the stretch), `contention_drains`. Released clears it. An SDK
+  child carries `owes_record` beside its phase.
+- **ChildSlot (agent)**: `drain_undelivered`, latched when a renewal reply's drain cannot be
+  handed to the supervisor and cleared by a later delivery.

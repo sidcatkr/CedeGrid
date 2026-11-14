@@ -2541,3 +2541,52 @@ No spec change: FR-079 asks renewals for running work.
 **T581's margin (Part D)**. The return test releases the lock about 2.3 s before the task's
 supervisor drains it at its own lease. The test widens that margin, for example with a longer
 agent lease, so that a slower machine does not fail it for no fault.
+
+## Item 062 Part B: a drain never waits for its own record (2026-11-15)
+
+**Input**: spec Session 2026-11-15's four answers on records and drains, FR-012, FR-063, FR-079,
+the journal answer of 2026-11-14; report 061 Decision 2 A; the design in
+`artifacts/review/outbox/062-drain-design.md` (outside the repository).
+
+**Technical Context**: Rust 1.88; no dependency, config key, wire or contract change, no new
+thread. The supervisor's loop and its SDK-child pass change order; the store gains a scoped
+lock wait; the agent changes how a renewal reply's drain is handed on. Native gate: the burst
+stop B1 at both budgets on the test host.
+
+**Constitution Check**: Principles II, III and VI, and the launch barrier.
+- *Principle II.* A drain's notice and its signals go out in the pass that reads it, counted
+  from the request; no journal write before them. Own work gives back first.
+- *Principle III.* A record refused for the lock is tried again every 250 ms, and after 20 s
+  the supervisor reports `journal_unavailable` and drains Opportunistic work, as today.
+- *Principle VI.* Each task is test first, each test seen failing.
+- *The launch barrier.* Reserve, Prepared, Authorized and EXEC, for the leader and for an SDK
+  child, are not touched; Released stays record-first with its 5 s wait.
+
+**A record's wait (R84)**. `BusyWait.limit` becomes a `Cell`; `StateStore::within(wait, write)`
+sets it for one call and restores it on drop, and `ExecutionJournal::within` has a default that
+runs the write as it is. A record after EXEC waits `RECORD_WAIT` (`PIN_WAIT`, 50 ms) for the
+lock. `journal_busy` moves to `src/state.rs`.
+
+**What the supervisor keeps (R84)**. `Outstanding` holds at most one phase record and one
+contention record, oldest first; a write sends the current value. After a refusal for the lock
+nothing is tried for `RECORD_RETRY` (250 ms); after `RECORD_PATIENCE` (20 s) of refusals,
+`journal_unavailable` goes out once for the stretch, with today's Opportunistic drain; other
+refusals keep four tries. The pass ends with one journal step. The drain block releases the
+steps, sets Draining in memory and owes its record; the notice, TERM and KILL follow in the
+same pass. An adjust's or the RAM cap's contention record is tried once, bounded, only while
+the run is Running; an adjust that starts a drain or TERM owes its record. Released clears the
+queue and is written as today.
+
+**SDK children (R84)**. A child's Running and Draining records after its EXEC are owed and
+bounded; a refusal never kills the child. Its Released and failure records wait 50 ms, a busy
+lock meaning "not yet". Its launch records keep their 5 s wait.
+
+**A drain in a renewal reply (R85)**. `renewal_reply` hands a reply that says drain to the
+supervisor through `drain()`, with or without time left, and marks the slot as a heartbeat
+reply's drain does. The supervisor takes a renewal that says drain whatever time is left; a
+grant still needs time left. A drain that cannot be handed on is reported once per slot
+(`drain_undelivered`).
+
+**Open points for the reviewer**: the leader's Running record is bounded too (it follows EXEC);
+an SDK child's launch records keep their 5 s, the one exception to "no write holds the loop";
+only the lock wait is bounded, not the commit's sync.
