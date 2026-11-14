@@ -284,3 +284,15 @@ verify every mechanism on the target kernels. The host check records what each f
   Refusing in the hidden commands keeps user code from running as root even if a parent did.
 - **Alternatives**: a check per subcommand (one can be missed); allowing `doctor` as root (it
   would describe a level the user's own runs never get).
+
+## R19. Dropping the registries
+
+- **Decision**: publish nothing new to npm or PyPI; the CLI ships as the GitHub Release binaries
+  with the install script; the SDKs stay in the repository with their tests.
+- **Rationale**: the user decided on 2026-10-27, and again on 2026-11-14, that the registries do
+  not fit CedeGrid; one install channel that verifies the binary's sha256 needs no registry
+  account, and the SDK tests already hold the wire contract without publishing.
+- **Alternatives**: keep the SDK packages on the registries (the user declined); attach the SDK
+  files to the GitHub Release and install them by URL (the reviewer's recommendation, open with
+  the user).
+

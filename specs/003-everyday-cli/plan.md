@@ -336,6 +336,35 @@ script as release assets. No wire, SDK, config or contract fixture change.
 Result: pass. The user set SC-013's p99 bound on 2026-11-02: at most 1.2× the p99 beside a
 fixed allocation of the same own share, in the same run.
 
+## Item 058: no distribution through npm or PyPI (2026-11-14)
+
+**Input**: spec Session 2026-11-14 and FR-073; the user's decision of 2026-10-27, restated on
+2026-11-14 (review item 058 Part E).
+
+**What changes**: nothing is removed in this item. FR-073 now says that no new version of anything
+goes to npm or PyPI. The removal is its own set of tasks, done only on the user's go-ahead and
+after the install script exists:
+- the npm launcher (`npm/src/launcher.ts`, `src/launcher_terminal.rs` and its use in
+  `src/main.rs`, and `CEDEGRID_LAUNCHER_PID`'s removal in `src/supervision/unix.rs`) and the
+  native npm packages;
+- `tools/publish_packages.py`, `tools/publish_github_packages.py`, the registry steps in
+  `.github/workflows/release.yml`, `.github/workflows/github-packages.yml`,
+  `tools/verify_launcher_pty.py`, and the parts of `tools/build_packages.py`,
+  `tools/verify_package_interop.py`, `tools/verify_python_packages.py`, `npm/scripts/build.ts`
+  and `npm/scripts/verify-packages.ts` that exist only for the registries;
+- `docs/release.md`'s publication section, the matching entries of `docs/release-0.2-gates.json`,
+  the launcher line in `CLAUDE.md` and the `ALLOWLIST` in `tools/pack_source_review.py`.
+
+Kept: everything that builds and checks the release binaries, and the SDK code, its tests and any
+SDK file attached to the release. By a search the removal touches 13 files of about 1680 lines,
+7 tool tests in `tests/test_release_gate.py` and one Rust test
+(`npm_launcher_identity_does_not_reach_internal_gate_or_supervisor` in `tests/cli.rs`). A
+migration note covers 0.2.0 on the registries and CLIs installed through npm.
+
+**Constitution Check**: Principle VII holds: the SDK tests keep running in every check and hold
+the wire contract in three languages. Principle V: no install path needs root. Nothing is
+deprecated or removed on a registry without the user's word.
+
 ## Complexity Tracking
 
 | Addition | Why needed | Simpler alternative rejected because |
