@@ -820,6 +820,11 @@ back more.
   coordinator still renews on the last report it has when it is asked, and its rule for a silent
   node stays in `follow-ups.md`. No configuration key and no wire change (item 060 Part B, report
   056 Decision 2(e)).
+- Q: Does the bound on intervals without a sample withhold renewals of Guaranteed work too? → A:
+  No. Past one lease without an acted-on sample the agent asks for no renewal of Opportunistic
+  work; it keeps asking for Guaranteed work, whose lease running out drains nothing and whose
+  renewal reply carries the coordinator's drain, cancel or preemption. This replaces, for
+  Guaranteed work, the answer above (item 061 Part A, report 060 Decision 2(d)).
 
 ## Terms
 
@@ -1877,7 +1882,8 @@ node reports with the expected per-resource values at each step.
   locked after its wait MUST NOT end the agent's loop: the interval ends there, every step holds,
   and the next interval decides again. While intervals have ended before a sample was acted on for
   longer than one lease (`lifecycle.allocation_lease_ms`), the agent MUST ask for no lease
-  renewals, and MUST ask again once an interval has acted on one.
+  renewals of Opportunistic work, and MUST ask again once an interval has acted on one; it keeps
+  asking for Guaranteed work, whose renewal reply carries the coordinator's drain.
 - **FR-078**: Before exec, the worker gate MUST set a parent-death signal: SIGKILL for
   Opportunistic work and SIGCONT for Guaranteed work, so no own work stays stopped or frozen, and
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
@@ -1905,8 +1911,9 @@ node reports with the expected per-resource values at each step.
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
   For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
   grant no renewals and offer no new work for that node; it MUST NOT drain on that report, and
-  drains happen only when leases expire. The agent MUST ask for a lease renewal only while the
-  newest sample it has acted on is no older than its lease (`lifecycle.allocation_lease_ms`); it
+  drains happen only when leases expire. The agent MUST ask for a lease renewal of Opportunistic
+  work only while the newest sample it has acted on is no older than its lease
+  (`lifecycle.allocation_lease_ms`), and for Guaranteed work always; it
   MUST NOT drain because that sample is older, and an interval that ends at the observation write
   has acted on its sample.
 - **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
