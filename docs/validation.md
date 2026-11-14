@@ -113,6 +113,11 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
   B1 runs pass every gate: the longest gap is 547 ms and 516 ms, 503 ms in the drain, with no
   lease fenced and no supervisor error (see
   [Item 056](#item-056-the-journals-lock-wait-and-the-over-share-wait)). Closed.
+- **An over-share task that ignores its hint while its need pauses and returns.** Since item 056 a
+  held hint's deadline starts again each time the need returns, so a task that ignores its hint is
+  not drained while its need pauses and returns within each deadline, and nobody else is asked for
+  that excess meanwhile. Open until the memory ladder's design for the user (item 060 Part C)
+  settles one deadline per breach.
 - **Own throughput on a shared core.** At item 049, beside a saturating other user on the
   probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
   three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe

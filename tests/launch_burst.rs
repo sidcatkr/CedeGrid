@@ -335,9 +335,38 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .unwrap()
         .as_millis() as u64;
     let drained = drain_started + Duration::from_secs(60);
+    // The supervisors' journal waits and their release times, read while the attempt
+    // directories exist: they are reclaimed after release (item 060).
+    let mut usage: BTreeMap<std::path::PathBuf, (Option<u64>, Option<u64>)> = BTreeMap::new();
+    let mut collect = |state: &Path| {
+        for attempt in fs::read_dir(state.join("attempts"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        {
+            let wait = fs::read(attempt.join("supervisor-usage.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|usage| usage["journal_longest_wait_ms"].as_u64());
+            let released = fs::metadata(attempt.join("execution-outcome.json"))
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|time| time.as_millis() as u64);
+            let entry = usage.entry(attempt).or_default();
+            entry.0 = entry.0.or(wait);
+            entry.1 = entry.1.or(released);
+        }
+    };
     while running(&state) > 0 && Instant::now() < drained {
+        collect(&state);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    collect(&state);
     let drain_ms = drain_started.elapsed().as_millis();
     let left = running(&state);
     // The coordinator fences an expired lease only when a request advances its clock.
@@ -405,29 +434,15 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         count("drain_unsent"),
         count("stop_uncertain"),
     );
-    // The last release after the drain, and the longest journal lock wait any process saw.
-    let attempts: Vec<_> = fs::read_dir(state.join("attempts"))
-        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-        .unwrap_or_default();
-    let modified_ms = |path: &Path| {
-        fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|time| time.as_millis() as u64)
-    };
-    let last_release = attempts
-        .iter()
-        .filter_map(|attempt| modified_ms(&attempt.join("execution-outcome.json")))
+    // The last release after the drain, and the longest journal lock wait any process saw,
+    // from what was read while the attempt directories existed.
+    let last_release = usage
+        .values()
+        .filter_map(|(_, released)| *released)
         .max()
         .map(|at| at.saturating_sub(drain_started_unix_ms));
     let wait_of = |value: &serde_json::Value| value["journal_longest_wait_ms"].as_u64();
-    let supervisor_wait = attempts
-        .iter()
-        .filter_map(|attempt| fs::read(attempt.join("supervisor-usage.json")).ok())
-        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .filter_map(|usage| wait_of(&usage))
-        .max();
+    let supervisor_wait = usage.values().filter_map(|(wait, _)| *wait).max();
     let agent_wait = log
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -435,9 +450,10 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .filter_map(|event| wait_of(&event))
         .max();
     eprintln!(
-        "burst journal: last release {} ms after the drain began; longest journal wait {} ms in a supervisor, {} ms in the agent; journal_busy events {}",
+        "burst journal: last release {} ms after the drain began; longest journal wait {} ms in a supervisor ({} attempts read), {} ms in the agent (none when no loop_cost period ended); journal_busy events {}",
         last_release.map_or("none".into(), |ms| ms.to_string()),
         supervisor_wait.map_or("none".into(), |ms| ms.to_string()),
+        usage.len(),
         agent_wait.map_or("none".into(), |ms| ms.to_string()),
         count("journal_busy"),
     );
