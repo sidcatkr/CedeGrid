@@ -270,7 +270,11 @@ window refills, for at most one window, the last window's estimate stands by the
 a measurement's wider bound does not read as external growth. Another user's measured usage is
 not that looseness: the kept estimate gives way in the interval in which the other principals'
 CPU, read from the principal list, has risen by `principal_min_percent` of capacity since it was
-taken. When an own task's sample is
+taken. It is kept only while that list, when it was taken and now, shows a process of another
+account with a readable user ID; with no list, or one that shows only the owner, nothing is kept
+and the interval's estimate applies (`cpu_window_estimate_not_kept`). The price: on a host that
+hides other accounts' processes nothing is ever kept, so there an own task's unknown sample can
+read as external growth for one window. When an own task's sample is
 missing, `allocation_unknown_hold`'s reason names the check that failed.
 
 CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
@@ -654,6 +658,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `ram_cap_refused` | A RAM cap write or its readback failed, so the cap is unavailable for this allocation and the hint follows. |
 | `allocation_unknown_hold` | An allocation's usage is unknown, so it is charged at the larger of its request and last known usage and its step holds. |
 | `measurement_unknown_hold` | Own usage exceeds what the host reports beyond the known error, so the resource holds. |
+| `cpu_window_estimate_not_kept` | The principal list does not show another account's process, so no CPU estimate is kept for a window's refill. |
 | `inconsistent_within_tolerance` | Own usage exceeds what the host reports within the known error, so external usage is clamped. |
 | `first_observation_baseline` | External GPU memory at the first observation is the baseline, not growth. |
 | `vram_noise_below_tolerance` | External GPU memory grew within the noise tolerance. |

@@ -506,13 +506,18 @@ impl<'a> Interval<'a> {
                 .saturating_mul(self.config.monitor.interval_ms);
             // Another user's measured usage is not looseness: the kept estimate gives way once
             // the other principals' measured CPU has risen by `principal_min_percent` of
-            // capacity since it was taken (FR-018).
-            let others = snapshot.principals.as_ref().map(|list| {
-                list.iter()
-                    .filter(|p| !p.is_owner)
-                    .map(|p| p.cpu_millicores)
-                    .fold(0u64, u64::saturating_add)
-            });
+            // capacity since it was taken. It is kept only while the list shows another
+            // account's process with a readable user ID, then and now (FR-018).
+            let others = snapshot
+                .principals
+                .as_ref()
+                .filter(|list| list.iter().any(|p| !p.is_owner && p.uid.is_some()))
+                .map(|list| {
+                    list.iter()
+                        .filter(|p| !p.is_owner)
+                        .map(|p| p.cpu_millicores)
+                        .fold(0u64, u64::saturating_add)
+                });
             let rise = (self.cpu_capacity.saturating_mul(u64::from(
                 self.config
                     .contention
@@ -520,14 +525,24 @@ impl<'a> Interval<'a> {
                     .principal_min_percent,
             )) / 100)
                 .max(1);
-            let kept = self
+            let recent = self
                 .prev
                 .cpu_window_external
-                .filter(|(_, at, _)| self.now.saturating_sub(*at) <= window_ms)
-                .filter(|(_, _, then)| match (then, others) {
-                    (Some(then), Some(now)) => now < then.saturating_add(rise),
-                    _ => true,
-                });
+                .filter(|(_, at, _)| self.now.saturating_sub(*at) <= window_ms);
+            let kept = recent.filter(|(_, _, then)| match (then, others) {
+                (Some(then), Some(now)) => now < then.saturating_add(rise),
+                _ => false,
+            });
+            if window.is_none()
+                && recent.is_some_and(|(_, _, then)| then.is_none() || others.is_none())
+            {
+                note(
+                    &mut self.statuses,
+                    ResourceKey::Cpu,
+                    "cpu_window_estimate_not_kept",
+                    "the principal list does not show another account's process, so no estimate is kept for the window's refill".into(),
+                );
+            }
             self.next.cpu_window_external =
                 window.map(|window| (window, self.now, others)).or(kept);
             match window.or(kept.map(|(estimate, _, _)| estimate)) {

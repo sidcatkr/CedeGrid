@@ -318,6 +318,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own usage exceeds what the host reports beyond the known error, so the resource holds.",
     ),
     (
+        "cpu_window_estimate_not_kept",
+        "The principal list does not show another account's process, so no CPU estimate is kept for a window's refill.",
+    ),
+    (
         "inconsistent_within_tolerance",
         "Own usage exceeds what the host reports within the known error, so external usage is clamped.",
     ),

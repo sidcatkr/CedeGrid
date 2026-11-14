@@ -7573,7 +7573,7 @@ mod yield_first_cooldown {
 
 mod measurement_window {
     use super::*;
-    use cedegrid::contention::{ContentionMode, ResourceKey};
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
 
     /// A scoped 4-CPU reading: host busy upper and lower, own lower, and optionally the
     /// window's host busy upper and lower and own lower.
@@ -7589,6 +7589,11 @@ mod measurement_window {
             snap.managed_cpu_window_lower_millicores = Some(own_window);
         }
         snap.managed_cpu_lower_millicores = Some(own);
+        // A readable list with another account's process, at no usage (item 058).
+        snap.principals = Some(vec![
+            super::cpu_principal(1000, true, 0),
+            super::cpu_principal(2000, false, 0),
+        ]);
         snap
     }
 
@@ -7706,6 +7711,64 @@ mod measurement_window {
                 "{mode:?}: {:?} against {:?}",
                 target(&joined),
                 target(&quiet)
+            );
+            // Yield First and Neutral step own work within SC-002's two intervals of the rise.
+            if mode != ContentionMode::Performance {
+                let next = engine
+                    .evaluate(
+                        &config,
+                        &listed(reading((3120, 3030), 2950, None), 40),
+                        &input(2950, 3050),
+                        1500,
+                    )
+                    .unwrap();
+                let stepped = |d: &Decision| {
+                    d.actions
+                        .iter()
+                        .any(|a| a.resource == ResourceKey::Cpu && a.step != YieldStep::None)
+                };
+                assert!(
+                    stepped(&joined) || stepped(&next),
+                    "{mode:?}: no CPU step within two intervals: {:?} then {:?}",
+                    joined.actions,
+                    next.actions
+                );
+            }
+        }
+    }
+
+    /// The same refill where the list cannot show another user's rise keeps no estimate: with no
+    /// list, and with the owner alone in it, the interval's own estimate applies, and the CPU
+    /// status says why (FR-018, item 058).
+    #[test]
+    fn a_refill_without_another_account_in_the_list_keeps_no_estimate() {
+        let owner_only = || Some(vec![super::cpu_principal(1000, true, 0)]);
+        for list in [None, owner_only()] {
+            let config = config();
+            let mut engine = PolicyEngine::new();
+            let mut windowed = reading((3080, 2990), 2950, Some(((2965, 2955), 2955)));
+            windowed.principals = list.clone();
+            let first = engine
+                .evaluate(&config, &windowed, &input(2950, 3000), 0)
+                .unwrap();
+            assert_eq!(external(&first), Some(10), "{list:?}");
+            let mut plain = reading((3080, 2990), 2950, None);
+            plain.principals = list.clone();
+            let refilling = engine
+                .evaluate(&config, &plain, &input(2950, 3000), 500)
+                .unwrap();
+            assert_eq!(
+                external(&refilling),
+                Some(130),
+                "{list:?}: nothing kept without another account in the list"
+            );
+            assert!(
+                refilling.resources[&ResourceKey::Cpu]
+                    .reasons
+                    .iter()
+                    .any(|r| r.code == "cpu_window_estimate_not_kept"),
+                "{list:?}: {:?}",
+                refilling.resources[&ResourceKey::Cpu].reasons
             );
         }
     }
