@@ -2261,6 +2261,187 @@ async fn a_journal_locked_for_its_whole_wait_holds_the_interval_and_the_loop_goe
     assert_eq!(outcome.exit_code, Some(0));
 }
 
+/// An agent whose intervals all end before the sample, here behind a locked journal while the
+/// dead-supervisor transition waits, asks for no lease renewals once its newest acted-on sample is
+/// older than one lease, and names the stretch once; it drains nothing (FR-077, FR-079, R80).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_without_a_sample_for_one_lease_asks_for_no_renewal() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let pid_file =
+        std::env::temp_dir().join(format!("cedegrid-renewal-{}.pid", std::process::id()));
+    let service = Service::start(
+        AllocationClass::Guaranteed,
+        vec![
+            python,
+            "-c".into(),
+            format!(
+                "import os,time; open({:?},'w').write(str(os.getpid())); time.sleep(40)",
+                pid_file.display()
+            ),
+        ],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 8_000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("withheld");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let record = service.record().unwrap();
+    let sequence = || {
+        let db = rusqlite::Connection::open_with_flags(
+            service
+                .dir
+                .path()
+                .join("coordinator")
+                .join(cedegrid::state::DATABASE_FILENAME),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT r.lease_sequence FROM reservations r JOIN assignments a USING(assignment_id) WHERE a.task_id='task'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let journal = service
+        .local
+        .config
+        .state_dir
+        .join(cedegrid::state::DATABASE_FILENAME);
+    let rival = rusqlite::Connection::open(&journal).unwrap();
+    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let identity: ProcessIdentity = serde_json::from_slice(
+        &fs::read(
+            service
+                .local
+                .config
+                .state_dir
+                .join("attempts")
+                .join(&record.assignment_id)
+                .join("supervisor-identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // SAFETY: the test's own supervisor, by its recorded PID.
+    assert_eq!(
+        unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    tokio::time::sleep(Duration::from_millis(8_000)).await;
+    let early = sequence();
+    tokio::time::sleep(Duration::from_millis(13_500)).await;
+    let late = sequence();
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let alive = agent.try_wait().unwrap().is_none();
+    let _ = agent.kill();
+    let _ = agent.wait();
+    if let Ok(pid) = fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            // SAFETY: the test's own workload, by the PID it wrote.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let _ = fs::remove_file(&pid_file);
+    }
+    service.server.abort();
+    let log = fs::read_to_string(service.dir.path().join("withheld.log")).unwrap();
+    assert!(alive, "the agent ended: {log}");
+    assert_eq!(
+        late, early,
+        "renewals went on with no sample for {} s: {log}",
+        21
+    );
+    let withheld = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "renewals_withheld")
+        .count();
+    assert_eq!(withheld, 1, "{log}");
+}
+
+/// An interval that ends at the observation write has acted on its sample, so an agent whose
+/// observation write stays locked keeps asking for renewals: an 8 s lease outlived by a 16.5 s
+/// hold is renewed, and the job ends with exit 0, not drained (FR-079, R80).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_whose_intervals_end_at_the_observation_write_keeps_renewing() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(22)".into()],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 8_000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("acting");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let sequence = || {
+        let db = rusqlite::Connection::open_with_flags(
+            service
+                .dir
+                .path()
+                .join("coordinator")
+                .join(cedegrid::state::DATABASE_FILENAME),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT r.lease_sequence FROM reservations r JOIN assignments a USING(assignment_id) WHERE a.task_id='task'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let journal = service
+        .local
+        .config
+        .state_dir
+        .join(cedegrid::state::DATABASE_FILENAME);
+    let rival = rusqlite::Connection::open(&journal).unwrap();
+    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let early = sequence();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let late = sequence();
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    let mut completed = None;
+    for _ in 0..200 {
+        completed = service.result(1).await;
+        if completed.is_some() {
+            break;
+        }
+    }
+    let _ = agent.kill();
+    let _ = agent.wait();
+    service.server.abort();
+    let log = fs::read_to_string(service.dir.path().join("acting.log")).unwrap();
+    assert!(late >= early + 2, "{early} then {late}: {log}");
+    assert!(completed.is_some(), "the job did not complete: {log}");
+    let record = service.record().unwrap();
+    let outcome = service.outcome(&record.assignment_id);
+    assert!(!outcome.yielded, "the job was drained: {log}");
+    assert_eq!(outcome.exit_code, Some(0));
+}
+
 /// An agent whose stdout reader went away keeps working and stops normally: its event lines
 /// are diagnostics, and a broken pipe there is no reason to fail (030, AGT-6).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

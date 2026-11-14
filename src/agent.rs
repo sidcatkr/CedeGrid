@@ -2922,6 +2922,36 @@ mod pacing_tests {
         );
     }
 
+    /// Renewals are asked only within one lease of the newest sample the loop acted on: behind a
+    /// locked journal ages of 0.5, 5.5, 10.5 and 15.5 s stop at the third; a new sample asks
+    /// again; at the observation write every top's sample is 5 s old and keeps asking (R80).
+    #[test]
+    fn renewals_are_asked_only_within_one_lease_of_the_newest_acted_sample() {
+        use super::service::renewals_asked;
+        let lease = Duration::from_secs(10);
+        for (age, asked) in [
+            (0, true),
+            (5_500, true),
+            (10_000, true),
+            (10_001, false),
+            (15_500, false),
+        ] {
+            assert_eq!(
+                renewals_asked(Duration::from_millis(age), lease),
+                asked,
+                "{age} ms"
+            );
+        }
+        let locked: Vec<bool> = [500, 5_500, 10_500, 15_500, 400]
+            .iter()
+            .map(|&age| renewals_asked(Duration::from_millis(age), lease))
+            .collect();
+        assert_eq!(locked, [true, true, false, false, true]);
+        for lease in [Duration::from_secs(10), Duration::from_secs(8)] {
+            assert!(renewals_asked(Duration::from_secs(5), lease));
+        }
+    }
+
     /// SQLite's busy code, bare or under context, is transient; a locked table, an I/O error
     /// and a missing file are not (FR-077).
     #[test]

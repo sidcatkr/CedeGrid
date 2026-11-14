@@ -208,6 +208,12 @@ pub(super) fn heartbeat_due(since_last: Duration, interval: Duration) -> bool {
     since_last >= interval
 }
 
+/// Whether lease renewals are asked for: only while the newest sample the loop acted on is no
+/// older than one lease, so work it no longer watches is not kept leased (FR-079).
+pub(super) fn renewals_asked(sample_age: Duration, lease: Duration) -> bool {
+    sample_age <= lease
+}
+
 /// The failure reports an iteration sends while the control lane is behind: 16 a second.
 pub(super) fn failure_floor(monitor: Duration) -> usize {
     usize::try_from((u128::from(monitor.as_millis() as u64) * 16).div_ceil(1000))
@@ -433,6 +439,11 @@ struct AgentLoop<'a> {
     observations_since_prune: u32,
     /// When this iteration's sample was taken.
     sampled_at: Instant,
+    /// When the newest sample whose steps reached the supervisors was taken; the loop's start
+    /// until the first one.
+    acted_sample_at: Instant,
+    /// Names a stretch of withheld renewals once.
+    withheld: Stretch,
     /// How long one coordinator request may hold the loop (030, AGT-4).
     rpc_budget: Duration,
     /// A signal stopped the agent: supervisors keep running for re-adoption (FR-080).
@@ -532,6 +543,11 @@ impl AgentLoop<'_> {
         let config = std::sync::Arc::clone(&self.config);
         let config = &*config;
         let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
+        let lease = Duration::from_millis(config.lifecycle.allocation_lease_ms);
+        let sample_age = self.acted_sample_at.elapsed();
+        // Past one lease without a sample acted on, no renewal is asked: leases run out (FR-079).
+        let renew = renewals_asked(sample_age, lease);
+        let mut withheld = 0usize;
         let mut records = BTreeMap::new();
         // Lease requests wait in one queue, longest waiting first: an authorization since
         // its launch, a renewal since it fell due.
@@ -682,9 +698,23 @@ impl AgentLoop<'_> {
             if wants_authorization(slot) {
                 waiting.push((slot.started_at, id.clone()));
             } else if running && slot.sequence > 0 && slot.last_renew.elapsed() >= interval {
-                waiting.push((slot.last_renew + interval, id.clone()));
+                if renew {
+                    waiting.push((slot.last_renew + interval, id.clone()));
+                } else {
+                    withheld += 1;
+                }
             }
             records.insert(id.clone(), record);
+        }
+        if self.withheld.starts(withheld > 0) {
+            emit(&serde_json::json!({
+                "event": "renewals_withheld",
+                "code": "renewals_withheld",
+                "allocations": withheld,
+                "sample_age_ms": sample_age.as_millis() as u64,
+                "limit_ms": lease.as_millis() as u64,
+                "detail": "no sample has been acted on for one lease; renewals wait for the next one",
+            }))?;
         }
         // Requests run one at a time and each costs a synced coordinator write, so they share
         // half the monitor interval; the rest wait for the next iteration (research R19).
@@ -2339,6 +2369,8 @@ pub async fn run(
         // Prune on the first iteration, then every `OBSERVATIONS_PER_PRUNE`.
         observations_since_prune: OBSERVATIONS_PER_PRUNE - 1,
         sampled_at: start,
+        acted_sample_at: start,
+        withheld: Stretch::default(),
         rpc_budget: observation_interval.max(Duration::from_millis(250)),
         leave_supervisors: false,
         store_write: Duration::ZERO,
@@ -2392,6 +2424,8 @@ pub async fn run(
             mark = LoopCost::thread_ns();
             state.share_observation(&snapshot);
             state.actuate(&mut decision, &allocations)?;
+            // This interval acted on its sample: renewals may go on (FR-079).
+            state.acted_sample_at = state.sampled_at;
             mark = state.cost.charge("actuate", mark);
             let before = state.store.change_key()?;
             let written = Instant::now();
