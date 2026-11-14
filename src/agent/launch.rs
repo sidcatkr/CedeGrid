@@ -441,6 +441,7 @@ pub(super) async fn start_assignment(
         observes_drain: false,
         drain_sent_at: None,
         drain_unsent: false,
+        drain_undelivered: false,
         drain_cause: None,
         started_at: Instant::now(),
         last_checkpoint_at: None,

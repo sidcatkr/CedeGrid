@@ -261,9 +261,9 @@ impl PipeControl {
                     expires_monotonic_ms,
                 })) => {
                     let remaining_ms = expires_monotonic_ms.saturating_sub(local_clock_ms()?);
+                    // A drain needs no time left; a grant does (FR-079, R85).
                     if validate_lease(&lease, &self.assignment).is_ok()
-                        && remaining_ms > 0
-                        && remaining_ms <= lease.valid_for_ms
+                        && (lease.drain || (remaining_ms > 0 && remaining_ms <= lease.valid_for_ms))
                     {
                         self.assignment.coordinator_epoch = lease.coordinator_epoch;
                         if lease.drain {

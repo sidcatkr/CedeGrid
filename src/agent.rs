@@ -703,6 +703,8 @@ struct ChildSlot {
     drain_sent_at: Option<Instant>,
     /// The last drain or terminate did not reach the supervisor; it is sent again.
     drain_unsent: bool,
+    /// A renewal reply's drain found the supervisor's pipe closed; reported once (R85).
+    drain_undelivered: bool,
     /// Why it was drained, reported to the coordinator once negotiated.
     drain_cause: Option<crate::contention::YieldCause>,
     started_at: Instant,
@@ -2410,6 +2412,47 @@ mod drain_tests {
         (slot, writes)
     }
 
+    /// A renewal reply that says drain is handed on with no time left on its lease, as a drain
+    /// line, and the slot is marked as drained; to a closed pipe it is latched once (R85).
+    #[test]
+    fn a_renewal_replys_drain_is_handed_on_without_time_left() {
+        use std::sync::atomic::Ordering;
+        let lease = |sequence| crate::protocol::Lease {
+            assignment_id: "assignment".into(),
+            generation: 7,
+            coordinator_epoch: 3,
+            sequence,
+            valid_for_ms: 0,
+            drain: true,
+        };
+        let (mut slot, writes) = counted_slot(None);
+        super::service::renewal_reply(
+            &mut slot,
+            Instant::now(),
+            Ok(crate::protocol::Response::Lease { lease: lease(2) }),
+        )
+        .unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert!(slot.drain_sent_at.is_some());
+        assert_eq!(
+            slot.drain_cause,
+            Some(crate::contention::YieldCause::CoordinatorDrain)
+        );
+        assert!(!slot.drain_undelivered);
+        let (mut closed, _) = counted_slot(Some(std::io::ErrorKind::BrokenPipe));
+        for sequence in [2, 3] {
+            super::service::renewal_reply(
+                &mut closed,
+                Instant::now(),
+                Ok(crate::protocol::Response::Lease {
+                    lease: lease(sequence),
+                }),
+            )
+            .unwrap();
+        }
+        assert!(closed.drain_undelivered);
+    }
+
     /// A coordinator drain is not sent to a slot whose supervisor has exited: nothing is written,
     /// no share is taken and no drain is recorded for the run (report 051 Decision 2).
     #[test]
@@ -2519,6 +2562,7 @@ mod drain_tests {
             observes_drain: false,
             drain_sent_at: None,
             drain_unsent: false,
+            drain_undelivered: false,
             drain_cause: None,
             started_at: Instant::now(),
             last_checkpoint_at: None,

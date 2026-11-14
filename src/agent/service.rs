@@ -121,13 +121,36 @@ fn authorization_reply(
 }
 
 /// A renewal's reply: the lease goes to the supervisor, anything else is reported.
-fn renewal_reply(slot: &mut ChildSlot, requested: Instant, result: Result<Response>) -> Result<()> {
+pub(super) fn renewal_reply(
+    slot: &mut ChildSlot,
+    requested: Instant,
+    result: Result<Response>,
+) -> Result<()> {
     match result {
         Ok(Response::Lease { lease }) => {
             let remaining_ms = lease
                 .valid_for_ms
                 .saturating_sub(requested.elapsed().as_millis() as u64);
-            if remaining_ms > 0 {
+            if lease.drain {
+                // Taking authority away needs no live lease: the drain goes as a drain line,
+                // with or without time left (FR-079, R85).
+                slot.sequence = lease.sequence;
+                let delivered =
+                    super::drain(slot, Some(crate::contention::YieldCause::CoordinatorDrain));
+                let closed = !delivered && !slot.drain_unsent;
+                if closed && !slot.drain_undelivered {
+                    // Reported once for the slot; a failed report must not stop the loop.
+                    let _ = emit(&serde_json::json!({
+                        "event": "drain_undelivered",
+                        "assignment_id": slot.assignment.request.assignment_id,
+                        "source": "renewal_reply",
+                        "lease_sequence": lease.sequence,
+                        "remaining_ms": remaining_ms,
+                        "detail": "the supervisor's control pipe is closed, so the coordinator's drain did not reach it",
+                    }));
+                }
+                slot.drain_undelivered = closed;
+            } else if remaining_ms > 0 {
                 let seq = lease.sequence;
                 let _ = send(
                     slot,

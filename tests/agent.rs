@@ -668,6 +668,51 @@ fn the_critical_term_goes_before_either_record() {
     );
 }
 
+/// A renewal line that says drain is taken with its time run out: the run yields (FR-079, R85).
+#[test]
+fn a_renewal_that_says_drain_is_taken_with_no_time_left() {
+    let dir = directory();
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let spec = spec(
+        dir.path(),
+        AllocationClass::Guaranteed,
+        vec![python, "-c".into(), DRAIN_PROBE.into()],
+    );
+    let work = PathBuf::from(&spec.assignment.request.cwd);
+    let (mut child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    authorize(&mut input, 60_000);
+    assert!(within(Duration::from_secs(5), || work
+        .join("ready")
+        .exists()));
+    let lease = Lease {
+        assignment_id: "assignment".into(),
+        generation: 7,
+        coordinator_epoch: 3,
+        sequence: 2,
+        valid_for_ms: 10_000,
+        drain: true,
+    };
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"renewal","lease":lease,"expires_monotonic_ms":clock_ms().saturating_sub(1_000)})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let noticed = within(Duration::from_secs(2), || work.join("noticed").exists());
+    fs::write(work.join("stop"), b"").unwrap();
+    wait(&mut child);
+    let outcome: ExecutionOutcome =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
+            .unwrap();
+    assert!(noticed, "the drain was not taken");
+    assert!(outcome.yielded, "{outcome:?}");
+}
+
 #[test]
 fn real_extra_cpu_threads_still_trigger_the_agent_envelope() {
     // The test plays the agent: it measures the owned worker with the agent's
