@@ -1036,6 +1036,29 @@ Gates: at the item's commit, own throughput with CedeGrid at least the mode's bo
 the windows as biased; a clean-looking 0.945 means the self-check misses the case it was built
 for.
 
+## Item 056: the journal's lock wait and the over-share wait
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness at the item's last product commit. A leftover check of both accounts
+follows each run; the B1 runs start from a host-side script with no login during them. Each run's
+printed result line and its analysis are copied to `server-check/056/`.
+
+```sh
+# B1, the burst stop, at the test's 1 MiB/s and at the default 10 MiB/s. The test asserts its four
+# gates and prints each phase's longest gap, the last Released commit after the drain and the
+# longest journal wait (supervisors' and the agent's).
+ITEM=056 nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+ITEM=056 BURST_BYTES=10485760 nohup bash $H/partb-051.sh <commit> b1 > <log> 2>&1 &
+# C4 run 2 once more, and C3's floor breach in Neutral.
+bash runs-037.sh <commit> <second account uid> c4b c3n
+```
+
+Gates:
+- B1, both runs: every gap between observations within 1 s in every phase, every task drained or
+  released, no lease fenced after the drain, and no supervisor error. If a fence remains, the
+  heartbeat after a release seen while draining is added, test first, and B1 runs again.
+- C4 run 2: as in item 051. C3 in Neutral: the floor restored within item 048's time.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

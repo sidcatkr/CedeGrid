@@ -2324,3 +2324,71 @@ hidden from the agent, so that half of the answer is reported with what it would
 
 **The rest**. The clean macOS serial run waits for a quiet Mac; Part D waits for the user's answer.
 
+
+## Item 056: the journal's lock wait, the held-back parts, the remainder's cost order and the over-share wait (2026-11-14)
+
+**Input**: spec Session 2026-11-14's last three answers, FR-016, FR-077, FR-080 and SC-016; report
+054's Decisions 1 to 5 as the review decided them; the designs `056-a-design.md` (Part A) and
+`056-d-design.md` (Parts C and D) in the review outbox.
+
+**Technical Context**: Rust 1.88; no new dependency, no config key, no schema and no wire change.
+Part A adds one `unsafe` FFI call (`rusqlite::ffi::sqlite3_busy_handler`) in `src/state.rs`; the
+crate already calls `rusqlite::ffi` there. Parts B to D stay inside the pure policy. Native runs
+are listed in `native-gates.md`, "Item 056".
+
+**Constitution Check**: Principles II, III and VI, and the launch barrier.
+- *Principle II.* Part A commits and reports releases seconds sooner during a burst stop, and a
+  step is still sent before the observation is written, so a busy journal never delays a yield.
+  Part D stops an over-share task's excess from passing to in-share tasks while its wait runs,
+  and stops asking the same task twice; under a need that pauses at least once per hint deadline,
+  a task that ignores its hint waits one more deadline each time, as `plan_step` already does for
+  a lone hint, and the OOM mark stays.
+- *Principle III.* A held interval sends no report and reuses no old decision as new; a busy pin
+  defers a report and decides nothing. An unreadable state is not read as free.
+- *Principle VI.* Only the test host's B1, C4 and C3 runs are evidence for the gates.
+- *Launch barrier.* Prepared, Authorized and EXEC keep their order and their single attempts; a
+  write still locked at 5 s fails before EXEC as today.
+
+**The journal's lock wait (R73)**. Every read-write `StateStore` connection gets its own busy
+handler in place of SQLite's: sleeps of 1 ms doubling to a 16 ms cap, each uniform in the upper
+half of its step from a per-connection seed, ending at the connection's limit on the monotonic
+clock: 5 s, and 50 ms for an attempt pin's connection. The handler's context is owned by the store
+and outlives the connection; a panic in it gives up the wait. `busy_timeout_ms` is reported from
+the store's limit. `lock_waits()` gives the count and the longest wait, written by supervisors to
+`supervisor-usage.json` and by the agent to `loop_cost`. The pin takes its row and releases pins
+a busy release left behind in one transaction; a pin that finds the journal busy gives `None`
+through `PinGate`, no other pin is tried in that iteration, and the iteration goes on. A journal
+error whose chain holds SQLite's busy code ends the interval, not the agent, with one
+`journal_busy` event per stretch (stage `interval` or `pin`); every other journal error ends the
+agent as before. `tests/launch_burst.rs` asserts B1's four gates and prints each phase's longest
+gap, the last Released commit after the drain and the longest journal wait. That the coordinator
+renews running work on the last stored report while a node is silent is today's behaviour for
+any missed heartbeat; it goes to `follow-ups.md`. A heartbeat after a release seen while draining
+is added only if B1 still shows a fence.
+
+**The held-back parts (R74)**. `held_back.noise_tolerance` is never set and so never shown; the
+field stays in the type. The catalog sentence, the field's comment and the guarantees say the
+tolerance is a growth threshold that withholds nothing, and the guarantees no longer list it among
+the parts kept from admission. The parts kept from own work equal capacity less others' use
+(`external` and `unattributed`) less the budget, on GPU memory and on RAM, with another user and
+without.
+
+**The remainder follows the cost order (R75)**. The rule stands. A new test pins what the code does
+where the over-share task also leads the cost order (`p` 2000 MiB, `q` 14000 MiB, 600 MiB free):
+Yield First hints `p` to 0 and `q` to 9400 MiB; Neutral and Performance hint `p` to 1600 MiB and
+leave `q`. The guarantees' clause follows FR-016's wording.
+
+**The over-share wait (R76)**. One pure predicate, `hint_wait_over`, judges a held hint's wait by
+the dwell since its last change and the hint deadline since the later of that change and the
+need's return; `plan_step` escalates by it and the ladder counts the hint by it, so a hint counts
+through a renewed wait. `OverSharePart` gains `passed`, what the task was asked and did not count;
+in the remainder the task is asked at most what the cost order asks beyond its own part, so its
+uncounted part goes to the tasks after it, and only once its wait is over with no drain (FR-024's
+class rule). The 500 random sequences are written again; own tasks stopped for memory and
+intervals with a floor breach are compared at `14ebea2`, at item 054's end and after this part,
+and for each sequence still worse than at `14ebea2` the first differing decision and its cause are
+listed. The snapshot directories are kept beside the native evidence.
+
+**The rest**. `docs/validation.md`: the rows, and "Open operational gates" closes the burst stop only
+when both B1 runs pass every gate. Full local suites and the Docker Linux check at the final
+commit, each with its log saved.

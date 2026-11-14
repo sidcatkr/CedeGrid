@@ -1330,3 +1330,49 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: keeping the estimate only within one margin step (undoes T518 where bounds are
   wide); accepting one window (the user's SC-002 bound is two intervals).
 
+
+## R73. How a locked node journal is waited for (item 056)
+
+- **Decision**: a per-connection busy handler with jittered sleeps of 1 to 16 ms up to the
+  connection's limit (5 s, an attempt pin 50 ms); a busy pin defers its report; a journal write
+  still locked after 5 s holds the interval instead of ending the agent.
+- **Rationale**: in B1 about 20 supervisors began their Released commits together and, under
+  SQLite's default handler, retried in step at one commit per 100 ms; the agent's pin waited
+  1.33 s and two releases ended as supervisor errors. In a local model of one lock with commits
+  holding 1.5 to 3.5 ms, 20 writers that begin together finish in 81 ms against 1134 ms, and 150
+  in 430 ms where the default times out. rusqlite's safe `busy_handler` passes only the count, so
+  a per-connection limit needs the FFI call.
+- **Alternatives**: the safe handler with two fixed limits (leaves other limits on SQLite's
+  handler); a retry loop in Rust per write (misses statements a read can block on under the
+  rollback-journal profiles); writing the observation before actuating (puts the journal's wait
+  in front of every yield).
+
+## R74. What `held_back` lists (item 056)
+
+- **Decision**: only amounts withheld; the noise tolerance is not one.
+- **Rationale**: the tolerance plus the device's unattributed memory is a growth threshold that
+  nothing subtracts from the budget or from admission (report 054 Decision 1); others' use is
+  already shown as `external` and `unattributed`.
+- **Alternatives**: others' use as a new part (a wire change in three languages); the unattributed
+  amount alone in the field (shown twice, and RAM has no such part).
+
+## R75. The remainder when the over-share task leads the cost order (item 056)
+
+- **Decision**: FR-016's cost order, as before item 051; the shape is pinned by a test.
+- **Rationale**: the task with the least progress to lose is the cheapest to take down whoever
+  caused the excess, and no in-share task pays any part of the excess either way.
+- **Alternatives**: asking over-share tasks last for the remainder (the tasks with more progress
+  to lose pay the margin).
+
+## R76. One clock for an over-share hint, and its part asked once (item 056)
+
+- **Decision**: count a held hint toward the excess on the clock its step escalates by, and never
+  ask a task again for what it was asked and did not count.
+- **Rationale**: the ladder counted from the hint's last change while the step escalated from the
+  need's return, so after a pause the hint waited again but counted nothing and in-share tasks
+  were stepped (seven of the 500 sequences, three of them stopping a task); since item 054 the
+  uncounted part also entered the remainder and was asked of the same task again (`random::242`,
+  1000 MiB asked twice).
+- **Alternatives**: measuring the deadline from the breach's first observation (a renewed wait can
+  pass SC-012's bound; needs a clarify); dropping the dwell term (differs only where a hint
+  deadline is shorter than the dwell).

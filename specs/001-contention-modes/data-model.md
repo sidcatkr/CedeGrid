@@ -589,3 +589,12 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - Probe records (tools): `self_check` in `ready.json` and `result.json`: `units`, `initial_ratio`,
   `ratio`, `held`, `biased`. Not a product field.
 
+
+## Item 056 additions
+
+- Node journal connection: a busy wait per connection (limit, seed, count of waits, longest wait);
+  `busy_timeout_ms` reports the limit. Local diagnostics `journal_waits` and
+  `journal_longest_wait_ms` in `supervisor-usage.json` and the agent's `loop_cost`. Not the wire.
+- Agent event `journal_busy` with `stage` `interval` or `pin`, once per stretch. Local, not the wire.
+- `held_back.noise_tolerance`: kept in the type, never set (SC-016).
+- Ladder state (pure): `OverSharePart.passed`, what an over-share task was asked and did not count.
