@@ -14,8 +14,8 @@ use crate::contention::{
     Admission, ComputeFloor, ContentionMode, GPU_DEMAND_WINDOW_DECISIONS,
     GPU_DEMAND_WINDOW_EVERY_MS, GPU_MIN_DUTY_MILLI, LadderInput, LadderTiming, Measurement,
     ModeInput, Principal, RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState,
-    VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, own_allowance, plan_step,
-    remeasure_window_allowed, victim_order,
+    VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, hint_wait_over, own_allowance,
+    plan_step, remeasure_window_allowed, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;

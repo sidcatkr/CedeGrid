@@ -1022,6 +1022,17 @@ impl LadderInput {
     }
 }
 
+/// Whether a held hint's wait is over, on the clock its step escalates by: the dwell since its
+/// last change, and its deadline since the later of that change and the need's return (FR-037).
+/// The ladder counts an over-share hint by the same clock, so a hint whose wait starts again
+/// with the need counts what it was asked through that wait (FR-023).
+pub fn hint_wait_over(state: &StepState, timing: &LadderTiming, now_ms: u64) -> bool {
+    let contended_since = state.contended_since_ms.unwrap_or(now_ms);
+    let anchor = state.entered_at_ms.max(contended_since);
+    now_ms.saturating_sub(state.entered_at_ms) >= timing.dwell_ms
+        && now_ms.saturating_sub(anchor) >= timing.hint_deadline_ms
+}
+
 /// Pure ladder transition for one allocation and resource (data-model.md YieldStep).
 pub fn plan_step(
     state: Option<&StepState>,
@@ -1127,7 +1138,8 @@ pub fn plan_step(
             && (current == YieldStep::None
                 || current != YieldStep::Hint && !cap_effective && persisted >= timing.response_ms
                 || pause_bound
-                || current == YieldStep::Hint && persisted >= timing.hint_deadline_ms)
+                || current == YieldStep::Hint
+                    && state.is_some_and(|s| hint_wait_over(s, timing, now_ms)))
             || input.unavailable.contains(&current)
             || cap_to_zero;
         // In Performance compute a cap that missed its target is recomputed and applied

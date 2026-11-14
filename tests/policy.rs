@@ -8742,6 +8742,70 @@ mod floors_by_mode {
         }
     }
 
+    /// The need pauses with `z`'s hint held, free memory exactly at the floor from 500 to
+    /// 5 000 ms, and returns at 5 500 ms. The hint's wait starts again with the need, on the
+    /// clock its step escalates by, and the hint counts what it was asked through that renewed
+    /// wait: the 200 MiB excess is asked of `z` alone, `z` is drained when the renewed deadline
+    /// passes, and the in-share tasks are never stepped for it (FR-016, FR-023, R76, item 056).
+    #[test]
+    fn a_held_hint_counts_through_its_renewed_wait_when_the_need_returns() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "z"], &[], &[("z", 1_000)]);
+        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+            let at = |now: u64| match now {
+                0 => (
+                    vec![
+                        ram_job("a", class, 5_000),
+                        ram_job("b", class, 5_000),
+                        ram_job("z", class, 6_000),
+                    ],
+                    700,
+                ),
+                500..=5_000 => (
+                    vec![
+                        ram_job("a", class, 5_000),
+                        ram_job("b", class, 5_000),
+                        ram_job("z", class, 5_700),
+                    ],
+                    1_000,
+                ),
+                _ => (
+                    vec![
+                        ram_job("a", class, 5_200),
+                        ram_job("b", class, 5_000),
+                        ram_job("z", class, 5_700),
+                    ],
+                    800,
+                ),
+            };
+            let run = scripted(&config_in(mode), &facts, 10_500, at);
+            assert_eq!(
+                run[0].steps,
+                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(5_700)))]),
+                "{mode:?}"
+            );
+            let returned = run.iter().find(|i| i.now == 5_500).unwrap();
+            assert_eq!(
+                returned.steps,
+                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(5_500)))]),
+                "{mode:?}"
+            );
+            for interval in &run {
+                assert!(
+                    !interval.steps.contains_key("a") && !interval.steps.contains_key("b"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.steps
+                );
+                if interval.now < 10_500 {
+                    assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
+                }
+            }
+            let last = run.last().unwrap();
+            assert_eq!(last.drains, vec!["z".to_string()], "{mode:?}");
+        }
+    }
+
     /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
     /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
     /// the in-share tasks were never asked for its excess; in Yield First they are asked for the

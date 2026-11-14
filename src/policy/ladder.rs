@@ -1191,7 +1191,7 @@ impl<'a> Interval<'a> {
             && match &decision.state {
                 Some(next) if next.step >= YieldStep::Drain => false,
                 Some(next) if next.step == YieldStep::Hint => {
-                    now.saturating_sub(next.entered_at_ms) < victim_timing.hint_deadline_ms
+                    !hint_wait_over(next, &victim_timing, now)
                         || (victim.guaranteed && frame.guaranteed_waits)
                 }
                 _ => victim.guaranteed && frame.guaranteed_waits,
