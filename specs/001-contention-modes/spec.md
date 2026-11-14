@@ -779,6 +779,21 @@ back more.
   in-share task pays any part of another task's excess. This replaces item 054's wording "no
   over-share task is emptied for the margin while another task keeps more" (item 056 Part C,
   report 054 Decision 4).
+- Q: What happens when a write to the node journal finds it locked? → A: Every process that
+  writes the node journal, the agent and each supervisor, retries after short, randomly spread,
+  capped sleeps for the same 5 s as before; what each transition persists, and when, is
+  unchanged. An attempt's pin waits about 50 ms: when the journal is still locked, that attempt's
+  publication or failure report, and every pin after it in that interval, wait for the next
+  interval, and the interval goes on; the pin still comes before every read that leads to a
+  publication. Any other journal write of the agent's loop that is still locked after 5 s is
+  transient, like a failed open: the interval ends there and the loop goes on. What the interval
+  had already sent to its supervisors stands, every step holds, nothing later in it runs (for the
+  observation write: no record of the observation, no report to the coordinator, no stop check),
+  a `journal_busy` event names the stretch once, and the next interval samples and decides again.
+  Any other journal error ends the agent as before. No report goes out in such an interval, so
+  the coordinator offers the node no new work; it still renews running work on the last report it
+  has, as for any missed heartbeat, and a report sent after a wait longer than `telemetry_ttl_ms`
+  is stale under FR-079 (item 056 Part A, report 054 Decisions 2 and 3).
 
 ## Terms
 
@@ -1830,7 +1845,9 @@ node reports with the expected per-resource values at each step.
   child MUST restore the original soft limit before the user's command runs. A launch whose
   descriptors do not fit under the limit with headroom MUST be refused with a reason. `EMFILE` or
   `ENFILE` MUST NOT end the agent's loop: a failed open while sampling reads as unknown for that
-  interval, and a failed open while launching refuses that launch.
+  interval, and a failed open while launching refuses that launch. A journal write that is still
+  locked after its wait MUST NOT end the agent's loop: the interval ends there, every step holds,
+  and the next interval decides again.
 - **FR-078**: Before exec, the worker gate MUST set a parent-death signal: SIGKILL for
   Opportunistic work and SIGCONT for Guaranteed work, so no own work stays stopped or frozen, and
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
@@ -1867,7 +1884,8 @@ node reports with the expected per-resource values at each step.
   spread its drains over iterations so that no iteration exceeds the 1 s cadence, and leases and
   heartbeats keep their pace: a stopping agent heartbeats at its heartbeat interval, not every
   iteration. The request budget MUST be checked before an attempt is pinned for a failure
-  report, and the pin MUST still come before every read that leads to a publication.
+  report, and the pin MUST still come before every read that leads to a publication. A pin that
+  finds the journal locked for its wait defers that attempt's report to the next interval.
 - **FR-081**: Node history MUST be bounded by fixed constants: a heartbeat reports unreleased
   executions plus the last 256 released ones; observations keep the last 24 h, with a row cap;
   an attempt's directory is removed after its outcome receipt and publication garbage
