@@ -8679,6 +8679,38 @@ mod floors_by_mode {
         );
     }
 
+    /// The same shape with `p`, the over-share task, also leading the cost order: beyond its
+    /// 400 MiB excess it is asked what the cost order asks of it, as before item 051. In Yield
+    /// First that empties `p` for the margin and asks `q` only the 4 600 MiB left; in Neutral
+    /// and Performance only the excess is asked. No in-share task pays any of `p`'s excess
+    /// (FR-016, R75, item 056).
+    #[test]
+    fn an_over_share_task_that_leads_the_cost_order_is_asked_what_the_order_asks_of_it() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![ram_job("p", class, 2_000), ram_job("q", class, 14_000)];
+        let facts = over_share_facts(&["p", "q"], &[], &[("p", 1_000)]);
+        for (mode, expected) in [
+            (
+                ContentionMode::YieldFirst,
+                BTreeMap::from([
+                    ("p".to_string(), (YieldStep::Hint, Some(0))),
+                    ("q".to_string(), (YieldStep::Hint, Some(9_400))),
+                ]),
+            ),
+            (
+                ContentionMode::Neutral,
+                BTreeMap::from([("p".to_string(), (YieldStep::Hint, Some(1_600)))]),
+            ),
+            (
+                ContentionMode::Performance,
+                BTreeMap::from([("p".to_string(), (YieldStep::Hint, Some(1_600)))]),
+            ),
+        ] {
+            let run = scripted(&config_in(mode), &facts, 0, |_| (jobs.clone(), 600));
+            assert_eq!(run[0].steps, expected, "{mode:?}");
+        }
+    }
+
     /// Neutral, when the floor needs more than the excess: 400 MiB to free, 300 MiB of it over
     /// the fair share, in `z`. `z` is asked for its 300 MiB and `a` for the 100 MiB beyond it in
     /// the same interval; nobody pays any part of `z`'s excess. In Performance in-share memory is

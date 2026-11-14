@@ -513,7 +513,9 @@ meanwhile. So no more over-share tasks are drained than bring own memory within 
 the floor, or the mode's target, needs beyond the excess (in Yield First its margin) is asked in
 the same interval by the victim order, each over-share task counted at what it holds less what
 it was already asked, and in-share tasks give it only where in-share memory gives way: in Yield
-First and Neutral, and in Performance and Aggressive for a breach own work caused. A drained task is admitted again once
+First and Neutral, and in Performance and Aggressive for a breach own work caused. Beyond its
+excess an over-share task is asked only what that order asks of it, so one that has the least
+progress to lose may be emptied for the margin while another task keeps more. A drained task is admitted again once
 its memory fits. The cost is time: free memory can stay below the floor for the over-share
 task's wait, the hint deadline plus the drain for a task that ignores its hint and the breach
 window for a Guaranteed RAM task off the critical path, where the in-share tasks were hinted
