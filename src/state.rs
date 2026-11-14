@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
+/// How long a write waits for the journal's lock.
+const JOURNAL_WAIT: Duration = Duration::from_secs(5);
+const BUSY_FIRST_US: u64 = 1_000;
+const BUSY_CAP_US: u64 = 16_000;
 /// How long observations are kept, and at most how many (FR-081).
 pub const OBSERVATION_RETENTION_MS: u64 = 24 * 3600 * 1000;
 pub const OBSERVATION_ROWS: u64 = 200_000;
@@ -333,6 +337,8 @@ pub struct DurabilitySettings {
 
 pub struct StateStore {
     pub(crate) connection: Connection,
+    // After the connection, which holds a pointer to it until it closes.
+    busy: Option<Box<BusyWait>>,
     path: PathBuf,
     profile: StorageProfile,
     // Last field: SQLite must close before the final lifecycle reference.
@@ -402,7 +408,7 @@ impl StateStore {
             "existing state identity changed while opening SQLite"
         );
         verify_sqlite_named_inode(&connection)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
+        let busy = install_busy_wait(&connection, JOURNAL_WAIT)?;
         connection.pragma_update(None, "synchronous", profile.synchronous())?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         #[cfg(target_os = "macos")]
@@ -426,6 +432,7 @@ impl StateStore {
         );
         let store = Self {
             connection,
+            busy: Some(busy),
             path,
             profile,
             namespace_guard,
@@ -519,7 +526,7 @@ impl StateStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .context("cannot open private state database")?;
-        connection.busy_timeout(busy_timeout)?;
+        let busy = install_busy_wait(&connection, busy_timeout)?;
         let existing_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
@@ -584,6 +591,7 @@ impl StateStore {
         }
         let store = Self {
             connection,
+            busy: Some(busy),
             path,
             profile,
             namespace_guard,
@@ -677,6 +685,7 @@ impl StateStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self {
             connection,
+            busy: None,
             path,
             profile,
             namespace_guard,
@@ -706,6 +715,13 @@ impl StateStore {
         Ok(store)
     }
 
+    /// How many lock waits this connection began, and the longest of them.
+    pub fn lock_waits(&self) -> (u64, Duration) {
+        self.busy.as_ref().map_or((0, Duration::ZERO), |busy| {
+            (busy.waits.get(), busy.longest.get())
+        })
+    }
+
     pub fn namespace_guard(&self) -> NamespaceGuard {
         self.namespace_guard.clone()
     }
@@ -727,11 +743,15 @@ impl StateStore {
             profile: self.profile,
             assurance: self.profile.assurance(),
             assurance_detail: self.profile.assurance().detail().into(),
-            busy_timeout_ms: u64::try_from(self.connection.pragma_query_value(
-                None,
-                "busy_timeout",
-                |row| row.get::<_, i64>(0),
-            )?)?,
+            // A custom busy handler reads 0 from the pragma, so the store reports its own limit.
+            busy_timeout_ms: match &self.busy {
+                Some(busy) => u64::try_from(busy.limit.as_millis())?,
+                None => u64::try_from(self.connection.pragma_query_value(
+                    None,
+                    "busy_timeout",
+                    |row| row.get::<_, i64>(0),
+                )?)?,
+            },
             journal_mode: self
                 .connection
                 .pragma_query_value(None, "journal_mode", |row| row.get(0))?,
@@ -2059,5 +2079,307 @@ mod directory_tests {
         assert!(format!("{:#}", result.unwrap_err()).contains("injected I/O failure"));
         assert!(child.is_dir());
         assert!(!grandchild.exists());
+    }
+}
+
+/// One connection's wait on a locked journal (R73).
+struct BusyWait {
+    limit: Duration,
+    /// Set when SQLite's count is 0, at the start of each wait.
+    started: std::cell::Cell<Option<std::time::Instant>>,
+    /// xorshift64 state, seeded per connection so writers started together do not share it.
+    seed: std::cell::Cell<u64>,
+    waits: std::cell::Cell<u64>,
+    longest: std::cell::Cell<Duration>,
+}
+
+impl BusyWait {
+    fn new(limit: Duration) -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let seed = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+            | 1;
+        Self {
+            limit,
+            started: std::cell::Cell::new(None),
+            seed: std::cell::Cell::new(seed),
+            waits: std::cell::Cell::new(0),
+            longest: std::cell::Cell::new(Duration::ZERO),
+        }
+    }
+
+    /// The sleep before retry `count`, or `None` once the limit has passed.
+    fn next(&self, count: u32) -> Option<Duration> {
+        let now = std::time::Instant::now();
+        let started = match self.started.get() {
+            Some(started) if count > 0 => started,
+            _ => {
+                self.started.set(Some(now));
+                self.waits.set(self.waits.get() + 1);
+                now
+            }
+        };
+        let mut random = self.seed.get();
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        self.seed.set(random);
+        let waited = now.duration_since(started);
+        let sleep = busy_sleep(count, waited, self.limit, random);
+        let total = waited + sleep.unwrap_or_default();
+        if total > self.longest.get() {
+            self.longest.set(total);
+        }
+        sleep
+    }
+}
+
+/// The sleep before retry `count`, `waited` into the wait: 1 ms doubling to a 16 ms cap, each
+/// sleep in the upper half of its step, cut to end at `limit`; `None` once the limit has passed.
+fn busy_sleep(count: u32, waited: Duration, limit: Duration, random: u64) -> Option<Duration> {
+    if waited >= limit {
+        return None;
+    }
+    let step = (BUSY_FIRST_US << count.min(4)).min(BUSY_CAP_US);
+    let half = step / 2;
+    let sleep = Duration::from_micros(half + random % (half + 1));
+    Some(sleep.min(limit - waited))
+}
+
+/// SQLite's busy callback: the context is the `BusyWait` its store owns, which outlives the
+/// connection. A panic gives up the wait, so the statement fails busy.
+unsafe extern "C" fn busy_callback(
+    context: *mut std::os::raw::c_void,
+    count: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: SQLite passes back the pointer `install_busy_wait` gave it; the box lives in
+        // the store, declared after the connection, so it is dropped only after the close.
+        let wait = unsafe { &*context.cast::<BusyWait>() };
+        wait.next(u32::try_from(count).unwrap_or(u32::MAX))
+    }));
+    match outcome {
+        Ok(Some(sleep)) => {
+            std::thread::sleep(sleep);
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Replace SQLite's busy handler on `connection` with jittered, capped sleeps up to `limit`.
+fn install_busy_wait(connection: &Connection, limit: Duration) -> Result<Box<BusyWait>> {
+    ensure!(
+        limit.as_millis() <= i32::MAX as u128,
+        "SQLite busy timeout exceeds supported range"
+    );
+    let wait = Box::new(BusyWait::new(limit));
+    // SAFETY: the handle is this live connection's; the context stays valid until the store,
+    // which owns both, drops the connection first.
+    let code = unsafe {
+        rusqlite::ffi::sqlite3_busy_handler(
+            connection.handle(),
+            Some(busy_callback),
+            std::ptr::from_ref::<BusyWait>(&wait).cast_mut().cast(),
+        )
+    };
+    ensure!(
+        code == rusqlite::ffi::SQLITE_OK,
+        "cannot install the journal's busy handler: {code}"
+    );
+    Ok(wait)
+}
+
+#[cfg(test)]
+mod busy_sleep_tests {
+    use super::*;
+
+    /// A locked journal is retried after short, jittered sleeps that double to 16 ms and never
+    /// pass the connection's limit (R73).
+    #[test]
+    fn a_locked_journal_is_retried_after_short_jittered_sleeps_until_its_limit() {
+        let limit = Duration::from_secs(5);
+        for random in [0, 1, 499, 500, 501, u64::MAX] {
+            let first = busy_sleep(0, Duration::ZERO, limit, random).unwrap();
+            assert!(first >= Duration::from_micros(500) && first <= Duration::from_millis(1));
+            for count in [4, 5, 20, 1000] {
+                let sleep = busy_sleep(count, Duration::from_secs(1), limit, random).unwrap();
+                assert!(sleep >= Duration::from_millis(8) && sleep <= Duration::from_millis(16));
+            }
+        }
+        assert_ne!(
+            busy_sleep(3, Duration::ZERO, limit, 1),
+            busy_sleep(3, Duration::ZERO, limit, 2)
+        );
+        assert_eq!(busy_sleep(4, limit, limit, 7), None);
+        assert_eq!(
+            busy_sleep(4, limit - Duration::from_millis(3), limit, 7),
+            Some(Duration::from_millis(3))
+        );
+        let pin = Duration::from_millis(50);
+        let mut waited = Duration::ZERO;
+        let mut count = 0;
+        while let Some(sleep) = busy_sleep(count, waited, pin, u64::from(count) * 7919) {
+            waited += sleep;
+            count += 1;
+            assert!(waited <= pin);
+        }
+        assert_eq!(waited, pin);
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod lock_wait_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const WRITERS: usize = 40;
+    const HOLD: Duration = Duration::from_millis(8);
+
+    fn unix_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// One writer: opens the journal as the product does, waits for the shared start, then
+    /// holds a write transaction for a fixed time. Launched by the test below.
+    #[test]
+    #[ignore = "subprocess fixture for processes_that_begin_a_transition_together_commit_within_the_bound"]
+    fn lock_wait_fixture() {
+        let dir = PathBuf::from(std::env::var("CEDEGRID_TEST_LOCK_WAIT_DIR").unwrap());
+        let mut store =
+            StateStore::open_with_profile(&dir.join("state"), StorageProfile::WalFull).unwrap();
+        // The disk's sync cost is not what is measured: the hold is fixed below.
+        store
+            .connection
+            .pragma_update(None, "synchronous", "OFF")
+            .unwrap();
+        #[cfg(target_os = "macos")]
+        store
+            .connection
+            .pragma_update(None, "fullfsync", "OFF")
+            .unwrap();
+        std::fs::write(dir.join(format!("ready-{}", std::process::id())), b"").unwrap();
+        let start = loop {
+            if let Ok(text) = std::fs::read_to_string(dir.join("start"))
+                && let Ok(start) = text.trim().parse::<u64>()
+            {
+                break start;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        while unix_ms() < start {
+            std::hint::spin_loop();
+        }
+        let transaction = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let held = std::time::Instant::now();
+        transaction
+            .execute(
+                "INSERT INTO lock_wait (pid) VALUES (?1)",
+                [std::process::id()],
+            )
+            .unwrap();
+        std::thread::sleep(HOLD);
+        let hold = held.elapsed();
+        transaction.commit().unwrap();
+        println!("lock_wait {} {}", hold.as_micros(), unix_ms());
+    }
+
+    /// Processes that begin a journal transition together all commit within a bound: half as
+    /// much again as the sum of their holds, plus 150 ms for polling. A writer that retries in
+    /// step with the others, one commit per retry instant, cannot meet it (FR-077, R73).
+    #[test]
+    fn processes_that_begin_a_transition_together_commit_within_the_bound() {
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".lock-wait-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
+        let root = directory.path().to_path_buf();
+        let store =
+            StateStore::open_with_profile(&root.join("state"), StorageProfile::WalFull).unwrap();
+        store
+            .connection
+            .execute("CREATE TABLE lock_wait (pid INTEGER NOT NULL)", [])
+            .unwrap();
+        drop(store);
+        let children: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "state::lock_wait_tests::lock_wait_fixture",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("CEDEGRID_TEST_LOCK_WAIT_DIR", &root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let ready = std::fs::read_dir(&root)
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("ready-")
+                })
+                .count();
+            if ready == WRITERS {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{ready} writers ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let start = unix_ms() + 300;
+        std::fs::write(root.join("start"), start.to_string()).unwrap();
+        let (mut holds, mut last) = (Duration::ZERO, 0);
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "a writer failed: {}",
+                output.status
+            );
+            let text = String::from_utf8_lossy(&output.stdout);
+            let line = text
+                .lines()
+                .find_map(|line| line.split_once("lock_wait ").map(|(_, rest)| rest))
+                .unwrap_or_else(|| panic!("no result line: {text}"));
+            let mut fields = line.split_whitespace().map(|f| f.parse::<u64>().unwrap());
+            holds += Duration::from_micros(fields.next().unwrap());
+            last = last.max(fields.next().unwrap());
+        }
+        let store =
+            StateStore::open_with_profile(&root.join("state"), StorageProfile::WalFull).unwrap();
+        let rows: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM lock_wait", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, WRITERS as i64);
+        let took = Duration::from_millis(last.saturating_sub(start));
+        let bound = holds.mul_f64(1.5) + Duration::from_millis(150);
+        assert!(
+            took <= bound,
+            "the last of {WRITERS} writers committed {took:?} after the start, past {bound:?} (holds {holds:?})"
+        );
     }
 }
