@@ -1788,3 +1788,12 @@ Each code task is test first, one commit per task. Item 060's Parts C and E are 
 - [X] T579 Make `tests/launch_burst.rs` read the journal figures while the attempt directories and `loop_cost` exist; add the `follow-ups.md` rows (the SDKs' `ManagedChild.wait()`; the Guaranteed drain path through renewals on a node without a sample) and the "Open operational gates" row for an over-share task that ignores its hint while its need pauses and returns, per report 056 Decisions 4(a) and 5 (missing)
 
 Item 060's order: T577, T578, T579.
+
+## Phase 45: Convergence (item 061, renewals for Guaranteed work and the return test)
+
+Each code task is test first, one commit per task. Item 061's Part C stopped at its decision rule and has no task; Part D is a read-only list.
+
+- [ ] T580 Failing tests in `tests/agent.rs`, with a multi-task `Service` helper (one pool and job per task, so classes differ): behind a locked journal past one lease a Guaranteed slot is still asked for and an Opportunistic one is not, and a coordinator drain for the Guaranteed task reaches its supervisor in that state (stop and report where the interval ends if it ends before the reply is handed on); then withhold renewals of Opportunistic slots only in `src/agent/service.rs`; restate `docs/guarantees.md`'s renewal sentences; remove `follow-ups.md`'s row for the Guaranteed drain path, per FR-077, FR-079, R81 (contradicts)
+- [ ] T581 Test only: the two-task test in `tests/agent.rs` that renewals withheld behind a locked journal are asked again, for work still renewable, after the lock is released and an interval acts on a sample (Linux-only if it is not stable on macOS); correct T578's wording to what each of its tests covers, per FR-079, plan "Item 061" (missing)
+
+Item 061's order: T580, then T581.
