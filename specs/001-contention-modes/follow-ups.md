@@ -8,6 +8,9 @@ findings. Lines move to "Done" with a pointer once a later item does them.
 
 | Source | What | Target | Blocks |
 |---|---|---|---|
+| 062 Part B | An SDK child's launch records (reserve, Prepared, Authorized) still wait up to 5 s each for a locked journal, holding the supervisor's loop and its control lines for that time. Bounding them changes a launch barrier's attempts. | 001, after the merge | nothing |
+| 062 Part B | A record that gets the journal's lock still commits in the supervisor's loop; only the lock wait is bounded, not the commit's sync. | 001, after the merge | nothing |
+| 062 Part B | A failed drain-file write for an SDK child is a tick error and ends in KILL, where the leader retries the notice every pass. | 001, after the merge | nothing |
 | 054 Part D (report 051) | An owner's GPU process whose per-process samples have gaps reads unknown, and each time admission reopens it waits the GPU memory cooldown again. | 001, after the merge | nothing |
 | 054 Part D (report 051) | An open device reads unknown for one interval when a listed context has no sample newer than the cursor and the collector has not yet called it quiet. | 001, after the merge | nothing |
 | 054 Part F (report 053 F2) | Beside formed unattributed CPU usage, as on a host that hides other accounts' processes (`hidepid=2`), an owner's login lands in the unattributed estimate and still restarts Yield First's cooldown. | 001, after the merge | nothing |

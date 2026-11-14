@@ -761,14 +761,21 @@ stretch), and it asks again after the next interval that samples; an interval th
 observation write has its sample and keeps asking. It keeps asking for Guaranteed work, whose
 lease running out drains nothing and whose renewal reply carries a drain, cancel or preemption.
 An allocation whose supervisor has exited is asked no renewal in any class.
-A supervisor records a drain before it notifies the workload, so behind a journal that stays
-locked the drain waits for that write's four attempts, about 20 s, and then goes on.
+A supervisor that drains releases its steps, writes the drain notice and sends TERM and KILL
+when they are due, counted from the request, and records the drain after the notice; on the
+critical floor path TERM also comes before the step's record. A record that finds the journal
+locked waits about 50 ms and is tried again on later passes, so a locked journal delays the
+record and not the drain; until it lands the journal still shows the run as running. After 20 s
+of refusals the supervisor reports `journal_unavailable` and Opportunistic work drains, as
+before. An SDK child's Running and Draining records follow the same rule, and a refused child
+record never stops the child.
 
 A running supervisor waits for a control line, its leader's exit through the pidfd or a
 new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,
 TERM and KILL deadlines, the readiness check and the release confirmation, and passes at
 least once a second. Without a pidfd, while SDK connections or mediated children are
-active, or while a control or drain-file write fails, it passes every 5 ms.
+active, or while a control or drain-file write fails, it passes every 5 ms. While a journal
+record is outstanding it passes again when the record is next tried, every 250 ms.
 
 The Linux supervisor acquires a pidfd before any child reaping, verifies boot ID,
 start time, assignment ID and generation, and uses the stable handle for signaling
@@ -875,7 +882,8 @@ The defaults reach the forced termination stage approximately five seconds after
 local detection, or fifteen seconds after the last valid lease renewal when a
 10-second opportunistic lease expires. Sampling, scheduling, actual exit, and
 release confirmation add separate latency. No setting promises VRAM is returned in
-three seconds. Hung kernels/drivers can prevent timely release.
+three seconds. Hung kernels/drivers can prevent timely release. A locked node journal does
+not delay these milestones: the supervisor's records follow its signals.
 
 A living independent supervisor can retain deadlines without an agent. The local
 CLI currently combines the caller and supervisor, and has no remote channel. The
@@ -915,9 +923,14 @@ interval as many as the agent's last synced journal write fits in 250 ms, and at
 explicit operator drain reaches each allocation with its next lease renewal or heartbeat reply
 (an Opportunistic allocation whose renewals are withheld for want of a sample, with the first
 reply after its node samples),
-within one heartbeat interval and not spread, and its lease is not extended from then on.
+within one heartbeat interval, or, while the agent's intervals end at a locked journal, with
+the first renewal after the interval that was waiting, about 5 s; it is not spread, and its
+lease is not extended from then on. A drain in a renewal reply is handed to the supervisor
+with or without time left on the lease; one that finds the supervisor gone is reported once
+(`drain_undelivered`).
 Every process that writes the node journal retries a locked journal after randomly spread
-sleeps of at most 16 ms, for at most 5 s. The
+sleeps of at most 16 ms, for at most 5 s. A supervisor's records while its work runs wait
+about 50 ms in a pass and are tried again; its launch and release records wait 5 s. The
 agent's loop never waits for its own pacing of coordinator requests: heartbeats go at their
 interval, renewals before their deadlines (except Opportunistic ones while they are withheld for
 want of a sample)
@@ -928,8 +941,8 @@ interval. SIGHUP reloads the configuration: contention settings,
 modes included, apply from the next interval (`config_reloaded`); a change to a setting
 that needs a restart keeps the running configuration (`config_reload_refused`) (FR-080).
 
-A node report carries the agent's monotonic age of its sample. While the last report is
-older than `telemetry_ttl_ms`, the coordinator renews no lease and offers no work to that
+A node report carries the agent's monotonic age of its sample. While the node's last report
+arrived with a sample older than `telemetry_ttl_ms`, the coordinator renews no lease and offers no work to that
 node (`report_stale`); it drains nothing on that report, and only lease expiry drains
 (FR-079).
 An agent heartbeat alone cannot renew a coordinator-issued remote lease. Lease
