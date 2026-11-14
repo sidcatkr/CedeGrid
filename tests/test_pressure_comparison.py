@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 sys.path.insert(0,str(Path(__file__).parents[1]/'tools'))
 import pressure_comparison as comparison
@@ -217,11 +218,39 @@ class GateRunnerTests(unittest.TestCase):
     def test_the_same_core_gate_refuses_a_biased_or_unchecked_window(self):
         import pressure_probe
         verdict=pressure_probe.window_verdict
-        self.assertEqual(verdict({'completed_units':10}),'refused: no even/odd self-check recorded')
-        self.assertEqual(verdict({'self_check':{'ratio':1.004,'biased':False}}),'measured')
-        self.assertTrue(verdict({'self_check':{'ratio':1.05,'biased':True}}).startswith('refused'))
+        self.assertEqual(verdict({'completed_units':10}),'refused: no in-window even/odd check recorded')
+        # The window's own check decides (item 058), whatever the warm-up found.
+        self.assertEqual(verdict({'self_check':{'ratio':1.05,'biased':True},'window_check':{'ratio':1.004,'biased':False}}),'measured')
+        self.assertTrue(verdict({'self_check':{'ratio':1.0,'biased':False},'window_check':{'ratio':1.05,'biased':True}}).startswith('refused'))
         # A ratio over the limit is refused even if the probe did not mark it.
-        self.assertTrue(verdict({'self_check':{'ratio':1.02,'biased':False}}).startswith('refused'))
+        self.assertTrue(verdict({'window_check':{'ratio':1.02,'biased':False}}).startswith('refused'))
+        self.assertTrue(verdict({'window_check':{'ratio':None,'biased':True}}).startswith('refused'))
+
+    def test_a_unit_that_alternates_only_once_the_loop_runs_is_refused(self):
+        # Item 058: the probe's units cost the same until the real loop has run a while, then
+        # alternate 1.0 and 1.3 ms. A check made before `ready.json` cannot see it; the window's
+        # own even/odd sums must, and the window is refused.
+        import argparse,pressure_probe
+        calls=[0]
+        def unit():
+            calls[0]+=1
+            spin=1.3e-3 if calls[0]>300 and calls[0]%2==0 else 1e-3
+            end=time.thread_time()+spin
+            while time.thread_time()<end:pass
+        saved=(pressure_probe.cpu_unit,pressure_probe.local_guard,pressure_probe.rss_bytes)
+        pressure_probe.cpu_unit=unit
+        pressure_probe.local_guard=lambda *_:{'errors':[]}
+        pressure_probe.rss_bytes=lambda:0
+        try:
+            with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+                result=pressure_probe.run(argparse.Namespace(mode='cpu',seconds=2.,cpu=0,
+                    output=str(Path(temporary)/'probe'),duty=1.,period_ms=500.,no_self_check=False,
+                    self_check_holds=0))
+        finally:
+            pressure_probe.cpu_unit,pressure_probe.local_guard,pressure_probe.rss_bytes=saved
+        self.assertGreater(result['window_check']['ratio'],1.2)
+        self.assertTrue(result['window_check']['biased'])
+        self.assertTrue(pressure_probe.window_verdict(result).startswith('refused'))
 
     def test_a_duty_probe_is_busy_for_its_duty_of_each_period(self):
         import argparse,pressure_probe

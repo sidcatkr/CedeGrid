@@ -14,22 +14,25 @@ CHECK_SECONDS=.05
 # and how many blocks it may hold to remove a larger one.
 BIAS_LIMIT=.01
 BIAS_HOLDS=8
+WARM_UNITS=100
 
 
 def cpu_unit():
     hashlib.pbkdf2_hmac('sha256',b'cedegrid-matched-probe',b'fixed-seed',1500)
 
 
-def self_check(unit,clock=time.thread_time,hold=None,units=200,holds=BIAS_HOLDS):
+def self_check(unit,clock=time.thread_time,hold=None,units=200,holds=BIAS_HOLDS,paced=False):
     """Times even against odd units by the thread's CPU time. The allocator can hand the same
     blocks back every other call, so a unit's working data alternates between two placements and
     one of them can be dearer; holding a block shifts the placements. Holds one more block while
-    the difference is over BIAS_LIMIT, at most `holds` times, and says what it found."""
+    the difference is over BIAS_LIMIT, at most `holds` times, and says what it found. `paced`
+    idles after each unit as long as it took, as the real loop does."""
     held=[]
     def ratio():
         costs=[]
         for _ in range(units):
-            began=clock();unit();costs.append(clock()-began)
+            began=clock();unit();spent=clock()-began;costs.append(spent)
+            if paced:time.sleep(spent)
         even=sum(costs[0::2])/len(costs[0::2]);odd=sum(costs[1::2])/len(costs[1::2])
         return max(even,odd)/max(min(even,odd),1e-12)
     if hold is None:
@@ -43,13 +46,29 @@ def self_check(unit,clock=time.thread_time,hold=None,units=200,holds=BIAS_HOLDS)
             'biased':current>1+BIAS_LIMIT}
 
 
+def rss_bytes():
+    """This process's resident set size, or None where /proc does not show it."""
+    try:
+        return next((int(line.split()[1])*1024 for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('VmRSS:')),None)
+    except OSError:
+        return None
+
+
+def parity_check(even,odd,units):
+    """The window's even-against-odd unit cost, from the time summed by parity."""
+    if units<2 or min(even,odd)<=0:return {'units':units,'ratio':None,'biased':True}
+    mean_even=even/((units+1)//2);mean_odd=odd/(units//2)
+    ratio=max(mean_even,mean_odd)/min(mean_even,mean_odd)
+    return {'units':units,'ratio':round(ratio,4),'biased':ratio>1+BIAS_LIMIT}
+
+
 def window_verdict(result):
     """Whether a same-core window's probe result can be judged: refused when the probe recorded
-    no self-check or carried an even-against-odd difference over BIAS_LIMIT into the window."""
-    check=result.get('self_check')
-    if not check:return 'refused: no even/odd self-check recorded'
-    if check.get('biased') or check.get('ratio',0)>1+BIAS_LIMIT:
-        return f"refused: even/odd units differ by {check.get('ratio',0)-1:.1%}, over {BIAS_LIMIT:.0%}"
+    no even-against-odd check of the window itself, or one over BIAS_LIMIT (item 058)."""
+    check=result.get('window_check')
+    if not check:return 'refused: no in-window even/odd check recorded'
+    if check.get('biased') or (check.get('ratio') or 0)>1+BIAS_LIMIT:
+        return f"refused: even/odd units differ by {(check.get('ratio') or 0)-1:.1%} in the window, over {BIAS_LIMIT:.0%}"
     return 'measured'
 
 
@@ -87,7 +106,7 @@ def run(args):
     if not 0<args.duty<=1 or not 0<args.period_ms<=10000:
         raise ValueError('probe duty must be in (0, 1] and its period in (0, 10] s')
     output=inside_home(args.output);output.mkdir(parents=True,exist_ok=False)
-    os.sched_setaffinity(0,{args.cpu})
+    if hasattr(os,'sched_setaffinity'):os.sched_setaffinity(0,{args.cpu})
     context=NoContext()
     if os.environ.get('CEDEGRID_CONTEXT'):
         from cedegrid import WorkerContext
@@ -103,17 +122,19 @@ def run(args):
         torch.cuda.synchronize()
         from pressure import Nvml
         gpu=Nvml(os.environ['CUDA_VISIBLE_DEVICES'])
-    # Before it is ready, the CPU probe checks that its units cost the same on even and odd calls.
-    check=self_check(cpu_unit,holds=args.self_check_holds) if args.mode=='cpu' and not args.no_self_check else None
-    atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic(),'self_check':check})
+    atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic()})
+    # After it is ready, a warm-up of the real loop checks that units cost the same on even and
+    # odd calls and holds blocks while they do not; the window then checks itself (item 058).
+    check=self_check(cpu_unit,clock=time.monotonic,holds=args.self_check_holds,units=WARM_UNITS,paced=True) \
+        if args.mode=='cpu' and not args.no_self_check else None
     deadline=time.monotonic()+args.seconds;started=time.monotonic();units=0;drained=False;next_guard=0
-    period=args.period_ms/1000;phase=started;busy=0.
+    period=args.period_ms/1000;phase=started;busy=0.;parity=[0.,0.]
     while time.monotonic()<deadline:
         if stopped():
             drained=True;break
         if time.monotonic()>=next_guard:
             guard=local_guard(output,{'min_ram_free_bytes':16*1024**3,'min_disk_free_bytes':16*1024**3})
-            rss=next((int(line.split()[1])*1024 for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('VmRSS:')),None)
+            rss=rss_bytes()
             if guard['errors'] or rss is None or rss>2*1024**3:raise RuntimeError('probe RAM/disk guard failed')
             if gpu is not None:
                 reading=gpu.sample(True)
@@ -126,16 +147,18 @@ def run(args):
         began=time.monotonic()
         if args.mode=='cpu':
             cpu_unit()
+            spent=time.monotonic()-began;parity[units%2]+=spent
             # A bounded half-core producer leaves meaningful CPU room before
             # pressure; this is identical under unmanaged and managed execution.
-            time.sleep(time.monotonic()-began)
+            time.sleep(spent)
         else:
             torch.mm(a,b,out=c);torch.cuda.synchronize()
         units+=1;busy+=time.monotonic()-began
     result={'mode':args.mode,'completed_units':units,'elapsed_seconds':time.monotonic()-started,
         'drained':drained,'finished_monotonic':time.monotonic(),'managed':not isinstance(context,NoContext),
         'check_seconds':CHECK_SECONDS,'duty':args.duty,'period_seconds':period,'busy_seconds':busy,
-        'self_check':check}
+        'self_check':check,
+        'window_check':parity_check(parity[0],parity[1],units) if args.mode=='cpu' and not args.no_self_check else None}
     atomic_json(output/'result.json',result)
     context.complete(result)
     if gpu is not None:gpu.close()
