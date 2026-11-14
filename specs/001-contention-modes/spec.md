@@ -794,6 +794,14 @@ back more.
   the coordinator offers the node no new work; it still renews running work on the last report it
   has, as for any missed heartbeat, and a report sent after a wait longer than `telemetry_ttl_ms`
   is stale under FR-079 (item 056 Part A, report 054 Decisions 2 and 3).
+- Q: How does the agent know that other accounts' usage can be read per process, so that an
+  estimate may be kept for a window's refill? → A: The readable principal list, both when the
+  estimate is taken and in the current interval, holds at least one process of another account
+  with a readable user ID. If either list is unreadable, or holds only the owner's processes or
+  processes whose user ID cannot be read, no estimate is kept and the interval's own estimate
+  applies; the decision's CPU note says why. On a host that hides other accounts' processes
+  nothing is kept, so there an own task's unknown sample can read as external growth for one
+  window (item 058 Part B, report 055 Decisions 2 and 3).
 
 ## Terms
 
@@ -1397,8 +1405,10 @@ node reports with the expected per-resource values at each step.
   mode: an own task's one-interval unknown measurement does not raise the external estimate in
   the next interval. The estimate kept for a window's refill MUST give way in the interval in
   which the other principals' measured usage, from the readable principal list, has risen by
-  `principal_min_percent` of capacity since it was taken; where other accounts' usage cannot be
-  read per process, or the list is unreadable, no estimate is kept.
+  `principal_min_percent` of capacity since it was taken; an estimate is kept only while the
+  readable principal list, when it was taken and now, holds a process of another account with a
+  readable user ID, so none is kept where the list is unreadable or other accounts' processes are
+  hidden.
 
 **Modes**
 
