@@ -803,6 +803,24 @@ back more.
   nothing is kept, so there an own task's unknown sample can read as external growth for one
   window (item 058 Part B, report 055 Decisions 2 and 3).
 
+### Session 2026-11-15
+
+- Q: How long does an agent keep its work leased when its intervals end before the sample? → A:
+  One lease. The agent asks for a lease renewal only while the newest sample it has acted on
+  (sampled, decided, its steps sent to the supervisors) is no older than
+  `lifecycle.allocation_lease_ms`, its own lease and an existing setting; `telemetry_ttl_ms` is
+  the coordinator's. Past that it asks for none, the one case in which a renewal that is due is
+  not sent, and a `renewals_withheld` event names the stretch once. It drains nothing for this:
+  leases run out and each supervisor acts as it does today, Opportunistic work draining at its
+  deadline and Guaranteed work running on (FR-079). It asks again in the first interval after one
+  that acts on a sample. An interval that ends at the observation write has acted on its sample
+  and keeps asking; a sample whose readings are unknown is still a sample, and the unknown window
+  applies to it. Until the first sample the agent's start counts as one. With the defaults a lease
+  can first run out 15 to 20 s after the last such sample, where since item 056 it never did. The
+  coordinator still renews on the last report it has when it is asked, and its rule for a silent
+  node stays in `follow-ups.md`. No configuration key and no wire change (item 060 Part B, report
+  056 Decision 2(e)).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1857,7 +1875,9 @@ node reports with the expected per-resource values at each step.
   `ENFILE` MUST NOT end the agent's loop: a failed open while sampling reads as unknown for that
   interval, and a failed open while launching refuses that launch. A journal write that is still
   locked after its wait MUST NOT end the agent's loop: the interval ends there, every step holds,
-  and the next interval decides again.
+  and the next interval decides again. While intervals have ended before a sample was acted on for
+  longer than one lease (`lifecycle.allocation_lease_ms`), the agent MUST ask for no lease
+  renewals, and MUST ask again once an interval has acted on one.
 - **FR-078**: Before exec, the worker gate MUST set a parent-death signal: SIGKILL for
   Opportunistic work and SIGCONT for Guaranteed work, so no own work stays stopped or frozen, and
   no Opportunistic copy runs uncontrolled beside a replacement, after its supervisor dies. The
@@ -1885,7 +1905,10 @@ node reports with the expected per-resource values at each step.
 - **FR-079**: A node report MUST carry the agent's monotonic age of its sample when it is sent.
   For a report older than the telemetry freshness limit (`telemetry_ttl_ms`), the coordinator MUST
   grant no renewals and offer no new work for that node; it MUST NOT drain on that report, and
-  drains happen only when leases expire.
+  drains happen only when leases expire. The agent MUST ask for a lease renewal only while the
+  newest sample it has acted on is no older than its lease (`lifecycle.allocation_lease_ms`); it
+  MUST NOT drain because that sample is older, and an interval that ends at the observation write
+  has acted on its sample.
 - **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
   re-adoption; an explicit operator drain, and the end of `max_runtime_seconds`, drain every
   allocation. The agent MUST reload its configuration on request and apply a mode change without
