@@ -26,6 +26,14 @@ struct Journal {
     busy: Option<(ExecutionPhase, std::cell::Cell<u32>)>,
     /// When Draining is first asked: whether the drain file named in this file exists.
     notice_seen: Option<(PathBuf, std::cell::Cell<Option<bool>>)>,
+    /// When the contention record or Draining is first asked: whether this file appears within
+    /// 300 ms.
+    term_seen: Option<(PathBuf, std::cell::Cell<Option<bool>>)>,
+    /// The contention record waits for the lock as long as it is given, at most 1 s, and is
+    /// refused as busy.
+    slow_contention: bool,
+    /// The lock wait of the write in progress, from `within`.
+    wait: std::cell::Cell<Option<Duration>>,
 }
 impl Journal {
     fn new() -> Self {
@@ -37,6 +45,20 @@ impl Journal {
             pause_phase: ExecutionPhase::Prepared,
             busy: None,
             notice_seen: None,
+            term_seen: None,
+            slow_contention: false,
+            wait: std::cell::Cell::new(None),
+        }
+    }
+    fn note_term(&self) {
+        if let Some((path, seen)) = &self.term_seen
+            && seen.get().is_none()
+        {
+            let end = Instant::now() + Duration::from_millis(300);
+            while !path.exists() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            seen.set(Some(path.exists()));
         }
     }
     fn last(&self) -> ExecutionRecord {
@@ -64,7 +86,34 @@ impl ExecutionJournal for Journal {
         self.records.borrow_mut().push(record.clone());
         Ok(record)
     }
+    fn within(&self, wait: Duration, write: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        self.wait.set(Some(wait));
+        let result = write();
+        self.wait.set(None);
+        result
+    }
+    fn record_contention(
+        &self,
+        _assignment_id: &str,
+        _generation: u64,
+        _contention: &cedegrid::contention::AllocationContention,
+    ) -> Result<()> {
+        self.note_term();
+        if self.slow_contention {
+            let wait = self.wait.get().unwrap_or(Duration::from_secs(1));
+            std::thread::sleep(wait.min(Duration::from_secs(1)));
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            )
+            .into());
+        }
+        Ok(())
+    }
     fn transition(&self, record: &ExecutionRecord) -> Result<()> {
+        if record.phase == ExecutionPhase::Draining {
+            self.note_term();
+        }
         if record.phase == ExecutionPhase::Draining
             && let Some((path, seen)) = &self.notice_seen
             && seen.get().is_none()
@@ -1006,6 +1055,59 @@ fn the_drain_notice_is_written_before_the_draining_record() {
     );
 }
 
+/// The critical terminate step's TERM is sent before either record is asked: the journal, when
+/// first asked for the step's record or for Draining, sees the worker's `termed` (FR-063, R84).
+#[test]
+fn the_critical_term_is_sent_before_the_step_and_drain_records() {
+    struct TerminateWhenReady(PathBuf, bool);
+    impl supervision::SupervisorControl for TerminateWhenReady {
+        fn poll(&mut self) -> Result<Vec<supervision::SupervisorCommand>> {
+            use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+            if !self.1 && self.0.exists() {
+                self.1 = true;
+                return Ok(vec![supervision::SupervisorCommand::Adjust {
+                    sequence: 1,
+                    resources: BTreeMap::from([(
+                        ResourceKey::Ram,
+                        StepRequest {
+                            step: YieldStep::Terminate,
+                            target: None,
+                            cause: YieldCause::FloorBreach,
+                            deadline_ms: None,
+                        },
+                    )]),
+                }]);
+            }
+            Ok(vec![])
+        }
+    }
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "trap 'touch termed' TERM; touch ready; while :; do sleep 0.05; done".into(),
+    ];
+    let journal = Journal {
+        term_seen: Some((temp.path().join("termed"), std::cell::Cell::new(None))),
+        ..Journal::new()
+    };
+    let opts = SupervisorOptions {
+        lease_ms: 60_000,
+        drain_timeout_ms: 3_000,
+        term_grace_ms: 500,
+        ..options()
+    };
+    let mut control = TerminateWhenReady(temp.path().join("ready"), false);
+    let outcome = run_controlled(&req, &opts, &journal, &mut Backend::new(), &mut control).unwrap();
+    assert!(outcome.yielded, "{outcome:?}");
+    assert_eq!(
+        journal.term_seen.as_ref().unwrap().1.get(),
+        Some(true),
+        "a record was asked before the critical TERM"
+    );
+}
+
 /// A Draining record refused for the lock more often than the old four tries is tried again on
 /// later passes and lands while the worker still runs (R84).
 #[test]
@@ -1584,6 +1686,45 @@ mod actuation {
         let resumed = script.seen.rate("resumed0", "resumed1");
         assert!(capped < 0.6 * free, "free {free} capped {capped}");
         assert!(resumed > 0.7 * free, "free {free} resumed {resumed}");
+    }
+
+    /// A new CPU cap holds while its journal record waits for a locked journal: the record waits
+    /// only the bounded time, so the duty cycle keeps its phases (R84).
+    #[test]
+    fn a_cpu_cap_keeps_its_phases_while_its_record_waits() {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = AllocationClass::Opportunistic;
+        req.resources.cpu_millicores = 1000;
+        req.argv = counter_worker(true);
+        let counter = temp.path().join("counter");
+        let mut script = Script::new(
+            temp.path(),
+            vec![
+                running(&counter),
+                record(&[("free0", &counter)]),
+                after("free1", &counter, "free0", 1000),
+                record(&[("capped0", &counter)]),
+                send(adjust(1, YieldStep::Cap, Some(250))),
+                after("capped1", &counter, "capped0", 1500),
+            ],
+        );
+        let journal = Journal {
+            slow_contention: true,
+            ..Journal::new()
+        };
+        run_controlled(
+            &req,
+            &long_lease(),
+            &journal,
+            &mut Backend::new(),
+            &mut script,
+        )
+        .unwrap();
+        script.check();
+        let free = script.seen.rate("free0", "free1");
+        let capped = script.seen.rate("capped0", "capped1");
+        assert!(capped < 0.6 * free, "free {free} capped {capped}");
     }
 }
 

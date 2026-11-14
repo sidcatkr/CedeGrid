@@ -627,26 +627,6 @@ impl Family for OwnedFamily<'_> {
     }
 }
 
-fn record_contention_with_retry(
-    journal: &dyn ExecutionJournal,
-    record: &ExecutionRecord,
-    contention: &crate::contention::AllocationContention,
-) -> Result<()> {
-    let mut delay = Duration::from_millis(10);
-    let mut attempt = 1;
-    loop {
-        match journal.record_contention(&record.assignment_id, record.generation, contention) {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt >= JOURNAL_ATTEMPTS => return Err(error),
-            Err(_) => {
-                std::thread::sleep(delay);
-                delay = delay.saturating_mul(2);
-                attempt += 1;
-            }
-        }
-    }
-}
-
 /// The cap or hint targets applied per resource.
 fn applied_targets(
     contention: &crate::contention::AllocationContention,
@@ -693,6 +673,7 @@ fn apply_runtime_commands(
     targets: &mut crate::actuation::TargetChannel,
     directories: &[PathBuf],
     journal: &dyn ExecutionJournal,
+    outstanding: &mut Outstanding,
     control: &mut dyn SupervisorControl,
     (hint_ready, observes_drain): (bool, bool),
     leader_exited: bool,
@@ -888,8 +869,17 @@ fn apply_runtime_commands(
                     details.push(format!("resource targets unavailable: {error:#}"));
                 }
                 contention.sequence = sequence;
-                if let Err(error) = record_contention_with_retry(journal, record, contention) {
-                    details.push(format!("journal unavailable: {error:#}"));
+                // Recorded before `adjusted` while the run is Running, at most one bounded try;
+                // a step that started a drain or TERM is recorded after its signals (R84).
+                outstanding.owe_contention(false);
+                if lifecycle.phase == LifecyclePhase::Running {
+                    let drains = outstanding.contention_drains;
+                    if let Some(refused) =
+                        outstanding.settle(|kind| write_owed(journal, record, contention, kind))
+                    {
+                        details.push(format!("journal unavailable: {:#}", refused.1));
+                        record_refused(request, lifecycle, elapsed, refused, drains);
+                    }
                 }
                 let _ = control.report(SupervisorReport::Adjusted {
                     sequence,
@@ -1054,6 +1044,7 @@ const RECORD_PATIENCE: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owed {
     Phase,
+    Contention,
 }
 
 /// Journal records taken after EXEC that have not landed, oldest first and at most one of each
@@ -1070,6 +1061,47 @@ struct Outstanding {
     retry_at: Option<Instant>,
     /// `journal_unavailable` went out for this stretch.
     reported: bool,
+    /// Giving up the contention record drains Opportunistic work, as the RAM cap's always did.
+    contention_drains: bool,
+}
+
+/// Write one owed record with the bounded wait.
+fn write_owed(
+    journal: &dyn ExecutionJournal,
+    record: &ExecutionRecord,
+    contention: &crate::contention::AllocationContention,
+    kind: Owed,
+) -> Result<()> {
+    journal.within(RECORD_WAIT, &mut || match kind {
+        Owed::Phase => journal.transition(record),
+        Owed::Contention => {
+            journal.record_contention(&record.assignment_id, record.generation, contention)
+        }
+    })
+}
+
+/// A record given up, or refused for `RECORD_PATIENCE`: reported once, and Opportunistic work
+/// drains as before when it was its phase record or a RAM cap's record (research R3, R84).
+fn record_refused(
+    request: &LaunchRequest,
+    lifecycle: &mut Lifecycle,
+    elapsed: u64,
+    (kind, error): (Owed, anyhow::Error),
+    contention_drains: bool,
+) {
+    let detail = match kind {
+        Owed::Phase => "reservation needs reconciliation",
+        Owed::Contention => "the applied steps are not recorded",
+    };
+    report(
+        "journal_unavailable",
+        &request.assignment_id,
+        format!("{error:#}; {detail}"),
+    );
+    if request.class == AllocationClass::Opportunistic && (kind == Owed::Phase || contention_drains)
+    {
+        lifecycle.request_drain(elapsed);
+    }
 }
 
 impl Outstanding {
@@ -1081,6 +1113,12 @@ impl Outstanding {
 
     fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Owe the contention record; `drains` when giving it up drains Opportunistic work.
+    fn owe_contention(&mut self, drains: bool) {
+        self.contention_drains |= drains;
+        self.owe(Owed::Contention);
     }
 
     fn retry_at(&self) -> Option<Instant> {
@@ -1105,6 +1143,9 @@ impl Outstanding {
                     self.owed.pop_front();
                     self.refusals = 0;
                     self.retry_at = None;
+                    if kind == Owed::Contention {
+                        self.contention_drains = false;
+                    }
                     continue;
                 }
                 Err(error) => error,
@@ -1122,6 +1163,9 @@ impl Outstanding {
             if dropped {
                 self.owed.pop_front();
                 self.refusals = 0;
+                if kind == Owed::Contention {
+                    self.contention_drains = false;
+                }
             }
             if (dropped || now.duration_since(since) >= RECORD_PATIENCE) && !self.reported {
                 self.reported = true;
@@ -1464,24 +1508,13 @@ pub(super) fn supervise(
         // After EXEC no error leads straight to SIGKILL (research R3). A journal
         // that stays unavailable drains opportunistic work through its
         // deadlines; Guaranteed work stays supervised and is reported.
-        let journal_unavailable =
-            |lifecycle: &mut Lifecycle, elapsed: u64, error: anyhow::Error| {
-                report(
-                    "journal_unavailable",
-                    &request.assignment_id,
-                    format!("{error:#}; reservation needs reconciliation"),
-                );
-                if request.class == AllocationClass::Opportunistic {
-                    lifecycle.request_drain(elapsed);
-                }
-            };
         let mut outstanding = Outstanding::default();
         outstanding.owe(Owed::Phase);
-        if let Some((_, error)) =
-            outstanding.settle(|_| journal.within(RECORD_WAIT, &mut || journal.transition(&record)))
+        if let Some(refused) =
+            outstanding.settle(|kind| write_owed(journal, &record, &contention, kind))
         {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            journal_unavailable(&mut lifecycle, elapsed, error);
+            record_refused(request, &mut lifecycle, elapsed, refused, false);
         }
         let actuator = actuator.insert(backend.actuator(&ActuatorSettings {
             class: request.class,
@@ -1761,6 +1794,7 @@ pub(super) fn supervise(
                         &mut targets,
                         &directories,
                         journal,
+                        &mut outstanding,
                         control,
                         readiness,
                         leader_status.is_some(),
@@ -1897,9 +1931,14 @@ pub(super) fn supervise(
                             .applied_target(crate::contention::ResourceKind::Ram)
                             .or(step.target);
                     }
-                    if let Err(error) = record_contention_with_retry(journal, &record, &contention)
-                    {
-                        journal_unavailable(&mut lifecycle, elapsed, error);
+                    outstanding.owe_contention(true);
+                    if lifecycle.phase == LifecyclePhase::Running {
+                        let drains = outstanding.contention_drains;
+                        if let Some(refused) = outstanding
+                            .settle(|kind| write_owed(journal, &record, &contention, kind))
+                        {
+                            record_refused(request, &mut lifecycle, elapsed, refused, drains);
+                        }
                     }
                     let unavailable = actuator
                         .unavailable(crate::contention::ResourceKind::Ram)
@@ -2015,10 +2054,11 @@ pub(super) fn supervise(
                 );
             }
             // The journal step comes after every effect of this pass (R84).
-            if let Some((_, error)) = outstanding
-                .settle(|_| journal.within(RECORD_WAIT, &mut || journal.transition(&record)))
+            let drains = outstanding.contention_drains;
+            if let Some(refused) =
+                outstanding.settle(|kind| write_owed(journal, &record, &contention, kind))
             {
-                journal_unavailable(&mut lifecycle, elapsed, error);
+                record_refused(request, &mut lifecycle, elapsed, refused, drains);
             }
             // Wait for a control line, the leader's exit or a new SDK connection until the
             // next deadline; a source without an event keeps the short pass.

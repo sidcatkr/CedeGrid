@@ -522,6 +522,152 @@ fn a_drain_behind_a_locked_journal_notifies_and_signals_before_its_record() {
     );
 }
 
+/// A supervisor started on `DRAIN_PROBE` and authorized, its worker ready and its journal row
+/// Running, with the node journal then held by a rival writer.
+fn locked_probe(
+    dir: &Path,
+) -> (
+    SupervisorSpec,
+    Owned,
+    ChildStdin,
+    mpsc::Receiver<serde_json::Value>,
+    rusqlite::Connection,
+) {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let mut spec = spec(
+        dir,
+        AllocationClass::Guaranteed,
+        vec![python, "-c".into(), DRAIN_PROBE.into()],
+    );
+    spec.config.lifecycle.drain_timeout_ms = 1_500;
+    spec.config.lifecycle.term_grace_ms = 3_000;
+    let work = PathBuf::from(&spec.assignment.request.cwd);
+    let (child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    authorize(&mut input, 60_000);
+    assert!(within(Duration::from_secs(5), || {
+        work.join("ready").exists() && journal_phase(&spec) == Some(ExecutionPhase::Running)
+    }));
+    let rival = rusqlite::Connection::open(
+        spec.config
+            .state_dir
+            .join(cedegrid::state::DATABASE_FILENAME),
+    )
+    .unwrap();
+    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+    (spec, child, input, rx, rival)
+}
+
+/// The first event of this kind within `deadline`.
+fn event_within(
+    rx: &mpsc::Receiver<serde_json::Value>,
+    kind: &str,
+    deadline: Duration,
+) -> Option<serde_json::Value> {
+    let end = Instant::now() + deadline;
+    while let Some(left) = end.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(event) if event["event"] == kind => return Some(event),
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// The journal rows written for the test's assignment, oldest first.
+fn journal_events(spec: &SupervisorSpec) -> Vec<serde_json::Value> {
+    let db = rusqlite::Connection::open_with_flags(
+        spec.config
+            .state_dir
+            .join(cedegrid::state::DATABASE_FILENAME),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut rows = db
+        .prepare("SELECT record_json FROM execution_events WHERE assignment_id='assignment' ORDER BY rowid")
+        .unwrap();
+    rows.query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|json| serde_json::from_str(&json.unwrap()).unwrap())
+        .collect()
+}
+
+/// Behind a locked journal a cap adjust and a query are each answered within 1 s: no control
+/// line waits for a record (R84).
+#[test]
+fn a_control_line_is_answered_while_a_record_waits() {
+    let dir = directory();
+    let (spec, mut child, mut input, rx, rival) = locked_probe(dir.path());
+    let work = PathBuf::from(&spec.assignment.request.cwd);
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"adjust","sequence":1,"resources":{"cpu":{"step":"cap","target":200,"cause":"external_growth"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let adjusted = event_within(&rx, "adjusted", Duration::from_secs(1));
+    writeln!(input, "{}", serde_json::json!({"kind":"query"})).unwrap();
+    input.flush().unwrap();
+    let state = event_within(&rx, "state", Duration::from_secs(1));
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    fs::write(work.join("stop"), b"").unwrap();
+    wait(&mut child);
+    assert!(adjusted.is_some(), "no adjusted within 1 s");
+    assert!(state.is_some(), "no state within 1 s");
+}
+
+/// Behind a locked journal a critical terminate step sends TERM and `adjusted` within 1 s, the
+/// row still reads Running with no applied steps, and after the unlock the step's record lands
+/// before the Draining record (FR-063, R84).
+#[test]
+fn the_critical_term_goes_before_either_record() {
+    let dir = directory();
+    let (spec, mut child, mut input, rx, rival) = locked_probe(dir.path());
+    let work = PathBuf::from(&spec.assignment.request.cwd);
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"kind":"adjust","sequence":1,"resources":{"ram":{"step":"terminate","cause":"floor_breach"}}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let asked = Instant::now();
+    let adjusted = event_within(&rx, "adjusted", Duration::from_secs(1));
+    let termed = within(
+        (asked + Duration::from_secs(1)).saturating_duration_since(Instant::now()),
+        || work.join("termed").exists(),
+    );
+    let while_locked = journal_events(&spec);
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    let draining = within(Duration::from_secs(2), || {
+        journal_phase(&spec) == Some(ExecutionPhase::Draining)
+    });
+    let events = journal_events(&spec);
+    fs::write(work.join("stop"), b"").unwrap();
+    wait(&mut child);
+    assert!(adjusted.is_some(), "no adjusted within 1 s");
+    assert!(termed, "no TERM within 1 s of the critical step");
+    let last = while_locked.last().unwrap();
+    assert_eq!(last["phase"], "running", "{last}");
+    assert!(last.get("contention").is_none(), "{last}");
+    assert!(draining, "Draining did not land after the unlock");
+    let step = events
+        .iter()
+        .position(|row| row["contention"]["applied"]["ram"]["step"] == "terminate");
+    let drained = events.iter().position(|row| row["phase"] == "draining");
+    assert!(
+        step.is_some() && step < drained,
+        "the step's record did not land before Draining: {events:?}"
+    );
+}
+
 #[test]
 fn real_extra_cpu_threads_still_trigger_the_agent_envelope() {
     // The test plays the agent: it measures the owned worker with the agent's
