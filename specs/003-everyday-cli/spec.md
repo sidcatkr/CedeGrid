@@ -84,6 +84,23 @@ Principle V's Tracked control level.
   user's p99 beside Tracked caps is at most 1.2× its p99 beside a fixed allocation of the same
   own share, measured in the same run.
 
+### Session 2026-11-14
+
+- Q: Is anything still published to npm or PyPI? → A: No. No new version of anything is
+  published to npm or PyPI: not the CLI, not its native packages, not the SDKs. The CLI ships as
+  the GitHub Release binaries with the install script (the user's decision of 2026-10-27,
+  restated 2026-11-14; item 058 Part E). This replaces Session 2026-11-02's "pip carries the
+  Python SDK only and npm the TypeScript SDK" and "the existing npm CLI packages keep working".
+- Q: What happens to the Python and TypeScript SDKs? → A: They stay in the repository, keep their
+  APIs (FR-080) and keep their tests, which run as code tests in every check as now: they hold the
+  wire contract in three languages (Principle VII). How a user installs an SDK without a
+  registry is open, awaiting the user: the reviewer's recommendation is files attached to the
+  same GitHub Release (a wheel and an npm tarball, each with its sha256), installed by URL; not
+  yet confirmed.
+- Q: What about the versions already on the registries and people who installed the CLI through
+  npm? → A: A migration note for the release covers them; nothing is deprecated or removed on a
+  registry without the user's own word.
+
 ## Terms
 
 - **Run**: one piece of work started with `cedegrid run`, an SDK task or a cluster assignment,
@@ -508,9 +525,12 @@ without delegation, and check the output and `--json`.
 - **FR-073**: The CLI's main install channel MUST be the GitHub Release binaries with a one-line
   install script. The script MUST install into `~/.local/bin`, need no root, pin the version and
   verify the binary's sha256 before installing it. Homebrew and `cargo install` are secondary
-  channels. The README MUST lead with the script, not with `npm install --global`. The pip
-  package MUST carry the Python SDK only and the npm SDK package the TypeScript SDK; the CLI MUST
-  NOT be bundled into the pip wheel. The existing npm CLI packages keep working (FR-080).
+  channels. The README MUST lead with the script, not with `npm install --global`. No new
+  version of anything is published to npm or PyPI: not the CLI, its native packages or the SDKs.
+  The Python and TypeScript SDKs stay in the repository with their APIs (FR-080) and tests; how
+  they are installed without a registry is open (Clarifications, Session 2026-11-14). Versions
+  already on the registries, and CLIs installed through npm, are covered by a migration note;
+  nothing is deprecated or removed on a registry without the user's word.
 
 **Compatibility and safety**
 
