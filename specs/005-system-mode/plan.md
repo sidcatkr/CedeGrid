@@ -9,7 +9,8 @@
 
 An administrator installs `cedegrid-system`. It adds one root broker behind
 `/run/cedegrid/broker.sock` (root:cedegrid, 0660), two slices below the root, and the `cedegrid`
-group. A group member's `cedegrid run` asks the broker for the member's units. The broker judges
+group. A group member's `cedegrid system start` (and 003's `run`, once built) asks the broker for
+the member's units. The broker judges
 the caller only by the socket's peer credentials, builds every unit property itself, and has
 systemd start `cedegrid-u<uid>.service` and `cedegrid-idle-u<uid>.service` with `User=<uid>` and
 `Delegate=yes`. Inside them, the present agent runs the delegated Full path with the user's rights.
@@ -115,7 +116,7 @@ src/
 │   ├── moves.rs            # freeze, verify, move, thaw (FR-018)
 │   ├── oom.rs              # the OOM loop: counters, fair share, writes
 │   └── score.rs            # pure score function (FR-024, FR-025, N1, D2)
-├── system_mode.rs          # client side: detect the socket, ask for units, doctor line
+├── system_mode.rs          # client side: `cedegrid system`, detect the socket, ask for units, doctor line
 ├── main.rs                 # hidden dispatch for the broker and the idle executor
 ├── kernel.rs               # pidfd and /proc directory helpers
 ├── cgroup.rs               # delegated root detection inside a unit
@@ -168,14 +169,18 @@ agent-made empty leaf in the other unit, thaw. A failure refuses and thaws the s
 - The broker is the one writer in System mode; the agent's own OOM marks are off there.
 
 **Client (FR-012 to FR-015).**
-- `run` sees the socket, sends start, waits for the unit, and hands the job to the agent in it.
+- `cedegrid system start` sees the socket, sends start, and waits for the unit; the agent in it
+  serves jobs as 001's agent does. 003's `run` reuses this client when 003 is built. The root
+  refusal (003 FR-082) is built here for every command, with the broker's dispatch as the one
+  exception.
 - Without an answer within 2 s (provisional), it falls back with one line, or refuses with
   `--require-system`.
 - `doctor` prints the level and why, the effective policy, the `cpu.idle` path (R1), whether
   `systemd-oomd` reaches the slices (R11), and which limits apply (N3).
 
-**Margin (FR-020, R3).** Yield First's CPU margin gets a System mode value, set from R3-run. It
-stays at today's value until the run sets it.
+**Margin (FR-020, R3).** CPU's default `yield_first_margin_percent` gets a System mode value, set
+from R3-run; an explicit setting still wins. It stays at today's 15 until the run sets it. Today's
+range (1 to 90) is widened to admit 0 in System mode only, if R3-run reaches it.
 
 ## Complexity Tracking
 

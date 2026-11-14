@@ -127,7 +127,9 @@ is pending the user's choice.
 ### User Story 1 - A group member gets Full where no delegation exists (Priority: P1)
 
 An administrator has installed the system package and added a user to the `cedegrid` group. The
-host gives users no delegated cgroup of their own. The user runs `cedegrid run` as before. The run
+host gives users no delegated cgroup of their own. The user starts their work as before: with
+`cedegrid system start`, which this feature adds, and with `cedegrid run` once feature 003 is
+built. The work
 goes through the broker, lands in the user's own unit, and runs at the Full level with the user's
 rights. `doctor` says "System". On a host without the package, nothing changes.
 
@@ -150,7 +152,7 @@ path and `doctor`. Then remove the package and run the same job.
 4. **Given** the socket present but the broker not answering, **When** the user starts a run,
    **Then** the run says so in one line and runs as without the package, unless the user asked to
    require System mode, in which case it refuses.
-5. **Given** a user running `sudo cedegrid run …`, **When** the command starts, **Then** it refuses
+5. **Given** a user running any `cedegrid` command with `sudo`, **When** the command starts, **Then** it refuses
    as 003 FR-082 says. The broker's own fixed subcommand is the only `cedegrid` command that runs
    as root.
 
@@ -340,7 +342,8 @@ it, but the feature can be tested before packaging exists.
   unit's cgroup, and policy, measurement and running work are 001's and 003's. The broker MUST NOT run the user's program, read the user's job, or take any
   figure from the user's agent.
 - **FR-013**: Where no system package is installed, CedeGrid MUST behave exactly as without this
-  feature. Where the socket exists but the broker does not answer within a short timeout, `run`
+  feature. Where the socket exists but the broker does not answer within a short timeout, the
+  client (`cedegrid system start`, and 003's `run` once it is built)
   MUST say so in one line and run as without the package, unless the user asked to require System
   mode, in which case it MUST refuse.
 - **FR-014**: `doctor` MUST say which level applies (System, delegated Full or Tracked) and why,
@@ -504,4 +507,9 @@ Thresholds marked *provisional* are set by the plan's measurements and confirmed
 - GPU access is unchanged: System mode changes no device permission, and 001's GPU rules apply
   inside the unit.
 - System mode is Linux only. macOS and Windows keep their client paths.
-- `run` asked to require System mode uses a flag the plan names; without it, `run` falls back.
+- The order of features is 001's branch, then this feature, then 003 (user, 2026-11-14). 003's
+  `run` does not exist yet, so this feature's entry point is a `cedegrid system` command (start,
+  stop, status) that asks the broker for the units; the agent in the ordinary unit then serves
+  jobs as 001's agent does. 003's `run` uses the same client when 003 is built. 003 FR-082's
+  refusal of commands run as root is built here first, with the broker as its exception.
+- The client asked to require System mode uses `--require-system`; without it, it falls back.
