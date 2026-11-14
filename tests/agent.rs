@@ -2178,6 +2178,89 @@ async fn a_hung_coordinator_does_not_stall_sampling() {
     assert!(observations >= 8, "{observations} observations in 6 s");
 }
 
+/// A journal locked by another writer for longer than the 5 s a write waits holds the agent's
+/// interval instead of ending the agent: the event names the stretch once, observations resume
+/// once the lock is gone, and the running job is neither drained nor changed (FR-077, R73).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_journal_locked_for_its_whole_wait_holds_the_interval_and_the_loop_goes_on() {
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let service = Service::start(
+        AllocationClass::Opportunistic,
+        vec![python, "-c".into(), "import time; time.sleep(22)".into()],
+        |local| {
+            local.config.lifecycle.allocation_lease_ms = 15_000;
+        },
+    )
+    .await;
+    let mut agent = service.agent("held");
+    let end = Instant::now() + Duration::from_secs(20);
+    while !service
+        .record()
+        .is_some_and(|r| r.phase == ExecutionPhase::Running)
+    {
+        assert!(Instant::now() < end, "job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let before = service.record().unwrap();
+    let database = service
+        .local
+        .config
+        .state_dir
+        .join(cedegrid::state::DATABASE_FILENAME);
+    let rival = rusqlite::Connection::open(&database).unwrap();
+    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let held = clock_ms();
+    tokio::time::sleep(Duration::from_millis(11_500)).await;
+    let released = clock_ms();
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        agent.try_wait().unwrap().is_none(),
+        "the agent ended on a locked journal: {}",
+        fs::read_to_string(service.dir.path().join("held.err")).unwrap_or_default()
+    );
+    let log = fs::read_to_string(service.dir.path().join("held.log")).unwrap();
+    let busy: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "journal_busy" && event["stage"] == "interval")
+        .collect();
+    assert_eq!(busy.len(), 1, "{log}");
+    let times: Vec<u64> = StateStore::open_read_only(&service.local.config.state_dir)
+        .unwrap()
+        .observations(400)
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["snapshot"]["observed_at_unix_ms"].as_u64())
+        .collect();
+    // An interval sampled in the hold may write its row once the lock is gone; no more.
+    let inside = times
+        .iter()
+        .filter(|&&t| t > held + 1000 && t < released)
+        .count();
+    assert!(inside <= 1, "{inside} observations sampled inside the hold");
+    let after = times.iter().filter(|&&t| t >= released).count();
+    assert!(after >= 3, "{after} observations after the release");
+    let during = service.record().unwrap();
+    assert_eq!(during.phase, ExecutionPhase::Running);
+    assert_eq!(during.generation, before.generation);
+    let mut completed = None;
+    for _ in 0..200 {
+        completed = service.result(1).await;
+        if completed.is_some() {
+            break;
+        }
+    }
+    let _ = agent.kill();
+    let _ = agent.wait();
+    service.server.abort();
+    assert!(completed.is_some(), "the job did not complete: {log}");
+    let outcome = service.outcome(&during.assignment_id);
+    assert!(!outcome.yielded, "the job was drained: {log}");
+    assert_eq!(outcome.exit_code, Some(0));
+}
+
 /// An agent whose stdout reader went away keeps working and stops normally: its event lines
 /// are diagnostics, and a broken pipe there is no reason to fail (030, AGT-6).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

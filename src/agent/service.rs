@@ -341,9 +341,19 @@ impl PinGate {
     }
 
     /// Whether a pin found the journal busy in this iteration.
-    #[cfg(test)]
     pub(super) fn found_busy(&self) -> bool {
         self.busy
+    }
+}
+
+/// A condition that holds over consecutive intervals, named once when it starts.
+#[derive(Default)]
+pub(super) struct Stretch(bool);
+
+impl Stretch {
+    /// Records this interval; true when it starts a stretch.
+    pub(super) fn starts(&mut self, now: bool) -> bool {
+        !std::mem::replace(&mut self.0, now) && now
     }
 }
 
@@ -2343,6 +2353,7 @@ pub async fn run(
             .slots
             .insert(slot.assignment.request.assignment_id.clone(), slot);
     }
+    let (mut held_stretch, mut pin_stretch) = (Stretch::default(), Stretch::default());
     loop {
         // Anchor observations to their scheduled cadence. Processing and RPC
         // time consume this interval instead of extending it. After an overrun,
@@ -2407,9 +2418,32 @@ pub async fn run(
             state.stop_due(&records)
         }
         .await;
+        let journal_held = matches!(&iteration, Err(error) if journal_busy(error));
+        let name_held = held_stretch.starts(journal_held);
+        if pin_stretch.starts(state.pins.found_busy()) {
+            emit(&serde_json::json!({
+                "event": "journal_busy",
+                "code": "journal_busy",
+                "stage": "pin",
+                "detail": "an attempt pin found the journal busy; its report waits for the next interval",
+            }))?;
+        }
         match iteration {
             Ok(true) => break,
             Ok(false) => {}
+            // A journal still locked after its wait is transient: the interval ends there,
+            // what it sent stands, every step holds, and the next interval decides again
+            // (FR-077).
+            Err(error) if journal_held => {
+                if name_held {
+                    emit(&serde_json::json!({
+                        "event": "journal_busy",
+                        "code": "journal_busy",
+                        "stage": "interval",
+                        "detail": format!("{error:#}"),
+                    }))?;
+                }
+            }
             // Running out of descriptors never ends the loop: the interval's readings are
             // unknown, so nothing new is decided and steps hold; the next one tries again
             // (FR-077).

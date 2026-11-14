@@ -2922,6 +2922,38 @@ mod pacing_tests {
         );
     }
 
+    /// SQLite's busy code, bare or under context, is transient; a locked table, an I/O error
+    /// and a missing file are not (FR-077).
+    #[test]
+    fn a_locked_journal_is_transient_and_other_journal_errors_are_not() {
+        let sqlite = |code: i32| {
+            anyhow::Error::from(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        assert!(super::journal_busy(&sqlite(rusqlite::ffi::SQLITE_BUSY)));
+        assert!(super::journal_busy(
+            &sqlite(rusqlite::ffi::SQLITE_BUSY).context("cannot append an observation")
+        ));
+        assert!(!super::journal_busy(&sqlite(rusqlite::ffi::SQLITE_LOCKED)));
+        assert!(!super::journal_busy(&sqlite(rusqlite::ffi::SQLITE_IOERR)));
+        let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(!super::journal_busy(&missing));
+    }
+
+    /// A stretch of held intervals is named when it starts and not again until an interval
+    /// without it has passed.
+    #[test]
+    fn a_busy_stretch_is_named_once() {
+        let mut stretch = super::service::Stretch::default();
+        let named: Vec<bool> = [false, true, true, true, false, true, false]
+            .into_iter()
+            .map(|busy| stretch.starts(busy))
+            .collect();
+        assert_eq!(named, [false, true, false, false, false, true, false]);
+    }
+
     fn lanes(budget: u64, cap: Duration) -> super::Lanes {
         let control = budget / 10;
         super::Lanes {
