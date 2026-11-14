@@ -1396,3 +1396,25 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   so a kept estimate there could hide one for up to a window (report 055 Decision 3).
 - **Alternatives**: a field saying whether other accounts are hidden (the snapshot has none, and
   the item asks for policy only).
+
+## R79. Who owns the busy handler's context (item 060)
+
+- **Decision**: one `Journal` type owns the connection and the context, connection first; the
+  context is a raw pointer from `Box::leak`, freed on drop.
+- **Rationale**: on two open paths the context was a local declared after the connection, so an
+  error return freed it first, and the context was a `Box` moved after SQLite took a pointer into
+  it, which `std`'s documentation on `Box` (non-normative) does not allow. SQLite's close path does
+  not call the handler, so nothing failed; the new shape does not depend on that.
+- **Alternatives**: removing the handler before freeing (changes what close may do); keeping the
+  `Box` and pinning it (still two owners to keep in order on every path).
+
+## R80. The limit on intervals without a sample (item 060)
+
+- **Decision**: one lease, `lifecycle.allocation_lease_ms`, against the newest sample acted on.
+- **Rationale**: it is the only existing agent setting that fits: a sample's age at the next
+  iteration can be the 5 s journal wait after an interval that ended at the observation write, so
+  a shorter limit would stop renewals for an interval that did sample. Monitor and heartbeat
+  intervals, the GPU sample age, the unknown window and the drain times were weighed and rejected
+  (`060-b-design.md`).
+- **Alternatives**: the heartbeat interval measured from the end of the last acting iteration; a
+  fixed bound, which needs a new constant or key.

@@ -2435,3 +2435,45 @@ unchanged; T558's test asserts the step within SC-002's two intervals.
 **The security review as a gate (Part D)**. The `follow-ups.md` row blocks a merge into `main`,
 a release and a tag, and `docs/release.md` lists the review among the release gates, naming no
 model, tool or program.
+
+## Item 060: the busy handler's lifetime, a bound on intervals without a sample, and small fixes (2026-11-15)
+
+**Input**: spec Session 2026-11-15, FR-077 and FR-079; report 056's Decisions 2 to 5 as the review
+decided them; the design `060-b-design.md` in the review outbox (Part B, decisions 1 to 6 A).
+
+**Technical Context**: Rust 1.88; no new dependency, no config key, no schema and no wire change.
+Part A restructures who owns the busy handler's context in `src/state.rs`; Part B adds one
+predicate and two fields to the agent's loop; Part D changes a test and two documents. No native
+gate is added.
+
+**Constitution Check**: Principles II and III, and the code that faces the kernel.
+- *Principle III.* Part B bounds the response to "no sample at all": no report and steps hold, then
+  no renewal after one lease, then Opportunistic work drains at its lease's end; an event names the
+  stretch.
+- *Principle II.* Work the agent no longer watches gives its capacity back at a known time; a
+  locked-journal stretch of up to about 14.5 s at the defaults costs nothing.
+- *The code that faces the kernel and SQLite.* Part A keeps one `unsafe` installation and makes
+  the context's lifetime hold by construction; the security review before release covers it.
+
+**The busy handler's lifetime (R79)**. A `Journal` owns the connection, its first field, and the
+busy handler's context, held through a raw pointer from `Box::leak` and freed when the journal
+drops. Fields drop in order, so the connection always closes before the context is freed, also
+when an open fails after the install; moving the journal moves only the pointer. `Journal::with_wait`
+is the one place that installs the handler; `StateStore.connection` becomes a `Journal`, which
+derefs to the connection. Nothing behaves differently. A test-only probe on SQLite's close trace
+checks the order for a dropped store and for an open that fails after the install. SQLite 3.53.2's
+close path never calls the busy handler, so the old order read no freed memory; the code no longer
+depends on that.
+
+**A bound on intervals without a sample (R80)**. The agent asks for lease renewals only while the
+newest sample it has acted on (sampled, decided, its steps sent) is no older than
+`lifecycle.allocation_lease_ms`; past that it asks for none, drains nothing, and emits
+`renewals_withheld` once per stretch. The mark is set after the steps are sent, so an interval
+that ends at the observation write keeps renewing; the agent's start counts as a sample. With the
+defaults a lease can first run out 15 to 20 s after the last acted-on sample. Withholding closes
+the renewal reply as a drain path for Guaranteed work on such a node; that is recorded in
+`follow-ups.md`.
+
+**Small fixes (Part D)**. The burst test reads the journal figures while they exist; `follow-ups.md`
+gains the SDKs' `ManagedChild.wait()` row and the Guaranteed drain-path row; "Open operational
+gates" gains the over-share task that ignores its hint while its need pauses and returns.

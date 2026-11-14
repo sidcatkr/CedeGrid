@@ -605,3 +605,10 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   warm-up's `self_check` moves after `ready.json`. Not a product field.
 - Reason code `cpu_window_estimate_not_kept` on the CPU status: the list did not show another
   account's process, so no estimate was kept for the window's refill (FR-018).
+
+## Item 060 additions
+
+- `Journal` (`src/state.rs`): the node journal's connection with its busy handler's context;
+  connection first. Not on disk, not the wire.
+- Agent loop state: `acted_sample_at`, set when an interval's steps have been sent. Agent event
+  `renewals_withheld`, once per stretch. Local, not the wire.
