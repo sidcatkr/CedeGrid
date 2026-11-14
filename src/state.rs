@@ -18,6 +18,8 @@ use std::time::Duration;
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
 /// How long a write waits for the journal's lock.
 const JOURNAL_WAIT: Duration = Duration::from_secs(5);
+/// How long an attempt pin waits for it: a busy pin defers its report to the next interval.
+pub(crate) const PIN_WAIT: Duration = Duration::from_millis(50);
 const BUSY_FIRST_US: u64 = 1_000;
 const BUSY_CAP_US: u64 = 16_000;
 /// How long observations are kept, and at most how many (FR-081).
@@ -375,6 +377,16 @@ impl StateStore {
         profile: StorageProfile,
         namespace_guard: NamespaceGuard,
     ) -> Result<Self> {
+        Self::open_existing_with_wait_guarded(state_dir, profile, namespace_guard, JOURNAL_WAIT)
+    }
+
+    /// As `open_existing_with_profile_guarded`, with its own lock wait (an attempt pin's).
+    pub(crate) fn open_existing_with_wait_guarded(
+        state_dir: &Path,
+        profile: StorageProfile,
+        namespace_guard: NamespaceGuard,
+        wait: Duration,
+    ) -> Result<Self> {
         namespace_guard.validate_root(state_dir)?;
         ensure!(
             runtime_sqlite_supported(),
@@ -408,7 +420,7 @@ impl StateStore {
             "existing state identity changed while opening SQLite"
         );
         verify_sqlite_named_inode(&connection)?;
-        let busy = install_busy_wait(&connection, JOURNAL_WAIT)?;
+        let busy = install_busy_wait(&connection, wait)?;
         connection.pragma_update(None, "synchronous", profile.synchronous())?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         #[cfg(target_os = "macos")]

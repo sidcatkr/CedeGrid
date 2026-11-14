@@ -314,6 +314,39 @@ fn take_oom_verdict(
 /// and two synced writes: for a released result, or for a checkpoint head that is unreadable
 /// (the pinned path reports it) or not yet published. `head` is the head's hash, `None` when
 /// it could not be read.
+/// An iteration's attempt pins: after one finds the journal busy, no other is tried, so the
+/// iteration waits at most one pin's bound and its reports go in the next one (FR-080).
+#[derive(Default)]
+pub(super) struct PinGate {
+    busy: bool,
+}
+
+impl PinGate {
+    /// The pin, or `None` when the journal is busy now or was earlier in this iteration.
+    pub(super) fn take(
+        &mut self,
+        pin: impl FnOnce() -> Result<crate::publication_gc::AttemptPin>,
+    ) -> Result<Option<crate::publication_gc::AttemptPin>> {
+        if self.busy {
+            return Ok(None);
+        }
+        match pin() {
+            Ok(pin) => Ok(Some(pin)),
+            Err(error) if super::journal_busy(&error) => {
+                self.busy = true;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether a pin found the journal busy in this iteration.
+    #[cfg(test)]
+    pub(super) fn found_busy(&self) -> bool {
+        self.busy
+    }
+}
+
 pub(super) fn needs_pin(
     checkpoint: bool,
     released: bool,
@@ -347,6 +380,8 @@ struct AgentLoop<'a> {
     agent: &'a AgentConfig,
     executable: &'a Path,
     store: StateStore,
+    /// This iteration's attempt pins.
+    pins: PinGate,
     client: std::sync::Arc<NodeClient>,
     namespace_guard: NamespaceGuard,
     collector: ManagedCollector,
@@ -883,8 +918,12 @@ impl AgentLoop<'_> {
                         continue;
                     }
                 }
-                let publication_pin =
-                    crate::publication_gc::pin_attempt(&self.store, &slot.output_dir)?;
+                let Some(publication_pin) = self
+                    .pins
+                    .take(|| crate::publication_gc::pin_attempt(&self.store, &slot.output_dir))?
+                else {
+                    continue;
+                };
                 let descriptor_bytes = match crate::publication::read_head(
                     &self.store,
                     &slot.output_dir,
@@ -1149,7 +1188,12 @@ impl AgentLoop<'_> {
                     continue;
                 };
                 let normal_exit = outcome.is_some_and(|o| o.exit_code == Some(0) && !o.yielded);
-                let publication_pin = crate::publication_gc::pin_attempt(&self.store, &output)?;
+                let Some(publication_pin) = self
+                    .pins
+                    .take(|| crate::publication_gc::pin_attempt(&self.store, &output))?
+                else {
+                    continue;
+                };
                 let descriptor_bytes = match crate::publication::read_head(
                     &self.store,
                     &output,
@@ -2254,6 +2298,7 @@ pub async fn run(
         agent,
         executable,
         store,
+        pins: PinGate::default(),
         client,
         namespace_guard,
         collector,
@@ -2306,6 +2351,7 @@ pub async fn run(
             next_periodic_wake(next_observation, observation_interval, Instant::now());
         let iteration: Result<bool> = async {
             let mut mark = LoopCost::thread_ns();
+            state.pins = PinGate::default();
             if let Some(guard) = &replay_journal {
                 guard.verify(config)?;
             }

@@ -539,6 +539,17 @@ fn storage_exhausted(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether an error is the journal's lock wait running out: transient, so the interval ends
+/// and a pin's report waits (FR-077, FR-080). Matched by SQLite's code, never by text.
+pub(crate) fn journal_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DatabaseBusy)
+    })
+}
+
 /// This process's soft and hard `RLIMIT_NOFILE`.
 #[cfg(unix)]
 // `rlim_t` is not `u64` on every target.
@@ -2866,6 +2877,49 @@ mod pacing_tests {
         assert!(needs_pin(true, false, Some(Some("b")), Some("a")));
         assert!(needs_pin(true, false, Some(Some("a")), None));
         assert!(needs_pin(true, false, None, Some("a")));
+    }
+
+    /// A pin that finds the journal busy gives no pin and ends that iteration's pins, so one
+    /// iteration waits at most one pin's bound; the next iteration tries again, and any other
+    /// error still fails (FR-080, R73).
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_pin_ends_the_iterations_pins_and_nothing_else() {
+        use super::service::PinGate;
+        let temporary = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = temporary.path().join("state");
+        let store = crate::state::StateStore::open(&root).unwrap();
+        let output = root.join("attempts/attempt");
+        std::fs::create_dir_all(&output).unwrap();
+        let rival = rusqlite::Connection::open(store.database_path()).unwrap();
+        rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut gate = PinGate::default();
+        let pin = gate
+            .take(|| crate::publication_gc::pin_attempt(&store, &output))
+            .unwrap();
+        assert!(pin.is_none());
+        assert!(gate.found_busy());
+        let mut called = false;
+        let again = gate
+            .take(|| {
+                called = true;
+                crate::publication_gc::pin_attempt(&store, &output)
+            })
+            .unwrap();
+        assert!(again.is_none() && !called);
+        rival.execute_batch("ROLLBACK").unwrap();
+        let mut next = PinGate::default();
+        assert!(
+            next.take(|| crate::publication_gc::pin_attempt(&store, &output))
+                .unwrap()
+                .is_some()
+        );
+        let outside = root.join("elsewhere");
+        assert!(
+            PinGate::default()
+                .take(|| crate::publication_gc::pin_attempt(&store, &outside))
+                .is_err()
+        );
     }
 
     fn lanes(budget: u64, cap: Duration) -> super::Lanes {

@@ -22,14 +22,23 @@ pub struct AttemptPin {
 }
 impl Drop for AttemptPin {
     fn drop(&mut self) {
-        // Failure conservatively leaves a crash pin. Its verified owner identity
+        // A release the journal's lock kept out goes with the next pin on this journal: its
+        // owner is this live process, so garbage collection would keep the attempt's spool.
+        // Any other failure conservatively leaves a crash pin, whose verified owner identity
         // must later be proven absent before GC can remove it.
-        let _ = self.store.connection.execute(
+        if let Err(error) = self.store.connection.execute(
             "DELETE FROM local_publication_pins WHERE pin_id=?1",
             [&self.id],
-        );
+        ) && error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+            && let Ok(mut left) = LEFT_BEHIND.lock()
+        {
+            left.push((self.store.database_path().to_path_buf(), self.id.clone()));
+        }
     }
 }
+/// Pins whose release found the journal locked, by database, for the next pin to release.
+static LEFT_BEHIND: std::sync::Mutex<Vec<(std::path::PathBuf, String)>> =
+    std::sync::Mutex::new(Vec::new());
 fn initialize(db: &Connection) -> Result<()> {
     let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_publication_pins')", [], |r| r.get(0))?;
     if !exists {
@@ -58,10 +67,11 @@ pub fn pin_attempt(store: &StateStore, output: &Path) -> Result<AttemptPin> {
         !is_upgrade_held(&store.connection, assignment)?,
         "legacy attempt is held for explicit upgrade reconciliation"
     );
-    let owned = StateStore::open_existing_with_profile_guarded(
+    let owned = StateStore::open_existing_with_wait_guarded(
         root,
         store.storage_profile(),
         store.namespace_guard(),
+        crate::state::PIN_WAIT,
     )?;
     initialize(&owned.connection)?;
     let generation = owned
@@ -70,7 +80,18 @@ pub fn pin_attempt(store: &StateStore, output: &Path) -> Result<AttemptPin> {
     let identity =
         crate::supervision::process_identity(std::process::id(), assignment, generation)?;
     let id = uuid::Uuid::new_v4().to_string();
-    owned.connection.execute(
+    let database = owned.database_path().to_path_buf();
+    let left: Vec<String> = LEFT_BEHIND.lock().map_or_else(
+        |_| Vec::new(),
+        |left| {
+            left.iter()
+                .filter(|(path, _)| *path == database)
+                .map(|(_, id)| id.clone())
+                .collect()
+        },
+    );
+    let tx = Transaction::new_unchecked(&owned.connection, TransactionBehavior::Immediate)?;
+    tx.execute(
         "INSERT INTO local_publication_pins VALUES(?1,?2,?3,?4)",
         params![
             id,
@@ -79,6 +100,15 @@ pub fn pin_attempt(store: &StateStore, output: &Path) -> Result<AttemptPin> {
             serde_json::to_string(&identity)?
         ],
     )?;
+    for left in &left {
+        tx.execute("DELETE FROM local_publication_pins WHERE pin_id=?1", [left])?;
+    }
+    tx.commit()?;
+    if !left.is_empty()
+        && let Ok(mut pending) = LEFT_BEHIND.lock()
+    {
+        pending.retain(|(path, id)| *path != database || !left.contains(id));
+    }
     Ok(AttemptPin { store: owned, id })
 }
 #[derive(Serialize, Deserialize)]
@@ -404,6 +434,61 @@ mod tests {
             0
         );
         assert!(output.join("result.receipt.json").exists());
+    }
+    /// A rival writer holding the journal's write lock, as about 20 supervisors' commits do in a
+    /// burst stop.
+    fn rival(store: &StateStore) -> Connection {
+        let rival = Connection::open(store.database_path()).unwrap();
+        rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+        rival
+    }
+    fn pins(store: &StateStore) -> i64 {
+        store
+            .connection
+            .query_row("SELECT count(*) FROM local_publication_pins", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+    /// A pin that finds the journal locked gives up after its own short bound, not the 5 s a
+    /// journal write waits, and leaves no row; once the lock is gone a pin is taken and released
+    /// as before (FR-080, R73).
+    #[test]
+    fn a_busy_pin_gives_up_after_its_bound() {
+        let (_temp, store, output) = fixture();
+        drop(pin_attempt(&store, &output).unwrap());
+        let rival = rival(&store);
+        let started = std::time::Instant::now();
+        let error = pin_attempt(&store, &output)
+            .err()
+            .expect("a busy pin must fail");
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(40) && took < Duration::from_secs(1),
+            "the pin waited {took:?}"
+        );
+        assert!(crate::agent::journal_busy(&error), "{error:#}");
+        rival.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pins(&store), 0);
+        let pin = pin_attempt(&store, &output).unwrap();
+        assert_eq!(pins(&store), 1);
+        drop(pin);
+        assert_eq!(pins(&store), 0);
+    }
+    /// A pin whose release finds the journal locked leaves its row only until the next pin on
+    /// the same journal, which releases it in its own transaction (R73).
+    #[test]
+    fn a_pin_released_while_the_journal_is_busy_goes_with_the_next_pin() {
+        let (_temp, store, output) = fixture();
+        let pin = pin_attempt(&store, &output).unwrap();
+        let rival = rival(&store);
+        drop(pin);
+        rival.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pins(&store), 1);
+        let next = pin_attempt(&store, &output).unwrap();
+        assert_eq!(pins(&store), 1);
+        drop(next);
+        assert_eq!(pins(&store), 0);
     }
     #[test]
     fn a_pin_owns_its_lifecycle_until_database_close() {
