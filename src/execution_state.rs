@@ -455,6 +455,13 @@ impl ExecutionJournal for StateStore {
     fn namespace_guard(&self) -> Option<crate::namespace::NamespaceGuard> {
         Some(StateStore::namespace_guard(self))
     }
+    fn within(
+        &self,
+        wait: std::time::Duration,
+        write: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        StateStore::within(self, wait, write)
+    }
     fn storage_control_evidence(&self) -> Result<Vec<ControlEvidence>> {
         let settings = self.durability_settings()?;
         let replayable = settings.profile.is_replayable();

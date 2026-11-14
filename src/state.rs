@@ -747,6 +747,25 @@ impl StateStore {
         sqlite_version()
     }
 
+    /// Run one write with the lock wait cut to `wait`, the connection's own limit restored after
+    /// it on every path (R84).
+    pub fn within<T>(&self, wait: Duration, write: impl FnOnce() -> Result<T>) -> Result<T> {
+        struct Restore<'a>(Option<(&'a BusyWait, Duration)>);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some((busy, limit)) = self.0 {
+                    busy.limit.set(limit);
+                }
+            }
+        }
+        let _restore = Restore(
+            self.connection
+                .busy_wait()
+                .map(|busy| (busy, busy.limit.replace(wait))),
+        );
+        write()
+    }
+
     pub fn durability_settings(&self) -> Result<DurabilitySettings> {
         Ok(DurabilitySettings {
             profile: self.profile,
@@ -754,7 +773,7 @@ impl StateStore {
             assurance_detail: self.profile.assurance().detail().into(),
             // A custom busy handler reads 0 from the pragma, so the store reports its own limit.
             busy_timeout_ms: match self.connection.busy_wait() {
-                Some(busy) => u64::try_from(busy.limit.as_millis())?,
+                Some(busy) => u64::try_from(busy.limit.get().as_millis())?,
                 None => u64::try_from(self.connection.pragma_query_value(
                     None,
                     "busy_timeout",
@@ -2091,9 +2110,21 @@ mod directory_tests {
     }
 }
 
+/// Whether an error is the journal's lock wait running out: transient, so the interval ends
+/// and a pin's report waits (FR-077, FR-080). Matched by SQLite's code, never by text.
+pub(crate) fn journal_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DatabaseBusy)
+    })
+}
+
 /// One connection's wait on a locked journal (R73).
 struct BusyWait {
-    limit: Duration,
+    /// The wait for one lock; `StateStore::within` cuts it for one write.
+    limit: std::cell::Cell<Duration>,
     /// Set when SQLite's count is 0, at the start of each wait.
     started: std::cell::Cell<Option<std::time::Instant>>,
     /// xorshift64 state, seeded per connection so writers started together do not share it.
@@ -2110,7 +2141,7 @@ impl BusyWait {
             .finish()
             | 1;
         Self {
-            limit,
+            limit: std::cell::Cell::new(limit),
             started: std::cell::Cell::new(None),
             seed: std::cell::Cell::new(seed),
             waits: std::cell::Cell::new(0),
@@ -2135,7 +2166,7 @@ impl BusyWait {
         random ^= random << 17;
         self.seed.set(random);
         let waited = now.duration_since(started);
-        let sleep = busy_sleep(count, waited, self.limit, random);
+        let sleep = busy_sleep(count, waited, self.limit.get(), random);
         let total = waited + sleep.unwrap_or_default();
         if total > self.longest.get() {
             self.longest.set(total);
@@ -2366,6 +2397,39 @@ mod busy_sleep_tests {
             assert!(waited <= pin);
         }
         assert_eq!(waited, pin);
+    }
+
+    /// A write inside `within` waits for a held lock only as long as it is given, and the
+    /// store's own wait holds again after it (R84).
+    #[test]
+    fn a_write_within_a_short_wait_gives_up_at_that_wait() {
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".within-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
+        let root = directory.path().join("state");
+        let store = StateStore::open_with_profile(&root, StorageProfile::WalFull).unwrap();
+        let rival = Connection::open(root.join(DATABASE_FILENAME)).unwrap();
+        rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let result = store.within(PIN_WAIT, || {
+            store.connection.execute_batch("BEGIN IMMEDIATE; COMMIT")?;
+            Ok(())
+        });
+        let waited = started.elapsed();
+        let error = result.unwrap_err();
+        assert!(journal_busy(&error), "{error:#}");
+        assert!(waited < Duration::from_millis(500), "waited {waited:?}");
+        assert_eq!(store.durability_settings().unwrap().busy_timeout_ms, 5_000);
+        rival.execute_batch("ROLLBACK").unwrap();
+        store
+            .within(PIN_WAIT, || {
+                store.connection.execute_batch("BEGIN IMMEDIATE; COMMIT")?;
+                Ok(())
+            })
+            .unwrap();
     }
 }
 

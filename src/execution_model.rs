@@ -145,6 +145,15 @@ pub trait ExecutionJournal {
     fn reserve(&self, request: &LaunchRequest, capacity: &Resources) -> Result<ExecutionRecord>;
     /// Must commit before authorizing user code. Transitions validate assignment/generation.
     fn transition(&self, record: &ExecutionRecord) -> Result<()>;
+    /// Run one write with the journal's lock wait cut to `wait`; a journal with no lock runs it
+    /// as it is (R84).
+    fn within(
+        &self,
+        _wait: std::time::Duration,
+        write: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        write()
+    }
     /// Journal the steps applied to a running allocation without a phase change.
     fn record_contention(
         &self,

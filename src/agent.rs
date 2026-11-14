@@ -362,6 +362,13 @@ impl ExecutionJournal for AssignedJournal {
     fn namespace_guard(&self) -> Option<NamespaceGuard> {
         Some(self.store.namespace_guard())
     }
+    fn within(
+        &self,
+        wait: std::time::Duration,
+        write: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.store.within(wait, write)
+    }
     fn storage_control_evidence(&self) -> Result<Vec<ControlEvidence>> {
         self.store.storage_control_evidence()
     }
@@ -539,16 +546,7 @@ fn storage_exhausted(error: &anyhow::Error) -> bool {
     })
 }
 
-/// Whether an error is the journal's lock wait running out: transient, so the interval ends
-/// and a pin's report waits (FR-077, FR-080). Matched by SQLite's code, never by text.
-pub(crate) fn journal_busy(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<rusqlite::Error>()
-            .and_then(rusqlite::Error::sqlite_error_code)
-            == Some(rusqlite::ErrorCode::DatabaseBusy)
-    })
-}
+pub(crate) use crate::state::journal_busy;
 
 /// This process's soft and hard `RLIMIT_NOFILE`.
 #[cfg(unix)]
