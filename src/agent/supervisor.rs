@@ -485,7 +485,12 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
             Err(error)
         }
     };
-    write_supervisor_usage(&spec.output_dir, &supervisor_identity, lifecycle_started)?;
+    write_supervisor_usage(
+        &spec.output_dir,
+        &supervisor_identity,
+        lifecycle_started,
+        journal.store.lock_waits(),
+    )?;
     result
 }
 
@@ -493,6 +498,7 @@ fn write_supervisor_usage(
     output: &Path,
     identity: &ProcessIdentity,
     started: Instant,
+    (journal_waits, journal_longest_wait): (u64, std::time::Duration),
 ) -> Result<()> {
     #[cfg(unix)]
     {
@@ -518,13 +524,21 @@ fn write_supervisor_usage(
                 "schema_version":1,"identity":identity,"scope":"supervisor_self_excludes_workers",
                 "runtime_os":std::env::consts::OS,"user_cpu_us":u64::try_from(user)?,"system_cpu_us":u64::try_from(system)?,
                 "peak_rss_bytes":peak_rss,"elapsed_since_entry_ms":started.elapsed().as_millis() as u64,
-                "observed_monotonic_ms":local_clock_ms()?,"cutoff":"after workload outcome/event publication, before this accounting file and process exit"
+                "observed_monotonic_ms":local_clock_ms()?,
+                "journal_waits":journal_waits,"journal_longest_wait_ms":journal_longest_wait.as_millis() as u64,
+                "cutoff":"after workload outcome/event publication, before this accounting file and process exit"
             }),
         )
     }
     #[cfg(not(unix))]
     {
-        let _ = (output, identity, started);
+        let _ = (
+            output,
+            identity,
+            started,
+            journal_waits,
+            journal_longest_wait,
+        );
         bail!("supervisor self accounting unsupported")
     }
 }

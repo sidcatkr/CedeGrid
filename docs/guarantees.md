@@ -736,7 +736,10 @@ runs. The agent takes a launch only while its open descriptors, 8 for each launc
 progress and 64 kept free fit under that limit; otherwise it advertises fewer launch slots
 and reports `launch_refused` with code `descriptor_limit`. Running out of descriptors
 (`EMFILE` or `ENFILE`) never ends the agent's loop: that interval decides nothing new and
-every step holds.
+every step holds. A journal write still locked after its 5 s wait does not end the loop either:
+the interval ends there, what it had already sent to its supervisors stands, no observation is
+recorded and no report is sent, and the next interval samples again (`journal_busy`, once per
+stretch).
 
 A running supervisor waits for a control line, its leader's exit through the pidfd or a
 new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,
@@ -887,10 +890,14 @@ agent re-adopts them, retrying on later intervals while a supervisor lives, in r
 mode too. The end of `max_runtime_seconds` drains every allocation a share at a time: each
 interval as many as the agent's last synced journal write fits in 250 ms, and at least one. An
 explicit operator drain reaches each allocation with its next lease renewal or heartbeat reply,
-within one heartbeat interval and not spread, and its lease is not extended from then on. The
+within one heartbeat interval and not spread, and its lease is not extended from then on.
+Every process that writes the node journal retries a locked journal after randomly spread
+sleeps of at most 16 ms, for at most 5 s. The
 agent's loop never waits for its own pacing of coordinator requests: heartbeats go at their
 interval, renewals before their deadlines and failure reports at least 16 a second, whatever
-`max_transfer_bytes_per_second` is, stopping or not. SIGHUP reloads the configuration: contention settings,
+`max_transfer_bytes_per_second` is, stopping or not. The one exception is an interval in which
+an attempt's pin finds the journal locked for 50 ms: the reports still waiting go in the next
+interval. SIGHUP reloads the configuration: contention settings,
 modes included, apply from the next interval (`config_reloaded`); a change to a setting
 that needs a restart keeps the running configuration (`config_reload_refused`) (FR-080).
 

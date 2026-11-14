@@ -405,6 +405,42 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         count("drain_unsent"),
         count("stop_uncertain"),
     );
+    // The last release after the drain, and the longest journal lock wait any process saw.
+    let attempts: Vec<_> = fs::read_dir(state.join("attempts"))
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    let modified_ms = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_millis() as u64)
+    };
+    let last_release = attempts
+        .iter()
+        .filter_map(|attempt| modified_ms(&attempt.join("execution-outcome.json")))
+        .max()
+        .map(|at| at.saturating_sub(drain_started_unix_ms));
+    let wait_of = |value: &serde_json::Value| value["journal_longest_wait_ms"].as_u64();
+    let supervisor_wait = attempts
+        .iter()
+        .filter_map(|attempt| fs::read(attempt.join("supervisor-usage.json")).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter_map(|usage| wait_of(&usage))
+        .max();
+    let agent_wait = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "loop_cost")
+        .filter_map(|event| wait_of(&event))
+        .max();
+    eprintln!(
+        "burst journal: last release {} ms after the drain began; longest journal wait {} ms in a supervisor, {} ms in the agent; journal_busy events {}",
+        last_release.map_or("none".into(), |ms| ms.to_string()),
+        supervisor_wait.map_or("none".into(), |ms| ms.to_string()),
+        agent_wait.map_or("none".into(), |ms| ms.to_string()),
+        count("journal_busy"),
+    );
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
         "burst: longest gap {longest} ms, {ran} of {TASKS} running before stop ({}), {left} left running after the drain, the drain took {drain_ms} ms with a longest gap of {longest_in_stop} ms, {expired} leases expired, {refused} authorizations refused ({stale} for stale evidence), {errors} supervisor errors",
@@ -419,6 +455,12 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         "initial authorizations were refused for stale evidence"
     );
     assert_eq!(left, 0, "the operator drain released every run");
+    // B1's gates (item 056): no lease fenced after the drain and no supervisor error.
+    assert_eq!(
+        expired_after_drain, 0,
+        "leases expired after the drain began"
+    );
+    assert_eq!(errors, 0, "supervisor errors during the burst stop");
     assert!(
         longest <= GAP_BOUND_MS,
         "longest gap between observations {longest} ms exceeds {GAP_BOUND_MS} ms"

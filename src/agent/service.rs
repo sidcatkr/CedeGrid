@@ -2412,7 +2412,11 @@ pub async fn run(
             state.heartbeat(&snapshot, &allocations, &decision).await?;
             state.cost.charge("heartbeat", mark);
             state.cost.iteration();
-            if let Some(report) = state.cost.take_report(Instant::now()) {
+            if let Some(mut report) = state.cost.take_report(Instant::now()) {
+                // The journal's lock waits since the agent started, for the burst stop's record.
+                let (waits, longest) = state.store.lock_waits();
+                report["journal_waits"] = waits.into();
+                report["journal_longest_wait_ms"] = (longest.as_millis() as u64).into();
                 emit(&report)?;
             }
             state.stop_due(&records)
