@@ -509,7 +509,10 @@ completes it. Each is hinted if it takes hints and drained when its hint deadlin
 excess still held, or drained without the hint if it takes none. A drain already decided counts
 in full while the task still runs, and a hint within its deadline, or a Guaranteed task whose
 drain waits for the breach window, counts what was asked, so the excess is passed to nobody
-meanwhile. So no more over-share tasks are drained than bring own memory within its share. What
+meanwhile. A hint's deadline runs from the later of its last change and the need's return, for
+counting as for its next step. What a task was asked and did not count, once its wait is over
+with no drain (a Guaranteed task that may not be drained yet), passes to the tasks after it in
+the victim order and is never asked of that task again. So no more over-share tasks are drained than bring own memory within its share. What
 the floor, or the mode's target, needs beyond the excess (in Yield First its margin) is asked in
 the same interval by the victim order, each over-share task counted at what it holds less what
 it was already asked, and in-share tasks give it only where in-share memory gives way: in Yield

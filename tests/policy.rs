@@ -8806,6 +8806,50 @@ mod floors_by_mode {
         }
     }
 
+    /// `random::242`'s shape in Performance with free memory at 0: `z`, Guaranteed and the
+    /// over-share task, is hinted for its 1 000 MiB excess; at 1 000 ms its wait is over, but it
+    /// may not be drained while Opportunistic `o` is left (FR-024), so its excess passes on. It
+    /// is asked for those 1 000 MiB once, not again in the remainder, and the next task in the
+    /// cost order is asked for them (FR-016, FR-023, R76, item 056).
+    #[test]
+    fn an_over_share_task_is_asked_for_its_own_part_once() {
+        let facts = over_share_facts(&["z", "x", "o"], &[], &[("z", 1_000)]);
+        let mut o = allocation(
+            "o",
+            AllocationPhase::Running,
+            resources(100, 1_000, 0),
+            Some(resources(100, 0, 0)),
+        );
+        o.class = AllocationClass::Opportunistic;
+        let at = |now: u64| {
+            let z = if now >= 1_000 { 11_289 } else { 12_289 };
+            (
+                vec![
+                    ram_job("z", AllocationClass::Guaranteed, z),
+                    ram_job("x", AllocationClass::Guaranteed, 15_342),
+                    o.clone(),
+                ],
+                0,
+            )
+        };
+        let run = scripted(&config_in(ContentionMode::Performance), &facts, 1_000, at);
+        for interval in &run[..2] {
+            assert_eq!(
+                interval.steps,
+                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(11_289)))]),
+                "at {}",
+                interval.now
+            );
+        }
+        assert_eq!(
+            run[2].steps,
+            BTreeMap::from([
+                ("z".to_string(), (YieldStep::Hint, Some(10_289))),
+                ("x".to_string(), (YieldStep::Hint, Some(14_342))),
+            ])
+        );
+    }
+
     /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
     /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
     /// the in-share tasks were never asked for its excess; in Yield First they are asked for the

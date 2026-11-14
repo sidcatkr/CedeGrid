@@ -830,11 +830,18 @@ impl<'a> Interval<'a> {
                     asked,
                     counted,
                     settled,
+                    passed: 0,
                 },
             );
         }
-        // What no over-share task could be stepped for passes on (FR-024's class rule).
-        rest = rest.saturating_add(first);
+        // What no over-share task counted passes on once its wait is over (FR-024's class
+        // rule): to the tasks after it in the cost order, never back to the task asked for it.
+        let passed = first;
+        for part in parts.values_mut() {
+            part.passed = part.asked.saturating_sub(part.counted).min(passed);
+        }
+        rest = rest.saturating_add(passed);
+        let open = rest;
         // The remainder by the cost order as before over-share tasks led it: each over-share
         // task counted at what it holds less what it was asked, and a drained one at nothing.
         let mut left: Vec<VictimFacts> = victims
@@ -862,7 +869,9 @@ impl<'a> Interval<'a> {
                 self.plan_victim(frame, victim, false, false, &mut rest);
                 continue;
             };
-            if part.settled || rest == 0 || view.amount == 0 {
+            // Beyond its part it is asked what the cost order asks of it, less its own part.
+            let beyond = rest.min(open.saturating_sub(part.passed));
+            if part.settled || beyond == 0 || view.amount == 0 {
                 self.plan_victim(frame, victim, false, true, &mut part.at_turn.clone());
                 continue;
             }
@@ -872,7 +881,7 @@ impl<'a> Interval<'a> {
                 .ladder
                 .get(&(victim.id.clone(), key.clone()))
                 .map_or(YieldStep::None, |s| s.step);
-            let mut both = part.at_turn.saturating_add(rest);
+            let mut both = part.at_turn.saturating_add(beyond);
             self.plan_victim(frame, victim.clone(), false, true, &mut both);
             let freed = match self.next.ladder.get(&(victim.id.clone(), key.clone())) {
                 Some(next) if next.step == YieldStep::Cap => victim
@@ -888,7 +897,7 @@ impl<'a> Interval<'a> {
                 {
                     view.amount
                 }
-                Some(_) => view.amount.min(rest),
+                Some(_) => view.amount.min(beyond),
                 None => 0,
             };
             rest = rest.saturating_sub(freed);
@@ -2111,4 +2120,7 @@ struct OverSharePart {
     asked: u64,
     counted: u64,
     settled: bool,
+    /// What it was asked and did not count, which passes on once its wait is over (FR-024's
+    /// class rule) and is never asked of it again.
+    passed: u64,
 }
