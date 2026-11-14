@@ -1167,7 +1167,17 @@ impl Service {
         argv: Vec<String>,
         configure: impl FnOnce(&mut SupervisorSpec),
     ) -> Self {
+        Self::start_tasks(vec![("task", class, argv)], configure).await
+    }
+
+    /// As `start`, with one pool and job per task so their classes can differ; the first
+    /// task's pool and job are `pool` and `job`, the others' are suffixed with the task id.
+    async fn start_tasks(
+        tasks: Vec<(&str, AllocationClass, Vec<String>)>,
+        configure: impl FnOnce(&mut SupervisorSpec),
+    ) -> Self {
         use cedegrid::{agent::AgentConfig, coordinator::serve, protocol::*};
+        let (_, class, argv) = tasks[0].clone();
         let dir = directory();
         let root = std::env::current_dir().unwrap();
         let pki = dir.path().join("pki");
@@ -1262,7 +1272,7 @@ impl Service {
                     cpu_affinity: None,
                     max_transfer_bytes_per_second: 10 * 1024 * 1024,
                     capacity: local.capacity.clone(),
-                    max_workers: 1,
+                    max_workers: tasks.len(),
                     max_spool_bytes: 10 * 1024 * 1024,
                     max_runtime_seconds: 90,
                 },
@@ -1271,30 +1281,43 @@ impl Service {
             .unwrap(),
         )
         .unwrap();
-        operator
-            .request(&Request::PutPool {
-                pool: PoolSpec {
-                    pool_id: "pool".into(),
-                    class,
-                    node_ids: vec!["node".into()],
-                    min_workers: 1,
-                    max_workers: 1,
-                },
-            })
-            .await
-            .unwrap();
         local.assignment.request.assignment_id = String::new();
-        operator
-            .request(&Request::Submit {
-                job: JobSpec {
-                    job_id: "job".into(),
-                    pool_id: "pool".into(),
-                    priority: 0,
-                    tasks: vec![local.assignment.request.clone()],
-                },
-            })
-            .await
-            .unwrap();
+        for (index, (task_id, class, argv)) in tasks.iter().enumerate() {
+            let suffix = if index == 0 {
+                String::new()
+            } else {
+                format!("-{task_id}")
+            };
+            let mut request = local.assignment.request.clone();
+            if index > 0 {
+                request.task_id = (*task_id).into();
+                request.class = *class;
+                request.argv = argv.clone();
+            }
+            operator
+                .request(&Request::PutPool {
+                    pool: PoolSpec {
+                        pool_id: format!("pool{suffix}"),
+                        class: request.class,
+                        node_ids: vec!["node".into()],
+                        min_workers: 1,
+                        max_workers: 1,
+                    },
+                })
+                .await
+                .unwrap();
+            operator
+                .request(&Request::Submit {
+                    job: JobSpec {
+                        job_id: format!("job{suffix}"),
+                        pool_id: format!("pool{suffix}"),
+                        priority: 0,
+                        tasks: vec![request],
+                    },
+                })
+                .await
+                .unwrap();
+        }
         Self {
             dir,
             operator,
@@ -1384,6 +1407,33 @@ impl Service {
             .ok()?
             .into_iter()
             .find(|r| r.task_id == "task")
+    }
+
+    fn record_of(&self, task_id: &str) -> Option<ExecutionRecord> {
+        StateStore::open_read_only(&self.local.config.state_dir)
+            .ok()?
+            .executions()
+            .ok()?
+            .into_iter()
+            .find(|r| r.task_id == task_id)
+    }
+
+    /// The coordinator's lease sequence for a task: one more for each granted renewal.
+    fn lease_sequence(&self, task_id: &str) -> i64 {
+        let db = rusqlite::Connection::open_with_flags(
+            self.dir
+                .path()
+                .join("coordinator")
+                .join(cedegrid::state::DATABASE_FILENAME),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT r.lease_sequence FROM reservations r JOIN assignments a USING(assignment_id) WHERE a.task_id=?1",
+            [task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
     }
 
     fn outcome(&self, assignment: &str) -> ExecutionOutcome {
@@ -2262,15 +2312,16 @@ async fn a_journal_locked_for_its_whole_wait_holds_the_interval_and_the_loop_goe
 }
 
 /// An agent whose intervals all end before the sample, here behind a locked journal while the
-/// dead-supervisor transition waits, asks for no lease renewals once its newest acted-on sample is
-/// older than one lease, and names the stretch once; it drains nothing (FR-077, FR-079, R80).
+/// dead-supervisor transition waits, asks for no renewal of Opportunistic work once its newest
+/// acted-on sample is older than one lease, and names the stretch once; it drains nothing
+/// (FR-077, FR-079, R80, R81). The coordinator's 30 s lease keeps the task renewable there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_agent_without_a_sample_for_one_lease_asks_for_no_renewal() {
     let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
     let pid_file =
         std::env::temp_dir().join(format!("cedegrid-renewal-{}.pid", std::process::id()));
     let service = Service::start(
-        AllocationClass::Guaranteed,
+        AllocationClass::Opportunistic,
         vec![
             python,
             "-c".into(),
@@ -2367,6 +2418,242 @@ async fn an_agent_without_a_sample_for_one_lease_asks_for_no_renewal() {
         .filter(|event| event["event"] == "renewals_withheld")
         .count();
     assert_eq!(withheld, 1, "{log}");
+}
+
+/// Three running tasks behind a node journal held by a rival writer, with `task`'s supervisor
+/// killed so that each interval ends at the journal write before its sample: `guaranteed` and
+/// `opportunistic` are watched, and `guaranteed`'s workload writes `term` to its marker when
+/// it is drained. The agent's lease is 8 s; the coordinator's is 30 s, so `opportunistic`
+/// stays renewable at the coordinator through the hold.
+struct WithheldRenewals {
+    service: Service,
+    agent: Owned,
+    rival: rusqlite::Connection,
+    log: &'static str,
+    pids: Vec<PathBuf>,
+    marker: PathBuf,
+    started: Instant,
+}
+
+impl WithheldRenewals {
+    async fn start(log: &'static str) -> Self {
+        let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let base = std::env::temp_dir().join(format!("cedegrid-{log}-{}", std::process::id()));
+        let pids: Vec<PathBuf> = ["task", "guaranteed", "opportunistic"]
+            .iter()
+            .map(|name| base.with_extension(format!("{name}.pid")))
+            .collect();
+        let marker = base.with_extension("term");
+        let _ = fs::remove_file(&marker);
+        let sleeper = |pid: &Path| {
+            vec![
+                python.clone(),
+                "-c".into(),
+                format!(
+                    "import os,time; open({:?},'w').write(str(os.getpid())); time.sleep(60)",
+                    pid.display()
+                ),
+            ]
+        };
+        let drained = vec![
+            python.clone(),
+            "-c".into(),
+            format!(
+                "import os,signal,sys,time\n\
+                 def term(*_):\n    open({:?},'w').write('term'); sys.exit(0)\n\
+                 signal.signal(signal.SIGTERM, term)\n\
+                 open({:?},'w').write(str(os.getpid()))\n\
+                 time.sleep(60)",
+                marker.display(),
+                pids[1].display()
+            ),
+        ];
+        let service = Service::start_tasks(
+            vec![
+                ("task", AllocationClass::Guaranteed, sleeper(&pids[0])),
+                ("guaranteed", AllocationClass::Guaranteed, drained),
+                (
+                    "opportunistic",
+                    AllocationClass::Opportunistic,
+                    sleeper(&pids[2]),
+                ),
+            ],
+            |local| {
+                local.config.lifecycle.allocation_lease_ms = 8_000;
+            },
+        )
+        .await;
+        let agent = service.agent(log);
+        let end = Instant::now() + Duration::from_secs(30);
+        while !["task", "guaranteed", "opportunistic"].iter().all(|task| {
+            service
+                .record_of(task)
+                .is_some_and(|r| r.phase == ExecutionPhase::Running)
+        }) || service.lease_sequence("opportunistic") == 0
+            || service.lease_sequence("guaranteed") == 0
+        {
+            assert!(Instant::now() < end, "the three tasks never ran");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let victim = service.record_of("task").unwrap();
+        let journal = service
+            .local
+            .config
+            .state_dir
+            .join(cedegrid::state::DATABASE_FILENAME);
+        let rival = rusqlite::Connection::open(&journal).unwrap();
+        rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = Instant::now();
+        let identity: ProcessIdentity = serde_json::from_slice(
+            &fs::read(
+                service
+                    .local
+                    .config
+                    .state_dir
+                    .join("attempts")
+                    .join(&victim.assignment_id)
+                    .join("supervisor-identity.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // SAFETY: the test's own supervisor, by its recorded PID.
+        assert_eq!(
+            unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        Self {
+            service,
+            agent,
+            rival,
+            log,
+            pids,
+            marker,
+            started,
+        }
+    }
+
+    /// Sleep until `seconds` after the lock was taken.
+    async fn until(&self, seconds: f64) {
+        let at = self.started + Duration::from_secs_f64(seconds);
+        tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(self.service.dir.path().join(format!("{}.log", self.log)))
+            .unwrap_or_default()
+    }
+
+    fn withheld_events(&self) -> usize {
+        self.log()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["event"] == "renewals_withheld")
+            .count()
+    }
+
+    fn release(&self) {
+        self.rival.execute_batch("ROLLBACK").unwrap();
+    }
+
+    /// Stop the agent and every workload by the PID it wrote; whether the agent was alive.
+    fn finish(mut self) -> (bool, String) {
+        let alive = self.agent.try_wait().unwrap().is_none();
+        let _ = self.agent.kill();
+        let _ = self.agent.wait();
+        for pid in &self.pids {
+            if let Ok(text) = fs::read_to_string(pid) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    // SAFETY: the test's own workload, by the PID it wrote.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                let _ = fs::remove_file(pid);
+            }
+        }
+        let _ = fs::remove_file(&self.marker);
+        self.service.server.abort();
+        let log = self.log();
+        (alive, log)
+    }
+}
+
+/// Behind a locked journal past one lease without an acted-on sample, the agent still asks
+/// for renewals of Guaranteed work, whose lease bounds nothing, and asks for none of
+/// Opportunistic work (FR-077, FR-079, R81).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn past_one_lease_without_a_sample_only_guaranteed_work_is_still_renewed() {
+    let run = WithheldRenewals::start("classes").await;
+    run.until(8.0).await;
+    let early = (
+        run.service.lease_sequence("guaranteed"),
+        run.service.lease_sequence("opportunistic"),
+    );
+    run.until(21.5).await;
+    let late = (
+        run.service.lease_sequence("guaranteed"),
+        run.service.lease_sequence("opportunistic"),
+    );
+    let withheld = run.withheld_events();
+    run.release();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (alive, log) = run.finish();
+    assert!(alive, "the agent ended: {log}");
+    assert!(
+        late.0 > early.0,
+        "Guaranteed work was not renewed without a sample: {early:?} then {late:?}: {log}"
+    );
+    assert_eq!(
+        late.1, early.1,
+        "Opportunistic work was renewed with no sample for 21 s: {log}"
+    );
+    assert_eq!(withheld, 1, "{log}");
+}
+
+/// While renewals of Opportunistic work are withheld for want of a sample, a cancel of a
+/// Guaranteed task's job still reaches that task's supervisor with its next renewal reply,
+/// and its workload is stopped while the journal is still locked (FR-077, FR-079, R81). The
+/// supervisor records Draining before the drain notice, and that write waits for the lock
+/// through all its attempts, so the stop comes about 25 s after the cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_reaches_guaranteed_work_while_renewals_are_withheld() {
+    use cedegrid::protocol::Request;
+    let run = WithheldRenewals::start("drained").await;
+    let end = run.started + Duration::from_secs(16);
+    while run.withheld_events() == 0 {
+        assert!(Instant::now() < end, "renewals were never withheld");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let withheld_at = run.started.elapsed();
+    let opportunistic = run.service.lease_sequence("opportunistic");
+    run.service
+        .operator
+        .request(&Request::Cancel {
+            job_id: "job-guaranteed".into(),
+        })
+        .await
+        .unwrap();
+    let cancelled = Instant::now();
+    let end = cancelled + Duration::from_secs(40);
+    while !run.marker.exists() && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let drained = run.marker.exists();
+    let stopped_after = cancelled.elapsed();
+    let still_withheld = run.service.lease_sequence("opportunistic") == opportunistic;
+    let held_for = run.started.elapsed();
+    run.release();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (alive, log) = run.finish();
+    assert!(alive, "the agent ended: {log}");
+    assert!(
+        still_withheld,
+        "Opportunistic renewals resumed while the journal was still locked: {log}"
+    );
+    assert!(
+        drained,
+        "the cancel never reached the Guaranteed workload in the {held_for:?} hold (withheld from {withheld_at:?}): {log}"
+    );
+    eprintln!("the Guaranteed workload stopped {stopped_after:?} after the cancel");
 }
 
 /// An interval that ends at the observation write has acted on its sample, so an agent whose

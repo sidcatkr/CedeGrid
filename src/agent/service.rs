@@ -545,7 +545,8 @@ impl AgentLoop<'_> {
         let interval = Duration::from_millis(config.lifecycle.heartbeat_interval_ms);
         let lease = Duration::from_millis(config.lifecycle.allocation_lease_ms);
         let sample_age = self.acted_sample_at.elapsed();
-        // Past one lease without a sample acted on, no renewal is asked: leases run out (FR-079).
+        // Past one lease without a sample acted on, no Opportunistic renewal is asked and those
+        // leases run out; a Guaranteed lease bounds nothing and its reply carries drains (FR-079).
         let renew = renewals_asked(sample_age, lease);
         let mut withheld = 0usize;
         let mut records = BTreeMap::new();
@@ -698,7 +699,10 @@ impl AgentLoop<'_> {
             if wants_authorization(slot) {
                 waiting.push((slot.started_at, id.clone()));
             } else if running && slot.sequence > 0 && slot.last_renew.elapsed() >= interval {
-                if renew {
+                if renew
+                    || slot.assignment.request.class
+                        == crate::execution_model::AllocationClass::Guaranteed
+                {
                     waiting.push((slot.last_renew + interval, id.clone()));
                 } else {
                     withheld += 1;
@@ -713,7 +717,7 @@ impl AgentLoop<'_> {
                 "allocations": withheld,
                 "sample_age_ms": sample_age.as_millis() as u64,
                 "limit_ms": lease.as_millis() as u64,
-                "detail": "no sample has been acted on for one lease; renewals wait for the next one",
+                "detail": "no sample has been acted on for one lease; Opportunistic renewals wait for the next one",
             }))?;
         }
         // Requests run one at a time and each costs a synced coordinator write, so they share
