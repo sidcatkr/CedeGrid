@@ -336,3 +336,13 @@ Item 048's converge against constitution 7.0.0 and `specs/001-contention-modes/f
 - [ ] T115 Add a failing test in tests/run_cli.rs before T038 for the one-line Tracked notice and the `--require-containment` refusal (exit 3). Per FR-040, US6 scenarios 2 and 3 (partial)
 - [ ] T116 Add to T058 (tests/run_cli.rs) the `[run."<script>"]` write, the kept comments, the read-only floors and the one-line notice naming the file. Per FR-020, FR-021, FR-026, US3 scenarios 1, 2 and 5 (partial)
 - [ ] T117 Add to T039 (tests/tracked.rs) a case showing the Tracked actuator never grants fewer than one core under cross-cgroup contention. Per FR-048, edge case "Every core is granted away except one" (partial)
+
+## Phase 14: Convergence (item 058, no distribution through npm or PyPI)
+
+Recorded, not to be done now: each task waits for the user's go-ahead and for the install script (FR-073). Nothing is deprecated or removed on a registry without the user's word.
+
+- [ ] T419 Remove the npm launcher: `npm/src/launcher.ts`, `src/launcher_terminal.rs` and its use in `src/main.rs`, the `CEDEGRID_LAUNCHER_PID` removal in `src/supervision/unix.rs`, and `tests/cli.rs`'s `npm_launcher_identity_does_not_reach_internal_gate_or_supervisor`; and the native npm packages, per FR-073, R19 (unrequested)
+- [ ] T420 Remove the registry publishing (`tools/publish_packages.py`, `tools/publish_github_packages.py`, the registry steps in `.github/workflows/release.yml`, `.github/workflows/github-packages.yml`) and the gates that exist only for it (`tools/verify_launcher_pty.py`; the registry-only parts of `tools/build_packages.py`, `tools/verify_package_interop.py`, `tools/verify_python_packages.py`, `npm/scripts/build.ts` and `npm/scripts/verify-packages.ts`; the 7 registry tests in `tests/test_release_gate.py`), keeping everything that builds and checks the release binaries and the SDK files, per FR-073, R19 (unrequested)
+- [ ] T421 Update `docs/release.md`, `docs/release-0.2-gates.json`, `CLAUDE.md` and `tools/pack_source_review.py`'s `ALLOWLIST` for the removal, per FR-073 (partial)
+- [ ] T422 Write the migration note for 0.2.0 on the registries and for CLIs installed through npm, per FR-073, Clarifications Session 2026-11-14 (missing)
+- [ ] T423 Once the user confirms how an SDK is installed without a registry, provide it (the reviewer's recommendation: a wheel and an npm tarball attached to the GitHub Release, each with its sha256), per Clarifications Session 2026-11-14 (missing)
