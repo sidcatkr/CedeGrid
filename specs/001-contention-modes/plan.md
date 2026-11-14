@@ -2477,3 +2477,28 @@ the renewal reply as a drain path for Guaranteed work on such a node; that is re
 **Small fixes (Part D)**. The burst test reads the journal figures while they exist; `follow-ups.md`
 gains the SDKs' `ManagedChild.wait()` row and the Guaranteed drain-path row; "Open operational
 gates" gains the over-share task that ignores its hint while its need pauses and returns.
+
+## Item 061: renewals for Guaranteed work, and the test that renewals come back (2026-11-15)
+
+**Input**: spec Session 2026-11-15's last answer, FR-077 and FR-079; report 060's Decision 2(d)
+and 2(g) as the review decided them.
+
+**Technical Context**: Rust 1.88; no dependency, config key or wire change. Part A changes one
+condition in the agent's lease stage; Part B adds a test helper and a test. No native gate.
+
+**Constitution Check**: Principles II and III.
+- *Principle II.* A control that makes own work stop reaches Guaranteed work on a node without a
+  sample, through the renewal reply.
+- *Principle III.* Opportunistic work still loses its lease after one lease without a sample; a
+  Guaranteed lease bounds nothing, so withholding it gained nothing.
+
+**Renewals for Guaranteed work (R81)**. The withheld-renewal gate applies to Opportunistic slots
+only; Guaranteed slots keep asking. Tests show, behind a locked journal past one lease, a
+Guaranteed slot still asked for and an Opportunistic one not, and a coordinator drain for the
+Guaranteed task reaching its supervisor in that state. The `follow-ups.md` row for the drain path
+goes, and the guarantees' renewal sentences say which slots are withheld.
+
+**The test that renewals come back (Part B)**. The agent test helper submits more than one task,
+one pool and job per task so their classes can differ. A two-task test withholds renewals behind
+a locked journal, releases the lock, and sees renewals asked again after the first acted-on
+sample for work that is still renewable. T578's wording says what each test covers.

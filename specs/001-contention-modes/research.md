@@ -1418,3 +1418,12 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   (`060-b-design.md`).
 - **Alternatives**: the heartbeat interval measured from the end of the last acting iteration; a
   fixed bound, which needs a new constant or key.
+
+## R81. Guaranteed work keeps its renewals (item 061)
+
+- **Decision**: withhold renewals after one lease without an acted-on sample for Opportunistic
+  slots only.
+- **Rationale**: a Guaranteed lease that runs out drains nothing, so withholding its renewal
+  bounded nothing, while its renewal reply is the only path by which a coordinator drain, cancel
+  or preemption reaches that work on a node that sends no heartbeat.
+- **Alternatives**: withhold for every slot (item 060 as built; closes that path).
