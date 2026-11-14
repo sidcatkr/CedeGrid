@@ -2502,3 +2502,42 @@ goes, and the guarantees' renewal sentences say which slots are withheld.
 one pool and job per task so their classes can differ. A two-task test withholds renewals behind
 a locked journal, releases the lock, and sees renewals asked again after the first acted-on
 sample for work that is still renewable. T578's wording says what each test covers.
+
+## Item 062: the Guaranteed drain where all own memory gives way, no renewal for an exited supervisor, and T581's margin (2026-11-15)
+
+**Input**: spec Session 2026-11-15's last answer, FR-024 and FR-016; report 061's Decisions 1
+and 3 as the review decided them. Part B (a drain never waits for its own record) follows its
+design in a section of its own.
+
+**Technical Context**: Rust 1.88; no dependency, config key or wire change. Part A changes one
+condition in the memory ladder and adds a helper; Part C one condition in the agent's lease
+stage; Part D a test. No native gate for these parts.
+
+**Constitution Check**: Principles II and III.
+- *Principle II.* In Yield First and Neutral all own memory gives way at a floor; a Guaranteed
+  task over its share now reaches the last step FR-024 allows instead of waiting behind
+  opportunistic tasks that hold nothing.
+- *Principle III.* A missing reading is not "holds none": a task whose device entry is missing
+  counts by its charge, as unknown usage does everywhere else.
+
+**Work left by holding (R82)**. In `src/policy/ladder.rs`, `opportunistic_left` keeps its three
+conditions and, for RAM and GPU memory whose governing mode (`governing`, `src/policy.rs:765`)
+is Yield First or Neutral, also asks that the allocation holds some of the resource. A helper
+beside `judged` reads the holding as `judged` does, except that a GPU memory entry missing for a
+hint-ready allocation counts by its charge. Performance and Aggressive are unchanged, and
+`tests/policy.rs:8872` stays. Tests first in `tests/policy.rs`: `random::378`'s shape (Yield
+First, a Guaranteed task over its share, two Opportunistic tasks charged 973 and 3491 MiB that
+hold 0, a critical breach), where today no step results and afterwards the Guaranteed task
+reaches its last step; and an Opportunistic task whose device entry is missing still counts.
+Then the 500 decision-snapshot sequences are compared before and after, in total and by mode
+(own tasks stopped, Guaranteed tasks stopped, breach intervals, every sequence that differs);
+if any sequence but `random::378` differs, the item stops there.
+
+**No renewal for an exited supervisor (R83)**. In `src/agent/service.rs` `service_slots`, a
+slot whose supervisor has exited is not asked a renewal. Test first in the three-task helper:
+the killed task's lease sequence stops rising, for a Guaranteed and for an Opportunistic task.
+No spec change: FR-079 asks renewals for running work.
+
+**T581's margin (Part D)**. The return test releases the lock about 2.3 s before the task's
+supervisor drains it at its own lease. The test widens that margin, for example with a longer
+agent lease, so that a slower machine does not fail it for no fault.

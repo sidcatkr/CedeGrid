@@ -1427,3 +1427,23 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   bounded nothing, while its renewal reply is the only path by which a coordinator drain, cancel
   or preemption reaches that work on a node that sends no heartbeat.
 - **Alternatives**: withhold for every slot (item 060 as built; closes that path).
+
+## R82. Work left is judged by holding in the modes that give way (item 062)
+
+- **Decision**: in Yield First and Neutral, by the resource's governing mode, an opportunistic
+  allocation that holds none of a memory resource does not count as work left before a
+  Guaranteed allocation's last step; a missing reading counts by its charge.
+- **Rationale**: FR-024 waits for opportunistic work "that anyone can act on"; a task that holds
+  none of the resource frees nothing when released, so waiting for it kept a Guaranteed task
+  over its share from the floor's last step until the other user left (`random::378`).
+- **Alternatives**: every mode (drains a Guaranteed task in Performance in `random::242`; with
+  the ladder decision); wait for that decision (the stall stays).
+
+## R83. No renewal for an exited supervisor (item 062)
+
+- **Decision**: the agent asks no renewal for a slot whose supervisor has exited.
+- **Rationale**: every other slot path already leaves such a slot alone; the renewal kept a
+  lease current for work nobody supervises and sent its reply, drains included, to a closed
+  pipe. The capacity stays charged until the release either way.
+- **Alternatives**: keep it and document it; also move the dead supervisor's record out of the
+  interval (changes which write ends an interval; not taken).
