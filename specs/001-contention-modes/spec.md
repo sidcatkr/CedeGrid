@@ -825,6 +825,13 @@ back more.
   work; it keeps asking for Guaranteed work, whose lease running out drains nothing and whose
   renewal reply carries the coordinator's drain, cancel or preemption. This replaces, for
   Guaranteed work, the answer above (item 061 Part A, report 060 Decision 2(d)).
+- Q: Before a Guaranteed task's last step at a memory floor, does an opportunistic task that holds
+  none of the resource count as work left? → A: Not in Yield First and Neutral, by the resource's
+  governing mode: there an opportunistic allocation that holds none of the resource (by the usage
+  reading the ladder judges it by) is not work anyone can act on for it, and it does not keep the
+  Guaranteed allocation from its last step. One whose reading for the resource is missing or
+  unknown counts by its charge. In Performance and Aggressive it still counts as today (item 062
+  Part A, report 061 Decision 1 B).
 
 ## Terms
 
@@ -1414,7 +1421,8 @@ node reports with the expected per-resource values at each step.
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
   Class rules still win across tiers: every opportunistic allocation is drained before any
-  Guaranteed one (FR-024), and a Guaranteed allocation keeps its CPU request in every tier.
+  Guaranteed one, in Yield First and Neutral every one that holds any of the resource (FR-024),
+  and a Guaranteed allocation keeps its CPU request in every tier.
 - **FR-017**: Observation or control errors MUST hold the current step and block expansion. They
   MUST NOT by themselves terminate Guaranteed work. For opportunistic work they MAY escalate only
   through the bounded unknown policy (FR-008).
@@ -1710,7 +1718,9 @@ node reports with the expected per-resource values at each step.
   - MUST NOT be drained by automatic yielding, except to restore a RAM or GPU memory floor or the
     envelope under floor policy A (for a floor in Performance and Aggressive, only memory above
     own work's fair share, FR-023), as the last step: after all opportunistic work on the
-    resource that anyone can act on has been released, after a hint whose
+    resource that anyone can act on has been released (in Yield First and Neutral, by the
+    resource's governing mode, an opportunistic allocation that holds none of the resource is not
+    such work, and one whose reading is missing counts by its charge), after a hint whose
     `guaranteed_hint_deadline_s`, counted from that hint, has passed when the allocation is
     hint-ready, and, for RAM, after the breach has lasted `ram.guaranteed_breach_window_s`,
     counted from the start of the breach. GPU memory breaches have no window. On the critical floor
