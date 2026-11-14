@@ -1376,3 +1376,23 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: measuring the deadline from the breach's first observation (a renewed wait can
   pass SC-012's bound; needs a clarify); dropping the dwell term (differs only where a hint
   deadline is shorter than the dwell).
+
+## R77. Checking the probe's parity inside the window (item 058)
+
+- **Decision**: sum each unit's time by parity over the window itself, make the holds after a
+  warm-up of the real loop, refuse on the in-window ratio, and state the CPU given apart.
+- **Rationale**: at `7cc09c8` the pre-ready check read 1.001–1.002 while the managed probe's
+  units alternated between 162 and 191 µs in the window (Neutral 0.929); a check outside the
+  window cannot see a cost that starts with the loop. The probe already times each unit, so the
+  sum costs one addition per unit.
+- **Alternatives**: a longer check before `ready.json` (still outside the loop); a unit that
+  allocates nothing (changes every recorded rate; its own item if the gate keeps refusing).
+
+## R78. When the kept estimate may be kept (item 058)
+
+- **Decision**: keep it only while the list, when taken and now, shows another account's process
+  with a readable user ID.
+- **Rationale**: a list that shows only the owner, or nothing, cannot show another user's rise,
+  so a kept estimate there could hide one for up to a window (report 055 Decision 3).
+- **Alternatives**: a field saying whether other accounts are hidden (the snapshot has none, and
+  the item asks for policy only).

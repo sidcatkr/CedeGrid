@@ -1059,6 +1059,24 @@ Gates:
   heartbeat after a release seen while draining is added, test first, and B1 runs again.
 - C4 run 2: as in item 051. C3 in Neutral: the floor restored within item 048's time.
 
+## Item 058: the same-core check inside the window
+
+On the authorized test host only, under the user's standing approval and item 049's host rules,
+with `batch-037`'s harness at the item's commit. Each run is item 029's run 3 alone, with the
+leftover check after it; each run's result line and analysis are copied to `server-check/058/`.
+
+```sh
+# The control pair, Neutral, the probe's allocator cache count at 0 and at the default 7.
+bash runs-037.sh <commit> <second account uid> core058tc
+#   = same_core_029.py --mode neutral --load saturating --probe-env GLIBC_TUNABLES=glibc.malloc.tcache_count=0, then =7
+# The gate: run 3 in Performance and in Neutral, twice each.
+bash runs-037.sh <commit> <second account uid> core058
+```
+
+Gates: in every run, no window refused on the in-window even/odd ratio; the managed probe given at
+least 0.99 of the unmanaged probe's CPU in every window; own throughput with CedeGrid at least the
+mode's bound of without it. A window refused in both runs of a mode stops the item.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

@@ -598,3 +598,10 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 - Agent event `journal_busy` with `stage` `interval` or `pin`, once per stretch. Local, not the wire.
 - `held_back.noise_tolerance`: kept in the type, never set (SC-016).
 - Ladder state (pure): `OverSharePart.passed`, what an over-share task was asked and did not count.
+
+## Item 058 additions
+
+- Probe records (tools): `window_check` in `result.json`: `units`, `ratio`, `biased`; the
+  warm-up's `self_check` moves after `ready.json`. Not a product field.
+- Reason code `cpu_window_estimate_not_kept` on the CPU status: the list did not show another
+  account's process, so no estimate was kept for the window's refill (FR-018).

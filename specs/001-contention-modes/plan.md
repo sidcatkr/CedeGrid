@@ -2392,3 +2392,46 @@ listed. The snapshot directories are kept beside the native evidence.
 **The rest**. `docs/validation.md`: the rows, and "Open operational gates" closes the burst stop only
 when both B1 runs pass every gate. Full local suites and the Docker Linux check at the final
 commit, each with its log saved.
+
+## Item 058: the same-core check inside the window, and the kept estimate needs other accounts in the list (2026-11-14)
+
+**Input**: spec Session 2026-11-14's last answer and FR-018; report 055's Decisions 1 to 3 as the
+review decided them; the user's rule of 2026-11-13 that only the difference from the same own
+work without CedeGrid counts against it.
+
+**Technical Context**: Rust 1.88, Python 3.10 for the tools; no new dependency, no config key, no
+field and no wire change. Part A changes `tools/pressure_probe.py`, its tool tests and the
+validation harness only. Part B changes one policy rule and adds one reason code to the catalog.
+Part D changes two documents. Native runs are listed in `native-gates.md`, "Item 058".
+
+**Constitution Check**: Principles II, III and VI.
+- *Principle II.* Part A states the CPU the probe was given apart from what a unit costs inside
+  its process, so the gate judges what CedeGrid decides, by the user's rule.
+- *Principle III.* Part B keeps no estimate unless the list shows another account's process with
+  a readable user ID: an unreadable or hidden view of other users is not read as no rise. Its
+  price, an own task's unknown sample read as growth for one window where other users are
+  hidden, is stated in the guarantees.
+- *Principle VI.* Only the test host's runs are evidence for the same-core gate.
+
+**The check inside the window (R77)**. The CPU probe sums each unit's time by parity inside the
+window, from the monotonic span it already takes around each unit, and writes `window_check`
+(`units`, `ratio`, `biased`) to `result.json`. Its even/odd holds are made after `ready.json`
+and a short warm-up of the real loop, in place of the check before `ready.json`.
+`window_verdict` and the batch harness refuse a window on the in-window ratio. The harness also
+states per window the probe's CPU in ms per second (its schedstat run time) and units per
+CPU-second, and gates the managed probe's CPU at no less than 0.99 of the unmanaged probe's in
+every window; the throughput ratio keeps its gate for windows that are not refused. A control
+pair in Neutral, the allocator's per-thread cache count at 0 against the default 7 (the same
+variable, the same length), says whether the allocator is the mechanism. Item 029's run 3 then
+runs in Performance and in Neutral twice each; the gate closes when all four pass with no window
+refused, and a window refused in both runs of a mode stops the item.
+
+**The kept estimate needs other accounts (R78)**. The refill's estimate is kept only while the
+readable principal list, when it was taken and now, holds a process of another account with a
+readable user ID. Otherwise the interval's own estimate applies and the decision's CPU status
+carries `cpu_window_estimate_not_kept`. T518's fixture gains a readable list with its assertions
+unchanged; T558's test asserts the step within SC-002's two intervals.
+
+**The security review as a gate (Part D)**. The `follow-ups.md` row blocks a merge into `main`,
+a release and a tag, and `docs/release.md` lists the review among the release gates, naming no
+model, tool or program.
