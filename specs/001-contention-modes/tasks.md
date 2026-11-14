@@ -1766,3 +1766,15 @@ Designs: `056-a-design.md` (T561–T564) and `056-d-design.md` (T566–T569) in 
 - [X] T571 Failing test `a_publishers_pin_waits_the_journals_full_wait` in `src/publication_gc.rs`, then keep `pin_attempt`'s full journal wait for the publisher's start (`src/publication.rs`) and give only the loop's report pins the 50 ms bound (`pin_attempt_for_report`), after B1 at `bf29bcc` failed 53 and 91 runs on a 50 ms publisher pin, per FR-080, R73 (contradicts)
 
 Item 056's order: T561 to T564 (Part A), T565 (B), T566 (C), T567 to T569 (D), then T570. Parts E and F are not tasks: Part E is a `follow-ups.md` row (`769500a`) and Part F is measurement only.
+
+## Phase 43: Convergence (item 058, the same-core check inside the window and the kept estimate's list)
+
+Each code task is test first, one commit per task. T558 stays open until T575 is done.
+
+- [ ] T572 Failing tool test in `tests/test_pressure_comparison.py` (a unit whose cost alternates only once the real loop runs is refused; the check before `ready.json` passes it), then sum each unit's time by parity inside the window and write `window_check` (`units`, `ratio`, `biased`) to `result.json`, make the even/odd holds after `ready.json` and a warm-up of the real loop, and judge `window_verdict` on the in-window ratio, in `tools/pressure_probe.py` per R77 (missing)
+- [ ] T573 In the batch-037 harness (`same_core_029.py`, artifacts only): the verdict on `window_check`, per window the probe's CPU in ms per second from schedstat and units per CPU-second, the gate that the managed probe gets at least 0.99 of the unmanaged probe's CPU in every window, and the `runs-037.sh` parts `core058tc` and `core058` per R77, native-gates "Item 058" (missing)
+- [ ] T574 Run item 058's native gates on the test host (the control pair in Neutral, tcache count 0 against 7; run 3 in Performance and Neutral twice each), copy each result line and analysis to `server-check/058/`, and record them in `docs/validation.md` "Item 058" and "Own throughput on a shared core", stating whether `b9fbc0c` corrected the CPU-per-unit table, per R77, SC-017 (missing)
+- [ ] T575 Failing tests in `tests/policy.rs` (T518's refill with no list reads this interval's estimate; the owner alone in the list keeps nothing; T558's Yield First and Neutral step within SC-002's two intervals; `measurement_window`'s fixture gains a readable list with T518's assertions unchanged), then keep the refill's estimate only while the list, when taken and now, holds another account's process with a readable user ID in `src/policy/measure.rs`, with the CPU note `cpu_window_estimate_not_kept` in `src/contention.rs`'s catalog and `docs/guarantees.md`, and the refill sentence's two clauses and their price; check off T558; report which decision snapshots change, per FR-018, R78 (contradicts)
+- [ ] T576 Reword `follow-ups.md`'s item 056 Part E row so the independent security review blocks a merge into `main`, a release and a tag, and list it among the release gates in `docs/release.md`, naming no model, tool or program, per item 058 Part D (missing)
+
+Item 058's order: T572, T573, T575, T576, then T574 (the runs at the last commit).
