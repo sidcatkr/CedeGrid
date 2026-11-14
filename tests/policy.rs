@@ -8913,6 +8913,138 @@ mod floors_by_mode {
         );
     }
 
+    /// `random::378`'s shape: Guaranteed `g` holds all of own memory, takes no hint and does not
+    /// observe the drain file; Opportunistic `a` and `b` are charged their requests and hold none
+    /// of it. In the modes where all own memory gives way, work that holds none of the resource
+    /// is not work left, so `g` gets its last step: at once below the critical level, after the
+    /// RAM breach window above it (FR-024, FR-063, R82).
+    #[test]
+    fn opportunistic_work_that_holds_none_does_not_keep_guaranteed_work_from_its_drain() {
+        let mut facts = hinted(&["a", "b"]);
+        facts.extend(rootless(&["g"]));
+        let task = |id: &str, class, requested: u64, held: u64| {
+            let mut job = allocation(
+                id,
+                AllocationPhase::Running,
+                resources(100, requested, 0),
+                Some(resources(100, held, 0)),
+            );
+            job.class = class;
+            job
+        };
+        let jobs = || {
+            vec![
+                task("g", AllocationClass::Guaranteed, 7_988, 12_535),
+                task("a", AllocationClass::Opportunistic, 973, 0),
+                task("b", AllocationClass::Opportunistic, 3_491, 0),
+            ]
+        };
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let critical = scripted(&config_in(mode), &facts, 1_000, |_| (jobs(), 340));
+            for interval in &critical {
+                assert_eq!(
+                    interval.steps,
+                    BTreeMap::from([("g".to_string(), (YieldStep::Terminate, None))]),
+                    "{mode:?} at {}",
+                    interval.now
+                );
+            }
+            let breached = scripted(&config_in(mode), &facts, 10_000, |_| (jobs(), 700));
+            for interval in &breached {
+                let expected = (interval.now >= 10_000).then_some((YieldStep::Drain, None));
+                assert_eq!(
+                    interval.steps.get("g").copied(),
+                    expected,
+                    "{mode:?} at {}",
+                    interval.now
+                );
+            }
+        }
+    }
+
+    /// The same shape where `a` has no reading at all: unknown usage is never "holds none", so
+    /// `g` is not stepped while `a` is left (FR-024, Principle III, R82).
+    #[test]
+    fn opportunistic_work_with_no_reading_still_keeps_guaranteed_work_from_its_drain() {
+        let mut facts = hinted(&["a"]);
+        facts.extend(rootless(&["g"]));
+        let mut g = ram_job("g", AllocationClass::Guaranteed, 12_535);
+        g.requested = resources(100, 7_988, 0);
+        let a = allocation("a", AllocationPhase::Running, resources(100, 973, 0), None);
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let run = scripted(&config_in(mode), &facts, 4_000, |_| {
+                (vec![g.clone(), a.clone()], 340)
+            });
+            for interval in &run {
+                assert!(
+                    !interval.steps.contains_key("g"),
+                    "{mode:?} at {}: {:?}",
+                    interval.now,
+                    interval.steps
+                );
+            }
+        }
+    }
+
+    /// On a GPU memory floor in Yield First, a hint-ready Opportunistic task whose reading on the
+    /// device is present at 0 MiB holds none of it and does not keep Guaranteed `g` from its last
+    /// step; one whose device entry is missing, or that has no reading at all, counts by its
+    /// charge and does (FR-024, Principle III, R82).
+    #[test]
+    fn a_missing_device_reading_still_counts_as_work_left() {
+        let mut snap = gpu_snapshot();
+        snap.gpus[0].used_memory_mib = Some(15_800);
+        let mut facts = hinted(&["o"]);
+        facts.extend(rootless(&["g"]));
+        let mut g = allocation(
+            "g",
+            AllocationPhase::Running,
+            resources(100, 32, 8_000),
+            Some(resources(100, 32, 8_000)),
+        );
+        g.class = AllocationClass::Guaranteed;
+        let device = ResourceKey::GpuMemory("GPU-test".into());
+        let steps_of_g = |observed: Option<Resources>| {
+            let mut engine = PolicyEngine::new();
+            let input = PolicyInput {
+                allocations: vec![
+                    g.clone(),
+                    allocation(
+                        "o",
+                        AllocationPhase::Running,
+                        resources(100, 32, 2_000),
+                        observed,
+                    ),
+                ],
+                facts: facts.clone(),
+                ..PolicyInput::default()
+            };
+            (0..=2_000u64)
+                .step_by(500)
+                .flat_map(|now| {
+                    engine
+                        .evaluate(&config_in(ContentionMode::YieldFirst), &snap, &input, now)
+                        .unwrap()
+                        .actions
+                        .into_iter()
+                        .filter(|a| a.allocation_id == "g" && a.resource == device)
+                        .map(|a| a.step)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut present = resources(100, 32, 0);
+        present.gpu_memory_mib.insert("GPU-test".into(), 0);
+        assert!(
+            !steps_of_g(Some(present)).is_empty(),
+            "holds none on the device"
+        );
+        let missing = steps_of_g(Some(resources(100, 32, 0)));
+        assert!(missing.is_empty(), "a missing device entry: {missing:?}");
+        let unread = steps_of_g(None);
+        assert!(unread.is_empty(), "no reading: {unread:?}");
+    }
+
     /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
     /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
     /// the in-share tasks were never asked for its excess; in Yield First they are asked for the

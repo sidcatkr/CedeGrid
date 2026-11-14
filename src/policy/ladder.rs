@@ -486,11 +486,15 @@ impl<'a> Interval<'a> {
             self.next.cpu_over_since = Some(since);
             self.cpu_own_hold = now.saturating_sub(since) < timing.dwell_ms;
         }
-        // Opportunistic work nobody can act on cannot be released first.
+        // Opportunistic work nobody can act on cannot be released first. Where all own
+        // memory gives way, work that holds none of the memory is not work left (FR-024).
+        let by_holding =
+            kind != ResourceKind::Cpu && governing(config, kind) <= ContentionMode::Neutral;
         let opportunistic_left = input.allocations.iter().any(|a| {
             !is_guaranteed(a)
                 && amount_of(&key, &self.charges[&a.id]) > 0
                 && !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable)
+                && (!by_holding || holds(input, &self.charges, &key, a) > 0)
         });
         // Guaranteed memory is drained last (FR-024): after its hint deadline
         // when it can take a hint and, for RAM, the breach window. The critical
@@ -1940,6 +1944,25 @@ fn judged(
             observed.gpu_memory_mib.get(uuid).copied().unwrap_or(0)
         }
         _ => amount_of(key, &charges[&allocation.id]),
+    }
+}
+
+/// What an allocation holds of a memory resource, as `judged` reads it, except that a device
+/// entry missing from a hint-ready allocation's reading counts by its charge: a missing
+/// reading is not "holds none" (FR-024).
+fn holds(
+    input: &PolicyInput,
+    charges: &BTreeMap<String, Resources>,
+    key: &ResourceKey,
+    allocation: &Allocation,
+) -> u64 {
+    match (key, &allocation.observed) {
+        (ResourceKey::GpuMemory(uuid), Some(observed))
+            if !observed.gpu_memory_mib.contains_key(uuid) =>
+        {
+            amount_of(key, &charges[&allocation.id])
+        }
+        _ => judged(input, charges, key, allocation),
     }
 }
 

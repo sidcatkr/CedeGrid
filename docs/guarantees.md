@@ -492,7 +492,10 @@ only floor policy, then drains Guaranteed work that holds the memory, as the las
 `contention.guaranteed_hint_deadline_s` (5 s) and, for RAM, after the breach has lasted
 `contention.ram.guaranteed_breach_window_s` (10 s). GPU memory breaches have no window.
 A Guaranteed allocation that is not hint-ready waits only for the window, and on the
-critical path the window is skipped.
+critical path the window is skipped. In Yield First and Neutral, by the resource's mode, an
+opportunistic allocation that holds none of the memory does not hold that drain back, and one
+whose reading is missing counts by its charge; in Performance and Aggressive every
+opportunistic allocation charged on the resource still does.
 
 Floors hold by mode. Own memory above its memory fair share (the max-min share beside the
 RAM principals, or beside the device's GPU memory principals) gives way at the floors in every
