@@ -65,6 +65,11 @@ changed, unqualified, or mismatched evidence. The [detailed contract](release-0.
 defines descriptor/quota faults, namespace interleavings, 100k/1m pagination,
 three-host work, both GPUs, and three-agent 256 MiB artifact/control latency gates.
 
+Before a merge into `main`, a release or a tag, one more gate applies: an independent security
+review of the commit to be published, run in an isolated environment. Nothing is merged into
+`main`, released or tagged until it has run on that exact commit and its findings are fixed or
+accepted in writing.
+
 ## Publication prerequisites and exact-byte workflow
 
 The public registry preflight found no existing project for the main npm name,
