@@ -151,7 +151,7 @@ root code following other users. Alternatives considered: B and C above.
   (a C dependency at build time); or running `systemd-run` and `systemctl` at their fixed paths
   with an argument vector the broker builds, no shell, and a timeout.
 - **Decision.** Fixed-path `systemd-run` and `systemctl`, with argument vectors built from the
-  caller's user ID and the policy only. This adds no dependency (CLAUDE.md) and keeps the
+  caller's user ID and the policy only. This adds no dependency (the contributor notes ask for a written reason for each) and keeps the
   boundary small enough to review line by line. Units are transient, so the broker writes no unit
   files (FR-009). Its marker is a fixed `Description=` prefix together with a property only the
   broker sets, checked with `systemctl show` before every stop or move (FR-007).

@@ -135,7 +135,7 @@ docs/
 ```
 
 **Structure Decision**: one crate, as today. The broker lives in `src/broker/`, declared from
-`src/broker.rs` (CLAUDE.md: modules declared in their own file, no `#[path]`). `system_mode.rs` is
+`src/broker.rs` (the contributor notes: modules declared in their own file, no `#[path]`). `system_mode.rs` is
 the unprivileged client. Packaging files sit in `packaging/deb/` and ship through the release
 workflow.
 

@@ -24,7 +24,7 @@ CEDEGRID_TEST_SYSTEM_CONTAINER=1 cargo test --locked --test system_mode -- --ign
 ```
 
 This runs only `tests/system_mode.rs`'s opt-in fixtures, never `--ignored` across the suite
-(CLAUDE.md). Expected results:
+(the repository's contributor notes). Expected results:
 
 | Check | Expected |
 |---|---|
