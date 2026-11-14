@@ -2311,115 +2311,6 @@ async fn a_journal_locked_for_its_whole_wait_holds_the_interval_and_the_loop_goe
     assert_eq!(outcome.exit_code, Some(0));
 }
 
-/// An agent whose intervals all end before the sample, here behind a locked journal while the
-/// dead-supervisor transition waits, asks for no renewal of Opportunistic work once its newest
-/// acted-on sample is older than one lease, and names the stretch once; it drains nothing
-/// (FR-077, FR-079, R80, R81). The coordinator's 30 s lease keeps the task renewable there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_agent_without_a_sample_for_one_lease_asks_for_no_renewal() {
-    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
-    let pid_file =
-        std::env::temp_dir().join(format!("cedegrid-renewal-{}.pid", std::process::id()));
-    let service = Service::start(
-        AllocationClass::Opportunistic,
-        vec![
-            python,
-            "-c".into(),
-            format!(
-                "import os,time; open({:?},'w').write(str(os.getpid())); time.sleep(40)",
-                pid_file.display()
-            ),
-        ],
-        |local| {
-            local.config.lifecycle.allocation_lease_ms = 8_000;
-        },
-    )
-    .await;
-    let mut agent = service.agent("withheld");
-    let end = Instant::now() + Duration::from_secs(20);
-    while !service
-        .record()
-        .is_some_and(|r| r.phase == ExecutionPhase::Running)
-    {
-        assert!(Instant::now() < end, "job never started");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let record = service.record().unwrap();
-    let sequence = || {
-        let db = rusqlite::Connection::open_with_flags(
-            service
-                .dir
-                .path()
-                .join("coordinator")
-                .join(cedegrid::state::DATABASE_FILENAME),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        db.query_row(
-            "SELECT r.lease_sequence FROM reservations r JOIN assignments a USING(assignment_id) WHERE a.task_id='task'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap()
-    };
-    let journal = service
-        .local
-        .config
-        .state_dir
-        .join(cedegrid::state::DATABASE_FILENAME);
-    let rival = rusqlite::Connection::open(&journal).unwrap();
-    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let identity: ProcessIdentity = serde_json::from_slice(
-        &fs::read(
-            service
-                .local
-                .config
-                .state_dir
-                .join("attempts")
-                .join(&record.assignment_id)
-                .join("supervisor-identity.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    // SAFETY: the test's own supervisor, by its recorded PID.
-    assert_eq!(
-        unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) },
-        0
-    );
-    tokio::time::sleep(Duration::from_millis(8_000)).await;
-    let early = sequence();
-    tokio::time::sleep(Duration::from_millis(13_500)).await;
-    let late = sequence();
-    rival.execute_batch("ROLLBACK").unwrap();
-    drop(rival);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let alive = agent.try_wait().unwrap().is_none();
-    let _ = agent.kill();
-    let _ = agent.wait();
-    if let Ok(pid) = fs::read_to_string(&pid_file) {
-        if let Ok(pid) = pid.trim().parse::<i32>() {
-            // SAFETY: the test's own workload, by the PID it wrote.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-        let _ = fs::remove_file(&pid_file);
-    }
-    service.server.abort();
-    let log = fs::read_to_string(service.dir.path().join("withheld.log")).unwrap();
-    assert!(alive, "the agent ended: {log}");
-    assert_eq!(
-        late, early,
-        "renewals went on with no sample for {} s: {log}",
-        21
-    );
-    let withheld = log
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["event"] == "renewals_withheld")
-        .count();
-    assert_eq!(withheld, 1, "{log}");
-}
-
 /// Three running tasks behind a node journal held by a rival writer, with `task`'s supervisor
 /// killed so that each interval ends at the journal write before its sample: `guaranteed` and
 /// `opportunistic` are watched, and `guaranteed`'s workload writes `term` to its marker when
@@ -2437,6 +2328,11 @@ struct WithheldRenewals {
 
 impl WithheldRenewals {
     async fn start(log: &'static str) -> Self {
+        Self::start_with(log, AllocationClass::Guaranteed).await
+    }
+
+    /// As `start`, with the killed task `task` in the given class.
+    async fn start_with(log: &'static str, victim: AllocationClass) -> Self {
         let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
         let base = std::env::temp_dir().join(format!("cedegrid-{log}-{}", std::process::id()));
         let pids: Vec<PathBuf> = ["task", "guaranteed", "opportunistic"]
@@ -2470,7 +2366,7 @@ impl WithheldRenewals {
         ];
         let service = Service::start_tasks(
             vec![
-                ("task", AllocationClass::Guaranteed, sleeper(&pids[0])),
+                ("task", victim, sleeper(&pids[0])),
                 ("guaranteed", AllocationClass::Guaranteed, drained),
                 (
                     "opportunistic",
@@ -2654,6 +2550,33 @@ async fn a_drain_reaches_guaranteed_work_while_renewals_are_withheld() {
         "the cancel never reached the Guaranteed workload in the {held_for:?} hold (withheld from {withheld_at:?}): {log}"
     );
     eprintln!("the Guaranteed workload stopped {stopped_after:?} after the cancel");
+}
+
+/// A slot whose supervisor has exited is asked no renewal, Guaranteed or Opportunistic: behind a
+/// locked journal its record still reads Running until the dead supervisor's write lands, and
+/// before this its lease was renewed once per interval (FR-079, R83).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slot_whose_supervisor_exited_is_asked_no_renewal() {
+    for (log, class) in [
+        ("exited-guaranteed", AllocationClass::Guaranteed),
+        ("exited-opportunistic", AllocationClass::Opportunistic),
+    ] {
+        let run = WithheldRenewals::start_with(log, class).await;
+        run.until(1.5).await;
+        let early = run.service.lease_sequence("task");
+        run.until(12.0).await;
+        let late = run.service.lease_sequence("task");
+        let others = run.service.lease_sequence("guaranteed");
+        run.release();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (alive, log) = run.finish();
+        assert!(alive, "the agent ended: {log}");
+        assert_eq!(
+            late, early,
+            "{class:?}: the exited supervisor's lease was renewed: {log}"
+        );
+        assert!(others > 0, "{log}");
+    }
 }
 
 /// Renewals of Opportunistic work withheld behind a locked journal are asked again once the

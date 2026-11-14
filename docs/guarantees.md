@@ -760,6 +760,7 @@ drains nothing, so those leases run out as for a stale report (`renewals_withhel
 stretch), and it asks again after the next interval that samples; an interval that ends at the
 observation write has its sample and keeps asking. It keeps asking for Guaranteed work, whose
 lease running out drains nothing and whose renewal reply carries a drain, cancel or preemption.
+An allocation whose supervisor has exited is asked no renewal in any class.
 A supervisor records a drain before it notifies the workload, so behind a journal that stays
 locked the drain waits for that write's four attempts, about 20 s, and then goes on.
 

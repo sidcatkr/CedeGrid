@@ -698,7 +698,12 @@ impl AgentLoop<'_> {
             });
             if wants_authorization(slot) {
                 waiting.push((slot.started_at, id.clone()));
-            } else if running && slot.sequence > 0 && slot.last_renew.elapsed() >= interval {
+            } else if running
+                && !slot.exited
+                && slot.sequence > 0
+                && slot.last_renew.elapsed() >= interval
+            {
+                // A supervisor that has exited is renewed no lease: nobody runs that work (R83).
                 if renew
                     || slot.assignment.request.class
                         == crate::execution_model::AllocationClass::Guaranteed
