@@ -928,9 +928,9 @@ impl AgentLoop<'_> {
                         continue;
                     }
                 }
-                let Some(publication_pin) = self
-                    .pins
-                    .take(|| crate::publication_gc::pin_attempt(&self.store, &slot.output_dir))?
+                let Some(publication_pin) = self.pins.take(|| {
+                    crate::publication_gc::pin_attempt_for_report(&self.store, &slot.output_dir)
+                })?
                 else {
                     continue;
                 };
@@ -1200,7 +1200,7 @@ impl AgentLoop<'_> {
                 let normal_exit = outcome.is_some_and(|o| o.exit_code == Some(0) && !o.yielded);
                 let Some(publication_pin) = self
                     .pins
-                    .take(|| crate::publication_gc::pin_attempt(&self.store, &output))?
+                    .take(|| crate::publication_gc::pin_attempt_for_report(&self.store, &output))?
                 else {
                     continue;
                 };

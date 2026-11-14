@@ -17,7 +17,7 @@ use std::time::Duration;
 
 pub const DATABASE_FILENAME: &str = "state.sqlite3";
 /// How long a write waits for the journal's lock.
-const JOURNAL_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const JOURNAL_WAIT: Duration = Duration::from_secs(5);
 /// How long an attempt pin waits for it: a busy pin defers its report to the next interval.
 pub(crate) const PIN_WAIT: Duration = Duration::from_millis(50);
 const BUSY_FIRST_US: u64 = 1_000;

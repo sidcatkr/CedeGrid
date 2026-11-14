@@ -53,7 +53,23 @@ fn assignment(output: &Path) -> Result<&str> {
         .and_then(|s| s.to_str())
         .context("invalid attempt output")
 }
+/// Pin an attempt, waiting the journal's full wait for its lock, as the publisher does when it
+/// starts.
 pub fn pin_attempt(store: &StateStore, output: &Path) -> Result<AttemptPin> {
+    pin_attempt_within(store, output, crate::state::JOURNAL_WAIT)
+}
+
+/// Pin an attempt for the agent's report, waiting at most `PIN_WAIT`: a busy pin defers that
+/// report to the next interval (FR-080).
+pub fn pin_attempt_for_report(store: &StateStore, output: &Path) -> Result<AttemptPin> {
+    pin_attempt_within(store, output, crate::state::PIN_WAIT)
+}
+
+fn pin_attempt_within(
+    store: &StateStore,
+    output: &Path,
+    wait: std::time::Duration,
+) -> Result<AttemptPin> {
     let root = store
         .database_path()
         .parent()
@@ -71,7 +87,7 @@ pub fn pin_attempt(store: &StateStore, output: &Path) -> Result<AttemptPin> {
         root,
         store.storage_profile(),
         store.namespace_guard(),
-        crate::state::PIN_WAIT,
+        wait,
     )?;
     initialize(&owned.connection)?;
     let generation = owned
@@ -459,7 +475,7 @@ mod tests {
         drop(pin_attempt(&store, &output).unwrap());
         let rival = rival(&store);
         let started = std::time::Instant::now();
-        let error = pin_attempt(&store, &output)
+        let error = pin_attempt_for_report(&store, &output)
             .err()
             .expect("a busy pin must fail");
         let took = started.elapsed();
@@ -475,12 +491,30 @@ mod tests {
         drop(pin);
         assert_eq!(pins(&store), 0);
     }
+    /// A supervisor's publisher pins its attempt when it starts: that pin waits the journal's
+    /// full wait, as every other journal write does, so a launch burst's commits delay it but do
+    /// not fail the run (R73; B1 at `bf29bcc` failed 53 and 91 runs on a 50 ms pin here).
+    #[test]
+    fn a_publishers_pin_waits_the_journals_full_wait() {
+        let (_temp, store, output) = fixture();
+        drop(pin_attempt(&store, &output).unwrap());
+        let rival = rival(&store);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            rival.execute_batch("ROLLBACK").unwrap();
+        });
+        let started = std::time::Instant::now();
+        let pin = pin_attempt(&store, &output);
+        release.join().unwrap();
+        assert!(pin.is_ok(), "{:#}", pin.err().unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
     /// A pin whose release finds the journal locked leaves its row only until the next pin on
     /// the same journal, which releases it in its own transaction (R73).
     #[test]
     fn a_pin_released_while_the_journal_is_busy_goes_with_the_next_pin() {
         let (_temp, store, output) = fixture();
-        let pin = pin_attempt(&store, &output).unwrap();
+        let pin = pin_attempt_for_report(&store, &output).unwrap();
         let rival = rival(&store);
         drop(pin);
         rival.execute_batch("ROLLBACK").unwrap();

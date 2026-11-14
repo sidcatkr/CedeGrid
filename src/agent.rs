@@ -2895,7 +2895,7 @@ mod pacing_tests {
         rival.execute_batch("BEGIN IMMEDIATE").unwrap();
         let mut gate = PinGate::default();
         let pin = gate
-            .take(|| crate::publication_gc::pin_attempt(&store, &output))
+            .take(|| crate::publication_gc::pin_attempt_for_report(&store, &output))
             .unwrap();
         assert!(pin.is_none());
         assert!(gate.found_busy());
@@ -2903,21 +2903,21 @@ mod pacing_tests {
         let again = gate
             .take(|| {
                 called = true;
-                crate::publication_gc::pin_attempt(&store, &output)
+                crate::publication_gc::pin_attempt_for_report(&store, &output)
             })
             .unwrap();
         assert!(again.is_none() && !called);
         rival.execute_batch("ROLLBACK").unwrap();
         let mut next = PinGate::default();
         assert!(
-            next.take(|| crate::publication_gc::pin_attempt(&store, &output))
+            next.take(|| crate::publication_gc::pin_attempt_for_report(&store, &output))
                 .unwrap()
                 .is_some()
         );
         let outside = root.join("elsewhere");
         assert!(
             PinGate::default()
-                .take(|| crate::publication_gc::pin_attempt(&store, &outside))
+                .take(|| crate::publication_gc::pin_attempt_for_report(&store, &outside))
                 .is_err()
         );
     }
