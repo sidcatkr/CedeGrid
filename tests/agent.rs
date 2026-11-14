@@ -2328,11 +2328,11 @@ struct WithheldRenewals {
 
 impl WithheldRenewals {
     async fn start(log: &'static str) -> Self {
-        Self::start_with(log, AllocationClass::Guaranteed).await
+        Self::start_with(log, AllocationClass::Guaranteed, 8_000).await
     }
 
-    /// As `start`, with the killed task `task` in the given class.
-    async fn start_with(log: &'static str, victim: AllocationClass) -> Self {
+    /// As `start`, with the killed task `task` in the given class and the agent's lease.
+    async fn start_with(log: &'static str, victim: AllocationClass, lease_ms: u64) -> Self {
         let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
         let base = std::env::temp_dir().join(format!("cedegrid-{log}-{}", std::process::id()));
         let pids: Vec<PathBuf> = ["task", "guaranteed", "opportunistic"]
@@ -2375,7 +2375,7 @@ impl WithheldRenewals {
                 ),
             ],
             |local| {
-                local.config.lifecycle.allocation_lease_ms = 8_000;
+                local.config.lifecycle.allocation_lease_ms = lease_ms;
             },
         )
         .await;
@@ -2561,7 +2561,7 @@ async fn a_slot_whose_supervisor_exited_is_asked_no_renewal() {
         ("exited-guaranteed", AllocationClass::Guaranteed),
         ("exited-opportunistic", AllocationClass::Opportunistic),
     ] {
-        let run = WithheldRenewals::start_with(log, class).await;
+        let run = WithheldRenewals::start_with(log, class, 8_000).await;
         run.until(1.5).await;
         let early = run.service.lease_sequence("task");
         run.until(12.0).await;
@@ -2581,14 +2581,15 @@ async fn a_slot_whose_supervisor_exited_is_asked_no_renewal() {
 
 /// Renewals of Opportunistic work withheld behind a locked journal are asked again once the
 /// lock is released and an interval acts on a sample. The lock is released as soon as the
-/// stretch is named, while the task's supervisor still holds its last 8 s grant; released after
-/// that grant ends, the supervisor drains the task and nothing is left to renew (FR-079, R80).
+/// stretch is named, while the task's supervisor still holds its last grant: with a 12 s lease
+/// and intervals about 5 s apart that grant outlasts the release by about 7 s. Released after
+/// it ends, the supervisor drains the task and nothing is left to renew (FR-079, R80).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn withheld_renewals_are_asked_again_after_the_next_acted_on_sample() {
-    let run = WithheldRenewals::start("returned").await;
-    run.until(8.0).await;
+    let run = WithheldRenewals::start_with("returned", AllocationClass::Guaranteed, 12_000).await;
+    run.until(12.5).await;
     let early = run.service.lease_sequence("opportunistic");
-    let end = run.started + Duration::from_secs(16);
+    let end = run.started + Duration::from_secs(21);
     while run.withheld_events() == 0 && Instant::now() < end {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

@@ -1804,6 +1804,6 @@ Each code task is test first, one commit per task. Item 062's Part B (a drain ne
 
 - [X] T582 Failing tests in `tests/policy.rs`: on `random::378`'s shape (Yield First, a Guaranteed task over its share, two Opportunistic tasks charged 973 and 3491 MiB holding 0, a critical breach) the Guaranteed task reaches its last step; an Opportunistic task whose GPU device entry is missing still counts as work left; then in `src/policy/ladder.rs` the holding condition on `opportunistic_left` for RAM and GPU memory whose governing mode is Yield First or Neutral, with a helper beside `judged`; then compare the 500 decision-snapshot sequences before and after, in total and by mode, and stop if any but `random::378` differs, per FR-024, FR-016, R82 (contradicts)
 - [X] T583 Failing test in `tests/agent.rs` with the three-task helper: the killed task's lease sequence stops rising, for a Guaranteed and for an Opportunistic task; then `service_slots` asks no renewal for a slot whose supervisor has exited, per FR-079, R83 (partial)
-- [ ] T584 Test only: widen the margin of `withheld_renewals_are_asked_again_after_the_next_acted_on_sample` in `tests/agent.rs` (about 2.3 s today), per plan "Item 062" (partial)
+- [X] T584 Test only: widen the margin of `withheld_renewals_are_asked_again_after_the_next_acted_on_sample` in `tests/agent.rs` (about 2.3 s today), per plan "Item 062" (partial)
 
 Item 062's order for these: T582, then T583, then T584.
