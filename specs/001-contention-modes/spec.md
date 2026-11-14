@@ -781,7 +781,7 @@ back more.
   report 054 Decision 4).
 - Q: What happens when a write to the node journal finds it locked? → A: Every process that
   writes the node journal, the agent and each supervisor, retries after short, randomly spread,
-  capped sleeps for the same 5 s as before; what each transition persists, and when, is
+  capped sleeps for the same 5 s as before; what each transition persists, and when (for a supervisor's records while its work runs, see Session 2026-11-15), is
   unchanged. An attempt's pin waits about 50 ms: when the journal is still locked, that attempt's
   publication or failure report, and every pin after it in that interval, wait for the next
   interval, and the interval goes on; the pin still comes before every read that leads to a
@@ -832,6 +832,26 @@ back more.
   Guaranteed allocation from its last step. One whose reading for the resource is missing or
   unknown counts by its charge. In Performance and Aggressive it still counts as today (item 062
   Part A, report 061 Decision 1 B).
+- Q: On the critical path, does the TERM for a worker that does not observe the drain file wait
+  for a journal record? → A: No. The supervisor releases its steps and sends TERM in the pass that
+  reads the step, and records the step and the drain after it; KILL follows the grace counted
+  from the TERM that was sent (item 062 Part B, report 061 Decision 2 A).
+- Q: From when do a drain's deadlines count, and can a journal write come before its notice? →
+  A: From the request: the line as the supervisor reads it, the lease's deadline or the stop
+  signal. In that pass the supervisor releases its steps and writes the drain notice; it sends
+  TERM at `drain_timeout_ms` and KILL after `term_grace_ms`, and records Draining after the
+  notice. A locked journal delays the record, never the notice or a signal (item 062 Part B).
+- Q: How long does a supervisor's record wait for a locked journal while its work runs? → A:
+  About 50 ms in one pass, as an attempt's pin does, and it is tried again on later passes, the
+  newest record replacing an older one of its kind. The launch barrier's records and Released
+  keep their 5 s wait, and so do an SDK child's launch records. `journal_unavailable` is reported
+  once a record has been refused for 20 s, Opportunistic work then drains as before, and a record
+  that lands later withdraws neither. This replaces "and when" in the answer of 2026-11-14 for
+  those records (item 062 Part B).
+- Q: Does a drain in a renewal reply need time left on the lease? → A: No. The agent hands a
+  drain or a cancel in a renewal reply to the supervisor with or without time left, and the
+  supervisor takes it so; a grant still needs time left. One that cannot be handed on is
+  reported once (`drain_undelivered`) (item 062 Part B).
 
 ## Terms
 
@@ -1375,6 +1395,10 @@ node reports with the expected per-resource values at each step.
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
+  A drain's deadlines count from the request: in that pass the supervisor releases its steps and
+  writes the drain notice, sends TERM at `drain_timeout_ms` and KILL after `term_grace_ms`, and
+  records Draining after the notice; a locked journal delays the record, never the notice or a
+  signal.
   A reservation the policy cancels before it starts MUST be released without its initial
   authorization. A CPU drain planned while an allocation was pending MUST NOT drain it once it
   runs: it is re-planned as running work, which CPU contention alone never drains (SC-007).
@@ -1925,7 +1949,9 @@ node reports with the expected per-resource values at each step.
   work only while the newest sample it has acted on is no older than its lease
   (`lifecycle.allocation_lease_ms`), and for Guaranteed work always; it
   MUST NOT drain because that sample is older, and an interval that ends at the observation write
-  has acted on its sample.
+  has acted on its sample. The agent MUST hand a drain or a cancel in a renewal reply to the
+  supervisor with or without time left on the lease, and the supervisor MUST take it so; a grant
+  still needs time left.
 - **FR-080**: SIGTERM, SIGINT and restarts of the agent MUST leave supervisors running for
   re-adoption; an explicit operator drain, and the end of `max_runtime_seconds`, drain every
   allocation. The agent MUST reload its configuration on request and apply a mode change without
@@ -2040,7 +2066,9 @@ node reports with the expected per-resource values at each step.
     deadline;
   - allocations that are not hint-ready are drained at once;
   - allocations that do not observe the drain file are sent TERM without the drain-file wait,
-    then KILL after the grace period, acting on own processes only.
+    then KILL after the grace period, acting on own processes only. The supervisor sends TERM in
+    the pass that reads the step and records the step and the drain after it; KILL follows the
+    grace counted from the TERM that was sent.
 
   In Performance and Aggressive the critical path acts only on own memory above its fair share
   when others' growth caused the breach; in-share allocations get the save-progress signal
