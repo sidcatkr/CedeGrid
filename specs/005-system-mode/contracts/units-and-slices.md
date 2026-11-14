@@ -6,7 +6,7 @@
 |---|---|
 | `cedegrid-broker.socket` | `ListenStream=/run/cedegrid/broker.sock`, `SocketUser=root`, `SocketGroup=cedegrid`, `SocketMode=0660` |
 | `cedegrid-broker.service` | runs the installed binary's fixed broker subcommand as root; confined as far as the host's systemd allows (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `RestrictAddressFamilies=AF_UNIX`, `CapabilityBoundingSet=` limited to what scores, moves and `cpu.idle` need; the plan lists each against the host's version) |
-| `cedegrid.slice` | root-level slice for ordinary work where N4 places it there |
+| `cedegrid.slice` | root-level slice for ordinary work where N4 places it there; weight 100, or under N4 C a weight the broker sets from the count of busy accounts |
 | `cedegrid-idle.slice` | root-level slice with `CPUWeight=idle` where systemd accepts it, else `cpu.idle` written by the broker (research R1) |
 | the `cedegrid` group | created through `systemd-sysusers` |
 | `/etc/cedegrid/` | root-owned directory for the policy, mode 0755; ships with no policy file, so defaults apply |
@@ -30,6 +30,8 @@ service and the group, and leaves `/etc/cedegrid/` only if the administrator add
 | `OOMScoreAdjust=` | not set (FR-006) | not set |
 | `ManagedOOMSwap=`, `ManagedOOMMemoryPressure=` | not set (R11) | not set |
 | `PAMName=` | per N3 (recommended: not set) | per N3 |
+| `RuntimeDirectory=` | `cedegrid/uU`, mode 0700, owned by `U` (the agent's socket for the idle executor; R18) | not set; it uses the ordinary unit's |
+| `Restart=` | `on-failure`, within systemd's default start-rate limit (*provisional*); the agent reconciles at start as 001's does | same |
 
 No property comes from a request. The command takes no argument from the caller; the agent reads
 its configuration as the user, after it starts with the user's rights.

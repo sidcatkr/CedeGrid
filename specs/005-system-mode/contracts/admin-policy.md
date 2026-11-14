@@ -28,4 +28,10 @@ principal_min_percent = 1    # 001 FR-059's default
 - `doctor` shows the effective values and whether each comes from the file or the default.
 - Aggressive is allowed only when the administrator lists it, and unprotected Aggressive's
   per-run confirmation (004) still applies on top.
+- Who applies what: the broker applies `modes.allowed` to its `start` and `move` requests. The
+  agent in the unit, which runs the root-installed binary, applies `modes.allowed` and
+  `tasks_per_user` to each job, since the broker never sees jobs. The kernel enforces only the
+  unit's properties (`tasks_max`, `open_files`, `processes`, `locked_memory_mib`). The docs say
+  that the allowed modes are a rule for CedeGrid's own behavior, not a security boundary: work
+  inside a unit can still create processes up to the unit's limits.
 - Defaults marked here are *provisional*, set by the plan and confirmed by the user.

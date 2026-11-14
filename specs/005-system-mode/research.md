@@ -83,7 +83,9 @@ follow other users' activity. The shared host is outside this feature's validati
   `cedegrid.slice` at weight 100, and `doctor` says the split changed and how.
 - **N4 B: always root-level `cedegrid.slice` (the design as decided)**, with the weight chosen by
   measurement. On the test host that gives own work more than the baseline whenever more than one
-  other account is busy.
+  other account is busy. It also takes System mode work out of `user-<uid>.slice`, so per-account
+  limits an administrator set on user slices (a `user-.slice` drop-in's memory, CPU or task
+  limits) no longer cover it; under N4 A they still do.
 - **N4 C: a weight that follows the counts**, with the limits above.
 
 Rationale for N4 A: it is the only one that meets FR-019 on the test host by construction, with no
@@ -165,8 +167,9 @@ root code following other users. Alternatives considered: B and C above.
   write access to the two cgroups' common ancestor, the root cgroup (cgroup v2 "delegation
   containment", documented).
 - **Decision.** The idle unit runs a fixed CedeGrid executor subcommand, with no policy of its
-  own. The user's agent drives it over a socket inside the user's runtime directory, and it starts
-  supervisors in its own cgroup. The agent stays the one policy owner.
+  own. The user's agent drives it over a socket in the ordinary unit's own runtime directory,
+  `/run/cedegrid/u<uid>/` (`RuntimeDirectory=`, mode 0700, owned by the user, made and removed by
+  systemd with the unit; R18), and it starts supervisors in its own cgroup. The agent stays the one policy owner.
 - **Moving a job (FR-018, "verify, then put it in").** The caller asks for a move. The broker:
   1. resolves the job's leaf only inside the caller's source unit's cgroup;
   2. freezes it, as root;
@@ -179,8 +182,11 @@ root code following other users. Alternatives considered: B and C above.
   A frozen leaf cannot fork, so no process starts between the check and the move. Anything that
   fails these checks refuses the move and thaws the source. Every process in a unit's cgroup can
   only have been forked inside that unit, or moved there by root. So membership of the caller's
-  unit plus the caller's user ID is the broker's own proof that a process is the caller's
-  CedeGrid work. It trusts no list from the agent.
+  unit plus the caller's user and group IDs is the broker's own proof that a process is the
+  caller's CedeGrid work. It trusts no list from the agent. This proof is not Principle I's
+  verified set, which rests on the supervisor's pidfd and parent chain; using it needs decision N6
+  (R15). After the move, the broker reads back each process's cgroup (Principle V). A refused
+  move leaves the job where it is, and the agent applies the new mode there with 001's Full steps.
 
 ## R10. The OOM loop
 
@@ -295,7 +301,7 @@ the development loop.
 | D1 057 Part B | no give-back in Performance inside a unit | Performance holds the fair share inside a unit | Nothing in the broker depends on it; the agent's mode code is 001's either way |
 | D2 057 decision 1 | broker marks over-share at 1000 in Yield First and Neutral only | in every mode | the score function takes the mode rule as an input, with a test for each case |
 | D3 057 Part C | Part C's Full design inside units | 001's Full steps | no broker code depends on it; the gate's tasks are 057's, not 005's |
-| D4 Principle V amendment | build | build nothing | every implementation task waits on D4 (tasks.md, Phase 0) |
+| D4 Principle V amendment | build | build nothing | every implementation task waits on D4 (tasks.md, the gate) |
 
 A dependency the brief did not list, found here: **Principle II's OOM bullet.** Today it says own
 work's OOM score "MUST NOT be set below" the baseline (7.0.0, and also 057's draft). Lowering an
@@ -303,6 +309,16 @@ in-share score in System mode contradicts that sentence, so Principle V alone ca
 The Principle V draft therefore proposes a one-clause cross-reference in Principle II ("except in
 System mode, as Principle V allows"). The brief said Principle II stays as it is, so this needs
 the user's approval (decision N5 in the report).
+
+A second one, found by the cross-artifact check: **Principle I's verified set.** Principle I lets
+CedeGrid act only on processes its supervisor holds by pidfd through their parent chain, and "a
+process that leaves the tree … is never acted on". The broker scores and moves processes because
+they are inside a unit it made, with the unit's IDs (R9, R10). Inside such a cgroup no unrelated
+process can appear, so the purpose of Principle I holds, but its text does not cover this proof.
+The draft proposes one clause in Principle I for System mode (decision N6 A). The other way
+(N6 B) keeps Principle I as it is: the broker acts only on processes that are both in the unit
+and on a verified list from the agent, which can only narrow the set; a job's processes outside
+the supervisor's tree then keep the default score and are never marked.
 
 ## R16. Findings deferred to this feature (FR-038)
 
@@ -323,11 +339,26 @@ the user's approval (decision N5 in the report).
   (`CEDEGRID_TEST_SYSTEM_CONTAINER`), like the existing hardware gates, and run only in that job.
   No server is touched (FR-028).
 
+## R18. The user's last logout
+
+- **Documented.** Without lingering, `systemd-logind` removes the user's runtime directory
+  (`/run/user/<uid>`) when the user's last session ends. With `RemoveIPC=yes` in `logind.conf`
+  (systemd's upstream default), it also removes the user's System V and POSIX IPC objects at that
+  moment; system users are exempt, ordinary users are not, even while their processes run in
+  system units.
+- **Decision.** The agent and the idle executor talk through `/run/cedegrid/u<uid>/`, the ordinary
+  unit's `RuntimeDirectory=`, not the user's runtime directory. `RemoveIPC=` is a login setting
+  this feature must not change (FR-034), so `doctor` reads its effective value and says that work
+  using shared memory or IPC objects can lose them at the user's last logout; the docs say it
+  once. Whether the ordinary unit survives logout under N4 A is R2-run's question.
+- **Alternatives considered.** Turning on lingering for members (rejected: a host-wide login
+  change the user ruled out); a socket in `/tmp` (rejected: shared and writable by others).
+
 ## Runs for the other session (test host, after the user's R13 steps 1 and 2)
 
 | Run | What it decides | Shape |
 |---|---|---|
-| R2-run | N4 and FR-019 | F1 and F2 of item 057 in plain Linux and in System mode with each placement (N4 A, N4 B); at least 3 runs each way; own CPU and the second account's rate and p99. Also: log out the last session and check whether the unit in `user-<uid>.slice` survives |
+| R2-run | N4 and FR-019 | F1 and F2 of item 057 in plain Linux and in System mode with each placement (N4 A, N4 B); at least 3 runs each way; own CPU and the second account's rate and p99. Also: log out the last session and check whether the unit in `user-<uid>.slice` survives, whether the agent still reaches the idle executor, and whether a job using POSIX shared memory keeps it under the host's `RemoveIPC` value (R18) |
 | R3-run | the Yield First margin (FR-020, SC-004, SC-005) | Yield First own work against the second account's CPU-bound and cache-sensitive work, and the second account alone; margin from today's down to 0% |
 | R10-run | SC-006, SC-007, SC-008 | item 054's OOM shape with own work in share, then over share; `systemd-oomd` left as it is; plus a user write below a root-written score |
 | R16-run | SC-012 and EFF-6 to EFF-10 | on the test host, the broker's and both accounts' agents' CPU and memory, idle and busy. The 50-user bound is measured in the container (R17), where accounts can be made without touching a host |

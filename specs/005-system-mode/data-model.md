@@ -36,6 +36,8 @@ timeout is in the contract.
 | `delegate` | yes |
 | `tasks_max`, process limits | from the policy (FR-010, N3) |
 | `command` | the fixed subcommand at the installed path: the agent (ordinary) or the idle executor (idle) |
+| `runtime_directory` | ordinary only: `/run/cedegrid/u<uid>/`, 0700, owned by the user (R18) |
+| `restart` | `on-failure`, within systemd's start-rate limit (*provisional*) |
 | `marker` | the broker's fixed description prefix and marker property (R8) |
 | `state` | systemd's active state |
 
@@ -49,8 +51,8 @@ marker; it refuses instead.
 |---|---|
 | `source_leaf` | inside the caller's source unit's cgroup |
 | `destination_leaf` | an empty leaf inside the caller's other unit's cgroup, made by the agent |
-| `members` | read from the frozen source leaf; each has the caller's user ID; a pidfd is open on each |
-| `result` | moved, or refused with the source thawed |
+| `members` | read from the frozen source leaf; each has the caller's user and group IDs and is in the broker's verified set (N6); a pidfd is open on each |
+| `result` | moved, with each member's cgroup read back; or refused with the source thawed, the job left in its unit |
 
 ## Administrator policy
 
@@ -75,7 +77,7 @@ root-owned file not writable by others (FR-010).
 | `unit` | the cedegrid unit the process is in |
 | `in_share_pages` | the part of the user's share given to this task, oldest task first |
 | `value` | `−round(1000 × in_share_pages ÷ total_pages)` clamped to −999 when lowered; 1000 when marked (FR-025, D2); 0 otherwise |
-| `written` | the last value written; a write happens only when `value` differs |
+| `written` | the last value written, read back after each write; a write happens only when `value` differs |
 
 When a value is lowered depends on N1: A at all times; B only while another principal is over
 its share; C never.

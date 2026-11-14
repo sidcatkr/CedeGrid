@@ -21,8 +21,9 @@ save-progress signal (FR-075), OOM requeue (FR-076) and Principle I's ownership 
 [003-everyday-cli](../003-everyday-cli/spec.md)'s rule that every `cedegrid` command run as root
 refuses, with this broker as the one exception (FR-082), and its `run`, `doctor` and control
 level reporting. It needs a MAJOR amendment of constitution Principle V
-([drafts/amendment-principle-v.md](drafts/amendment-principle-v.md)); Principles I and II stay as
-they are.
+([drafts/amendment-principle-v.md](drafts/amendment-principle-v.md)). Principles I and II each
+need one clause that points to it, for what the broker counts as verified own work and for the
+OOM scores it lowers (decisions N6 and N5, pending the user).
 
 ## Dependencies on decisions not yet made
 
@@ -92,6 +93,37 @@ is pending the user's choice.
     PAM file and changes no existing one.
   - C: the host's login PAM stack. Its modules are meant for logins, not services, and it changes
     what a unit start runs as root.
+- **N4. Where the ordinary unit sits** (research R2).
+  - A: in the caller's `user-<uid>.slice` where the host splits CPU by account, else in
+    `cedegrid.slice`. *Recommended*: on the test host it keeps every account's CPU share at the
+    baseline by construction, and per-account limits an administrator set on user slices keep
+    applying. Cost: it holds only if the unit survives the user's last logout, which host run
+    R2-run checks; if it does not, the placement falls back to B.
+  - B: always in the root-level `cedegrid.slice`, the design as decided. Cost: on the test host
+    own work gets more CPU than the baseline as soon as more than one other account is busy
+    (reasoned, research R2), and per-account limits on user slices no longer cover System mode
+    work.
+  - C: `cedegrid.slice` with a weight that follows the number of busy accounts. Cost: root code
+    follows other users' activity, and `system.slice`'s share still changes.
+- **N5. Principle II's OOM sentence** (research R15). Principle II says own work within its fair
+  share "MUST NOT be set below" its launch score; FR-024 lowers it.
+  - A: one clause in Principle II, "except in System mode, as Principle V allows", in the same
+    revision as the Principle V amendment. *Recommended*: the OOM principle of 10-29 needs it, and
+    the lowering stays bounded by the fair share.
+  - B: no change; System mode only marks over-share tasks at 1000 (as N1 C). Cost: own in-share
+    work keeps plain Linux's OOM risk.
+- **N6. What the broker counts as verified own work.** Principle I lets CedeGrid act only on its
+  verified set: processes its supervisor holds by pidfd through their parent chain. The broker
+  scores and moves processes by unit membership instead.
+  - A: one clause in Principle I: in System mode, a process inside a unit the broker made, with
+    the unit's user and group IDs, held by a pidfd and checked by its start time, is verified for
+    the broker's scores and moves, because such a cgroup gains a process only by a fork inside it
+    or by the broker's own move. *Recommended*: it is a stronger identity than a parent chain, it
+    keeps Principle I's purpose, and it covers a job's processes that left the supervisor's tree.
+  - B: no change; the broker acts only on processes that are inside the unit and also on a list
+    of verified processes from the user's agent, which can only narrow the set. Cost: a job's
+    processes outside the supervisor's tree keep the default score and are never marked, so
+    SC-007 can fail when an over-share job's memory sits in them; FR-012 has to allow the list.
 
 ## Terms
 
@@ -106,6 +138,9 @@ is pending the user's choice.
 - **Own units**: `cedegrid-u<uid>.service` (ordinary work) and `cedegrid-idle-u<uid>.service`
   (Yield First) for one user ID, made by the broker. A unit's cgroup can only gain a process by a
   fork inside it, or by a move made by root.
+- **Idle executor**: a fixed CedeGrid subcommand that runs in the idle unit with no policy of its
+  own. The user's agent drives it to start Yield First work there, since a process in one unit
+  cannot start a process in the other.
 - **The two slices**: `cedegrid.slice` and `cedegrid-idle.slice`, directly below the root cgroup.
   `cedegrid-idle.slice` has `cpu.idle` set, so it gets CPU time only when its siblings at the root
   leave it.
@@ -143,8 +178,8 @@ path and `doctor`. Then remove the package and run the same job.
 **Acceptance Scenarios**:
 
 1. **Given** the system package installed and the user in the group, **When** the user starts a
-   run, **Then** the run's work is inside `cedegrid-u<uid>.service` under `cedegrid.slice`, runs
-   with the user's user and group IDs, uses the Full level, and `doctor` says System.
+   run, **Then** the run's work is inside `cedegrid-u<uid>.service`, in the slice decision N4
+   picks, runs with the user's user and group IDs, uses the Full level, and `doctor` says System.
 2. **Given** no system package, **When** the user starts the same run, **Then** it runs at the
    delegated Full level or Tracked exactly as without this feature, and `doctor` says which.
 3. **Given** the package installed and the user not in the group, **When** the user starts a run,
@@ -292,8 +327,16 @@ it, but the feature can be tested before packaging exists.
 - A job's mode moves between Yield First and another while one of its processes forks: the move
   waits until the job is held still, so no process starts between the check and the move.
 - Two runs of one user start at once: both land in the same unit; the unit is started once.
-- The agent inside a unit exits or crashes: systemd's restart policy for the unit is the plan's;
-  the broker never starts the user's program itself.
+- The agent inside a unit exits or crashes: systemd restarts the unit on failure, within its
+  start-rate limit (plan), and the agent reconciles as 001's agent does after a restart. The
+  broker never starts the user's program itself.
+- The user's last login session ends while the units run: the units are system units and keep
+  running. The agent and the idle executor talk through the unit's own runtime directory under
+  `/run/cedegrid/`, not the user's, which is removed at logout without lingering. Where the
+  host's `systemd-logind` has `RemoveIPC=yes`, it removes the user's System V and POSIX IPC
+  objects at that logout even while the units run; this feature changes no login setting, so
+  `doctor` and the docs say so (host run R2-run checks it).
+- A unit reaches `TasksMax=` or a process limit from the policy: `doctor` says which limit.
 
 ## Requirements *(mandatory)*
 
@@ -315,8 +358,9 @@ it, but the feature can be tested before packaging exists.
   units: start, stop, status, and move a job of the caller's between the caller's two units. Any
   other request MUST be refused.
 - **FR-006**: The broker MUST build every unit's name and properties from the caller's user ID and
-  the administrator policy only: `cedegrid-u<uid>.service` in `cedegrid.slice` and
-  `cedegrid-idle-u<uid>.service` in `cedegrid-idle.slice`, `User=<uid>`, the user's primary group,
+  the administrator policy only: `cedegrid-u<uid>.service` in the slice decision N4 picks
+  (`user-<uid>.slice` or `cedegrid.slice`) and `cedegrid-idle-u<uid>.service` in
+  `cedegrid-idle.slice`, `User=<uid>`, the user's primary group,
   `Delegate=yes`, `TasksMax=` from the policy, and as the command a fixed CedeGrid subcommand at
   the root-owned installed path. No unit MUST get a fixed negative `OOMScoreAdjust=`.
 - **FR-007**: The broker MUST start, stop and move work only in units it made, recognized by name
@@ -325,13 +369,18 @@ it, but the feature can be tested before packaging exists.
   timeout, a timeout on each systemd call, a per-user request rate and a per-user unit count, so
   that one user cannot delay another's request beyond SC-003's bound.
 - **FR-009**: The broker's own unit MUST be confined as far as the host's systemd allows: no
-  filesystem writes beyond the OOM score files of processes inside the cedegrid units and, where
-  systemd cannot set it, the idle slice's `cpu.idle`; unix sockets only; and D-Bus to systemd
+  filesystem writes beyond the OOM score files of processes inside the cedegrid units, the freeze
+  and process files of the job cgroups it moves (FR-018) and, where systemd cannot set it, the
+  idle slice's `cpu.idle`. Each write MUST be read back (Principle V); unix sockets only; and D-Bus to systemd
   only. The plan lists each setting and what the host's systemd version supports.
 - **FR-010**: The administrator policy MUST be read from root-owned files in `/etc/cedegrid/`. A
   file writable by anyone but root MUST NOT be loaded. The policy gives the allowed modes, each
   user's task limit and `TasksMax=`. A user's request or setting beyond it MUST be refused in one
-  line naming the policy, and `doctor` MUST show the effective policy.
+  line naming the policy, and `doctor` MUST show the effective policy. The broker applies the
+  allowed modes to its requests; the agent in the unit, which is the root-installed binary,
+  applies them and the task limit to each job. The limits the kernel enforces are the unit's
+  properties (`TasksMax=` and the process limits); the docs MUST NOT present the allowed modes as
+  a security boundary.
 - **FR-011**: Every request, its caller and its result, and every score the broker writes, MUST go
   to the system journal.
 - **FR-011a**: Whether a unit opens a PAM session is pending decision N3 (recommended: none, with
@@ -342,12 +391,13 @@ it, but the feature can be tested before packaging exists.
   unit's cgroup, and policy, measurement and running work are 001's and 003's. The broker MUST NOT run the user's program, read the user's job, or take any
   figure from the user's agent.
 - **FR-013**: Where no system package is installed, CedeGrid MUST behave exactly as without this
-  feature. Where the socket exists but the broker does not answer within a short timeout, the
+  feature. Where the socket exists but the broker does not answer within 2 s (*provisional*), the
   client (`cedegrid system start`, and 003's `run` once it is built)
   MUST say so in one line and run as without the package, unless the user asked to require System
   mode, in which case it MUST refuse.
 - **FR-014**: `doctor` MUST say which level applies (System, delegated Full or Tracked) and why,
-  and `ps` and `top` MUST label System runs.
+  and `observe` and the status output MUST label System runs, as 003's `ps` and `top` MUST once
+  they are built.
 - **FR-015**: Every `cedegrid` command run with effective user ID 0 MUST refuse, as 003 FR-082
   says, except the broker's fixed subcommand started by its own unit.
 
@@ -356,13 +406,16 @@ it, but the feature can be tested before packaging exists.
 - **FR-016**: Installing MUST create `cedegrid.slice` and `cedegrid-idle.slice` directly below
   the root cgroup, with `cpu.idle` on `cedegrid-idle.slice`. Other users' areas, such as the SSH
   service and login sessions, MUST be left as they are.
-- **FR-017**: Yield First work MUST run in the caller's `cedegrid-idle-u<uid>.service`, and every
-  other mode's work in `cedegrid-u<uid>.service`.
+- **FR-017**: Yield First work MUST run in the caller's `cedegrid-idle-u<uid>.service`, started
+  there by the idle executor at the agent's request, and every other mode's work in
+  `cedegrid-u<uid>.service`.
 - **FR-018**: When a running job's mode changes between Yield First and another mode, the broker
   MUST move that job, as a whole, between the caller's two units, and only if each of its
-  processes is in the caller's source unit and runs with the caller's user ID. No process MUST
-  start in the job between that check and the move. The broker MUST NOT move any other process
-  into a cedegrid unit.
+  processes is in the caller's source unit, runs with the caller's user ID and is in the
+  broker's verified set (decision N6). No process MUST start in the job between that check and
+  the move, and the broker MUST read back each process's cgroup after it. The broker MUST NOT
+  move any other process into a cedegrid unit. A refused move leaves the job in its unit, where
+  the agent applies the new mode with 001's Full steps and says so in one line.
 - **FR-019**: Moving own work into `cedegrid.slice` MUST NOT give own work more CPU under
   contention than the baseline gives the same work, and MUST NOT give any other account less, on
   each host layout the plan names. The rule for `cedegrid.slice`'s CPU weight, fixed or following
@@ -380,9 +433,10 @@ it, but the feature can be tested before packaging exists.
   per-account cgroup counters where the host has them, else per-process counters summed by user
   ID. It MUST NOT use any figure a user's agent sends. A counter it cannot read MUST make that
   user's memory unknown.
-- **FR-023**: The broker MUST write `oom_score_adj` only for processes inside cedegrid units it
-  made, each identified by a pidfd held across the read and the write, and MUST NOT write it for
-  any other process.
+- **FR-023**: The broker MUST write `oom_score_adj` only for processes in its verified set
+  (decision N6: under A, processes inside cedegrid units it made, with the unit's user and group
+  IDs; under B, those of them the agent also lists), each identified by a pidfd held across the
+  read and the write, and MUST NOT write it for any other process. It MUST read each value back.
 - **FR-024**: For each user's processes inside the cedegrid units, the broker MUST score down the
   part of the user's memory within the user's fair share, so that what is left of the kernel's
   score is the part above the share. When it does so is pending decision N1: at all times (N1 A),
@@ -428,11 +482,11 @@ it, but the feature can be tested before packaging exists.
 - **FR-036**: System mode MUST NOT add a give-back of its own. Inside a unit, the modes are 001's:
   under D1 case A as item 057 Part B states, under D1 case B as 001 states today. Caps inside a
   unit follow D3.
-- **FR-037**: Principle I holds in full: the broker acts on no process outside the cedegrid units,
-  and inside them it writes only scores and makes only the moves FR-018 allows. A process is under
-  a restriction only after CedeGrid has verified it ("verify, then put it in", user, 2026-11-13):
-  a unit's cgroup can gain a process only by a fork inside it or by the broker's move of verified
-  own work, and caps inside it follow D3.
+- **FR-037**: Principle I holds, with the clause decision N6 adds: the broker acts on no process
+  outside the cedegrid units, and inside them it writes only scores and makes only the moves
+  FR-018 allows. A process is under a restriction only after CedeGrid has verified it ("verify,
+  then put it in", user, 2026-11-13): a unit's cgroup can gain a process only by a fork inside it
+  or by the broker's move of verified own work, and caps inside it follow D3.
 - **FR-038**: The findings deferred to this feature in `follow-ups.md` (029 Part 0f, SUP-9,
   AGT-15, AGT-17, EFF-6 to EFF-10) MUST each be resolved here or moved to a named later feature
   with the reason, in the plan.
@@ -473,10 +527,12 @@ Thresholds marked *provisional* are set by the plan's measurements and confirmed
 - **SC-002**: Every case of FR-029 is refused or holds as stated, is logged, and leaves every other
   user's units and every process outside the cedegrid units unchanged, in 100% of runs.
 - **SC-003**: While one member sends requests as fast as they can, another member's request is
-  answered within 1 s (*provisional*), and the broker's memory stays within its bound.
+  answered within 1 s (*provisional*), and the broker's memory stays within SC-012's bound.
 - **SC-004**: When the second account's CPU-bound work starts beside Yield First own work, own work's
   CPU on the contended CPUs falls to the idle level within 10 ms (*provisional*), in each of at
-  least 3 runs.
+  least 3 runs. The idle level is the share the kernel's idle weight gives against a busy
+  sibling, about 3/1027 of each contended CPU (reasoned from the kernel's weights; R3-run
+  measures it).
 - **SC-005**: At the Yield First margin FR-020 sets, the second account's throughput and p99 latency
   beside Yield First own work are within the spread of its runs with no own work, at least 3 runs
   each way, on CPU-bound and on cache-sensitive work.

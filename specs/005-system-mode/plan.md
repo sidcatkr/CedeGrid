@@ -23,8 +23,9 @@ Root does three things only:
 Policy, measurement and running work stay the present code. Without the package, nothing changes.
 
 Research ([research.md](research.md)) settled the open points as far as the documentation
-allows. Three need a host run (R2, R3, R10), two need the user (N4 placement, N5 Principle II's
-OOM clause), and decisions N1 to N3 from the clarify session stand.
+allows. Three need a host run (R2, R3, R10), three need the user (N4 placement, N5 Principle II's
+OOM clause, N6 what the broker counts as verified own work under Principle I), and decisions N1
+to N3 from the clarify session stand.
 
 ## Technical Context
 
@@ -65,13 +66,13 @@ provisional); the OOM loop at one pass per second with no write when nothing cha
 
 | Principle or constraint | How this feature meets it | Status |
 |---|---|---|
-| I. External processes untouchable | The broker writes scores and makes moves only for processes inside cedegrid units it made, each held by a pidfd, and checks the caller's user ID on each (FR-023, FR-018, R9, R10). It signals, renices and throttles nothing | Pass |
+| I. External processes untouchable | The broker writes scores and makes moves only for processes inside cedegrid units it made, each held by a pidfd, and checks the caller's user and group IDs on each (FR-023, FR-018, R9, R10). It signals, renices and throttles nothing. **Gap found by the cross-artifact check**: that proof is not Principle I's verified set (supervisor's pidfd and parent chain). Raised as N6; the draft carries a one-clause option (R15) | Needs N6 |
 | II. No harm in any mode | System mode adds no give-back (FR-036); its effects follow D1 and D2 in both cases. **Conflict found**: lowering an in-share OOM score contradicts Principle II's "MUST NOT be set below it" (R15). Raised as N5; the Principle V draft carries the proposed clause | Needs N5 |
 | III. Unknown is never idle | Unreadable memory lowers no score, and lowered scores return to 0 after a window (FR-026, R10) | Pass |
 | IV. Pure policy | The score function and the fair-share computation are pure functions with their own tests; the broker's loop only reads and writes. `policy.rs` is unchanged | Pass |
-| V. Rootless | **Violated by design**: a root broker. Allowed only after the MAJOR amendment (D4, `drafts/amendment-principle-v.md`). Default install stays rootless (FR-001) | Needs D4 |
+| V. Rootless | **Violated by design**: a root broker. Allowed only after the MAJOR amendment (D4, `drafts/amendment-principle-v.md`). Default install stays rootless (FR-001). The read-back rule still holds: every score, move and `cpu.idle` write is read back (FR-009, FR-018, FR-023) | Needs D4 |
 | VI. Tests first | Security suite, score tests and container fixtures first (tasks.md) | Pass |
-| VII. Compatibility | No wire, SDK, worker-context or config change for existing paths. The broker protocol is new, local and versioned (FR-035). The administrator policy is a new file with its own `policy_version = 1` | Pass |
+| VII. Compatibility | No wire, SDK, worker-context or config change for existing paths. In System mode only, CPU's default `yield_first_margin_percent` and its range change (FR-020); no key is added, and the SDKs carry no agent configuration. The broker protocol is new, local and versioned (FR-035). The administrator policy is a new file with its own `policy_version = 1` | Pass |
 | VIII. Concise public docs | A System mode section in `docs/guarantees.md` and an administrator page, each claim one sentence, including the OOM limit (FR-027) and what `cpu.idle` does not cover (FR-021) | Pass |
 | Launch barrier | Unchanged inside the unit: the agent's barrier runs as today | Pass |
 | Hidden dispatch | The broker's subcommand joins the hidden dispatch that runs before argument parsing, threads and terminal handoff, ahead of the root refusal | Pass |
@@ -79,7 +80,7 @@ provisional); the OOM loop at one pass per second with no write when nothing cha
 | Tools | Any packaging script in `tools/` uses the Python standard library only | Pass |
 
 **Gate result**: planning may continue. Implementation may not start until the user approves D4,
-and N5 with it. Both are listed in the report.
+and N5 and N6 with it. All three are listed in the report.
 
 ## Project Structure
 
@@ -159,13 +160,20 @@ workflow.
   property set is in [contracts/units-and-slices.md](contracts/units-and-slices.md).
 - Ordinary-unit placement follows N4 (research R2).
 
-**Moves (FR-018, R9).** Freeze, verify by unit membership and user ID, pidfd, move into the
-agent-made empty leaf in the other unit, thaw. A failure refuses and thaws the source.
+**Moves (FR-018, R9).** Freeze, verify by unit membership and user and group IDs (N6), pidfd,
+move into the agent-made empty leaf in the other unit, read back, thaw. A failure refuses and
+thaws the source; the job stays in its unit and the agent applies the new mode there with 001's
+Full steps.
+
+**Logout (R18).** The agent and the idle executor talk through the ordinary unit's
+`RuntimeDirectory=` under `/run/cedegrid/`. `doctor` reports logind's `RemoveIPC=`. Units restart
+on failure within systemd's start-rate limit.
 
 **OOM loop (FR-022 to FR-027, R10).**
 - Counters per host layout feed 001's fair share with the policy's thresholds.
 - The pure score function takes the mode rule (D2) and N1's option as inputs.
-- Writes go through a `/proc/<pid>` directory handle checked against a pidfd and the start time.
+- Writes go through a `/proc/<pid>` directory handle checked against a pidfd and the start time,
+  and each is read back.
 - The broker is the one writer in System mode; the agent's own OOM marks are off there.
 
 **Client (FR-012 to FR-015).**
@@ -188,10 +196,13 @@ range (1 to 90) is widened to admit 0 in System mode only, if R3-run reaches it.
 |---|---|---|
 | Principle V: a root process | Gives Full to users on hosts without delegation, and places Yield First where `cpu.idle` works (at the level of other users' groups) | polkit cannot see unit properties, so a rule would let the group become root (R5). An administrator enabling per-user delegation and lingering changes host-wide login settings, which the user ruled out on the shared host, and still gives no root-level idle group |
 | Principle II's OOM sentence (N5) | Protecting in-share own work in an OOM others caused, the user's principle of 2026-10-29 | Without lowering a score, in-share own work is protected only up to everyone's baseline (today's limit, Principle II) |
+| Principle I's clause (N6) | The broker has no supervisor's parent chain for a process; unit membership with the unit's IDs is its own proof | Taking the agent's verified list (N6 B) leaves a job's processes outside the supervisor's tree unscored and unmarked, and makes root take input from the user's agent |
 | A second CedeGrid process per user (the idle executor) | One agent per user (003 FR-002), while its idle work must be born inside another cgroup it cannot reach | Two agents per user break FR-002; moving every Yield First task in through root would make root act on every launch |
 
 ## Post-design Constitution Check
 
 Rechecked after Phase 1 ([data-model.md](data-model.md), [contracts/](contracts/),
-[quickstart.md](quickstart.md)). No new violation was found. The two flagged rows are unchanged:
-V needs D4, and II needs N5.
+[quickstart.md](quickstart.md)): V needs D4, and II needs N5. The cross-artifact check after the
+tasks found a third row: I needs N6. It also added Principle V's read-back to every broker write,
+Principle VI's Python and npm suites to the final check, and Governance's rule that the amendment
+lands with `docs/guarantees.md` and its tests (tasks.md).

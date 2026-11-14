@@ -24,10 +24,12 @@ capacity back", Performance's fair-share limit, the over-share floor rule), so t
 made inside a feature (Development Workflow: "A proposed relaxation is raised as an amendment").
 
 **How it fits with feature 005's draft** (`specs/005-system-mode/drafts/amendment-principle-v.md`):
-that draft redefines Principle V and leaves Principles I and II as they are. The two touch
-different principles and no common sentence. If the user approves both before either lands, they
-go in one revision, 8.0.0, with one Sync Impact Report. If one is approved first, it is 8.0.0 and
-the other 9.0.0.
+that draft redefines Principle V and, if the user approves its decisions N5 and N6, adds one
+clause to Principle II's OOM bullet and one bullet to Principle I. The clause reads the same on
+this draft's "OOM order" bullet, after "MUST NOT be set below it". If the user approves both
+before either lands, they go in one revision, 8.0.0, with one Sync Impact Report. If one is
+approved first, it is 8.0.0 and the other 9.0.0, and a later rewrite of the OOM bullet keeps the
+clause.
 
 **What the same change must also carry** (Governance: relaxing a principle updates
 `docs/guarantees.md` and the affected tests in the same change): the spec, guarantee and gate
