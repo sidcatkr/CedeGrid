@@ -1042,19 +1042,97 @@ fn wait_for_events(fds: &[std::os::fd::RawFd], until: Instant) {
     unsafe { libc::poll(items.as_mut_ptr(), items.len() as libc::nfds_t, ms) };
 }
 
-fn persist_with_retry(journal: &dyn ExecutionJournal, record: &ExecutionRecord) -> Result<()> {
-    let mut delay = Duration::from_millis(10);
-    let mut attempt = 1;
-    loop {
-        match journal.transition(record) {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt >= JOURNAL_ATTEMPTS => return Err(error),
-            Err(_) => {
-                std::thread::sleep(delay);
-                delay = delay.saturating_mul(2);
-                attempt += 1;
-            }
+/// How long one record after EXEC waits for the journal's lock: the attempt pin's bound (R84).
+const RECORD_WAIT: Duration = crate::state::PIN_WAIT;
+/// How soon after a refusal for the lock a record is tried again.
+const RECORD_RETRY: Duration = Duration::from_millis(250);
+/// How long records may stay refused for the lock before `journal_unavailable`: the four waits
+/// this replaces.
+const RECORD_PATIENCE: Duration = Duration::from_secs(20);
+
+/// A journal record the loop owes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    Phase,
+}
+
+/// Journal records taken after EXEC that have not landed, oldest first and at most one of each
+/// kind; a write sends the current value. Nothing that takes authority or capacity from own work
+/// waits for them (R84).
+#[derive(Default)]
+struct Outstanding {
+    owed: std::collections::VecDeque<Owed>,
+    /// When this stretch of refusals began.
+    since: Option<Instant>,
+    /// Refusals of the head for a reason other than the lock.
+    refusals: u32,
+    /// Nothing is tried before this.
+    retry_at: Option<Instant>,
+    /// `journal_unavailable` went out for this stretch.
+    reported: bool,
+}
+
+impl Outstanding {
+    fn owe(&mut self, kind: Owed) {
+        if !self.owed.contains(&kind) {
+            self.owed.push_back(kind);
         }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn retry_at(&self) -> Option<Instant> {
+        self.retry_at.filter(|_| !self.owed.is_empty())
+    }
+
+    /// Write owed records, oldest first, each waiting at most `RECORD_WAIT` for the lock. A
+    /// refusal for the lock holds every record for `RECORD_RETRY`; any other refusal is tried
+    /// again after 10, 20 and 40 ms and dropped after the fourth. Returns the record and error to
+    /// report, once for a stretch: after `RECORD_PATIENCE` of refusals or a dropped record.
+    fn settle(
+        &mut self,
+        mut write: impl FnMut(Owed) -> Result<()>,
+    ) -> Option<(Owed, anyhow::Error)> {
+        let now = Instant::now();
+        if self.retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        while let Some(&kind) = self.owed.front() {
+            let error = match write(kind) {
+                Ok(()) => {
+                    self.owed.pop_front();
+                    self.refusals = 0;
+                    self.retry_at = None;
+                    continue;
+                }
+                Err(error) => error,
+            };
+            let since = *self.since.get_or_insert(now);
+            let dropped = if crate::state::journal_busy(&error) {
+                self.retry_at = Some(now + RECORD_RETRY);
+                false
+            } else {
+                self.refusals += 1;
+                self.retry_at =
+                    Some(now + Duration::from_millis(10) * (1 << (self.refusals - 1).min(2)));
+                self.refusals >= JOURNAL_ATTEMPTS
+            };
+            if dropped {
+                self.owed.pop_front();
+                self.refusals = 0;
+            }
+            if (dropped || now.duration_since(since) >= RECORD_PATIENCE) && !self.reported {
+                self.reported = true;
+                return Some((kind, error));
+            }
+            return None;
+        }
+        self.since = None;
+        self.reported = false;
+        self.retry_at = None;
+        None
     }
 }
 
@@ -1397,7 +1475,11 @@ pub(super) fn supervise(
                     lifecycle.request_drain(elapsed);
                 }
             };
-        if let Err(error) = persist_with_retry(journal, &record) {
+        let mut outstanding = Outstanding::default();
+        outstanding.owe(Owed::Phase);
+        if let Some((_, error)) =
+            outstanding.settle(|_| journal.within(RECORD_WAIT, &mut || journal.transition(&record)))
+        {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
             journal_unavailable(&mut lifecycle, elapsed, error);
         }
@@ -1528,6 +1610,8 @@ pub(super) fn supervise(
                     Duration::from_millis(options.release_confirm_timeout_ms),
                 )?;
                 lifecycle.confirm_release();
+                // Released supersedes every record still owed and is written as before.
+                outstanding.clear();
                 record.phase = ExecutionPhase::Released;
                 record.detail = "Leader and every registered mediated child reaped; backend/GPU release confirmed".into();
                 journal.transition(&record)?;
@@ -1865,9 +1949,8 @@ pub(super) fn supervise(
                 record.phase = ExecutionPhase::Draining;
                 record.detail =
                     "Agent, cancellation, or authorization deadline requested drain".into();
-                if let Err(error) = persist_with_retry(journal, &record) {
-                    journal_unavailable(&mut lifecycle, elapsed, error);
-                }
+                // Recorded after the notice and any due signal, at the end of this pass (R84).
+                outstanding.owe(Owed::Phase);
             }
             // A failed drain-file write is retried every pass; the drain
             // deadline still escalates to TERM.
@@ -1931,6 +2014,12 @@ pub(super) fn supervise(
                     "resource release remains unconfirmed after forced termination"
                 );
             }
+            // The journal step comes after every effect of this pass (R84).
+            if let Some((_, error)) = outstanding
+                .settle(|_| journal.within(RECORD_WAIT, &mut || journal.transition(&record)))
+            {
+                journal_unavailable(&mut lifecycle, elapsed, error);
+            }
             // Wait for a control line, the leader's exit or a new SDK connection until the
             // next deadline; a source without an event keeps the short pass.
             let mut fds = Vec::new();
@@ -1964,6 +2053,7 @@ pub(super) fn supervise(
                     })
                 }),
                 kill_at.map(|at| at + Duration::from_millis(options.release_confirm_timeout_ms)),
+                outstanding.retry_at(),
             ];
             let until = deadlines
                 .into_iter()

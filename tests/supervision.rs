@@ -22,6 +22,10 @@ struct Journal {
     fail_reserve: bool,
     ready: Option<PathBuf>,
     pause_phase: ExecutionPhase,
+    /// Refuse this phase's record as a locked journal this many times.
+    busy: Option<(ExecutionPhase, std::cell::Cell<u32>)>,
+    /// When Draining is first asked: whether the drain file named in this file exists.
+    notice_seen: Option<(PathBuf, std::cell::Cell<Option<bool>>)>,
 }
 impl Journal {
     fn new() -> Self {
@@ -31,6 +35,8 @@ impl Journal {
             fail_reserve: false,
             ready: None,
             pause_phase: ExecutionPhase::Prepared,
+            busy: None,
+            notice_seen: None,
         }
     }
     fn last(&self) -> ExecutionRecord {
@@ -59,6 +65,26 @@ impl ExecutionJournal for Journal {
         Ok(record)
     }
     fn transition(&self, record: &ExecutionRecord) -> Result<()> {
+        if record.phase == ExecutionPhase::Draining
+            && let Some((path, seen)) = &self.notice_seen
+            && seen.get().is_none()
+        {
+            let drain = fs::read_to_string(path).unwrap_or_default();
+            seen.set(Some(
+                !drain.trim().is_empty() && Path::new(drain.trim()).exists(),
+            ));
+        }
+        if let Some((phase, left)) = &self.busy
+            && *phase == record.phase
+            && left.get() > 0
+        {
+            left.set(left.get() - 1);
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            )
+            .into());
+        }
         if self.fail.as_ref() == Some(&record.phase) {
             bail!("injected {:?} persistence failure", record.phase);
         }
@@ -928,6 +954,89 @@ fn opportunistic_work_with_a_failing_journal_goes_through_drain_term_and_kill() 
         "{outcome:?}"
     );
     assert_eq!(journal.last().phase, ExecutionPhase::Released);
+}
+
+/// Drains once the worker has written its drain file's path to `drain-path`.
+struct DrainWhenReady(PathBuf, bool);
+impl supervision::SupervisorControl for DrainWhenReady {
+    fn poll(&mut self) -> Result<Vec<supervision::SupervisorCommand>> {
+        if !self.1 && self.0.exists() {
+            self.1 = true;
+            return Ok(vec![supervision::SupervisorCommand::Drain]);
+        }
+        Ok(vec![])
+    }
+}
+
+/// A worker that writes its drain file's path, ignores TERM and runs until it is killed.
+fn drain_path_worker() -> Vec<String> {
+    vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "printf %s \"$CEDEGRID_DRAIN_FILE\" > drain-path.tmp; mv drain-path.tmp drain-path; \
+         trap '' TERM; while :; do sleep 0.05; done"
+            .into(),
+    ]
+}
+
+/// A drain's notice is written before its Draining record is asked: the journal, when first
+/// asked for Draining, finds the drain file there (FR-012, R84).
+#[test]
+fn the_drain_notice_is_written_before_the_draining_record() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.argv = drain_path_worker();
+    let journal = Journal {
+        notice_seen: Some((temp.path().join("drain-path"), std::cell::Cell::new(None))),
+        ..Journal::new()
+    };
+    let opts = SupervisorOptions {
+        lease_ms: 60_000,
+        drain_timeout_ms: 200,
+        term_grace_ms: 200,
+        ..options()
+    };
+    let mut control = DrainWhenReady(temp.path().join("drain-path"), false);
+    let outcome = run_controlled(&req, &opts, &journal, &mut Backend::new(), &mut control).unwrap();
+    assert!(outcome.yielded, "{outcome:?}");
+    assert_eq!(
+        journal.notice_seen.as_ref().unwrap().1.get(),
+        Some(true),
+        "Draining was asked before the drain notice was written"
+    );
+}
+
+/// A Draining record refused for the lock more often than the old four tries is tried again on
+/// later passes and lands while the worker still runs (R84).
+#[test]
+fn a_draining_record_refused_for_the_lock_lands_on_a_later_pass() {
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.argv = drain_path_worker();
+    let journal = Journal {
+        busy: Some((ExecutionPhase::Draining, std::cell::Cell::new(6))),
+        ..Journal::new()
+    };
+    let opts = SupervisorOptions {
+        lease_ms: 60_000,
+        drain_timeout_ms: 3_000,
+        term_grace_ms: 1_000,
+        ..options()
+    };
+    let mut control = DrainWhenReady(temp.path().join("drain-path"), false);
+    let outcome = run_controlled(&req, &opts, &journal, &mut Backend::new(), &mut control).unwrap();
+    assert!(outcome.yielded, "{outcome:?}");
+    let phases: Vec<_> = journal
+        .records
+        .borrow()
+        .iter()
+        .map(|r| r.phase.clone())
+        .collect();
+    assert!(
+        phases.contains(&ExecutionPhase::Draining),
+        "Draining never landed: {phases:?}"
+    );
+    assert_eq!(journal.busy.as_ref().unwrap().1.get(), 0);
 }
 
 #[test]

@@ -406,6 +406,122 @@ fn supervisors_run_no_collector_or_policy_and_never_drain_locally() {
     assert_eq!(outcome.exit_code, Some(0));
 }
 
+/// A worker for drains behind a locked journal: in its working directory it writes `ready`,
+/// `noticed` once its drain file appears and `termed` on SIGTERM, and runs until `stop` appears.
+const DRAIN_PROBE: &str = r#"import os, signal, time
+def term(*_):
+    open('termed', 'w').close()
+signal.signal(signal.SIGTERM, term)
+open('ready', 'w').close()
+drain = os.environ.get('CEDEGRID_DRAIN_FILE', '')
+while not os.path.exists('stop'):
+    if drain and os.path.exists(drain) and not os.path.exists('noticed'):
+        open('noticed', 'w').close()
+    time.sleep(0.02)
+"#;
+
+/// The phase the supervisor's journal shows for the test's assignment.
+fn journal_phase(spec: &SupervisorSpec) -> Option<ExecutionPhase> {
+    StateStore::open_read_only(&spec.config.state_dir)
+        .ok()?
+        .executions()
+        .ok()?
+        .into_iter()
+        .find(|r| r.assignment_id == "assignment")
+        .map(|r| r.phase)
+}
+
+/// Poll until `done` or the deadline; whether it came.
+fn within(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let end = Instant::now() + deadline;
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() > end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A leader drain behind a locked node journal: the notice is written in the pass that reads
+/// the drain, TERM goes at its deadline counted from the request, the journal shows the run as
+/// running meanwhile, and Draining lands once the lock is gone (FR-012, R84).
+#[test]
+fn a_drain_behind_a_locked_journal_notifies_and_signals_before_its_record() {
+    let dir = directory();
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    let mut spec = spec(
+        dir.path(),
+        AllocationClass::Guaranteed,
+        vec![python, "-c".into(), DRAIN_PROBE.into()],
+    );
+    spec.config.lifecycle.drain_timeout_ms = 1_500;
+    spec.config.lifecycle.term_grace_ms = 3_000;
+    let work = PathBuf::from(&spec.assignment.request.cwd);
+    let (mut child, mut input, rx) = start(&spec);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()["event"],
+        "prepared"
+    );
+    authorize(&mut input, 60_000);
+    let running = within(Duration::from_secs(5), || {
+        work.join("ready").exists() && journal_phase(&spec) == Some(ExecutionPhase::Running)
+    });
+    assert!(
+        running,
+        "ready {} phase {:?}",
+        work.join("ready").exists(),
+        journal_phase(&spec)
+    );
+    let rival = rusqlite::Connection::open(
+        spec.config
+            .state_dir
+            .join(cedegrid::state::DATABASE_FILENAME),
+    )
+    .unwrap();
+    rival.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let asked = Instant::now();
+    writeln!(input, "{}", serde_json::json!({"kind":"drain"})).unwrap();
+    input.flush().unwrap();
+    let noticed = within(Duration::from_secs(1), || work.join("noticed").exists());
+    let noticed_after = asked.elapsed();
+    std::thread::sleep(
+        (asked + Duration::from_millis(1_200)).saturating_duration_since(Instant::now()),
+    );
+    let termed_early = work.join("termed").exists();
+    let termed = within(
+        (asked + Duration::from_millis(2_500)).saturating_duration_since(Instant::now()),
+        || work.join("termed").exists(),
+    );
+    let while_locked = journal_phase(&spec);
+    rival.execute_batch("ROLLBACK").unwrap();
+    drop(rival);
+    let draining = within(Duration::from_secs(1), || {
+        journal_phase(&spec) == Some(ExecutionPhase::Draining)
+    });
+    fs::write(work.join("stop"), b"").unwrap();
+    wait(&mut child);
+    assert!(
+        noticed,
+        "no drain notice within 1 s of the drain ({noticed_after:?})"
+    );
+    assert!(!termed_early, "TERM came before its deadline");
+    assert!(termed, "no TERM by 2.5 s");
+    assert_eq!(while_locked, Some(ExecutionPhase::Running));
+    assert!(draining, "Draining did not land within 1 s of the unlock");
+    let outcome: ExecutionOutcome =
+        serde_json::from_slice(&fs::read(spec.output_dir.join("execution-outcome.json")).unwrap())
+            .unwrap();
+    assert!(outcome.yielded);
+    assert_eq!(
+        outcome.termination_deadline_ms,
+        outcome.drain_started_ms.map(|ms| ms + 1_500),
+        "{outcome:?}"
+    );
+}
+
 #[test]
 fn real_extra_cpu_threads_still_trigger_the_agent_envelope() {
     // The test plays the agent: it measures the owned worker with the agent's
@@ -2507,9 +2623,9 @@ async fn past_one_lease_without_a_sample_only_guaranteed_work_is_still_renewed()
 
 /// While renewals of Opportunistic work are withheld for want of a sample, a cancel of a
 /// Guaranteed task's job still reaches that task's supervisor with its next renewal reply,
-/// and its workload is stopped while the journal is still locked (FR-077, FR-079, R81). The
-/// supervisor records Draining before the drain notice, and that write waits for the lock
-/// through all its attempts, so the stop comes about 25 s after the cancel.
+/// and its workload is stopped while the journal is still locked (FR-077, FR-079, R81): about one
+/// blocked interval after the cancel, since a drain's notice and signals never wait for its
+/// record (R84).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drain_reaches_guaranteed_work_while_renewals_are_withheld() {
     use cedegrid::protocol::Request;
@@ -2548,6 +2664,10 @@ async fn a_drain_reaches_guaranteed_work_while_renewals_are_withheld() {
     assert!(
         drained,
         "the cancel never reached the Guaranteed workload in the {held_for:?} hold (withheld from {withheld_at:?}): {log}"
+    );
+    assert!(
+        stopped_after < Duration::from_secs(10),
+        "the Guaranteed workload stopped {stopped_after:?} after the cancel"
     );
     eprintln!("the Guaranteed workload stopped {stopped_after:?} after the cancel");
 }
