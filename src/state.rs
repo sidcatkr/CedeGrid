@@ -338,9 +338,7 @@ pub struct DurabilitySettings {
 }
 
 pub struct StateStore {
-    pub(crate) connection: Connection,
-    // After the connection, which holds a pointer to it until it closes.
-    busy: Option<Box<BusyWait>>,
+    pub(crate) connection: Journal,
     path: PathBuf,
     profile: StorageProfile,
     // Last field: SQLite must close before the final lifecycle reference.
@@ -420,7 +418,7 @@ impl StateStore {
             "existing state identity changed while opening SQLite"
         );
         verify_sqlite_named_inode(&connection)?;
-        let busy = install_busy_wait(&connection, wait)?;
+        let connection = Journal::with_wait(connection, wait)?;
         connection.pragma_update(None, "synchronous", profile.synchronous())?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         #[cfg(target_os = "macos")]
@@ -444,7 +442,6 @@ impl StateStore {
         );
         let store = Self {
             connection,
-            busy: Some(busy),
             path,
             profile,
             namespace_guard,
@@ -538,7 +535,7 @@ impl StateStore {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .context("cannot open private state database")?;
-        let busy = install_busy_wait(&connection, busy_timeout)?;
+        let connection = Journal::with_wait(connection, busy_timeout)?;
         let existing_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
@@ -603,7 +600,6 @@ impl StateStore {
         }
         let store = Self {
             connection,
-            busy: Some(busy),
             path,
             profile,
             namespace_guard,
@@ -696,8 +692,7 @@ impl StateStore {
         connection.pragma_update(None, "synchronous", profile.synchronous())?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self {
-            connection,
-            busy: None,
+            connection: Journal::without_wait(connection),
             path,
             profile,
             namespace_guard,
@@ -729,9 +724,11 @@ impl StateStore {
 
     /// How many lock waits this connection began, and the longest of them.
     pub fn lock_waits(&self) -> (u64, Duration) {
-        self.busy.as_ref().map_or((0, Duration::ZERO), |busy| {
-            (busy.waits.get(), busy.longest.get())
-        })
+        self.connection
+            .busy_wait()
+            .map_or((0, Duration::ZERO), |busy| {
+                (busy.waits.get(), busy.longest.get())
+            })
     }
 
     pub fn namespace_guard(&self) -> NamespaceGuard {
@@ -756,7 +753,7 @@ impl StateStore {
             assurance: self.profile.assurance(),
             assurance_detail: self.profile.assurance().detail().into(),
             // A custom busy handler reads 0 from the pragma, so the store reports its own limit.
-            busy_timeout_ms: match &self.busy {
+            busy_timeout_ms: match self.connection.busy_wait() {
                 Some(busy) => u64::try_from(busy.limit.as_millis())?,
                 None => u64::try_from(self.connection.pragma_query_value(
                     None,
@@ -2159,15 +2156,143 @@ fn busy_sleep(count: u32, waited: Duration, limit: Duration, random: u64) -> Opt
     Some(sleep.min(limit - waited))
 }
 
-/// SQLite's busy callback: the context is the `BusyWait` its store owns, which outlives the
-/// connection. A panic gives up the wait, so the statement fails busy.
+/// A journal connection and the context of its busy handler. The connection is the first field,
+/// so it closes before the context is freed on every path; the context is held through a raw
+/// pointer, so moving the journal never invalidates the pointer SQLite holds (R73, item 060).
+pub(crate) struct Journal {
+    connection: Connection,
+    busy: Option<BusyContext>,
+}
+
+impl Journal {
+    /// The connection with jittered, capped lock retries up to `limit`. Installing is the only
+    /// step that can fail once the context exists, and a failed install leaves SQLite no pointer.
+    fn with_wait(connection: Connection, limit: Duration) -> Result<Self> {
+        ensure!(
+            limit.as_millis() <= i32::MAX as u128,
+            "SQLite busy timeout exceeds supported range"
+        );
+        let busy = BusyContext::new(limit);
+        // SAFETY: the handle is this live connection's. The context is freed only when the
+        // `Journal` built below drops, after its `connection` field has closed.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_busy_handler(
+                connection.handle(),
+                Some(busy_callback),
+                busy.0.as_ptr().cast(),
+            )
+        };
+        ensure!(
+            code == rusqlite::ffi::SQLITE_OK,
+            "cannot install the journal's busy handler: {code}"
+        );
+        #[cfg(test)]
+        drop_order::watch_close(&connection);
+        Ok(Self {
+            connection,
+            busy: Some(busy),
+        })
+    }
+
+    /// A read-only connection, which keeps SQLite's own busy handler.
+    fn without_wait(connection: Connection) -> Self {
+        Self {
+            connection,
+            busy: None,
+        }
+    }
+
+    fn busy_wait(&self) -> Option<&BusyWait> {
+        self.busy.as_ref().map(BusyContext::get)
+    }
+}
+
+impl std::ops::Deref for Journal {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl std::ops::DerefMut for Journal {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+}
+
+/// The busy handler's context, owned through the raw pointer `Box::into_raw` gives, and freed
+/// when this drops.
+struct BusyContext(std::ptr::NonNull<BusyWait>);
+
+impl BusyContext {
+    fn new(limit: Duration) -> Self {
+        Self(std::ptr::NonNull::from(Box::leak(Box::new(BusyWait::new(
+            limit,
+        )))))
+    }
+
+    fn get(&self) -> &BusyWait {
+        // SAFETY: the pointer came from `Box::leak` and is freed only by `drop`.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Drop for BusyContext {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        drop_order::record("context freed");
+        // SAFETY: the pointer came from `Box::leak` and nothing else frees it.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
+// SAFETY: the context is used by the connection's thread through SQLite's callback and through
+// `&self`; like the `Connection` beside it, it moves between threads but is never shared.
+unsafe impl Send for BusyContext {}
+
+#[cfg(test)]
+mod drop_order {
+    use std::cell::RefCell;
+    thread_local!(static EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) });
+    pub(super) fn record(event: &'static str) {
+        EVENTS.with(|events| events.borrow_mut().push(event));
+    }
+    pub(super) fn take() -> Vec<&'static str> {
+        EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+    }
+    unsafe extern "C" fn closed(
+        _event: std::os::raw::c_uint,
+        _context: *mut std::os::raw::c_void,
+        _p: *mut std::os::raw::c_void,
+        _x: *mut std::os::raw::c_void,
+    ) -> std::os::raw::c_int {
+        record("connection closed");
+        0
+    }
+    /// Records the connection's close, from SQLite's own close trace.
+    pub(super) fn watch_close(connection: &rusqlite::Connection) {
+        // SAFETY: a live handle; the callback takes no context.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(
+                connection.handle(),
+                rusqlite::ffi::SQLITE_TRACE_CLOSE as std::os::raw::c_uint,
+                Some(closed),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+    }
+}
+
+/// SQLite's busy callback: the context is the `BusyWait` its `Journal` owns, which is freed only
+/// after the connection has closed. A panic gives up the wait, so the statement fails busy.
 unsafe extern "C" fn busy_callback(
     context: *mut std::os::raw::c_void,
     count: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: SQLite passes back the pointer `install_busy_wait` gave it; the box lives in
-        // the store, declared after the connection, so it is dropped only after the close.
+        // SAFETY: SQLite passes back the pointer `Journal::with_wait` gave it; the context is
+        // freed only after the connection that calls this has closed.
         let wait = unsafe { &*context.cast::<BusyWait>() };
         wait.next(u32::try_from(count).unwrap_or(u32::MAX))
     }));
@@ -2180,32 +2305,35 @@ unsafe extern "C" fn busy_callback(
     }
 }
 
-/// Replace SQLite's busy handler on `connection` with jittered, capped sleeps up to `limit`.
-fn install_busy_wait(connection: &Connection, limit: Duration) -> Result<Box<BusyWait>> {
-    ensure!(
-        limit.as_millis() <= i32::MAX as u128,
-        "SQLite busy timeout exceeds supported range"
-    );
-    let wait = Box::new(BusyWait::new(limit));
-    // SAFETY: the handle is this live connection's; the context stays valid until the store,
-    // which owns both, drops the connection first.
-    let code = unsafe {
-        rusqlite::ffi::sqlite3_busy_handler(
-            connection.handle(),
-            Some(busy_callback),
-            std::ptr::from_ref::<BusyWait>(&wait).cast_mut().cast(),
-        )
-    };
-    ensure!(
-        code == rusqlite::ffi::SQLITE_OK,
-        "cannot install the journal's busy handler: {code}"
-    );
-    Ok(wait)
-}
-
 #[cfg(test)]
 mod busy_sleep_tests {
     use super::*;
+
+    /// The busy handler's context is freed only after its connection has closed: when a store
+    /// drops, and when an open fails after the handler was installed (item 060 Part A).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_busy_context_outlives_its_connection_on_every_path() {
+        let directory = crate::namespace::TestStateDir(
+            tempfile::Builder::new()
+                .prefix(".busy-context-test-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap(),
+        );
+        let root = directory.path().join("state");
+        drop(StateStore::open(&root).unwrap());
+        drop_order::take();
+        let store = StateStore::open_existing_with_profile(&root, StorageProfile::WalFull).unwrap();
+        drop(store);
+        assert_eq!(drop_order::take(), ["connection closed", "context freed"]);
+        // An open that fails after installing the handler: the schema check refuses.
+        let raw = Connection::open(root.join(DATABASE_FILENAME)).unwrap();
+        raw.pragma_update(None, "user_version", 99).unwrap();
+        drop(raw);
+        drop_order::take();
+        assert!(StateStore::open_existing_with_profile(&root, StorageProfile::WalFull).is_err());
+        assert_eq!(drop_order::take(), ["connection closed", "context freed"]);
+    }
 
     /// A locked journal is retried after short, jittered sleeps that double to 16 ms and never
     /// pass the connection's limit (R73).
