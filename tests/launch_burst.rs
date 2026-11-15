@@ -104,6 +104,28 @@ fn running(state: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Runs whose journal reads Released, and runs that ever recorded Draining.
+fn released_and_drained(state: &Path) -> (usize, usize) {
+    let Ok(db) = rusqlite::Connection::open_with_flags(
+        state.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return (0, 0);
+    };
+    let count = |sql: &str| {
+        db.query_row(sql, [], |row| row.get::<_, i64>(0))
+            .map_or(0, |n| n as usize)
+    };
+    (
+        count(
+            "SELECT count(*) FROM executions WHERE json_extract(record_json,'$.phase')='released'",
+        ),
+        count(
+            "SELECT count(DISTINCT assignment_id) FROM execution_events WHERE json_extract(record_json,'$.phase')='draining'",
+        ),
+    )
+}
+
 /// Allocations the coordinator fenced because their lease expired.
 fn lease_expiries(coordinator: &Path) -> usize {
     let Ok(db) = rusqlite::Connection::open_with_flags(
@@ -369,6 +391,15 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
     collect(&state);
     let drain_ms = drain_started.elapsed().as_millis();
     let left = running(&state);
+    // "None running" counts a run that reads Draining as stopped; the releases come later, once
+    // a worker that ignores the drain file has had its TERM.
+    while released_and_drained(&state).0 < TASKS && Instant::now() < drained {
+        collect(&state);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    collect(&state);
+    let released_ms = drain_started.elapsed().as_millis();
+    let (released, recorded_draining) = released_and_drained(&state);
     // The coordinator fences an expired lease only when a request advances its clock.
     client.request(&Request::Status { job_id: None }).await.ok();
     let expired_in_drain = lease_expiries(&root.join("coordinator")).saturating_sub(expired);
@@ -456,6 +487,9 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         usage.len(),
         agent_wait.map_or("none".into(), |ms| ms.to_string()),
         count("journal_busy"),
+    );
+    eprintln!(
+        "burst release: none running {drain_ms} ms after the drain began, {released} of {TASKS} released by {released_ms} ms; {recorded_draining} of {TASKS} recorded Draining"
     );
     // Evidence for the run log: other refusals and failures are reported, not judged here.
     eprintln!(
