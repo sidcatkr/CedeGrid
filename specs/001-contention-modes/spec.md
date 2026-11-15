@@ -781,8 +781,9 @@ back more.
   report 054 Decision 4).
 - Q: What happens when a write to the node journal finds it locked? → A: Every process that
   writes the node journal, the agent and each supervisor, retries after short, randomly spread,
-  capped sleeps for the same 5 s as before; what each transition persists, and when (for a supervisor's records while its work runs, see Session 2026-11-15), is
-  unchanged. An attempt's pin waits about 50 ms: when the journal is still locked, that attempt's
+  capped sleeps for up to 5 s, except a supervisor's records while its work runs, which wait
+  about 50 ms in a pass and are tried again (Session 2026-11-15); what each transition persists
+  is unchanged. An attempt's pin waits about 50 ms: when the journal is still locked, that attempt's
   publication or failure report, and every pin after it in that interval, wait for the next
   interval, and the interval goes on; the pin still comes before every read that leads to a
   publication. Any other journal write of the agent's loop that is still locked after 5 s is
