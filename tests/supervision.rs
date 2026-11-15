@@ -34,6 +34,10 @@ struct Journal {
     slow_contention: bool,
     /// The lock wait of the write in progress, from `within`.
     wait: std::cell::Cell<Option<Duration>>,
+    /// Every contention record is refused as busy at once.
+    busy_contention: bool,
+    /// When the first contention record was refused.
+    first_refused: std::rc::Rc<std::cell::Cell<Option<Instant>>>,
 }
 impl Journal {
     fn new() -> Self {
@@ -48,6 +52,8 @@ impl Journal {
             term_seen: None,
             slow_contention: false,
             wait: std::cell::Cell::new(None),
+            busy_contention: false,
+            first_refused: Default::default(),
         }
     }
     fn note_term(&self) {
@@ -99,6 +105,16 @@ impl ExecutionJournal for Journal {
         _contention: &cedegrid::contention::AllocationContention,
     ) -> Result<()> {
         self.note_term();
+        if self.busy_contention {
+            if self.first_refused.get().is_none() {
+                self.first_refused.set(Some(Instant::now()));
+            }
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            )
+            .into());
+        }
         if self.slow_contention {
             let wait = self.wait.get().unwrap_or(Duration::from_secs(1));
             std::thread::sleep(wait.min(Duration::from_secs(1)));
@@ -158,6 +174,46 @@ struct Backend {
     prepared: bool,
     verified: bool,
     released: bool,
+    /// When set, the actuator reports this as its RAM step code, so a test can change it.
+    ram_code: Option<std::rc::Rc<std::cell::Cell<Option<&'static str>>>>,
+}
+
+/// The rootless actuator, with a RAM step code the test sets.
+struct CodedActuator {
+    inner: Box<dyn Actuator>,
+    ram_code: std::rc::Rc<std::cell::Cell<Option<&'static str>>>,
+}
+impl Actuator for CodedActuator {
+    fn unavailable(
+        &self,
+        kind: cedegrid::contention::ResourceKind,
+    ) -> std::collections::BTreeSet<cedegrid::contention::YieldStep> {
+        self.inner.unavailable(kind)
+    }
+    fn apply(
+        &mut self,
+        family: &mut dyn Family,
+        kind: cedegrid::contention::ResourceKind,
+        step: cedegrid::contention::YieldStep,
+        target: Option<u64>,
+    ) -> Result<cedegrid::contention::YieldStep> {
+        self.inner.apply(family, kind, step, target)
+    }
+    fn tick(&mut self, family: &mut dyn Family) -> Result<()> {
+        self.inner.tick(family)
+    }
+    fn next_deadline(&self) -> Option<Instant> {
+        self.inner.next_deadline()
+    }
+    fn step_code(&self, kind: cedegrid::contention::ResourceKind) -> Option<&'static str> {
+        if kind == cedegrid::contention::ResourceKind::Ram {
+            return self.ram_code.get();
+        }
+        self.inner.step_code(kind)
+    }
+    fn release(&mut self, family: &mut dyn Family) -> Result<()> {
+        self.inner.release(family)
+    }
 }
 impl Backend {
     fn new() -> Self {
@@ -170,12 +226,23 @@ impl Backend {
             prepared: false,
             verified: false,
             released: false,
+            ram_code: None,
         }
     }
 }
 impl LaunchBackend for Backend {
     fn name(&self) -> &str {
         "rootless"
+    }
+    fn actuator(&self, settings: &ActuatorSettings) -> Box<dyn Actuator> {
+        let inner = Box::new(cedegrid::actuation::RootlessActuator::new(settings));
+        match &self.ram_code {
+            Some(code) => Box::new(CodedActuator {
+                inner,
+                ram_code: code.clone(),
+            }),
+            None => inner,
+        }
     }
     fn prepare(&mut self, _: &LaunchRequest) -> Result<GateSetup> {
         self.prepared = true;
@@ -1106,6 +1173,95 @@ fn the_critical_term_is_sent_before_the_step_and_drain_records() {
         Some(true),
         "a record was asked before the critical TERM"
     );
+}
+
+/// A RAM cap's contention record refused for the lock drains Opportunistic work even after the
+/// stretch was already reported for an adjust's record, which asks no drain (R84).
+#[test]
+fn a_ram_cap_record_refused_after_the_stretch_was_reported_still_drains() {
+    use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+    struct Steps {
+        started: Instant,
+        first_refused: std::rc::Rc<std::cell::Cell<Option<Instant>>>,
+        sent: bool,
+        flipped: Option<Instant>,
+        code: std::rc::Rc<std::cell::Cell<Option<&'static str>>>,
+    }
+    impl supervision::SupervisorControl for Steps {
+        fn poll(&mut self) -> Result<Vec<supervision::SupervisorCommand>> {
+            if !self.sent {
+                self.sent = true;
+                return Ok(vec![supervision::SupervisorCommand::Adjust {
+                    sequence: 1,
+                    resources: BTreeMap::from([(
+                        ResourceKey::Cpu,
+                        StepRequest {
+                            step: YieldStep::Cap,
+                            target: Some(500),
+                            cause: YieldCause::ExternalGrowth,
+                            deadline_ms: None,
+                        },
+                    )]),
+                }]);
+            }
+            // Past the patience the stretch is reported for the adjust's record; then the RAM
+            // cap's code changes and its record is owed too.
+            if self.flipped.is_none()
+                && self
+                    .first_refused
+                    .get()
+                    .is_some_and(|at| at.elapsed() > Duration::from_secs(21))
+            {
+                self.flipped = Some(Instant::now());
+                self.code.set(Some("ram_cap_ineffective"));
+            }
+            Ok(vec![])
+        }
+    }
+    let temp = TempDir::new().unwrap();
+    let mut req = request(temp.path());
+    req.class = AllocationClass::Opportunistic;
+    req.argv = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "trap 'exit 0' TERM; i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done".into(),
+    ];
+    let journal = Journal {
+        busy_contention: true,
+        ..Journal::new()
+    };
+    let code = std::rc::Rc::new(std::cell::Cell::new(None));
+    let mut backend = Backend::new();
+    backend.ram_code = Some(code.clone());
+    let opts = SupervisorOptions {
+        lease_ms: 120_000,
+        drain_timeout_ms: 200,
+        term_grace_ms: 200,
+        ..options()
+    };
+    let mut control = Steps {
+        started: Instant::now(),
+        first_refused: journal.first_refused.clone(),
+        sent: false,
+        flipped: None,
+        code,
+    };
+    let outcome = run_controlled(&req, &opts, &journal, &mut backend, &mut control).unwrap();
+    let flipped = control.flipped.expect("the RAM cap's code never changed");
+
+    assert!(
+        outcome.yielded,
+        "the RAM cap's refused record drained nothing: {outcome:?}"
+    );
+    // The drain came after the flip, so from the RAM cap's record, not the adjust's report.
+    let first = control.first_refused.get().unwrap();
+    let drain = Duration::from_millis(outcome.drain_started_ms.unwrap());
+    let supervisor_to_first = first.duration_since(control.started);
+    assert!(
+        drain + Duration::from_secs(2) > flipped.duration_since(control.started),
+        "drained at {drain:?}, before the RAM cap's code changed"
+    );
+    assert!(supervisor_to_first < Duration::from_secs(5));
 }
 
 /// A Draining record refused for the lock more often than the old four tries is tried again on

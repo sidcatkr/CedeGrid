@@ -877,7 +877,7 @@ fn apply_runtime_commands(
                     if let Some(refused) =
                         outstanding.settle(|kind| write_owed(journal, record, contention, kind))
                     {
-                        details.push(format!("journal unavailable: {:#}", refused.1));
+                        details.push(format!("journal unavailable: {:#}", refused.error));
                         record_refused(request, lifecycle, elapsed, refused, drains);
                     }
                 }
@@ -1086,22 +1086,37 @@ fn record_refused(
     request: &LaunchRequest,
     lifecycle: &mut Lifecycle,
     elapsed: u64,
-    (kind, error): (Owed, anyhow::Error),
+    Refused {
+        kind,
+        error,
+        report: first,
+    }: Refused,
     contention_drains: bool,
 ) {
     let detail = match kind {
         Owed::Phase => "reservation needs reconciliation",
         Owed::Contention => "the applied steps are not recorded",
     };
-    report(
-        "journal_unavailable",
-        &request.assignment_id,
-        format!("{error:#}; {detail}"),
-    );
+    // The event goes once for a stretch; the drain is asked each time a record that drains is
+    // refused past the patience or dropped.
+    if first {
+        report(
+            "journal_unavailable",
+            &request.assignment_id,
+            format!("{error:#}; {detail}"),
+        );
+    }
     if request.class == AllocationClass::Opportunistic && (kind == Owed::Phase || contention_drains)
     {
         lifecycle.request_drain(elapsed);
     }
+}
+
+/// A record given up, or refused past `RECORD_PATIENCE`; `report` for the first in a stretch.
+struct Refused {
+    kind: Owed,
+    error: anyhow::Error,
+    report: bool,
 }
 
 impl Outstanding {
@@ -1127,12 +1142,9 @@ impl Outstanding {
 
     /// Write owed records, oldest first, each waiting at most `RECORD_WAIT` for the lock. A
     /// refusal for the lock holds every record for `RECORD_RETRY`; any other refusal is tried
-    /// again after 10, 20 and 40 ms and dropped after the fourth. Returns the record and error to
-    /// report, once for a stretch: after `RECORD_PATIENCE` of refusals or a dropped record.
-    fn settle(
-        &mut self,
-        mut write: impl FnMut(Owed) -> Result<()>,
-    ) -> Option<(Owed, anyhow::Error)> {
+    /// again after 10, 20 and 40 ms and dropped after the fourth. Returns a refusal past
+    /// `RECORD_PATIENCE` or a dropped record, marked to report once for a stretch.
+    fn settle(&mut self, mut write: impl FnMut(Owed) -> Result<()>) -> Option<Refused> {
         let now = Instant::now();
         if self.retry_at.is_some_and(|at| now < at) {
             return None;
@@ -1167,9 +1179,14 @@ impl Outstanding {
                     self.contention_drains = false;
                 }
             }
-            if (dropped || now.duration_since(since) >= RECORD_PATIENCE) && !self.reported {
+            if dropped || now.duration_since(since) >= RECORD_PATIENCE {
+                let report = !self.reported;
                 self.reported = true;
-                return Some((kind, error));
+                return Some(Refused {
+                    kind,
+                    error,
+                    report,
+                });
             }
             return None;
         }
