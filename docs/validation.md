@@ -45,174 +45,53 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 
 ## Open operational gates
 
+Each gate below is open. It says what is not yet shown and which requirement or release gate it
+blocks. Measured results are in [Native gate results](#native-gate-results-feature-001).
+
 - **Multiple physical nodes.** Not yet verified on physical hosts:
   - useful work from two nodes
   - loss and rejoin of a node
   - checkpoint transfer between nodes
-- **GPU.** Verified on one consumer device only, with no MPS or MIG (see
-  [Native gate results](#native-gate-results-feature-001)). Other devices and drivers are not
-  verified. On that device, where own work and another user's busy context share the device in
-  time slices, own work holds the time-slice duty, and T456's gates pass in Performance and
-  Neutral beside a saturating user and in Performance beside a light one. Tracked's duty stops
-  and resumes own processes; Full's freezes each own leaf through `cgroup.freeze`. Full ran only
-  Performance beside the saturating user, at item 047 (see
-  [Item 047: SC-014's fill and Full's GPU path](#item-047-sc-014s-fill-and-fulls-gpu-path)).
-  Since item 053 a process CedeGrid launched counts toward the time-slice share from the
-  interval the device first lists it, sampled or not: at item 049 one Full window's second probe
-  went unsampled for 13.0 s and the other user got 709.8 requests/s against 751.8; at item 053
-  every window sent its first duty in its first decision, and both Full windows passed (see
-  [Item 053](#item-053-own-gpu-processes-in-the-counts-lifts-in-every-phase-yield-first-beside-a-principal)).
-  A zero GPU compute margin, Aggressive's GPU behavior, leaves the saturating user 0.3–6.5
-  requests a second short of half its rate alone. For feature 001 that is a record, not a gate.
-  Since item 027 an idle context of a user ID below `uid_min` is background while per-process
-  utilization is readable. The test host's greeter runs at or above `uid_min`, and at item 029
-  its idle graphics context held Yield First's admission on
-  `gpu_yield_first_activity_unknown`. At item 048 three of six managed probes in Yield First
-  missed the comparison's 60 s readiness: activity read unknown for 18–55 s after the device's last
-  busy phase. Since item 051 a device the collector finds quiet admits without a new driver
-  sample, and all 36 managed probes of six comparisons were admitted, 37–39 s after their
-  submission (see [Item 051](#item-051-reruns-after-report-048s-fixes)). The GPU attribution tolerance
-  stays 15 points until a second device is measured; the first device's largest gap was 5.
 
-  Freshness is never inferred from aggregate utilization or from an NVML `NotFound` response.
-- **Memory.** Item 048 ran the memory paths natively for the first time (see
-  [Item 048](#item-048-native-checks-at-head)).
-  - SC-012's RAM reclaim and the floor breach by mode pass.
-  - The OOM order passes: in-share own work keeps its launch value, and only the marked task is
-    at 1000.
-  - In three host-wide OOMs the second account caused, the kernel took only its allocator.
-  - SC-014's RAM and GPU memory fill missed at item 048 as SC-014 was written then, against
-    capacity less the floor: the host's own RAM at idle and others' use of the device count
-    against it. The GPU memory `noise_tolerance` withholds nothing: it is a growth threshold and
-    a reported field, pinned by `an_idle_device_withholds_no_noise_tolerance_from_gpu_memory`
-    (`tests/policy.rs`). Against SC-014 as restated on 2026-11-13, less others' use and their
-    peak, the fill passes at item 051: own RAM 99.7% in Performance and in Yield First, own GPU
-    memory 99.6% and 99.4% (see [Item 051](#item-051-reruns-after-report-048s-fixes)).
-  - Since item 051 an own task over its share gives memory back first. In one host-wide OOM the
-    second account caused, that task was asked first and alone and was stopped when the breach
-    turned critical; three of six in-share tasks were never stepped, and the other three had
-    become over-share as the second account's growth cut own work's fair share.
+  This blocks the physical multi-host gate of the [release record](release-0.2-gates.json).
+- **GPU devices.** Verified on one consumer device only, with no MPS or MIG. Other devices and
+  drivers are not verified, so SC-006 and SC-017 hold for that device only. The GPU attribution
+  tolerance (FR-007) stays 15 points until a second device is measured; the first device's
+  largest gap was 5. Full's leaf freeze on a time-sliced device is measured in Performance
+  beside a saturating user only. A zero GPU compute margin, Aggressive's GPU behavior, leaves
+  the saturating user 0.3–6.5 requests a second short of half its rate alone; for feature 001
+  that is a record, not a gate.
+
+  Freshness is never inferred from aggregate utilization or from a driver `NotFound` response.
+- **Memory.**
   - No native result exists for SC-012's GPU memory reclaim.
   - The kernel's preference for the marked task is shown by `oom_score` only (1343–1385 against
     the allocator's 746–756): no own task was killed, since CedeGrid gave the excess back first
-    each time. Not passed natively.
-  - An in-share own task killed by an OOM that others caused has not happened natively either. Its
-    classification as not own fault and its requeue without an attempt are covered by tests only:
-    `a_kill_in_an_interval_where_oom_kill_rose_is_an_oom_kill` (`src/agent/oom.rs`),
-    `an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt` and
+    each time. FR-023's out-of-memory order by fault is not passed natively.
+  - An in-share own task killed by an OOM that others caused has not happened natively either.
+    Its classification as not own fault and its requeue without an attempt (FR-076) are covered
+    by tests only: `a_kill_in_an_interval_where_oom_kill_rose_is_an_oom_kill`
+    (`src/agent/oom.rs`), `an_oom_kill_own_work_did_not_cause_requeues_without_an_attempt` and
     `uncounted_oom_requeues_stop_at_three_times_max_attempts` (`tests/coordinator.rs`).
-- **Burst stop.** With 150 tasks the longest gap between observations is still over the 1 s
-  bound: 1135 ms at item 048 and 1041 ms at item 051; at `fc5e330` one iteration took 4236 ms.
-  Since item 054 the agent's loop no longer waits for its own pacing of coordinator requests,
-  and the longest gap before the drain is 518–521 ms at either budget. During the drain it is
-  still over the bound, 1805 ms at 1 MiB/s and 1297 ms at the default budget: about 20
-  supervisors' journal commits retry in step under SQLite's default busy handler, the agent's
-  own journal write waits behind them, and at the default budget 25 leases were fenced and two
-  Released commits waited the full 5 s. Since item 056 every process that writes the node
-  journal retries a locked journal after jittered sleeps of at most 16 ms, and at `1eaa287` both
-  B1 runs pass every gate: the longest gap is 547 ms and 516 ms, 503 ms in the drain, with no
-  lease fenced and no supervisor error (see
-  [Item 056](#item-056-the-journals-lock-wait-and-the-over-share-wait)). Closed.
-- **An over-share task that ignores its hint while its need pauses and returns.** Since item 056 a
-  held hint's deadline starts again each time the need returns, so a task that ignores its hint is
-  not drained while its need pauses and returns within each deadline, and nobody else is asked for
-  that excess meanwhile. Open until the memory ladder's design for the user (item 060 Part C)
-  settles one deadline per breach.
-- **Own throughput on a shared core.** At item 049, beside a saturating other user on the
-  probe's core, own throughput with CedeGrid was 0.942–0.949 of without it in Performance, in
-  three runs, against 1.000 in Neutral and 0.998 at item 029. CedeGrid took no step and the probe
-  got its CPU; each unit cost the probe more CPU. Item 052 ran the pair again: the run
-  directory's name is not the cause, and Performance's loss rule is not shown on a shared core
-  by a gate of its own. At `0da6118` four runs read 0.994–0.998, in both modes and under either
-  name length. At `743312b` Performance still read 0.945 on the same day, with the same
-  environment and argument sizes, and the same build with the later commit's two Python SDK
-  files read 0.988. So the extra CPU came from SDK code that runs inside the managed probe, its
-  drain check, which item 050 changed. At item 055 the same `743312b` build read 1.004 with the
-  allocator's per-thread cache off, but also 0.995 with it on and item 055's probe, so that run
-  has no control and the mechanism is not shown. The probe now times its even against its odd
-  units before it is ready and refuses a biased window, but at `7cc09c8` Neutral read 0.929 with
-  no window refused: in the window the managed probe's units alternated (the other user's
-  latencies show its bursts at 162 and 191 µs in strict turn), which a check made once before
-  `ready.json` does not see. Open (see
-  [Item 055](#item-055-the-same-core-probe-checks-itself-and-cedegrids-own-cost-inside-a-task)).
+- **An over-share task that ignores its hint while its need pauses and returns.** A held hint's
+  deadline starts again each time the need returns. So a task that ignores its hint is not
+  drained while its need pauses and returns within each deadline, and nobody else is asked for
+  that excess meanwhile. This stays open until the memory ladder's design settles one deadline
+  per breach (FR-037).
+- **Own throughput on a shared core.** Beside a saturating other user on the probe's core, own
+  throughput with CedeGrid is 1.004 of without it in Performance and 0.929 in Neutral at
+  `7cc09c8`, with no CPU step. In the Neutral windows the managed probe used 175.4–175.5 µs of
+  CPU per unit against 161.1–162.5 µs unmanaged, and its units alternated in cost. The probe's
+  even/odd self-check runs once before `ready.json` and does not see that. The cause is not
+  shown, so the same-core gate stays open for Neutral (FR-021).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
-- **Performance ramp.** On one Linux host the ramp reaches 90% in under 3 s on CPU and on GPU
-  compute. A one-core contender started mid-ramp under a second unprivileged account reaches
-  0.9 core 2–3 s after it starts, pinned to one scope CPU or not, and holds a median of
-  0.92–0.94 core. Under the account that runs CedeGrid the same contender gets about 0.7 core,
-  as SC-002 allows for that account's own programs (see
-  [Reruns with launch pacing](#reruns-with-launch-pacing)). At item 027's commit the pinned
-  contender held a median of 0.90 core, 0.9 core or more in 61% of samples, while own work
-  stayed 80 m over its target and its caps were relaxed and set again every few intervals (see
-  [Reruns after item 027](#reruns-after-item-027)).
-- **Return after contention.** In Yield First the target returns one interval after a
-  contender's last usage, but held caps wait until the external estimate that no principal
-  accounts for has stayed below `principal_min_percent` for `principal_window_intervals`. The
-  8-interval window keeps that estimate up for about 4 s, so on the test host own work was back
-  at its uncontended target 7.5 s after the contender stopped.
-- **Idle utilization.** At item 047's commit, on 14 CPUs with 100 m tasks, own tasks reach
-  96.8% of capacity in Performance (97.6% with CedeGrid), 92.3% in Neutral (93.1%) and 82.7% in
-  Yield First (83.3%), against SC-014's 97%, 94% and 84%. In Neutral and Yield First, admission
-  charges each running task at its p95 usage (FR-034), and the steady tasks' p95 is above their
-  mean, so the charges fill the share 696 m and 609 m above the tasks' use (`held_back` reports it
-  as `charge_shortfall`); charged at their use, own tasks plus CedeGrid would reach 94.3% and
-  84.1%. On 4 CPUs Performance reached 97.1% with CedeGrid at item 027. Item 027 measured
-  92.3% and 81.8% with the same cause, and before it the same scope
-  reached 91.4%, 87.0% and 73.0% (see
-  [Item 047](#item-047-sc-014s-fill-and-fulls-gpu-path) and
-  [Reruns with exact own measurement](#reruns-with-exact-own-measurement)).
-  Since item 049 running work is charged at its mean while no other principal is active, and
-  the same runs reach 96.9%, 93.8% and 83.5% (97.7%, 94.6% and 84.2% with CedeGrid), which meets
-  SC-014's CPU targets with CedeGrid counted (see
-  [Item 049](#item-049-the-gates-phase-37-touches)).
-- **CedeGrid's own cost.** SC-014 counts own tasks plus CedeGrid with a 1% bound for CedeGrid
-  at 117 tasks on 14 CPUs (140 m). In the Docker Linux check (6 CPUs, 117 light tasks, release
-  build with fat LTO, 60 s), with supervisors that wait on events, the agent used 108 m and the
-  117 supervisors 34 m in all, 142 m; supervisors that passed every 100 ms used 85–125 m. The
-  agent's sampling stage then took 55.7 ms per second. Two changes that leave every decision as
-  it was cut it to 30.2 ms per second and the agent to 74 m, CedeGrid about 109 m in all
-  (0.78% of 14 CPUs), measured back to back: own tasks are re-verified through the pidfd held
-  since their first check and their counters read from `/proc` directly instead of through two
-  sysinfo refreshes per interval (from 5.7 to 0.4 ms per interval), and principals come from one
-  `/proc/<pid>/stat` read per process (from 10.9 to 2.9 ms per interval). The rest of the stage
-  is reading each task's clock and anonymous memory (about 7 ms per interval). Fat LTO lowered
-  the agent's cost by about 12% (127 to 112 m). Resident memory: the agent 52 MiB proportional,
-  a supervisor 1.6 MiB proportional (9–11 MiB counting shared pages). On the test host, with
-  129 tasks on 14 CPUs, CedeGrid used 104 m (0.74% of capacity), and the agent's sample stage
-  took 60 ms per second.
-- **Principals counted threads.** Until item 027's decisions on report 027-1, principal usage
-  came from a sysinfo refresh that lists every thread as a process of its own, so a process's
-  CPU counted once for the process and again for each thread, its resident memory once per
-  thread, and own tasks' threads, not in the managed set, as the owner's unmanaged usage
-  (research R26). Each process now counts once. Earlier native results that read principal
-  usage, such as T178's contender share and SC-015, ran with the old count.
-- **Victims of an excess.** Caps already held give a contended CPU excess between them at one
-  level within their tier, and own usage over its target is shared the same way; new victims
-  then share what is left by usage, at one level, so none is capped to zero for it (item 049).
-- **Launch bursts.** A node renews each running assignment's lease every heartbeat (2 s by
-  default). Each renewal is a synced coordinator write, about 9 ms on the test host. Without
-  lease batches, renewals share half of each monitor interval, so one node keeps about 117
-  leases renewed; since item 027 a coordinator that offers `lease_batch/1` takes one request
-  per iteration in one transaction. In the native rerun at item 027's commit no lease expired
-  and the longest gap between observations was 905 ms, but the agent exited with "Too many open
-  files" after 137 of the 150 tasks had started: the host's soft limit is 1024 descriptors, and
-  the agent holds about 7 per running task (three supervisor pipes, a state database connection
-  and its WAL, the pidfd held since the task's first check, and the stderr capture), plus pipes
-  for each launch in progress. Each started task's supervisor drained it once the agent was
-  gone. Before item 027, in
-  the native burst gate, 150 light tasks admitted at once, 123 leases expired before their first
-  authorization or a renewal: 67 tasks never started, 81 were drained after starting, and the
-  longest gap between observations was 1.25 s against a 1 s bound. Where synced writes cost
-  50–90 ms (Docker, macOS) the limit is lower. A reservation is no longer refused because its
-  own burst closed admission (see [Reruns with launch pacing](#reruns-with-launch-pacing)).
-- **Cancelled reservations.** Under contention a node may cancel a reservation that has not
-  started. Before item 027, if the coordinator authorized it before the cancellation landed,
-  the node drained it once it ran, even when CPU was the only contended resource: on the test
-  host, 4 of 16 tasks in a Yield First run and 1 of 117 in a Performance run. A cancelled
-  reservation is now released before authorization, and a CPU drain planned while pending is
-  planned again as running work. In item 027's native runs no task was drained except by each
-  harness's own cancel at its end.
+- **Launch bursts without lease batches.** A node renews each running assignment's lease every
+  heartbeat (2 s by default). Each renewal is a synced coordinator write, about 9 ms on the test
+  host. Against a coordinator without `lease_batch/1` (FR-032), renewals share half of each
+  monitor interval, so one node keeps about 117 leases renewed. Where synced writes cost
+  50–90 ms (a container, macOS) the limit is lower. With `lease_batch/1` (FR-074) the 150-task
+  burst passes.
 - **Storage.** A FUSE-backed filesystem without a supported directory-sync barrier is not
   qualified for durable namespace publication. The replayable profile tolerates process crashes
   only.
@@ -221,642 +100,159 @@ Passing on macOS, or cross-compiling, does not establish Linux runtime behavior.
 
 ## Native gate results (feature 001)
 
-Run on 2026-10-26 on one authorized Linux host, the test host, with the commands in
-`specs/001-contention-modes/native-gates.md`. These results hold for this host only. `src/`
-and `Cargo.lock` are the same at every commit listed, so each gate ran the same product code.
+These results come from one authorized Linux host, the test host, with the commands in
+`specs/001-contention-modes/native-gates.md`. They hold for this host only. Each row is the
+current result of its gate: the requirement it measures, the commit and date of the run, the
+figures and the result. A later run of a gate replaces the earlier one; git history keeps the
+earlier ones. Loads of "the other user" ran under a second unprivileged account, the second
+account, which started and stopped them; CedeGrid took no action on them. Dates are UTC.
 
 | Host role | Kernel | CPUs | RAM | GPU | Driver |
 |---|---|---|---|---|---|
 | test host | Linux 7.0.0 (Ubuntu 26.04), cgroup v2 with PSI, `cpu memory pids` delegated to the user manager | 20 logical (Intel Core i5-13500), 1 NUMA node | 31 GiB, 8 GiB swap | NVIDIA GeForce GTX 1060 6 GB | 580.178.04, CUDA 13.0 |
 
-| Gate | Commit | Values | Result |
-|---|---|---|---|
-| T054, delegated cgroup steps (quickstart §4) | `4d631d0`, `893c1c2` | `cpu.weight`, `cpu.max` and `cgroup.freeze` written, read back and restored; with a foreign test-owned process in the leaf, LowerShare is refused and Cap falls back to the rootless duty cycle ("cgroup write refused"), leaving the leaf unchanged | pass |
-| T138, RAM cap | `4d631d0`, `893c1c2` | `memory.high` written, read back and restored to `max`; swap is on, so the swap-off `memory.stat` check does not apply | pass |
-| T141e, PSI | `4d631d0`, `893c1c2` | (1) status available, 10 external cgroups, external avg10 0; (3) 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples; (2) under another account on 2026-10-27, in [Reruns with launch pacing](#reruns-with-launch-pacing) | pass |
-| T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `893c1c2`, `1c8a850` | `ramp_seconds` 2.784 idle, 2.728 and 2.762 with a contender (target 10 s); the contender, one busy loop started at 3 s, gets a median of 0.72 core after 10 s pinned and unpinned, and 0.9 core in 7% and 0% of half-second samples; `foreign_actions` 0 | ramp pass, contender fail (SC-004) |
-| T088, GPU on an occupied device | `893c1c2` | owned-context test passes; a fresh external CUDA context takes 74 MiB, so the 512 MiB minimum stays; with an idle external context, 100 of 100 GPU tasks complete in Neutral and in Performance, admission open, no GPU step, unattributed device memory 203 MiB; GPU activity reads Unknown in 88% of those sessions' samples; paused: 0 completions, VRAM unchanged; 50% duty cycle at 500 ms gives 0.50 of baseline, longest gap 258 ms, longest kernel 4.4 ms; T152: summed per-process SM differs from device utilization by at most 2, 2 and 5 points with 1, 2 and 4 processes | pass |
-| T117, CPU reclaim (Yield First, Neutral, Performance; protection profile, `reserve_physical_cores = 1`) | `1c8a850` | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
-| T117, GPU (Neutral, Performance; protection profile, `reserve_physical_cores = 1`) | `c0779d3` | GPU compute at the target share 2 intervals after the protected GPU load starts, after up to 6 caps and one pause, no drain; decision p95 0.07 and 0.60 s; post-yield p99 0.77×; matched throughput 0.923 in Performance but 0.723 in Neutral, where each new 20 s job reads as Unknown GPU activity at start, is capped at the fair share and stays capped through the cooldown | Performance pass, Neutral fail |
-| T117, SC-014 (4 CPUs, 500 m tasks, idle) | `374637d`, `c0779d3` | own CPU 87.5% of capacity in Neutral and Performance, 75.0% in Yield First (targets 94%, 97% and 84%); the decisions read own work about 330–430 m low and count that as external; with 500 m tasks own use moves in 500 m steps, so this run cannot reach the targets even with exact measurement | fail |
-| T117, SC-015 (beside a 60 m external user) | `374637d`, `c0779d3` | own CPU as a share of capacity minus the user and the margin: 93.6% in Neutral, 90.7% in Performance, 89.8% in Yield First (target 90%); no step change in 5 minutes | Neutral and Performance pass, Yield First fail |
-| T118, SC-005 audit (protection profile, `reserve_physical_cores = 1`) | `1c8a850` (CPU), `c0779d3` (GPU) | CPU and GPU, at the defaults and with Performance and a 512 MiB floor: 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
-
-### Reruns with exact own measurement
-
-Run on 2026-10-26 on the same test host at `770651f`, which reads own CPU from the process
-clock or the leaf `cpu.stat` with a summed bound and measures an interval that lists only own
-verified GPU processes. The kernel has `CONFIG_HZ=1000` and an empty `nohz_full` list, so the
-precise own-CPU sources apply. The 14-CPU scope is the host's 14 physical cores, one logical
-CPU each. SC runs name their task loop: the catch-up loop (as in the first runs) makes up CPU
-lost to a cap or pause, so a task runs a full core when its cap rises; the steady loop does not.
-
-| Gate | Values | Result |
-|---|---|---|
-| Own-CPU clock tests | 44 telemetry tests pass natively, including the 3 gated process-clock tests | pass |
-| T178, Performance ramp (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.755 idle, 2.754 and 2.756 with a contender; `foreign_actions` 0; a contender under the account that runs CedeGrid, started at 3 s, gets a median of 0.70 core after 10 s pinned and 0.62 unpinned, and 0.9 core in 2% and 0% of half-second samples (that account's other programs share its fair share, per SC-002); the contender under a second account was not run, because that account's SSH key is not accepted | ramp pass, contender open |
-| SC-004, ramp on GPU compute (1 task) | own GPU compute reaches 90% 2.6 s after submission once the deployment's 30 s GPU cooldown has passed; submitted earlier, it waits for that cooldown (22.6 s) and then reaches 1000 within 0.5 s | pass |
-| T117, GPU (Neutral, Performance) | Performance: matched throughput 0.923, decision p95 0.41 s, post-yield p99 0.76×. Neutral: matched throughput 0.722; GPU measurement stays known, but the device always lists the display manager's greeter (another account, a 2 MiB graphics context), so the own-only path does not apply; each new job's first interval has no fresh per-process sample baseline, Neutral counts that activity as one more principal and caps the job at half the device until the next scale-up move about 10 s later | Performance pass, Neutral fail |
-| T088 (Neutral, beside an idle external CUDA context and without it) | 100 of 100 and 50 of 50 GPU tasks complete, admission open, no GPU step; GPU compute reads as an unknown amount in 94% and 91% of the retained intervals with own work, mostly for lack of a fresh per-process sample baseline; the greeter is listed in both | pass |
-| SC-014, 4 CPUs, 250 m tasks (comparison) | Neutral 87.5% (no step change); Performance 91.8% with 163 step changes (catch-up loop), 89.0% with 1 (steady); Yield First 49.4% with 21 step changes and 61 paused samples (catch-up), 69.7% with none (steady); targets 94%, 97% and 84% | fail |
-| SC-014, 14 CPUs, steady loop | Performance, 250 m tasks: 91.4% of capacity, 93.7% with CedeGrid's own processes, 130 step changes and 9 paused samples; Neutral, 100 m tasks: 87.0% and 90.5%, no step change; Yield First, 100 m tasks: 73.0% and 76.4%, no step change; targets 97%, 94% and 84%. With 100 m tasks Performance admitted 134 at once and every task failed (below) | fail |
-| SC-015, 4 CPUs beside a 60 m external user | own tasks 3500 m in Neutral and in Performance (targets 3366 and 3474 m, catch-up loop, no step change); Yield First 1978 m with 100 step changes (catch-up), 3051 m of 3006 m with none (steady) | pass with the steady loop |
-
-What holds own CPU work below the SC-014 targets on this host:
-
-- CedeGrid's agent and supervisors (56–65 m on 4 CPUs, 325–489 m with 53–113 tasks) and the
-  gap between own work's measured lower bound and its use (95–144 m on 4 CPUs, 513–907 m on 14)
-  count as external, so they come out of the share. With 113 tasks the summed own-CPU bound
-  equals the per-allocation sum, as the read pass over that many processes is long, and the
-  tasks' CPU read from `/proc` was 173 m above the decisions' upper bound; that gap is not yet
-  explained.
-- With the catch-up loop, held caps that rise together let every task burst at once; Yield
-  First then pauses or caps most tasks to zero about every 30 s. Admission also counted capped
-  usage as room: a fourteenth task started with all thirteen capped. With the steady loop,
-  neither mode cycles on 4 CPUs.
-- The agent's loop slows as tasks are added: about 1.4 s per 500 ms interval with 113 tasks.
-  Launching 134 tasks at once stalled it 4.2 s, past the coordinator's 3 s telemetry limit, so
-  every initial authorization was refused and all 140 tasks failed. The launch barrier held
-  and every release was verified.
-
-### Reruns with launch pacing
-
-Run on 2026-10-27 on the same test host at `07c2d8b`, which launches assignments off the
-agent's loop, at most 32 per heartbeat, with lease requests sharing half of each monitor
-interval, and authorizes a burst's own reservations while admission is closed only by that
-burst. Loads under another account ran as a second unprivileged account, which started and
-stopped them; CedeGrid did not act on them. Loop costs come from a copy of the same commit with
-stage timing added.
-
-| Gate | Values | Result |
-|---|---|---|
-| Launch-burst gate (150 light tasks at once, Performance) | longest gap between observations 1253 ms (bound 1000 ms); 8 of 150 tasks running at the stop; no refusal for stale evidence or for admission closed by the burst's own allocations, as admission stayed open until leases expired; 123 leases expired before the first authorization or a renewal, so 67 tasks never started and 81 were drained after starting; later, 36 requests for the expired tasks were refused pending reconciliation and 8 for admission closed while those tasks were released. Loop with 150 slots: 659 ms per iteration at the median and 1112 ms at p95, of which lease requests 575 ms at the median and heartbeats up to 515 ms | fail |
-| T178, Performance ramp with a contender under a second unprivileged account (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.591 idle, 2.686 pinned, 1.173 unpinned; the contender, one busy loop started about 3.6 s after submission, reaches 0.9 core in 3.0 s pinned and 2.0 s unpinned, with a median of 0.94 and 0.92 core after 10 s and 0.9 core or more in 81% and 76% of half-second samples; its account's CPU pressure some avg10 stays near 5.5, below `psi_some_percent` (10), so no decision reports `saturated_by_psi`, and Performance's target is capacity minus external minus the margin (about 2730 m of 4000); `foreign_actions` 0 | pass |
-| T141e step 2, PSI under another account | eight busy loops of a second unprivileged account on 2 CPUs: external some avg10 67.9–92.0 in all 30 samples, `saturated_by_psi` on CPU in all 30, busy 10.1–11.2% (`saturation_percent` 98) | pass |
-| SC-014, 14 CPUs, 100 m tasks, steady loop (Performance) | 116 tasks admitted in 17.3 s, at most 32 per heartbeat; longest gap between observations 749 ms; no refusal; own tasks 89.6% of capacity, 92.3% with CedeGrid's own processes (target 97%); CedeGrid's 386 m and the own-measurement bound's 1441 m count as external; one running task drained after its cancelled reservation was authorized. Loop with 117 slots: 341 ms of work per 500 ms interval at the median, of which lease renewals 263 ms, sampling 58 ms and heartbeats up to 59 ms | burst pass, SC-014 fail |
-| SC-015, 4 CPUs beside a 60 m external user (Yield First, catch-up loop) | own tasks 2661 m, 84.0% of capacity minus the external user and the margin (target 90%); 65 step changes and 105 paused samples; 4 of 16 running tasks drained after their cancelled reservations were authorized | fail |
-
-### Reruns after item 027
-
-Run on 2026-10-29 on the same test host at `9916e59`, a release build with fat LTO, with the
-commands under "Item 027 native gates" in `specs/001-contention-modes/native-gates.md`. Loads
-under another account ran as a second unprivileged account, which started and stopped them;
-CedeGrid did not act on them. In runs 3, 4 and 6 every drain was the harness's own cancel after
-its measurement window.
-
-| Gate | Values | Result |
-|---|---|---|
-| Run 1, idle 60 s (external estimate at p95 at most 1% of capacity) | Tracked 42 m on 4 CPUs (1.05%) and 99 m on 14 (0.71%); Full 41 m (1.02%) and 95 m (0.68%); CedeGrid 8–9 m at the median. The estimate is the window's upper bound on host busy minus own work and CedeGrid: on 4 CPUs the window's busy bounds were 7 m and 41 m at the median, while the host's busy with no CedeGrid process was 2.5 m (7.4 m at p95) | 14 CPUs pass, 4 CPUs fail |
-| Run 2, launch burst (150 light tasks at once, Performance) | longest gap between observations 905 ms (879 ms in a second run); no lease expired, no refusal, no supervisor error; 142 tasks reserved and 137 started, then the agent exited with "Too many open files" (soft limit 1024), and each supervisor drained its task | fail |
-| Run 3, SC-014, 14 CPUs, 100 m tasks, steady loop | Performance: 129 tasks, own tasks 97.4% of capacity, 98.2% with CedeGrid's 104 m, no step. With warm-ups long enough for one-worker growth (all admitted after 24 and 57 minutes): Neutral 121 tasks, 92.3% and 92.9% with CedeGrid's 95 m; Yield First 108 tasks, 81.8% and 82.4% with 77 m; no step in either. Admission's p95 charges for running tasks exceed the share by 170 m and 226 m, so no further task fits | Performance pass, Neutral and Yield First fail |
-| Run 3, SC-014, 4 CPUs, 100 m tasks, Performance | 36 tasks, own tasks 96.6% of capacity, 97.1% with CedeGrid's 19 m, no step | pass |
-| Run 4, SC-015, Yield First, 4 CPUs, 250 m tasks beside a 60 m user | 13 tasks; own tasks 96.0% (catch-up loop) and 97.2% (steady) of capacity minus the user and the margin; no step, no pause | pass |
-| Run 5, T178 pinned, contender under a second account (4 CPUs, 16 tasks of 250 m) | `ramp_seconds` 2.554; the contender reaches 0.9 core 2.5 s after it starts (8.5 s by the gate's own sampler) and holds a median of 0.90 core after 10 s, 0.9 core or more in 61% of samples; own work stays 80 m over its target; 4–14 tasks hold `own_over_target` caps of 239–253 m, about 4 change target each interval, and over 51 intervals 32 caps were relaxed to none and 35 added; `foreign_actions` 0 | contender pass, caps cycle |
-| Run 6, return after contention (Yield First, 4 CPUs, 13 tasks of 250 m, one-core contender for 30 s) | own work at the contended target in the interval the contender is first observed; after its last usage the target returns in 1 interval, held caps rise in one move 5.5 s later, and own work is at 98% of the uncontended target 7.5 s after the last usage (bound 3 s); no drain | SC-002 pass, return fail |
-| Run 7, loop with 129 tasks (run 3's 14-CPU Performance run) | observation interval p50 498 ms, p95 533 ms, maximum 609 ms; CedeGrid 104 m (0.74% of capacity); agent `loop_cost` per minute: sample 3.6 s, slots 1.08 s, policy 0.18 s, heartbeat 0.15 s | pass |
-| GPU (Part 5) | per-process utilization readable (`NVML_SUCCESS`); the one listed context is the greeter's graphics context, under a user ID at or above `uid_min`, so it is not background; GPU activity stays unknown and admission open | as specified |
-
-### Item 029 runs
-
-Run on 2026-10-30 on the same test host with the commands under "Item 029 native gates" in
-`specs/001-contention-modes/native-gates.md`: the launch burst at `fc5e330`, the rest at
-`1c6ca7e`, whose Rust code is the same. Own throughput is with CedeGrid against the same probe
-without it. Runs 1 and 5 use the `own-efficiency` profile: every default but the mode, the
-coordinator and the harness on CPUs outside the scope, and the agent on the scope's CPUs, since
-its scope is its own affinity. Loads of the other user ran as a second unprivileged account,
-which started and stopped them; CedeGrid took no action on them. For Performance, only loss
-beyond its 2% margin and the agent's measured CPU counts.
-
-| Run | Values | Result |
-|---|---|---|
-| 1, idle, 2 CPUs, the half-core probe checking for a drain every 50 ms | Performance 0.995 (0.995, 0.995, 0.996), Neutral 0.999, Yield First 0.995; the agent 9 m (0.43% of the scope), so no Performance loss counts | pass |
-| 2, a light other user on the probe's core (100 requests a second) | no step in any mode; own throughput 0.998 in Performance, 1.010 in Neutral, 0.998 in Yield First; the other user's p99 0.68 ms alone and 0.66–0.69 ms beside own work, with or without CedeGrid; the agent 8 m | pass |
-| 3, a saturating other user on the probe's core | Performance: no step, own throughput 0.998, target 1370 m against capacity minus their 570 m minus the 40 m margin (1390 m). Neutral: no step, 0.996, target 861 m (the fair share). Yield First: caps, hints and pauses, 0.174. The other user's p99 0.33 ms alone and 0.66 ms beside the probe, with or without CedeGrid, in every mode | as specified |
-| 4, a fixed allocation against CedeGrid in Performance, 4 CPUs, the other user saturating two of them 30 s on and 30 s off for 300 s | own work with CedeGrid 1.24 times that of the probes pinned with taskset to the other two CPUs; the other user's p50 while on 0.325 ms beside the fixed allocation and 0.347 ms beside CedeGrid, p99 0.356 ms and 3.33 ms; 188 CPU step changes in 300 s; the agent 9 m | own work pass; the other user's p99 is the cost |
-| 5, GPU idle, 3 CPUs | Performance 1.002, Neutral 1.000; Yield First 1.001 and 1.005 in two repetitions, then its probe waited over 60 s with `gpu_yield_first_activity_unknown`: the device lists another account's idle graphics context, so GPU activity reads unknown and Yield First holds admission; the agent 16 m (0.53%) | Performance and Neutral pass |
-| 5, a light (200 small multiplies a second) or saturating other GPU user on the same device, its CPU outside the scope | Performance: light 0.505, saturating 0.665. Neutral: light 0.501, saturating 0.469. Yield First admits nothing while the other user is active (`gpu_yield_first_needs_quiet_device` in every interval). Beside the light user, GPU compute reads unknown from the probe's start, when its per-process samples lag the device (35% against 72%), so own work is capped at its fair share (500); averaged over only the samples it has, the duty-capped probe then reads 56% against a device at 13–36%, so the measurement never comes back. Beside the saturating user, per-process averages truncated to whole percent leave 1% of the device unattributed, at the 1% principal floor, so it counts as a third contending principal and the fair share is 334 instead of 500 in most intervals; in Neutral the 500 duty cap leaves own work 165. The other user's p99: light 1.21 ms alone, 0.80–0.81 ms beside the probe without CedeGrid and 1.06–1.07 ms with it; saturating 0.68 ms alone and 1.37–1.38 ms beside the probe with or without CedeGrid. The agent 18–21 m (0.6–0.7%) | Performance fail; Neutral loses by the same faults; Yield First as specified |
-| 6, a GPU job whose three loader threads want more CPU than its fair share, beside a saturating other user on its two CPUs | Tracked: units 1.01 and CPU 1.00 of the job without CedeGrid, GPU 69% against 70%, with caps. Full: units 0.95, CPU 0.93, GPU 69% against 71%, with a lower share. In neither does GPU throughput fall more than the CPU share explains | as specified |
-| 7, report 027's run 2, 150 tasks at once | no agent exit, all 150 ran, no lease expired, no refusal and no supervisor error; the agent's soft descriptor limit raised to 524288, 1079 open at the peak; longest observation gap while launching 839 ms (p95 799 ms); after SIGTERM, the iteration that drains all 150 at once took 4236 ms, and the stop iterations after it about 1 s | launching pass; stop fail |
-| 7, report 027's run 5, T178 pinned with the other user's contender | `ramp_seconds` 2.668; the contender at its core 0.51 s after it started; `foreign_actions` 0 | pass |
-| 7, report 027's run 6, the return after a 30 s one-core contender, 4 CPUs | Yield First: own work at the contended target in 1 interval; after the contender's last usage the target is back in 1.5 s and own usage at 98% of its usage before in 4.0 s; 273 pause samples, no drain. Performance: the same interval, the target back in 1.0 s, own usage in 6.0 s; 7 pause samples, no drain | SC-002 pass; the target within 3 s, own usage not |
-
-Known limit from run 4: in Performance, own work gains 24% over a fixed half-scope allocation
-and the other user's median stays within 0.02 ms (0.347 ms against 0.325 ms), but their p99
-grows from 0.356 ms to 3.33 ms while capped own tasks share their CPUs: rootless (Tracked)
-caps are duty cycles that stop and resume own work within each period, with 188 CPU step
-changes in 300 s. The loss rule protects the other user's demand and fair share, not their
-tail latency. Keeping own threads off a contended CPU (affinity or `cpu.weight` before a duty
-cycle) and the step churn are left to a later item.
-
-Item 030 changed what rows 5 and 7 measured: GPU compute now counts each process over the
-whole interval with rounding not a principal, and a draining stop spreads its drains over
-intervals (a signal stop no longer drains). Those rows stand as recorded; the batch after item
-033 below runs row 5's GPU users and row 7's return again.
-
-### Batch after item 033
-
-Run on 2026-10-31 on the same test host at `cd077e9`, a release build, with the commands under
-"Item 029 native gates" (row 5), "Item 031 native gates", "Item 032" and "Item 033" in
-`specs/001-contention-modes/native-gates.md`. Loads of the other user ran as the second
-unprivileged account, which started and stopped them; the supervisor-loss runs used a light
-load of the test's own account. The agent's cost is its own CPU, against 1% of its scope, the
-029 own-efficiency budget.
-
-| Run | Values | Result |
-|---|---|---|
-| T368, run 5 again, the GPU probe on 3 CPUs beside a light (200 small multiplies a second) or saturating other GPU user | Performance: light 0.497, saturating 0.501. Neutral: light 0.498, saturating 0.500. Own work is capped at its fair share (500) in every managed window: GPU compute reads unknown (`gpu_compute_amount_unknown`) whenever the probe or the saturating user is on the device, because the summed per-process utilization is about a third of the device's (33% against 99% beside the unmanaged probe, 19% against 55% beside the capped one, 11% against 33% with the saturating user alone). With the light user alone it is 5% against 15%, within the 15-point tolerance, and reads measured. The other user's p99: light 1.21–1.22 ms alone, 0.88 ms beside the probe without CedeGrid, 1.15–1.16 ms with it; saturating 0.68 ms alone, 1.37–1.38 ms beside the probe with or without CedeGrid. The agent 18–21 m (0.6–0.7%) | saturating as specified; light fail in both modes |
-| T387 1, a multiprocessing stand-in: a leader filling 1 GiB, then 4 forked workers reading it and spinning for 120 s, 4 CPUs, Performance | Tracked and Full: a family of 5 in every decision (`family_members`), nothing outside it, no `cap_at_minimum_duty`, every member at the launch baseline `oom_score_adj` 0. Own memory 1035 MiB against the buffer plus the workers' private pages, 1029 MiB. Beside the other user saturating the 4 CPUs: own CPU 1877 m against a target of 1804 m (Tracked) and 1685 m against 1671 m (Full); the leader idle in its join. The agent 83–86 m in Tracked (2.1–2.2% of the scope, 0.43% of the host), 12 m in Full | pass, but Tracked's agent cost is over budget |
-| T387 2, a PyTorch `DataLoader(num_workers=4)` (fork) over a synthetic dataset, the same way | a family of 5, nothing outside it; own CPU beside the load 1954 m against 1917 m (Tracked) and 1901 m against 1887 m (Full); own memory 303 MiB (anonymous and shared PSS) against 606 MiB of total PSS with the library pages. In Tracked, 8 of the 10 samples that caught a stop had all 5 members stopped at once, and every stop was followed by all 5 running. The agent 35 m in Tracked (0.9%), 11–12 m in Full | pass |
-| T387 3, leftovers: the leader exits after 5 s while its 4 workers run on | Tracked and Full, Guaranteed and Opportunistic: `members_ended` 4, the release confirmed 7–8 ms after the leader's exit, no member, zombie or leaf left | pass |
-| T396, run 7's return after a 30 s one-core contender, 4 CPUs, with the agent's decision records | Yield First: the target back 2.5 s after the contender's last usage, own usage at 98% of its level before in 9.0 s; the held caps stay at the minimum duty for 3 intervals, the quiet count then reverses them to 107–131 m against a 250 m task target, and they rise in four more steps 2 s apart; at the start own work is within 80 m of the contended target after 4 intervals (120 m above it after 1). Performance: the target and own usage back in 1.0 s, no pause | Yield First's return fails (T339 open); Performance pass |
-| T406, supervisor loss in Tracked: a leader and 2 CPU workers held in an off phase by a Yield First cap beside a light load of the test's own account, the run's supervisor killed while all 3 were stopped | Guaranteed: no SIGHUP; the leader running at once (its parent-death signal is SIGCONT), every member running 0.45 s after the kill, the output complete; `family_recovered` continued 3. Opportunistic: every member gone 0.45 s after the kill, none left stopped; `family_recovered` ended 2, already gone 1 (the leader, by its parent-death signal) | pass |
-
-The per-process GPU reading in T368 is a steady third of the device's in every window, which
-fits each process's summed samples being divided by the device's sample count while the driver
-returns fewer per-process samples per interval; the records do not hold the device's sample
-count, so this is the likely cause, not a proven one. Tracked's agent cost in T387 1 is the
-per-interval `smaps_rollup` read of each member, which walks its mapping: five processes
-sharing 1 GiB cost about 43 ms per interval, where T385's 64 MiB family cost 3 ms. Full reads
-the leaf instead. In T387 1's Tracked runs the harness read each member's `smaps_rollup`
-between the state reads, so its samples rarely show all members stopped at once; T387 2's
-read every state first.
-
-### Rerun after item 034
-
-Run on 2026-10-31 on the same test host at `5c49ee2`, with the commands under "Item 034: the
-rerun after the batch's fixes" in `specs/001-contention-modes/native-gates.md` and the same
-host rules.
-
-| Run | Values | Result |
-|---|---|---|
-| T368, run 5 beside the light and saturating GPU users | Performance: light 0.497, saturating 0.501. Neutral: light 0.497, saturating 0.500 over the windows that finished; its last managed probe launched late and the run failed. `compute_sampling` shows each process with exactly 1 sample in every interval against the device's 3, so no process period was readable and every interval kept the device's count | unchanged; the fix's fallback applies on this host |
-| T396, run 7's return in Yield First | only 3 of 16 tasks were admitted: the previous run's late probe, left running after its agent's signal stop (FR-080), was still on a scope CPU when admission began; own usage back in 0.51 s and the target in 1.0 s, with no held cap | not the batch's shape; no result |
-| T387, the Tracked multiprocessing run with the 1 GiB family | a family of 5, nothing outside it; own memory 1035 MiB against 1029 MiB; beside the saturating user own CPU 1914 m against a target of 1849 m, and 17 of 18 stopped samples with all 5 members stopped; the agent 22 m idle and 21 m beside the load (0.56% and 0.53% of the scope, 86 m and 83 m in the batch) | pass |
-
-On this driver the per-process samples come once per process per query, at the device's sample
-times, so each process's period can only be read across intervals.
-
-### Rerun after item 035
-
-Run on 2026-10-31 on the same test host at `113067a` (the code of `5c49ee2`), with the return
-harness ending its own run before stopping its agent and no test process of either account left
-before or after the run. Run 5 waits for item 035's GPU decision.
-
-| Run | Values | Result |
-|---|---|---|
-| T396, run 7's return in Yield First beside a 30 s one-core contender, 13 tasks admitted | own work at the contended target after 1 interval; after the contender's last usage the target is back in 2.5 s; at the quiet count, 2.5 s after it, every held cap rose in one move and own usage was at 97.96% of its level before 0.5 s later and at 98% in 3.5 s (9.0 s in the batch); 273 pause samples, no drain | pass under FR-034's Yield First bound since item 036: the quiet count at 32.7 s, own usage at 98% at 33.7 s, 2 intervals after it; the measured return from the contender's last usage is 3.5 s |
-
-### Rerun after item 036
-
-Run on 2026-10-31 on the same test host at `5f729bc`, with the commands under "Item 036: T368
-with the sample span (T433)" in `specs/001-contention-modes/native-gates.md`. No test process of
-either account was left before the first run or after any run.
-
-| Run | Values | Result |
-|---|---|---|
-| T368, run 5 beside the light (200 small multiplies a second) and saturating GPU users | GPU compute reads measured in every interval of every managed window (74–80 of 80 alone, 0–6 over the last 4), where the earlier runs read unknown whenever the probe was on the device. Performance: light 0.834 (the two managed windows 0.77 and 0.90), saturating 0.628. Neutral: light 0.642, saturating not measured: its first managed probe launched 9.8 s into its window, held by Neutral's CPU admission cooldown after the unmanaged probe stopped, and the harness read its result before it ended. Beside the light user, own work is duty-capped in 72–75 intervals per managed window. That user reads 13–16% alone and mostly 26–33% beside own work, 61–77% in some intervals, and the target follows it. Its latency: p50 0.77 ms with and without CedeGrid; p99 1.21–1.23 ms alone, 0.88–0.89 ms beside the probe without CedeGrid, 1.15–1.16 ms with it. The saturating user ran 750 requests a second beside the probe without CedeGrid and 1023–1189 with it. Replaying each run's records through the code gives the recorded reading in 1609 of 1610 intervals. The other one is a window's third interval, where the agent compared over intervals before the window that the replay does not carry. The agent 18–20 m (0.6–0.7%) | measured; light fail in both modes; saturating as specified in Performance, Neutral not measured |
-
-### Item 037 and 038 runs
-
-Run on 2026-10-31 on the same test host at `8e16cc1`, with the commands under "Item 037: the
-light-user diagnostic and T368's Neutral saturating case" in
-`specs/001-contention-modes/native-gates.md`, the probe-alone level and the device's clocks
-sampled every 100 ms. No test process of either account was left before the first run or after
-either run.
-
-| Run | Values | Result |
-|---|---|---|
-| The light-user diagnostic: the GPU probe unmanaged at fixed duty levels (500 ms period) beside the light user (200 small multiplies a second), 120 intervals per level, no managed run | The probe alone 1572 units/s; beside the light user at 100% 1312 and, at the end, 1302 (0.835 and 0.828 of alone). The 70% and 40% levels ran at 89.8% busy each, 1172 and 1168 units/s: the probe idled only 50 ms of each period, a fault fixed in `c52ba5c`. The light user's request rate stayed at 200 a second at every level. Its mean per-interval reading: 158 m alone, sampled in every interval at 15–16%; 120 m and 78 m beside the probe at 100%, sampled in 47 and 34 of 120 intervals at 33% or 66%; 170 m and 160 m beside the probe at about 90%, sampled in 63 and 57 intervals. Its p50: 1.11 ms alone, 0.77–0.78 ms beside the probe; p99: 1.22 ms alone, 0.88 ms beside the probe at 100%, 1.01–1.03 ms beside it at about 90%. The device stayed in P2 with its memory clock at 3802 MHz. The SM clock read 1506 MHz with the light user alone (30 W) and 1873–1911 MHz with the probe (80 W) | the light user costs own work 16.5% at full duty; its reading beside own work comes in 33% steps; 70% and 40% not measured |
-| The diagnostic again at `c52ba5c`, the probe's duty fixed | The probe alone 1573 units/s; at 100% 1311 and 1304 (0.833 and 0.829 of alone); at 70% (busy 0.699) 912; at 40% (busy 0.399) 520. The light user's request rate stayed at 200 a second. Its mean per-interval reading: 158 m alone; 130 m and 77 m beside the probe at 100%; 251 m at 70% and 264 m at 40%, sampled in 112 and 120 of 120 intervals. Its p99: 1.22 ms alone, 0.88 ms beside the probe at 100%, 1.06 ms at 70% and 1.07 ms at 40%. The SM clock read 1885–1898 MHz at every probe level and 1506 MHz with the light user alone, in P2 throughout | the reading rises as own work's duty falls, at a constant rate: inflation, not demand; the gaps also raise its p99 |
-| T368, Neutral beside the saturating GPU user, with run 5 waiting for each probe's result | 0.513: managed 386 and 366 units/s against unmanaged 736 and 729; the managed probes launched 1.7 and 1.8 s into their windows; GPU compute measured in every interval; the saturating user 1132–1146 requests a second beside the managed probe, 747–754 beside the unmanaged one | as specified |
-
-Read under SC-017 (item 040), which judges own work against the same probe alone on the device
-and the other user against its rate without CedeGrid and its fair share alone, the saturating
-results above are over-yields, not passes. The probe alone ran 1572–1573 units a second on this
-device. Beside the saturating user without CedeGrid it ran 729–736, 0.46–0.47 of alone, so
-SC-017's bound is about 0.44. With CedeGrid it ran 0.27–0.32 of alone in 036's Performance
-saturating run (0.628 against without) and 0.23–0.25 in 038's Neutral saturating run (0.513),
-while the saturating user ran 1023–1146 requests a second against 747–755 without CedeGrid: own
-work gave that user more than its fair share. The rows keep their values; the gap is a GPU
-compute cap's duty of target ÷ 1000, which item 040 replaces.
-
-### T445 after items 039 and 040
-
-Run on 2026-11-01 on the same test host at `c581f4a`, with the commands under "Item 039 and 040:
-T368 with GPU demand from uncapped intervals and the duty from own share (T445)" in
-`specs/001-contention-modes/native-gates.md`. Each run starts with the probe alone, then the other
-user alone, then the unmanaged and managed windows in turn, 80 intervals each. No test process of
-either account was left before the first run or after any run. Own work's bound is SC-017's, at
-the target the mode sets for the two principals on the device: 500 beside the saturating user,
-Neutral's 792 and Performance's recorded targets beside the light user. The other user's bound
-is the smaller of its rate without CedeGrid and half its rate alone, less 3%.
-
-| Run | Values | Result |
-|---|---|---|
-| T368, Performance beside the light user | The probe alone 1573 units/s; without CedeGrid 1320 and 1303 (0.834 of alone); with it 1305 and 1294 (0.830 and 0.823 against bounds of 0.736 and 0.803 at targets 766 and 833); the old ratio 0.991. Duty median 0.998 and 1. GPU compute measured in every interval. The light user ran 200 requests a second in every window; p50 1.10 ms alone, 0.77 ms without and with CedeGrid; p99 1.22 ms alone, 0.82–0.88 ms without, 1.13–1.15 ms with | pass |
-| T368, Performance beside the saturating user | The probe alone 1559; without 736 and 731 (0.470); with 546 and 571 (0.350 and 0.366 against 0.44); the old ratio 0.761. The other user 1556 requests a second alone, 749–754 without, 978 and 932 with (bound 729); p50 1.36 ms and p99 1.37–1.38 ms with and without. First managed window: three intervals whose per-process samples summed 77% against the device's 99% put GPU compute on the unknown path for 43 of 80 intervals, 40 of them as recently inconsistent; 41 caps were set for unknown activity at 500 and a duty of 0.5, the others ran at 0.99. Second window: the target fell to 334 at 10.7 s and held for 59 decisions, at a duty of 0.706 | own work fails; the other user passes |
-| T368, Neutral beside the light user | The probe alone 1551; without 1303 and 1298 (0.838); with 825 and 759 (0.532 and 0.489 against 0.762); the old ratio 0.609. The light user 200 requests a second; p50 1.10 ms alone, 0.77–0.78 ms without and with; p99 1.21 ms alone, 0.89 ms without, 1.13–1.18 ms with. First window: own work's share was learned as 570 from two intervals, so a cap at the watch's 500 ran at a duty of 0.877; own work read 880–890, above that target, and was paused for 20 intervals. Second window: the target was 334 from the first cap on (54 decisions), with a share of 443 from three intervals and a duty of 0.753 | own work fails; the light user passes |
-| T368, Neutral beside the saturating user | The probe alone 1556; without 735 and 729 (0.470); with 654 and 618 (0.420 and 0.397 against 0.44); the old ratio 0.869. The other user 1551 requests a second alone, 747–753 without, 849 and 880 with (bound 728); p50 1.36–1.37 ms and p99 1.37–1.38 ms with and without. First window: the target fell to 334 at 15.8 s and held for 49 decisions, at a duty of 0.839. Second window: a share of 594 from three intervals set a duty of 0.841; after a re-measure window at 34 s the estimate restarted and a share of 660 set 0.757 | own work fails; the other user passes |
-
-Against the earlier runs the old ratio rose from 0.834 to 0.991 (Performance light), from 0.628 to
-0.761 (Performance saturating) and from 0.513 to 0.869 (Neutral saturating), and fell from 0.642
-to 0.609 (Neutral light). Each decision and the agent's state database show three causes:
-
-- **The 334 targets.** The fair share counts external usage that no UID accounts for as one more
-  principal once it reaches the contention floor, 1% on GPU compute, and on a saturated device
-  that principal's demand is unknown. In the estimate's averaged view the external total and the
-  per-UID averages drift apart. The device-level external amount exceeds the other user's
-  per-process samples in time-sliced intervals (770 against 660). The total also keeps the
-  owner's unmanaged usage, which the per-UID amounts leave out: Neutral light's second estimate
-  opened with the interval in which the unmanaged probe exited, 740 of 880. The mean gap reached
-  10 at the decision where Performance saturating's target fell to 334, and about 20 in Neutral
-  light's second window. While own work is capped below full duty no interval feeds the estimate,
-  so the gap held for the rest of each window.
-- **Own work's share.** It is learned from the first two to five uncapped intervals after own
-  work starts, whose readings come in steps of about 330, and is kept while own work is capped.
-  It read 443–660 in the Neutral runs, where Performance light, with 20 and 65 such intervals,
-  learned 767 and 843. Too low a share sets a duty above what the target needs, too high a share
-  one below it.
-- **The unknown path.** In Performance saturating's first window, 41 caps for unknown activity
-  ran at a duty of target ÷ 1000.
-
-The rows keep their values; the causes wait for a decision.
-
-### T456 after item 041
-
-Run on 2026-11-01 on the same test host at `36bfe68`, with the commands under "Item 041: T368
-and two own processes under the time-slice rule (T456)" in
-`specs/001-contention-modes/native-gates.md`. No test process of either account was left before
-the first run or after any run. Own work's bound is SC-017's at the mode's target for the
-principals actually on the device (Q26):
-- 500 beside the saturating user;
-- beside the light user, the device less that user's estimate alone and the mode's margin
-  (Neutral 792, Performance 823).
-
-| Run | Values | Result |
-|---|---|---|
-| T368, Performance beside the light user | The probe alone 1572 units/s; without CedeGrid 1319 and 1303 (0.834 of alone); with it 1306 and 1298 (0.831 and 0.826 against 0.793); the old ratio 0.993. No GPU compute step in either managed window; the time-slice rule held in all 80 decisions of each, mostly at m = 1, E = 1, k = 1. The light user ran 200 requests a second; p50 0.77 ms with and without CedeGrid, p99 0.88–0.89 ms without and 1.08–1.10 ms with | pass |
-| T368, Performance beside the saturating user | The probe alone 1560; without 736 and 731 (0.470); with 736 and 731 (0.472 and 0.469 against 0.44); the old ratio 1.000. No step; the rule held in all 80 decisions of each window, 21 of the first window's on the unknown path with m = 1. The other user 1555 requests a second alone, 749–755 without, 775 and 767 with (bound 729); p50 1.36–1.37 ms and p99 1.37–1.38 ms with and without | pass |
-| T368, Neutral beside the light user | The probe alone 1552; without 1304 and 1295 (0.837); with 1298 and 1290 (0.836 and 0.831 against 0.762); the old ratio 0.996. No step; the rule held in all 80 decisions of each window. The light user 200 requests a second; p50 0.77–0.78 ms, p99 0.88–0.89 ms without and 0.94–0.98 ms with | pass |
-| T368, Neutral beside the saturating user | The probe alone 1557; without 736 and 731 (0.471); with 731 and 731 (0.469 and 0.469 against 0.441); the old ratio 0.997. No step; the rule held in all 80 decisions of each window. The other user 1552 requests a second alone, 749–754 without, 761 and 838 with (bound 729); p50 1.37 ms and p99 1.37–1.38 ms with and without | pass |
-| Performance and Neutral, two own probe processes beside the saturating user | Without CedeGrid the two probes ran 0.660–0.662 of the pair alone (973–977 of 1474–1475 units/s), and the other user 504–507 requests a second, 0.33 of its 1548 alone: each busy context's equal slice. With CedeGrid the harness's cluster allowed one worker, the pool's and the agent's `max_workers` of 1, so the second probe's job ran only after the first ended. Each managed window therefore held one own process at a time, at m = 1, and the rule held: no step, the other user 760–761 requests a second, half its rate alone. The late tasks moved the second managed window past the end of the other user's load. A rerun with one worker per probe ran them one after the other again. Each managed probe asked for 1024 MiB of VRAM, and beside the device's 4096 MiB floor, on 6144 MiB, the headroom was 1797 MiB before the first and 773 MiB after it. Each probe used about 122 MiB. The unmanaged windows read 0.655–0.660 of the pair alone, and the other user 0.33. Item 042 ran them again at `71f0874` with 512 MiB requests, twice (the second with a common start for both probes and a longer wait for their results). Every valid managed window ran both probes together at m = 2, E = 1, k = 1, and own work fell below SC-017's 0.47:
-
-- **Performance:** 0.13 and 0.17 of the pair alone over the probes' runs, with the other user at 1319 and 1034 requests a second (bound 751). Caps fell as low as 0 and 5 on single interval readings of 990. From 9.8 s and 24.5 s own work was paused through the rest of the window, so the probes ran 43.5 s and 73.7 s for their 40 s, and the harness stopped each run. Performance's target stayed at 659, the device less the estimate's 330 and the margin.
-- **Neutral:** 0.337 in its valid window, with the other user at 1022 (bound 751); caps fell to 15–20 and own work was paused in most decisions. Its other managed windows started the probes 11.8 s and about 12 s apart, so they do not count | fail: own work falls below SC-017 when it holds more than its share of contexts, and the other user passes |
-
-Against T445 the old ratio rose from 0.991 to 0.993 (Performance light), from 0.761 to 1.000
-(Performance saturating), from 0.609 to 0.996 (Neutral light) and from 0.869 to 0.997 (Neutral
-saturating). The light user's p99 beside own work fell from 1.13–1.18 ms to 0.94–1.10 ms. Its p50
-and request rate were unchanged.
-
-### T456 after item 043
-
-Run on 2026-11-01 on the same test host at `9467f8a`, with the commands under "Item 043: T456's
-remaining runs under the time-slice duty" in `specs/001-contention-modes/native-gates.md`: two own
-probe processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
-process of either account was left before the first run or after any run. Every managed window
-passed 042's checks: both probes ran together (overlap 39.8–40.1 s), m = 2 in 72–78 decisions,
-and the window lay inside the other user's load. No window paused own work.
-
-| Run | Values | Result |
-|---|---|---|
-| Performance, beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.657 of it, the other user 510 requests a second (0.33 of its 1569 alone). With it: own work 0.522 and 0.477 (bound 0.47); the other user 720.5 and 781.2 (bound ½ × alone × 0.97 = 760.9). The first window's duty was d0 = 750 in all 72 decisions; the second's 750 in 34 and 666 in 44 from the listing path | own work passes; the other user fails in the first window (0.459 of alone) |
-| Neutral, beside the saturating user | Pair alone 1477; without 0.661, the other user 507 (0.33 of 1550). With it: own work 0.495 and 0.515 (bound 0.47); the other user 761.3 and 724.2 (bound 751.5). The duty was 750 in 51 decisions and 666 from the listing path in 27 in the first window, 750 in 76 of the second | own work passes; the other user fails in the second window (0.467 of alone) |
-| Performance, beside the light user | Pair alone 1474; without 0.863, the light user 200 requests a second, p99 2.73 ms. With it: own work 0.813 and 0.806 (bound 0.792, the target 822); the light user 200 and 200, p99 2.727 and 2.728 ms (bound 3.006). No principal was slice-bound in 57 decisions of each window; the listing path set d0 666 in 21, and the duty stepped up to 866 | passes |
-
-At d0 = 750 the duty gave own work 0.515–0.522 of the pair alone rather than the 0.5 that equal
-slices predict, and the saturating user 0.459–0.467 of its rate alone against the 0.485 its gate
-needs. d0 leaves no part of the mode's margin. The windows that passed spent 27–44 decisions at
-666, which the listing path set from an idle context of another principal that the device lists
-throughout. T456 stays open.
-
-### T456 after item 044
-
-Run on 2026-11-01 on the same test host at `f81a7c0`, with the commands under "Item 044: T456
-under aligned duty phases and the margin at d0" in `specs/001-contention-modes/native-gates.md`:
-two own probe processes, each its own job with 512 MiB, submitted 40 s before each managed window.
-No test process of either account was left before the first run or after any run. Every managed
-window passed 042's checks (overlap 39.8–40.0 s, m = 2 in 75–78 decisions, inside the other
-user's load), and no window paused own work. The harness read each managed probe's run state from
-`/proc` about every 10 ms.
-
-| Run | Values | Result |
-|---|---|---|
-| Performance, beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.657 of it, the other user 511 (0.33 of its 1568 alone). With it: own work 0.490 and 0.488 (bound 0.45); the other user 780.4 and 762.7 (bound 760.6). d0 720 from the window's busy counts in every duty decision; the probes' off-phases overlapped 1.0 and 0.997, the duty held 0.735 and 0.745 | passes |
-| Neutral, beside the saturating user | Pair alone 1476; without 0.663, the other user 507 (0.33 of 1550). With it: own work 0.468 and 0.471 (bound 0.42); the other user 804.8 and 793.9 (bound 751.5). d0 675 in every duty decision; overlap 0.996 and 0.998, the duty held 0.704 and 0.713 | passes |
-| Performance, beside the light user | Pair alone 1474; without 0.864, the light user 200 requests a second, p99 2.73 ms. With it: own work 0.864 and 0.863 (bound 0.791), never capped (no principal slice-bound in any decision); the light user 200 and 200, p99 2.728 and 2.730 ms (bound 3.005) | passes |
-| Aggressive (Performance with no GPU compute margin), beside the saturating user, for the record | Pair alone 1482; without 0.660. With it: own work 0.518 and 0.499 (bound 0.47); the other user 724.6 and 746.8 (½ × 1552 × 0.97 = 752.7). d0 750; the duty stepped up to 850 and 800 on intervals the device read below 100% busy, and back | the other user falls short in both windows; not a T456 gate |
-
-The duty held is 1 − each probe's stopped share, which includes the re-measure window that lifts
-the cap for 3 s of each window. Own work's share matched 2 × the duty held ÷ 3 within 0.009, and
-never exceeded it, so no drain after a stop shows at this resolution. All of T456's gates pass.
-
-### Item 045: the step floor with a zero margin
-
-Run on 2026-11-01 on the same test host at `2fa6587`, with the commands under "Item 045: the step
-floor with a zero margin" in `specs/001-contention-modes/native-gates.md`: two own probe
-processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
-process of either account was left before the first run or after any run. All four managed
-windows passed 042's checks, no window paused own work, and the probes' off-phases overlapped
-0.995–0.998.
-
-| Run | Values | Result |
-|---|---|---|
-| Zero margin (Performance with no GPU compute margin), beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 (0.33 of its 1569 alone). With it: own work 0.511 and 0.506 (bound 0.47); the other user 740.5 and 734.7 (½ × alone × 0.97 = 760.8). The duty held at d0 = 750 in all 77 duty decisions of each window, with no rise or fall; the probes were stopped 0.226–0.228 of the time, the duty held 0.772–0.774 with the re-measure window | own work passes; the other user falls short in both windows (0.472 and 0.468 of alone) |
-| Performance, beside the saturating user (regression check) | Pair alone 1477; without 0.661, the other user 507 (0.33 of 1549). With it: own work 0.496 and 0.497 (bound 0.45); the other user 761.0 and 752.1 (bound 751.4). d0 = 720 held throughout, no step; the duty held 0.748 and 0.752 | passes |
-
-The step floor removed the zero-margin rises: 044's run of the same shape rose 6 times on
-dwells floored to 99, this one never. What leaves the other user short at a zero margin is the
-re-measure window, 3 s of each 40 s managed window at full duty, which lifts own work's held
-duty from 0.75 to about 0.773, and the time-slicing's own cost of about 1%, both of which fall on
-the other user while no margin absorbs them.
-
-### Item 046: own work pays for the re-measure windows
-
-Run on 2026-11-01 on the same test host at `23e386e`, with the commands under "Item 046: own work
-pays for the re-measure windows" in `specs/001-contention-modes/native-gates.md`: two own probe
-processes, each its own job with 512 MiB, submitted 40 s before each managed window. No test
-process of either account was left before the first run or after any run, no window paused own
-work, no duty stepped, and the probes' off-phases overlapped 0.995–0.999. Neutral's first run had
-no valid window: a moment of unknown GPU observation held the second probe's launch until the
-first had ended, and the delay took the second managed window past the other user's load. It ran
-once more.
-
-| Run | Values | Result |
-|---|---|---|
-| Zero margin (Performance with no GPU compute margin), beside the saturating user | Pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 (0.33 of its 1569 alone). With it: own work 0.498 and 0.493 (bound 0.47); the other user 760.7 and 754.5 (½ × alone × 0.97 = 761.0). d0 750, w 91, d0' 725 in every duty decision; the duty held 0.754 in both windows | own work passes; the other user falls short by 0.3 and 6.5 requests a second (0.485 and 0.481 of alone) |
-| Performance, beside the saturating user | Pair alone 1478; without 0.662, the other user 508 (0.33 of 1550). With it: own work 0.481 and 0.460 (bound 0.45); the other user 784.4 and 809.5 (bound 751.5). d0 720, d0' 692; the duty held 0.725 and 0.697 | passes |
-| Neutral, beside the saturating user (the run again) | Pair alone 1487; without 0.659, the other user 508 (0.33 of 1554). With it: own work 0.447 and 0.481 (bound 0.42); the other user 833.1 and 780.5 (bound 753.7). d0 675, d0' 643; the duty held 0.677 and 0.726 | passes |
-
-With the windows paid by own work, the zero-margin duty held 0.754 against d0 0.75, where 045
-held 0.773, and the other user rose from 0.468–0.472 to 0.481–0.485 of its rate alone. Own work
-and the other user then split the device's time evenly, and the other user still holds 0.962–0.970
-of its half by throughput, against 0.98 of its third without CedeGrid.
-
-For feature 001 a zero margin stays a record, not a gate; measuring the duty's switch cost, and
-folding it into d0 if it is CedeGrid's, goes to feature 004's backlog before Aggressive ships.
-
-### Item 047: SC-014's fill and Full's GPU path
-
-Run on 2026-11-02 on the same test host with the code of `a7f472e` (the build of `23e386e`, whose
-Rust code is the same), with the commands under "Item 047" in
-`specs/001-contention-modes/native-gates.md`. No test process of either account was left before
-the first run or after any run.
-
-**Full's GPU path.** The agent records of items 044 and 046 show that every T456 run there ran
-Tracked (`cgroup.enabled = false`), so the leaf freeze had run with fixture leaves only. This run
-put the agent in a delegated user scope with an empty delegated root and `cgroup.freeze`
-authorized: two own probe processes, each its own job with 512 MiB, submitted 40 s before each
-managed window. The harness read each probe's leaf `cgroup.events` `frozen` and its `/proc`
-state about every 10 ms. The first attempt lost the other user's latencies when the harness's
-connection to the host dropped; it ran once more.
-
-| Run | Values | Result |
-|---|---|---|
-| Performance in Full, beside the saturating user | Pair alone 1496 units/s; without CedeGrid 0.657 of it, the other user 510 (0.33 of its 1567 alone). With it: own work 0.480 and 0.470 (bound 0.45); the other user 790.6 and 791.0 (bound 494.4; ½ × alone × 0.97 = 760.2). Both windows pass 042's checks (overlap 39.8 s, m = 2 in 74 and 76 decisions, inside the other user's load), no pause, no step; d0 720, w 91, d0' 692 in every duty decision. Each probe ran in its own leaf under the delegated root; the off phase was the leaf freeze alone (frozen 0.275 and 0.282 of the time, `/proc` stopped 0), the probes' off phases overlapped 0.993 and 0.996, the duty held 0.725 and 0.718, and own work's share matched 2 × the duty held ÷ 3 within 0.009. No leaf was left | passes |
-
-**SC-014 at HEAD.** Report 027's run 3: 14 CPUs, 100 m tasks, the steady loop. Performance is
-the control; Neutral and Yield First get warm-ups long enough for one-worker growth. CedeGrid's
-own processes are stated apart. The counted runs ran from a host-side script with no login to the
-host during them.
-
-A first batch polled the host every 30 s. Each login's processes counted as the test account's
-unmanaged usage, about 300 m for an interval, and in Yield First each one restarted the admission
-cooldown, so it admitted one task. Run again, the harness's stability windows (25 s and 75 s) then
-ended Neutral's and Yield First's warm-ups at 8 tasks and 1 task. The counted Neutral and Yield
-First runs waited 300 s and 600 s of unchanged admission; Yield First's warm-up reached its
-4800 s cap, 300 s after its last admission.
-
-| Run | Values | Result |
-|---|---|---|
-| SC-014, Performance | 128 tasks, all admitted after 14 s; own tasks 96.8% and 96.7% of capacity in two runs, 97.6% and 97.5% with CedeGrid's 111 m and 109 m (0.8%); the share was capacity less the 2% margin, CedeGrid and the external estimate (59 m); no step | pass |
-| SC-014, Neutral | 121 tasks, all admitted after 24 min; own tasks 92.3% of capacity, 93.1% with CedeGrid's 110 m; target share 13095 m against own use of 12921 m, with the charges above usage (`charge_shortfall`) 696 m at the median, so no further task fits; no step | fail (94%) |
-| SC-014, Yield First | 109 tasks, the last admitted after 75 min; own tasks 82.7% of capacity, 83.3% with CedeGrid's 93 m; target share 11676 m against own use of 11549 m, `charge_shortfall` 609 m; no step | fail (84%) |
-
-Item 027 measured 92.3% and 81.8% of capacity (92.9% and 82.4% with CedeGrid) with the same cause.
-Charged at their usage, own tasks plus CedeGrid would fill each share to 94.3% and 84.1%. During
-the warm-ups admission was open in 81% and 70% of the decisions and cooling down in the rest. An
-own task's measurement went unknown in 0.1% and 0.8% of them, mostly while Yield First ran its
-first tasks, and each time the external estimate rose by about 250 m for an interval.
-
-### Item 048: native checks at HEAD
-
-Run on 2026-11-02 on the same test host at `9c01943`, with the commands under "Item 048" in
-`specs/001-contention-modes/native-gates.md`. The test deployment's floors are 16 GiB of RAM and
-4096 MiB of GPU memory, and the host's own processes hold about 1.9 GiB of RAM at idle. No test
-process of either account was left after any run.
-
-| Run | Values | Result |
-|---|---|---|
-| B1, a 150-task burst, then a draining stop (operator drain, then TERM) | All 150 ran; every task drained or released; the drain took 9.3 s; no lease expired, no refusal, no supervisor error. The longest gap between observations was 1135 ms, against one 4236 ms iteration at `fc5e330`. Nine gaps were over 1 s, seven of them in a 9.4 s span that matches the drain, though the records do not mark its start. | fail: 1135 ms against 1 s |
-| B2, Yield First on the idle GPU (report 029 run 5's idle row), three comparisons | Three managed probes finished and three missed the harness's 60 s readiness; each comparison stops at its first miss. The comparison's own earlier phases kept the device busy (`gpu_yield_first_needs_quiet_device`), then activity read unknown for 18.5, 55 and 27.5 s (`gpu_yield_first_activity_unknown`) although GPU compute read measured, before admission opened. | fail, intermittent |
-| B3, SC-014's GPU memory fill (capacity less the floor: 2048 MiB) | Performance: own GPU memory 1856 MiB (90.6%). Yield First: 1454 MiB against 1638 MiB less its margin (88.8%). What is left is the device's other use (129 MiB, 127 of it used memory that no process accounts for), the harness's 32 MiB slack and the gap between requested and observed memory; the report first put it on `noise_tolerance`, which withholds nothing; since item 056 that field is never shown. The device's only other context was the greeter's, 2 MiB. | fail |
-| B4, the OOM order without an OOM (a 3 GiB capacity) | The second account's 1.5 GiB took the fair share from 1139 MiB to 558 MiB. Only the task launched last went to `oom_score_adj` 1000; the in-share task kept its launch value 0. When the second account released 3 s later, the share was back at 1038 MiB, and the same process went back to 0 before any drain. With `ram.prefer_own_oom_victim` every own task was at 1000 from launch. | pass |
-| B5, an own task past its leaf's `memory.max` (Full, 256 MiB) | With host swap, the kernel swapped the excess, and the task ran at 262 MiB resident to its end. With `memory.swap.max = 0` on the test's own delegated root it was killed three times in its leaf (host `oom_kill` +3). Each kill was recorded as `oom_kill` with `own_fault`, the fair share being unknown before its first memory reading, and counted as a failure. After three attempts the task stood at `needs_reconciliation`. No leaf was left. | pass |
-| C1, SC-014's RAM fill | Performance: own RAM 12763 MiB, 85.8% of capacity less the floor, 98.3% of its target of 12982 MiB (capacity less the floor and the host's own use), held back by `peak` 175 MiB. Yield First: 9990 MiB, 83.9% of capacity less the floor and margin, 99.9% of its 10001 MiB target. | fail as written; Yield First within 1% of its target |
-| C2, SC-012's RAM reclaim: after a Performance fill the second account grows by 4 GiB in about 1.1 s | From the breach to the floor restored: 4.43 s with plain tasks (bound 5.5 s), 5.99 s with hint-ready tasks (bound 10.5 s), 1.04 s with Guaranteed hint-ready tasks (bound 15.5 s). The second account got all its memory each time. | pass |
-| C3, a floor breach the second account causes, growing by 10 GiB | Performance: own RAM fell from 12764 MiB to 6172 MiB in 2.3 s and stopped at its fair share of about 6370 MiB, with the floor breached until the second account released 90 s later. Neutral: from 12701 MiB to 2012 MiB in 4.1 s, below its fair share of about 6360 MiB, and the floor restored in 3.1 s. Yield First: from 9912 MiB to 760 MiB in 3.2 s and then 0; free memory stayed 1318 MiB above the floor. | pass |
-| C4, a host-wide OOM the second account causes, beside six in-share tasks and one over-share task, three runs | The kernel took one process in each run, the second account's allocator (24–28 GB resident), and no own task. CedeGrid gave the excess back 7–9 s before each OOM. With SDK tasks, all seven got the save-progress signal at the breach, while own memory was within its share, and the task over share was marked and freed on its hint. With an over-share task that ignores hints, the in-share SDK tasks freed instead, so own memory came back within its share and the mark ended while that task still held 3 GB. With no SDK task, the over-share task, marked at `oom_score` 1385 against the allocator's 756, was drained 2.4 s later and started again after the OOM. The second account's processes kept `oom_score_adj` 0. | in-share work pass; no own task was killed, so the kernel's preference and the requeue after a kill were not exercised |
-
-B1's stop spreads its drains over iterations, and most iterations over 1 s fall in the span that
-matches the drain, by at most 135 ms. B2
-misses when Yield First's wait for a quiet device, and the unknown activity reading after the device's
-last use, run past the harness's limit. In C4 hint-ready tasks pay first, whichever task holds the excess: the
-ladder hints the tasks that can hear hints, in victim order, and skips the rest.
-
-### Item 049: the gates Phase 37 touches
-
-Run on 2026-11-02 and 2026-11-03 on the same test host, with the commands under "Item 049" in
-`specs/001-contention-modes/native-gates.md`. Phase 37's product code ends at `743312b`. A first
-batch ran at `64999b1`; its SC-014 run showed a rounding defect in T512's level (below), fixed in
-`743312b`, and every run that defect could reach ran again there. The idle and same-core runs
-cannot reach it, with no own task and one, and stand at `64999b1`. No test process of either
-account was left before the first run or after any run.
-
-| Run | Commit | Values | Result |
-|---|---|---|---|
-| Idle, 4 CPUs (report 027's run 1), Tracked and Full | `64999b1` | The decisions' external estimate at p95: 30 m in Tracked and 33 m in Full, 0.75% and 0.82% of capacity (medians 23 m and 24 m); CedeGrid's own 9–10 m; 120 decisions each, every measurement known. At `c5ec4a4` Tracked read 89 m (2.23%): one CPU's idle ticks ran past the interval, since the counters are read just after its start, so one reading went unknown, and the estimate kept for the window's refill did not survive it. Both were fixed with a failing test first (`de5e841`, `64999b1`) | pass (1%) |
-| Performance, two own probes beside the saturating user, Tracked | `743312b` | Pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 requests/s of its 1568 alone. With it: own work 0.475 and 0.472 (bound 0.45); the other user 796.8 and 787.0 (½ × alone × 0.97 = 760.5). Both windows pass 042's checks (overlap 39.8 s, m = 2 in 78 and 77 decisions); no pause; d0 720, w 91, d0' 692; the duty held 0.718 and 0.722; the probes' off phases overlapped 0.998 and 0.996 | pass |
-| The same in Full | `743312b` | Pair alone 1478 units/s; without CedeGrid 0.662, the other user 508 of its 1550. First window: own work 0.478, the other user 787.3 (bound 751.8), frozen 0.279 of the time, the duty held 0.721. Second window: own work 0.522, the other user 709.8. The driver gave the second probe no per-process sample for its first 13.0 s, so the rule counted one own context and sent no duty until 13.9 s; the other user ran at 484 requests/s until then and about 800 after. No leaf was left | first window pass; second fails (709.8 against 751.8) |
-| Full, a process of the test's own account joins the first probe's frozen leaf | `743312b` | The leaf read frozen at the join and thawed 49.9 ms later; it stayed thawed for the rest of the window; `cpu.max` stayed `max`; the process kept nice 0, saw no signal, and its largest gap was 34.6 ms. At `64999b1`: 50.1 ms and 42.2 ms | pass |
-| Yield First, 4 CPUs, 16 steady tasks of 250 m, the second account's one-core load for 30 s | `743312b` | 13 tasks admitted, own work 3274 m. Own work was at the contended target in the first interval that shows the load (SC-002 allows 2); the target was back 1.0 s after the load stopped and own work 3.0 s after. The scope read 99% busy for one interval, so the target went to 0 and 12 tasks were paused for the 10 s pause bound (252 pause samples; 273 at items 029 and 035); no drain | pass |
-| Item 029's run 3: a saturating other user on the probe's core | `64999b1` | Neutral: own throughput with CedeGrid 1.000 of without, in two runs. Performance: 0.949, 0.942 and 0.947 in three runs, against 0.998 at item 029. No step, no pause and the same nice, policy and affinity in every window. The managed probe got more CPU, not less (429–430 ms/s against 425–426 unmanaged), but each unit cost it 171–173 µs of CPU against 160–162 µs. The other user ran at 1766–1778 requests/s against 1771–1788, with p99 0.680–0.685 ms against 0.660 ms | Neutral pass; Performance fails against item 029's value |
-| SC-014, Performance (14 CPUs, 100 m tasks, the steady loop, no login during the run) | `743312b` | 128 tasks, all admitted after 14 s; own tasks 96.9% of capacity, 97.7% with CedeGrid's 111 m; no step | pass |
-| SC-014, Neutral | `743312b` | 123 tasks, all admitted after 24 min; own tasks 93.8% of capacity, 94.6% with CedeGrid's 108 m; `charge_shortfall` 571 m at the median; no step | pass |
-| SC-014, Yield First | `743312b` | 110 tasks, the last admitted after 59 min; own tasks 83.5% of capacity, 84.2% with CedeGrid's 94 m; `charge_shortfall` 473 m; no step | pass |
-| SC-014, Yield First, with a login from each account every 60 s through the warm-up and the window (run on 2026-11-12, after a host restart) | `743312b` | 73 login rounds, none failed, longest gap 62 s. 111 tasks, the last admitted after 62 min; own tasks 84.4% of capacity, 85.1% with CedeGrid's 103 m; `charge_shortfall` 533 m. One login burst read 1363 m external for one interval, 6.8 s before the window: all 111 tasks were capped at 93 m, and the caps were relaxed in steps and gone 19 s into the window. No pause; the later logins read 260–290 m and caused no step | pass (84%) |
-| T513: the tasks' CPU against the decisions' bound, in the three SC-014 runs | `743312b` | Tasks' CPU from `/proc` 13568 m, 13133 m and 11696 m; the decisions' own-CPU bound 13575–13812 m, 13130–13358 m and 11669–11872 m. The tasks are 244 m, 225 m and 176 m below the upper bound, so the 173 m gap of the earlier runs is gone | no code change |
-
-**The level rounding defect.** At `64999b1` SC-014 reached 87.9%, 44.1% and 39.7% of capacity.
-T512's level, which splits an excess among new victims, rounded down before it was compared, so
-with no excess at all a task a few millicores above nearly equal others still got a cap. The
-caps held from early in the warm-up and kept admission closed. `743312b` gives nothing at the
-level when there is no excess, with a test that fails on the old code. At `64999b1` the Yield
-First run above held CPU caps on 12 of 13 tasks before the load began, and one Tracked two-probe
-window counted one own context for its whole 40 s: own work held 983 units/s there against 711
-in the valid window, and the other user 509.7 requests/s against a fair 761.4.
-
-**Performance on the probe's core.** The extra CPU per unit sits inside the probe's own timed
-hash call, alternates call by call (about 19.5 µs, then 2 µs) from the probe's first unit, and
-shows in the other user's latencies as two preemption lengths in every managed Performance
-window and one everywhere else. CedeGrid took no step and the probe's scheduling did not change.
-The managed Performance probe differs from the managed Neutral one in what it can see only by
-the length of the run directory's name, which moves its heap layout. The test host's layout was
-not observed, so the cause is not confirmed. One run in Performance under a name of Neutral's
-length would settle it; that run's reruns were used up.
-
-### Item 051: reruns after report 048's fixes
-
-Run on 2026-11-13 on the same test host with the commands under "Item 051" in
-`specs/001-contention-modes/native-gates.md`, at `6e3fb89` unless a row names another commit; its
-product code is `3db0c2e`'s. The device's other use was 285 MiB (129 MiB at item 048). No test
-process of either account was left after any run.
-
-| Run | Values | Result |
-|---|---|---|
-| B1, a 150-task burst, then an operator drain and TERM | All 150 ran and every task was released; the drain took 12.3 s (9.3 s at item 048). The longest gap between observations was 1041 ms (1135 ms at item 048), against the 1 s bound. Six gaps were over 1 s: one with all 150 tasks running and nothing draining, two during the drain and three after TERM. A second run, with the agent's control requests timed, had a longest gap of 1074 ms: a heartbeat took 45 ms with no allocation and 420–491 ms with 150 | fail |
-| B2, Yield First on the idle GPU, three comparisons with a 180 s readiness wait, at `8884d80` (the quiet-device fix) | All 18 managed probes were admitted and finished, 37.1–39.3 s after their submission: activity read unknown for 5.5–7.4 s after the preceding busy phase, then GPU memory admission cooled down for 30 s. While the owner's own unmanaged probe was busy, GPU admission read `gpu_yield_first_needs_quiet_device` in every sample | pass |
-| B2 again at `6e3fb89` (with the owner rule) | All 18 managed probes were admitted and finished, 37.3–38.8 s after their submission. While the owner's own unmanaged probe was busy, GPU admission read open in every sample | pass |
-| B3, SC-014's GPU memory fill as restated (capacity 6144 MiB less the 4096 MiB floor and 285 MiB of others' use: 1763 MiB; 1354 MiB less Yield First's margin) | What CedeGrid offered before the last task matched the target to the MiB in both modes. First run: own GPU memory 1724 MiB (97.8%) and 1322 MiB (97.6%), each harness task holding 8 MiB less than it requested. Rerun with tasks that hold their request: 1756 MiB (99.6%) in Performance, 1346 MiB (99.4%) in Yield First | pass on the rerun |
-| C1, SC-014's RAM fill as restated (capacity less the 16 GiB floor, others' use and their peak) | Performance: own RAM 11540 MiB of 11569 (99.7%), with 264 MiB of others' peak kept back. Yield First: 8831 MiB of 8859 (99.7%), less its 2976 MiB margin. Own RAM was constant over each 60 s window | pass |
-| C4 run 2: a host-wide OOM the second account causes, beside a 3 GiB over-share task that ignores hints and six 1 GiB in-share tasks that read them (Performance, Guaranteed) | Own memory was within its share until the second account's growth, 3.5 GiB a second, cut the share from 11.0 GiB to 4.0 GiB in 2.4 s. The over-share task was marked first and alone at +0.9 s. From +1.9 s own memory above the share was more than that task holds, so the next three tasks in victim order were over-share too, were hinted and freed. At +4.0 s the breach was critical: the over-share task was sent TERM and those three were drained. The other three in-share tasks were never stepped. The OOM killer took one process, the second account's allocator, at +35.5 s. Admission reopened 4.4 s later and the four stopped tasks ran again within 1.5 s. No save-progress request was sent | pass for the order; three of six in-share tasks kept their memory |
-| Item 050's rerun: Yield First, 4 CPUs, 16 steady tasks of 250 m, the second account's one-core load for 30 s | 13 tasks admitted, own work 3271 m. Own work was at the contended target in the first interval that shows the load; the target was back 1.0 s after the load stopped and own work 3.0 s after; 210 pause samples (252 at item 049); no drain | pass |
-
-**B1.** The drains are not what fills an iteration. The agent paces its coordinator requests,
-inside its loop, to a tenth of `max_transfer_bytes_per_second`, and the test sets that budget to
-1 MiB/s where the default is 10 MiB/s. A heartbeat for 150 allocations is about 43 KB, which that
-pace stretches by 2.8 ms an allocation to almost one monitor interval; the lease renewals before
-the next sample add to it, and once the agent is stopping it sends a heartbeat every iteration.
-A drain costs a pipe write. Item 051's smaller share of drains an iteration, sized from the
-agent's observation write, therefore changed nothing the gate measures, and this test's stop
-never uses it: an operator drain reaches the supervisors through heartbeat and renewal replies.
-In the same run 20 tasks were still running 8 to 10 s after the drain was asked and ended by
-lease expiry, which the test's count of expired leases, taken before the drain, does not show.
-
-**B2.** The comparison records node reports, whose admission carries the catalog reason. The
-named failed check of item 051 is in the decision's reason only and is not in this evidence.
-
-### Item 052: the same-core loss again
-
-Run on 2026-11-13 on the same test host, each run alone: item 029's run 3 (a saturating other
-user on the probe's core, five windows of 40 s) with the harness reading each probe's CPU ticks,
-minor faults and the sizes of its environment and arguments from `/proc`. No step was taken in
-any window, and no test process of either account was left after any run.
-
-| Run | Commit | Own throughput, managed against unmanaged | Probe CPU per unit, managed and unmanaged | Result |
-|---|---|---|---|---|
-| Performance under a 16-character name (Neutral's length) | `0da6118` | 0.997 | 161.3–161.5 µs and 161.2 µs | no loss |
-| Neutral under a 20-character name (Performance's length) | `0da6118` | 0.998 | 162.0–163.5 µs and 161.2–162.3 µs | no loss |
-| Performance under its usual name | `0da6118` | 0.994 | 162.1 µs and 161.0 µs | no loss |
-| Neutral under its usual name | `0da6118` | 0.995 | 161.3–161.4 µs and 161.2–161.3 µs | no loss |
-| Performance under its usual name | `743312b` | 0.945 | 171.9–173.3 µs and 161.4–162.5 µs | the loss of item 049 |
-| The same, with `0da6118`'s `python/cedegrid/worker.py` and `process.py` in a test-only copy of the build | `743312b` | 0.988 | 162.2–163.2 µs and 161.0 µs | no loss in CPU per unit |
-
-- The managed probe's environment is 2741 bytes under a 16-character name and 2765 under a
-  20-character one; its arguments are 278–282 bytes. The unmanaged probe's environment is 719
-  bytes. The lossy run at `743312b` and the loss-free Performance run under the same name at
-  `0da6118` both have 2765 and 282.
-- In the lossy windows the extra time is all user time (system time 1–2 ticks, one minor fault),
-  and the other user's median latency is 0.50 ms where it is 0.64 ms in every other window
-  beside a probe. Its one-preemption latencies have one mode in every window of every run.
-- `tools/pressure_probe.py` is the same at both commits. Of the code that runs inside the probe,
-  only the Python SDK's drain check changed between them (item 050), and the managed probe calls
-  it 20 times a second.
-- Item 050's rerun at `0da6118`, Yield First beside the second account's one-core load: own
-  work at the contended target in the interval that first shows the load, no drain, 273 pause
-  samples, the target back after 1.5 s and own work after 3.0 s. In the 22 intervals in which
-  all 13 tasks were capped, own usage was 1.002 of the caps' sum on average and at most 1.069.
-
-### Item 053: own GPU processes in the counts, lifts in every phase, Yield First beside a principal
-
-Run on 2026-11-13 on the same test host at `a0a7bea`, with the commands under "Item 053" in
-`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
-any run, and no leaf was left under a run's delegated scope once the scope ended.
-
-| Run | Values | Result |
-|---|---|---|
-| Performance, two own probes beside the saturating user, Tracked | Pair alone 1496 units/s; without CedeGrid 0.660 of it, the other user 512 requests/s of its 1571 alone. With it: own work 0.486 and 0.475 (bound 0.45); the other user 785.1 and 797.0 (½ × alone × 0.97 = 761.8). Both windows pass 042's checks (overlap 39.8 s, m = 2 in 78 decisions of 80 each); no pause; the duty held 0.734 and 0.718; the probes' off phases overlapped 0.998 and 0.997. Both probes counted, and the first duty sent, in each window's first decision (1.1 s and 1.3 s in) | pass |
-| The same in Full | Pair alone 1479 units/s; without CedeGrid 0.664, the other user 509 of its 1555. Own work 0.480 and 0.477; the other user 792.5 and 794.2 (bound 754.2); m = 2 in 78 and 79 decisions; frozen 0.28 of the time in each window; both probes counted and the first duty sent at 1.2 s and 1.0 s. At item 049 the second window waited 13.9 s for its first duty and the other user got 709.8 | pass |
-| Neutral, two own probes beside the saturating user, Tracked | Pair alone 1480 units/s; without CedeGrid 0.663, the other user 509 of its 1554. Own work 0.447 and 0.447 (bound 0.42); the other user 840.0 and 840.4 (bound 753.4); m = 2 in 79 and 78 decisions; the duty held 0.672 and 0.673; the first duty at 1.0 s and 1.2 s | pass |
-| Full, a process of the test's own account joins the first probe's frozen leaf | The leaf read frozen at the join and thawed 49.8 ms later and stayed thawed; `cpu.max` stayed `max 100000`; the process kept nice 0, saw no signal, and its largest gap was 35.7 ms | pass |
-| Full, the same join, and the first probe's task cancelled 19.5 ms after it | The probe was gone 1.52 s after the join. 3 s later the leaf held only the joined process, with `cgroup.freeze` 0 and `frozen` 0; the process was running (`S`) and `cpu.max` read `max 100000`. The leaf, kept by that process, went with the run's scope | pass |
-| SC-015's shape in Yield First: 4 CPUs, 250 m steady tasks, beside the second account's steady light load on the same CPUs (80–143 m in every interval, an admitted principal throughout), with an owner login every 60 s and no other login | 12 tasks, the last admitted 374.6 s after submission. Own work 3026 m: 91.8% of capacity less the second account's 103 m and the 600 m margin (target 90%); no step and no pause. 12 owner logins, the longest gap 61 s; at a login the owner read 43–105 m. CPU admission was closed only for the agent's first 30 s, its start cooldown; no cooldown restarted in the warm-up or the window, and admission was open in 96.6% of decisions from submission to the window's end. No login made own work exceed its target in any interval, so the run does not reach the path where a login is told from a principal's rise; the tests in `tests/policy.rs` `yield_first_cooldown` carry it. Held back in the window (medians): the margin 600 m, others' use 126 m, `charge_shortfall` 80 m; the target 3260 m, so a thirteenth task of 250 m did not fit | pass |
-
-### Item 054: the loop without pacing waits, the over-share ask, the owner's GPU use
-
-Run on 2026-11-13 on the same test host at `44f8257`, with the commands under "Item 054" in
-`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
-any run.
-
-| Run | Values | Result |
-|---|---|---|
-| B1, 150 tasks, an operator drain, then TERM, at the test's 1 MiB/s | Longest gap 518 ms before the drain (1041 ms at item 051), 1805 ms from the drain to TERM, 505 ms after TERM; the drain took 8676 ms. No lease expired before or during the drain; 5 were fenced after it. One iteration in the drain held the agent's attempt pin 1.33 s on the journal's write lock, beside about 20 supervisors' Released commits retrying in step under SQLite's default busy handler | fail |
-| The same at the default 10 MiB/s | Longest gap 521 ms before the drain, 1297 ms in it, 505 ms after TERM; the drain took 10485 ms. 25 leases were fenced during the drain: 11 runs released after the last heartbeat before their deadline, 12 committed Draining after it (12 `lease_unavailable`), and 2 supervisors' Released commits waited the full 5 s for the lock and ended in a supervisor error, still recorded Released | fail |
-| The same at 1 MiB/s with each control request timed (a record) | Longest gap 547 ms; the drain took 8674 ms; 1 lease fenced after it. Its pass is chance: the agent's first journal write landed outside the supervisors' commit groups | record |
-| C4 run 2, as at item 051 | The over-share task was sent TERM 3.8 s after the breach, once it turned critical, and the next task in victim order, then over its share, was drained at 3.9 s. The six in-share tasks got the save-progress signal at 1.3 to 1.4 s, which item 051's run did not send. The floor stayed breached until the second account released at about 37 s; the OOM killer took one process | pass for the order |
-| C3, the second account's 10 GiB growth breaches the floor, Neutral | Own RAM fell from 12432 MiB to 1616 MiB in 4.2 s; the floor was restored 3.14 s after the breach (3.1 s at item 048); each fill task got one save-progress signal | pass |
-| Part E: B2's comparison in Yield First while the second account holds an idle context on the device | All 15 cases completed. GPU compute admission was open in every sample, also while the owner's unmanaged probe was busy; the managed probes were ready 2.1 to 9.2 s after their start, the longer waits being the GPU memory cooldown | pass |
-| The same while the second account computes | GPU compute and memory admission held on `gpu_yield_first_needs_quiet_device` from the start, and the managed probe was not admitted within 60 s | pass (held) |
-| Part F: SC-015's shape in Yield First (4 CPUs, 250 m steady tasks, a 150 s window) beside the second account's steady light load (101 m at the median), with a one-core CPU burst of 1.5 s on the owner's account every 60 s, and the second account's load raised to about 400 m 90 s into the window | 12 tasks, the last admitted 373.9 s after submission. Before the raise own work held 3006 m, 91.2% of capacity less the second account's 103 m and the margin (target 90%). The bursts read 950–1060 m. Five of them, once tasks were admitted, left own work outside its target for one or two decisions each, with a cap for the burst's length and no pause; none restarted the cooldown: CPU and RAM admission stayed allowed through every burst. The only closed stretch before the raise was the agent's start cooldown. The second account's rise read 407 m 0.56 s after it began; in that decision the cooldown restarted (closed for 30.5 s) and own work's target fell from about 3110 m to 2897 m, with own work's caps lowered in the same decision (SC-002 allows two intervals) | pass |
-
-### Item 055: the same-core probe checks itself, and CedeGrid's own cost inside a task
-
-**CedeGrid's own cost inside a task.** Measured on the Mac at `6d1e871` by the process's CPU time
-(`python/tests/test_own_cost.py`, `npm/tests/own-cost.test.ts`): a drain check, which also
-checks the target file's identity, costs 3.5 µs in the Python SDK and 6.8 µs in the TypeScript
-one; reading and parsing a changed target file costs 36 µs and 47 µs. At 20 checks a second, the
-matched probe's rate, that is 0.007% and 0.014% of one core. Both tests fail at 1%.
-
-Run on 2026-11-13 on the test host, each run item 029's run 3 (a saturating other user on the
-probe's core, two unmanaged and two managed windows of 40 s), alone, with the leftover check
-after it. No CPU step was taken in any window. CPU per unit is the probe's user ticks over the
-units in the span they were sampled (about 34 s of each 40 s window).
-
-| Run | Commit | Own throughput, managed against unmanaged | Probe CPU per unit, unmanaged and managed | Even/odd self-check | Result |
+Rows measured before `9916e59` read principal usage from a refresh that listed every thread as a
+process of its own. A process's CPU counted once for the process and again for each thread, its
+resident memory once per thread, and own tasks' threads, not in the managed set, as the owner's
+unmanaged usage. Since `9916e59` each process counts once. The contender and SC-015 rows at
+`07c2d8b` and `770651f` ran with the old count.
+
+### Controls and pressure
+
+| Gate | Requirement | Commit | Measured | Figures | Result |
 |---|---|---|---|---|---|
-| Performance, the allocator's per-thread cache off in both probes (`GLIBC_TUNABLES=glibc.malloc.tcache_count=0`), item 055's probe only measuring | `743312b` | 1.004 (0.945 at item 052 with the cache on and the old probe) | 161.3–161.4 and 161.8–162.1 µs | 1.000–1.002 in every window | no loss; no control (next row) |
-| Performance, item 055's probe, the cache on | `743312b` | 0.995 | 161.0–161.9 and 161.0–161.5 µs | 1.001–1.008, no block held, none refused | no loss: the new probe alone moved it |
-| Performance, the commit's probe | `7cc09c8` | 1.004 | 160.9–161.1 and 161.0–161.1 µs | the unmanaged probe held one block in both windows (1.012–1.013 to 1.000–1.002) | pass |
-| Neutral, the commit's probe | `7cc09c8` | 0.929 | 161.1–162.5 and 175.4–175.5 µs | 1.001–1.002 before `ready.json`, none refused | fail: alternating units in the window, not caught |
+| Delegated cgroup steps | FR-029 | `4d631d0`, `893c1c2` | 2026-10-26 | `cpu.weight`, `cpu.max` and `cgroup.freeze` written, read back and restored; with a foreign test-owned process in the leaf, LowerShare is refused and Cap falls back to the rootless duty cycle ("cgroup write refused"), leaving the leaf unchanged | pass |
+| RAM cap | FR-011 | `4d631d0`, `893c1c2` | 2026-10-26 | `memory.high` written, read back and restored to `max`; swap is on, so the swap-off `memory.stat` check does not apply | pass |
+| CPU pressure, own session | FR-072 | `4d631d0`, `893c1c2` | 2026-10-26 | status available, 10 external cgroups, external avg10 0; 40 busy loops on 20 CPUs in own session: own avg10 up to 67.7, external 0, busy 20,000 of 20,000 m, no `saturated_by_psi` in 30 samples | pass |
+| CPU pressure under another account | FR-072 | `07c2d8b` | 2026-10-27 | eight busy loops of the second account on 2 CPUs: external some avg10 67.9–92.0 in all 30 samples, `saturated_by_psi` on CPU in all 30, busy 10.1–11.2% (`saturation_percent` 98) | pass |
 
-### Item 056: the journal's lock wait, and the over-share wait
+### CPU
 
-Run on 2026-11-14 on the same test host, with the commands under "Item 056" in
-`specs/001-contention-modes/native-gates.md`. No test process of either account was left after
-any run.
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| Performance ramp, a contender pinned to a scope CPU (4 CPUs, 16 tasks of 250 m) | SC-004 | `1c6ca7e` | 2026-10-30 | `ramp_seconds` 2.668 (target 10 s); the second account's one-core contender served 0.51 s after it started; `foreign_actions` 0 | pass |
+| Performance ramp, the contender unpinned | SC-004 | `07c2d8b` | 2026-10-27 | `ramp_seconds` 1.173; the contender reaches 0.9 core in 2.0 s, with a median of 0.92 core after 10 s and 0.9 core or more in 76% of half-second samples; `foreign_actions` 0 | pass |
+| The contender under the account that runs CedeGrid | SC-002 | `770651f` | 2026-10-26 | a median of 0.70 core after 10 s pinned and 0.62 unpinned, 0.9 core in 2% and 0% of half-second samples; that account's other programs share its fair share, as SC-002 allows | as specified |
+| Performance ramp on GPU compute (1 task) | SC-004 | `770651f` | 2026-10-26 | own GPU compute reaches 90% 2.6 s after submission once the deployment's 30 s GPU cooldown has passed; submitted earlier, it waits for that cooldown (22.6 s) | pass |
+| CPU reclaim in Yield First, Neutral and Performance (protection profile, `reserve_physical_cores = 1`) | SC-012 | `1c8a850` | 2026-10-26 | matched throughput 0.933, 0.942, 0.933; decision p95 0.81, 0.78, 0.77 s; post-yield p99 1.05, 1.03, 1.07×; own usage at the target share 2 intervals (1.0 s) after the demand is first observed in Yield First and Neutral, 1–2 in Performance; one cap and no drain per case; manager peak 0.14–0.19 core and 94 MiB | pass |
+| No action outside own work, CPU and GPU, at the defaults and with Performance and a 512 MiB floor (protection profile) | SC-005 | `1c8a850` (CPU), `c0779d3` (GPU) | 2026-10-26 | 0 actions and 0 drains outside own allocations, protected snapshots unchanged, every protected run completed, no failed external GPU allocation, every owned GPU release confirmed, 0 OOM lines | pass |
+| Return after the second account's 30 s one-core load, Yield First (4 CPUs, 16 steady tasks of 250 m) | SC-002 | `0da6118` | 2026-11-13 | 13 tasks admitted; own work at the contended target in the interval that first shows the load; no drain; 273 pause samples; the target back 1.5 s and own work 3.0 s after the load stopped; in the 22 intervals in which all 13 tasks were capped, own usage was 1.002 of the caps' sum on average and at most 1.069 | SC-002 pass |
+| Return after a 30 s one-core contender, Performance (4 CPUs) | SC-002, FR-034 | `cd077e9` | 2026-10-31 | the target and own usage back 1.0 s after the contender's last usage; no pause | pass |
+| Idle fill, Performance (14 CPUs, 100 m tasks, the steady loop, no login during the run) | SC-014 | `743312b` | 2026-11-03 | 128 tasks, all admitted after 14 s; own tasks 96.9% of capacity, 97.7% with CedeGrid's 111 m; no step | pass (97%) |
+| Idle fill, Neutral | SC-014 | `743312b` | 2026-11-03 | 123 tasks, all admitted after 24 min; own tasks 93.8% of capacity, 94.6% with CedeGrid's 108 m; `charge_shortfall` 571 m at the median; no step | pass (94%) |
+| Idle fill, Yield First | SC-014 | `743312b` | 2026-11-03 | 110 tasks, the last admitted after 59 min; own tasks 83.5% of capacity, 84.2% with CedeGrid's 94 m; `charge_shortfall` 473 m; no step | pass (84%) |
+| Idle fill, Yield First, with a login from each account every 60 s through the warm-up and the window | SC-014, FR-034 | `743312b` | 2026-11-12 | 73 login rounds, none failed, longest gap 62 s. 111 tasks, the last admitted after 62 min; own tasks 84.4% of capacity, 85.1% with CedeGrid's 103 m; `charge_shortfall` 533 m. One login burst read 1363 m external for one interval, 6.8 s before the window: all 111 tasks were capped at 93 m, and the caps were relaxed in steps and gone 19 s into the window. No pause; the later logins read 260–290 m and caused no step | pass (84%) |
+| Idle fill, Performance, 4 CPUs, 100 m tasks | SC-014 | `9916e59` | 2026-10-29 | 36 tasks, own tasks 96.6% of capacity, 97.1% with CedeGrid's 19 m, no step | pass |
+| Own CPU against the tasks' CPU, in the three 14-CPU idle-fill runs | FR-073 | `743312b` | 2026-11-03 | tasks' CPU from `/proc` 13568 m, 13133 m and 11696 m; the decisions' own-CPU bound 13575–13812 m, 13130–13358 m and 11669–11872 m; the tasks are 244 m, 225 m and 176 m below the upper bound | pass |
+| Own-CPU clock tests | FR-073 | `770651f` | 2026-10-26 | 44 telemetry tests pass natively, including the 3 gated process-clock tests | pass |
+| External estimate at idle, at p95 at most 1% of capacity, 4 CPUs, Tracked and Full | FR-073 | `64999b1` | 2026-11-02 | 30 m in Tracked and 33 m in Full, 0.75% and 0.82% of capacity (medians 23 m and 24 m); CedeGrid's own 9–10 m; 120 decisions each, every measurement known | pass (1%) |
+| The same, 14 CPUs | FR-073 | `9916e59` | 2026-10-29 | Tracked 99 m (0.71%), Full 95 m (0.68%); CedeGrid 8–9 m at the median | pass (1%) |
+| Beside a steady external user, Neutral and Performance (4 CPUs, a 60 m user, the catch-up loop) | SC-015 | `770651f` | 2026-10-26 | own tasks 3500 m in both modes (targets 3366 and 3474 m); no step change | pass |
+| Beside a steady external user, Yield First (4 CPUs, 250 m steady tasks, a 150 s window, the second account's steady light load at 101 m median) | SC-015 | `44f8257` | 2026-11-13 | 12 tasks, the last admitted 373.9 s after submission; own work 3006 m, 91.2% of capacity less the second account's 103 m and the margin (target 90%) | pass |
+| Yield First's cooldown in the same run: a one-core burst of 1.5 s on the owner's account every 60 s, and the second account's load raised to about 400 m 90 s into the window | FR-034 | `44f8257` | 2026-11-13 | the bursts read 950–1060 m; five of them, once tasks were admitted, left own work outside its target for one or two decisions each, with a cap for the burst's length and no pause; none restarted the cooldown, and CPU and RAM admission stayed allowed through every burst; the only closed stretch before the raise was the agent's start cooldown; the second account's rise read 407 m 0.56 s after it began, and in that decision the cooldown restarted (closed for 30.5 s) and own work's target fell from about 3110 m to 2897 m, with own work's caps lowered in the same decision | pass |
+| No drain when CPU is the only contended resource | SC-007 | `9916e59` | 2026-10-29 | in the idle-fill, SC-015 and return runs at this commit, every drain was the harness's own cancel after its measurement window | pass |
+| Loop cadence with 129 tasks (the 14-CPU Performance idle-fill run) | FR-080 | `9916e59` | 2026-10-29 | observation interval p50 498 ms, p95 533 ms, maximum 609 ms; CedeGrid 104 m (0.74% of capacity); agent `loop_cost` per minute: sample 3.6 s, slots 1.08 s, policy 0.18 s, heartbeat 0.15 s | pass |
+| CedeGrid's own cost at 117 tasks, in a Linux container (6 CPUs, 117 light tasks, release build with fat LTO, 60 s) | SC-014 | `9916e59` | 2026-10-29 | the agent 74 m and CedeGrid about 109 m in all, 0.78% of 14 CPUs. The agent's sampling stage took 30.2 ms per second against 55.7 ms at `abbcd63`, measured back to back: own tasks are re-verified through the pidfd held since their first check and their counters read from `/proc` directly (from 5.7 to 0.4 ms per interval), and principals come from one `/proc/<pid>/stat` read per process (from 10.9 to 2.9 ms per interval). The rest of the stage is reading each task's clock and anonymous memory (about 7 ms per interval) | pass (1%) |
+| CedeGrid's own cost inside a task, by the process's CPU time (`python/tests/test_own_cost.py`, `npm/tests/own-cost.test.ts`) on the development host | SC-014 | `6d1e871` | 2026-11-13 | a drain check, which also checks the target file's identity, costs 3.5 µs in the Python SDK and 6.8 µs in the TypeScript one; reading and parsing a changed target file costs 36 µs and 47 µs; at 20 checks a second, the matched probe's rate, that is 0.007% and 0.014% of one core; both tests fail at 1% | pass |
 
-| Run | Commit | Values | Result |
-|---|---|---|---|
-| B1, 150 tasks, an operator drain, then TERM, at the test's 1 MiB/s | `bf29bcc` | 0 of 150 ran: 53 supervisors failed to start their publisher, whose attempt pin found the journal busy within its 50 ms bound | fail; fixed in `1eaa287` |
-| The same at the default 10 MiB/s | `bf29bcc` | 91 supervisors failed the same way | fail |
-| B1 at 1 MiB/s | `1eaa287` | 150 of 150 ran. Longest gap 547 ms before the drain, 503 ms from the drain to TERM, 382 ms after TERM; the drain took 2019 ms (8676 ms at item 054). No lease expired, no supervisor error, no `journal_busy` event | pass |
-| B1 at the default 10 MiB/s | `1eaa287` | 150 of 150 ran. Longest gap 516 ms, 503 ms in the drain, 363 ms after TERM; the drain took 2220 ms (10485 ms at item 054). No lease expired, no supervisor error | pass |
-| C4 run 2, as at item 054 | `1eaa287` | The six in-share tasks got the save-progress signal at 1.5 s; the over-share task was sent TERM at 3.5 s and the next task in victim order drained at 3.5 s. The floor stayed breached until the second account released at about 30 s; the OOM killer took one process, the second account's allocator | pass for the order |
-| C3, the second account's 10 GiB growth breaches the floor, Neutral | `1eaa287` | First run: own RAM fell from 12702 MiB to 2588 MiB in 3.3 s and held there; the floor was restored 5.74 s after the breach. Rerun: from 12701 MiB to 2588 MiB in 4.0 s, the floor restored 2.88 s after the breach (3.1 s at item 048) | pass on the rerun. Both runs held the same own state after their hints; in the first, about 150 MiB was missing from the host's `MemAvailable` from 2.0 s and came back over 30 s, so the floor read 27 MiB short until a held hint's drain freed 89 MiB at 5.9 s |
+### Own throughput beside another user
 
-The journal's lock waits are written to `supervisor-usage.json` and to the agent's `loop_cost`,
-but the burst test read neither: the attempt directories were gone and no `loop_cost` period
-ended in a 30 s run, so no longest commit wait is recorded for B1.
+Own throughput is with CedeGrid against the same probe without it. These runs use the
+`own-efficiency` profile: every default but the mode, the coordinator and the harness on CPUs
+outside the scope, and the agent on the scope's CPUs. For Performance, only loss beyond its 2%
+margin and the agent's measured CPU counts.
 
-From `98dda27` a supervisor writes a drain's notice and signals before its Draining record, so
-the burst's "drain took" figure, the time until no journal row reads running, is not like for
-like with `1eaa287`'s: a run whose Draining record has not landed still reads running until its
-Released. From `5163c1a` the test reports that time and the time until every run reads
-Released apart, and counts the runs that recorded Draining.
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| Idle, 2 CPUs, the half-core probe checking for a drain every 50 ms | FR-020, FR-021, FR-022 | `1c6ca7e` | 2026-10-30 | Performance 0.995 (0.995, 0.995, 0.996), Neutral 0.999, Yield First 0.995; the agent 9 m (0.43% of the scope), so no Performance loss counts | pass |
+| A light other user on the probe's core (100 requests a second) | FR-020, FR-021, FR-022 | `1c6ca7e` | 2026-10-30 | no step in any mode; own throughput 0.998 in Performance, 1.010 in Neutral, 0.998 in Yield First; the other user's p99 0.68 ms alone and 0.66–0.69 ms beside own work, with or without CedeGrid; the agent 8 m | pass |
+| A saturating other user on the probe's core, Performance | FR-022 | `7cc09c8` | 2026-11-13 | 1.004; no CPU step; probe CPU per unit 160.9–161.1 µs unmanaged and 161.0–161.1 µs managed; the unmanaged probe's even/odd self-check held one block in both windows (1.012–1.013, then 1.000–1.002) | pass |
+| The same, Neutral | FR-021 | `7cc09c8` | 2026-11-13 | 0.929; no CPU step; probe CPU per unit 161.1–162.5 µs unmanaged and 175.4–175.5 µs managed; the self-check read 1.001–1.002 before `ready.json` and refused no window | fail: the managed probe's units alternated in the window, and the check did not catch it |
+| The same, Yield First | FR-020 | `1c6ca7e` | 2026-10-30 | caps, hints and pauses; own throughput 0.174 | as specified |
+| A fixed allocation against CedeGrid in Performance: 4 CPUs, the other user saturating two of them 30 s on and 30 s off for 300 s | FR-022 | `1c6ca7e` | 2026-10-30 | own work with CedeGrid 1.24 times that of the probes pinned with taskset to the other two CPUs; the other user's p50 while on 0.325 ms beside the fixed allocation and 0.347 ms beside CedeGrid, p99 0.356 ms and 3.33 ms; 188 CPU step changes in 300 s; the agent 9 m | own work pass; the other user's p99 is the cost |
 
-| Run | Commit | Values | Result |
-|---|---|---|---|
-| B1 at 1 MiB/s | `98dda27` | 150 of 150 ran. Longest gap 635 ms; the drain took 5663 ms (not like for like, above). Longest supervisor journal wait 1851 ms. No lease expired, no supervisor error | pass |
-| B1 at the default 10 MiB/s | `98dda27` | 150 of 150 ran. Longest gap 652 ms; the drain took 5059 ms (not like for like). Longest supervisor journal wait 910 ms. No lease expired, no supervisor error | pass |
-| B1 at 1 MiB/s | `5163c1a` | 150 of 150 ran. Longest gap 637 ms. None running 4449 ms after the drain began, all released by 5677 ms; 145 of 150 recorded Draining. Longest supervisor journal wait 1467 ms. No lease expired, no supervisor error | pass |
-| B1 at the default 10 MiB/s | `5163c1a` | 150 of 150 ran. Longest gap 828 ms. None running 2628 ms after the drain began, all released by 5691 ms; 150 of 150 recorded Draining. One `coordinator_disconnected` event. No lease expired, no supervisor error | pass |
+In the fixed-allocation run the other user's median stays within 0.02 ms, but their p99 grows
+while capped own tasks share their CPUs: rootless (Tracked) caps are duty cycles that stop and
+resume own work within each period. The loss rule protects the other user's demand and fair
+share, not their tail latency. Keeping own threads off a contended CPU, by affinity or
+`cpu.weight` before a duty cycle, is not part of this result.
+
+### Launch and stop
+
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| 150 tasks at once, an operator drain, then TERM, at the test's request budget of 1 MiB/s | FR-074, FR-080 | `5163c1a` | 2026-11-15 | 150 of 150 ran. Longest gap between observations 637 ms (bound 1 s). None running 4449 ms after the drain began, all released by 5677 ms; 145 of 150 recorded Draining. Longest supervisor journal wait 1467 ms. No lease expired, no supervisor error | pass |
+| The same at the default 10 MiB/s | FR-074, FR-080 | `5163c1a` | 2026-11-15 | 150 of 150 ran. Longest gap 828 ms. None running 2628 ms after the drain began, all released by 5691 ms; 150 of 150 recorded Draining. One `coordinator_disconnected` event. No lease expired, no supervisor error | pass |
+| Descriptors in a 150-task burst | FR-077 | `fc5e330` | 2026-10-30 | the agent's soft descriptor limit raised to 524288, 1079 open at the peak; all 150 ran, no agent exit, no lease expired, no refusal and no supervisor error | pass |
+
+A supervisor writes a drain's notice and signals before its Draining record. A run whose
+Draining record has not landed reads running until its Released, so the test reports the time
+until no run reads running and the time until every run reads Released apart.
+
+### Families and supervision
+
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| A multiprocessing stand-in, Tracked: a leader filling 1 GiB, then 4 forked workers reading it and spinning for 120 s, 4 CPUs, Performance | FR-083, FR-085, FR-086 | `5c49ee2` | 2026-10-31 | a family of 5, nothing outside it; own memory 1035 MiB against the buffer plus the workers' private pages, 1029 MiB; beside the saturating user own CPU 1914 m against a target of 1849 m, and 17 of 18 stopped samples with all 5 members stopped; the agent 22 m idle and 21 m beside the load (0.56% and 0.53% of the scope) | pass |
+| The same in Full | FR-083, FR-085, FR-086 | `cd077e9` | 2026-10-31 | a family of 5 in every decision (`family_members`), nothing outside it, no `cap_at_minimum_duty`, every member at the launch baseline `oom_score_adj` 0; own memory 1035 MiB against 1029 MiB; beside the other user saturating the 4 CPUs own CPU 1685 m against a target of 1671 m, the leader idle in its join; the agent 12 m | pass |
+| A data loader with 4 forked workers (`DataLoader(num_workers=4)`) over a synthetic dataset, the same way | FR-083, FR-085, FR-086 | `cd077e9` | 2026-10-31 | a family of 5, nothing outside it; own CPU beside the load 1954 m against 1917 m (Tracked) and 1901 m against 1887 m (Full); own memory 303 MiB (anonymous and shared PSS) against 606 MiB of total PSS with the library pages. In Tracked, 8 of the 10 samples that caught a stop had all 5 members stopped at once, and every stop was followed by all 5 running. The agent 35 m in Tracked (0.9%), 11–12 m in Full | pass |
+| Leftovers: the leader exits after 5 s while its 4 workers run on | FR-087 | `cd077e9` | 2026-10-31 | Tracked and Full, Guaranteed and Opportunistic: `members_ended` 4, the release confirmed 7–8 ms after the leader's exit, no member, zombie or leaf left | pass |
+| Supervisor loss in Tracked: a leader and 2 CPU workers held in an off phase by a Yield First cap beside a light load of the test's own account, the run's supervisor killed while all 3 were stopped | FR-088 | `cd077e9` | 2026-10-31 | Guaranteed: no SIGHUP; the leader running at once (its parent-death signal is SIGCONT), every member running 0.45 s after the kill, the output complete; `family_recovered` continued 3. Opportunistic: every member gone 0.45 s after the kill, none left stopped; `family_recovered` ended 2, already gone 1 (the leader, by its parent-death signal) | pass |
+
+### GPU
+
+The light other GPU user runs 200 small multiplies a second. In the two-probe runs each own
+probe is its own job with 512 MiB, submitted 40 s before each managed window; a window counts
+when both probes ran together inside the other user's load. The other user's bound is the
+smaller of its rate without CedeGrid and half its rate alone, less 3% (SC-017).
+
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| GPU work on an occupied device | SC-006 | `893c1c2` (Performance), `770651f` (Neutral) | 2026-10-26 | the owned-context test passes; a fresh external GPU context takes 74 MiB, so the 512 MiB minimum stays. Performance: 100 of 100 GPU tasks complete beside an idle external context, admission open, no GPU step, unattributed device memory 203 MiB. Neutral: 100 of 100 beside an idle external context and 50 of 50 without it, admission open, no GPU step | pass |
+| GPU pause, duty cycle and per-process attribution | FR-011, FR-007 | `893c1c2` | 2026-10-26 | paused: 0 completions, VRAM unchanged; a 50% duty cycle at 500 ms gives 0.50 of baseline, longest gap 258 ms, longest kernel 4.4 ms; summed per-process SM differs from device utilization by at most 2, 2 and 5 points with 1, 2 and 4 processes | pass |
+| GPU reclaim, Neutral and Performance (protection profile) | SC-012 | `770651f` | 2026-10-26 | Performance: matched throughput 0.923, decision p95 0.41 s, post-yield p99 0.76×. Neutral: matched throughput 0.722; each new job's first interval has no fresh per-process sample baseline, so Neutral counts that activity as one more principal and caps the job at half the device until its next scale-up step | Performance pass, Neutral fail |
+| Idle device, 3 CPUs (`own-efficiency`) | FR-021, FR-022 | `1c6ca7e` | 2026-10-30 | own throughput Performance 1.002, Neutral 1.000; the agent 16 m (0.53%) | pass |
+| Yield First on an idle device, three comparisons with a 180 s readiness wait | FR-027 | `6e3fb89` | 2026-11-13 | all 18 managed probes were admitted and finished, 37.3–38.8 s after their submission; while the owner's own unmanaged probe was busy, GPU admission read open in every sample | pass |
+| Yield First while the second account holds an idle context on the device | FR-027 | `44f8257` | 2026-11-13 | all 15 cases completed; GPU compute admission was open in every sample, also while the owner's unmanaged probe was busy; the managed probes were ready 2.1 to 9.2 s after their start, the longer waits being the GPU memory cooldown | pass |
+| Yield First while the second account computes | FR-027 | `44f8257` | 2026-11-13 | GPU compute and memory admission held on `gpu_yield_first_needs_quiet_device` from the start, and the managed probe was not admitted within 60 s | pass (held) |
+| One own probe beside the light user, Performance | SC-017 | `36bfe68` | 2026-11-01 | the probe alone 1572 units/s; without CedeGrid 1319 and 1303 (0.834 of alone); with it 1306 and 1298 (0.831 and 0.826 against a bound of 0.793 at the target 823); the old ratio 0.993; no GPU compute step. The light user ran 200 requests a second; p50 0.77 ms with and without CedeGrid, p99 0.88–0.89 ms without and 1.08–1.10 ms with | pass |
+| One own probe beside the saturating user, Performance | SC-017 | `36bfe68` | 2026-11-01 | the probe alone 1560; without 736 and 731 (0.470); with 736 and 731 (0.472 and 0.469 against 0.44); the old ratio 1.000; no step. The other user 1555 requests a second alone, 749–755 without, 775 and 767 with (bound 729); p50 1.36–1.37 ms and p99 1.37–1.38 ms with and without | pass |
+| One own probe beside the light user, Neutral | SC-017 | `36bfe68` | 2026-11-01 | the probe alone 1552; without 1304 and 1295 (0.837); with 1298 and 1290 (0.836 and 0.831 against 0.762 at the target 792); the old ratio 0.996; no step. The light user 200 requests a second; p50 0.77–0.78 ms, p99 0.88–0.89 ms without and 0.94–0.98 ms with | pass |
+| One own probe beside the saturating user, Neutral | SC-017 | `36bfe68` | 2026-11-01 | the probe alone 1557; without 736 and 731 (0.471); with 731 and 731 (0.469 and 0.469 against 0.441); the old ratio 0.997; no step. The other user 1552 requests a second alone, 749–754 without, 761 and 838 with (bound 729); p50 1.37 ms and p99 1.37–1.38 ms with and without | pass |
+| Two own probes beside the saturating user, Performance, Tracked | SC-017 | `a0a7bea` | 2026-11-13 | the pair alone 1496 units/s; without CedeGrid 0.660 of it, the other user 512 requests/s of its 1571 alone. With it: own work 0.486 and 0.475 (bound 0.45); the other user 785.1 and 797.0 (½ × alone × 0.97 = 761.8). Both windows ran both probes together (overlap 39.8 s, m = 2 in 78 decisions of 80 each); no pause; the duty held 0.734 and 0.718; the probes' off phases overlapped 0.998 and 0.997. Both probes counted, and the first duty sent, in each window's first decision (1.1 s and 1.3 s in) | pass |
+| The same in Full, the off phase being the leaf freeze | SC-017 | `a0a7bea` | 2026-11-13 | the pair alone 1479 units/s; without CedeGrid 0.664, the other user 509 of its 1555. Own work 0.480 and 0.477; the other user 792.5 and 794.2 (bound 754.2); m = 2 in 78 and 79 decisions; frozen 0.28 of the time in each window; both probes counted and the first duty sent at 1.2 s and 1.0 s | pass |
+| Two own probes beside the saturating user, Neutral, Tracked | SC-017 | `a0a7bea` | 2026-11-13 | the pair alone 1480 units/s; without CedeGrid 0.663, the other user 509 of its 1554. Own work 0.447 and 0.447 (bound 0.42); the other user 840.0 and 840.4 (bound 753.4); m = 2 in 79 and 78 decisions; the duty held 0.672 and 0.673; the first duty at 1.0 s and 1.2 s | pass |
+| Two own probes beside the light user, Performance | SC-017 | `f81a7c0` | 2026-11-01 | the pair alone 1474; without 0.864, the light user 200 requests a second, p99 2.73 ms. With it: own work 0.864 and 0.863 (bound 0.791), never capped (no principal slice-bound in any decision); the light user 200 and 200, p99 2.728 and 2.730 ms (bound 3.005) | pass |
+| A zero GPU compute margin (Aggressive's GPU behavior), two own probes beside the saturating user | SC-017 | `23e386e` | 2026-11-01 | the pair alone 1497 units/s; without CedeGrid 0.658 of it, the other user 511 (0.33 of its 1569 alone). With it: own work 0.498 and 0.493 (bound 0.47); the other user 760.7 and 754.5 (½ × alone × 0.97 = 761.0); the duty held 0.754 in both windows | own work passes; the other user falls short by 0.3 and 6.5 requests a second (0.485 and 0.481 of alone); a record, not a feature 001 gate |
+| Full, a process of the test's own account joins a probe's frozen leaf | FR-001 | `a0a7bea` | 2026-11-13 | the leaf read frozen at the join and thawed 49.8 ms later and stayed thawed; `cpu.max` stayed `max 100000`; the process kept nice 0, saw no signal, and its largest gap was 35.7 ms | pass |
+| Full, the same join, and the probe's task cancelled 19.5 ms after it | FR-001 | `a0a7bea` | 2026-11-13 | the probe was gone 1.52 s after the join. 3 s later the leaf held only the joined process, with `cgroup.freeze` 0 and `frozen` 0; the process was running (`S`) and `cpu.max` read `max 100000`. The leaf, kept by that process, went with the run's scope | pass |
+| A GPU job whose three loader threads want more CPU than its fair share, beside a saturating other user on its two CPUs | FR-022 | `1c6ca7e` | 2026-10-30 | Tracked: units 1.01 and CPU 1.00 of the job without CedeGrid, GPU 69% against 70%, with caps. Full: units 0.95, CPU 0.93, GPU 69% against 71%, with a lower share. In neither does GPU throughput fall more than the CPU share explains | as specified |
+
+### Memory
+
+The test deployment's floors are 16 GiB of RAM and 4096 MiB of GPU memory. The GPU memory
+`noise_tolerance` withholds nothing: it is a growth threshold and a reported field, pinned by
+`an_idle_device_withholds_no_noise_tolerance_from_gpu_memory` (`tests/policy.rs`).
+
+| Gate | Requirement | Commit | Measured | Figures | Result |
+|---|---|---|---|---|---|
+| Idle GPU memory fill: capacity 6144 MiB less the 4096 MiB floor and 285 MiB of others' use, 1763 MiB; 1354 MiB less Yield First's margin | SC-014 | `6e3fb89` | 2026-11-13 | what CedeGrid offered before the last task matched the target to the MiB in both modes; with tasks that hold their request, own GPU memory 1756 MiB (99.6%) in Performance and 1346 MiB (99.4%) in Yield First | pass |
+| Idle RAM fill: capacity less the 16 GiB floor, others' use and their peak | SC-014 | `6e3fb89` | 2026-11-13 | Performance: own RAM 11540 MiB of 11569 (99.7%), with 264 MiB of others' peak kept back. Yield First: 8831 MiB of 8859 (99.7%), less its 2976 MiB margin. Own RAM was constant over each 60 s window | pass |
+| RAM reclaim: after a Performance fill the second account grows by 4 GiB in about 1.1 s | SC-012 | `9c01943` | 2026-11-02 | from the breach to the floor restored: 4.43 s with plain tasks (bound 5.5 s), 5.99 s with hint-ready tasks (bound 10.5 s), 1.04 s with Guaranteed hint-ready tasks (bound 15.5 s). The second account got all its memory each time | pass |
+| A floor breach the second account causes, growing by 10 GiB, Performance and Yield First | FR-023 | `9c01943` | 2026-11-02 | Performance: own RAM fell from 12764 MiB to 6172 MiB in 2.3 s and stopped at its fair share of about 6370 MiB, with the floor breached until the second account released 90 s later. Yield First: from 9912 MiB to 760 MiB in 3.2 s and then 0; free memory stayed 1318 MiB above the floor | pass |
+| The same, Neutral | FR-023 | `1eaa287` | 2026-11-14 | own RAM fell from 12701 MiB to 2588 MiB in 4.0 s, and the floor was restored 2.88 s after the breach. A first run at the same commit fell to 2588 MiB in 3.3 s, held the same own state after its hints, and restored the floor 5.74 s after the breach | pass on the second run |
+| The out-of-memory order without an OOM (a 3 GiB capacity) | FR-023 | `9c01943` | 2026-11-02 | the second account's 1.5 GiB took the fair share from 1139 MiB to 558 MiB. Only the task launched last went to `oom_score_adj` 1000; the in-share task kept its launch value 0. When the second account released 3 s later, the share was back at 1038 MiB, and the same process went back to 0 before any drain. With `ram.prefer_own_oom_victim` every own task was at 1000 from launch | pass |
+| An own task past its leaf's `memory.max` (Full, 256 MiB) | FR-076 | `9c01943` | 2026-11-02 | with host swap, the kernel swapped the excess, and the task ran at 262 MiB resident to its end. With `memory.swap.max = 0` on the test's own delegated root it was killed three times in its leaf (host `oom_kill` +3). Each kill was recorded as `oom_kill` with `own_fault`, the fair share being unknown before its first memory reading, and counted as a failure. After three attempts the task stood at `needs_reconciliation`. No leaf was left | pass |
+| A host-wide OOM the second account causes, beside a 3 GiB over-share task that ignores hints and six 1 GiB in-share tasks that read them (Performance, Guaranteed) | FR-023, FR-037, FR-075 | `1eaa287` | 2026-11-14 | counted from the start of the second account's growth: the six in-share tasks got the save-progress signal at 1.5 s; the over-share task was sent TERM at 3.5 s and the next task in victim order drained at 3.5 s. The floor stayed breached until the second account released at about 30 s; the OOM killer took one process, the second account's allocator | pass for the order |
+| Host-wide OOMs the second account causes, beside six in-share tasks and one over-share task, with SDK tasks and with no SDK task | FR-023, FR-075 | `9c01943` | 2026-11-02 | in each of three runs at this commit the kernel took one process, the second account's allocator (24–28 GB resident), and no own task; CedeGrid gave the excess back 7–9 s before each OOM. With SDK tasks, all seven got the save-progress signal at the breach, while own memory was within its share, and the task over share was marked and freed on its hint. With no SDK task, the over-share task, marked at `oom_score` 1385 against the allocator's 756, was drained 2.4 s later and started again after the OOM. The second account's processes kept `oom_score_adj` 0 | in-share work pass; no own task was killed, so the kernel's preference and the requeue after a kill were not exercised |
 
 ### Own-work ratios in the protection runs
 
-The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
-scope with `cpu.reserve_physical_cores = 1` (the default is 0), built to test reclaim and
-protection, not own-work efficiency. Their own-work ratios, 0.93–0.94 of the same probe
-without CedeGrid while idle and 0.71–0.80 under contention, come from that setup:
+The CPU and GPU reclaim and SC-005 runs use the protection profile of
+`tools/pressure_comparison.py`: a 2-CPU scope with `cpu.reserve_physical_cores = 1` (the default
+is 0), built to test reclaim and protection, not own-work efficiency. Their own-work ratios,
+0.93–0.94 of the same probe without CedeGrid while idle and 0.71–0.80 under contention, come
+from that setup:
 
 - **Idle.** No CPU `managed_idle` case stepped (`yielded: false` in all 15). The managed probe
   asked `draining()` before every unit, and the SDK then re-read and parsed the target file on
@@ -870,13 +266,11 @@ without CedeGrid while idle and 0.71–0.80 under contention, come from that set
 - The probe and the protected load run on different physical cores, so the protected load's
   p99 without CedeGrid is not same-core contention either.
 
-Since item 029 the SDKs re-read the target file only when its stat identity changes, both
+From `1c6ca7e` on, the SDKs re-read the target file only when its stat identity changes, both
 probes check for a drain every 50 ms (the unmanaged one through a no-op context), Neutral and
 Performance tasks launch at nice 0, and the `own-efficiency` profile keeps every default, with
-the coordinator and the harness outside the probe's scope and the placement in the report.
-Report 027's run 1 and run 3 rows above stand as recorded: run 1's 4-CPU estimate is the
-window's upper bound, and run 3's Neutral and Yield First fill stays below SC-014 on this host
-because admission's p95 charges exceed the share (`charge_shortfall`).
+the coordinator and the harness outside the probe's scope and the placement in the report. The
+own-throughput rows above use that profile.
 
 ## Rules for validation runs
 
