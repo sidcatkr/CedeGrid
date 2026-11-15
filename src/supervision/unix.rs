@@ -2081,7 +2081,11 @@ pub(super) fn supervise(
             if let Some(server) = children.as_mut()
                 && outstanding.retry_at().is_none_or(|at| at <= Instant::now())
             {
-                server.settle_records(journal);
+                // A given-up child record drains Opportunistic work, as the leader's does.
+                if server.settle_records(journal) && request.class == AllocationClass::Opportunistic
+                {
+                    lifecycle.request_drain(elapsed);
+                }
             }
             // Wait for a control line, the leader's exit or a new SDK connection until the
             // next deadline; a source without an event keeps the short pass.

@@ -58,6 +58,9 @@ struct ChildServer {
     leader_directory: Option<PathBuf>,
     /// After a child record was refused for the lock, none is tried before this (R84).
     records_retry_at: Option<Instant>,
+    /// When this stretch of the children's lock refusals began, and whether it was reported.
+    records_since: Option<Instant>,
+    records_reported: bool,
 }
 impl ChildServer {
     fn new(parent: &LaunchRequest, generation: u64, setup: GateSetup, journal: &dyn ExecutionJournal) -> Result<Option<Self>> {
@@ -100,6 +103,8 @@ impl ChildServer {
             served: false,
             leader_directory: None,
             records_retry_at: None,
+            records_since: None,
+            records_reported: false,
         }))
     }
     fn expose(&self, request: &mut LaunchRequest) {
@@ -177,14 +182,17 @@ impl ChildServer {
     }
     /// Write the children's owed Running or Draining records from their current phase, each
     /// waiting at most `RECORD_WAIT`; after a refusal for the lock none is tried for
-    /// `RECORD_RETRY`, and a record refused four times for another reason is dropped and
-    /// reported. A refusal never stops a child (R84).
-    fn settle_records(&mut self, journal: &dyn ExecutionJournal) {
+    /// `RECORD_RETRY`. A record refused for the lock past `RECORD_PATIENCE`, reported once for
+    /// the stretch, or refused four times for another reason and dropped, asks what the
+    /// leader's does: true, so that Opportunistic work drains. A refusal never stops a child
+    /// itself (R84).
+    fn settle_records(&mut self, journal: &dyn ExecutionJournal) -> bool {
         let now = Instant::now();
         if self.records_retry_at.is_some_and(|at| now < at) {
-            return;
+            return false;
         }
         self.records_retry_at = None;
+        let mut drain = false;
         for child in self.children.values_mut().filter(|c| c.owes_record) {
             let phase = child.phase;
             let detail = match phase {
@@ -201,7 +209,19 @@ impl ChildServer {
                 }
                 Err(error) if crate::state::journal_busy(&error) => {
                     self.records_retry_at = Some(now + RECORD_RETRY);
-                    return;
+                    let since = *self.records_since.get_or_insert(now);
+                    if now.duration_since(since) >= RECORD_PATIENCE {
+                        if !self.records_reported {
+                            self.records_reported = true;
+                            report(
+                                "journal_unavailable",
+                                &child.id,
+                                format!("{error:#}; the child's record is not written"),
+                            );
+                        }
+                        drain = true;
+                    }
+                    return drain;
                 }
                 Err(error) => {
                     child.record_refusals += 1;
@@ -213,10 +233,16 @@ impl ChildServer {
                             &child.id,
                             format!("{error:#}; the child's record is not written"),
                         );
+                        drain = true;
                     }
                 }
             }
         }
+        if !self.children.values().any(|c| c.owes_record) {
+            self.records_since = None;
+            self.records_reported = false;
+        }
+        drain
     }
     fn request_stop(&mut self) {
         for child in self.children.values_mut() {

@@ -837,6 +837,17 @@ impl ExecutionJournal for InjectJournal {
                 .into());
             }
         }
+        if matches!(p, ManagedChildPhase::Running | ManagedChildPhase::Draining) {
+            // Stage 6 refuses them for another reason, stage 7 for the lock, every time.
+            anyhow::ensure!(self.stage != 6, "injected child record failure");
+            if self.stage == 7 {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    None,
+                )
+                .into());
+            }
+        }
         if self.stage == 4 && p == ManagedChildPhase::Released {
             let left = RELEASE_FAILURES.with(|left| left.get());
             if left > 0 {
@@ -934,6 +945,57 @@ Path('leader-done').write_text('1')
         (Some(0), None),
         "{child:?}"
     );
+}
+
+/// A child's record given up, after four refusals for another reason or past the patience for
+/// the lock, is reported and drains an Opportunistic allocation, as the leader's record does
+/// (R84, Principle III).
+fn a_given_up_child_record_drains(stage: u8, child_seconds: u32) {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = InjectJournal {
+        store: StateStore::open(&dir.path().join("state")).unwrap(),
+        stage,
+        pause: None,
+    };
+    let mut request = request(
+        dir.path(),
+        &format!(
+            r#"
+import sys
+from cedegrid import spawn_managed
+child=spawn_managed([sys.executable,'-c','import time; time.sleep({child_seconds})'],single_process=True,no_escape=True)
+child.wait(timeout={},poll_interval=.05)
+"#,
+            child_seconds + 10
+        ),
+    );
+    request.class = AllocationClass::Opportunistic;
+    let outcome = supervision::supervise(
+        &request,
+        &request.resources,
+        &SupervisorOptions {
+            lease_ms: 120_000,
+            ..options()
+        },
+        &journal,
+        &mut RootlessBackend::new(10),
+        Path::new(env!("CARGO_BIN_EXE_cedegrid")),
+    )
+    .unwrap();
+    assert!(
+        outcome.yielded,
+        "stage {stage}: the given-up child record drained nothing: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_child_record_refused_four_times_drains_opportunistic_work() {
+    a_given_up_child_record_drains(6, 5);
+}
+
+#[test]
+fn a_child_record_refused_for_the_lock_past_the_patience_drains_opportunistic_work() {
+    a_given_up_child_record_drains(7, 25);
 }
 
 #[cfg(target_os = "linux")]
