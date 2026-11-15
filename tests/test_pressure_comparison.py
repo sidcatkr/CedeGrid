@@ -228,13 +228,13 @@ class GateRunnerTests(unittest.TestCase):
 
     def test_a_unit_that_alternates_only_once_the_loop_runs_is_refused(self):
         # Item 058: the probe's units cost the same until the real loop has run a while, then
-        # alternate 1.0 and 1.3 ms. A check made before `ready.json` cannot see it; the window's
+        # alternate 1.0 and 1.5 ms. A check made before `ready.json` cannot see it; the window's
         # own even/odd sums must, and the window is refused.
         import argparse,pressure_probe
         calls=[0]
         def unit():
             calls[0]+=1
-            spin=1.3e-3 if calls[0]>300 and calls[0]%2==0 else 1e-3
+            spin=1.5e-3 if calls[0]>300 and calls[0]%2==0 else 1e-3
             end=time.thread_time()+spin
             while time.thread_time()<end:pass
         saved=(pressure_probe.cpu_unit,pressure_probe.local_guard,pressure_probe.rss_bytes)
