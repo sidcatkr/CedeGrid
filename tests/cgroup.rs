@@ -476,7 +476,7 @@ mod runtime_steps {
     }
 
     /// A managed child joins the leaf beside the leader and the children verified before it,
-    /// and nothing else (SUP-3).
+    /// and nothing else.
     #[test]
     fn a_managed_child_is_verified_beside_the_leader_and_verified_children() {
         use cedegrid::cgroup::check_child_membership;
@@ -700,7 +700,7 @@ mod runtime_steps {
     /// Undoing a cap this actuator wrote needs only its leaf, whatever its members: lifting acts
     /// on nothing CedeGrid did not restrict itself. A new restriction on that leaf is still
     /// refused and moves to the rootless mechanism, which reaches only the verified family
-    /// (FR-078, Principle I, item 053; before item 053 the undo was refused too).
+    /// (FR-078, Principle I; the undo used to be refused too).
     #[test]
     fn a_restore_on_a_joined_leaf_needs_only_the_leaf_and_a_new_cap_still_verifies() {
         let temp = tempfile::tempdir().unwrap();
@@ -877,7 +877,7 @@ mod runtime_steps {
 
     /// Full offers Opportunistic work the GPU compute share Tracked offers, with
     /// `cgroup.freeze` authorized or not, and Guaranteed work no GPU compute step
-    /// (FR-024). For every resource, Full offers each step Tracked offers (plan "Item 028").
+    /// (FR-024). For every resource, Full offers each step Tracked offers.
     #[test]
     fn full_offers_every_step_tracked_offers() {
         let temp = tempfile::tempdir().unwrap();
@@ -1081,7 +1081,7 @@ mod runtime_steps {
     }
 
     /// Beside a `cpu.max` cap the GPU duty runs on its own, and reversing either step
-    /// leaves the other in place (plan "Item 028").
+    /// leaves the other in place.
     #[test]
     fn a_cpu_max_cap_and_a_gpu_duty_hold_together() {
         let temp = tempfile::tempdir().unwrap();
@@ -1191,7 +1191,7 @@ mod runtime_steps {
 
     /// Where the CPU cap is the rootless duty, the GPU share joins that cycle at the
     /// smaller duty instead of freezing on a second one, in either order, and reversing
-    /// either step leaves the other (plan "Item 028").
+    /// either step leaves the other.
     #[test]
     fn a_rootless_cpu_duty_and_a_gpu_share_run_one_cycle() {
         let temp = tempfile::tempdir().unwrap();
@@ -1243,7 +1243,7 @@ mod runtime_steps {
     }
 
     /// Full and Tracked report the same state for a GPU compute cap, so the policy
-    /// credits the applied duty alike (`applied_duty_credit`, plan "Item 028").
+    /// credits the applied duty alike (`applied_duty_credit`).
     #[test]
     fn full_and_tracked_report_a_gpu_compute_cap_alike() {
         let temp = tempfile::tempdir().unwrap();
@@ -1504,7 +1504,7 @@ mod runtime_steps {
     }
 
     /// A cap write that took effect, then a failed readback and a failed restore, leaves
-    /// `memory.high` at the cap: the step's error says so, and the next tick restores it (SUP-12).
+    /// `memory.high` at the cap: the step's error says so, and the next tick restores it.
     #[test]
     fn a_ram_cap_left_by_a_failed_restore_is_reported_and_restored_on_the_next_tick() {
         use std::cell::Cell;
@@ -1795,8 +1795,8 @@ mod runtime_steps {
     }
 
     /// A release thaws a leaf a foreign process joined, at once: the freeze is this actuator's
-    /// own, and lifting it acts on nothing it did not restrict (FR-078, Principle I, item 053;
-    /// before item 053 the release was refused and only a later tick thawed it).
+    /// own, and lifting it acts on nothing it did not restrict (FR-078, Principle I;
+    /// the release used to be refused, and only a later tick thawed it).
     #[test]
     fn a_release_thaws_a_leaf_a_process_joined() {
         let temp = tempfile::tempdir().unwrap();
@@ -1827,7 +1827,7 @@ mod runtime_steps {
     }
 
     /// A release returns every control this actuator wrote to its launch value whatever the
-    /// leaf's members, an empty leaf included, after the leader's exit (FR-078, item 053).
+    /// leaf's members, an empty leaf included, after the leader's exit (FR-078).
     #[test]
     fn a_release_restores_caps_whatever_the_members() {
         for members in ["81\n99\n", ""] {
@@ -1877,7 +1877,7 @@ mod runtime_steps {
 
     /// A restore never tightens a control: where the value in place is looser than the launch
     /// value, it stays, and only a write that verifies the members brings the launch value back
-    /// (FR-078, item 053).
+    /// (FR-078).
     #[test]
     fn a_restore_never_tightens() {
         let temp = tempfile::tempdir().unwrap();
@@ -1910,7 +1910,7 @@ mod runtime_steps {
     }
 
     /// A thaw whose write failed at release is retried by the watch that runs in every phase,
-    /// without a tick and without a rootless pause (FR-078, item 053).
+    /// without a tick and without a rootless pause (FR-078).
     #[test]
     fn a_failed_thaw_is_retried_without_a_tick() {
         use std::cell::Cell;
@@ -1967,7 +1967,7 @@ mod runtime_steps {
 
     /// While a recorded freeze holds, a member list that cannot be read twice running counts as
     /// changed and thaws the leaf; one unreadable read followed by a matching one does not
-    /// (FR-078, Principle III, item 053).
+    /// (FR-078, Principle III).
     #[test]
     fn unreadable_members_twice_thaw_a_frozen_leaf() {
         use std::cell::Cell;
@@ -2036,8 +2036,8 @@ mod runtime_steps {
     }
 
     /// A reattaching supervisor's actuator thaws a freeze it recorded itself whatever the
-    /// leaf's members; a freeze it has no record of still needs the members verified (FR-078,
-    /// item 053).
+    /// leaf's members; a freeze it has no record of still needs the members verified
+    /// (FR-078).
     #[test]
     fn a_reconcile_thaws_its_own_freeze_whatever_the_members() {
         let temp = tempfile::tempdir().unwrap();
@@ -2062,7 +2062,7 @@ mod runtime_steps {
 
     /// A leaf left frozen by a duty's off phase is thawed when an agent reattaches and the
     /// applied steps record no Pause; a recorded Pause stays frozen; a foreign member refuses
-    /// the write (FR-078, 028 Decision 1).
+    /// the write (FR-078).
     #[test]
     fn a_reattach_thaws_a_leaf_frozen_without_a_recorded_pause() {
         use cedegrid::contention::{ResourceKey, StepRequest, YieldCause};

@@ -3730,7 +3730,7 @@ fn burst_authorizations(change: &dyn Fn(&mut NodeReport)) -> (usize, usize, Vec<
     (authorized, refused, late)
 }
 
-/// FR-028, item 026: at a reservation's first authorization, CPU or RAM closed
+/// FR-028: at a reservation's first authorization, CPU or RAM closed
 /// only by the node's own new allocations counts as open, so a burst's own
 /// launches do not refuse the rest of the burst; new placement still sees it
 /// closed, and the reservations must still fit the budget.
@@ -4489,7 +4489,7 @@ fn status_of(
 /// A refusal at the authorization barrier is not the task's failure: nothing ran, so a
 /// replay-safe task is requeued without using an attempt, and its status says why (FR-018).
 /// The status says "never authorized": the coordinator knows that no lease went out, not
-/// whether it refused or the launch gate never asked again (item 052).
+/// whether it refused or the launch gate never asked again.
 #[test]
 fn a_refusal_at_the_barrier_uses_no_attempt() {
     let d = dir();
@@ -4812,7 +4812,7 @@ fn a_stale_report_stops_grants_and_offers_but_never_drains() {
 
 /// An Opportunistic offer the node reports preparing (downloading inputs, waiting for a
 /// launch slot) keeps its deadline while the reports keep coming, so a preparation longer
-/// than one lease is not fenced; an offer nobody reports still expires (030, AGT-10).
+/// than one lease is not fenced; an offer nobody reports still expires.
 #[test]
 fn a_preparing_offer_does_not_expire_while_its_node_reports_it() {
     let d = dir();

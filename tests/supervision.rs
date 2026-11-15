@@ -2012,7 +2012,7 @@ fn no_oom_preference_is_claimed_where_the_platform_cannot_apply_it() {
 
 /// Once the agent has died, a supervisor's stderr is a pipe nobody reads; `eprintln!` panics
 /// on it, which would leave the workload unsupervised. Supervisor code reports through its
-/// non-panicking `report` helper instead (030, AGT-9).
+/// non-panicking `report` helper instead.
 #[test]
 fn supervisor_runtime_code_never_uses_eprintln() {
     for file in [

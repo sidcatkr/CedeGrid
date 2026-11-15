@@ -262,7 +262,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         coordinator_url: endpoint.clone(),
         tls: tls("node-0"),
         cpu_affinity: None,
-        // The transfer budget, 1 MiB/s unless the run sets another (item 054's two B1 runs).
+        // The transfer budget, 1 MiB/s unless the run sets another (two budgets are run).
         max_transfer_bytes_per_second: std::env::var("CEDEGRID_TEST_BURST_TRANSFER_BYTES")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -358,7 +358,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         .as_millis() as u64;
     let drained = drain_started + Duration::from_secs(60);
     // The supervisors' journal waits and their release times, read while the attempt
-    // directories exist: they are reclaimed after release (item 060).
+    // directories exist: they are reclaimed after release.
     let mut usage: BTreeMap<std::path::PathBuf, (Option<u64>, Option<u64>)> = BTreeMap::new();
     let mut collect = |state: &Path| {
         for attempt in fs::read_dir(state.join("attempts"))
@@ -505,7 +505,7 @@ async fn a_performance_node_admits_150_tasks_at_once_and_keeps_its_cadence() {
         "initial authorizations were refused for stale evidence"
     );
     assert_eq!(left, 0, "the operator drain released every run");
-    // B1's gates (item 056): no lease fenced after the drain and no supervisor error.
+    // B1's gates: no lease fenced after the drain and no supervisor error.
     assert_eq!(
         expired_after_drain, 0,
         "leases expired after the drain began"

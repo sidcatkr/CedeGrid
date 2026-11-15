@@ -779,7 +779,7 @@ fn existing_drain_does_not_trigger_unnecessary_additional_drain() {
 
 /// On a device with no other user, own work's GPU memory budget is the capacity less the floor
 /// and less the memory the device reports used that no process accounts for. The noise tolerance
-/// is a growth threshold and withholds nothing (SC-014, item 051).
+/// is a growth threshold and withholds nothing (SC-014).
 #[test]
 fn an_idle_device_withholds_no_noise_tolerance_from_gpu_memory() {
     let input = PolicyInput {
@@ -810,7 +810,7 @@ fn an_idle_device_withholds_no_noise_tolerance_from_gpu_memory() {
 /// The parts `held_back` keeps from own work add up to capacity less others' use (shown as
 /// `external`, with `unattributed` inside it) less the budget, on GPU memory and on RAM, with
 /// another user and without; the noise tolerance withholds nothing, so it is not a part
-/// (SC-016, item 056).
+/// (SC-016).
 #[test]
 fn the_held_back_parts_kept_from_own_work_are_capacity_less_others_use_less_the_budget() {
     use cedegrid::contention::ResourceKey;
@@ -1933,7 +1933,7 @@ fn best_effort_mode_config_rejects_empty_and_partial_authorization() {
     );
 }
 
-// Yielding defects D1–D6 from the code-quality audit, inverted by specs/001-contention-modes.
+// Yielding defects found in a code review, inverted by specs/001-contention-modes.
 
 fn large_gpu_snapshot(used_mib: u64, external_pids: Vec<u32>) -> Snapshot {
     let mut snap = gpu_snapshot();
@@ -2056,7 +2056,7 @@ fn a_family_is_noted_with_its_size_and_outsiders_with_their_reason() {
 /// GPU attribution unknown for one allocation, its device's entry missing from the
 /// observation, keeps its CPU and RAM readings: neither holds for it, while the device's
 /// memory charges it at max(request, last known) as unknown own usage, so its external usage
-/// is not inflated and GPU admission holds (FR-008, TEL-5).
+/// is not inflated and GPU admission holds (FR-008).
 #[test]
 fn unknown_gpu_attribution_keeps_the_cpu_and_ram_readings() {
     use cedegrid::contention::ResourceKey;
@@ -2193,7 +2193,7 @@ fn d2_vram_changes_below_the_noise_tolerance_are_not_growth() {
 }
 
 /// When GPU activity reads unknown, the reason that blocks admission names the check that
-/// failed: the collector's freshness decision, as T518 did for an own task's sample (item 051).
+/// failed: the collector's freshness decision, as T518 did for an own task's sample.
 #[test]
 fn the_reason_for_unknown_gpu_activity_names_the_failed_check() {
     let mut cfg = config();
@@ -2224,7 +2224,7 @@ fn the_reason_for_unknown_gpu_activity_names_the_failed_check() {
 /// A device the collector found Quiet admits in Yield First without a new driver sample, as at
 /// the launch recheck: an idle listed context returns no per-process sample, so asking for one
 /// kept the device unknown until some process produced a timestamp. The collector's Unknown
-/// still holds admission and Active still needs a quiet device (FR-010, FR-027, item 051).
+/// still holds admission and Active still needs a quiet device (FR-010, FR-027).
 #[test]
 fn a_quiet_device_without_a_new_sample_admits_in_yield_first() {
     use cedegrid::contention::{Admission, ResourceKey};
@@ -2302,7 +2302,7 @@ fn a_quiet_device_without_a_new_sample_admits_in_yield_first() {
 /// policy and at the launch recheck alike. Another account's context holds it, busy or not this
 /// interval, as does a context whose owner cannot be read, and without the contexts or their
 /// samples the device's class decides as before. The owner's memory still counts as usage beside
-/// own work (FR-027, FR-059, item 051).
+/// own work (FR-027, FR-059).
 #[test]
 fn the_owners_unmanaged_gpu_compute_does_not_hold_yield_first() {
     use cedegrid::contention::{Admission, ContentionMode, ResourceKey};
@@ -2343,7 +2343,7 @@ fn the_owners_unmanaged_gpu_compute_does_not_hold_yield_first() {
             contexts(&[unread], &[owner, unread], true),
             false,
         ),
-        // Item 054: another account's context quiet for the window does not hold the owner's
+        // Another account's context quiet for the window does not hold the owner's
         // use; one whose owner cannot be read, or that is busy, still does.
         (
             "another account quiet for the window",
@@ -2578,7 +2578,7 @@ fn d5_sampling_skew_between_own_and_host_cpu_keeps_the_budget() {
 
 /// The collector's summed own CPU bound (one tick of pending time per scope CPU,
 /// not per process) replaces the sum of per-allocation lower bounds, within that
-/// sum and the sum of upper bounds (item 024 Part 0).
+/// sum and the sum of upper bounds.
 #[test]
 fn the_summed_own_cpu_bound_applies_within_the_per_allocation_sums() {
     use cedegrid::contention::ResourceKey;
@@ -3136,7 +3136,7 @@ fn cpu_principal(uid: u32, is_owner: bool, cpu_millicores: u64) -> PrincipalUsag
 }
 
 /// An unreadable principal list is not a departure: admitted users stand through it and count
-/// at once when the list reads again, instead of qualifying over the window anew (TEL-9, FR-059).
+/// at once when the list reads again, instead of qualifying over the window anew (FR-059).
 #[test]
 fn admitted_principals_stand_through_an_unreadable_list() {
     let own = PolicyInput {
@@ -3182,7 +3182,7 @@ fn admitted_principals_stand_through_an_unreadable_list() {
 
 /// While the principal list cannot be read, own work's CPU share is at most the last one a
 /// readable list gave: unknown is no reason for a larger share. It stays held over many such
-/// intervals, and the first readable list replaces it (FR-059, Principle III, item 053).
+/// intervals, and the first readable list replaces it (FR-059, Principle III).
 #[test]
 fn the_cpu_share_under_an_unreadable_list_is_the_last_readable_one() {
     let own = PolicyInput {
@@ -3233,7 +3233,7 @@ fn the_cpu_share_under_an_unreadable_list_is_the_last_readable_one() {
 }
 
 /// The share kept for an unreadable list is the one under contention, so a list that goes
-/// unreadable as the CPU saturates still counts the admitted users (FR-059, item 053).
+/// unreadable as the CPU saturates still counts the admitted users (FR-059).
 #[test]
 fn a_list_that_goes_unreadable_as_the_cpu_saturates_still_counts_its_principals() {
     let own = PolicyInput {
@@ -3271,7 +3271,7 @@ fn a_list_that_goes_unreadable_as_the_cpu_saturates_still_counts_its_principals(
     assert_eq!(share(false, 8000, 2500), 2334);
 }
 
-/// With no readable list before, an unreadable one keeps today's rule (FR-059, item 053).
+/// With no readable list before, an unreadable one keeps today's rule (FR-059).
 #[test]
 fn an_unreadable_list_with_no_readable_one_before_it_is_unchanged() {
     let own = PolicyInput {
@@ -3298,7 +3298,7 @@ fn an_unreadable_list_with_no_readable_one_before_it_is_unchanged() {
 
 /// RAM: own work's fair share under an unreadable list is the last readable one, so in
 /// Performance own memory above it gives way at a floor breach in that interval, as it would
-/// with the list read (FR-059, FR-023, Principle II, item 053).
+/// with the list read (FR-059, FR-023, Principle II).
 #[test]
 fn own_memory_above_the_last_readable_share_gives_way_under_an_unreadable_list() {
     use cedegrid::contention::{ContentionMode, ResourceKey};
@@ -3807,7 +3807,7 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
 
 /// While no other principal is active on CPU, running opportunistic work is charged at its
 /// window mean, and at its p95 from the interval one appears: an over-admission while alone can
-/// only cost own work, and a burst only caps own work, with no drain (FR-034, item 049).
+/// only cost own work, and a burst only caps own work, with no drain (FR-034).
 #[test]
 fn cpu_admission_charges_the_mean_while_alone_and_the_p95_once_a_principal_appears() {
     const OWNER: u32 = 1000;
@@ -3900,7 +3900,7 @@ fn usage_held_back_by_a_cpu_step_is_not_admission_room() {
     let ids: Vec<String> = (0..13).map(|i| format!("t{i}")).collect();
     let mut engine = PolicyEngine::new();
     // Each task runs at its 250m request, or at what a cap allows, or not at all
-    // while paused, as the tasks in report 024 did.
+    // while paused, as measured tasks did.
     let mut limits: BTreeMap<String, u64> = BTreeMap::new();
     let mut evaluate = |external: u64, now: u64| {
         let usage = |id: &String| limits.get(id).copied().unwrap_or(250).min(250);
@@ -3970,7 +3970,7 @@ fn usage_held_back_by_a_cpu_step_is_not_admission_room() {
     assert!(calm.admission_headroom.cpu_millicores > 0);
 }
 
-/// Item 026 (FR-028): CPU and RAM report `admission_own_new` while their admission
+/// FR-028: CPU and RAM report `admission_own_new` while their admission
 /// is closed only by the node's own allocations that have no first measurement
 /// yet, or by the cooldown only they restarted; never for another cause.
 mod admission_own_new {
@@ -4266,7 +4266,7 @@ fn memory_headroom_uses_the_external_peak_over_its_window() {
 }
 
 /// One unknown RAM interval keeps the external peaks: once RAM is known again, admission
-/// still subtracts the window's peak until it ages out (FR-060, POL-4).
+/// still subtracts the window's peak until it ages out (FR-060).
 #[test]
 fn an_unknown_ram_interval_keeps_the_external_peaks() {
     let mut cfg = config();
@@ -4303,7 +4303,7 @@ fn a_quiet_gpu_context_counts_toward_the_device_peak() {
         .insert("relaxed_detection".into());
     let mut engine = PolicyEngine::new();
     let mut headroom = |used: u64, now: u64| {
-        // A healthy observation of one quiet external context, as in D3.
+        // A healthy observation of one quiet external context.
         let mut snap = large_gpu_snapshot(used, vec![4242]);
         snap.gpus[0].external_compute = ComputeActivity::Quiet;
         snap.gpus[0].compute_sample_id = Some(now + 1);
@@ -4436,7 +4436,7 @@ fn external_memory_peaks_follow_each_external_process() {
 }
 
 /// An unreadable process list is not an exit: each tracked external process keeps its peak
-/// through it, so remembered demand does not turn into admission room (TEL-9, FR-060, FR-077).
+/// through it, so remembered demand does not turn into admission room (FR-060, FR-077).
 #[test]
 fn an_unreadable_process_list_keeps_each_external_peak() {
     let mut engine = PolicyEngine::new();
@@ -4468,7 +4468,7 @@ fn an_unreadable_process_list_keeps_each_external_peak() {
 
 /// On a device, an unreadable process list keeps a tracked process's peak while the device's
 /// own list still shows the process, and drops it once that list shows it gone: the device's
-/// list is known evidence of the exit (TEL-9, FR-060).
+/// list is known evidence of the exit (FR-060).
 #[test]
 fn an_unreadable_process_list_keeps_a_gpu_peak_while_the_device_lists_the_process() {
     let mut engine = PolicyEngine::new();
@@ -4958,7 +4958,7 @@ fn a_gpu_memory_gap_holds_through_the_unknown_window() {
 /// Takes the measured GPU compute path after two measured intervals, for tests of that
 /// path; the quiet window's hysteresis has its own test.
 fn measured_at_once(cfg: &mut Config) {
-    // Two intervals span longer than the GPU sample age, which stays above one interval (TEL-3).
+    // Two intervals span longer than the GPU sample age, which stays above one interval.
     cfg.gpu.process_sample_max_age_ms = Some(600);
     cfg.contention.gpu_compute.quiet_window_intervals = Some(2);
     cfg.contention
@@ -5141,7 +5141,7 @@ fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
 
 /// The policy credits a GPU compute cap its supervisor reports applied at the cap's duty
 /// from the reported facts alone. Full and Tracked report the same facts for that cap
-/// (`tests/cgroup.rs`), so own work is credited alike in both (plan "Item 028").
+/// (`tests/cgroup.rs`), so own work is credited alike in both.
 #[test]
 fn a_reported_gpu_compute_cap_is_credited_at_its_duty() {
     use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
@@ -7133,7 +7133,7 @@ fn decision_snapshot() {
 /// Own CPU and host busy over the 8-interval window set the steady-state budget, while the
 /// per-interval estimate decides growth (FR-073).
 /// Yield First's scale-up cooldown keeps running through a change that forms no principal, and
-/// a change that lasts the principal window restarts it, as in every mode (FR-034, item 049).
+/// a change that lasts the principal window restarts it, as in every mode (FR-034).
 mod yield_first_cooldown {
     use super::*;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
@@ -7410,7 +7410,7 @@ mod yield_first_cooldown {
     }
 
     /// Beside an admitted principal, an owner's login-sized burst does not restart Yield
-    /// First's cooldown: only a principal's cause does (FR-034, item 053).
+    /// First's cooldown: only a principal's cause does (FR-034).
     #[test]
     fn an_owner_login_beside_an_admitted_principal_does_not_restart_it() {
         assert!(allowed_beside_a_principal(
@@ -7453,7 +7453,7 @@ mod yield_first_cooldown {
     }
 
     /// Unattributed CPU already past the principal window: an owner's login listed under the
-    /// owner does not restart it, and that usage's own rise does (FR-034, item 053).
+    /// owner does not restart it, and that usage's own rise does (FR-034).
     #[test]
     fn an_owner_login_beside_unattributed_usage_past_the_window_does_not_restart_it() {
         assert!(allowed_beside_a_principal(0, 300, (1200, &[], 300), 2));
@@ -7589,7 +7589,7 @@ mod measurement_window {
             snap.managed_cpu_window_lower_millicores = Some(own_window);
         }
         snap.managed_cpu_lower_millicores = Some(own);
-        // A readable list with another account's process, at no usage (item 058).
+        // A readable list with another account's process, at no usage.
         snap.principals = Some(vec![
             super::cpu_principal(1000, true, 0),
             super::cpu_principal(2000, false, 0),
@@ -7619,7 +7619,7 @@ mod measurement_window {
     /// A window that was reset is refilling: the per-interval estimate alone carries its wide
     /// bound, which must not read as external growth. The last window's estimate stands, by the
     /// window's own rule, for at most one window; growth beyond the bound applies at once
-    /// (FR-018, Principle III, item 049).
+    /// (FR-018, Principle III).
     #[test]
     fn a_refilling_window_keeps_the_last_estimate_within_the_per_interval_bound() {
         let config = config();
@@ -7655,7 +7655,7 @@ mod measurement_window {
     /// Another user's measured usage is not looseness: a new user at 40 m (1% of capacity, the
     /// default `principal_min_percent`) while the window refills, inside a wide own bound, ends
     /// the kept estimate in the interval its measured usage shows it, in every mode, and own
-    /// work's target falls in that interval (FR-018, SC-002, item 055).
+    /// work's target falls in that interval (FR-018, SC-002).
     #[test]
     fn a_measured_rise_of_another_user_ends_the_kept_estimate() {
         for mode in [
@@ -7739,7 +7739,7 @@ mod measurement_window {
 
     /// The same refill where the list cannot show another user's rise keeps no estimate: with no
     /// list, and with the owner alone in it, the interval's own estimate applies, and the CPU
-    /// status says why (FR-018, item 058).
+    /// status says why (FR-018).
     #[test]
     fn a_refill_without_another_account_in_the_list_keeps_no_estimate() {
         let owner_only = || Some(vec![super::cpu_principal(1000, true, 0)]);
@@ -7799,7 +7799,7 @@ mod measurement_window {
         assert_eq!(external(&refilling), Some(10), "looseness is not growth");
     }
 
-    /// The record names the sampler's check that failed for an allocation (FR-018, item 049).
+    /// The record names the sampler's check that failed for an allocation (FR-018).
     #[test]
     fn an_unknown_allocation_names_the_failed_check() {
         let mut task = allocation("a", AllocationPhase::Running, resources(250, 0, 0), None);
@@ -7904,7 +7904,7 @@ mod measurement_window {
 }
 
 /// One missing observation keeps an allocation's admission p95 window: once observed again
-/// it is charged at its p95 at once, not at its request for another window (POL-4).
+/// it is charged at its p95 at once, not at its request for another window.
 #[test]
 fn a_missing_observation_keeps_the_admission_p95_window() {
     let cfg = config();
@@ -8190,7 +8190,7 @@ mod own_over_target {
         shares
     }
 
-    /// Report 026's run 6 shape: 16 tasks of 250m that make up lost CPU, on 4 CPUs beside a
+    /// A measured shape: 16 tasks of 250m that make up lost CPU, on 4 CPUs beside a
     /// steady 60m user, in Yield First for 5 minutes, read one interval late with
     /// per-interval noise inside the bound. No pause or drain, caps that change only when
     /// external usage changes, and own work averaging at least 90% of capacity minus the user
@@ -8668,8 +8668,8 @@ mod floors_by_mode {
     /// `z`, which lost the least progress. `z` takes hints but never frees. It alone is asked
     /// for the excess, and it is drained when its hint deadline passes; the in-share tasks get
     /// no step for it, where they were hinted one interval later before. In Yield First they are
-    /// asked for the margin beyond it from the next interval (FR-016, FR-023, FR-037, items 051
-    /// and 054).
+    /// asked for the margin beyond it from the next interval (FR-016, FR-023,
+    /// FR-037).
     #[test]
     fn an_over_share_task_that_ignores_its_hint_is_drained_at_the_deadline() {
         let class = AllocationClass::Opportunistic;
@@ -8689,7 +8689,7 @@ mod floors_by_mode {
             for interval in &run {
                 // In Yield First the 6 200 MiB of margin beyond the excess are asked by the cost
                 // order, which `z` leads at first; once its hint holds, the in-share tasks are
-                // asked for them (item 054).
+                // asked for them.
                 let margin = mode == ContentionMode::YieldFirst && interval.now >= 500;
                 assert!(
                     margin || interval.steps.keys().all(|id| id == "z"),
@@ -8724,7 +8724,7 @@ mod floors_by_mode {
     /// `random::46`'s shape in Yield First: own work 16 000 MiB with 600 MiB free, 400 MiB over
     /// its fair share, all in `p`, and the margin lowers own work's target to 9 400 MiB. `p` is
     /// asked for its excess and the 6 200 MiB beyond it go by the cost order, so `p` is not
-    /// emptied while `q` keeps the whole target (FR-016, FR-023, item 054).
+    /// emptied while `q` keeps the whole target (FR-016, FR-023).
     #[test]
     fn an_over_share_task_is_asked_for_its_excess_and_the_margin_goes_by_the_cost_order() {
         let class = AllocationClass::Opportunistic;
@@ -8743,10 +8743,10 @@ mod floors_by_mode {
     }
 
     /// The same shape with `p`, the over-share task, also leading the cost order: beyond its
-    /// 400 MiB excess it is asked what the cost order asks of it, as before item 051. In Yield
+    /// 400 MiB excess it is asked what the cost order asks of it, as it was before. In Yield
     /// First that empties `p` for the margin and asks `q` only the 4 600 MiB left; in Neutral
     /// and Performance only the excess is asked. No in-share task pays any of `p`'s excess
-    /// (FR-016, R75, item 056).
+    /// (FR-016, R75).
     #[test]
     fn an_over_share_task_that_leads_the_cost_order_is_asked_what_the_order_asks_of_it() {
         let class = AllocationClass::Opportunistic;
@@ -8777,7 +8777,7 @@ mod floors_by_mode {
     /// Neutral, when the floor needs more than the excess: 400 MiB to free, 300 MiB of it over
     /// the fair share, in `z`. `z` is asked for its 300 MiB and `a` for the 100 MiB beyond it in
     /// the same interval; nobody pays any part of `z`'s excess. In Performance in-share memory is
-    /// kept for a breach others caused, so only `z` is asked (FR-016, FR-023, item 054).
+    /// kept for a breach others caused, so only `z` is asked (FR-016, FR-023).
     #[test]
     fn the_floor_beyond_the_excess_is_asked_in_the_same_interval_where_in_share_memory_gives_way() {
         let class = AllocationClass::Opportunistic;
@@ -8809,7 +8809,7 @@ mod floors_by_mode {
     /// 5 000 ms, and returns at 5 500 ms. The hint's wait starts again with the need, on the
     /// clock its step escalates by, and the hint counts what it was asked through that renewed
     /// wait: the 200 MiB excess is asked of `z` alone, `z` is drained when the renewed deadline
-    /// passes, and the in-share tasks are never stepped for it (FR-016, FR-023, R76, item 056).
+    /// passes, and the in-share tasks are never stepped for it (FR-016, FR-023, R76).
     #[test]
     fn a_held_hint_counts_through_its_renewed_wait_when_the_need_returns() {
         let class = AllocationClass::Opportunistic;
@@ -8873,7 +8873,7 @@ mod floors_by_mode {
     /// over-share task, is hinted for its 1 000 MiB excess; at 1 000 ms its wait is over, but it
     /// may not be drained while Opportunistic `o` is left (FR-024), so its excess passes on. It
     /// is asked for those 1 000 MiB once, not again in the remainder, and the next task in the
-    /// cost order is asked for them (FR-016, FR-023, R76, item 056).
+    /// cost order is asked for them (FR-016, FR-023, R76).
     #[test]
     fn an_over_share_task_is_asked_for_its_own_part_once() {
         let facts = over_share_facts(&["z", "x", "o"], &[], &[("z", 1_000)]);
@@ -9048,7 +9048,7 @@ mod floors_by_mode {
     /// The same over-share task frees what it was asked for at 2 s: 300 MiB, or 6 500 MiB in
     /// Yield First, whose margin lowers own work's target to 9 500 MiB. It is not drained, and
     /// the in-share tasks were never asked for its excess; in Yield First they are asked for the
-    /// margin once its hint holds (FR-023, items 051 and 054).
+    /// margin once its hint holds (FR-023).
     #[test]
     fn a_hint_ready_over_share_task_that_frees_in_time_is_not_drained() {
         let class = AllocationClass::Opportunistic;
@@ -9079,7 +9079,7 @@ mod floors_by_mode {
             for interval in &run {
                 assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
                 // In Yield First the in-share tasks give way for the margin once `z`'s hint
-                // holds (item 054).
+                // holds.
                 let margin = mode == ContentionMode::YieldFirst && interval.now >= 500;
                 assert!(
                     margin || interval.steps.keys().all(|id| id == "z"),
@@ -9094,7 +9094,7 @@ mod floors_by_mode {
     /// Two plain tasks could each cover what own work holds over its target: 300 MiB, or
     /// 6 500 MiB in Yield First. Only the first in victim order is drained, also while it still
     /// runs: a drain already decided counts in full, so no second task is drained for the same
-    /// excess (FR-023, item 051).
+    /// excess (FR-023).
     #[test]
     fn no_more_over_share_tasks_are_drained_than_bring_own_memory_within_its_share() {
         let class = AllocationClass::Opportunistic;
@@ -9132,7 +9132,7 @@ mod floors_by_mode {
     /// A small plain task holds the whole 300 MiB over the share and is drained. While it still
     /// runs, the in-share tasks get nothing. Once it is draining, free memory is 400 MiB short
     /// of the floor and the drain frees 300, so the next task in order is asked for the 100 MiB
-    /// left, and no other task is asked (item 051, rule 4).
+    /// left, and no other task is asked (rule 4).
     #[test]
     fn in_share_tasks_are_asked_only_after_every_over_share_task_was_handled() {
         let class = AllocationClass::Opportunistic;
@@ -9173,10 +9173,10 @@ mod floors_by_mode {
         }
     }
 
-    /// Item 048's C4 run 2: Performance, every task Guaranteed, the over-share task plain. It
+    /// A measured shape: Performance, every task Guaranteed, the over-share task plain. It
     /// cannot be hinted, and its drain waits for the breach window, so until the breach turns
     /// critical nothing is stepped; then it is sent TERM. The in-share tasks, which take hints,
-    /// get none, and only the over-share task is marked (FR-023, FR-024, FR-063, item 051).
+    /// get none, and only the over-share task is marked (FR-023, FR-024, FR-063).
     #[test]
     fn a_hint_deaf_over_share_task_is_drained_and_in_share_tasks_keep_their_memory() {
         let class = AllocationClass::Guaranteed;
@@ -9207,13 +9207,13 @@ mod floors_by_mode {
             Some(YieldStep::Terminate)
         );
         // The in-share tasks are asked once to save their progress; `z` gets its hint and its
-        // drain (FR-075, item 054).
+        // drain (FR-075).
         assert_eq!(run[0].saved, ["a", "b", "c"]);
         assert!(run[1..].iter().all(|interval| interval.saved.is_empty()));
     }
 
     /// One breach episode asks each in-share task once to save its progress, and a second
-    /// episode asks again (FR-075, item 054).
+    /// episode asks again (FR-075).
     #[test]
     fn each_breach_episode_asks_the_in_share_tasks_once() {
         let class = AllocationClass::Guaranteed;
@@ -9237,7 +9237,7 @@ mod floors_by_mode {
     }
 
     /// Once the drained over-share task is gone and free memory is back, admission has room for
-    /// it again (item 051, rule 3; FR-061's backoff applies as before).
+    /// it again (rule 3, FR-061's backoff applies as before).
     #[test]
     fn a_drained_over_share_task_is_admitted_again_once_its_memory_fits() {
         let class = AllocationClass::Opportunistic;
@@ -9578,7 +9578,7 @@ mod save_progress {
 
     /// A breach own memory caused lists the in-share task too, once: 16 000 MiB own is above its
     /// 15 500 MiB share beside 16 000 MiB external, the excess is `b`'s (the best fit), and `a`
-    /// is asked to save its progress; `b` gets its hint (FR-075, item 054).
+    /// is asked to save its progress; `b` gets its hint (FR-075).
     #[test]
     fn an_own_fault_breach_lists_the_in_share_tasks() {
         let a = BTreeSet::from(["a".to_string()]);

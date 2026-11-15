@@ -33,7 +33,7 @@ fn cpu_monotonic_idle_complement_covers_observed_missing_busy_ticks() {
 fn cpu_idle_complement_preserves_busy_ticks_and_needs_an_interval() {
     let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
     tracker.observe(Ok("cpu0 100 0 0 100 0 0 0 0\n"), Some(&[0]), 0, 1500);
-    // Iowait is idle (TEL-1): 25 busy ticks of 50 with one tick of rounding.
+    // Iowait is idle: 25 busy ticks of 50 with one tick of rounding.
     let observed = tracker.observe(Ok("cpu0 125 0 0 100 25 0 0 0\n"), Some(&[0]), 500, 1500);
     assert_eq!(observed.busy_millicores, Some(520));
     assert_eq!(
@@ -52,7 +52,7 @@ fn cpu_busy_bounds_round_by_one_tick_and_count_iowait_as_idle() {
     let plain = tracker.observe(Ok("cpu0 125 0 0 125 0 0 0 0\n"), Some(&[0]), 500, 1500);
     assert_eq!(plain.busy_millicores, Some(520));
     assert_eq!(plain.busy_lower_millicores, Some(480));
-    // 25 user and 25 iowait ticks: iowait is idle in both bounds (TEL-1).
+    // 25 user and 25 iowait ticks: iowait is idle in both bounds.
     let iowait = tracker.observe(Ok("cpu0 150 0 0 125 25 0 0 0\n"), Some(&[0]), 1000, 1500);
     assert_eq!(iowait.busy_millicores, Some(520));
     assert_eq!(iowait.busy_lower_millicores, Some(480));
@@ -62,7 +62,7 @@ fn cpu_busy_bounds_round_by_one_tick_and_count_iowait_as_idle() {
 }
 
 /// Iowait on a CPU is idle time another task may run in: the busy upper bound does not count
-/// it, so own threads blocked on disk are not booked as external CPU (FR-073, TEL-1).
+/// it, so own threads blocked on disk are not booked as external CPU (FR-073).
 #[test]
 fn iowait_is_idle_in_both_busy_bounds() {
     let mut tracker = CpuUsageTracker::with_clock_tick_hz(std::num::NonZeroU64::new(100).unwrap());
@@ -428,7 +428,7 @@ fn fixture_probe_records_ancestor_limits_effective_sets_and_hierarchy_without_wr
 }
 
 /// A CPU the task may run on but that is offline has no `/proc/stat` counter: it is left out
-/// of the CPU set, so CPU telemetry stays known (TEL-4).
+/// of the CPU set, so CPU telemetry stays known.
 #[test]
 fn an_allowed_but_offline_cpu_is_left_out_of_the_cpu_set() {
     let temp = tempfile::tempdir().unwrap();

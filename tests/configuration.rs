@@ -1057,7 +1057,7 @@ fn settings_that_lengthen_reclaim_are_bounded() {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }
     for good in [
-        // The interval stays below the GPU sample age (TEL-3).
+        // The interval stays below the GPU sample age.
         "[monitor]\ninterval_ms = 10000\n[gpu]\nprocess_sample_max_age_ms = 10001",
         "[lifecycle]\ndrain_timeout_ms = 60000\nterm_grace_ms = 60000",
         "[kernel]\nmonitor_interval_ms = 10000\nfreshness_intervals = 20",
@@ -1089,7 +1089,7 @@ fn an_unset_sample_age_is_derived_from_the_interval() {
 
 /// An explicit sample age at or below the monitor interval would let the per-process cursor
 /// expire at every read, so it is refused on every host; the error names both keys and the
-/// smallest value that loads (FR-070, TEL-3).
+/// smallest value that loads (FR-070).
 #[test]
 fn an_explicit_sample_age_at_or_below_the_interval_is_refused() {
     for (interval, age) in [(3000, 2000), (3000, 3000), (500, 400)] {

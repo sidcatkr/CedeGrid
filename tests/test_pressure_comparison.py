@@ -159,7 +159,7 @@ class GateRunnerTests(unittest.TestCase):
             self.assertIn(option,usage)
 
     def test_the_readiness_wait_is_an_option_with_the_old_default(self):
-        """Yield First waits for a quiet device before it admits, which can pass 60 s (item 051)."""
+        """Yield First waits for a quiet device before it admits, which can pass 60 s."""
         plan=lambda *extra:json.loads(subprocess.run([sys.executable,str(Path(__file__).parents[1]/'tools/pressure_comparison.py'),
             '--root','/unused','--output','/unused','--mode','gpu','--gpu-uuid','GPU-test',*extra],
             capture_output=True,text=True,check=True).stdout)['configuration']['readiness_seconds']
@@ -219,7 +219,7 @@ class GateRunnerTests(unittest.TestCase):
         import pressure_probe
         verdict=pressure_probe.window_verdict
         self.assertEqual(verdict({'completed_units':10}),'refused: no in-window even/odd check recorded')
-        # The window's own check decides (item 058), whatever the warm-up found.
+        # The window's own check decides, whatever the warm-up found.
         self.assertEqual(verdict({'self_check':{'ratio':1.05,'biased':True},'window_check':{'ratio':1.004,'biased':False}}),'measured')
         self.assertTrue(verdict({'self_check':{'ratio':1.0,'biased':False},'window_check':{'ratio':1.05,'biased':True}}).startswith('refused'))
         # A ratio over the limit is refused even if the probe did not mark it.
@@ -227,7 +227,7 @@ class GateRunnerTests(unittest.TestCase):
         self.assertTrue(verdict({'window_check':{'ratio':None,'biased':True}}).startswith('refused'))
 
     def test_a_unit_that_alternates_only_once_the_loop_runs_is_refused(self):
-        # Item 058: the probe's units cost the same until the real loop has run a while, then
+        # The probe's units cost the same until the real loop has run a while, then
         # alternate 1.0 and 1.5 ms. A check made before `ready.json` cannot see it; the window's
         # own even/odd sums must, and the window is refused.
         import argparse,pressure_probe

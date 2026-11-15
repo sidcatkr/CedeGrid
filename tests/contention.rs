@@ -3674,8 +3674,7 @@ mod psi_saturation {
     }
 
     /// A principal recorded as satisfied that now uses clearly less, beside own work at its
-    /// Performance target: the saturation own work causes does not make the target cycle
-    /// (POL-5).
+    /// Performance target: the saturation own work causes does not make the target cycle.
     #[test]
     fn own_caused_saturation_beside_a_lower_satisfied_principal_keeps_the_target_steady() {
         let mut host = Host::new(ContentionMode::Performance).wanting(5000);
@@ -3707,8 +3706,8 @@ mod psi_saturation {
     }
 
     /// One interval in which own usage is unknown holds CPU but keeps the satisfied record:
-    /// on return nothing probes again and the target stays the uncontended one (FR-021,
-    /// POL-4).
+    /// on return nothing probes again and the target stays the uncontended one
+    /// (FR-021).
     #[test]
     fn a_held_interval_keeps_the_satisfied_record() {
         let mut host = Host::new(ContentionMode::Neutral).wanting(7200);
@@ -3972,7 +3971,7 @@ fn decision_snapshot() {
     snapshot::check("contention", scenarios);
 }
 
-/// Report 021's T178 contender, item 023 Part 3: a test, not a policy change. Own
+/// A measured contender: a test, not a policy change. Own
 /// work is 16 tasks of 250 m on 4000 m, measured exactly; a contender that wants
 /// one core starts once own work has ramped. The simulated host splits CPU by
 /// threads, weighted max-min, and honours the caps the policy applies.
@@ -4097,7 +4096,7 @@ mod t178_contender {
         served
     }
 
-    /// Report 027 run 5 (FR-013): in Performance, with one task waiting on I/O now and then
+    /// A measured return (FR-013): in Performance, with one task waiting on I/O now and then
     /// while own work's total stays within the contention floor of its target, no held
     /// `own_over_target` cap is raised or removed; own work stays at its target within the
     /// contention floor and the contender keeps its core.
@@ -4231,7 +4230,7 @@ mod t178_contender {
     }
 
     /// With exact own measurement, the contender reaches its demand in every mode,
-    /// as another user and under the account that runs CedeGrid, so report 021's
+    /// as another user and under the account that runs CedeGrid, so a measured
     /// 0.72 core is not explained by the account the contender ran under.
     #[test]
     fn the_contender_reaches_its_demand_with_exact_own_measurement() {
@@ -4249,15 +4248,14 @@ mod t178_contender {
         assert!(served_from(YieldFirst, true) <= 2);
         // The account's own unmanaged program is part of the owner's principal, so
         // in Neutral it never contends for a fair share: it is served only as own
-        // work's margin frees capacity, after 5 intervals here (report 023,
-        // Decisions needed).
+        // work's margin frees capacity, after 5 intervals here.
         let owner = served_from(Neutral, true);
         assert!((3..=10).contains(&owner), "{owner}");
     }
 }
 
 /// Held caps rise within the spare, and tasks that make up lost CPU do not cycle
-/// once caps hold from their first period (FR-013, SC-015, report 024).
+/// once caps hold from their first period (FR-013, SC-015).
 mod cap_rises {
     use super::*;
     use crate::snapshot::PolicyEngine;
@@ -4494,7 +4492,7 @@ mod cap_rises {
     }
 }
 
-/// CPU returns at once once contention has fully ended (FR-034, item 027 Part 5b): own work
+/// CPU returns at once once contention has fully ended (FR-034): own work
 /// of 16 tasks of 250 m on 4000 m beside a contender of another user. The simulated host
 /// splits CPU by threads, weighted max-min, and honours the caps the policy applies.
 /// New victims of a contended CPU excess share it by usage within their tier, at one level, as
@@ -4838,7 +4836,7 @@ mod contention_ended {
     }
 
     /// An unknown CPU interval after the contender leaves keeps the quiet count, so the return
-    /// is late by that one interval only (FR-034, POL-4).
+    /// is late by that one interval only (FR-034).
     #[test]
     fn an_unknown_interval_keeps_the_quiet_count() {
         for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
@@ -4879,8 +4877,8 @@ mod contention_ended {
     /// The 033 batch's run 7 shape (FR-034, Q15, R44): at the contender's end the held caps ran
     /// from the minimum duty up (1 m to 253 m), each binding. At the quiet count the held caps
     /// together reach the mode's target in one move, so in Yield First own usage is back within
-    /// 2 intervals of its quiet count, not in rises one dwell apart (6.5 s before item 034).
-    /// Neutral's (3.5 s before item 034) and Performance's (1.0 s) returns on the same shape
+    /// 2 intervals of its quiet count, not in rises one dwell apart (6.5 s before).
+    /// Neutral's (3.5 s before) and Performance's (1.0 s) returns on the same shape
     /// stay within their 3 s and get no slower.
     #[test]
     fn uneven_held_caps_return_to_the_target_in_one_move() {
@@ -4925,7 +4923,7 @@ mod contention_ended {
         }
     }
 
-    /// Report 029 run 7's return (FR-034, Decision 2): 13 steady 250 m tasks in Yield First
+    /// A measured return (FR-034): 13 steady 250 m tasks in Yield First
     /// and 15 in Performance beside a one-core contender for 30 s, each capped task running at
     /// 85% of a binding cap. Once the quiet count says contention has ended, own usage comes
     /// back to its level before in one move: in Yield First within 2 intervals of the quiet
@@ -5247,7 +5245,7 @@ mod launch_nice {
     }
 }
 
-/// Item 039: external GPU compute demand read where own work ran uncapped (FR-021, FR-022, Q19).
+/// External GPU compute demand read where own work ran uncapped (FR-021, FR-022, Q19).
 mod gpu_demand {
     use super::*;
     use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
@@ -5888,7 +5886,7 @@ mod gpu_demand {
 
     /// Yield First's targets on T434's and T436's fixtures, with the node in Yield First, are
     /// those it had from the interval's amount alone or lower, per interval (FR-021, FR-065):
-    /// pinned from the code before item 039 (`15aa96e`), which repeats with the readings every
+    /// pinned from the code before the change (`15aa96e`), which repeats with the readings every
     /// 60 intervals, and holds 250 beside the saturating user.
     #[test]
     fn yield_first_targets_are_the_intervals_or_lower() {
@@ -5939,12 +5937,12 @@ mod gpu_demand {
         );
     }
 
-    /// Replays a recorded run's GPU readings through the policy, open loop (plan "Item 039" 5):
+    /// Replays a recorded run's GPU readings through the policy, open loop:
     /// `CEDEGRID_GPU_DEMAND_REPLAY` names a run folder with `gpu-trace.json` and
     /// `gpu-replay.json`, `CEDEGRID_GPU_DEMAND_MODE` its mode (`performance`, `neutral`). Own work
     /// runs in the managed windows only; the readings are those recorded under the run's own caps.
     /// With `CEDEGRID_GPU_DEMAND_OWN=unmanaged` the owner's processes in the unmanaged windows are
-    /// taken as own work's instead, so the policy reads them uncapped (plan "Item 043" 6).
+    /// taken as own work's instead, so the policy reads them uncapped.
     #[test]
     #[ignore = "replay: needs CEDEGRID_GPU_DEMAND_REPLAY"]
     fn replay_gpu_demand() {
@@ -5952,7 +5950,7 @@ mod gpu_demand {
             std::env::var_os("CEDEGRID_GPU_DEMAND_REPLAY")
                 .expect("CEDEGRID_GPU_DEMAND_REPLAY names a run folder"),
         );
-        // Item 045: `aggressive` is Performance with no GPU compute margin, as on the host.
+        // `aggressive` is Performance with no GPU compute margin, as on the host.
         let config = match std::env::var("CEDEGRID_GPU_DEMAND_MODE").as_deref() {
             Ok("neutral") => mode_config(ContentionMode::Neutral),
             Ok("aggressive") => time_slice::aggressive_config(),
@@ -5965,7 +5963,7 @@ mod gpu_demand {
         let own_window = std::env::var("CEDEGRID_GPU_DEMAND_OWN").unwrap_or("managed".into());
         let mut engine = PolicyEngine::new();
         let mut now = 0;
-        // Item 041: the recordings predate the device's contexts. The other user's processes are
+        // The recordings predate the device's contexts. The other user's processes are
         // those listed while it ran alone, the owner's unmanaged ones the other listed processes,
         // and own work's the sampled ones not listed as external; the device is taken as
         // time-sliced, as the test host's has neither MPS nor MIG.
@@ -6034,7 +6032,7 @@ mod gpu_demand {
                         .filter(|pid| peer.contains(pid))
                         .map(|pid| (pid, peer_uid))
                         .collect(),
-                    // Item 044: the recordings predate the flag; samples were read where the
+                    // The recordings predate the flag; samples were read where the
                     // interval recorded any process's.
                     samples_readable: gpu
                         .compute_sampling
@@ -6049,7 +6047,7 @@ mod gpu_demand {
             let (mut last, mut own_share) = (None, None);
             let (mut held, mut counts) = (0, vec![]);
             let mut steps: BTreeMap<String, usize> = BTreeMap::new();
-            // Item 046: d0, w and d0' per decision.
+            // d0, w and d0' per decision.
             type D0Key = (
                 Option<u64>,
                 Option<u64>,
@@ -6193,7 +6191,7 @@ mod gpu_demand {
     }
 
     /// Replays one recorded window with its recorded contexts through the policy, open loop
-    /// (item 053): `CEDEGRID_TIME_SLICE_REPLAY` names a run folder with `gpu-replay.json` and
+    ///: `CEDEGRID_TIME_SLICE_REPLAY` names a run folder with `gpu-replay.json` and
     /// `gpu-trace.json`, `CEDEGRID_TIME_SLICE_WINDOW` the window's index (5 for the Full run, 3
     /// for the Tracked one). The run's `alone` window feeds the estimate first; then two own
     /// allocations run in Performance. From the first decision whose device lists both own
@@ -6325,7 +6323,7 @@ mod gpu_demand {
         0, 0, 250, 990, 330, 990, 0, 0, 990, 990, 0, 0, 990, 990, 0, 580, 990, 440, 0, 440,
     ];
 
-    /// A time-sliced device (item 040): each busy context gets an equal slice of the time the
+    /// A time-sliced device: each busy context gets an equal slice of the time the
     /// device is busy. The other user, saturating, runs alone for 60 intervals, then own work
     /// runs `contexts(i)` contexts at the duty its last decision sent and holds duty × its slices,
     /// the other user the rest; own work's reading swings as the recorded pattern does around that
@@ -6609,7 +6607,7 @@ mod gpu_demand {
         assert_eq!(record_of(&fresh).own_uncapped, None);
     }
 
-    /// Item 041's time-sliced device, with its contexts listed and sampled: each busy context
+    /// A time-sliced device, with its contexts listed and sampled: each busy context
     /// gets an equal slice of the time the device is busy (FR-021, Q22).
     mod time_slice {
         use super::*;
@@ -6816,7 +6814,7 @@ mod gpu_demand {
 
         /// The counts come from every interval whose samples are readable, also while own work is
         /// capped and no uncapped interval feeds the estimate: a second own process that starts
-        /// computing under the cap counts at once (FR-021, item 053).
+        /// computing under the cap counts at once (FR-021).
         #[test]
         fn the_counts_update_while_own_work_is_capped() {
             let run = saturating_with(
@@ -6838,7 +6836,7 @@ mod gpu_demand {
         }
 
         /// A listed context that is not own work, the owner's unmanaged one or another user's,
-        /// counts only while sampled: unchanged (FR-021, item 053).
+        /// counts only while sampled: unchanged (FR-021).
         #[test]
         fn a_listed_context_that_is_not_own_work_counts_only_when_sampled() {
             use cedegrid::model::{CountedBy, OwnCounted};
@@ -7323,7 +7321,7 @@ mod gpu_demand {
             }
         }
 
-        /// Item 043's tick-level time-sliced device: each interval is 100 ticks. Own work's m
+        /// A tick-level time-sliced device: each interval is 100 ticks. Own work's m
         /// contexts run in the first duty × 100 ticks; each external principal (UID, contexts,
         /// demand in thousandths of the device it would take alone) runs while it still wants
         /// time; each busy context takes an equal part of a tick. Returns own work's share, each
@@ -8328,7 +8326,7 @@ mod gpu_demand {
     }
 }
 
-/// Item 044: own allocations' GPU duty cycles within each period, beside one saturating context,
+/// Own allocations' GPU duty cycles within each period, beside one saturating context,
 /// every busy context an equal share of each millisecond (FR-021, Q31, R52).
 mod gpu_phase {
     use cedegrid::actuation::AlignedPhase;

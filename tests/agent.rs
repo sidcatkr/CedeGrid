@@ -2492,7 +2492,7 @@ mod operator_limits {
 
 /// A coordinator that accepts connections and never answers does not stop the agent's
 /// loop: it keeps sampling (and so yielding) about once per monitor interval, retrying its
-/// requests each iteration (030, AGT-4).
+/// requests each iteration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hung_coordinator_does_not_stall_sampling() {
     let service = Service::start(
@@ -3004,7 +3004,7 @@ async fn an_agent_whose_intervals_end_at_the_observation_write_keeps_renewing() 
 }
 
 /// An agent whose stdout reader went away keeps working and stops normally: its event lines
-/// are diagnostics, and a broken pipe there is no reason to fail (030, AGT-6).
+/// are diagnostics, and a broken pipe there is no reason to fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_stdout_does_not_end_the_agent() {
     let service = Service::start(
@@ -3153,7 +3153,7 @@ async fn sighup_applies_a_mode_change_and_refuses_a_path_change() {
 }
 
 /// A live supervisor that does not answer the new agent's first query is re-adopted on a
-/// later iteration once it answers, so its job completes unyielded (FR-080, 030 AGT-8).
+/// later iteration once it answers, so its job completes unyielded (FR-080).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_supervisor_that_misses_the_first_query_is_readopted_later() {
     let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
@@ -3225,7 +3225,7 @@ async fn a_supervisor_that_misses_the_first_query_is_readopted_later() {
     assert!(!outcome.yielded, "{outcome:?}");
 }
 
-/// Item 033's workload: a leader, with 2 forked workers unless `PIN_FAMILY=0`, each doing
+/// A family workload: a leader, with 2 forked workers unless `PIN_FAMILY=0`, each doing
 /// 1.5 s of CPU work, so a stopped member only finishes once it is continued. With
 /// `PIN_HANDLERS=1` each logs SIGHUP and SIGCONT and keeps running; otherwise they keep the
 /// default disposition. The leader writes `done` once its workers finished cleanly.
@@ -3312,7 +3312,7 @@ impl Service {
 }
 
 /// Kill a Tracked run's supervisor while its family is stopped, with the agent alive or
-/// down at that moment, and record what each member received and how the run ended (033).
+/// down at that moment, and record what each member received and how the run ended.
 #[cfg(target_os = "linux")]
 async fn supervisor_loss(
     class: AllocationClass,

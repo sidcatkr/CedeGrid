@@ -2530,7 +2530,7 @@ impl supervision::SupervisorControl for PauseAfterLeaderExit {
 }
 
 /// Once the leader has exited, its draining children take no new runtime step, so a pause
-/// cannot stop a child that must see its drain file (030, SUP-6).
+/// cannot stop a child that must see its drain file.
 #[test]
 fn no_runtime_step_reaches_children_draining_after_the_leader_exit() {
     let dir = tempfile::tempdir().unwrap();
@@ -2593,7 +2593,7 @@ while not (d/'child.pid').exists():
 }
 
 /// A failure in the supervisor's own bookkeeping, here a child's journal transition, holds the
-/// run and is retried; it never drains the leader (030, R3).
+/// run and is retried; it never drains the leader (R3).
 #[test]
 fn a_bookkeeping_failure_holds_and_retries_instead_of_draining() {
     let dir = tempfile::tempdir().unwrap();
@@ -2636,7 +2636,7 @@ Path('leader-done').write_text('1')
     );
 }
 
-/// A control driven by a closure over the reports so far, for the family tests (item 031).
+/// A control driven by a closure over the reports so far, for the family tests.
 #[cfg(target_os = "linux")]
 struct Driven<F: FnMut(&[supervision::SupervisorReport]) -> Vec<supervision::SupervisorCommand>> {
     reports: Vec<supervision::SupervisorReport>,
@@ -2954,7 +2954,7 @@ while len(list(Path('.').glob('polite-*')) + list(Path('.').glob('stubborn-*')))
 
 /// A drain signals the leader first, so the workload can stop its own workers; members still
 /// alive after the grace get SIGKILL. A leader that exits during the drain leaves its members
-/// TERMed at once and KILLed by the drain's deadline (FR-087, item 031 D.2).
+/// TERMed at once and KILLed by the drain's deadline (FR-087).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_drain_signals_the_leader_first_then_kills_members() {
@@ -3216,7 +3216,7 @@ fn supervise_lifts(dir: &Path, lifts: Lifts) -> (anyhow::Result<()>, Lifts) {
 
 /// After the leader's exit the supervisor still lifts what it restricted: it keeps watching
 /// its actuator while a family member lives, so a restore the backend refused at the exit is
-/// retried and a frozen leaf whose members changed thaws (FR-078, item 053). Linux only: the
+/// retried and a frozen leaf whose members changed thaws (FR-078). Linux only: the
 /// child that outlives the leader is a family member through `/proc` discovery.
 #[cfg(target_os = "linux")]
 #[test]
@@ -3238,7 +3238,7 @@ fn after_the_leaders_exit_the_supervisor_keeps_lifting() {
 }
 
 /// On the error path a release the backend refuses is retried, bounded, every 50 ms, since
-/// that path does not tick again (FR-078, item 053).
+/// that path does not tick again (FR-078).
 #[test]
 fn on_the_error_path_a_refused_release_is_retried() {
     let dir = tempfile::tempdir().unwrap();
