@@ -144,7 +144,7 @@ class ManagedChildTests(unittest.TestCase):
                 spawn_managed(['child'], single_process=True, no_escape=True)
 
     def test_an_oversize_request_is_rejected_before_sending(self):
-        """SDK-4: nothing was sent, so the outcome is known, not uncertain."""
+        """Nothing was sent, so the outcome is known, not uncertain."""
         from cedegrid.errors import ValidationError
         environment = {'CEDEGRID_SUPERVISOR_SOCKET': '/nonexistent/supervisor.sock', 'CEDEGRID_SUPERVISOR_TOKEN': 'token',
                        'CEDEGRID_NAMESPACE_ID': 'namespace', 'CEDEGRID_SESSION_ID': 'session',
@@ -162,7 +162,7 @@ class ManagedChildTests(unittest.TestCase):
             self.assertEqual([op for op, _ in fake.calls], ['status'])
 
     def test_wait_errors_carry_the_documented_codes(self):
-        """SDK-7: the same codes as the TypeScript SDK, still catchable as the builtin errors."""
+        """The same codes as the TypeScript SDK, still catchable as the builtin errors."""
         from cedegrid import DeadlineExceeded, RemoteError, is_cedegrid_error
         for reply, expected, code in [({'state': 'running'}, DeadlineExceeded, 'ERR_CEDEGRID_TIMEOUT'),
                                       ({'state': 'needs_reconciliation'}, RemoteError, 'ERR_CEDEGRID_RECONCILIATION_REQUIRED')]:

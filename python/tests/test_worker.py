@@ -78,7 +78,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNotNone(error.cause)
         self.assertFalse(self.context.output.exists())
     def test_the_request_digest_is_the_same_in_both_sdks(self):
-        """SDK-5: the digest covers the request with sorted keys; the TypeScript test pins the same value."""
+        """The digest covers the request with sorted keys; the TypeScript test pins the same value."""
         self.supervisor.fail_commit=True
         with self.assertRaises(PublicationUncertain) as caught:
             self.context.complete({'b':1,'a':{'d':2,'c':3},'é':'x'},publication_id='digest')
@@ -95,7 +95,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.context.draining());self.assertEqual(calls,[1])
     @unittest.skipIf(not hasattr(os, 'geteuid') or os.geteuid() == 0, 'needs an unprivileged POSIX account')
     def test_an_unreadable_drain_path_is_checked_again(self):
-        """An error other than not-found is no drain for now, logged once (SDK-3)."""
+        """An error other than not-found is no drain for now, logged once."""
         private = self.root/'private'; private.mkdir()
         context = WorkerContext(self.context.context, private/'drain', client=SupervisorFixture())
         (private/'drain').touch(); private.chmod(0)
@@ -108,7 +108,7 @@ class WorkerTests(unittest.TestCase):
             private.chmod(0o700)
         with self.assertRaises(DrainRequested): context.safe_point()
     def test_the_drain_path_has_one_precedence(self):
-        """SDK-9: an explicit argument, then the context's `drain_file`, then the environment;
+        """An explicit argument, then the context's `drain_file`, then the environment;
         an empty value is unset. The TypeScript SDK follows the same order."""
         import json
         from unittest.mock import patch
@@ -341,7 +341,7 @@ class ResourceTargetTests(unittest.TestCase):
         if os.access(self.target_file, os.R_OK) and unreadable is not None:
             self.skipTest('mode 0 does not stop reads here')
         self.assertIsNone(unreadable)
-        # The stat identity is unchanged; the next call reads again (SDK-1).
+        # The stat identity is unchanged; the next call reads again.
         self.assertEqual(signals.poll().sequence, 1)
     def test_a_rewrite_with_a_reused_inode_is_seen_while_recent(self):
         import json, os, time
@@ -424,7 +424,7 @@ class ResourceTargetTests(unittest.TestCase):
             self.assertIsNone(self.context.resource_targets(), bad)
     @unittest.skipIf(not hasattr(os, 'geteuid') or os.geteuid() == 0, 'needs an unprivileged POSIX account')
     def test_a_failed_ack_write_is_logged_once_and_retried_later(self):
-        """SDK-8: one warning per failure, and the next attempt waits for the retry interval."""
+        """One warning per failure, and the next attempt waits for the retry interval."""
         from unittest.mock import patch
         self.write(3, ram_mib=100)
         self.root.chmod(0o500)

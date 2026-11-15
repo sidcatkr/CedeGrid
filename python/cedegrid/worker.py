@@ -119,7 +119,7 @@ def _amounts(value):
 # A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5).
 _RECENT_NS = 50_000_000
 # After a failed ack write the next attempt waits this long, so a full disk is not retried and
-# logged on every read (SDK-8).
+# logged on every read.
 _ACK_RETRY_S = 1.0
 
 
@@ -174,7 +174,7 @@ class ResourceSignals:
 
     def _drain_requested(self) -> bool:
         """Whether the drain file exists. An error other than not-found is no drain for now:
-        it is logged once and the path is checked again on the next call (SDK-3)."""
+        it is logged once and the path is checked again on the next call."""
         if self.drain_file is None:
             return False
         try:
@@ -194,7 +194,7 @@ class ResourceSignals:
         """Parse the file again when its stat identity changed or its mtime is within 50 ms
         of now: the supervisor replaces it by rename, but two writes within one mtime tick can
         keep the size and a reused inode (R5). The identity is kept only after a read that
-        succeeded, so a failed read is tried again (SDK-1)."""
+        succeeded, so a failed read is tried again."""
         if self.target_file is None:
             return None, None, 0
         try:
@@ -324,7 +324,7 @@ class WorkerContext:
         self._client = client or _SupervisorClient.from_env(context)
         self.output = Path(context["output_dir"]) if context.get("output_dir") else None
         # One precedence in both SDKs: an explicit argument, the context's value, then the
-        # environment the supervisor set; an empty value is unset (SDK-9).
+        # environment the supervisor set; an empty value is unset.
         drain_file = drain_file or context.get("drain_file") or os.environ.get("CEDEGRID_DRAIN_FILE")
         self.drain_file = Path(drain_file) if drain_file else None
         self._drain_hooks, self._drain_notified = [], False

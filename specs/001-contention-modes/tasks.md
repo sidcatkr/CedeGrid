@@ -1833,7 +1833,7 @@ Each code task is test first, each test seen failing, one commit per task. Part 
 - [X] T596 Part D in `src/`: remove the loop's item, report, part, decision and deviation numbers and finding IDs from comments and strings; a line that also names an `FR-`/`SC-` keeps that; test names and `T`/`R` IDs stay; strings a test or contract reads are listed and left, per Principle VIII (unrequested)
 - [X] T597 Part D in `tests/`, as T596 (unrequested)
 - [X] T598 Part D in `tools/`, as T596 (unrequested)
-- [ ] T599 Part D in `python/`, as T596 (unrequested)
+- [X] T599 Part D in `python/`, as T596 (unrequested)
 - [ ] T600 Part D in `npm/`, as T596 (unrequested)
 - [ ] T601 Native: one B1 pair on the test host at the last commit, each run alone with the leftover check, `df` first and nothing deleted for it; a `docs/validation.md` row saying item 062's drain figure is not like for like, per plan native gate (missing)
 
