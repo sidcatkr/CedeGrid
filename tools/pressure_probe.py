@@ -64,7 +64,7 @@ def parity_check(even,odd,units):
 
 def window_verdict(result):
     """Whether a same-core window's probe result can be judged: refused when the probe recorded
-    no even-against-odd check of the window itself, or one over BIAS_LIMIT (item 058)."""
+    no even-against-odd check of the window itself, or one over BIAS_LIMIT."""
     check=result.get('window_check')
     if not check:return 'refused: no in-window even/odd check recorded'
     if check.get('biased') or (check.get('ratio') or 0)>1+BIAS_LIMIT:
@@ -124,7 +124,7 @@ def run(args):
         gpu=Nvml(os.environ['CUDA_VISIBLE_DEVICES'])
     atomic_json(output/'ready.json',{'pid':os.getpid(),'monotonic':time.monotonic()})
     # After it is ready, a warm-up of the real loop checks that units cost the same on even and
-    # odd calls and holds blocks while they do not; the window then checks itself (item 058).
+    # odd calls and holds blocks while they do not; the window then checks itself.
     check=self_check(cpu_unit,clock=time.monotonic,holds=args.self_check_holds,units=WARM_UNITS,paced=True) \
         if args.mode=='cpu' and not args.no_self_check else None
     deadline=time.monotonic()+args.seconds;started=time.monotonic();units=0;drained=False;next_guard=0
