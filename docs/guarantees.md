@@ -767,8 +767,10 @@ critical floor path TERM also comes before the step's record. A record that find
 locked waits about 50 ms and is tried again on later passes, so a locked journal delays the
 record and not the drain; until it lands the journal still shows the run as running. After 20 s
 of refusals the supervisor reports `journal_unavailable` and Opportunistic work drains, as
-before. An SDK child's Running and Draining records follow the same rule, and a refused child
-record never stops the child.
+before, each time a record that drains is refused past those 20 s or given up. An SDK child's
+Running and Draining records follow the same rule: a refused child record never stops the child
+itself, and one given up drains Opportunistic work as the leader's does. A record still owed
+when the run is released is not written: Released supersedes it.
 
 A running supervisor waits for a control line, its leader's exit through the pidfd or a
 new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,

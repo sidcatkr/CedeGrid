@@ -838,6 +838,19 @@ The journal's lock waits are written to `supervisor-usage.json` and to the agent
 but the burst test read neither: the attempt directories were gone and no `loop_cost` period
 ended in a 30 s run, so no longest commit wait is recorded for B1.
 
+From `98dda27` a supervisor writes a drain's notice and signals before its Draining record, so
+the burst's "drain took" figure, the time until no journal row reads running, is not like for
+like with `1eaa287`'s: a run whose Draining record has not landed still reads running until its
+Released. From `5163c1a` the test reports that time and the time until every run reads
+Released apart, and counts the runs that recorded Draining.
+
+| Run | Commit | Values | Result |
+|---|---|---|---|
+| B1 at 1 MiB/s | `98dda27` | 150 of 150 ran. Longest gap 635 ms; the drain took 5663 ms (not like for like, above). Longest supervisor journal wait 1851 ms. No lease expired, no supervisor error | pass |
+| B1 at the default 10 MiB/s | `98dda27` | 150 of 150 ran. Longest gap 652 ms; the drain took 5059 ms (not like for like). Longest supervisor journal wait 910 ms. No lease expired, no supervisor error | pass |
+| B1 at 1 MiB/s | `5163c1a` | 150 of 150 ran. Longest gap 637 ms. None running 4449 ms after the drain began, all released by 5677 ms; 145 of 150 recorded Draining. Longest supervisor journal wait 1467 ms. No lease expired, no supervisor error | pass |
+| B1 at the default 10 MiB/s | `5163c1a` | 150 of 150 ran. Longest gap 828 ms. None running 2628 ms after the drain began, all released by 5691 ms; 150 of 150 recorded Draining. One `coordinator_disconnected` event. No lease expired, no supervisor error | pass |
+
 ### Own-work ratios in the protection runs
 
 The T117 and T118 runs use the protection profile of `tools/pressure_comparison.py`: a 2-CPU
