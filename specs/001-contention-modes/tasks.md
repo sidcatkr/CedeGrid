@@ -1821,3 +1821,20 @@ Each code task is test first, each test seen failing, one commit per task. The l
 - [ ] T591 Native: the burst stop B1 at both budgets on the test host, each alone with the leftover check, `df` before the deploy and nothing deleted for it; report its gates and the two journal figures, per plan "Item 062 Part B" (missing)
 
 Item 062 Part B's order: T585 to T590, then T591 at the last commit.
+
+## Phase 48: Convergence (item 063, records that must drain, a child's given-up record, burst figures, loop numbers out of comments)
+
+Each code task is test first, each test seen failing, one commit per task. Part D changes comments and strings only, one commit per directory.
+
+- [ ] T592 Failing test in `tests/supervision.rs`: an Opportunistic run whose contention records are refused for the lock, an adjust past `RECORD_PATIENCE`, then a RAM cap step-code change from a test actuator, drains; then in `src/supervision/unix.rs` the drain a refused record asks is asked whenever a draining record is refused past the patience or dropped, the `journal_unavailable` event staying once per stretch, per spec Session 2026-11-15, R84 (contradicts)
+- [ ] T593 Failing tests in `tests/managed_supervision.rs` with an Opportunistic parent: a child's record refused four times for a reason other than the lock, and one refused for the lock past `RECORD_PATIENCE`, are each reported and drain the allocation; then `settle_records` in `src/child_supervision.rs` reports once per stretch and asks the drain as the leader's records do, a Guaranteed parent's children running on, per R84, Principle III (partial)
+- [ ] T594 Test only: `tests/launch_burst.rs` reports the time to "none running" and to "all released" apart and counts runs with a Draining row in `execution_events`, per report 062 Decision 1 A (partial)
+- [ ] T595 Test only: `tests/test_pressure_comparison.py`'s window test alternates 1.0 against 1.5 ms; the probe's threshold stays, per report 062 Decision 2 A (partial)
+- [ ] T596 Part D in `src/`: remove the loop's item, report, part, decision and deviation numbers and finding IDs from comments and strings; a line that also names an `FR-`/`SC-` keeps that; test names and `T`/`R` IDs stay; strings a test or contract reads are listed and left, per Principle VIII (unrequested)
+- [ ] T597 Part D in `tests/`, as T596 (unrequested)
+- [ ] T598 Part D in `tools/`, as T596 (unrequested)
+- [ ] T599 Part D in `python/`, as T596 (unrequested)
+- [ ] T600 Part D in `npm/`, as T596 (unrequested)
+- [ ] T601 Native: one B1 pair on the test host at the last commit, each run alone with the leftover check, `df` first and nothing deleted for it; a `docs/validation.md` row saying item 062's drain figure is not like for like, per plan native gate (missing)
+
+Item 063's order: T592, T593, T594, T595, T596 to T600, then T601 at the last commit.
