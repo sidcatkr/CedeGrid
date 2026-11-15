@@ -73,7 +73,7 @@ pub struct ExecutionOutcome {
     /// The leaf's `memory.events` `oom_kill` count at release, in Full (FR-076).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf_oom_kills: Option<u64>,
-    /// Output bytes not kept, past the retention cap or after a capture error (030, SUP-2).
+    /// Output bytes not kept, past the retention cap or after a capture error.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub log_bytes_dropped: u64,
     /// Why output capture stopped keeping bytes, if it did; the run's result is unaffected.
@@ -89,7 +89,7 @@ pub struct ExecutionOutcome {
 
 impl ExecutionOutcome {
     /// Read an attempt's outcome file. A missing or unparsable file is no outcome. Any other
-    /// read failure is an error: it decides nothing, and the caller reads the file again (AGT-14).
+    /// read failure is an error: it decides nothing, and the caller reads the file again.
     pub fn read(path: &Path) -> std::io::Result<Option<Self>> {
         match std::fs::read(path) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
@@ -758,7 +758,7 @@ mod tests {
     use super::*;
 
     /// A missing or unparsable outcome file is no outcome; a read that fails for another reason
-    /// decides nothing, so the caller reads it again instead of reporting a failure (AGT-14).
+    /// decides nothing, so the caller reads it again instead of reporting a failure.
     #[test]
     fn an_unreadable_outcome_file_is_not_an_outcome() {
         let dir = tempfile::tempdir().unwrap();
@@ -863,7 +863,7 @@ mod tests {
         );
     }
     /// The supervisor waits until the next lifecycle deadline: the lease expiry while it
-    /// runs, then TERM and KILL after a drain (plan "Item 027").
+    /// runs, then TERM and KILL after a drain.
     #[test]
     fn the_next_deadline_is_the_lease_then_term_then_kill() {
         let mut state = lifecycle(AllocationClass::Opportunistic);

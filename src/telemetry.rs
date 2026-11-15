@@ -313,7 +313,7 @@ impl Collector {
         #[cfg(target_os = "linux")]
         if let Some(table) = self.process_table.as_mut() {
             // A table that could not be read is unknown, not a host without processes: no
-            // list is reported and the tracked external processes stay tracked (TEL-9).
+            // list is reported and the tracked external processes stay tracked.
             let samples = table.sample()?;
             return Some(self.principals_from(&samples));
         }
@@ -423,7 +423,7 @@ impl Collector {
         self.managed_identities = identities;
     }
     /// A process's GPU memory per device. A device whose accounting is unknown has no entry,
-    /// so only that reading is unknown and CPU and RAM keep theirs (TEL-5).
+    /// so only that reading is unknown and CPU and RAM keep theirs.
     pub fn gpu_usage(
         &self,
         pid: u32,
@@ -920,7 +920,7 @@ impl Collector {
             }
             if let Some(cursor) = next_cursor {
                 // A successful query refreshes the cursor's age even with no newer sample; an
-                // unchanged timestamp after a failed one does not (TEL-3).
+                // unchanged timestamp after a failed one does not.
                 let queried = matches!(&samples, Ok(_) | Err(NvmlError::NotFound));
                 if previous.is_none()
                     || refreshes_cursor(baseline.map(|(old, _)| old), cursor, queried)
@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     /// Own RAM counts shared memory: `Pss_Anon` and `Pss_Shmem` from `smaps_rollup`, and a
-    /// leaf's `anon` and `shmem` from `memory.stat`, without its page cache (TEL-2).
+    /// leaf's `anon` and `shmem` from `memory.stat`, without its page cache.
     #[test]
     fn own_ram_counts_shared_memory() {
         let rollup = "Rss:  9000 kB\nPss:  8000 kB\nPss_Anon:  2048 kB\nPss_File:  4096 kB\nPss_Shmem:  3072 kB\n";
@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     /// A per-process sample cursor's age restarts on a newer timestamp and on a successful query
-    /// with nothing newer, never on a failed one (TEL-3).
+    /// with nothing newer, never on a failed one.
     #[test]
     fn a_successful_query_without_new_samples_refreshes_the_cursor() {
         assert!(refreshes_cursor(None, 100, false));
@@ -1528,7 +1528,7 @@ mod tests {
         }
     }
 
-    /// Report 035's shape (FR-021, Q17, R46): the other user's process sampled at the window's
+    /// A measured shape (FR-021, Q17, R46): the other user's process sampled at the window's
     /// end, the duty-capped own probe 1 or 2 device periods before it, once each per interval.
     /// Each sample counts its whole span since its process's previous one, at most one window, so
     /// after the first interval, whose probe sample covers only from the window's start, both
@@ -1998,7 +1998,7 @@ mod tests {
         assert_eq!(back.compute_sampling, snap.compute_sampling);
     }
 
-    /// Report 029 run 5's two shapes (FR-021, R33). An own process duty-capped to a third of
+    /// Two measured shapes (FR-021, R33). An own process duty-capped to a third of
     /// the interval at 60% beside a light 10% user: the device reads 30%, and each process at
     /// its share of the whole interval accounts for it, so compute is measured, not unknown.
     /// A saturating pair whose means round to 99 of 100 points leaves no remainder to count
@@ -2441,7 +2441,7 @@ mod tests {
                 contexts.listed,
                 vec![(21, Some(2002)), (22, Some(2002)), (23, None)]
             );
-            // Item 044: whether the samples were read, so an empty `sampled` is known (Q33).
+            // Whether the samples were read, so an empty `sampled` is known (Q33).
             assert_eq!(contexts.samples_readable, previous.is_some());
         }
     }
@@ -2596,7 +2596,7 @@ mod tests {
 
     /// The quiet window counts other accounts' contexts only: the owner's busy samples neither
     /// break a quiet tick nor restart the window, and an owner's new context starts nothing,
-    /// while another account's busy sample or new context does (FR-027, item 054).
+    /// while another account's busy sample or new context does (FR-027).
     #[test]
     fn the_owners_compute_neither_breaks_nor_restarts_other_accounts_quiet_window() {
         type Samples = std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>;
@@ -3066,7 +3066,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(collector.gpu_usage(42, &good)["GPU-good"], 123);
-        // A device of unknown accounting has no entry; only that reading is unknown (TEL-5).
+        // A device of unknown accounting has no entry; only that reading is unknown.
         assert!(!collector.gpu_usage(42, &bad).contains_key("GPU-bad"));
         let both = crate::model::Resources {
             gpu_memory_mib: BTreeMap::from([("GPU-good".into(), 200), ("GPU-bad".into(), 200)]),
@@ -3391,7 +3391,7 @@ mod tests {
         );
     }
 
-    /// Full with item 031: a worker the leader forked joins the verified family, so a leaf of
+    /// Full: a worker the leader forked joins the verified family, so a leaf of
     /// family members is read again; a worker outside the family, whose IDs differ, still
     /// refuses the leaf reading and is left to its owner (FR-085).
     #[test]
@@ -4173,7 +4173,7 @@ mod tests {
 
     /// The total takes the first eight fields of the `cpu` line: user and nice already hold
     /// guest and guest_nice, so adding those counts guest time twice and every process's CPU
-    /// reads low on a host running guests (TEL-9).
+    /// reads low on a host running guests.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_global_cpu_total_counts_guest_time_once() {
@@ -4194,7 +4194,7 @@ mod tests {
     }
 
     /// A process table that cannot be read is no sample, not an empty host: the table keeps
-    /// its state, and the next readable sample lists the processes again (TEL-9, FR-077).
+    /// its state, and the next readable sample lists the processes again (FR-077).
     #[cfg(target_os = "linux")]
     #[test]
     fn an_unreadable_process_table_is_not_an_empty_one() {

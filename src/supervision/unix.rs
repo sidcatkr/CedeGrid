@@ -355,7 +355,7 @@ struct CaptureEnd {
 /// Read the workload's pipe to its end whatever happens to the log: the read side never
 /// closes early, so a workload never gets SIGPIPE or blocks because of log retention.
 /// Up to 4 MiB is kept, reserved in 1 MiB chunks; after a reserve or write error the rest
-/// is read and dropped (030, SUP-2).
+/// is read and dropped.
 fn drain_pipe(
     reader: &mut dyn Read,
     file: &mut dyn Write,
@@ -1549,7 +1549,7 @@ pub(super) fn supervise(
         let mut term_unavailable = false;
         let mut control_failing = false;
         // An error in the supervisor's own bookkeeping holds the run and is retried, reported
-        // once per failing spell of each source; it is not a reason to drain (030, R3).
+        // once per failing spell of each source; it is not a reason to drain (R3).
         let (mut leader_spell, mut children_spell, mut family_spell) =
             (Spell::default(), Spell::default(), Spell::default());
         let hold = |result: Result<()>, spell: &mut Spell| {
@@ -2836,7 +2836,7 @@ fn identity(_pid: u32, _assignment: &str, _generation: u64) -> Result<ProcessIde
     bail!("native process identity is unavailable on this platform")
 }
 /// One bookkeeping source's failing spell: its failure is reported when a spell starts, and
-/// a success ends it, apart from every other source's (030, R3).
+/// a success ends it, apart from every other source's (R3).
 /// The supervisor as its run's child subreaper; the previous setting returns on drop, so an
 /// in-process supervisor leaves its process as it found it (FR-083).
 #[cfg(target_os = "linux")]
@@ -2925,7 +2925,7 @@ mod capture_tests {
     }
 
     /// A capture error never ends the read side early: the workload's writes keep draining,
-    /// and what was not kept is counted (030, SUP-2).
+    /// and what was not kept is counted.
     #[test]
     fn a_capture_error_keeps_draining_and_counts_what_it_drops() {
         let mut source = Source { chunks: 8, read: 0 };

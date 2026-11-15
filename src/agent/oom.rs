@@ -39,7 +39,7 @@ const SIGKILL: i32 = 9;
 /// Whether the OOM killer ended the task, and who caused it. A KILL counts as the OOM
 /// killer's only when the leaf's count shows a kill or, without a leaf count, the host's
 /// count rose over the last samples; a known leaf count decides alone, since any process
-/// can raise the host's (AGT-12). A missing count leaves it unclassified (Principle III).
+/// can raise the host's. A missing count leaves it unclassified (Principle III).
 pub(crate) fn classify(ending: &Ending) -> OomVerdict {
     if ending.termination_signal != Some(SIGKILL) || ending.supervisor_terminated {
         return OomVerdict::None;
@@ -156,7 +156,7 @@ mod tests {
     fn other_endings_are_no_oom_kill() {
         let within = view(14_000);
         // No rise, another signal, or a missing count: unclassified, a normal outcome. A known
-        // leaf count of 0 overrides a rise of the host's, which any process can cause (AGT-12).
+        // leaf count of 0 overrides a rise of the host's, which any process can cause.
         for (signal, host, leaf) in [
             (KILL, vec![Some(5), Some(5), Some(5)], None),
             (KILL, vec![Some(5), Some(5), Some(5)], Some(0)),

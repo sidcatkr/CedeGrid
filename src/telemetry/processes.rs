@@ -114,7 +114,7 @@ impl ProcessTable {
     /// One entry per readable `/proc/<pid>` directory. A process first seen, or one whose start
     /// time changed, has no CPU yet. `None` when the table itself cannot be read: `/proc/stat`,
     /// the `/proc` listing, or a process's `stat` for want of a descriptor. The table then
-    /// keeps its state, the MPS flag included, so the next sample's CPU spans the gap (TEL-9).
+    /// keeps its state, the MPS flag included, so the next sample's CPU spans the gap.
     pub(super) fn sample(&mut self) -> Option<Vec<ProcessSample>> {
         let (total, cpus, boot) = global_ticks()?;
         let delta_total = self.last_total.map(|last| total.saturating_sub(last));

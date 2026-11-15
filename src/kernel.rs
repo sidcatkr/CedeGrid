@@ -306,7 +306,7 @@ fn busy_bounds(
         let mut lower_denominator = u128::from(total) * 1000;
         if let Some(hz) = clock_tick_hz {
             // One counter tick bounds endpoint rounding. Iowait is idle here too: the CPU
-            // was free for another task, and own CPU time never includes it (TEL-1).
+            // was free for another task, and own CPU time never includes it.
             let idle_lower = u128::from(idle.saturating_sub(1)) * 1000;
             let elapsed_ticks = u128::from(interval_ms) * u128::from(hz);
             // A CPU's counter is read after the read's start, so it can run past the interval
@@ -1740,7 +1740,7 @@ fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTo
         .and_then(|hierarchy| hierarchy.ancestors.first())
         .and_then(|level| level.cpuset_effective.clone());
     // A CPU allowed but offline has no /proc/stat counter; without the online list every
-    // allowed CPU stays (TEL-4).
+    // allowed CPU stays.
     let online = read_text(&roots.sys.join("devices/system/cpu/online"))
         .ok()
         .and_then(|value| parse_cpu_list(&value).ok());

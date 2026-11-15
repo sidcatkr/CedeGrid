@@ -212,7 +212,7 @@ fn record_checkpoint(output: &Path, hash: &str) -> Result<()> {
 
 /// A coordinator request bounded by the loop's budget: a hung or slow coordinator never
 /// holds sampling and local yielding, and a request cut short is sent again next iteration
-/// (lease items, heartbeats and failures are all idempotent) (030, AGT-4).
+/// (lease items, heartbeats and failures are all idempotent).
 async fn bounded<T>(
     budget: Duration,
     request: impl std::future::Future<Output = Result<T>>,
@@ -467,7 +467,7 @@ struct AgentLoop<'a> {
     acted_sample_at: Instant,
     /// Names a stretch of withheld renewals once.
     withheld: Stretch,
-    /// How long one coordinator request may hold the loop (030, AGT-4).
+    /// How long one coordinator request may hold the loop.
     rpc_budget: Duration,
     /// A signal stopped the agent: supervisors keep running for re-adoption (FR-080).
     leave_supervisors: bool,
@@ -1042,7 +1042,7 @@ impl AgentLoop<'_> {
                     {
                         continue;
                     }
-                    // A read that failed decides no outcome; it is read again (AGT-14).
+                    // A read that failed decides no outcome; it is read again.
                     let Ok(outcome) =
                         ExecutionOutcome::read(&slot.output_dir.join("execution-outcome.json"))
                     else {
@@ -2524,7 +2524,7 @@ pub async fn run(
                     "detail": format!("{error:#}"),
                 }))?;
             }
-            // A full disk or quota is transient too: the interval is skipped (030, AGT-6).
+            // A full disk or quota is transient too: the interval is skipped.
             Err(error) if storage_exhausted(&error) => {
                 emit(&serde_json::json!({
                     "event": "storage_exhausted",

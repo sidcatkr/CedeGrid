@@ -116,7 +116,7 @@ impl<'a> Interval<'a> {
                     }
                     // A requested device missing from the observation has unknown attribution:
                     // it is charged at max(request, last known) as unknown own usage, while CPU
-                    // and RAM keep their readings (TEL-5).
+                    // and RAM keep their readings.
                     let mut kept = observed.clone();
                     for (uuid, requested) in &allocation.requested.gpu_memory_mib {
                         if observed.gpu_memory_mib.contains_key(uuid) {
@@ -148,7 +148,7 @@ impl<'a> Interval<'a> {
                             .last_observed
                             .insert(allocation.id.clone(), last.clone());
                     }
-                    // A missing observation keeps the admission window (POL-4).
+                    // A missing observation keeps the admission window.
                     if let Some(window) = prev.cpu_usage.get(&allocation.id) {
                         self.next
                             .cpu_usage
@@ -663,7 +663,7 @@ impl<'a> Interval<'a> {
         let (config, snapshot, prev, now) = (self.config, self.snapshot, self.prev, self.now);
         let Some(list) = snapshot.principals.as_ref() else {
             // An unreadable list is not a departure: the counts stand as they were, so an
-            // admitted user still counts when the list reads again (TEL-9, FR-077).
+            // admitted user still counts when the list reads again (FR-077).
             for ((k, uid), count) in &prev.principal_counts {
                 if k == &key {
                     self.next
@@ -958,7 +958,7 @@ impl<'a> Interval<'a> {
     }
 
     /// While a resource is unknown or held, its principals, satisfied records and probes
-    /// stand as they were (POL-4).
+    /// stand as they were.
     fn carry_principals(&mut self, key: &ResourceKey) {
         let prev = self.prev;
         for ((k, uid), count) in &prev.principal_counts {
@@ -1116,7 +1116,7 @@ impl<'a> Interval<'a> {
     }
 
     /// The cap on own work's fair share while the principal list cannot be read: the last one a
-    /// readable list gave, if any (FR-059, item 053).
+    /// readable list gave, if any (FR-059).
     fn fair_share_limit(&self, key: &ResourceKey) -> Option<u64> {
         self.snapshot
             .principals
@@ -1127,7 +1127,7 @@ impl<'a> Interval<'a> {
 
     /// A readable list's share is kept for a later unreadable one, on compute the share under
     /// contention, since only that one is read there; an unreadable list notes when it holds the
-    /// share down (FR-059, item 053).
+    /// share down (FR-059).
     fn note_fair_share(
         &mut self,
         key: &ResourceKey,
@@ -1515,7 +1515,7 @@ impl<'a> Interval<'a> {
         // A listed context without a fresh sample is unknown, unless the collector found it
         // background (FR-021) or quiet: an idle context returns no sample, and Quiet is the
         // collector's own evidence over its window, so asking for a sample turned it into
-        // Unknown until some process produced one (FR-010, item 051).
+        // Unknown until some process produced one (FR-010).
         let activity_unknown = gpu.external_compute == ComputeActivity::Unknown
             || (gpu.external_compute != ComputeActivity::Quiet
                 && memory
@@ -1555,7 +1555,7 @@ impl<'a> Interval<'a> {
         if let Some(code) = &block_code {
             self.blocked_gpus.insert(gpu.uuid.clone());
             self.unsafe_now = true;
-            // Unknown activity names the check that failed (item 051): the policy's own, or
+            // Unknown activity names the check that failed: the policy's own, or
             // the collector's freshness decision.
             let check = (code == "gpu_yield_first_activity_unknown").then(|| {
                 if gpu.external_compute != ComputeActivity::Unknown {
@@ -1806,7 +1806,7 @@ impl<'a> Interval<'a> {
         let demand = self.next.gpu_demand.get(&gpu.uuid)?;
         // While the samples are readable the counts are the contexts within one counting window
         // of their last sample, and own work's also of their first listing, capped intervals
-        // included; the listing only while the samples are not readable (Q33, item 053).
+        // included; the listing only while the samples are not readable (Q33).
         let mut own_counted = Vec::new();
         let (own, mut principals, source) = if contexts.samples_readable {
             let seen = |pid: &u32| demand.seen.get(pid).filter(|context| context.counts());
@@ -2397,7 +2397,7 @@ fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
 /// One device utilization reading's quantum, a whole percent, in per mille (FR-021, Q35).
 const UTILIZATION_QUANTUM_MILLI: u64 = 10;
 
-/// Advance a device's contexts by one interval (FR-021, item 053): a context no longer listed
+/// Advance a device's contexts by one interval (FR-021): a context no longer listed
 /// goes; with the samples readable each one's quiet count rises, own work's newly listed ones enter
 /// at their listing and every sampled one restarts at its sample. An interval with no listing
 /// changes nothing.

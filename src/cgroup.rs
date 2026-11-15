@@ -337,7 +337,7 @@ pub fn runtime_write(
 }
 
 /// A managed child about to run is in a leaf that holds nothing beyond the leader, the
-/// children verified before it, and itself (SUP-3).
+/// children verified before it, and itself.
 pub fn check_child_membership(
     members: &BTreeSet<u32>,
     family: &BTreeSet<u32>,
@@ -529,7 +529,7 @@ pub struct CgroupActuator<L: LeafIo> {
     ram_refused: Option<&'static str>,
     /// The GPU compute share, while it runs as a freeze duty.
     gpu_duty: Option<FreezeDuty>,
-    /// Resources a release could not restore, retried in every phase (030, SUP-4, FR-078).
+    /// Resources a release could not restore, retried in every phase (FR-078).
     retry_restore: BTreeSet<ResourceKind>,
     /// Consecutive unreadable member lists while a recorded freeze holds (FR-078).
     members_unreadable: u8,
@@ -693,7 +693,7 @@ impl<L: LeafIo> CgroupActuator<L> {
         if let Err(error) = result {
             self.ram_refused = Some("ram_cap_refused");
             // A write that took effect before its readback failed must not stay: a restore
-            // that fails too is reported and goes again on each tick (SUP-12).
+            // that fails too is reported and goes again on each tick.
             if let Err(restore) = self.restore(family, ResourceKind::Ram) {
                 self.retry_restore.insert(ResourceKind::Ram);
                 return Err(error.context(format!(

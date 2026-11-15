@@ -1830,7 +1830,7 @@ Each code task is test first, each test seen failing, one commit per task. Part 
 - [X] T593 Failing tests in `tests/managed_supervision.rs` with an Opportunistic parent: a child's record refused four times for a reason other than the lock, and one refused for the lock past `RECORD_PATIENCE`, are each reported and drain the allocation; then `settle_records` in `src/child_supervision.rs` reports once per stretch and asks the drain as the leader's records do, a Guaranteed parent's children running on, per R84, Principle III (partial)
 - [X] T594 Test only: `tests/launch_burst.rs` reports the time to "none running" and to "all released" apart and counts runs with a Draining row in `execution_events`, per report 062 Decision 1 A (partial)
 - [X] T595 Test only: `tests/test_pressure_comparison.py`'s window test alternates 1.0 against 1.5 ms; the probe's threshold stays, per report 062 Decision 2 A (partial)
-- [ ] T596 Part D in `src/`: remove the loop's item, report, part, decision and deviation numbers and finding IDs from comments and strings; a line that also names an `FR-`/`SC-` keeps that; test names and `T`/`R` IDs stay; strings a test or contract reads are listed and left, per Principle VIII (unrequested)
+- [X] T596 Part D in `src/`: remove the loop's item, report, part, decision and deviation numbers and finding IDs from comments and strings; a line that also names an `FR-`/`SC-` keeps that; test names and `T`/`R` IDs stay; strings a test or contract reads are listed and left, per Principle VIII (unrequested)
 - [ ] T597 Part D in `tests/`, as T596 (unrequested)
 - [ ] T598 Part D in `tools/`, as T596 (unrequested)
 - [ ] T599 Part D in `python/`, as T596 (unrequested)

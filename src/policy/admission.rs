@@ -156,7 +156,7 @@ impl Interval<'_> {
         // In Yield First an interval in which own work does not fit restarts the count only for a
         // principal's cause; anything else holds admission through the headroom while it lasts,
         // and the count keeps running. An unreadable list tells no such change from a
-        // principal (FR-034, item 053).
+        // principal (FR-034).
         let window = config.contention.principal_window_intervals;
         let floor = (self.cpu_capacity.saturating_mul(u64::from(
             config
@@ -252,7 +252,7 @@ impl Interval<'_> {
             .sum()
     }
 
-    /// Whether a principal caused this interval's change on a resource (FR-034, item 053): a user
+    /// Whether a principal caused this interval's change on a resource (FR-034): a user
     /// became a principal in it, or the principals admitted before and now rose together by
     /// more than `tolerance` since the last interval in which own work fit. With no usage on
     /// record for that interval, an admitted principal counts as risen (Principle III).
@@ -344,7 +344,7 @@ impl Interval<'_> {
                 self.next.process_peaks.insert(id, samples);
             }
             // An unreadable list is not an exit: each tracked process keeps its peak and counts
-            // at its last sample, so remembered demand is not admitted against (TEL-9, FR-077).
+            // at its last sample, so remembered demand is not admitted against (FR-077).
             // On a device, its own process list is known evidence: a process it no longer lists
             // has exited.
             if snapshot.external_processes.is_none() {

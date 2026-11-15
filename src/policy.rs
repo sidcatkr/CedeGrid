@@ -192,12 +192,12 @@ struct GpuDemand {
     /// unknown (FR-021, Q29).
     last_time_sliced: bool,
     /// Each listed context's readable intervals since its first listing or last sample, for the
-    /// time-slice rule's counts (FR-021, item 053).
+    /// time-slice rule's counts (FR-021).
     seen: BTreeMap<u32, SeenContext>,
 }
 
 /// A context in a device's counts: readable intervals since own work's first listing of it or its
-/// last sample, whether it was ever sampled, and the UID of its last sample (FR-021, item 053).
+/// last sample, whether it was ever sampled, and the UID of its last sample (FR-021).
 #[derive(Debug, Clone, Default)]
 struct SeenContext {
     quiet: usize,
@@ -308,12 +308,12 @@ pub struct PolicyEngine {
     /// Each principal's usage on CPU and RAM, and on CPU what no listed principal accounts for
     /// under `None`, at the last interval in which own work fit beside a readable list; `None`
     /// when that interval's list was unreadable. Yield First's cooldown restarts only for a
-    /// principal's rise beyond it (FR-034, item 053).
+    /// principal's rise beyond it (FR-034).
     cpu_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
     ram_fit_usage: Option<BTreeMap<Option<u32>, u64>>,
     /// Own work's fair share on each resource as last computed from a readable principal list,
     /// on CPU and GPU compute the one under contention; it caps the share while the list cannot
-    /// be read (FR-059, item 053).
+    /// be read (FR-059).
     fair_share_readable: BTreeMap<ResourceKey, u64>,
     /// The last known CPU view, carried through unknown and held intervals, for the hold
     /// while CPU is unknown (FR-022).

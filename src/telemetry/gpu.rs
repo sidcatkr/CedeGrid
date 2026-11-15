@@ -270,7 +270,7 @@ pub(super) fn quiet_activity(
 
 /// Whether a per-process sample cursor's age restarts: on a newer timestamp, and on a
 /// successful query with nothing newer, which shows the cursor still stands for now; a failed
-/// query never refreshes it (TEL-3).
+/// query never refreshes it.
 pub(super) fn refreshes_cursor(stored: Option<u64>, cursor: u64, queried: bool) -> bool {
     stored.is_none_or(|old| cursor > old || queried && cursor == old)
 }

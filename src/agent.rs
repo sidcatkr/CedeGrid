@@ -100,7 +100,7 @@ pub struct SupervisorSpec {
     /// The soft descriptor limit the agent started with, restored for the task (FR-077).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile_soft: Option<u64>,
-    /// When the agent launched it, so a re-adopted run keeps its start (030, AGT-11).
+    /// When the agent launched it, so a re-adopted run keeps its start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launched_at_unix_ms: Option<u64>,
 }
@@ -304,7 +304,7 @@ fn emit(value: &impl Serialize) -> Result<()> {
     let mut out = std::io::stdout().lock();
     match out.write_all(&line).and_then(|()| out.flush()) {
         // Events are diagnostics: once their reader is gone they are dropped, and the agent
-        // goes on (030, AGT-6).
+        // goes on.
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         result => Ok(result?),
     }
@@ -745,7 +745,7 @@ struct JournalSeen {
 
 /// Move cached journal reads past the agent's own observation writes: entries read at
 /// `before` stand at `after` too when no other connection committed in between, since this
-/// connection wrote only observations (EFF-2).
+/// connection wrote only observations.
 fn rekey_journal_cache(
     slots: &mut BTreeMap<String, ChildSlot>,
     before: (i64, i64),
@@ -874,7 +874,7 @@ fn send(slot: &mut ChildSlot, message: &Control) -> Result<()> {
             "supervisor control pipe closed",
         )
     })?;
-    // One write for the whole line: the pipe is unbuffered (EFF-4).
+    // One write for the whole line: the pipe is unbuffered.
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     input.write_all(&line)?;
@@ -941,7 +941,7 @@ fn dispatch_drains(
             Some(key) => terminate(slot, key.clone(), cause),
             None => drain(slot, cause),
         };
-        // A send that failed used none of the iteration's share and is tried again (AGT-16).
+        // A send that failed used none of the iteration's share and is tried again.
         if delivered {
             *quota = quota.saturating_sub(1);
             sent += 1;
@@ -993,7 +993,7 @@ fn drain(slot: &mut ChildSlot, cause: Option<crate::contention::YieldCause>) -> 
 /// Record whether a drain or terminate reached its supervisor. A closed pipe means the
 /// supervisor is gone or already handles agent loss, so that drain is left alone: not sent
 /// again and not reported. Any other failure leaves decided work running, so the policy's
-/// drains are sent again until one lands (AGT-16).
+/// drains are sent again until one lands.
 fn note_drain_send(slot: &mut ChildSlot, sent: Result<()>) -> bool {
     let closed = sent.as_ref().err().is_some_and(|error| {
         error
@@ -1311,7 +1311,7 @@ mod agent_transport_tests {
         preparing.phase = ExecutionPhase::Prepared;
         store.transition(&preparing).unwrap();
         // Each heartbeat reconciles again; a record that stays uncertain is not rewritten, so
-        // the journal's events do not grow with every heartbeat (030, AGT-3).
+        // the journal's events do not grow with every heartbeat.
         let events = || -> i64 {
             store
                 .connection
@@ -1340,8 +1340,7 @@ mod agent_transport_tests {
     }
 
     /// The reconcile path checks a GPU context's release once per heartbeat; it never waits
-    /// for it, which blocked the agent's loop up to the release-confirm timeout per record
-    /// (030, AGT-3).
+    /// for it, which blocked the agent's loop up to the release-confirm timeout per record.
     #[test]
     fn reconciliation_never_waits_for_a_gpu_release() {
         let source = include_str!("agent/reconcile.rs");
@@ -1998,7 +1997,7 @@ mod negotiation_tests {
             "a rejected heartbeat falls back to 0.2 reports"
         );
 
-        // The next accepted 0.2 report learns the features again (deviation 11).
+        // The next accepted 0.2 report learns the features again.
         negotiated.learn(&reply(&COORDINATOR_FEATURES));
         let mut recovered = report();
         negotiated.apply(&mut recovered, NodeContentionReport::default);
@@ -2062,7 +2061,7 @@ mod drain_tests {
     /// A draining stop sends its drains a share per iteration, sized so the supervisors'
     /// journal writes fit in 250 ms at the host's synced-write cost (run 7: about 28 ms, so 8
     /// of 150 per iteration); a drain the policy decides for a breach goes out at once
-    /// (FR-080, report 029 Decision 1).
+    /// (FR-080).
     #[test]
     fn a_draining_stop_spreads_its_drains_over_iterations() {
         use crate::contention::{ResourceKey, YieldCause, YieldStep};
@@ -2132,7 +2131,7 @@ mod drain_tests {
 
     /// The agent's own observation write moves `total_changes()` but not `data_version`, so a
     /// cache entry read before it is moved past it and the next iteration reuses it; another
-    /// connection's commit, or an entry read at another key, is not moved (EFF-2).
+    /// connection's commit, or an entry read at another key, is not moved.
     #[test]
     fn own_observation_writes_keep_the_journal_cache() {
         let dir = crate::namespace::TestStateDir(
@@ -2186,7 +2185,7 @@ mod drain_tests {
         );
     }
 
-    /// A message to a supervisor goes out in one write call, not one per JSON token (EFF-4).
+    /// A message to a supervisor goes out in one write call, not one per JSON token.
     #[test]
     fn a_supervisor_message_is_one_write() {
         struct Counter(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
@@ -2221,8 +2220,8 @@ mod drain_tests {
     }
 
     /// A drain to a closed pipe is left alone: the supervisor is gone or handles agent loss
-    /// itself, so nothing is sent again and no failed send is reported (AGT-16, item 052; item
-    /// 051's burst reported 40 such drains).
+    /// itself, so nothing is sent again and no failed send is reported; a launch burst once
+    /// reported 40 such drains.
     #[test]
     fn a_drain_to_a_closed_pipe_is_not_sent_again() {
         use crate::contention::{ResourceKey, YieldCause, YieldStep};
@@ -2288,7 +2287,7 @@ mod drain_tests {
 
     /// A policy drain whose send failed is sent again on the next pass, as what the policy
     /// asks then. Until it is delivered the slot still counts as draining, and a failed send
-    /// takes none of a stop's quota (AGT-16).
+    /// takes none of a stop's quota.
     #[test]
     fn a_drain_that_failed_to_send_is_sent_again() {
         use crate::contention::{ResourceKey, YieldCause, YieldStep};
@@ -2454,7 +2453,7 @@ mod drain_tests {
     }
 
     /// A coordinator drain is not sent to a slot whose supervisor has exited: nothing is written,
-    /// no share is taken and no drain is recorded for the run (report 051 Decision 2).
+    /// no share is taken and no drain is recorded for the run.
     #[test]
     fn a_coordinator_drain_skips_a_supervisor_that_exited() {
         use std::sync::atomic::Ordering;
@@ -2496,7 +2495,7 @@ mod drain_tests {
     }
 
     /// A coordinator drain takes one of the iteration's share only when it reaches its
-    /// supervisor: a closed pipe and a failed write take none (report 051 Decision 2).
+    /// supervisor: a closed pipe and a failed write take none.
     #[test]
     fn a_coordinator_drain_takes_a_share_only_when_delivered() {
         use std::io::ErrorKind;
@@ -3195,7 +3194,7 @@ mod descriptor_tests {
     }
 
     /// A full disk or quota skips the interval like descriptor exhaustion; a missing file,
-    /// which can mean a lost namespace, still ends the loop (030, AGT-6).
+    /// which can mean a lost namespace, still ends the loop.
     #[test]
     fn a_full_disk_skips_the_interval_and_a_missing_file_does_not() {
         for code in [libc::ENOSPC, libc::EDQUOT] {

@@ -492,7 +492,7 @@ pub(super) fn reconcile_guarded(
 }
 
 /// One look at whether a GPU context of `pid` is gone; never a wait, since this runs on the
-/// agent's loop every heartbeat (030, AGT-3). An unreadable device counts as not released.
+/// agent's loop every heartbeat. An unreadable device counts as not released.
 fn gpu_released_now(resources: &crate::model::Resources, pid: u32) -> bool {
     crate::telemetry::GpuReleaseGuard::prepare(resources)
         .and_then(|guard| guard.is_released(pid))
@@ -517,7 +517,7 @@ fn instant_at(unix_ms: u64) -> Instant {
 
 /// A re-adopted run's start and last published checkpoint, from its spec's launch time and
 /// the agent's checkpoint record, so a restart does not reset the progress victim order
-/// weighs (FR-016, 030 AGT-11). Missing ones start now.
+/// weighs (FR-016). Missing ones start now.
 pub(super) fn restored_times(
     launched_at_unix_ms: Option<u64>,
     output: &Path,
@@ -540,7 +540,7 @@ mod restored_time_tests {
     use super::*;
 
     /// A re-adopted run keeps the start and the last published checkpoint it had, so victim
-    /// order sees the progress a restart would lose (FR-016, 030 AGT-11).
+    /// order sees the progress a restart would lose (FR-016).
     #[test]
     fn a_readopted_run_keeps_its_start_and_checkpoint_times() {
         let dir = tempfile::tempdir().unwrap();

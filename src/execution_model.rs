@@ -298,7 +298,7 @@ pub trait LaunchBackend {
     }
     fn verify(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>>;
     /// Verify a managed child the supervisor launched, by its own identity; a backend with a
-    /// leaf also checks the leaf holds only the leader and verified children (SUP-3).
+    /// leaf also checks the leaf holds only the leader and verified children.
     fn verify_child(&mut self, identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {
         self.verify(identity)
     }

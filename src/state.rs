@@ -2189,7 +2189,7 @@ fn busy_sleep(count: u32, waited: Duration, limit: Duration, random: u64) -> Opt
 
 /// A journal connection and the context of its busy handler. The connection is the first field,
 /// so it closes before the context is freed on every path; the context is held through a raw
-/// pointer, so moving the journal never invalidates the pointer SQLite holds (R73, item 060).
+/// pointer, so moving the journal never invalidates the pointer SQLite holds (R73).
 pub(crate) struct Journal {
     connection: Connection,
     busy: Option<BusyContext>,
@@ -2341,7 +2341,7 @@ mod busy_sleep_tests {
     use super::*;
 
     /// The busy handler's context is freed only after its connection has closed: when a store
-    /// drops, and when an open fails after the handler was installed (item 060 Part A).
+    /// drops, and when an open fails after the handler was installed.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_busy_context_outlives_its_connection_on_every_path() {

@@ -261,7 +261,7 @@ impl Actuator for RootlessActuator {
             YieldStep::Cap => {
                 let target = target.unwrap_or(self.requested_cpu / 2);
                 // The same cap on a cycle already running keeps its phase: an adjust must not
-                // start the on phase again or continue the family inside an off phase (SUP-8).
+                // start the on phase again or continue the family inside an off phase.
                 if self.cap == Some(target) && self.paused.is_empty() && !self.aligned() {
                     return Ok(step);
                 }
@@ -644,7 +644,7 @@ mod tests {
     }
 
     /// The next phase switch of a duty cycle is the supervisor's next deadline; without a
-    /// duty cycle there is none (plan "Item 027").
+    /// duty cycle there is none.
     #[test]
     fn the_next_deadline_is_the_duty_cycles_phase_switch() {
         let mut family = Recorder::default();
@@ -667,7 +667,7 @@ mod tests {
 
     /// An adjust that leaves the CPU cap where it is keeps the running cycle's phase: it neither
     /// starts the on phase again nor continues the family inside an off phase, so the cap holds
-    /// through adjusts (SUP-8). A changed cap still takes effect at once.
+    /// through adjusts. A changed cap still takes effect at once.
     #[test]
     fn an_unchanged_cpu_cap_keeps_the_cycles_phase() {
         let mut family = Recorder::default();
@@ -861,7 +861,7 @@ mod tests {
     }
 
     /// A stop that reached only part of the family still counts as a stop: release continues
-    /// every member, so none stays stopped (030, SUP-5 and R2).
+    /// every member, so none stays stopped (R2).
     #[test]
     fn a_partial_stop_is_continued_on_release() {
         let mut family = PartlyStoppable {
