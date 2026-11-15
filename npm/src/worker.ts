@@ -168,7 +168,7 @@ export async function spawnManaged(argv: string[], options: SpawnOptions): Promi
         return new ManagedChild(client, reply.child_id);
     }
     catch (cause) {
-        // A request refused before sending was never spawned: its outcome is known (SDK-4).
+        // A request refused before sending was never spawned: its outcome is known.
         if (cause instanceof RemoteError || cause instanceof ValidationError)
             throw cause;
         throw new SpawnUncertain(requestId, { cause });
@@ -206,7 +206,7 @@ type Signals = [ResourceTargets | null, ResourceAllowance | null, bigint];
 /** A target file modified this recently is parsed again: one mtime tick can hide a rewrite (R5). */
 const RECENT_NS = 50_000_000n;
 /** After a failed ack write the next attempt waits this long, so a full disk is not retried
- * and logged on every read (SDK-8). */
+ * and logged on every read. */
 const ACK_RETRY_MS = 1000;
 /** Parse a target file into targets, allowance and the save-progress sequence, or null when it
  * could not be read, so the caller reads it again. An invalid or newer-version file is none of
@@ -260,7 +260,7 @@ export class ResourceSignals {
     /** Parse the file again when its stat identity changed or its mtime is within 50 ms of
      * now: the supervisor replaces it by rename, but two writes within one mtime tick can keep
      * the size and a reused inode (R5). The identity is kept only after a read that succeeded,
-     * so a failed read is tried again (SDK-1). */
+     * so a failed read is tried again. */
     private read(): Signals {
         if (!this.targetFile)
             return [null, null, 0n];
@@ -362,7 +362,7 @@ export class ResourceSignals {
     }
     private drainUnreadable = false;
     /** Whether the drain file exists. An error other than not-found is no drain for now: it is
-     * logged once and the path is checked again on the next call (SDK-3). */
+     * logged once and the path is checked again on the next call. */
     private drainRequested(): boolean {
         if (!this.drainFile)
             return false;
@@ -420,7 +420,7 @@ export class WorkerContext {
         integer(context.generation, 'generation', 1n, I64_MAX);
         this.client = client ?? SupervisorClient.fromEnv(context);
         // One precedence in both SDKs: the context's value, then the environment the supervisor
-        // set; an empty value is unset (SDK-9).
+        // set; an empty value is unset.
         this.signals = new ResourceSignals(context.drain_file || process.env.CEDEGRID_DRAIN_FILE || undefined, context.resource_target_file || process.env.CEDEGRID_RESOURCE_TARGET_FILE || undefined);
     }
     static fromEnv(): WorkerContext { return new WorkerContext(readContext()); }
@@ -516,7 +516,7 @@ export class WorkerContext {
             return reply as PublicationHandle;
         }
         catch (cause) {
-            // A request refused before sending published nothing (SDK-4).
+            // A request refused before sending published nothing.
             if (cause instanceof ValidationError || (cause instanceof RemoteError && cause.code !== 'ERR_CEDEGRID_PUBLICATION_UNCERTAIN'))
                 throw cause;
             if (cause instanceof RemoteError && 'details' in cause)

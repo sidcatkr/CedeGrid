@@ -142,7 +142,7 @@ test('mixed require/import share the implementation and constructors', async () 
 });
 test('unsupported targets fail only native launcher selection', () => { assert.throws(() => nativePackage('freebsd' as any, 'x64'), { code: 'ERR_CEDEGRID_UNSUPPORTED_TARGET' }); assert.equal(typeof commandTask, 'function'); });
 test('the request digest is the same in both SDKs', async () => {
-    // SDK-5: the digest covers the request with sorted keys; the Python test pins the same value.
+    // The digest covers the request with sorted keys; the Python test pins the same value.
     const context = new WorkerContext({ schema_version: 2n, namespace_id: 'ns', session_id: 's', task_id: 't', assignment_id: 'a', generation: 1n }, { async request() { throw new Error('lost ack'); } });
     await assert.rejects(context.complete({ b: 1n, a: { d: 2n, c: 3n }, 'é': 'x' }, [], { publicationId: 'digest' }), (error: unknown) => error instanceof PublicationUncertain && error.requestDigest === '89c18b6d97dbeb74ce169b7a15200133f26a15b32a65ecac20312e8753464f31');
 });

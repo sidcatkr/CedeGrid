@@ -138,7 +138,7 @@ test('the ack records the highest sequence seen', () => {
 });
 
 test('a failed ack write is logged once and retried later', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
-    // SDK-8: one warning per failure, and the next attempt waits for the retry interval.
+    // One warning per failure, and the next attempt waits for the retry interval.
     const f = fixture();
     try {
         const warn = t.mock.method(console, 'warn', () => { });
@@ -304,7 +304,7 @@ test('a failed read is not cached', () => {
         try { unreadable = signals.poll(); }
         finally { nodeFs.chmodSync(f.targetFile, 0o600); }
         if (unreadable === null) {
-            // The stat identity is unchanged; the next call reads again (SDK-1).
+            // The stat identity is unchanged; the next call reads again.
             assert.equal(signals.poll()!.sequence, 1n);
         }
     }

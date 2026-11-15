@@ -74,7 +74,7 @@ test('a raising drain hook is isolated', (t) => {
 });
 
 test('an unreadable drain path is checked again', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, (t) => {
-    // An error other than not-found is no drain for now, logged once (SDK-3).
+    // An error other than not-found is no drain for now, logged once.
     const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
     const directory = join(root, 'private');
     try {
@@ -97,7 +97,7 @@ test('an unreadable drain path is checked again', { skip: process.platform === '
 });
 
 test('the drain path has one precedence', () => {
-    // SDK-9: the context's drain_file, then the environment; an empty value is unset. The
+    // The context's drain_file, then the environment; an empty value is unset. The
     // Python SDK follows the same order.
     const root = mkdtempSync(join(tmpdir(), 'cedegrid-drain-'));
     const named = join(root, 'named-drain'), ambient = join(root, 'ambient-drain');
@@ -203,7 +203,7 @@ test('a spawn reply without a child ID is uncertain and a rejection stays defini
 });
 
 test('a request over the size limit is rejected before sending, not reported as uncertain', async () => {
-    // SDK-4: nothing was sent, so the outcome is known.
+    // Nothing was sent, so the outcome is known.
     const big = 'x'.repeat(3 * 1024 * 1024 + 1);
     await withSupervisor([], async requests => {
         await assert.rejects(spawnManaged(['child'], { noEscape: true, singleProcess: true, env: { BIG: big } }), (error: unknown) => error instanceof ValidationError && !(error instanceof SpawnUncertain));
