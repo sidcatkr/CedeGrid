@@ -341,6 +341,9 @@ locked_memory_mib = 64
 [principals]
 uid_min = 2000
 principal_min_percent = 5
+
+[units]
+pam_session = "cedegrid"
 "#,
         1000,
     )
@@ -1070,12 +1073,12 @@ mod client {
         assert_eq!(
             decide(Outcome::NoAnswer("is not running".into()), false),
             Decision::Fallback(Some(
-                "Running without System mode: The System mode broker is not running.".into()
+                "System mode unavailable, continuing without it: broker is not running".into()
             ))
         );
         assert!(matches!(
             decide(Outcome::NoAnswer("is not running".into()), true),
-            Decision::Refuse(line) if line.starts_with("Stopped by --require-system")
+            Decision::Refuse(line) if line.starts_with("System mode required (--require-system)")
         ));
         for code in [
             RefusalCode::NotAMember,
@@ -1304,4 +1307,501 @@ mod client {
             server.join().unwrap();
         }
     }
+}
+
+// T019 to T021, T032, T034: the peer check, the systemd calls and the listener, against fakes.
+
+#[cfg(unix)]
+mod broker_service {
+    use cedegrid::broker::ModeName;
+    use cedegrid::broker::admin_policy::AdminPolicy;
+    use cedegrid::broker::peer::{Accounts, PeerCredentials, authorize};
+    use cedegrid::broker::request::{MAX_REQUEST_BYTES, Refusal, RefusalCode, Reply, UnitStatus};
+    use cedegrid::broker::server::{
+        BrokerState, RateLimiter, handle, read_frame, serve, serve_connection,
+    };
+    use cedegrid::broker::systemd::{
+        Systemd, UnitShow, parse_show, start_units, status_units, stop_units,
+    };
+    use cedegrid::broker::units::{
+        Caller, MARKER_VARIABLE, OrdinarySlice, PamSession, Placement, UnitKind, UnitSpec,
+        marker_value,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const PLACE: Placement = Placement {
+        ordinary_slice: OrdinarySlice::UserSlice,
+        pam: PamSession::None,
+    };
+
+    struct FakeAccounts {
+        members: BTreeSet<u32>,
+        broken: bool,
+    }
+
+    impl Accounts for FakeAccounts {
+        fn primary_gid(&self, uid: u32) -> anyhow::Result<u32> {
+            anyhow::ensure!(!self.broken, "database unreadable");
+            Ok(uid + 100)
+        }
+
+        fn is_member(&self, uid: u32) -> anyhow::Result<bool> {
+            anyhow::ensure!(!self.broken, "database unreadable");
+            Ok(self.members.contains(&uid))
+        }
+    }
+
+    fn accounts(members: &[u32]) -> FakeAccounts {
+        FakeAccounts {
+            members: members.iter().copied().collect(),
+            broken: false,
+        }
+    }
+
+    /// A systemd stand-in that records calls and keeps unit state.
+    #[derive(Default)]
+    struct FakeSystemd {
+        units: Mutex<BTreeMap<String, UnitShow>>,
+        calls: Mutex<Vec<String>>,
+        fail_start: bool,
+    }
+
+    impl FakeSystemd {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn put(&self, name: &str, show: UnitShow) {
+            self.units.lock().unwrap().insert(name.to_owned(), show);
+        }
+    }
+
+    fn ours(kind: UnitKind, uid: u32, state: &str) -> UnitShow {
+        UnitShow {
+            load_state: "loaded".into(),
+            active_state: state.into(),
+            control_group: format!("/cg/{uid}"),
+            description: "CedeGrid System mode unit (x) for user ID".into(),
+            environment: vec![format!("{MARKER_VARIABLE}={}", marker_value(kind, uid))],
+        }
+    }
+
+    impl Systemd for FakeSystemd {
+        fn show(&self, unit: &str) -> Result<UnitShow, Refusal> {
+            self.calls.lock().unwrap().push(format!("show {unit}"));
+            Ok(self
+                .units
+                .lock()
+                .unwrap()
+                .get(unit)
+                .cloned()
+                .unwrap_or(UnitShow {
+                    load_state: "not-found".into(),
+                    active_state: "inactive".into(),
+                    ..UnitShow::default()
+                }))
+        }
+
+        fn start(&self, spec: &UnitSpec) -> Result<(), Refusal> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("start {}", spec.name));
+            if self.fail_start {
+                return Err(Refusal::new(RefusalCode::SystemdFailed, "failed."));
+            }
+            self.put(&spec.name, ours(spec.kind, spec.uid, "active"));
+            Ok(())
+        }
+
+        fn stop(&self, unit: &str) -> Result<(), Refusal> {
+            self.calls.lock().unwrap().push(format!("stop {unit}"));
+            self.units.lock().unwrap().remove(unit);
+            Ok(())
+        }
+
+        fn reset_failed(&self, unit: &str) -> Result<(), Refusal> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("reset-failed {unit}"));
+            self.units.lock().unwrap().remove(unit);
+            Ok(())
+        }
+    }
+
+    const CALLER: Caller = Caller {
+        uid: 1234,
+        primary_gid: 1334,
+    };
+
+    fn peer(uid: u32) -> PeerCredentials {
+        PeerCredentials {
+            uid,
+            gid: uid,
+            pid: Some(42),
+        }
+    }
+
+    #[test]
+    fn callers_are_checked_against_the_group_now() {
+        let members = accounts(&[1234]);
+        assert_eq!(authorize(peer(1234), &members, 1000), Ok(CALLER));
+        assert_eq!(
+            authorize(peer(1235), &members, 1000).unwrap_err().code,
+            RefusalCode::NotAMember
+        );
+        assert_eq!(
+            authorize(peer(0), &accounts(&[0]), 0).unwrap_err().code,
+            RefusalCode::RefusedAccount
+        );
+        assert_eq!(
+            authorize(peer(999), &accounts(&[999]), 1000)
+                .unwrap_err()
+                .code,
+            RefusalCode::RefusedAccount
+        );
+        let broken = FakeAccounts {
+            members: [1234].into(),
+            broken: true,
+        };
+        assert_eq!(
+            authorize(peer(1234), &broken, 1000).unwrap_err().code,
+            RefusalCode::NotAMember
+        );
+    }
+
+    #[test]
+    fn show_output_parses_and_the_marker_is_checked() {
+        let show = parse_show(
+            "LoadState=loaded\nActiveState=active\nControlGroup=/system.slice/x\nDescription=CedeGrid System mode unit (ordinary) for user ID 1234\nEnvironment=A=b CEDEGRID_SYSTEM_UNIT=ordinary:1234\nnoise\n",
+        );
+        assert_eq!(show.load_state, "loaded");
+        assert_eq!(show.active_state, "active");
+        assert_eq!(show.control_group, "/system.slice/x");
+        assert!(!show.absent());
+        assert!(show.is_ours(UnitKind::Ordinary, 1234));
+        assert!(!show.is_ours(UnitKind::Idle, 1234));
+        assert!(!show.is_ours(UnitKind::Ordinary, 1235));
+        let mut other = show.clone();
+        other.description = "Something else".into();
+        assert!(!other.is_ours(UnitKind::Ordinary, 1234));
+        assert!(parse_show("LoadState=not-found\n").absent());
+    }
+
+    #[test]
+    fn start_makes_both_units_once() {
+        let systemd = FakeSystemd::default();
+        let policy = AdminPolicy::defaults(1000).unwrap();
+        let units = start_units(&systemd, CALLER, &policy, PLACE).unwrap();
+        assert_eq!(units.len(), 2);
+        assert!(units.iter().all(|unit| unit.state == "active"));
+        let starts = |systemd: &FakeSystemd| {
+            systemd
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("start "))
+                .count()
+        };
+        assert_eq!(starts(&systemd), 2);
+        // A second start leaves running units alone.
+        start_units(&systemd, CALLER, &policy, PLACE).unwrap();
+        assert_eq!(starts(&systemd), 2);
+    }
+
+    #[test]
+    fn a_failed_unit_of_ours_is_reset_then_started() {
+        let systemd = FakeSystemd::default();
+        systemd.put(
+            "cedegrid-u1234.service",
+            ours(UnitKind::Ordinary, 1234, "failed"),
+        );
+        let policy = AdminPolicy::defaults(1000).unwrap();
+        start_units(&systemd, CALLER, &policy, PLACE).unwrap();
+        let calls = systemd.calls();
+        let reset = calls
+            .iter()
+            .position(|call| call == "reset-failed cedegrid-u1234.service")
+            .unwrap();
+        let start = calls
+            .iter()
+            .position(|call| call == "start cedegrid-u1234.service")
+            .unwrap();
+        assert!(reset < start);
+    }
+
+    #[test]
+    fn a_unit_without_the_marker_is_never_touched() {
+        let foreign = UnitShow {
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            description: "An administrator's own unit".into(),
+            ..UnitShow::default()
+        };
+        let policy = AdminPolicy::defaults(1000).unwrap();
+        for name in ["cedegrid-u1234.service", "cedegrid-idle-u1234.service"] {
+            let systemd = FakeSystemd::default();
+            systemd.put(name, foreign.clone());
+            assert_eq!(
+                start_units(&systemd, CALLER, &policy, PLACE)
+                    .unwrap_err()
+                    .code,
+                RefusalCode::UnitNotOurs
+            );
+            assert_eq!(
+                stop_units(&systemd, CALLER).unwrap_err().code,
+                RefusalCode::UnitNotOurs
+            );
+            assert_eq!(
+                status_units(&systemd, CALLER).unwrap_err().code,
+                RefusalCode::UnitNotOurs
+            );
+            assert!(
+                !systemd
+                    .calls()
+                    .iter()
+                    .any(|call| call.starts_with("stop ") || call.starts_with("reset-failed ")),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_and_status_reach_only_the_callers_units() {
+        let systemd = FakeSystemd::default();
+        let policy = AdminPolicy::defaults(1000).unwrap();
+        start_units(&systemd, CALLER, &policy, PLACE).unwrap();
+        let other = Caller {
+            uid: 2000,
+            primary_gid: 2100,
+        };
+        start_units(&systemd, other, &policy, PLACE).unwrap();
+        let stopped = stop_units(&systemd, CALLER).unwrap();
+        assert!(stopped.iter().all(|unit| unit.state == "absent"));
+        let others = status_units(&systemd, other).unwrap();
+        assert!(others.iter().all(|unit| unit.state == "active"));
+        assert!(
+            systemd
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("stop "))
+                .all(|call| call.ends_with("u1234.service"))
+        );
+    }
+
+    fn state(systemd: FakeSystemd, members: &[u32], policy: Option<&'static str>) -> BrokerState {
+        BrokerState {
+            systemd: Box::new(systemd),
+            accounts: Box::new(accounts(members)),
+            load_policy: Box::new(move || match policy {
+                Some(text) => AdminPolicy::parse(text, 1000),
+                None => AdminPolicy::defaults(1000),
+            }),
+            host_uid_min: 1000,
+            placement: PLACE,
+            rate: Mutex::new(RateLimiter::new(8, 2)),
+        }
+    }
+
+    fn line(json: &str) -> Vec<u8> {
+        format!("{json}\n").into_bytes()
+    }
+
+    #[test]
+    fn handle_checks_the_caller_before_the_request() {
+        let state = state(FakeSystemd::default(), &[1234], None);
+        let handled = handle(&state, peer(1235), b"garbage");
+        assert_eq!(handled.reply.code, Some(RefusalCode::NotAMember));
+        let handled = handle(&state, peer(1234), b"garbage");
+        assert_eq!(handled.reply.code, Some(RefusalCode::Malformed));
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"status","uid":0}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::IdentityInRequest));
+    }
+
+    #[test]
+    fn handle_applies_the_policy_to_modes() {
+        let state = state(
+            FakeSystemd::default(),
+            &[1234],
+            Some("[modes]\nallowed = [\"neutral\"]\n"),
+        );
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"start","mode":"performance"}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::ModeNotAllowed));
+        assert!(handled.reply.message.unwrap().contains("modes.allowed"));
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"start","mode":"neutral"}"#),
+        );
+        assert!(handled.reply.ok);
+        assert_eq!(handled.kind, "start");
+        assert_eq!(handled.reply.units.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_policy_file_stops_every_request() {
+        let state = state(FakeSystemd::default(), &[1234], Some("unknown = 1\n"));
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"status"}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::PolicyRefused));
+    }
+
+    #[test]
+    fn moves_are_refused_until_built() {
+        let state = state(FakeSystemd::default(), &[1234], None);
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"move","job":"j","mode":"neutral"}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::MoveRefused));
+    }
+
+    #[test]
+    fn systemd_failures_are_reported() {
+        let systemd = FakeSystemd {
+            fail_start: true,
+            ..FakeSystemd::default()
+        };
+        let state = state(systemd, &[1234], None);
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"start"}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::SystemdFailed));
+    }
+
+    #[test]
+    fn rate_limit_is_per_user_and_refills() {
+        let mut rate = RateLimiter::new(3, 2);
+        let now = Instant::now();
+        assert!((0..3).all(|_| rate.allow(1000, now)));
+        assert!(!rate.allow(1000, now));
+        // Another user is not held back by the first.
+        assert!(rate.allow(1001, now));
+        assert!(rate.allow(1000, now + Duration::from_millis(500)));
+        assert!(!rate.allow(1000, now + Duration::from_millis(500)));
+        assert!(rate.allow(1000, now + Duration::from_secs(10)));
+    }
+
+    fn pair() -> (UnixStream, UnixStream) {
+        UnixStream::pair().unwrap()
+    }
+
+    #[test]
+    fn read_frame_stops_at_the_newline_the_limit_or_the_deadline() {
+        let (mut client, server) = pair();
+        client.write_all(b"{\"protocol\":1}\nextra").unwrap();
+        let frame = read_frame(&server, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert!(frame.starts_with(b"{\"protocol\":1}\n"));
+
+        let (mut client, server) = pair();
+        let writer = std::thread::spawn(move || {
+            let _ = client.write_all(&vec![b' '; MAX_REQUEST_BYTES + 10_000]);
+            client
+        });
+        let frame = read_frame(&server, Instant::now() + Duration::from_secs(2)).unwrap();
+        assert_eq!(frame.len(), MAX_REQUEST_BYTES + 1);
+        drop(server);
+        drop(writer.join().unwrap());
+
+        let (mut client, server) = pair();
+        client.write_all(b"{\"protocol\":").unwrap();
+        let started = Instant::now();
+        let refusal = read_frame(&server, started + Duration::from_millis(200)).unwrap_err();
+        assert_eq!(refusal.code, RefusalCode::RequestTimeout);
+        assert!(started.elapsed() < Duration::from_millis(600));
+    }
+
+    #[test]
+    fn a_connection_gets_one_reply_line() {
+        let state = state(FakeSystemd::default(), &[1234], None);
+        let (mut client, server) = pair();
+        client
+            .write_all(b"{\"protocol\":1,\"kind\":\"status\"}\n")
+            .unwrap();
+        serve_connection(&state, &server, peer(1234), Instant::now());
+        drop(server);
+        let mut reply = String::new();
+        BufReader::new(&client).read_line(&mut reply).unwrap();
+        let reply: Reply = serde_json::from_str(&reply).unwrap();
+        assert!(reply.ok);
+        let units: Vec<UnitStatus> = reply.units.unwrap();
+        assert!(units.iter().all(|unit| unit.state == "absent"));
+    }
+
+    #[test]
+    fn the_listener_serves_real_connections_with_real_peer_credentials() {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let me = unsafe { libc::getuid() };
+        let base = std::env::var_os("TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!(".sm-listen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut state = state(FakeSystemd::default(), &[me], None);
+        state.host_uid_min = 1;
+        let state = Arc::new(state);
+        std::thread::spawn(move || serve(listener, state));
+        let ask = |body: &str| -> Reply {
+            let mut stream = UnixStream::connect(&path).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+            let mut reply = String::new();
+            BufReader::new(&stream).read_line(&mut reply).unwrap();
+            serde_json::from_str(&reply).unwrap()
+        };
+        let reply = ask("{\"protocol\":1,\"kind\":\"start\",\"mode\":\"yield_first\"}\n");
+        assert!(reply.ok, "{reply:?}");
+        let units = reply.units.unwrap();
+        assert_eq!(units[0].name, format!("cedegrid-u{me}.service"));
+        let reply = ask("{\"protocol\":1,\"kind\":\"start\",\"mode\":\"aggressive\"}\n");
+        assert_eq!(reply.code, Some(RefusalCode::ModeNotAllowed));
+        // The burst is spent: further requests are rate limited, not queued forever.
+        let limited = (0..12)
+            .map(|_| ask("{\"protocol\":1,\"kind\":\"status\"}\n"))
+            .filter(|reply| reply.code == Some(RefusalCode::RateLimited))
+            .count();
+        assert!(limited > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = ModeName::Neutral;
+    }
+}
+
+#[test]
+fn pam_session_comes_from_the_policy() {
+    use cedegrid::broker::units::PamSession;
+    assert_eq!(
+        AdminPolicy::defaults(1000).unwrap().pam_session.value,
+        PamSession::None
+    );
+    for (name, expected) in [
+        ("none", PamSession::None),
+        ("cedegrid", PamSession::CedegridLimits),
+        ("login", PamSession::HostLogin),
+    ] {
+        let policy =
+            AdminPolicy::parse(&format!("[units]\npam_session = \"{name}\"\n"), 1000).unwrap();
+        assert_eq!(policy.pam_session.value, expected);
+        assert_eq!(policy.pam_session.source, Source::File);
+    }
+    assert!(AdminPolicy::parse("[units]\npam_session = \"system-auth\"\n", 1000).is_err());
 }

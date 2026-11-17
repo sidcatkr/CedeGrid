@@ -4,6 +4,7 @@
 //! root, or that group or others can write, is refused, and the broker then serves no request.
 
 use super::ModeName;
+use super::units::PamSession;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
@@ -33,6 +34,7 @@ struct PolicyFile {
     modes: ModesSection,
     limits: LimitsSection,
     principals: PrincipalsSection,
+    units: UnitsSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -49,6 +51,12 @@ struct LimitsSection {
     open_files: Option<u64>,
     processes: Option<u64>,
     locked_memory_mib: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UnitsSection {
+    pam_session: Option<PamSession>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,6 +119,8 @@ pub struct AdminPolicy {
     pub locked_memory_mib: Setting<Option<u64>>,
     pub uid_min: Setting<u32>,
     pub principal_min_percent: Setting<u8>,
+    /// Whether the units open a PAM session (N3); `none` by default.
+    pub pam_session: Setting<PamSession>,
 }
 
 impl AdminPolicy {
@@ -179,6 +189,7 @@ impl AdminPolicy {
             (1..=50).contains(&principal_min_percent.value),
             "principals.principal_min_percent must be between 1 and 50"
         );
+        let pam_session = Setting::pick(file.units.pam_session, PamSession::None);
         Ok(Self {
             policy_version,
             allowed_modes,
@@ -189,6 +200,7 @@ impl AdminPolicy {
             locked_memory_mib,
             uid_min,
             principal_min_percent,
+            pam_session,
         })
     }
 
@@ -247,6 +259,11 @@ impl AdminPolicy {
                 "principals.principal_min_percent",
                 self.principal_min_percent.value.to_string(),
                 self.principal_min_percent.source,
+            ),
+            (
+                "units.pam_session",
+                self.pam_session.value.name().to_owned(),
+                self.pam_session.source,
             ),
         ]
     }

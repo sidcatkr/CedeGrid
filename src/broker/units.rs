@@ -50,15 +50,29 @@ pub enum OrdinarySlice {
     CedegridSlice,
 }
 
-/// Whether a unit opens a PAM session (decision N3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Whether a unit opens a PAM session (decision N3), set by the policy's `units.pam_session`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PamSession {
-    /// No session; the process limits come from the administrator policy (N3 A).
+    /// No session; the process limits come from the administrator policy (N3 A, the default).
+    #[serde(rename = "none")]
     None,
-    /// CedeGrid's own PAM service, with only the limits module (N3 B).
+    /// The `cedegrid` PAM service, which the administrator provides with only `pam_limits`
+    /// (N3 B).
+    #[serde(rename = "cedegrid")]
     CedegridLimits,
-    /// The host's login stack (N3 C).
+    /// The host's `login` PAM stack (N3 C).
+    #[serde(rename = "login")]
     HostLogin,
+}
+
+impl PamSession {
+    pub fn name(self) -> &'static str {
+        match self {
+            PamSession::None => "none",
+            PamSession::CedegridLimits => "cedegrid",
+            PamSession::HostLogin => "login",
+        }
+    }
 }
 
 /// The two open choices the builder takes as inputs.

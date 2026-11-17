@@ -125,6 +125,8 @@ pub enum RefusalCode {
     UnknownKind,
     ModeNotAllowed,
     TaskLimit,
+    /// The administrator policy file is refused, so the broker serves no request.
+    PolicyRefused,
     RateLimited,
     UnitNotOurs,
     JobNotFound,
@@ -216,7 +218,7 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
         Some(end) if end + 1 != frame.len() => {
             return Err(Refusal::new(
                 RefusalCode::Malformed,
-                "Send exactly one request per connection, ending at its newline.",
+                "more than one request on the connection; send one request per connection",
             ));
         }
         Some(end) => &frame[..end],
@@ -224,27 +226,27 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
         None => {
             return Err(Refusal::new(
                 RefusalCode::Malformed,
-                "End the request with a newline before closing the connection.",
+                "request not terminated by a newline",
             ));
         }
     };
     let value: Value = serde_json::from_slice(body).map_err(|_| {
         Refusal::new(
             RefusalCode::Malformed,
-            "Send the request as one JSON object on one line.",
+            "request is not a single-line JSON object",
         )
     })?;
     let Value::Object(fields) = value else {
         return Err(Refusal::new(
             RefusalCode::Malformed,
-            "Send the request as one JSON object on one line.",
+            "request is not a single-line JSON object",
         ));
     };
     if let Some(name) = fields.keys().find(|name| names_identity(name)) {
         return Err(Refusal::new(
             RefusalCode::IdentityInRequest,
             format!(
-                "Remove the field {}; the broker takes who you are from the socket only.",
+                "field {} not accepted: callers are identified by socket credentials only",
                 shown(name)
             ),
         ));
@@ -258,7 +260,7 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
         _ => {
             return Err(Refusal::new(
                 RefusalCode::Malformed,
-                "Name the request's kind as a string: start, stop, status or move.",
+                "missing or invalid field kind (expected start, stop, status or move)",
             ));
         }
     };
@@ -281,13 +283,13 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
                 Some(Value::String(job)) => JobId::parse(job).ok_or_else(|| {
                     Refusal::new(
                         RefusalCode::Malformed,
-                        "Name the job by its identifier: 1 to 128 letters, digits, '_' or '-'.",
+                        "invalid job ID (expected 1 to 128 characters from [A-Za-z0-9_-])",
                     )
                 })?,
                 _ => {
                     return Err(Refusal::new(
                         RefusalCode::Malformed,
-                        "Name the job to move in the field job.",
+                        "move request without field job",
                     ));
                 }
             };
@@ -296,7 +298,7 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
                 None => {
                     return Err(Refusal::new(
                         RefusalCode::Malformed,
-                        "Name the mode the job moves to in the field mode.",
+                        "move request without field mode",
                     ));
                 }
             };
@@ -304,7 +306,7 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
         }
         _ => Err(Refusal::new(
             RefusalCode::UnknownKind,
-            "Ask for one of start, stop, status or move.",
+            "unknown request kind (expected start, stop, status or move)",
         )),
     }
 }
@@ -322,7 +324,7 @@ fn check_protocol(fields: &Map<String, Value>) -> Result<(), Refusal> {
     let Some(protocol) = fields.get("protocol").and_then(Value::as_u64) else {
         return Err(Refusal::new(
             RefusalCode::Malformed,
-            format!("Give the protocol version as the integer {PROTOCOL}."),
+            format!("missing or invalid field protocol (expected the integer {PROTOCOL})"),
         ));
     };
     match protocol.cmp(&u64::from(PROTOCOL)) {
@@ -330,13 +332,13 @@ fn check_protocol(fields: &Map<String, Value>) -> Result<(), Refusal> {
         std::cmp::Ordering::Less => Err(Refusal::new(
             RefusalCode::ProtocolMismatch,
             format!(
-                "The broker speaks protocol {PROTOCOL} and the client {protocol}; upgrade the cedegrid client."
+                "protocol mismatch: broker {PROTOCOL}, client {protocol}; upgrade the cedegrid client"
             ),
         )),
         std::cmp::Ordering::Greater => Err(Refusal::new(
             RefusalCode::ProtocolMismatch,
             format!(
-                "The broker speaks protocol {PROTOCOL} and the client {protocol}; ask the administrator to upgrade cedegrid-system."
+                "protocol mismatch: broker {PROTOCOL}, client {protocol}; ask an administrator to upgrade cedegrid-system"
             ),
         )),
     }
@@ -353,7 +355,7 @@ fn mode_value(value: &Value) -> Result<ModeName, Refusal> {
     value.as_str().and_then(ModeName::from_name).ok_or_else(|| {
         Refusal::new(
             RefusalCode::Malformed,
-            "Name the mode as yield_first, neutral, performance or aggressive.",
+            "invalid mode (expected yield_first, neutral, performance or aggressive)",
         )
     })
 }
@@ -362,9 +364,9 @@ fn unknown_field(name: &str) -> Refusal {
     Refusal::new(
         RefusalCode::UnknownField,
         format!(
-            "Remove the field {}; this request takes only {}.",
+            "unknown field {} (this request accepts {})",
             shown(name),
-            "protocol, kind and, where its kind allows them, mode and job"
+            "protocol, kind, and mode or job where the kind takes them"
         ),
     )
 }
@@ -372,7 +374,7 @@ fn unknown_field(name: &str) -> Refusal {
 fn too_large() -> Refusal {
     Refusal::new(
         RefusalCode::RequestTooLarge,
-        format!("Keep the request within {MAX_REQUEST_BYTES} bytes, ending at its newline."),
+        format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
     )
 }
 
@@ -386,6 +388,6 @@ fn shown(name: &str) -> String {
     if plain {
         format!("'{name}'")
     } else {
-        "with an unexpected name".to_owned()
+        "(name not shown)".to_owned()
     }
 }

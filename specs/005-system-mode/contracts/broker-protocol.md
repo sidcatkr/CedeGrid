@@ -49,6 +49,7 @@ Each `message` is one sentence that says what to do.
 | `request_too_large`, `request_timeout`, `malformed` | framing |
 | `unknown_field`, `identity_in_request`, `unknown_kind` | content |
 | `mode_not_allowed`, `task_limit` | administrator policy |
+| `policy_refused` | the policy file is not root's, is writable by others, or does not parse; the broker serves no request until it is fixed |
 | `rate_limited` | the caller's request rate is over its bound |
 | `unit_not_ours` | a unit with the caller's name exists without the broker's marker |
 | `job_not_found`, `move_refused` | a move whose job is not in the caller's source unit, or whose members fail a check |

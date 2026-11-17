@@ -2,15 +2,20 @@
 //!
 //! The broker starts and stops a `cedegrid` group member's two units, moves a member's job
 //! between them, and writes OOM scores inside them. Nothing else runs as root. The modules here
-//! are the request parser, the administrator policy, the unit builder, the score function and the
-//! process handle the writes go through. The listener, the systemd calls, moves and the OOM loop
-//! land with their tasks.
+//! are the request parser, the administrator policy, the unit builder, the score function, the
+//! process handle the writes go through, the peer check, the systemd calls and the listener.
+//! Moves and the OOM loop land with their tasks.
 
 pub mod admin_policy;
+#[cfg(unix)]
+pub mod peer;
 #[cfg(target_os = "linux")]
 pub mod process_handle;
 pub mod request;
 pub mod score;
+#[cfg(unix)]
+pub mod server;
+pub mod systemd;
 pub mod units;
 
 use serde::{Deserialize, Serialize};

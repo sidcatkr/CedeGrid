@@ -21,9 +21,17 @@ locked_memory_mib = 0        # LimitMEMLOCK=; 0 means systemd's default
 [principals]
 uid_min = 1000               # 001 FR-059, used by the OOM loop; default from login.defs UID_MIN
 principal_min_percent = 1    # 001 FR-059's default
+
+[units]
+pam_session = "none"         # N3: "none" (default), "cedegrid" or "login"
 ```
 
 - Every section uses `deny_unknown_fields`. An unknown key refuses the file.
+- `units.pam_session` (user decision N3 of 2026-11-17): `none` opens no PAM session and the
+  `limits` section sets the units' process limits; `cedegrid` sets `PAMName=cedegrid`, a PAM
+  service the administrator provides with only `pam_limits`; `login` uses the host's `login`
+  stack. Under `cedegrid` and `login` the session's limits apply instead of the `limits` section,
+  except `tasks_max`.
 - A user's setting above a limit is refused in one line naming the policy key (FR-010).
 - `doctor` shows the effective values and whether each comes from the file or the default.
 - Aggressive is allowed only when the administrator lists it, and unprotected Aggressive's

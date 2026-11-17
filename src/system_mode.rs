@@ -23,10 +23,7 @@ pub fn root_refusal(euid: u32, first_arg: Option<&OsStr>) -> Option<String> {
     if euid != 0 || first_arg == Some(OsStr::new(BROKER_SUBCOMMAND)) {
         return None;
     }
-    Some(
-        "cedegrid does not run as root: run the same command as your own user, without sudo."
-            .to_owned(),
-    )
+    Some("refusing to run as root; run cedegrid as your own user, without sudo".to_owned())
 }
 
 /// What came back from asking the broker.
@@ -58,20 +55,24 @@ pub enum Decision {
 pub fn decide(outcome: Outcome, require_system: bool) -> Decision {
     let fallback = |line: String| {
         if require_system {
-            Decision::Refuse(format!("Stopped by --require-system: {line}"))
+            Decision::Refuse(format!(
+                "System mode required (--require-system) but unavailable: {line}"
+            ))
         } else {
-            Decision::Fallback(Some(format!("Running without System mode: {line}")))
+            Decision::Fallback(Some(format!(
+                "System mode unavailable, continuing without it: {line}"
+            )))
         }
     };
     match outcome {
         Outcome::Units(units) => Decision::System(units),
         Outcome::NotInstalled if require_system => Decision::Refuse(
-            "System mode is not installed on this host; ask the administrator to install cedegrid-system, or run without --require-system."
+            "System mode required (--require-system) but cedegrid-system is not installed on this host"
                 .to_owned(),
         ),
         // Without the package, nothing changes and nothing is printed (FR-013).
         Outcome::NotInstalled => Decision::Fallback(None),
-        Outcome::NoAnswer(reason) => fallback(format!("The System mode broker {reason}.")),
+        Outcome::NoAnswer(reason) => fallback(format!("broker {reason}")),
         Outcome::Refused(refusal) => match refusal.code {
             // The administrator's policy is refused, never bypassed by the fallback (FR-010).
             RefusalCode::ModeNotAllowed | RefusalCode::TaskLimit | RefusalCode::UnitNotOurs => {
@@ -91,9 +92,9 @@ pub fn ask(socket: &Path, request: &Request, timeout: Duration) -> Outcome {
 
     match std::fs::symlink_metadata(socket) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Outcome::NotInstalled,
-        Err(_) => return Outcome::NoAnswer("socket could not be read".to_owned()),
+        Err(_) => return Outcome::NoAnswer("socket cannot be read".to_owned()),
         Ok(meta) if !meta.file_type().is_socket() => {
-            return Outcome::NoAnswer("path is not a socket".to_owned());
+            return Outcome::NoAnswer("socket path is not a socket".to_owned());
         }
         Ok(_) => {}
     }
@@ -103,12 +104,12 @@ pub fn ask(socket: &Path, request: &Request, timeout: Duration) -> Outcome {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             return Outcome::Refused(Refusal::new(
                 RefusalCode::NotAMember,
-                "Only members of the cedegrid group may use System mode; ask the administrator to add you.",
+                "not a member of group cedegrid; ask an administrator to add your account",
             ));
         }
         Err(_) => return Outcome::NoAnswer("is not running".to_owned()),
     };
-    let silent = || Outcome::NoAnswer(format!("did not answer within {} s", timeout.as_secs()));
+    let silent = || Outcome::NoAnswer(format!("did not answer within {} s", timeout.as_secs_f64()));
     if stream.set_read_timeout(Some(timeout)).is_err()
         || stream.set_write_timeout(Some(timeout)).is_err()
     {
@@ -136,18 +137,18 @@ pub fn ask(_socket: &Path, _request: &Request, _timeout: Duration) -> Outcome {
 /// Reads one reply line.
 pub fn reply_outcome(line: &[u8]) -> Outcome {
     let Ok(reply) = serde_json::from_slice::<Reply>(line) else {
-        return Outcome::NoAnswer("sent a reply this client cannot read".to_owned());
+        return Outcome::NoAnswer("sent an unreadable reply".to_owned());
     };
     if reply.protocol != crate::broker::PROTOCOL {
         let side = if reply.protocol > crate::broker::PROTOCOL {
             "upgrade the cedegrid client"
         } else {
-            "ask the administrator to upgrade cedegrid-system"
+            "ask an administrator to upgrade cedegrid-system"
         };
         return Outcome::Refused(Refusal::new(
             RefusalCode::ProtocolMismatch,
             format!(
-                "The broker speaks protocol {} and this client {}; {side}.",
+                "protocol mismatch: broker {}, client {}; {side}",
                 reply.protocol,
                 crate::broker::PROTOCOL
             ),
@@ -159,8 +160,8 @@ pub fn reply_outcome(line: &[u8]) -> Outcome {
             code,
             reply
                 .message
-                .unwrap_or_else(|| "The broker refused the request.".to_owned()),
+                .unwrap_or_else(|| "request refused by the broker".to_owned()),
         )),
-        _ => Outcome::NoAnswer("sent a reply this client cannot read".to_owned()),
+        _ => Outcome::NoAnswer("sent an unreadable reply".to_owned()),
     }
 }
