@@ -118,6 +118,26 @@ pub fn install() {
     ok("usermod", &["-aG", "cedegrid", SECOND]);
 }
 
+/// Installs the packages again over themselves, as an upgrade does: dpkg runs `postinst
+/// configure <old version>`. The broker is left as the package leaves it.
+pub fn upgrade() {
+    if let Ok(debs) = std::env::var("CEDEGRID_TEST_DEBS") {
+        let mut files: Vec<String> = std::fs::read_dir(&debs)
+            .expect("CEDEGRID_TEST_DEBS")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().display().to_string())
+            .filter(|path| path.ends_with(".deb"))
+            .collect();
+        files.sort();
+        let mut args = vec!["-i"];
+        args.extend(files.iter().map(String::as_str));
+        ok("dpkg", &args);
+        return;
+    }
+    let packaging = std::env::var("CEDEGRID_TEST_PACKAGING").expect("CEDEGRID_TEST_PACKAGING");
+    ok("sh", &[&format!("{packaging}/postinst"), "configure", "0.0.0"]);
+}
+
 /// `systemctl show` for the given properties.
 pub fn show(unit: &str, properties: &str) -> BTreeMap<String, String> {
     ok("systemctl", &["show", &format!("--property={properties}"), "--", unit])

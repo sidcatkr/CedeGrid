@@ -3114,6 +3114,28 @@ mod container {
 
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn an_upgrade_restarts_a_running_broker_and_keeps_the_units() {
+        assert!(enabled(), "{GATE}");
+        install();
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        let unit = ordinary(MEMBER_UID);
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&unit, "ActiveState")["ActiveState"] == "active"
+        }));
+        let invocation = show(&unit, "InvocationID")["InvocationID"].clone();
+        let broker = show("cedegrid-broker.service", "MainPID")["MainPID"].clone();
+        assert_ne!(broker, "0", "the start left no broker running");
+        upgrade();
+        let after = show("cedegrid-broker.service", "MainPID")["MainPID"].clone();
+        assert_ne!(after, "0", "the upgrade left no broker running");
+        assert_ne!(after, broker, "the upgrade kept the old broker process");
+        assert_eq!(show(&unit, "ActiveState")["ActiveState"], "active");
+        assert_eq!(show(&unit, "InvocationID")["InvocationID"], invocation);
+        stop_units(MEMBER);
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn a_silent_broker_falls_back_and_running_units_survive_a_restart() {
         assert!(enabled(), "{GATE}");
         install();

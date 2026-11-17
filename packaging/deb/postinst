@@ -6,4 +6,9 @@ if [ "$1" = "configure" ]; then
     install -d -o root -g root -m 0755 /etc/cedegrid
     systemctl daemon-reload
     systemctl enable --now cedegrid-broker.socket
+    # An upgrade replaces the binary: a running broker restarts on the new one and finds its
+    # units again by name and marker; the units keep running.
+    if [ -n "$2" ]; then
+        systemctl try-restart cedegrid-broker.service
+    fi
 fi
