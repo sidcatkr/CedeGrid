@@ -1524,6 +1524,23 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   cores, misses fractional targets); keep a paused task stopped while contention lasts (no
   progress lost, but no bound and the slot stays held); resume it at the bound (the other user
   then gets plain Linux after 10 s). The last two remain open if the user prefers them.
+- **Revision (2026-11-17, after run E8)**: the drain at the pause bound cost own work 5-25%
+  against the former cap; the pause now moves to another task at the bound instead, and a
+  draining task makes no other task hold. Run E1 showed `cpu.max` not clearly more exact, so
+  Full takes no CPU rate cap either (D2 A').
+- **Revision (2026-11-17, implementing D2)**: the cap's suites, rerun with whole tasks, showed
+  what a cap had done implicitly. The moved pause is covered only as far as own work with it
+  running would be over its target, so a hold shrinks at the bound after the target rose, and
+  the cover rounds toward own work unless own work a task over its target would fill the host,
+  where a saturated host would hide the other user's demand and the hold would swing. Where no
+  running task can cover it, as in Yield First, the moved pauses take turns: the whole-task form
+  of the former minimum duty. A pause for own usage over its target holds while own work is not
+  below its target by the contention floor (FR-013), so a dipping task does not resume and pause
+  it by turns. Only a task that is paused counts toward the excess; a moved pause is not a step
+  down for admission; the envelope pauses whatever else the resource waits on; and a pause ended
+  because contention ended leaves no dwell. Costs against the cap, kept in SC-002 and SC-003: the
+  fair share holds to within one task, and in Yield First, where whole tasks left own work just
+  over its margin on a host it saturated, every task is paused one interval later.
 
 ## R90. The first-come GPU floor (constitution 8.1.0)
 

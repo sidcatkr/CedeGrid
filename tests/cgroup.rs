@@ -594,10 +594,17 @@ mod runtime_steps {
             (step, read(&dir, "cpu.weight")),
             (YieldStep::LowerShare, "1".into())
         );
-        actuator
-            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
-            .unwrap();
-        assert_eq!(read(&dir, "cpu.max"), "25000 100000");
+        // CPU takes no rate cap, `cpu.max` authorized or not: it is a launch setting (FR-089).
+        assert!(
+            actuator
+                .unavailable(ResourceKind::Cpu)
+                .contains(&YieldStep::Cap)
+        );
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+                .is_err()
+        );
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
             .unwrap();
@@ -673,11 +680,12 @@ mod runtime_steps {
             pids: vec![41],
             signals: vec![],
         };
-        // No rootless rate cap exists, so a refused `cpu.max` is an error (FR-089).
-        let refused = actuator
-            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
-            .unwrap_err();
-        assert!(format!("{refused:#}").contains("membership"), "{refused:#}");
+        // CPU takes no rate cap at all (FR-089).
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+                .is_err()
+        );
         assert_eq!(read(&dir, "cpu.max"), "max 100000");
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
@@ -697,13 +705,13 @@ mod runtime_steps {
         assert_eq!(read(&dir, "cpu.weight"), "10");
     }
 
-    /// Undoing a cap this actuator wrote needs only its leaf, whatever its members: lifting acts
+    /// Undoing a step this actuator wrote needs only its leaf, whatever its members: lifting acts
     /// on nothing CedeGrid did not restrict itself. A new restriction on that leaf is still
     /// refused: a freeze moves to the rootless pause, which reaches only the verified family, and
-    /// a cap has no rootless mechanism (FR-078, FR-089, Principle I; the undo used to be refused
-    /// too).
+    /// a lower share has no rootless mechanism (FR-078, FR-089, Principle I; the undo used to be
+    /// refused too).
     #[test]
-    fn a_restore_on_a_joined_leaf_needs_only_the_leaf_and_a_new_cap_still_verifies() {
+    fn a_restore_on_a_joined_leaf_needs_only_the_leaf_and_a_new_step_still_verifies() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_owned();
         leaf(&dir, "51\n");
@@ -717,21 +725,15 @@ mod runtime_steps {
             signals: vec![],
         };
         actuator
-            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+            .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
             .unwrap();
+        assert_eq!(read(&dir, "cpu.weight"), "1");
         fs::write(dir.join("cgroup.procs"), "51\n52\n").unwrap();
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::None, None)
             .unwrap();
-        assert_eq!(read(&dir, "cpu.max"), "max 100000");
+        assert_eq!(read(&dir, "cpu.weight"), "10");
         assert!(family.signals.is_empty());
-        assert!(
-            actuator
-                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
-                .is_err(),
-            "the new cap is refused, with no rootless rate cap to move to"
-        );
-        assert_eq!(read(&dir, "cpu.max"), "max 100000");
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
             .unwrap();
@@ -770,10 +772,12 @@ mod runtime_steps {
             pids: vec![61],
             signals: vec![],
         };
-        // A cap never raises the launch-time quota.
-        actuator
-            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500))
-            .unwrap();
+        // The launch-time quota is a launch setting only: no runtime step writes it (FR-089).
+        assert!(
+            actuator
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(500))
+                .is_err()
+        );
         assert_eq!(read(&dir, "cpu.max"), "20000 100000");
         actuator
             .apply(&mut family, ResourceKind::Cpu, YieldStep::Pause, None)
@@ -1423,7 +1427,7 @@ mod runtime_steps {
     /// A release returns every control this actuator wrote to its launch value whatever the
     /// leaf's members, an empty leaf included, after the leader's exit (FR-078).
     #[test]
-    fn a_release_restores_caps_whatever_the_members() {
+    fn a_release_restores_steps_whatever_the_members() {
         for members in ["81\n99\n", ""] {
             let temp = tempfile::tempdir().unwrap();
             let dir = temp.path().to_owned();
@@ -1437,7 +1441,7 @@ mod runtime_steps {
             );
             let mut family = family(81);
             actuator
-                .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(250))
+                .apply(&mut family, ResourceKind::Cpu, YieldStep::LowerShare, None)
                 .unwrap();
             actuator
                 .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(3500))
@@ -1448,7 +1452,7 @@ mod runtime_steps {
                 family.pids.clear();
             }
             actuator.release(&mut family).unwrap();
-            assert_eq!(read(&dir, "cpu.max"), "max 100000", "{members:?}");
+            assert_eq!(read(&dir, "cpu.weight"), "10", "{members:?}");
             assert_eq!(read(&dir, "memory.high"), "max", "{members:?}");
         }
         let temp = tempfile::tempdir().unwrap();
@@ -1476,31 +1480,28 @@ mod runtime_steps {
     fn a_restore_never_tightens() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_owned();
-        leaf(&dir, "83\n");
-        fs::write(dir.join("cpu.max"), "20000 100000\n").unwrap();
-        let mut config = all_controls();
-        config.cpu_max = Some(cedegrid::cgroup::CpuMax {
-            quota_us: 20_000,
-            period_us: 100_000,
-        });
-        let mut actuator = CgroupActuator::new(
-            DirectoryLeaf::open(&dir).unwrap(),
-            &config,
-            &settings(AllocationClass::Opportunistic),
-        );
+        memory_leaf(&dir, "83\n", "max");
+        let launch = (3800 * MIB).to_string();
+        fs::write(dir.join("memory.high"), format!("{launch}\n")).unwrap();
+        let mut config = config(&["cgroup.procs", "memory.high"]);
+        config.memory_high_mib = Some(3800);
+        let mut settings = settings(AllocationClass::Opportunistic);
+        settings.requested.ram_mib = 4096;
+        let mut actuator =
+            CgroupActuator::new(DirectoryLeaf::open(&dir).unwrap(), &config, &settings);
         let mut family = family(83);
         actuator
-            .apply(&mut family, ResourceKind::Cpu, YieldStep::Cap, Some(100))
+            .apply(&mut family, ResourceKind::Ram, YieldStep::Cap, Some(3500))
             .unwrap();
-        assert_eq!(read(&dir, "cpu.max"), "10000 100000");
+        assert_ne!(read(&dir, "memory.high"), launch);
         // Something loosened it meanwhile, and a foreign process joined.
-        fs::write(dir.join("cpu.max"), "max 100000\n").unwrap();
+        fs::write(dir.join("memory.high"), "max\n").unwrap();
         fs::write(dir.join("cgroup.procs"), "83\n99\n").unwrap();
         assert!(actuator.release(&mut family).is_err(), "no verified write");
-        assert_eq!(read(&dir, "cpu.max"), "max 100000", "not tightened");
+        assert_eq!(read(&dir, "memory.high"), "max", "not tightened");
         fs::write(dir.join("cgroup.procs"), "83\n").unwrap();
         actuator.watch(&mut family).unwrap();
-        assert_eq!(read(&dir, "cpu.max"), "20000 100000");
+        assert_eq!(read(&dir, "memory.high"), launch);
     }
 
     /// A thaw whose write failed at release is retried by the watch that runs in every phase,

@@ -411,6 +411,7 @@ impl PolicyEngine {
                 to_free: None,
                 pending: false,
                 asked_target: None,
+                paused_usage: None,
             },
         );
     }
@@ -518,9 +519,6 @@ struct Interval<'a> {
     /// CPU contention has fully ended: Yield First and Neutral return CPU in one move,
     /// without the mode's scale-up interval (FR-034).
     cpu_contention_ended: bool,
-    /// The first interval CPU contention has ended: held CPU steps rise to the mode's target in
-    /// one move (FR-034, R44).
-    cpu_contention_returned: bool,
     /// CPU and RAM admission, when closed, is closed only by own new allocations.
     cpu_new_only: bool,
     ram_new_only: bool,
@@ -639,7 +637,6 @@ impl<'a> Interval<'a> {
             cpu_own_hold: false,
             cedegrid_cpu: 0,
             cpu_contention_ended: false,
-            cpu_contention_returned: false,
             cpu_new_only: false,
             ram_new_only: false,
             ram_held: false,
@@ -745,17 +742,6 @@ impl<'a> Interval<'a> {
         );
         (decision, self.next)
     }
-}
-
-/// Whether a CPU rate cap applies: the node's cgroup backend is enabled with `cpu.max`
-/// authorized (Full). Elsewhere CPU work is held back by whole tasks (FR-089).
-fn cpu_rate_cap(config: &Config) -> bool {
-    config.cgroup.enabled
-        && config
-            .cgroup
-            .authorized_controls
-            .iter()
-            .any(|control| control == "cpu.max")
 }
 
 /// The mode that sets own work's aggregate on a resource: the node mode within

@@ -26,13 +26,15 @@
   the amount is unknown. A device returns to the measured path only after
   `contention.gpu_compute.quiet_window_intervals` consecutive measured intervals. Under an
   unknown amount, Neutral holds the fair share and Performance admits nothing new there.
-- **Whole-task holds.** Yield First and Neutral hold own GPU compute work, and CPU work in
-  Tracked, back by pausing whole tasks, with no rate cap and no stop-and-resume duty cycle. A
-  task is paused only while the own work left running stays at or above the mode's target, so a
-  single job is never paused below it. A pause still answering its demand after
-  `pause_bound_s` (10 s) gives a hint-ready CPU task its hint and otherwise drains the task,
-  which is requeued without using an attempt. In Full with `cpu.max` authorized, CPU work is
-  still capped. On a time-sliced GPU, own tasks are paused down to the share of the busy
+- **Whole-task holds.** Yield First and Neutral hold own CPU and GPU compute work back by
+  pausing whole tasks, in Tracked and in Full, with no rate cap and no stop-and-resume duty
+  cycle; in Full a pause freezes the leaf, and `cpu.max` is a launch setting only. A task is
+  paused only while the own work left running stays at or above the mode's target, so a single
+  job is never paused below it, and a task larger than the excess is not held. A pause still
+  answering its demand after `pause_bound_s` (10 s) moves to another task, so no task is drained
+  for CPU; where every task is paused, as in Yield First, the pauses take turns. Guaranteed CPU
+  work above its request only gets a lower share. On a time-sliced GPU, own tasks are paused
+  down to the share of the busy
   processes the time-slice rule allows beside a principal that reads at least
   `contention.gpu_compute.slice_bound_percent` (75) percent of its slices.
   `contention.gpu_compute.slice_step_percent` still loads and has no effect.

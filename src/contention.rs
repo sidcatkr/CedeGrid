@@ -887,6 +887,10 @@ pub struct StepState {
     /// the larger of it and the current target (FR-037).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_target: Option<u64>,
+    /// A whole-task pause's task usage when it was paused, which the task that takes its place
+    /// at the pause bound must cover (FR-089).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_usage: Option<u64>,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -1075,6 +1079,7 @@ pub fn plan_step(
             asked_target: (step == YieldStep::Hint && input.kind.is_memory())
                 .then_some(input.target)
                 .flatten(),
+            paused_usage: None,
         }),
         skipped,
     };
@@ -1186,13 +1191,20 @@ pub fn plan_step(
     let mut held = state.clone();
     held.contended_since_ms = None;
     // Where no cap applies, a pause held for external growth ends in the interval contention has
-    // ended, as a cap would rise there (FR-034, FR-089).
+    // ended, as a cap would rise there (FR-034, FR-089). Ending it leaves no step to dwell on, so
+    // a contender that returns is answered at once, as a lowered cap would answer it (SC-002).
     if current == YieldStep::Pause
         && timing.returning
         && state.cause == YieldCause::ExternalGrowth
         && (!input.applies(YieldStep::Cap) || input.unavailable.contains(&YieldStep::Cap))
     {
         held.step = input.previous_step(current);
+        if held.step == YieldStep::None {
+            return LadderDecision {
+                state: None,
+                skipped: Vec::new(),
+            };
+        }
         held.entered_at_ms = now_ms;
         held.target = None;
         held.calm_since_ms = None;

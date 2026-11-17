@@ -1943,12 +1943,19 @@ fn advertised_controls_come_from_backend_capability_never_from_observations() {
         "cgroup.freeze".into(),
     ];
     config.cgroup.validate().unwrap();
-    // The controls a prepared backend would offer follow its authorized settings.
+    // The controls a prepared backend would offer follow its authorized settings. `cpu.max` is
+    // a launch setting only, offered when a launch quota is set (FR-029, FR-089).
     let offered = config.cgroup.advertised_controls();
     assert!(offered.contains(&"cpu.weight".to_string()));
-    assert!(offered.contains(&"cpu.max".to_string()));
+    assert!(!offered.contains(&"cpu.max".to_string()));
     assert!(offered.contains(&"cgroup.freeze".to_string()));
     assert!(!offered.iter().any(|c| c.ends_with(".pressure")));
+    let mut quota = config.cgroup.clone();
+    quota.cpu_max = Some(cedegrid::cgroup::CpuMax {
+        quota_us: 50_000,
+        period_us: 100_000,
+    });
+    assert!(quota.advertised_controls().contains(&"cpu.max".to_string()));
     // This backend cannot prepare, so none of them is advertised.
     let advertised = cedegrid::agent::advertised_controls(&config, false);
     assert!(advertised.contains(&"cpu.nice".to_string()));

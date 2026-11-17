@@ -646,8 +646,8 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   listing is more than 30 s old is restarted when next listed; updated only from a complete
   listing (FR-090).
 - **Interval (per decision)**: `slice_hold`: per device on the time-slice path with a slice-bound
-  principal, the count t of own tasks that keep running (FR-021, FR-089), floor included;
-  `cpu_cap_available`: whether a CPU rate cap applies (cgroup enabled with `cpu.max` authorized).
+  principal, the count t of own tasks that keep running (FR-021, FR-089), floor included. No
+  CPU rate cap applies at either level (report 057 D2), so the interval no longer tracks one.
 - **TimeSliceRecord** gains `hold` (t) and `floor` (`applies`, or the reason it does not:
   `order_unknown`, `uid_unreadable`, `arrived_later`, `not_one_principal`). `d0`,
   `window_share`, `d0_windows`, `duty`, `step` and `utilization_milli` stay for recorded

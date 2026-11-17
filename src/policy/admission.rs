@@ -41,25 +41,46 @@ impl Interval<'_> {
         let (config, snapshot, input, prev, now) =
             (self.config, self.snapshot, self.input, self.prev, self.now);
         let ladder = &self.next.ladder;
-        let moving_down: BTreeSet<ResourceKey> = ladder
-            .iter()
-            .filter(|((id, key), next)| {
-                let before = prev.ladder.get(&(id.clone(), key.clone()));
-                let step = before.map_or(YieldStep::None, |s| s.step);
-                let fell = match (next.target, before.and_then(|s| s.target)) {
-                    (Some(next), Some(before)) => {
-                        before.saturating_sub(next) > jitter_tolerance(config, ladder, key)
-                    }
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-                next.step > step
-                    || (next.step == step
-                        && matches!(step, YieldStep::Cap | YieldStep::Hint)
-                        && fell)
-            })
-            .map(|((_, key), _)| key.clone())
-            .collect();
+        // A pause that moves to another task at its bound is the hold staying, not a step down:
+        // on each resource, new pauses count only beyond the pauses ended in the same interval
+        // (FR-028, FR-089).
+        let mut ended: BTreeMap<&ResourceKey, usize> = BTreeMap::new();
+        for ((id, key), before) in &prev.ladder {
+            if before.step == YieldStep::Pause
+                && ladder
+                    .get(&(id.clone(), key.clone()))
+                    .is_none_or(|next| next.step < YieldStep::Pause)
+            {
+                *ended.entry(key).or_default() += 1;
+            }
+        }
+        let mut paused: BTreeMap<&ResourceKey, usize> = BTreeMap::new();
+        let mut moving_down = BTreeSet::new();
+        for ((id, key), next) in ladder {
+            let before = prev.ladder.get(&(id.clone(), key.clone()));
+            let step = before.map_or(YieldStep::None, |s| s.step);
+            if next.step == YieldStep::Pause && step < YieldStep::Pause {
+                *paused.entry(key).or_default() += 1;
+                continue;
+            }
+            let fell = match (next.target, before.and_then(|s| s.target)) {
+                (Some(next), Some(before)) => {
+                    before.saturating_sub(next) > jitter_tolerance(config, ladder, key)
+                }
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if next.step > step
+                || (next.step == step && matches!(step, YieldStep::Cap | YieldStep::Hint) && fell)
+            {
+                moving_down.insert(key.clone());
+            }
+        }
+        for (key, count) in paused {
+            if count > ended.get(key).copied().unwrap_or(0) {
+                moving_down.insert(key.clone());
+            }
+        }
         // A CPU cap that holds may sit within the tolerance above a jittering budget.
         let cpu_fits = self.charged.cpu_millicores <= self.budget.cpu_millicores
             || (!moving_down.contains(&ResourceKey::Cpu)

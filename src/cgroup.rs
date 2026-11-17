@@ -32,8 +32,8 @@ const WRITABLE_CONTROLS: &[&str] = &[
 ];
 /// Controls that runtime yield steps write, when the operator authorizes them. A
 /// RAM cap is `memory.high` only; `memory.max`, `memory.low` and `memory.min` are
-/// never runtime steps.
-const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cpu.max", "cgroup.freeze", "memory.high"];
+/// never runtime steps, and `cpu.max` is a launch setting only: CPU takes no rate cap (FR-089).
+const RUNTIME_CONTROLS: &[&str] = &["cpu.weight", "cgroup.freeze", "memory.high"];
 /// How often a frozen leaf's members are read, so a process that joins is thawed within this.
 const FROZEN_MEMBER_CHECK: Duration = Duration::from_millis(50);
 
@@ -552,12 +552,8 @@ pub struct CgroupActuator<L: LeafIo> {
     leaf: L,
     authorized: BTreeSet<String>,
     class: AllocationClass,
-    requested_cpu: u64,
     /// Launch values restored when a step reverses.
     weight: String,
-    cpu_max: String,
-    launch_quota_us: Option<u64>,
-    period_us: u64,
     fallback: crate::actuation::RootlessActuator,
     written: std::collections::BTreeMap<ResourceKind, BTreeSet<&'static str>>,
     detail: Option<String>,
@@ -577,22 +573,14 @@ pub struct CgroupActuator<L: LeafIo> {
 
 impl<L: LeafIo> CgroupActuator<L> {
     pub fn new(leaf: L, config: &CgroupConfig, settings: &ActuatorSettings) -> Self {
-        let period_us = config.cpu_max.as_ref().map_or(100_000, |max| max.period_us);
         Self {
             leaf,
             authorized: config.authorized_controls.iter().cloned().collect(),
             class: settings.class,
-            requested_cpu: settings.requested.cpu_millicores.max(1),
             // Without a launch setting the leaf keeps the kernel default weight.
             weight: config
                 .cpu_weight
                 .map_or_else(|| "100".into(), |weight| weight.to_string()),
-            cpu_max: config.cpu_max.as_ref().map_or_else(
-                || format!("max {period_us}"),
-                |max| format!("{} {}", max.quota_us, max.period_us),
-            ),
-            launch_quota_us: config.cpu_max.as_ref().map(|max| max.quota_us),
-            period_us,
             fallback: crate::actuation::RootlessActuator::new(settings),
             written: Default::default(),
             detail: None,
@@ -607,17 +595,6 @@ impl<L: LeafIo> CgroupActuator<L> {
             retry_restore: BTreeSet::new(),
             members_unreadable: 0,
         }
-    }
-
-    /// The cap quota per period, never above the launch-time quota.
-    fn quota_us(&self, target: Option<u64>) -> u64 {
-        let quota = target
-            .unwrap_or(self.requested_cpu / 2)
-            .saturating_mul(self.period_us)
-            .div_ceil(1000)
-            .max(1000);
-        self.launch_quota_us
-            .map_or(quota, |launch| quota.min(launch))
     }
 
     fn authorized(&self, control: &str) -> bool {
@@ -651,7 +628,6 @@ impl<L: LeafIo> CgroupActuator<L> {
             }
             let value = match control {
                 "cpu.weight" => self.weight.clone(),
-                "cpu.max" => self.cpu_max.clone(),
                 "memory.high" => self.memory_high.clone(),
                 _ => "0".into(),
             };
@@ -912,13 +888,11 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
         let fallback = self.fallback.unavailable(kind);
         let mut steps = BTreeSet::from([YieldStep::Hint]);
         match kind {
+            // CPU takes no rate cap at either level, only whole-task pauses (FR-089).
             ResourceKind::Cpu => {
+                steps.insert(YieldStep::Cap);
                 if !self.authorized("cpu.weight") {
                     steps.insert(YieldStep::LowerShare);
-                }
-                // `cpu.max` is the only CPU rate cap; Tracked has none (FR-089).
-                if !self.authorized("cpu.max") {
-                    steps.insert(YieldStep::Cap);
                 }
                 if !self.authorized("cgroup.freeze") && fallback.contains(&YieldStep::Pause) {
                     steps.insert(YieldStep::Pause);
@@ -968,12 +942,6 @@ impl<L: LeafIo> Actuator for CgroupActuator<L> {
             (_, YieldStep::None) => {}
             (ResourceKind::Cpu, YieldStep::LowerShare) => {
                 self.write(family, kind, "cpu.weight", "1")?;
-            }
-            (ResourceKind::Cpu, YieldStep::Cap) if self.authorized("cpu.max") => {
-                let value = format!("{} {}", self.quota_us(target), self.period_us);
-                if let Err(refusal) = self.write(family, kind, "cpu.max", &value) {
-                    self.fall_back(family, kind, step, target, refusal)?;
-                }
             }
             (_, YieldStep::Pause) if self.authorized("cgroup.freeze") => {
                 if let Err(refusal) = self.freeze(family, kind, Duration::from_secs(1)) {
@@ -2114,9 +2082,11 @@ mod tests {
         }
         let family = BTreeSet::from([10, 11, 12, 13, 14]);
         let workers = Leaf("10\n11\n12\n13\n14\n");
-        for control in ["cpu.max", "cgroup.freeze"] {
+        for control in ["cpu.weight", "cgroup.freeze"] {
             verify_runtime_target(&workers, &family, control).unwrap();
         }
+        // `cpu.max` is a launch setting only, never a runtime step (FR-089).
+        assert!(verify_runtime_target(&workers, &family, "cpu.max").is_err());
         assert!(verify_runtime_target(&workers, &BTreeSet::from([10]), "cgroup.freeze").is_err());
         let outsider = Leaf("10\n11\n12\n13\n14\n99\n");
         assert!(verify_runtime_target(&outsider, &family, "cgroup.freeze").is_err());

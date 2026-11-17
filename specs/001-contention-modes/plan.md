@@ -2747,3 +2747,19 @@ table), the data model, `contracts/decision-output.md` for the time-slice record
 cap or a GPU compute duty are moved to Full or rewritten to whole-task holds; the mode-order
 property test and the 500-sequence snapshot comparison by mode and level. Native: E9 on the test
 host before release (SC-020), then E8; C1 waits for E1 and E2.
+
+**Revision for D1 and D2 (2026-11-17)**. At its bound a whole-task pause moves to the next task
+instead of draining (D1). No CPU rate cap applies at either level (D2): `cpu_rate_cap` goes, the
+cgroup actuator reports Cap unavailable for CPU and drops its runtime `cpu.max` write (`cpu.max`
+stays a launch setting and leaves `RUNTIME_CONTROLS`), `doctor` lists no CPU cap, and the
+level-fill, the return level and the own-cap hold go with the cap. Rerunning the cap's suites
+with whole tasks added, in `plan_pass`: the moved pause is covered as far as own work with it
+running would be over its target, rounding toward own work unless that would fill the host; moved
+pauses no running task can cover take turns; only a paused task counts toward the excess; the
+envelope's excess is covered whatever the frame's cause. In `plan_victim`, `holds_own_pause`
+keeps an own-over-target pause while own work is not below its target by the contention floor.
+In `src/contention.rs`, a pause ended because contention ended leaves no state. In
+`src/policy/admission.rs`, new pauses count as moving down only beyond the pauses ended in the
+same interval. Tests that asserted CPU caps are rewritten to whole tasks (eight equal tasks in
+the scenario world, 100 m tasks in the PSI host, 32 in the reclaim and observability runs) or
+removed where they asserted cap mechanics only (cap rises, the return level).

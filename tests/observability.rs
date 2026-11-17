@@ -130,17 +130,36 @@ fn limit(actions: &[YieldAction], key: &ResourceKey, capacity: u64) -> u64 {
         })
 }
 
+/// Own work runs as the job and CPU-only tasks, this many in all, so whole-task holds can give
+/// back part of its CPU (FR-089).
+const TASKS: u64 = 32;
+
+fn task_ids() -> Vec<String> {
+    (0..TASKS)
+        .map(|i| {
+            if i == 0 {
+                "job".to_string()
+            } else {
+                format!("cpu-{i}")
+            }
+        })
+        .collect()
+}
+
 fn facts() -> BTreeMap<String, AllocationFacts> {
-    BTreeMap::from([(
-        "job".to_string(),
-        AllocationFacts {
-            unavailable: BTreeMap::from([(
-                ResourceKey::Cpu,
-                std::collections::BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
-            )]),
-            ..AllocationFacts::default()
-        },
-    )])
+    task_ids()
+        .into_iter()
+        .map(|id| {
+            let facts = AllocationFacts {
+                unavailable: BTreeMap::from([(
+                    ResourceKey::Cpu,
+                    std::collections::BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
+                )]),
+                ..AllocationFacts::default()
+            };
+            (id, facts)
+        })
+        .collect()
 }
 
 fn assert_catalogued(decision: &Decision) {
@@ -157,9 +176,10 @@ struct Step {
     snapshot: Snapshot,
 }
 
-/// A job that wants the whole CPU and GPU beside one external user whose CPU and
-/// GPU compute demands follow `phases` (intervals, CPU, GPU), with the supervisor
-/// applying every cap and pause at once.
+/// A job and CPU-only tasks that together want the whole CPU, the job the GPU too, beside one
+/// external user whose CPU and GPU compute demands follow `phases` (intervals, CPU, GPU), with
+/// the supervisor applying every pause at once. The host splits CPU between the user and own
+/// work, and own work's part equally among its running tasks.
 fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
     let mut engine = PolicyEngine::new();
     let mut actions: Vec<YieldAction> = vec![];
@@ -168,10 +188,17 @@ fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
     let gpu_key = ResourceKey::GpuCompute(GPU.into());
     for &(intervals, external_cpu, external_gpu) in phases {
         for _ in 0..intervals {
-            let cpu = share(
-                CPU,
-                &[external_cpu, limit(&actions, &ResourceKey::Cpu, CPU)],
-            );
+            let ids = task_ids();
+            let paused = |id: &String| {
+                actions.iter().any(|a| {
+                    &a.allocation_id == id
+                        && a.resource == ResourceKey::Cpu
+                        && a.step == YieldStep::Pause
+                })
+            };
+            let running = ids.iter().filter(|id| !paused(id)).count() as u64;
+            let cpu = share(CPU, &[external_cpu, running * (CPU / TASKS)]);
+            let each = cpu[1] / running.max(1);
             let gpu = share(1000, &[external_gpu, limit(&actions, &gpu_key, 1000)]);
             let mut snapshot = host();
             snapshot.cpu_busy_millicores = Some((cpu[0] + cpu[1]).min(CPU));
@@ -185,27 +212,39 @@ fn run(cfg: &Config, phases: &[(u64, u64, u64)]) -> Vec<Step> {
                 device.external_process_ids = Some(vec![987]);
                 device.external_compute = ComputeActivity::Active;
             }
-            let job = Allocation {
-                id: "job".into(),
-                class: AllocationClass::Opportunistic,
-                phase: AllocationPhase::Running,
-                requested: Resources {
-                    cpu_millicores: 1000,
-                    ram_mib: 1024,
-                    gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 2048)]),
-                },
-                observed: Some(Resources {
-                    cpu_millicores: cpu[1],
-                    ram_mib: 1024,
-                    gpu_memory_mib: BTreeMap::from([(GPU.to_string(), 2048)]),
-                }),
-                observed_upper: None,
-                observed_window_cpu: None,
-                usage_unknown: None,
-                modes: BTreeMap::new(),
-            };
+            let allocations = ids
+                .iter()
+                .map(|id| {
+                    let job = id == "job";
+                    let gpu_memory_mib = if job {
+                        BTreeMap::from([(GPU.to_string(), 2048)])
+                    } else {
+                        BTreeMap::new()
+                    };
+                    let ram_mib = if job { 1024 } else { 64 };
+                    Allocation {
+                        id: id.clone(),
+                        class: AllocationClass::Opportunistic,
+                        phase: AllocationPhase::Running,
+                        requested: Resources {
+                            cpu_millicores: 1000 / TASKS,
+                            ram_mib,
+                            gpu_memory_mib: gpu_memory_mib.clone(),
+                        },
+                        observed: Some(Resources {
+                            cpu_millicores: if paused(id) { 0 } else { each },
+                            ram_mib,
+                            gpu_memory_mib,
+                        }),
+                        observed_upper: None,
+                        observed_window_cpu: None,
+                        usage_unknown: None,
+                        modes: BTreeMap::new(),
+                    }
+                })
+                .collect();
             let input = PolicyInput {
-                allocations: vec![job],
+                allocations,
                 facts: facts(),
                 ..PolicyInput::default()
             };
@@ -316,17 +355,18 @@ fn a_scripted_cpu_contention_run_is_shown_at_every_step() {
     for end in &ends {
         assert_shown(&steps[*end], &cfg, &key, kind);
     }
-    // Idle: Neutral keeps its 5% margin; the job, which wants the whole CPU, is
-    // capped at that target for its own usage over it (FR-011).
+    // Idle: Neutral keeps its 5% margin; own work, which wants the whole CPU, is held to that
+    // target by whole tasks for its own usage over it (FR-011, FR-089).
     let idle = &steps[ends[0]].decision;
-    assert!(
-        idle.actions.iter().all(|a| a.resource == key
-            && a.step == YieldStep::Cap
-            && a.target == Some(30_400)
-            && a.cause == cedegrid::contention::YieldCause::OwnOverTarget),
-        "{:?}",
-        idle.actions
-    );
+    let own_pauses = |d: &Decision| {
+        !d.actions.is_empty()
+            && d.actions.iter().all(|a| {
+                a.resource == key
+                    && a.step == YieldStep::Pause
+                    && a.cause == cedegrid::contention::YieldCause::OwnOverTarget
+            })
+    };
+    assert!(own_pauses(idle), "{:?}", idle.actions);
     assert_eq!(idle.resources[&key].target_share, Some(30_400));
     assert_eq!(
         idle.resources[&key].held_back.as_ref().unwrap().margin,
@@ -345,21 +385,18 @@ fn a_scripted_cpu_contention_run_is_shown_at_every_step() {
     );
     assert!(steady.iter().any(|c| c == "satisfied_demand"), "{steady:?}");
     // Growth past the fair share: the target falls to the fair share, and the user takes
-    // at least the other half, which counts as external. Own usage falls to the target, so
-    // the idle cap no longer binds and reverses with its cause.
+    // at least the other half, which counts as external, as tasks are paused for its growth.
     let grown = &steps[ends[2]].decision;
     assert!(grown.resources[&key].target_share.unwrap() <= CPU / 2 + CPU / 100);
     assert!(grown.resources[&key].external.unwrap() >= CPU / 2 - CPU / 100);
-    let growth: Vec<String> = steps[ends[1] + 1..=ends[2]]
-        .iter()
-        .flat_map(|s| codes_of(&s.decision, &key))
-        .collect();
     assert!(
-        growth.iter().any(|c| c == "step_reversed_own_usage_fell"),
-        "{growth:?}"
+        grown.actions.iter().any(|a| a.step == YieldStep::Pause
+            && a.cause == cedegrid::contention::YieldCause::ExternalGrowth),
+        "{:?}",
+        grown.actions
     );
-    // The user leaves: own usage is over the margin's target again and is capped there
-    // with its own cause.
+    // The user leaves: own usage is over the margin's target again and is held there with
+    // its own cause.
     let after = &steps[ends[2] + 1..];
     assert!(
         after.iter().any(|s| s.decision.actions.iter().any(
@@ -368,13 +405,7 @@ fn a_scripted_cpu_contention_run_is_shown_at_every_step() {
         "no step for own usage after the user left"
     );
     let last = &steps[ends[3]].decision;
-    assert!(
-        last.actions
-            .iter()
-            .all(|a| a.resource == key && a.target == Some(30_400)),
-        "{:?}",
-        last.actions
-    );
+    assert!(own_pauses(last), "{:?}", last.actions);
     assert_eq!(last.resources[&key].target_share, Some(30_400));
 }
 

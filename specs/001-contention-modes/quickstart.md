@@ -67,16 +67,14 @@ the step reverses after the load stops, and that the job completes. The bounds, 
 the whole-task holds and the pause bound come from the policy tests on the second line.
 
 **Expected:**
-- A load that fits in the 15% margin leaves own work running, with any cap at most keeping the
-  margin free.
+- A load that fits in the 15% margin leaves own work running, with whole tasks paused at most
+  to keep the margin free, to within one task.
 - A load that saturates the CPU (contended) pauses the opportunistic job within 2 monitor
-  intervals (SC-002); in Neutral, `observe` shows a `cap` at the fair share in Full and, in
-  Tracked, whole tasks paused only while the rest stays at or above it; in Performance no step.
-- In Full no drain or termination occurs (SC-007): after the pause bound the job resumes at the
-  5% minimum duty, as a hint for an SDK worker or a cap for a plain command. In Tracked, a pause
-  still contended at the bound gives an SDK worker its hint and drains a plain command, which is
-  requeued without using an attempt.
-- After the load shrinks, a held cap rises again at the mode's rate; after it stops, the steps
+  intervals (SC-002); in Neutral, `observe` shows whole tasks paused only while the rest stays at
+  or above the fair share, in Tracked and in Full; in Performance no step.
+- No drain or termination occurs (SC-007): a pause still contended at the bound moves to another
+  task, and where every task is paused the pauses take turns.
+- After the load shrinks, paused tasks resume at the mode's rate; after it stops, the steps
   reverse.
 
 ## 4. Delegated cgroup actuation (Linux, authorized only)
