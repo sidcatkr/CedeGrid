@@ -38,8 +38,7 @@ impl UnitShow {
     /// Whether the unit carries the broker's marker for this kind and caller (FR-007).
     pub fn is_ours(&self, kind: UnitKind, uid: u32) -> bool {
         let marker = format!("{MARKER_VARIABLE}={}", marker_value(kind, uid));
-        self.description.starts_with(DESCRIPTION_PREFIX)
-            && self.environment.contains(&marker)
+        self.description.starts_with(DESCRIPTION_PREFIX) && self.environment.contains(&marker)
     }
 }
 
