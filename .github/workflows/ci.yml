@@ -40,6 +40,19 @@ jobs:
       - run: rustup toolchain install stable --profile minimal
       - run: cargo +stable check --locked --all-targets
       - run: cargo +stable test --locked --lib --test policy --test telemetry --test cli
+  system-mode:
+    # Feature 005: the System mode fixtures as root under systemd 249 in a container, with the
+    # two packages installed and purged through dpkg.
+    timeout-minutes: 45
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t cedegrid-system-mode tools/docker-validation/system-mode
+      - run: >-
+          docker run -d --name cedegrid-sm --privileged --cgroupns=private
+          --tmpfs /run --tmpfs /run/lock --tmpfs /tmp -v "$PWD":/src:ro cedegrid-system-mode
+      - run: docker exec cedegrid-sm timeout 120 systemctl is-system-running --wait || true
+      - run: docker exec -e CEDEGRID_TEST_RELEASE=1 cedegrid-sm /src/tools/docker-validation/system-mode/run.sh
   minimum-rust:
     timeout-minutes: 30
     runs-on: ubuntu-latest

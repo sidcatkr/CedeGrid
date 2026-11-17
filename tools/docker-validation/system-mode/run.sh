@@ -23,6 +23,11 @@ runuser -u test -- env CEDEGRID_TEST_RELEASE="${CEDEGRID_TEST_RELEASE:-}" sh -eu
     else
         cargo build --locked --bin cedegrid
     fi
+    profile=debug
+    if [ "${CEDEGRID_TEST_RELEASE:-}" = 1 ]; then profile=release; fi
+    rm -rf "$HOME/debs"
+    python3 tools/build_deb.py --binary "target/$profile/cedegrid" --packaging packaging/deb \
+        --version 0.0.0~test --arch "$(dpkg --print-architecture)" --output "$HOME/debs"
     cargo test --locked --test system_mode --no-run --message-format=json \
         | python3 -c "import json,sys
 for line in sys.stdin:
@@ -37,4 +42,5 @@ CEDEGRID_TEST_SYSTEM_CONTAINER=1 \
 CEDEGRID_TEST_RELEASE="${CEDEGRID_TEST_RELEASE:-}" \
 CEDEGRID_TEST_BIN=/home/test/work/target/$profile/cedegrid \
 CEDEGRID_TEST_PACKAGING=/home/test/work/packaging/deb \
+CEDEGRID_TEST_DEBS=/home/test/debs \
     "$test_bin" --test-threads=1 --ignored "$filter"

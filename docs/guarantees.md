@@ -1026,3 +1026,43 @@ descriptors and receipts remain. Uncertain or unpublished data cannot be discard
 to fabricate spare disk capacity. Offline backup/restore preserves the durable
 ledger and fences surviving reservations; its point-in-time RPO and source-retirement
 requirement are described in [coordinator operations](coordinator-work.md).
+
+## System mode
+
+System mode applies only where an administrator installed `cedegrid-system`; the default install
+runs without privileges. The administrator page is [System mode](system-mode.md).
+
+What runs as root:
+
+- One process, the broker, runs as root. The agent, the supervisors and all user work run with
+  the user's rights.
+- The broker identifies a caller only by the socket's peer credentials and serves only current
+  members of the `cedegrid` group, never user ID 0 or system accounts.
+- A request that names a user, unit, path, cgroup, program, mount, device or capability is
+  refused; every request and its result is written to the journal.
+- The broker starts and stops only the two units it made for the caller, recognized by name and
+  by a marker, and builds every property from the caller's user ID and the administrator policy.
+- It moves only the caller's job between the caller's two units, frozen from the check to the
+  move, and only when every process in it has the caller's user and group IDs.
+- It writes `oom_score_adj` only for processes inside those units, through a pidfd-held
+  `/proc/<pid>` directory, and reads every value back.
+- It writes no other file except the moved job's cgroup files and `cpu.idle` on the Yield First
+  slice, and changes no PAM, login, sysctl or kernel module setting.
+- Purging the package stops every unit the broker made and removes what the package installed.
+
+Limits:
+
+- The allowed modes in the administrator policy are a CedeGrid setting, not a security boundary;
+  the limits the kernel enforces are the units' properties (`TasksMax=` and the process limits).
+- With `units.pam_session = "none"`, the default, login limits from PAM do not apply to System
+  mode work.
+- `cpu.idle` gives way on CPU time only, not on SMT siblings, caches or memory bandwidth.
+- Where the host does not split CPU by account, or with `units.ordinary_slice = "cedegrid"`,
+  System mode work competes in `cedegrid.slice` beside `user.slice` and `system.slice`, which
+  changes the CPU split between those groups.
+- With logind's default `RemoveIPC=yes`, a user's System V IPC objects and POSIX shared memory
+  are removed at the user's last logout, also while their units run.
+- In-share own memory is protected only while another user is above their fair share, and only
+  for processes inside the units.
+- When a small process outside CedeGrid causes an out-of-memory condition, the kernel can still
+  kill a larger process.

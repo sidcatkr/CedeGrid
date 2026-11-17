@@ -63,10 +63,28 @@ fn ensure_account(name: &str, uid: Option<u32>) {
     ok("useradd", &args);
 }
 
-/// Installs the built binary and the packaging files as the package would, then the accounts.
-/// Safe to call more than once.
+/// Installs the two packages with dpkg when `CEDEGRID_TEST_DEBS` names them, else the built
+/// binary and packaging files as the package would; then the accounts. Safe to call again.
 pub fn install() {
     ensure_account(OUTSIDER, None);
+    if let Ok(debs) = std::env::var("CEDEGRID_TEST_DEBS") {
+        let mut files: Vec<String> = std::fs::read_dir(&debs)
+            .expect("CEDEGRID_TEST_DEBS")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().display().to_string())
+            .filter(|path| path.ends_with(".deb"))
+            .collect();
+        files.sort();
+        let mut args = vec!["-i"];
+        args.extend(files.iter().map(String::as_str));
+        ok("dpkg", &args);
+        let _ = run("systemctl", &["stop", "cedegrid-broker.service"]);
+        ensure_account(MEMBER, Some(MEMBER_UID));
+        ensure_account(SECOND, Some(SECOND_UID));
+        ok("usermod", &["-aG", "cedegrid", MEMBER]);
+        ok("usermod", &["-aG", "cedegrid", SECOND]);
+        return;
+    }
     let binary = std::env::var("CEDEGRID_TEST_BIN").expect("CEDEGRID_TEST_BIN");
     let packaging = std::env::var("CEDEGRID_TEST_PACKAGING").expect("CEDEGRID_TEST_PACKAGING");
     ok("install", &["-o", "root", "-g", "root", "-m", "0755", &binary, "/usr/bin/cedegrid"]);
@@ -212,6 +230,10 @@ pub fn reply_code(reply: &str) -> String {
 /// Removes what `install` put in place, as `apt purge` would: the removal scripts around the
 /// file removal. The test accounts stay.
 pub fn purge() {
+    if std::env::var_os("CEDEGRID_TEST_DEBS").is_some() {
+        ok("dpkg", &["--purge", "cedegrid-system", "cedegrid"]);
+        return;
+    }
     let packaging = std::env::var("CEDEGRID_TEST_PACKAGING").expect("CEDEGRID_TEST_PACKAGING");
     let _ = run("sh", &[&format!("{packaging}/prerm"), "purge"]);
     for file in [

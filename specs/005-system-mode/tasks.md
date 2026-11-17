@@ -52,6 +52,7 @@ the task list.
   - *In progress:* every file added so far is listed; the list grows with each task.
 - [x] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid_idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
 - [ ] T004 [P] Add a CI job on `ubuntu-22.04` in `.github/workflows/ci.yml` that builds both `.deb` files and starts a container with systemd as PID 1, running only `tests/system_mode.rs` with `CEDEGRID_TEST_SYSTEM_CONTAINER=1` (never `--ignored` across the suite)
+  - *Written, not yet run:* job `system-mode` in `.github/workflows/ci.yml` builds the image and runs the suite with a release build; it runs once the branch is on GitHub.
 - [x] T005 [P] Write the container harness in `tests/support/system_container.rs`: start and stop the container, run a command as a named test account, install and purge the packages, and take the inventory SC-009 compares (units, slices, groups, files under `/etc`, `/run`, `/usr`)
   - `tests/support/system_container.rs` and `tools/docker-validation/system-mode/` (image and `run.sh`); all 10 container fixtures pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 
@@ -295,6 +296,7 @@ the task list.
   - `prerm` stops the broker and every unit with the broker's description prefix and marker; `postrm` removes the group and an empty `/etc/cedegrid` on purge. The purge fixture passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [ ] T054 [US5] Make the agent apply the administrator policy to each job in System mode, in `src/agent/` and `src/config.rs`: read `/etc/cedegrid/policy.toml` with the broker's loader, refuse a disallowed mode and a job past `tasks_per_user` (passes T051)
 - [ ] T055 [US5] Add the `.deb` build for `cedegrid` and `cedegrid-system` to the release workflow in `.github/workflows/release.yml`, with checksums in the release (FR-033)
+  - *In part:* `tools/build_deb.py` (standard library only, with `tests/test_build_deb.py`) builds both packages with `dpkg-deb`; the container suite installs and purges them with dpkg. The release workflow step and checksums are not written yet.
 - [ ] T056 [US5] Add the project's own apt repository publication and its signing to `.github/workflows/release.yml`, behind a separate approval in the workflow (FR-033)
 
 **Checkpoint**: every story passes in the container.
@@ -332,7 +334,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
 
 ## Phase 9: Polish and cross-cutting
 
-- [ ] T062 [P] Write the System mode section in `docs/guarantees.md`, one sentence per claim. It covers:
+- [x] T062 [P] Write the System mode section in `docs/guarantees.md`, one sentence per claim. It covers:
   - what root does and does not do;
   - the OOM limit (FR-027);
   - what `cpu.idle` does not cover (FR-021);
@@ -340,6 +342,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
   - that the allowed modes are CedeGrid's own rule, and the unit's properties are the limits the kernel enforces;
   - what logind's `RemoveIPC=` does at the user's last logout (R18);
   - the CPU split change on hosts without per-account slices (R2).
+  - Written at the end of `docs/guarantees.md`; the logout claim (R18) rests on systemd's documentation until host run T057.
 - [ ] T063 [P] Write the administrator page in `docs/system-mode.md`: install, policy, group, removal, and the exact root commands
   - *Drafted:* `docs/system-mode.md` describes the finished feature; recheck it against moves (T039), the OOM loop (T048), doctor (T025) and purge (T053) before release.
 - [ ] T064 [P] Fix SUP-9 (a busy journal blocks the supervisor in an off phase) with a bounded lock wait and a test in `src/supervision/unix.rs` and `tests/supervision.rs`
