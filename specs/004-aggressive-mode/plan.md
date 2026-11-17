@@ -1,64 +1,70 @@
 # Implementation Plan: Aggressive Mode for CPU and GPU Compute
 
-**Branch**: specified on `001-contention-modes`; implemented on `004-aggressive-mode` after 001 is
-merged into `dev` | **Date**: 2026-10-26 | **Spec**: [spec.md](spec.md)
+**Branch**: built on the 005 branch in parallel with 001's last tasks, for this release |
+**Date**: 2026-10-26, reworked 2026-11-17 against constitution 8.1.0 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/004-aggressive-mode/spec.md`
 
 ## Summary
 
-Aggressive is a fourth `ContentionMode` after Performance. It reuses Performance's policy path
-with three overrides: a 0% idle margin on CPU and GPU compute, compute scale-up at once (the
-scale-up interval is 0, and admission fills every free slot as Performance does), and memory at
-Performance's floors only. Performance's dwell, hysteresis, reversal tolerance, reclaim bounds,
-floors and unknown handling apply unchanged.
+Aggressive is a fourth `ContentionMode` after Performance. Since 001 item 057, Performance takes
+no running steps on compute; its allowance only decides admission. Aggressive is that path with
+two overrides: an admission margin of 0% on CPU and GPU compute (Performance keeps 2%), and
+admission that fills what fits in one heartbeat (a compute scale-up interval of 0). Memory is
+Performance's: the floors bound admission, and nothing is hinted, drained or marked.
 
-The protection keeps the mode ordering strict per observation (report 018 Decision 1, answer B).
-For each compute resource and observation, protected Aggressive's target is the larger of:
-- Performance's target for the same observation;
-- the protected target: all available capacity, limited so that every other active principal
-  that is waiting keeps the lesser of its demand and its fair share.
+Protected Aggressive keeps 001's admission rule. New own work starts only where every other
+principal keeps the lesser of its demand and its fair share, and never into activity of unknown
+amount. In `own_allowance` that is Performance's contended arm with the margin at 0:
+`max(fair share, available, probe)`, where `available` already holds a starved principal's
+recorded demand out (`expected_external`). So protected Aggressive admits at least what
+Performance admits in every observation, and the ordering stays strict.
 
-So while Performance holds more than the protection leaves, Aggressive equals Performance and
-gives back exactly as Performance does, within 001's SC-012 reclaim bounds. Once Performance
-has stepped down to the protected point or below, Aggressive holds the protected target.
+Unprotected Aggressive is the admission exception. With the grant on an allocation and no
+unknown activity, its compute allowance is the whole capacity (the kernel and the GPU driver
+split it); under unknown activity, it is protected Aggressive's. The grant comes per submission
+through two SDK fields, carried on the wire, and is checked by the launching agent before the
+launch barrier persists Authorized. It also needs the host's allowance, which a person turns on
+in interactive `cedegrid setup` after the numbers screen and the fixed phrase. On a System mode
+host, the administrator policy must also permit it.
 
-Unprotected Aggressive is protected Aggressive with the protection off: it never steps compute
-down for external demand and does not grow into activity of unknown amount. It is turned on
-only per run, by `--unprotected-aggressive` or the matching SDK field, after a two-step
-confirmation the launching agent checks. The CLI surfaces (`run`, `ps`, `top`, `--save`,
-per-job entries, profiles, the setup interface) and per-user run-queue wait come from 003.
+003's CLI surfaces (`run`, `--save`, per-job entries, profiles, `ps`, `top`) are out of this
+release. When 003 lands, it adds the same flags and markers through the parity test.
 
 ## Technical Context
 
 **Language/Version**: Rust 1.88 (MSRV, edition 2024); Python SDK 3.10+; TypeScript SDK.
 
-**Primary Dependencies**: none new. Existing crates only (serde, axum/rustls for the wire,
-ratatui/crossterm from 003 for the setup interface).
+**Primary Dependencies**: none new.
 
-**Storage**: the agent's SQLite state database (`state.sqlite3`) holds the global allowance
-record; nothing new in configuration files beyond the mode value and its acknowledgement.
+**Storage**: the agent's SQLite state database (`state.sqlite3`) holds the allowance record. It
+fails closed: missing, corrupt, unreadable or another schema reads as off. Configuration gains
+only the mode value, its acknowledgement and the explicit cap. The System mode administrator
+policy gains one key.
 
-**Testing**: `cargo test` (policy unit and property tests in `tests/contention.rs`,
-`tests/policy.rs`, `tests/configuration.rs`, `tests/cli.rs`, the decision snapshot in
-`tests/decision_snapshot.rs`), the contract fixture `tests/contracts/cedegrid-0.2.json`,
-`python/tests`, `npm/tests`, and native gates on the authorized test host (SC-008).
+**Testing**: `cargo test` (`tests/contention.rs`, `tests/policy.rs`, `tests/configuration.rs`,
+`tests/system_mode.rs`, the decision snapshot), the contract fixture
+`tests/contracts/cedegrid-0.2.json`, `python/tests`, `npm/tests`, and native gates on the test
+host (SC-008), scheduled through the coordinator after 001's E9.
 
-**Target Platform**: Linux for the protection and actuation; the configuration, SDK, wire and
-refusal paths on every platform 001 supports.
+**Target Platform**: Linux for actuation and gates; configuration, SDK, wire and refusal paths
+on every platform 001 supports.
 
 **Project Type**: library + CLI + agent and coordinator services, with Python and TypeScript SDKs.
 
-**Performance Goals**: Aggressive ≥ Performance on every resource in every observation
-(SC-003, SC-007); a waiting light contender reaches its demand no later than under
-Performance (SC-001, 001 SC-012); policy evaluation stays within 001's decision p95 (≤ 1 s).
+**Performance Goals**: Aggressive admits at least what Performance admits in every observation
+(SC-003, SC-007). On an idle host it fills all capacity within one heartbeat. Policy evaluation
+stays within 001's decision p95 (≤ 1 s).
 
-**Constraints**: pure policy (Principle IV); no priority raise or thread inflation (FR-017);
-Performance unchanged (FR-020); unprotected Aggressive never stored (FR-012); no new
-dependency.
+**Constraints**: pure policy (Principle IV); no running compute step in either form (FR-004);
+no priority raise or thread inflation (FR-017); Performance unchanged (FR-020); unprotected
+Aggressive never stored (FR-012); no new dependency. `src/policy*`, `src/contention.rs` and
+`src/explain.rs` stay untouched until the coordinator says 001's T622 has landed and 001 is
+merged in.
 
-**Scale/Scope**: one new mode value, one new `ModeInput` field set, one new policy function,
-the unprotected grant and the global allowance, label and marker in every output 003 adds.
+**Scale/Scope**: one mode value, one `ModeInput` field, one arm in `own_allowance`, the grant
+check at launch, the allowance record, one administrator key, and labels and markers in the
+outputs 001 has.
 
 ## Constitution Check
 
@@ -66,44 +72,57 @@ the unprotected grant and the global allowance, label and marker in every output
 
 | Principle | How the plan complies |
 |---|---|
-| I. External processes untouchable | Aggressive acts only through 001's actuators on own verified processes. The protection reads per-principal usage, run-queue wait and the probe; it never acts on a contender. |
-| II. No harm in any mode (6.0.0) | Protected Aggressive's target is `max(Performance, protected)` per observation, so it never holds less than Performance and a waiting principal gets its share back no slower than Performance gives it (the 6.0.0 Modes rule). Floors, the OOM-victim rule and the no-priority-raise rule hold in both forms. Unprotected Aggressive is the one named exception: compute time only, per run, flag plus two-step confirmation, never stored, marked while active. Aggressive and its node cap are *caution* options with their own acknowledgement. |
-| III. Unknown is never idle | Activity of unknown amount holds protected Aggressive at the fair share, as Performance does (the protected target includes an unbounded unknown principal). Unprotected Aggressive does not grow into it. A waiting principal whose demand is unknown keeps its fair share. |
-| IV. Pure policy | `protected_allowance` is a pure function of `ModeInput`; the wait evidence and the grant enter as data. Confirmation and the allowance are checked in the agent, effects stay in the supervisor. |
-| V. Rootless | No privilege. The allowance lives in the agent's own state database. |
-| VI. Tests first | Every task group starts with a failing test: ordering, report 018's case, the protection cases, refusal paths, label and marker, CLI and SDK parity. SC-008 rests on native gates. |
-| VII. Compatibility | `aggressive` in job and wire modes and the unprotected fields land in Rust, Python and TypeScript with the contract fixture (JC-05 flips to accepted, with the node cap deciding the effective mode; new cases for the unprotected fields). Older agents refuse an `aggressive` job, as JC-05 does today. `config_version = 1` stays. |
-| VIII. Public docs | `docs/guarantees.md` replaces "Aggressive is not implemented" with the mode, its protection and the unprotected exception, generically. |
+| I. External processes untouchable | Aggressive acts only through 001's actuators on own verified processes, and in this design only at admission. It reads per-principal usage and the probe; it never acts on a contender. |
+| II. No harm in any mode (8.1.0) | Both forms take no running compute step (Performance and Aggressive rule). Protected Aggressive keeps the Admission rule, with 0% margin ("Aggressive 0%" in Loss by mode). Unprotected Aggressive is the one admission exception: new compute work only, per submission, two fields plus the allowance (and the administrator key in System mode), never stored, never into unknown activity or the floors, reported while active. Memory follows Floors by mode and OOM order for Performance and Aggressive: no hint, drain, TERM or mark. Aggressive and its cap are caution options with their own acknowledgement. The first-come GPU floor is a Yield First and Neutral exception and is unchanged. |
+| III. Unknown is never idle | Unknown activity keeps protected Aggressive at Performance's unknown arm (the fair share). Unprotected Aggressive takes protected Aggressive's allowance under unknown activity, so it never starts into it. An unreadable allowance counts as off. |
+| IV. Pure policy | The arm is a pure function of `ModeInput`; the grant enters as `ModeInput.unprotected`. The allowance, the fields and the administrator key are checked in the agent; effects stay in the supervisor. |
+| V. Least privilege | No new privilege. The allowance lives in the agent's own state. In System mode, the broker gains nothing: the agent in the member's unit reads the administrator policy, as 005 T054 does for allowed modes. |
+| VI. Tests first | Every task group starts with a failing test: ordering with Aggressive, the 0% margin, the unprotected arm, no running step, refusal paths, the fail-closed allowance, markers, SDK and wire parity. SC-008 rests on native gates. |
+| VII. Compatibility | `aggressive` in job and wire modes and the grant fields land in Rust, Python and TypeScript with the contract fixture. JC-05 flips to accepted, with the node cap deciding the effective mode. An older agent refuses an `aggressive` job, as JC-05 does today. `config_version = 1` stays. |
+| VIII. Public docs | `docs/guarantees.md` replaces "Aggressive is not implemented" with the mode, admission-only protection and the unprotected exception, generically. |
 
 Result: pass. No violations, so Complexity Tracking is empty.
 
-## Protection rule: where it goes
+## Admission rule: where it goes
 
-- `src/contention.rs:1325`, in `own_allowance`, right after the memory arm
-  (`_ if input.kind.is_memory() => available`) and before Performance's contended arm (line
-  1326): a `ContentionMode::Aggressive` arm that computes Performance's target for the same
-  `ModeInput` (`own_allowance(&ModeInput { mode: Performance, ..input.clone() }, thresholds)`)
-  and returns `performance.max(protected_allowance(input, thresholds))`. With
-  `input.unprotected`, it returns the larger of that and own work's current usage, so own work
-  never steps down for external demand; under activity of unknown amount that is the larger of
-  the fair share and current usage, so it does not grow into the activity.
-- `src/contention.rs:1655`, beside `neutral_share`: `protected_allowance`, the max-min share of
-  `capacity - background` for own work (unbounded demand) against every other principal's
-  demand: a waiting principal's known demand, or unbounded when unknown; a principal that is not
-  waiting at its usage; the unattributed usage as in `neutral_share`; one unbounded principal for
-  activity of unknown amount. Owner-unmanaged usage comes off as in `neutral_share`. With nobody
-  waiting and no unknown activity, it equals `capacity - external`, the 0% margin target.
-- `src/contention.rs:1234`, `ModeInput`: `waiting: Vec<(Option<u32>, Option<u64>)>` (waiting
-  principals, with a demand where wait evidence or the probe gives one) and `unprotected: bool`.
-- `src/contention.rs:715` and `:728`: `margin_percent(Aggressive)` is 0 for compute;
-  `scale_up_interval_ms(Aggressive)` is 0 for compute and 2000 for memory.
-  `src/contention.rs:839`: Aggressive takes Performance's response timing.
-- `src/policy/measure.rs:641`, `:1087` and `:1201`: fill `waiting` from 001's contended state
-  (a saturated principal without satisfied demand waits, demand unknown) and, once 003 lands,
-  from per-user run-queue wait (demand = usage plus unserved runnable time).
-- `src/policy/measure.rs:1271` (`targets_of`) iterates `ContentionMode::ALL`, which gains
-  Aggressive, so every decision's mode targets gain an `aggressive` entry.
-- `src/agent/service.rs:928`: `fill` is true for an effective mode at or above Performance.
+Function names, not line numbers: 001 is still landing T622 in these files.
+
+- `src/contention.rs`, `ContentionMode`: add `Aggressive` after `Performance` (name
+  `aggressive`, label `Aggressive`, order 3), and to `ContentionMode::ALL`. `margin_percent`
+  returns 0 for Aggressive on compute; it's a constant, not a configuration key.
+  `scale_up_interval_ms` is 0 for Aggressive on compute and Performance's 2000 on memory.
+  Response timing (`LadderTiming`) is Performance's.
+- `src/contention.rs`, `own_allowance`: Aggressive takes Performance's arms with its 0% margin,
+  so contended compute is `max(neutral_share, available, probe)` and uncontended is `available`.
+  With `input.unprotected` set and no unknown activity, compute returns `input.capacity`. The
+  memory arm is shared with Performance.
+- `src/contention.rs`, `ModeInput`: `unprotected: bool`, set from the allocation's grant.
+- `src/policy/ladder.rs` and `src/policy.rs`: every place that tests "Performance or above" for
+  "no running step" must include Aggressive. Check each match on `ContentionMode` for
+  exhaustiveness, which the compiler forces.
+- `src/policy/measure.rs`, `targets_of`: iterates `ContentionMode::ALL`, so decisions gain an
+  `aggressive` target.
+- `src/policy/admission.rs`, `admissions`: an allocation under an unprotected grant uses the
+  unprotected allowance; the rest use their job's mode, as 001 FR-030 does.
+- `src/agent/service.rs`: `fill` is true for an effective mode at or above Performance (it
+  already is for Performance; Aggressive joins).
+- `src/agent/launch.rs`: the grant check before Authorized (R7). It verifies both fields, the
+  allowance record (fail closed), the node cap at Aggressive, and, inside a System mode unit,
+  the administrator key. It logs the one warning line, and refusals name what is missing.
+- `src/state.rs`: the allowance table and its reads, which fail closed. `src/backup.rs`:
+  restore resets it to off.
+- `src/setup.rs`, `src/setup/interface.rs`: the cap step to Aggressive with its confirmation;
+  the allowance step (numbers screen, yes/no without default, the fixed phrase); turning it off
+  without confirmation, also non-interactively.
+- `src/config.rs`, `src/config_migration.rs`: the mode value, `aggressive_mode`, an explicit
+  `max_mode = "aggressive"`, and the refusal of every key that would enable unprotected
+  Aggressive.
+- `src/protocol.rs`, `src/coordinator.rs`: the job mode value and the grant object; the
+  coordinator passes the grant to the agent and decides nothing about it.
+- `src/broker/admin_policy.rs` and `specs/005-system-mode/contracts/admin-policy.md`: the
+  key `modes.unprotected_aggressive = false` by default. `src/system_mode.rs`,
+  `launch_refusal_with`: refuse a grant while it is off.
+- `src/explain.rs`: `[Aggressive]` and `UNPROTECTED` in `observe` and `doctor`, and in JSON.
 
 ## Project Structure
 
@@ -112,11 +131,11 @@ Result: pass. No violations, so Complexity Tracking is empty.
 ```text
 specs/004-aggressive-mode/
 ├── plan.md              # This file
-├── research.md          # Phase 0: decisions R1-R9
+├── research.md          # Phase 0: decisions R1-R11
 ├── data-model.md        # Phase 1: entities and fields
 ├── quickstart.md        # Phase 1: validation scenarios and native gates
 ├── contracts/
-│   ├── policy-protection.md   # The target rule and its invariants
+│   ├── policy-protection.md   # The admission rule and its invariants
 │   └── cli-sdk-wire.md        # Names, fields, refusals, markers
 ├── checklists/requirements.md
 └── tasks.md             # /speckit-tasks output
@@ -126,48 +145,43 @@ specs/004-aggressive-mode/
 
 ```text
 src/
-├── contention.rs          # ContentionMode::Aggressive, margins, scale-up, own_allowance arm,
-│                          # protected_allowance, ModeInput fields, reason codes
-├── policy/measure.rs      # waiting evidence into ModeInput; targets_of
-├── policy/admission.rs    # Aggressive admission pace (fills like Performance)
-├── config.rs              # "aggressive" mode value, aggressive_mode acknowledgement,
-│                          # max_mode explicit raise, refusal of unprotected keys
-├── config_migration.rs    # the same refusal after a 0.2 configuration is migrated
-├── setup.rs, setup/interface.rs  # red [Aggressive] label, node-cap step, global allowance
-├── state.rs               # global allowance record
-├── protocol.rs            # job/wire mode value and the unprotected grant fields
-├── coordinator.rs         # accepts aggressive within the node cap
-├── agent/service.rs       # fill pacing; grant check at launch; marker and warning
-├── agent/launch.rs        # unprotected grant verification before Authorized
-├── explain.rs             # observe/doctor label, marker, held_back.protected_share
-└── (003) run, ps, top     # flags, numbers screen, phrase, label, marker, --save refusal
+├── contention.rs          # ContentionMode::Aggressive, margin 0, scale-up 0, own_allowance arm,
+│                          # ModeInput.unprotected, reason codes        (after T622)
+├── policy.rs, policy/     # no running step for Aggressive; targets_of; admissions (after T622)
+├── config.rs, config_migration.rs  # mode value, acknowledgement, cap, refusals
+├── setup.rs, setup/interface.rs    # cap step, allowance on (numbers screen, phrase) and off
+├── state.rs, backup.rs    # allowance record (fail closed); restore resets it
+├── protocol.rs, coordinator.rs     # job mode value and grant object
+├── agent/launch.rs, agent/service.rs  # grant check before Authorized; fill; warning line
+├── broker/admin_policy.rs, system_mode.rs  # administrator key; refusal in a unit
+└── explain.rs             # label and marker in observe and doctor      (after T622)
 
-python/cedegrid/, npm/src/ # mode value, unprotected_aggressive and confirm fields
+python/cedegrid/, npm/src/ # mode value; unprotected_aggressive and confirm fields
 tests/
-├── contention.rs          # ordering property, protection cases, report 018's case
-├── policy.rs              # scenario ordering, several light users, wait again, no cycling
-├── decision_snapshot.rs   # random scenarios with Aggressive; existing modes unchanged
-├── configuration.rs       # acknowledgement, cap, refusal of stored unprotected keys
-├── cli.rs                 # confirmation steps, refusals, label and marker
-└── contracts/cedegrid-0.2.json  # JC-05 and new unprotected cases
+├── contention.rs, policy.rs        # ordering, 0% margin, unprotected arm, no running step
+├── decision_snapshot.rs   # existing modes unchanged; Aggressive entries added
+├── configuration.rs       # acknowledgement, cap, refusals of stored unprotected keys
+├── state.rs (or agent.rs) # allowance fail-closed cases, restore reset
+├── system_mode.rs         # administrator key refusal in a unit
+└── contracts/cedegrid-0.2.json  # JC-05 and the grant cases
 ```
 
-**Structure Decision**: the existing single crate and SDK layout. No new module: the policy work
-is one function and one arm in `src/contention.rs`, the grant check sits in the agent's launch
-path, and the CLI parts extend 003's commands.
+**Structure Decision**: the existing single crate and SDK layout. No new module.
 
-## Order against 003
+## Order in this release
 
-Report 018's recommendation, kept: after 001 merges,
-1. 003's setup and foundational phases (task schema, local agent, per-user wait evidence);
-2. 004's policy, configuration, SDK and wire core (US1 policy tasks, the grant model);
-3. the rest of 003 (`ps`, `top`, setup interface);
-4. 004's CLI parts (numbers screen and phrase, label and marker, `--save` refusal).
+1. Now, while 001 lands T622: the parts outside 001's held files. That covers configuration,
+   the state record, setup, protocol and SDK fields, the grant check at launch, the
+   administrator key, and the contract fixture. Each starts with failing tests.
+2. After the coordinator says T622 has landed, merge 001, then do the policy parts in
+   `contention.rs` and `policy*`, and the markers in `explain.rs`.
+3. The security review of the unprotected admission path (the grant check, the allowance
+   record, the refusals), before release.
+4. Native gates on the test host, scheduled through the coordinator after 001's E9.
 
-Running all of 003 before all of 004 also works. Without 003's wait evidence, a waiting
-principal's demand is unknown, so its protected share is its fair share and Aggressive equals
-Performance under contention; it gains on Performance when idle and when wait evidence gives a
-light principal's demand (R3).
+Without 003's run-queue wait, a contending principal's demand comes from usage and the probe, as
+in Performance. Protected Aggressive then differs from Performance by the 2% margin and the fill
+pace.
 
 ## Complexity Tracking
 
