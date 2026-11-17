@@ -24,6 +24,99 @@ pub fn in_unit() -> bool {
     IN_UNIT.get().copied().unwrap_or(false)
 }
 
+/// The modes a job would run at, one per resource: its request or the node's mode, capped by
+/// the node's most aggressive allowed mode (001 FR-030).
+pub fn job_modes(
+    contention: &crate::config::ContentionConfig,
+    request: Option<&crate::execution_model::JobContention>,
+) -> Vec<crate::contention::ContentionMode> {
+    use crate::contention::{ResourceKind, effective_mode};
+    let kinds = [
+        ResourceKind::Cpu,
+        ResourceKind::Ram,
+        ResourceKind::GpuCompute,
+        ResourceKind::GpuMemory,
+    ];
+    let most = kinds
+        .iter()
+        .map(|kind| contention.mode(*kind))
+        .max()
+        .unwrap_or(contention.default_mode);
+    let cap = contention.max_mode.unwrap_or(most);
+    kinds
+        .iter()
+        .map(|kind| {
+            let requested = request.and_then(|request| request.modes.get(kind).copied());
+            effective_mode(contention.mode(*kind), requested, cap)
+        })
+        .collect()
+}
+
+/// Why the administrator policy refuses a launch, as an event code and one line naming the
+/// policy key (FR-010); `None` when it may start. `active` counts the tasks already running or
+/// preparing. A policy that cannot be read refuses every launch.
+pub fn launch_refusal_with(
+    policy: anyhow::Result<crate::broker::admin_policy::AdminPolicy>,
+    modes: &[crate::contention::ContentionMode],
+    active: usize,
+) -> Option<(&'static str, String)> {
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(error) => {
+            return Some((
+                "policy_refused",
+                format!("/etc/cedegrid/policy.toml rejected: {error:#}"),
+            ));
+        }
+    };
+    if let Some(mode) = modes.iter().find(|mode| {
+        crate::broker::ModeName::from_name(mode.name()).is_none_or(|name| !policy.allows(name))
+    }) {
+        let allowed: Vec<&str> = policy
+            .allowed_modes
+            .value
+            .iter()
+            .map(|mode| mode.name())
+            .collect();
+        return Some((
+            "mode_not_allowed",
+            format!(
+                "mode {} not allowed by policy modes.allowed (allowed: {})",
+                mode.name(),
+                allowed.join(", ")
+            ),
+        ));
+    }
+    let limit = policy.tasks_per_user.value as usize;
+    (active >= limit).then(|| {
+        (
+            "task_limit",
+            format!("{active} tasks running reach policy limits.tasks_per_user ({limit})"),
+        )
+    })
+}
+
+/// `launch_refusal_with` for this host's policy and a job's request.
+#[cfg(unix)]
+pub fn launch_refusal(
+    config: &crate::config::Config,
+    request: &crate::execution_model::LaunchRequest,
+    active: usize,
+) -> Option<(&'static str, String)> {
+    let modes = job_modes(&config.contention, request.contention.as_ref());
+    launch_refusal_with(crate::broker::admin_policy::load(), &modes, active)
+}
+
+/// Without unix sockets there is no System mode, so nothing is refused here.
+#[cfg(not(unix))]
+pub fn launch_refusal(
+    _config: &crate::config::Config,
+    _request: &crate::execution_model::LaunchRequest,
+    _active: usize,
+) -> Option<(&'static str, String)> {
+    None
+}
+
 /// How long the client waits for the broker before it falls back (*provisional*, FR-013).
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 

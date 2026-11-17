@@ -3739,3 +3739,71 @@ fn outside_a_unit_the_agent_keeps_its_own_oom_marks() {
     // The flag is set only by the agent's start inside a checked System mode unit.
     assert!(!cedegrid::system_mode::in_unit());
 }
+
+// T051, T054: the agent in a unit applies the administrator policy to each launch.
+
+mod policy_in_unit {
+    use cedegrid::broker::admin_policy::AdminPolicy;
+    use cedegrid::contention::ContentionMode::{Neutral, Performance, YieldFirst};
+    use cedegrid::system_mode::launch_refusal_with;
+
+    fn policy(text: &str) -> anyhow::Result<AdminPolicy> {
+        AdminPolicy::parse(text, 1000)
+    }
+
+    #[test]
+    fn modes_outside_the_policy_are_refused_naming_the_key() {
+        let only_neutral = || policy("[modes]\nallowed = [\"yield_first\", \"neutral\"]\n");
+        assert_eq!(
+            launch_refusal_with(only_neutral(), &[Neutral, YieldFirst], 0),
+            None
+        );
+        let (code, detail) =
+            launch_refusal_with(only_neutral(), &[Neutral, Performance], 0).unwrap();
+        assert_eq!(code, "mode_not_allowed");
+        assert!(detail.contains("modes.allowed"), "{detail}");
+        assert!(detail.contains("performance"), "{detail}");
+    }
+
+    #[test]
+    fn tasks_past_the_policy_limit_are_refused() {
+        let two = || policy("[limits]\ntasks_per_user = 2\n");
+        assert_eq!(launch_refusal_with(two(), &[Performance], 1), None);
+        let (code, detail) = launch_refusal_with(two(), &[Performance], 2).unwrap();
+        assert_eq!(code, "task_limit");
+        assert!(detail.contains("limits.tasks_per_user"), "{detail}");
+    }
+
+    #[test]
+    fn an_unreadable_policy_refuses_every_launch() {
+        let (code, _) = launch_refusal_with(policy("unknown = 1\n"), &[Neutral], 0).unwrap();
+        assert_eq!(code, "policy_refused");
+    }
+}
+
+#[test]
+fn a_jobs_modes_are_its_requests_capped_by_the_node() {
+    use cedegrid::config::ContentionConfig;
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::JobContention;
+    use cedegrid::system_mode::job_modes;
+    let mut node = ContentionConfig::default();
+    node.default_mode = ContentionMode::Neutral;
+    // No request: the node's mode everywhere.
+    assert!(
+        job_modes(&node, None)
+            .iter()
+            .all(|mode| *mode == ContentionMode::Neutral)
+    );
+    // A request above the node's most aggressive mode is capped there.
+    let request = JobContention {
+        modes: [
+            (ResourceKind::Ram, ContentionMode::Performance),
+            (ResourceKind::Cpu, ContentionMode::YieldFirst),
+        ]
+        .into(),
+    };
+    let modes = job_modes(&node, Some(&request));
+    assert_eq!(modes[0], ContentionMode::YieldFirst);
+    assert_eq!(modes[1], ContentionMode::Neutral);
+}

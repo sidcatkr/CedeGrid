@@ -451,6 +451,8 @@ struct AgentLoop<'a> {
     counted_drains: BTreeSet<String>,
     /// Assignments already reported as held back by the descriptor limit (FR-077).
     descriptor_refused: BTreeSet<String>,
+    /// Offers refused once under System mode's administrator policy (005 FR-010).
+    policy_refused: BTreeSet<String>,
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -2011,6 +2013,22 @@ impl AgentLoop<'_> {
                     if active >= agent.max_workers || self.stopping.is_some() {
                         continue;
                     }
+                    // In a System mode unit the administrator policy limits modes and tasks; an
+                    // offer beyond it is refused once and left to the coordinator (005 FR-010).
+                    if crate::system_mode::in_unit()
+                        && let Some((code, detail)) =
+                            crate::system_mode::launch_refusal(config, &assignment.request, active)
+                    {
+                        if self.policy_refused.insert(id.clone()) {
+                            emit(&serde_json::json!({
+                                "event": "launch_refused",
+                                "code": code,
+                                "assignment_id": id,
+                                "detail": detail,
+                            }))?;
+                        }
+                        continue;
+                    }
                     // A launch whose descriptors do not fit with headroom is refused and the
                     // offer left to the coordinator (FR-077).
                     if descriptor_room(self.preparations.len() as u64) == 0 {
@@ -2426,6 +2444,7 @@ pub async fn run(
         last_growth: start,
         counted_drains: BTreeSet::new(),
         descriptor_refused: BTreeSet::new(),
+        policy_refused: BTreeSet::new(),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
