@@ -208,6 +208,9 @@ struct GpuDemand {
     /// Each listed context's readable intervals since its first listing or last sample, for the
     /// time-slice rule's counts (FR-021).
     seen: BTreeMap<u32, SeenContext>,
+    /// When the per-process samples were last readable: NVML can have none every other interval,
+    /// and the counts stand for the sample age (FR-021).
+    last_readable_ms: Option<u64>,
 }
 
 /// A context in a device's counts: readable intervals since own work's first listing of it or its

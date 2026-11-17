@@ -1541,6 +1541,19 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   because contention ended leaves no dwell. Costs against the cap, kept in SC-002 and SC-003: the
   fair share holds to within one task, and in Yield First, where whole tasks left own work just
   over its margin on a host it saturated, every task is paused one interval later.
+- **Revision (2026-11-17, after E8 at the D2 commit)**: covering whole when the host would fill
+  left Tracked own work about 770 m under its target (E8 8144-9979 units/s, below the former
+  cap), and rounding toward own work swings by a task each bound in the simulations. The user
+  asked for neither: both sides held, no swing. On CPU the paused tasks are now the ones whose
+  usage comes nearest the excess (greedy in victim order while each fits, then the smallest task
+  that overshoots less than it leaves), so each side loses at most half the smallest task; held
+  pauses count first; a moved pause is covered the same way and its replacement inherits its
+  cause; an own-over-target pause holds while resuming would overshoot more than it undershoots;
+  paused tasks have the first claim on admission headroom. E8 Tracked: 11959-12057 units/s, the
+  other user 5977-6114 req/s, at most 4 of 100 intervals more than 2% below target, error p95
+  64-112 m. Alternatives: rounding toward own work (D1; up to a task over, swings in the
+  simulations), toward the other user (D2 as committed; up to a task under), and a renice for the
+  residual (irreversible without privilege, so not in Tracked).
 
 ## R90. The first-come GPU floor (constitution 8.1.0)
 

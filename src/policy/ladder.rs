@@ -187,7 +187,9 @@ impl<'a> Interval<'a> {
     /// reservations first, and how the other steps on it hold or reverse.
     fn plan_resource(&mut self, key: ResourceKey) {
         let frame = self.resource_frame(key);
-        let own_hold = frame.kind == ResourceKind::Cpu && self.cpu_own_hold;
+        // A pause at its bound moves even while own usage over its target waits its dwell.
+        let own_hold =
+            frame.kind == ResourceKind::Cpu && self.cpu_own_hold && !self.pause_at_bound(&frame);
         let mut planned = BTreeSet::new();
         for pending_pass in [true, false] {
             self.plan_pass(&frame, pending_pass, &mut planned);
@@ -588,7 +590,11 @@ impl<'a> Interval<'a> {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);
-        if !pending_pass && kind == ResourceKind::Cpu && self.cpu_own_hold {
+        if !pending_pass
+            && kind == ResourceKind::Cpu
+            && self.cpu_own_hold
+            && !self.pause_at_bound(frame)
+        {
             // While own usage over its target is enforced, only a job above its own mode's
             // target yields, that difference; the other steps stay as they are (FR-011).
             for victim in victims {
@@ -625,15 +631,12 @@ impl<'a> Interval<'a> {
                 .map(cpu_usage_of)
                 .fold(0, u64::saturating_add);
             // A pause still answering its demand at its bound moves to another task: it resumes,
-            // and the next tasks in the order cover what it used, as far as own work with it
-            // running would be over its target, so the hold stays without growing and no task is
-            // drained for CPU (FR-014, FR-089). Rounding favours own work, except where own work
-            // a task over its target would fill the host: there the cover is whole, a part of a
-            // task below the target, since a saturated host hides what the others want and the
-            // hold would swing. The envelope's pauses drain.
+            // and other tasks cover what it used, as far as own work with it running would be over
+            // its target, so the hold stays without growing and no task is drained for CPU
+            // (FR-014, FR-089). The envelope's pauses drain.
             let bound = frame.timing.pause_bound_ms;
             let mut rotated = BTreeSet::new();
-            let (mut resumed_usage, mut largest) = (0u64, 0u64);
+            let mut resumed_usage = 0u64;
             for victim in &victims {
                 if let Some(state) = self.prev.ladder.get(&(victim.id.clone(), key.clone()))
                     && state.step == YieldStep::Pause
@@ -641,26 +644,78 @@ impl<'a> Interval<'a> {
                     && now.saturating_sub(state.entered_at_ms) >= bound
                 {
                     rotated.insert(victim.id.clone());
-                    let usage = state.paused_usage.unwrap_or(0);
-                    resumed_usage = resumed_usage.saturating_add(usage);
-                    largest = largest.max(usage);
+                    resumed_usage = resumed_usage.saturating_add(state.paused_usage.unwrap_or(0));
                 }
             }
             let over = |own: u64| {
                 own.saturating_sub(draining)
                     .saturating_sub(self.budget.cpu_millicores)
             };
-            let mut remaining = needed.min(over(frame.own_usage));
-            let mut cover = resumed_usage.min(over(frame.own_usage.saturating_add(resumed_usage)));
-            let whole = (frame.own_usage + resumed_usage - cover)
-                .saturating_sub(draining)
-                .saturating_add(largest)
-                .saturating_add(frame.external)
-                >= self.cpu_capacity;
+            // While own usage over its target waits its dwell, only the moved pauses are covered.
+            let fresh = if self.cpu_own_hold {
+                0
+            } else {
+                needed.min(over(frame.own_usage))
+            };
+            let cover = resumed_usage.min(over(frame.own_usage.saturating_add(resumed_usage)));
+            // A pause already held covers what its task still shows; the others that can be paused
+            // now are chosen for the rest, a task whose step changed within the dwell waiting.
+            let dwell = frame.timing.dwell_ms;
+            let state_of = |id: &String| self.prev.ladder.get(&(id.clone(), key.clone()));
+            let held: BTreeSet<String> = victims
+                .iter()
+                .filter(|v| {
+                    !rotated.contains(&v.id)
+                        && state_of(&v.id).is_some_and(|s| s.step == YieldStep::Pause)
+                })
+                .map(|v| v.id.clone())
+                .collect();
+            let held_usage: u64 = victims
+                .iter()
+                .filter(|v| held.contains(&v.id))
+                .map(|v| v.amount)
+                .sum();
+            let candidates: Vec<(String, u64)> = victims
+                .iter()
+                .filter(|v| {
+                    v.amount > 0
+                        && !v.guaranteed
+                        && !rotated.contains(&v.id)
+                        && !held.contains(&v.id)
+                        && state_of(&v.id)
+                            .is_none_or(|s| now.saturating_sub(s.entered_at_ms) >= dwell)
+                })
+                .map(|v| (v.id.clone(), v.amount))
+                .collect();
+            let victims_left: Vec<u64> = victims
+                .iter()
+                .filter(|v| {
+                    v.amount > 0
+                        && !v.guaranteed
+                        && !rotated.contains(&v.id)
+                        && !held.contains(&v.id)
+                })
+                .map(|v| v.amount)
+                .collect();
+            let chosen = nearest(
+                &candidates,
+                fresh.saturating_sub(held_usage),
+                &BTreeSet::new(),
+            );
+            let covering = nearest(&candidates, cover, &chosen);
+            let covered: u64 = candidates
+                .iter()
+                .filter(|(id, _)| covering.contains(id))
+                .map(|(_, amount)| *amount)
+                .sum();
+            let moved_cause = rotated
+                .iter()
+                .next()
+                .and_then(|id| state_of(id).map(|state| (state.cause, state.trigger_external)));
             let mut moved = Vec::new();
             for victim in victims {
                 if rotated.contains(&victim.id) {
-                    moved.push(victim.id.clone());
+                    moved.push((victim.id.clone(), victim.amount));
                     planned.insert(victim.id.clone());
                     let mut resumed = self.prev.ladder[&(victim.id.clone(), key.clone())].clone();
                     resumed.step = YieldStep::None;
@@ -671,9 +726,10 @@ impl<'a> Interval<'a> {
                         .insert((victim.id.clone(), key.clone()), resumed);
                     continue;
                 }
-                let fits = victim.amount <= remaining
-                    || hard > 0
-                    || cover > 0 && (whole || victim.amount <= cover);
+                let fits = held.contains(&victim.id)
+                    || chosen.contains(&victim.id)
+                    || covering.contains(&victim.id)
+                    || hard > 0;
                 let asked = if victim.amount > 0 && fits {
                     victim.amount
                 } else {
@@ -683,30 +739,48 @@ impl<'a> Interval<'a> {
                 let id = (victim.id.clone(), key.clone());
                 planned.insert(victim.id.clone());
                 self.plan_victim(frame, victim, pending_pass, false, &mut share);
-                // Only a task that is paused counts: one whose pause waits, as for its dwell,
-                // leaves its part to the next in the order.
                 let paused = self
                     .next
                     .ladder
                     .get(&id)
                     .is_some_and(|state| state.step >= YieldStep::Pause);
-                let freed = if paused { asked } else { asked - share };
-                remaining = remaining.saturating_sub(freed);
-                hard = hard.saturating_sub(freed);
-                cover = cover.saturating_sub(freed);
-            }
-            // Where no running task is left to take their place, as when Yield First pauses every
-            // task, the moved pauses take turns: the first resumes and the rest hold again from
-            // now, so own work keeps one task running instead of all at once (FR-014, FR-089).
-            for id in moved.iter().skip(1) {
-                let mut held = self.prev.ladder[&(id.clone(), key.clone())].clone();
-                let usage = held.paused_usage.unwrap_or(0);
-                if cover == 0 || !whole && usage > cover {
-                    break;
+                hard = hard.saturating_sub(if paused { asked } else { asked - share });
+                // A task that takes a moved pause's place holds for what that pause answered, its
+                // cause and the demand that started it, so it ends as that pause would have.
+                if covering.contains(&id.0)
+                    && let Some((cause, trigger)) = moved_cause
+                    && let Some(state) = self.next.ladder.get_mut(&id)
+                    && state.step == YieldStep::Pause
+                    && state.entered_at_ms == now
+                {
+                    state.cause = cause;
+                    state.trigger_external = trigger;
                 }
+            }
+            // Where too few running tasks are left to take their place, as when Yield First pauses
+            // every task, the moved pauses take turns: the first resumes and the others hold
+            // again from now as far as the cover needs them, so own work keeps one task running
+            // instead of all at once (FR-014, FR-089).
+            // Only where the running tasks could not cover it, whatever their dwell: a cover that
+            // waits a dwell is taken up in a later interval.
+            let running: u64 = victims_left
+                .iter()
+                .fold(0u64, |sum, amount| sum.saturating_add(*amount));
+            let left = cover.saturating_sub(covered.max(running));
+            let turns: Vec<(String, u64)> = moved
+                .iter()
+                .skip(1)
+                .map(|(id, _)| {
+                    let usage = self.prev.ladder[&(id.clone(), key.clone())]
+                        .paused_usage
+                        .unwrap_or(0);
+                    (id.clone(), usage)
+                })
+                .collect();
+            for id in nearest(&turns, left, &BTreeSet::new()) {
+                let mut held = self.prev.ladder[&(id.clone(), key.clone())].clone();
                 held.entered_at_ms = now;
-                cover = cover.saturating_sub(usage);
-                self.next.ladder.insert((id.clone(), key.clone()), held);
+                self.next.ladder.insert((id, key.clone()), held);
             }
             return;
         }
@@ -1164,9 +1238,22 @@ impl<'a> Interval<'a> {
         }
     }
 
+    /// Whether a whole-task CPU pause on the frame's resource has reached its bound, so it moves
+    /// to another task whatever else holds (FR-014, FR-089).
+    fn pause_at_bound(&self, frame: &Frame) -> bool {
+        frame.kind == ResourceKind::Cpu
+            && self.prev.ladder.iter().any(|((_, key), state)| {
+                *key == frame.key
+                    && state.step == YieldStep::Pause
+                    && state.cause != YieldCause::EnvelopeBreach
+                    && self.now.saturating_sub(state.entered_at_ms) >= frame.timing.pause_bound_ms
+            })
+    }
+
     /// Hysteresis for `own_over_target` pauses (FR-013, FR-089): while own work is not below its
-    /// target by the contention floor, a held pause holds, so own work stays at its target and
-    /// does not pause and resume a task by turns. At its bound the pause moves as any does.
+    /// target by the contention floor or half the paused task, a held pause holds, so own work
+    /// stays at its target and does not pause and resume a task by turns. At its bound the pause
+    /// moves as any does.
     fn holds_own_pause(&self, state: &StepState, frame: &Frame) -> bool {
         let floor = (self.cpu_capacity.saturating_mul(u64::from(
             self.config
@@ -1175,9 +1262,12 @@ impl<'a> Interval<'a> {
                 .principal_min_percent,
         )) / 100)
             .max(1);
+        // Resuming it would leave own work further over its target than the pause leaves it
+        // below, as FR-089's nearest choice would pause it again.
+        let half = state.paused_usage.unwrap_or(0) / 2;
         state.step == YieldStep::Pause
             && state.cause == YieldCause::OwnOverTarget
-            && frame.own_usage.saturating_add(floor) > self.budget.cpu_millicores
+            && frame.own_usage.saturating_add(floor.max(half)) > self.budget.cpu_millicores
     }
 
     /// Steps of allocations that are no longer candidates hold or reverse.
@@ -2024,6 +2114,36 @@ fn replanned_pending_drain(
         && state.is_some_and(|state| state.pending && state.step >= YieldStep::Drain)
 }
 
+/// The tasks to pause for `need`, from `candidates` in victim order: each that fits what is left,
+/// so own work stays at or above its target; then, if a part is left, the smallest other task
+/// whose pause leaves own work less below its target than running leaves it above. Neither own
+/// work nor the others then lose more than half a task, and with equal tasks the choice does not
+/// change while `need` moves by less than half of one (FR-089).
+fn nearest(candidates: &[(String, u64)], need: u64, taken: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut left = need;
+    let mut chosen = BTreeSet::new();
+    for (id, amount) in candidates {
+        if left > 0 && *amount > 0 && *amount <= left && !taken.contains(id) {
+            chosen.insert(id.clone());
+            left -= amount;
+        }
+    }
+    if left > 0
+        && let Some((id, _)) = candidates
+            .iter()
+            .filter(|(id, amount)| {
+                *amount > 0
+                    && *amount < left.saturating_mul(2)
+                    && !taken.contains(id)
+                    && !chosen.contains(id)
+            })
+            .min_by_key(|(_, amount)| *amount)
+    {
+        chosen.insert(id.clone());
+    }
+    chosen
+}
+
 fn cpu_usage_of(allocation: &Allocation) -> u64 {
     allocation.observed.as_ref().map_or(0, |o| o.cpu_millicores)
 }
@@ -2039,4 +2159,38 @@ struct OverSharePart {
     /// What it was asked and did not count, which passes on once its wait is over (FR-024's
     /// class rule) and is never asked of it again.
     passed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nearest;
+    use std::collections::BTreeSet;
+
+    fn pick(amounts: &[u64], need: u64) -> Vec<String> {
+        let candidates: Vec<(String, u64)> = amounts
+            .iter()
+            .enumerate()
+            .map(|(i, amount)| (format!("t{i}"), *amount))
+            .collect();
+        nearest(&candidates, need, &BTreeSet::new())
+            .into_iter()
+            .collect()
+    }
+
+    /// The paused total lands nearest the excess, each side within half the smallest task, and
+    /// equal tasks keep their choice while the excess moves by less than half of one (FR-089).
+    #[test]
+    fn whole_tasks_are_chosen_nearest_the_excess() {
+        // 230 m over with two 1000 m tasks: pausing one leaves 770 m under, so none is paused.
+        assert!(pick(&[1000, 1000], 230).is_empty());
+        // 600 m over: pausing one leaves 400 m under, nearer than 600 m over.
+        assert_eq!(pick(&[1000, 1000], 600), ["t0"]);
+        // Fits in victim order first, then the smallest that overshoots less than it leaves.
+        assert_eq!(pick(&[1000, 300, 250], 1225), ["t0", "t2"]);
+        // Equal tasks: 200 m over pauses one 250 m task; 100 m over pauses none.
+        assert_eq!(pick(&[250; 4], 200), ["t0"]);
+        assert!(pick(&[250; 4], 100).is_empty());
+        assert_eq!(pick(&[250; 4], 230), pick(&[250; 4], 200));
+        assert!(pick(&[250; 4], 0).is_empty());
+    }
 }
