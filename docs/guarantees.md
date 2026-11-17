@@ -267,7 +267,10 @@ missing, `allocation_unknown_hold`'s reason names the check that failed.
 CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
 the owner's side: it comes out of external usage and the owner's unmanaged usage, never
 forms an unattributed principal, and lowers own tasks' budget and targets by its amount, so
-own tasks and CedeGrid together stay within the owner's share. `doctor` shows it as
+own tasks and CedeGrid together stay within the owner's share. Where the agent runs in a CPU
+cgroup of the owner's own (its user slice, or its System mode unit, with the `cpu`
+controller), the kernel already charges that CPU to the owner, so own work's kept share below
+is not lowered by it a second time. `doctor` shows it as
 `in use (CedeGrid)` and the node report carries it per resource. The agent reports its
 loop's own CPU by stage once a minute (`loop_cost`).
 
@@ -332,7 +335,11 @@ or for activity of unknown amount, and only the operator's envelope still steps 
 another principal gets is the kernel's and the driver's split beside the same work. It holds
 back at admission only: new own work starts only within the larger of the fair share and
 capacity minus observed external usage minus its margin, and nothing new starts while
-activity is of unknown amount. Otherwise Yield First keeps 15%
+activity is of unknown amount. In Neutral, Performance and Aggressive, while another principal
+contends and the others leave own work its equal share of the capacity less the operator
+reserve, within a principal's floor (1% of capacity), own work keeps that equal share for
+admission: the margin is room for others' growth past an equal share, which no mode owes, and
+readings that close to the share do not move it. Otherwise Yield First keeps 15%
 of capacity free, Neutral 5% and Performance 2%; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
 scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU and GPU

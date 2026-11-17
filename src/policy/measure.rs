@@ -932,9 +932,28 @@ impl<'a> Interval<'a> {
         self.note_fair_share(&ResourceKey::Cpu, &view, &thresholds);
         self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
+        // Own work keeps an equal share while the others keep theirs. CedeGrid's own CPU comes
+        // out of it only where the kernel does not already charge it to the owner's own CPU
+        // cgroup (user, 2026-11-17).
+        let kept = crate::contention::kept_share(
+            &view,
+            &thresholds,
+            self.cpu_capacity
+                .saturating_sub(self.cpu_reserve)
+                .min(self.cpu_ceiling),
+            self.budget.cpu_millicores,
+        );
+        let kept = if owner_cpu_cgroup(self.snapshot) {
+            kept
+        } else {
+            kept.saturating_sub(cedegrid)
+        };
         let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
-        for target in targets.values_mut() {
+        for (mode, target) in targets.iter_mut() {
             *target = target.saturating_sub(cedegrid);
+            if *mode != ContentionMode::YieldFirst {
+                *target = (*target).max(kept);
+            }
         }
         self.mode_targets.insert(ResourceKey::Cpu, targets);
         // The idle reserve is the larger of the explicit reserve and the mode's
@@ -942,7 +961,8 @@ impl<'a> Interval<'a> {
         self.budget.cpu_millicores = own_allowance(&view, &thresholds)
             // Capacity minus the reserve and external usage, within the ancestor quota.
             .min(self.budget.cpu_millicores)
-            .saturating_sub(cedegrid);
+            .saturating_sub(cedegrid)
+            .max(kept);
         // An unprotected grant's budget, only where the cap reaches Aggressive (004 R12).
         self.unprotected_cpu =
             (config.contention.max_mode() == ContentionMode::Aggressive).then(|| {
@@ -2406,4 +2426,37 @@ fn note_reason(
             .unwrap_or_default()
             .to_string(),
     );
+}
+
+/// Whether the agent runs in a CPU cgroup of the owner's own, so the kernel charges CedeGrid's
+/// CPU to the owner rather than to other users: an ancestor that is the owner's user slice or
+/// System mode unit and has the `cpu` controller.
+fn owner_cpu_cgroup(snapshot: &Snapshot) -> bool {
+    let own = |name: &str| {
+        let user = name
+            .strip_prefix("user-")
+            .and_then(|rest| rest.strip_suffix(".slice"));
+        let unit = name
+            .strip_prefix("cedegrid-u")
+            .and_then(|rest| rest.strip_suffix(".service"));
+        user.or(unit)
+            .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+    };
+    snapshot
+        .kernel
+        .as_ref()
+        .and_then(|kernel| kernel.hierarchy.as_ref())
+        .is_some_and(|hierarchy| {
+            hierarchy.ancestors.iter().any(|level| {
+                level
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(own)
+                    && level
+                        .controllers
+                        .as_ref()
+                        .is_some_and(|controllers| controllers.iter().any(|c| c == "cpu"))
+            })
+        })
 }

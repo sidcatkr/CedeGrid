@@ -1605,6 +1605,44 @@ fn satisfied_demand(input: &ModeInput, uid: Option<u32>, usage: u64) -> Option<u
         .map(|(_, demand)| *demand)
 }
 
+/// Own work's equal share of compute while another principal contends, kept for admission as
+/// long as the others keep theirs (user, 2026-11-17): the margin is room for others' growth past
+/// an equal share, which no mode owes. `schedulable` is the capacity less the operator reserve;
+/// `room` is what the others' usage leaves of it. The share is kept while `room` reaches it
+/// within a principal's floor, so readings that close to the share do not move it, and is zero
+/// otherwise, on memory, in Yield First, under unknown activity, or with no other principal.
+pub fn kept_share(
+    input: &ModeInput,
+    thresholds: &ResourceThresholds,
+    schedulable: u64,
+    room: u64,
+) -> u64 {
+    if input.kind.is_memory() || input.unknown_activity || input.mode == ContentionMode::YieldFirst
+    {
+        return 0;
+    }
+    let others = contending_principals(input, thresholds).len() as u64;
+    if others == 0 {
+        return 0;
+    }
+    // The owner's own processes outside CedeGrid come out of the owner's share first.
+    let owner_unmanaged: u64 = input
+        .principals
+        .iter()
+        .flatten()
+        .filter(|(principal, _)| principal.is_owner)
+        .map(|(_, usage)| *usage)
+        .sum();
+    let share = (schedulable.saturating_sub(input.background) / (others + 1))
+        .saturating_sub(owner_unmanaged)
+        .min(input.fair_share_limit.unwrap_or(u64::MAX));
+    if room.saturating_add(principal_floor(input, thresholds)) >= share {
+        share
+    } else {
+        0
+    }
+}
+
 /// Compute is contended when external activity of unknown amount exists, or when
 /// the resource is saturated and an external principal, or the unattributed
 /// usage that stands for one, uses at least the contention floor without its
