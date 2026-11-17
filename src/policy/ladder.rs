@@ -368,9 +368,12 @@ impl<'a> Interval<'a> {
         let (config, input, now) = (self.config, self.input, self.now);
         let kind = key.kind();
         let held = self.next.unknown_since.contains_key(&key);
-        let measurement_known =
-            !held
-                || self.next.unknown_since.get(&key).is_some_and(|start| {
+        // Performance and Aggressive hold every step while a measurement is unknown and never
+        // escalate for it; admission stays closed (FR-008, FR-022).
+        let escalates = governing(config, kind) < ContentionMode::Performance;
+        let measurement_known = !held
+            || escalates
+                && self.next.unknown_since.get(&key).is_some_and(|start| {
                     now.saturating_sub(*start) >= unknown_window(config, kind)
                 });
         let gpu_unknown = matches!(&key, ResourceKey::GpuMemory(uuid) if self.blocked_gpus.contains(uuid))

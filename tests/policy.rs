@@ -2904,6 +2904,45 @@ fn performance_takes_no_cpu_step_for_others_or_unknown() {
     assert!(!cpu_actions(ContentionMode::Neutral).is_empty());
 }
 
+/// In Performance unknown RAM telemetry holds every step and closes admission past the unknown
+/// window too; it never escalates to a memory step, as Neutral's does (FR-008, FR-022, R87).
+#[test]
+fn performance_never_escalates_unknown_ram() {
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(1000, 8000, 0),
+            Some(resources(1000, 8000, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let ram_steps = |mode| {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        let mut engine = PolicyEngine::new();
+        let mut seen = 0;
+        for now in (0..60_000).step_by(500) {
+            let mut snap = snapshot();
+            snap.available_ram_mib = (now < 5_000).then_some(20_000);
+            let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+            if now >= 5_000 && mode == ContentionMode::Performance {
+                assert_eq!(decision.admission_headroom.ram_mib, 0, "at {now}");
+            }
+            seen += decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Ram)
+                .count();
+        }
+        seen
+    };
+    assert_eq!(ram_steps(ContentionMode::Performance), 0);
+    assert!(ram_steps(ContentionMode::Neutral) > 0);
+}
+
 /// CPU/RAM admission waits its own cooldown, whose default follows the mode's
 /// scale-up interval; the GPU cooldown never gates it (audit M1).
 #[test]
