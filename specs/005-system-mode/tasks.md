@@ -82,8 +82,8 @@ the task list.
   - the command is the fixed installed path with the fixed subcommand and no caller argument;
   - the ordinary unit's slice is parameterized by N4 (`user-<uid>.slice` or `cedegrid.slice`);
   - `PAMName=` and the process limits are parameterized by N3.
-- [ ] T009 [P] Tests for the pidfd and `/proc` directory helpers in `tests/kernel.rs`: a write through a directory handle whose start time no longer matches reaches nothing; an exited PID fails closed.
-  - *Written, not yet run:* the tests are in `tests/system_mode.rs` (Linux only), not `tests/kernel.rs`, beside T014's new location.
+- [x] T009 [P] Tests for the pidfd and `/proc` directory helpers in `tests/kernel.rs`: a write through a directory handle whose start time no longer matches reaches nothing; an exited PID fails closed.
+  - The tests are in `tests/system_mode.rs` (Linux only), not `tests/kernel.rs`, beside T014's new location. They pass on Linux 6.8 (aarch64, local VM, 2026-11-17).
 - [x] T010 [P] CLI tests in `tests/cli.rs`: every command run with effective user ID 0 refuses in one line saying to run it as the user without `sudo` (003 FR-082, built here first); the broker's hidden subcommand is dispatched before argument parsing and is the one exception.
   - The refusal is `system_mode::root_refusal`, called first in `main()`; tested in `tests/system_mode.rs`, not `tests/cli.rs`.
 
@@ -92,8 +92,8 @@ the task list.
 - [x] T011 Implement the request parser and its limits in `src/broker/request.rs` (passes T006)
 - [x] T012 [P] Implement the policy loader in `src/broker/admin_policy.rs` (passes T007)
 - [x] T013 [P] Implement the pure property builder in `src/broker/units.rs`, taking N3 and N4 as inputs, with `RuntimeDirectory=cedegrid/u<uid>` (0700) on the ordinary unit and `Restart=on-failure` on both (passes T008)
-- [ ] T014 [P] Implement the pidfd and `/proc/<pid>` directory helpers with the start-time check in `src/kernel.rs` (passes T009)
-  - *Moved:* written as `src/broker/process_handle.rs`, because kernel code stays read-only (contributor notes) and this handle writes `oom_score_adj`. Its Linux tests have not run yet.
+- [x] T014 [P] Implement the pidfd and `/proc/<pid>` directory helpers with the start-time check in `src/kernel.rs` (passes T009)
+  - *Moved:* written as `src/broker/process_handle.rs`, because kernel code stays read-only (contributor notes) and this handle writes `oom_score_adj`. Its Linux tests pass (local VM, kernel 6.8).
 - [x] T015 Add the hidden dispatch for the broker and the idle executor subcommands, and the root refusal for every other command, in `src/main.rs`, before argument parsing, threads and terminal handoff (passes T010)
   - Done for the broker's dispatch and the root refusal; the idle executor's dispatch comes with T022.
 
