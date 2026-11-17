@@ -80,11 +80,14 @@ blocks. Measured results are in [Native gate results](#native-gate-results-featu
   that excess meanwhile. This stays open until the memory ladder's design settles one deadline
   per breach (FR-037).
 - **Own throughput on a shared core.** Beside a saturating other user on the probe's core, own
-  throughput with CedeGrid is 1.004 of without it in Performance and 0.929 in Neutral at
-  `7cc09c8`, with no CPU step. In the Neutral windows the managed probe used 175.4–175.5 µs of
-  CPU per unit against 161.1–162.5 µs unmanaged, and its units alternated in cost. The probe's
-  even/odd self-check runs once before `ready.json` and does not see that. The cause is not
-  shown, so the same-core gate stays open for Neutral (FR-021).
+  throughput with CedeGrid is 1.004–1.013 of without it in Performance and 0.998–0.999 in
+  Neutral at `4f6830d`, with no CPU step, and the managed probe got 0.997–1.010 of the unmanaged
+  probe's CPU in every window. The gate still does not close: every run refused at least one
+  window, managed or unmanaged, because the probe's even and odd units differed by 1.1–1.3% in
+  the window. With glibc's per-thread allocator cache off in both probes no window was refused;
+  at its default both unmanaged windows were. The open part is the probe's cost pattern, not
+  CedeGrid; it closes with a probe whose loop does not allocate, or runs with that cache off
+  (FR-021, FR-022).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
 - **Launch bursts without lease batches.** A node renews each running assignment's lease every
@@ -171,8 +174,9 @@ margin and the agent's measured CPU counts.
 |---|---|---|---|---|---|
 | Idle, 2 CPUs, the half-core probe checking for a drain every 50 ms | FR-020, FR-021, FR-022 | `1c6ca7e` | 2026-10-30 | Performance 0.995 (0.995, 0.995, 0.996), Neutral 0.999, Yield First 0.995; the agent 9 m (0.43% of the scope), so no Performance loss counts | pass |
 | A light other user on the probe's core (100 requests a second) | FR-020, FR-021, FR-022 | `1c6ca7e` | 2026-10-30 | no step in any mode; own throughput 0.998 in Performance, 1.010 in Neutral, 0.998 in Yield First; the other user's p99 0.68 ms alone and 0.66–0.69 ms beside own work, with or without CedeGrid; the agent 8 m | pass |
-| A saturating other user on the probe's core, Performance | FR-022 | `7cc09c8` | 2026-11-13 | 1.004; no CPU step; probe CPU per unit 160.9–161.1 µs unmanaged and 161.0–161.1 µs managed; the unmanaged probe's even/odd self-check held one block in both windows (1.012–1.013, then 1.000–1.002) | pass |
-| The same, Neutral | FR-021 | `7cc09c8` | 2026-11-13 | 0.929; no CPU step; probe CPU per unit 161.1–162.5 µs unmanaged and 175.4–175.5 µs managed; the self-check read 1.001–1.002 before `ready.json` and refused no window | fail: the managed probe's units alternated in the window, and the check did not catch it |
+| A saturating other user on the probe's core, Performance | FR-022 | `4f6830d` | 2026-11-17 | own throughput 1.004 and 1.013 of without CedeGrid (1.004 and 1.015 over the windows kept); no CPU step; probe CPU per unit 161.1–161.3 µs managed and 161.3–162.2 µs unmanaged; the managed probe got 0.999–1.010 of the unmanaged probe's CPU; one unmanaged window refused in each run (even/odd 1.011–1.012) | open: a window refused in both runs |
+| The same, Neutral | FR-021 | `4f6830d` | 2026-11-17 | own throughput 0.998 and 0.999 of without CedeGrid (0.998 over the windows kept in the second run; none kept in the first); no CPU step; probe CPU per unit 161.8–163.0 µs managed and 161.8–161.9 µs unmanaged, so the managed probe no longer costs more per unit; the managed probe got 0.997–1.005 of the unmanaged probe's CPU; five of eight windows refused (even/odd 1.012–1.013) | open: windows refused in both runs |
+| The same, Neutral, the allocator's per-thread cache off in both probes (control) | FR-021 | `4f6830d` | 2026-11-17 | `GLIBC_TUNABLES=glibc.malloc.tcache_count=0`: 1.002, no window refused (even/odd at most 1.005); at the default count of 7: 0.995, both unmanaged windows refused (1.012–1.013) | control: the allocator cache sets the even/odd pattern |
 | The same, Yield First | FR-020 | `1c6ca7e` | 2026-10-30 | caps, hints and pauses; own throughput 0.174 | as specified |
 | A fixed allocation against CedeGrid in Performance: 4 CPUs, the other user saturating two of them 30 s on and 30 s off for 300 s | FR-022 | `1c6ca7e` | 2026-10-30 | own work with CedeGrid 1.24 times that of the probes pinned with taskset to the other two CPUs; the other user's p50 while on 0.325 ms beside the fixed allocation and 0.347 ms beside CedeGrid, p99 0.356 ms and 3.33 ms; 188 CPU step changes in 300 s; the agent 9 m | own work pass; the other user's p99 is the cost |
 
