@@ -3851,8 +3851,10 @@ fn a_jobs_modes_are_its_requests_capped_by_the_node() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     use cedegrid::execution_model::JobContention;
     use cedegrid::system_mode::job_modes;
-    let mut node = ContentionConfig::default();
-    node.default_mode = ContentionMode::Neutral;
+    let node = ContentionConfig {
+        default_mode: ContentionMode::Neutral,
+        ..ContentionConfig::default()
+    };
     // No request: the node's mode everywhere.
     assert!(
         job_modes(&node, None)
