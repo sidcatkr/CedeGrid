@@ -2879,13 +2879,19 @@ fn performance_takes_no_cpu_step_for_others_or_unknown() {
     let cpu_actions = |mode| {
         let mut cfg = config();
         cfg.contention.default_mode = mode;
+        if mode == ContentionMode::Aggressive {
+            cfg.contention.max_mode = Some(mode);
+            cfg.contention
+                .acknowledge_caution
+                .insert("aggressive_mode".into());
+        }
         let mut engine = PolicyEngine::new();
         let mut seen = Vec::new();
         for now in (0..20_000).step_by(500) {
             let mut snap = snapshot();
             snap.cpu_busy_millicores = (now < 15_000).then_some(8000);
             let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
-            if mode == ContentionMode::Performance {
+            if mode >= ContentionMode::Performance {
                 assert_eq!(decision.admission_headroom.cpu_millicores, 0, "at {now}");
             }
             seen.extend(
@@ -2899,6 +2905,8 @@ fn performance_takes_no_cpu_step_for_others_or_unknown() {
         seen
     };
     assert_eq!(cpu_actions(ContentionMode::Performance), []);
+    // 004 P6: Aggressive, too, never steps running work for others' compute.
+    assert_eq!(cpu_actions(ContentionMode::Aggressive), []);
     assert!(!cpu_actions(ContentionMode::Neutral).is_empty());
 }
 
@@ -8872,6 +8880,12 @@ mod floors_by_mode {
     /// stays closed (FR-023, FR-063, FR-075, R87).
     #[test]
     fn in_performance_a_floor_breach_steps_and_marks_no_own_task() {
+        for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+            breach_in(mode);
+        }
+    }
+
+    fn breach_in(mode: ContentionMode) {
         for (class, available) in [
             (AllocationClass::Opportunistic, 700),
             (AllocationClass::Guaranteed, 700),
@@ -8885,10 +8899,13 @@ mod floors_by_mode {
             ];
             let mut facts = over_share_facts(&["a", "b", "z"], &["c"], &[("z", 1_000)]);
             facts.get_mut("c").unwrap().observes_drain = false;
-            let cfg = config_in(ContentionMode::Performance);
+            let cfg = config_in(mode);
             let run = scripted(&cfg, &facts, 12_000, |_| (jobs.clone(), available));
             for interval in &run {
-                let label = format!("{class:?} with {available} MiB free at {}", interval.now);
+                let label = format!(
+                    "{mode:?}, {class:?} with {available} MiB free at {}",
+                    interval.now
+                );
                 assert!(interval.steps.is_empty(), "{label}: {:?}", interval.steps);
                 assert!(interval.drains.is_empty(), "{label}: {:?}", interval.drains);
                 assert!(interval.marked.is_empty(), "{label}: {:?}", interval.marked);

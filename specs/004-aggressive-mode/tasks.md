@@ -99,6 +99,10 @@ Aggressive.
   - P7: no hint, drain, TERM or OOM mark at a floor breach in Aggressive;
   - FR-017: neither form changes own priority or thread counts: every launch in Aggressive keeps
     the nice value and scheduling class it would have in Performance.
+  - *Done in part:* P6 and P7 extend Performance's no-step and floor-breach tests to Aggressive,
+    and FR-017 is `tests/configuration.rs` `an_aggressive_job_launches_at_the_default_priority`.
+    The F2c arithmetic is `tests/contention.rs` `aggressive::contended_it_is_performance_without_the_margin`;
+    the engine-level F2c scenario is the native gate's (T035).
 - [x] T008 [P] [US1] (now) In `python/tests` and `npm/tests`, test that the per-resource mode
   value `"aggressive"` is accepted by both SDKs and serialized as in
   `contracts/cli-sdk-wire.md`.
@@ -113,7 +117,7 @@ Aggressive.
   `src/policy/admission.rs`, treat Aggressive as Performance in every "no running step" path.
   Admission fills what fits in one heartbeat (scale-up 0), and `targets_of` in
   `src/policy/measure.rs` gains the `aggressive` target. Passes T007.
-- [ ] T011 [US1] (after T622) In `src/agent/service.rs`, `fill` is true for an effective mode at
+- [x] T011 [US1] (after T622) In `src/agent/service.rs`, `fill` is true for an effective mode at
   or above Performance, Aggressive included.
 - [ ] T012 [P] [US1] (after T622) In `src/protocol.rs` and `src/coordinator.rs`, accept the job
   mode `aggressive`, with the node cap deciding the effective mode. Flip contract case JC-05 to

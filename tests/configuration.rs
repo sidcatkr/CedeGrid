@@ -1970,3 +1970,26 @@ fn aggressive_needs_its_acknowledgement_and_an_explicit_cap() {
             .is_err()
     );
 }
+
+#[test]
+fn an_aggressive_job_launches_at_the_default_priority() {
+    // 004 FR-017: Aggressive never raises priority; it launches as Performance does.
+    use cedegrid::execution_model::LaunchRequest;
+    let reply: Value =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    let mut task = reply["assignments"][0]["request"].clone();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let path = root.join("node.toml");
+    fs::write(
+        &path,
+        "config_version=1\n[contention]\nmax_mode = \"aggressive\"\nacknowledge_caution = [\"aggressive_mode\"]\n[cpu]\nnice = 10\n",
+    )
+    .unwrap();
+    let (config, _) = config::load_for_run(&path).unwrap();
+    for mode in ["performance", "aggressive"] {
+        task["contention"] = json!({"modes": {"cpu": mode}});
+        let request: LaunchRequest = serde_json::from_value(task.clone()).unwrap();
+        assert_eq!(config.launch_nice(&request), 0, "{mode}");
+    }
+}

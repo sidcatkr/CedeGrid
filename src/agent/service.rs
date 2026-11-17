@@ -1849,7 +1849,7 @@ impl AgentLoop<'_> {
             .resources
             .get(&crate::contention::ResourceKey::Cpu)
             .and_then(|s| s.effective_mode)
-            == Some(crate::contention::ContentionMode::Performance);
+            >= Some(crate::contention::ContentionMode::Performance);
         let launch_slots = if admission_safe && self.stopping.is_none() && !self.spool_full {
             let paced = launch_slots(LaunchPacing {
                 max_workers: agent.max_workers,
