@@ -3017,7 +3017,8 @@ mod container {
 
     /// 004 T019, T020: a member's unprotected grant goes through the agent in its unit and is
     /// refused while the administrator key or the allowance is missing, naming each, and starts
-    /// once both hold, logging its warning.
+    /// once both hold, logging its warning. A started run keeps its grant across a drained and
+    /// retried attempt after the allowance is turned off, and a new run is then refused.
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn an_unprotected_grant_starts_only_under_the_policy_key_and_the_allowance() {
@@ -3184,7 +3185,7 @@ mod container {
             .spawn()
             .unwrap();
         let started = cedegrid_as(MEMBER, &["system", "start"]);
-        let submit = |job: &str| {
+        let submit = |job: &str, seconds: u32, attempts: u32| {
             python_as(
                 MEMBER,
                 &home,
@@ -3202,9 +3203,9 @@ while True:
     assert time.time() < deadline, 'the agent did not register'
     time.sleep(0.5)
 c.put_pool('pool', ['node-a'], max_workers=1, min_workers=0, allocation_class='opportunistic')
-t = command_task('{job}', ['/bin/sleep', '1'], '/tmp', cpu_millicores=100, ram_mib=64,
+t = command_task('{job}', ['/bin/sleep', '{seconds}'], '/tmp', cpu_millicores=100, ram_mib=64,
     allocation_class='opportunistic', single_process=True, no_escape=True, replay_safe=True,
-    max_attempts=1, unprotected_aggressive=True, confirm_unprotected_aggressive=True)
+    max_attempts={attempts}, unprotected_aggressive=True, confirm_unprotected_aggressive=True)
 c.submit('{job}', 'pool', [t])
 "#
                 ),
@@ -3232,7 +3233,7 @@ c.submit('{job}', 'pool', [t])
                 return Err(format!("system start: {}", stderr(&started)));
             }
             // 1. The key and the allowance are both missing: refused, naming both.
-            let sent = submit("job-a");
+            let sent = submit("job-a", 1, 1);
             if !sent.status.success() {
                 let log = unit_log(MEMBER_UID);
                 let tail: Vec<&str> = log.lines().rev().take(15).collect();
@@ -3262,7 +3263,7 @@ c.submit('{job}', 'pool', [t])
             if !set.status.success() {
                 return Err(format!("allowance: {}", stderr(&set)));
             }
-            let sent = submit("job-b");
+            let sent = submit("job-b", 1, 1);
             if !sent.status.success() {
                 return Err(format!("submit b: {}", stderr(&sent)));
             }
@@ -3277,7 +3278,7 @@ c.submit('{job}', 'pool', [t])
             // 3. The key permits it: a new grant starts, logs its warning and completes. The
             // assignments refused above were left to the coordinator, as every launch refusal is.
             policy(true);
-            let sent = submit("job-c");
+            let sent = submit("job-c", 1, 1);
             if !sent.status.success() {
                 return Err(format!("submit c: {}", stderr(&sent)));
             }
@@ -3290,8 +3291,91 @@ c.submit('{job}', 'pool', [t])
                     unit_log(MEMBER_UID)
                 ));
             }
-            if !unit_log(MEMBER_UID).contains("this run is UNPROTECTED") {
+            let warnings = || {
+                unit_log(MEMBER_UID)
+                    .matches("this run is UNPROTECTED")
+                    .count()
+            };
+            if warnings() == 0 {
                 return Err("no warning line for the started grant".into());
+            }
+            // 4. A started run keeps its grant across a drained and retried attempt after the
+            // allowance is turned off; a new run is refused (004 edge cases).
+            let operator = |code: &str| {
+                python_as(
+                    MEMBER,
+                    &home,
+                    &base,
+                    &format!(
+                        "from cedegrid import Client\nc = Client.from_config('{base}/operator.toml')\n{code}"
+                    ),
+                )
+            };
+            let started = warnings();
+            let sent = submit("job-d", 30, 3);
+            if !sent.status.success() {
+                return Err(format!("submit d: {}", stderr(&sent)));
+            }
+            if !wait_until(Duration::from_secs(60), || {
+                warnings() > started && state("job-d").contains("assigned")
+            }) {
+                return Err(format!("job-d did not start: {}", state("job-d")));
+            }
+            let cleared = python_as(
+                MEMBER,
+                &home,
+                &base,
+                &format!(
+                    "import sqlite3\nc = sqlite3.connect('{base}/state/state.sqlite3')\nc.execute('DELETE FROM unprotected_allowance')\nc.commit()"
+                ),
+            );
+            if !cleared.status.success() {
+                return Err(format!("allowance off: {}", stderr(&cleared)));
+            }
+            let refused = refusals().len();
+            let drained = operator("c.drain_node('node-a')");
+            if !drained.status.success() {
+                return Err(format!("drain: {}", stderr(&drained)));
+            }
+            if !wait_until(Duration::from_secs(60), || {
+                !state("job-d").contains("assigned")
+            }) {
+                return Err(format!("job-d was not drained: {}", state("job-d")));
+            }
+            let resumed = operator("c.drain_node('node-a', False)");
+            if !resumed.status.success() {
+                return Err(format!("undrain: {}", stderr(&resumed)));
+            }
+            if !wait_until(Duration::from_secs(120), || {
+                state("job-d").contains("completed")
+            }) {
+                return Err(format!(
+                    "job-d did not complete after its retry: {} {:?}",
+                    state("job-d"),
+                    refusals()
+                ));
+            }
+            if warnings() < started + 2 || refusals().len() != refused {
+                return Err(format!(
+                    "the retry did not keep its grant: {} warnings, refusals {:?}",
+                    warnings() - started,
+                    &refusals()[refused..]
+                ));
+            }
+            let sent = submit("job-e", 1, 1);
+            if !sent.status.success() {
+                return Err(format!("submit e: {}", stderr(&sent)));
+            }
+            if !wait_until(Duration::from_secs(60), || {
+                refusals()[refused..].iter().any(|line| {
+                    line.contains("ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED")
+                        && !line.contains("ERR_CEDEGRID_UNPROTECTED_POLICY")
+                })
+            }) {
+                return Err(format!(
+                    "job-e was not refused: {:?}",
+                    &refusals()[refused..]
+                ));
             }
             Ok(())
         })();

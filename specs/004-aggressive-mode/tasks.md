@@ -157,7 +157,7 @@ principal contends. Nothing else changes.
 
 ### Tests for User Story 2 (write first, confirm they fail)
 
-- [ ] T017 [P] [US2] (now) In `tests/configuration.rs`, test that `unprotected_aggressive` and
+- [x] T017 [P] [US2] (now) In `tests/configuration.rs`, test that `unprotected_aggressive` and
   `allow_unprotected_aggressive` at any table depth fail to load with
   `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: <key> cannot be stored; unprotected Aggressive is requested per submission only`,
   and that the same happens after `config_migration` migrates a 0.2 file that holds one.
@@ -191,7 +191,7 @@ principal contends. Nothing else changes.
 
 ### Implementation for User Story 2
 
-- [ ] T023 [US2] (now) In `src/config.rs` and `src/config_migration.rs`, refuse every key that
+- [x] T023 [US2] (now) In `src/config.rs` and `src/config_migration.rs`, refuse every key that
   would enable unprotected Aggressive. Passes T017.
 - [x] T024 [US2] (now) In `src/setup.rs` and `src/setup/interface.rs`, add the allowance step.
   The numbers screen (R11) shows other active principals and their CPU use from a fresh
@@ -214,6 +214,12 @@ principal contends. Nothing else changes.
     coordinator and a member's agent in its unit end to end: refused naming the key and the
     allowance, then the key alone, then started with its warning (T019, T020). A refused
     assignment is left to the coordinator, as every launch refusal is.
+  - *Done:* the launch check is in `src/agent/service.rs` rather than `launch.rs`. A start records
+    the grant per run in the state database (`state::record_grant`); a later attempt of that run
+    on the same host reads the allowance it started under (`state::allowance_for_run`), so a
+    drained and retried attempt keeps its grant after the allowance is turned off, while the cap
+    and the key are still checked. A restore forgets every started grant. The container fixture
+    covers the retry and a new run refused after the allowance is off.
 - [x] T027 [US2] (now) In `src/broker/admin_policy.rs`, add the key `modes.unprotected_aggressive`
   (default `false`). In `src/system_mode.rs` `launch_refusal_with`, refuse a grant while it is
   false. Update `specs/005-system-mode/contracts/admin-policy.md` and the policy section of

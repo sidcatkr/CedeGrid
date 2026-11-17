@@ -1243,6 +1243,109 @@ pub fn set_allowance(state_dir: &Path, at_unix_ms: u64) -> Result<()> {
     Ok(())
 }
 
+/// An unprotected grant that started on this host (004 data model). Later attempts of the same
+/// run keep it, even once the allowance is off.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveGrant {
+    pub allowance_set_at_unix_ms: u64,
+    pub started_unix_ms: u64,
+}
+
+/// Records that `task_id`'s grant, requested at `requested_unix_ms`, started here under the
+/// allowance set at `allowance_set_at_unix_ms`. The first start's record stays.
+pub fn record_grant(
+    state_dir: &Path,
+    task_id: &str,
+    requested_unix_ms: u64,
+    allowance_set_at_unix_ms: u64,
+    started_unix_ms: u64,
+) -> Result<()> {
+    let connection = allowance_connection(state_dir)?;
+    let time = |value: u64| i64::try_from(value).context("grant time out of range");
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS unprotected_grants (
+            task_id TEXT NOT NULL,
+            requested_unix_ms INTEGER NOT NULL,
+            allowance_set_at_unix_ms INTEGER NOT NULL,
+            started_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY (task_id, requested_unix_ms)
+        );",
+    )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO unprotected_grants VALUES (?1, ?2, ?3, ?4)",
+        params![
+            task_id,
+            time(requested_unix_ms)?,
+            time(allowance_set_at_unix_ms)?,
+            time(started_unix_ms)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// The record of `task_id`'s grant starting here, if any. Every read failure finds none.
+pub fn active_grant(
+    state_dir: &Path,
+    task_id: &str,
+    requested_unix_ms: u64,
+) -> Option<ActiveGrant> {
+    let read = || -> Result<Option<ActiveGrant>> {
+        let connection = allowance_connection(state_dir)?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unprotected_grants')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let row: Option<(i64, i64)> = connection
+            .query_row(
+                "SELECT allowance_set_at_unix_ms, started_unix_ms FROM unprotected_grants
+                 WHERE task_id = ?1 AND requested_unix_ms = ?2",
+                params![task_id, i64::try_from(requested_unix_ms)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((allowance, started)) => Some(ActiveGrant {
+                allowance_set_at_unix_ms: u64::try_from(allowance)?,
+                started_unix_ms: u64::try_from(started)?,
+            }),
+            None => None,
+        })
+    };
+    if std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME)).is_err() {
+        return None;
+    }
+    read().unwrap_or(None)
+}
+
+/// The allowance a grant's launch check reads (004 data model): the host's, or, where it is off,
+/// the allowance a started run of this task began under here. An allowance that cannot be read
+/// stays unreadable, so even a started run is refused.
+pub fn allowance_for_run(state_dir: &Path, task_id: &str, requested_unix_ms: u64) -> Allowance {
+    match read_allowance(state_dir) {
+        Allowance::Off { reason: None } => active_grant(state_dir, task_id, requested_unix_ms)
+            .map_or(Allowance::Off { reason: None }, |grant| Allowance::On {
+                set_at_unix_ms: grant.allowance_set_at_unix_ms,
+            }),
+        allowance => allowance,
+    }
+}
+
+/// Forgets every started grant; a restore calls this. A missing database or table has none.
+pub fn clear_grants(state_dir: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    let connection = allowance_connection(state_dir)?;
+    connection.execute_batch("DROP TABLE IF EXISTS unprotected_grants;")?;
+    Ok(())
+}
+
 /// Turns the allowance off. Any caller may; a missing database or table is already off.
 pub fn clear_allowance(state_dir: &Path) -> Result<()> {
     match std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME)) {

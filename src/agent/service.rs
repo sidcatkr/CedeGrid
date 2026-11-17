@@ -2038,10 +2038,28 @@ impl AgentLoop<'_> {
                     }
                     // An unprotected Aggressive grant starts only under the host's allowance, a
                     // node cap at Aggressive and, in a unit, the administrator key (004 FR-014).
+                    // A later attempt of a run that started unprotected here keeps the allowance
+                    // it began under.
+                    let grant = assignment
+                        .request
+                        .contention
+                        .as_ref()
+                        .and_then(|contention| contention.unprotected_aggressive);
+                    let allowance = grant.map(|grant| {
+                        crate::state::allowance_for_run(
+                            &config.state_dir,
+                            &assignment.request.task_id,
+                            grant.requested_unix_ms,
+                        )
+                    });
                     if let Some((code, detail)) = crate::system_mode::grant_refusal(
                         assignment.request.contention.as_ref(),
                         config.contention.max_mode(),
-                        || crate::state::read_allowance(&config.state_dir),
+                        || {
+                            allowance
+                                .clone()
+                                .unwrap_or(crate::state::Allowance::Off { reason: None })
+                        },
                         || {
                             crate::system_mode::in_unit()
                                 .then(|| {
@@ -2062,18 +2080,6 @@ impl AgentLoop<'_> {
                         }
                         continue;
                     }
-                    if assignment
-                        .request
-                        .contention
-                        .as_ref()
-                        .is_some_and(|contention| contention.unprotected_aggressive.is_some())
-                    {
-                        emit(&serde_json::json!({
-                            "event": "unprotected_aggressive",
-                            "assignment_id": id,
-                            "detail": "warning: this run is UNPROTECTED: other users' compute may slow down until it ends",
-                        }))?;
-                    }
                     // A launch whose descriptors do not fit with headroom is refused and the
                     // offer left to the coordinator (FR-077).
                     if descriptor_room(self.preparations.len() as u64) == 0 {
@@ -2086,6 +2092,30 @@ impl AgentLoop<'_> {
                             }))?;
                         }
                         continue;
+                    }
+                    if let (Some(grant), Some(crate::state::Allowance::On { set_at_unix_ms })) =
+                        (grant, &allowance)
+                    {
+                        // Recorded so later attempts of this run keep the grant; without the
+                        // record they read the host's allowance again, which is the safe side.
+                        if let Err(error) = crate::state::record_grant(
+                            &config.state_dir,
+                            &assignment.request.task_id,
+                            grant.requested_unix_ms,
+                            *set_at_unix_ms,
+                            super::reconcile::now_unix_ms(),
+                        ) {
+                            emit(&serde_json::json!({
+                                "event": "unprotected_grant_unrecorded",
+                                "assignment_id": id,
+                                "detail": format!("later attempts will read the allowance again: {error:#}"),
+                            }))?;
+                        }
+                        emit(&serde_json::json!({
+                            "event": "unprotected_aggressive",
+                            "assignment_id": id,
+                            "detail": "warning: this run is UNPROTECTED: other users' compute may slow down until it ends",
+                        }))?;
                     }
                     let task_config = config.clone();
                     let task_agent = agent.clone();

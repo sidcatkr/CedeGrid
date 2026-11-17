@@ -1828,7 +1828,8 @@ mod unprotected_allowance {
     //! 004 FR-015: the host's allowance for unprotected Aggressive fails closed.
     use super::storage_dir;
     use cedegrid::state::{
-        Allowance, DATABASE_FILENAME, StateStore, clear_allowance, read_allowance, set_allowance,
+        ActiveGrant, Allowance, DATABASE_FILENAME, StateStore, active_grant, allowance_for_run,
+        clear_allowance, clear_grants, read_allowance, record_grant, set_allowance,
     };
 
     fn off(allowance: &Allowance) -> bool {
@@ -1867,6 +1868,66 @@ mod unprotected_allowance {
         );
         clear_allowance(directory.path()).unwrap();
         assert!(set_allowance(directory.path(), 1).is_err());
+    }
+
+    /// A grant that started here is kept per run, so later attempts of that run find it; a
+    /// different run, a different request time, or a database that cannot be read finds none.
+    #[test]
+    fn a_started_grant_is_kept_per_run_and_reads_fail_closed() {
+        let directory = storage_dir();
+        let path = directory.path();
+        assert_eq!(active_grant(path, "task-a", 10), None);
+        drop(StateStore::open(path).unwrap());
+        assert_eq!(active_grant(path, "task-a", 10), None);
+        record_grant(path, "task-a", 10, 5, 20).unwrap();
+        let kept = ActiveGrant {
+            allowance_set_at_unix_ms: 5,
+            started_unix_ms: 20,
+        };
+        assert_eq!(active_grant(path, "task-a", 10), Some(kept.clone()));
+        // A later attempt keeps the first start's record.
+        record_grant(path, "task-a", 10, 7, 30).unwrap();
+        assert_eq!(active_grant(path, "task-a", 10), Some(kept));
+        assert_eq!(active_grant(path, "task-a", 11), None);
+        assert_eq!(active_grant(path, "task-b", 10), None);
+        // Turning the allowance off leaves started runs their grant (004 edge cases).
+        clear_allowance(path).unwrap();
+        assert!(active_grant(path, "task-a", 10).is_some());
+        clear_grants(path).unwrap();
+        assert_eq!(active_grant(path, "task-a", 10), None);
+        record_grant(path, "task-a", 10, 5, 20).unwrap();
+        let connection = rusqlite::Connection::open(path.join(DATABASE_FILENAME)).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+        assert_eq!(active_grant(path, "task-a", 10), None);
+        assert!(record_grant(path, "task-c", 1, 1, 1).is_err());
+    }
+
+    /// 004 edge cases: once a run started unprotected here, its later attempts keep the allowance
+    /// it started under; a new run reads the host's.
+    #[test]
+    fn a_later_attempt_of_a_started_run_keeps_the_allowance_it_started_under() {
+        let directory = storage_dir();
+        let path = directory.path();
+        let off = Allowance::Off { reason: None };
+        drop(StateStore::open(path).unwrap());
+        assert_eq!(allowance_for_run(path, "task-a", 10), off);
+        set_allowance(path, 5).unwrap();
+        let on = Allowance::On { set_at_unix_ms: 5 };
+        assert_eq!(allowance_for_run(path, "task-a", 10), on);
+        record_grant(path, "task-a", 10, 5, 20).unwrap();
+        clear_allowance(path).unwrap();
+        assert_eq!(allowance_for_run(path, "task-a", 10), on);
+        assert_eq!(allowance_for_run(path, "task-b", 10), off);
+        assert_eq!(allowance_for_run(path, "task-a", 11), off);
+        // A database this build cannot read refuses even a started run.
+        let connection = rusqlite::Connection::open(path.join(DATABASE_FILENAME)).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+        assert!(matches!(
+            allowance_for_run(path, "task-a", 10),
+            Allowance::Off { reason: Some(_) }
+        ));
     }
 
     #[test]
