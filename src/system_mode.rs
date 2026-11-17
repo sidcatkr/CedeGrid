@@ -181,6 +181,18 @@ pub fn launch_refusal(
 /// How long the client waits for the broker before it falls back (*provisional*, FR-013).
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the client waits for a stop: the broker waits for systemd to stop both units, each
+/// call bounded by `SYSTEMD_TIMEOUT`, and a stop has nothing to fall back to.
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// The reply timeout for a request.
+pub fn reply_timeout(request: &Request) -> Duration {
+    match request {
+        Request::Stop => STOP_TIMEOUT,
+        _ => CLIENT_TIMEOUT,
+    }
+}
+
 /// The most the client reads of a reply.
 const MAX_REPLY_BYTES: u64 = 64 * 1024;
 
@@ -347,7 +359,7 @@ pub fn run(request: &Request, require_system: bool) -> anyhow::Result<SystemRepo
     let outcome = ask(
         Path::new(crate::broker::SOCKET_PATH),
         request,
-        CLIENT_TIMEOUT,
+        reply_timeout(request),
     );
     match decide(outcome, require_system) {
         Decision::System(units) => Ok(SystemReport {

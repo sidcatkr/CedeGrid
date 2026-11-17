@@ -3976,3 +3976,15 @@ fn a_units_config_needs_no_delegated_root_of_its_own() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_stop_waits_for_both_units_and_nothing_else_waits_longer_than_two_seconds() {
+    use cedegrid::broker::systemd::SYSTEMD_TIMEOUT;
+    use cedegrid::system_mode::{CLIENT_TIMEOUT, reply_timeout};
+    // A stop of two units takes up to two systemd calls; every other request falls back fast.
+    assert!(reply_timeout(&Request::Stop) > SYSTEMD_TIMEOUT * 2);
+    for request in [Request::Status, Request::Start { mode: None }] {
+        assert_eq!(reply_timeout(&request), CLIENT_TIMEOUT);
+    }
+    assert_eq!(CLIENT_TIMEOUT, Duration::from_secs(2));
+}
