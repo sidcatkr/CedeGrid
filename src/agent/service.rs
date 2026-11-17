@@ -1483,9 +1483,6 @@ impl AgentLoop<'_> {
             (true, None) => self.ram_breach_start,
             (false, _) => None,
         };
-        let keeps = status
-            .and_then(|status| status.effective_mode.or(status.mode))
-            .is_some_and(|mode| mode >= crate::contention::ContentionMode::Performance);
         let breach_start = self.ram_breach_start;
         let tolerance_mib = self
             .config
@@ -1495,7 +1492,7 @@ impl AgentLoop<'_> {
         let view = own
             .zip(decision.ram_fair_share_mib)
             .map(|(own_mib, fair_share_mib)| oom::RamView {
-                keeps_memory: keeps.then(|| oom::Breach {
+                keeps_memory: Some(oom::Breach {
                     growth_mib: breach_start.map(|start| own_mib.saturating_sub(start)),
                     tolerance_mib,
                 }),
@@ -1509,14 +1506,24 @@ impl AgentLoop<'_> {
                     .map(|p| (p.uid, p.ram_mib))
                     .collect(),
             });
+        // Each task is judged by its own RAM mode (FR-030).
         for (id, slot) in self.slots.iter_mut() {
-            if !slot.exited
-                && allocations
-                    .iter()
-                    .any(|a| &a.id == id && a.observed.is_some())
-            {
-                slot.ram_view = view.clone();
+            if slot.exited {
+                continue;
             }
+            let Some(allocation) = allocations
+                .iter()
+                .find(|a| &a.id == id && a.observed.is_some())
+            else {
+                continue;
+            };
+            let mut slot_view = view.clone();
+            if let Some(slot_view) = slot_view.as_mut()
+                && !oom::keeps_memory(&self.config, &allocation.modes)
+            {
+                slot_view.keeps_memory = None;
+            }
+            slot.ram_view = slot_view;
         }
     }
 

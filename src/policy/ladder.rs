@@ -50,11 +50,9 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        // Performance and Aggressive mark none of their tasks, so the kernel chooses as it
-        // would without CedeGrid (FR-023).
-        if governing(config, ResourceKind::Ram) >= ContentionMode::Performance {
-            victims.retain(|v| v.mode < ContentionMode::Performance);
-        }
+        // Jobs in Performance and Aggressive are never marked, whatever the governing mode, so
+        // the kernel chooses among them as it would without CedeGrid (FR-023, FR-030).
+        victims.retain(|v| v.mode < ContentionMode::Performance);
         victim_order(&mut victims, excess);
         let mut covered = 0u64;
         for victim in victims {
@@ -437,11 +435,11 @@ impl<'a> Interval<'a> {
         } else {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
-        // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes no memory
-        // of work in those modes, as without CedeGrid; the kernel decides at exhaustion. The
-        // envelope still applies in full.
+        // Floors by mode (FR-023, FR-030): a floor breach takes no memory of jobs in Performance
+        // and Aggressive, whatever the governing mode, as without CedeGrid; the kernel decides at
+        // exhaustion. The envelope still applies in full.
         let mut keeps_mode_memory = false;
-        if floor_breach && governing(config, kind) >= ContentionMode::Performance {
+        if floor_breach {
             let protected = input
                 .allocations
                 .iter()
@@ -459,13 +457,19 @@ impl<'a> Interval<'a> {
             usage_excess =
                 usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
         }
+        // What own work holds beyond the operator envelope, which steps jobs of every mode.
+        let envelope_excess = input.envelope.as_ref().map_or(0, |envelope| {
+            if kind == ResourceKind::Cpu {
+                cpu_usage.saturating_sub(envelope.cpu_millicores)
+            } else {
+                judged_total.saturating_sub(amount_of(&key, envelope))
+            }
+        });
         // Performance and Aggressive take no CPU step for others, for own usage over the
         // admission target or for unknown activity: the budget sets admission only, and only the
         // operator's envelope still steps running work (FR-022).
         if kind == ResourceKind::Cpu && governing(config, kind) >= ContentionMode::Performance {
-            usage_excess = input.envelope.as_ref().map_or(0, |envelope| {
-                cpu_usage.saturating_sub(envelope.cpu_millicores)
-            });
+            usage_excess = envelope_excess;
         }
         if usage_excess > 0 {
             note_excess(&mut self.over_target, &key, usage_excess);
@@ -585,6 +589,7 @@ impl<'a> Interval<'a> {
             return_level,
             save_progress,
             keeps_mode_memory,
+            envelope_excess,
         }
     }
 
@@ -746,7 +751,9 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        if frame.keeps_mode_memory {
+        // A job in Performance or Aggressive yields running work only for the operator envelope,
+        // whatever the governing mode (FR-030).
+        if frame.keeps_mode_memory || !pending_pass && frame.envelope_excess == 0 {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);
@@ -793,6 +800,15 @@ impl<'a> Interval<'a> {
                 rest = &rest[len..];
             }
             for group in tiers.into_iter().flat_map(|(held, new)| [held, new]) {
+                // Jobs in Performance and Aggressive pay only what the envelope still needs once
+                // the jobs before them have paid (FR-030).
+                if group
+                    .first()
+                    .is_some_and(|v| v.mode >= ContentionMode::Performance)
+                {
+                    let paid = needed.saturating_sub(remaining);
+                    remaining = remaining.min(frame.envelope_excess.saturating_sub(paid));
+                }
                 let total: u64 = group.iter().map(|v| v.amount).sum();
                 let level = fill_level(&group, remaining.min(total));
                 for victim in group {
@@ -1034,21 +1050,15 @@ impl<'a> Interval<'a> {
     fn ceiling(&self, key: &ResourceKey, allocation: &Allocation) -> Option<u64> {
         let kind = key.kind();
         let mode = self.allocation_modes[&allocation.id][&kind];
-        // A job in Performance or Aggressive under that governing mode is not capped back to its
-        // target on compute (FR-022).
-        if !kind.is_memory()
-            && mode >= ContentionMode::Performance
-            && governing(self.config, kind) >= ContentionMode::Performance
-        {
+        // A job in Performance or Aggressive is not capped back to its target on compute, whatever
+        // the governing mode (FR-022, FR-030).
+        if !kind.is_memory() && mode >= ContentionMode::Performance {
             return None;
         }
         let fair = self
             .memory_fair_share
             .get(key)
-            .filter(|_| {
-                mode >= ContentionMode::Performance
-                    && governing(self.config, kind) >= ContentionMode::Performance
-            })
+            .filter(|_| mode >= ContentionMode::Performance)
             .copied()
             .unwrap_or(0);
         self.mode_targets
@@ -1472,6 +1482,9 @@ impl<'a> Interval<'a> {
                 amount: frame.share,
             })
             .collect();
+        // Jobs in Performance and Aggressive take no GPU compute step for others, whatever the
+        // governing mode (FR-022, FR-030).
+        victims.retain(|v| v.mode < ContentionMode::Performance);
         victim_order(&mut victims, frame.excess);
         let mut remaining = frame.excess;
         let mut planned = BTreeSet::new();
@@ -1719,6 +1732,9 @@ impl<'a> Interval<'a> {
                 a.phase == AllocationPhase::Running
                     && a.requested.gpu_memory_mib.contains_key(uuid)
                     && self.time_slice_exempt(&a.id, uuid)
+                    // Jobs in Performance and Aggressive keep the driver's slices (FR-030).
+                    && self.allocation_modes[&a.id][&ResourceKind::GpuCompute]
+                        < ContentionMode::Performance
             })
             .collect();
         let target = budget.share / exempt.len().max(1) as u64;
@@ -1888,6 +1904,9 @@ struct Frame {
     /// A floor breach where work in Performance or Aggressive keeps its memory (FR-023): it is
     /// no victim, gets the save-progress signal and no OOM mark.
     keeps_mode_memory: bool,
+    /// Own work beyond the operator envelope, the only excess jobs in Performance and
+    /// Aggressive pay (FR-030, FR-057).
+    envelope_excess: u64,
 }
 
 impl Frame {

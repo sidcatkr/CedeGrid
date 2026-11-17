@@ -4783,6 +4783,59 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
     assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
 }
 
+/// A Performance job on a Neutral node takes no GPU compute step for another principal; the
+/// node's Neutral job beside it does (FR-030, R88).
+#[test]
+fn a_performance_job_takes_no_gpu_compute_step_on_a_neutral_node() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (mut cfg, mut snap) = us5_device(
+        ContentionMode::Neutral,
+        Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    cfg.contention.max_mode = Some(ContentionMode::Performance);
+    snap.gpus[0].compute_sample_id = Some(1);
+    let job = |id: &str| {
+        allocation(
+            id,
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )
+    };
+    let mut eager = job("eager");
+    eager.modes = BTreeMap::from([(ResourceKind::GpuCompute, ContentionMode::Performance)]);
+    let mut engine = PolicyEngine::new();
+    let mut stepped = std::collections::BTreeSet::new();
+    for now in (0..10_000).step_by(500) {
+        let decision = engine
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![job("plain"), eager.clone()],
+                    facts: rootless(&["plain", "eager"]),
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap();
+        stepped.extend(
+            decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == key && a.step > cedegrid::contention::YieldStep::None)
+                .map(|a| a.allocation_id.clone()),
+        );
+    }
+    assert!(!stepped.contains("eager"), "{stepped:?}");
+    assert!(stepped.contains("plain"), "{stepped:?}");
+}
+
 /// While device telemetry is unknown (here a missing process list), GPU compute caps and
 /// pauses hold rather than being lifted (FR-008, GPU-3).
 #[test]
@@ -6204,7 +6257,17 @@ mod per_job_modes {
     /// Runs the policy with the supervisor applying every cap and pause at once,
     /// beside a shadow engine that sees the same hosts without per-job modes.
     pub(super) fn simulate(jobs: &[Job], external: u64, intervals: u64) -> Vec<Interval> {
-        let cfg = cfg();
+        simulate_in(&cfg(), jobs, external, intervals)
+    }
+
+    /// `simulate` on a given node configuration.
+    pub(super) fn simulate_in(
+        cfg: &Config,
+        jobs: &[Job],
+        external: u64,
+        intervals: u64,
+    ) -> Vec<Interval> {
+        let cfg = cfg.clone();
         let (mut engine, mut shadow) = (PolicyEngine::new(), PolicyEngine::new());
         let mut actions: Vec<YieldAction> = vec![];
         let mut out = vec![];
@@ -6318,18 +6381,20 @@ mod per_job_modes {
                 "external {external}: {:?}",
                 first.actions
             );
-            // Settled over the last minute: the Performance job holds the
-            // aggregate less what the Yield First job keeps.
+            // Settled over the last minute: the Performance job is never held, so it keeps
+            // what the scheduler gives it, at least the aggregate less what the Yield First job
+            // keeps (FR-030, R88).
             let settled = &run[120..];
             let (gentle, eager) = (average(settled, 0), average(settled, 1));
             let aggregate = settled.last().unwrap().aggregate;
             assert!(
-                gentle + eager <= aggregate + CPU / 100,
+                eager + gentle + CPU / 10 >= aggregate,
                 "external {external}: {gentle} + {eager} against {aggregate}"
             );
             assert!(
-                eager + gentle + CPU / 10 >= aggregate,
-                "external {external}: {gentle} + {eager} against {aggregate}"
+                run.iter()
+                    .all(|i| i.actions.iter().all(|a| a.allocation_id != "eager")),
+                "external {external}: the Performance job is never held"
             );
             assert!(eager > gentle, "external {external}: {gentle} {eager}");
             if external > 0 {
@@ -6361,6 +6426,116 @@ mod per_job_modes {
             settled.last().unwrap().aggregate,
             settled.last().unwrap().shadow_aggregate
         );
+    }
+
+    /// A Performance job on a node whose mode is Neutral or Yield First is never held for
+    /// another principal: the node's other jobs give what the aggregate needs as far as they
+    /// can, and alone on the node it is not held at all (FR-016, FR-030, R88).
+    #[test]
+    fn a_performance_job_is_never_held_whatever_the_node_mode() {
+        let job = |id, mode| Job {
+            id,
+            mode,
+            class: AllocationClass::Opportunistic,
+            request: 1000,
+            wants: CPU,
+        };
+        for node in [ContentionMode::Neutral, ContentionMode::YieldFirst] {
+            let mut cfg = cfg();
+            cfg.contention.default_mode = node;
+            let jobs = [
+                job("plain", None),
+                job("eager", Some(ContentionMode::Performance)),
+            ];
+            for external in [1000, 4000] {
+                let run = simulate_in(&cfg, &jobs, external, 240);
+                for (i, interval) in run.iter().enumerate() {
+                    assert!(
+                        interval.actions.iter().all(|a| a.allocation_id != "eager"),
+                        "{node:?}, external {external}, interval {i}: {:?}",
+                        interval.actions
+                    );
+                }
+                assert!(
+                    run.iter()
+                        .any(|i| i.actions.iter().any(|a| a.allocation_id == "plain")),
+                    "{node:?}, external {external}: the other job pays"
+                );
+            }
+            let run = simulate_in(&cfg, &jobs[1..], 4000, 120);
+            assert!(
+                run.iter().all(|i| i.actions.is_empty()),
+                "{node:?}: alone, nothing is held"
+            );
+        }
+    }
+
+    /// The operator envelope still steps a Performance job on a Neutral node (FR-030, FR-057).
+    #[test]
+    fn the_envelope_still_steps_a_performance_job_on_a_neutral_node() {
+        let mut job = allocation(
+            "eager",
+            AllocationPhase::Running,
+            resources(1000, 100, 0),
+            Some(resources(6000, 100, 0)),
+        );
+        job.modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::Performance)]);
+        let input = PolicyInput {
+            allocations: vec![job],
+            facts: rootless(&["eager"]),
+            envelope: Some(resources(3000, 16_000, 0)),
+            ..PolicyInput::default()
+        };
+        let mut engine = PolicyEngine::new();
+        let stepped = (0..20u64).any(|i| {
+            engine
+                .evaluate(&cfg(), &snapshot(), &input, i * 500)
+                .unwrap()
+                .actions
+                .iter()
+                .any(|a| a.allocation_id == "eager" && a.step > YieldStep::None)
+        });
+        assert!(stepped);
+    }
+
+    /// While CPU telemetry is unknown on a Neutral node, escalation past the unknown window
+    /// reaches the node's Neutral job and never its Performance job (FR-008, FR-030, R88).
+    #[test]
+    fn unknown_cpu_never_escalates_to_a_performance_job() {
+        let mut eager = allocation(
+            "eager",
+            AllocationPhase::Running,
+            resources(2000, 100, 0),
+            Some(resources(3000, 100, 0)),
+        );
+        eager.modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::Performance)]);
+        let plain = allocation(
+            "plain",
+            AllocationPhase::Running,
+            resources(2000, 100, 0),
+            Some(resources(3000, 100, 0)),
+        );
+        let input = PolicyInput {
+            allocations: vec![eager, plain],
+            facts: rootless(&["eager", "plain"]),
+            ..PolicyInput::default()
+        };
+        let mut engine = PolicyEngine::new();
+        let mut stepped = std::collections::BTreeSet::new();
+        for now in (0..30_000).step_by(500) {
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = (now < 5_000).then_some(8000);
+            let decision = engine.evaluate(&cfg(), &snap, &input, now).unwrap();
+            stepped.extend(
+                decision
+                    .actions
+                    .iter()
+                    .filter(|a| a.step > YieldStep::None)
+                    .map(|a| a.allocation_id.clone()),
+            );
+        }
+        assert!(!stepped.contains("eager"), "{stepped:?}");
+        assert!(stepped.contains("plain"), "{stepped:?}");
     }
 
     /// A Guaranteed job keeps its CPU request in every tier (FR-024).
@@ -8684,6 +8859,48 @@ mod floors_by_mode {
             );
             let signals: usize = run.iter().map(|i| i.saved.len()).sum();
             assert_eq!(signals, 4, "each task is signalled once");
+        }
+    }
+
+    /// On a node whose mode is Neutral or Yield First, a Performance job gives no memory back at
+    /// a floor breach others caused and is never marked for the OOM killer; the node's other
+    /// jobs give way as before (FR-023, FR-030, R88).
+    #[test]
+    fn a_performance_job_keeps_its_memory_at_a_breach_on_any_node() {
+        let class = AllocationClass::Opportunistic;
+        let mut eager = ram_job("z", class, 7_000);
+        eager.modes = BTreeMap::from([(
+            cedegrid::contention::ResourceKind::Ram,
+            ContentionMode::Performance,
+        )]);
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("c", class, 3_000),
+            eager,
+        ];
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let mut cfg = config_in(mode);
+            cfg.contention.max_mode = Some(ContentionMode::Performance);
+            cfg.contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            let run = scripted(&cfg, &facts, 12_000, |_| (jobs.clone(), 700));
+            for interval in &run {
+                let label = format!("{mode:?} at {}", interval.now);
+                assert!(
+                    !interval.steps.contains_key("z"),
+                    "{label}: {:?}",
+                    interval.steps
+                );
+                assert!(!interval.drains.contains(&"z".to_string()), "{label}");
+                assert!(!interval.marked.contains(&"z".to_string()), "{label}");
+            }
+            assert!(
+                run.iter().any(|i| !i.steps.is_empty()),
+                "{mode:?}: the other jobs give way"
+            );
         }
     }
 
