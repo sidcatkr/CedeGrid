@@ -643,3 +643,58 @@ fn a_heartbeat_reports_active_work_and_the_last_256_released_runs() {
     assert!(!reported.iter().any(|r| r.assignment_id == "a1843"));
     assert!(reported.len() <= 2048);
 }
+
+/// 004 FR-016: observe lists a run as unprotected from its authorization until it is released,
+/// with its grant and, where recorded, the allowance and start of its first unprotected start.
+#[test]
+fn unprotected_runs_are_listed_from_authorization_until_release() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let (dir, store) = store();
+    let grant = UnprotectedGrant {
+        confirmed: true,
+        requested_unix_ms: 7,
+    };
+    let mut granted = request("g", "g1");
+    granted.contention = Some(JobContention {
+        modes: BTreeMap::from([
+            (ResourceKind::Cpu, ContentionMode::Aggressive),
+            (ResourceKind::GpuCompute, ContentionMode::Aggressive),
+        ]),
+        unprotected_aggressive: Some(grant),
+    });
+    let room = Resources {
+        cpu_millicores: 4000,
+        ram_mib: 1024,
+        gpu_memory_mib: BTreeMap::new(),
+    };
+    let row = store.reserve(&granted, &room).unwrap();
+    let plain = store.reserve(&request("p", "p1"), &room).unwrap();
+    assert!(store.unprotected_runs().unwrap().is_empty());
+    let mut candidate = prepared(row);
+    store.transition(&candidate).unwrap();
+    let mut other = prepared(plain);
+    store.transition(&other).unwrap();
+    assert!(store.unprotected_runs().unwrap().is_empty());
+    candidate.phase = ExecutionPhase::Authorized;
+    store.transition(&candidate).unwrap();
+    other.phase = ExecutionPhase::Authorized;
+    store.transition(&other).unwrap();
+    let listed = |allowance, started| {
+        vec![UnprotectedRun {
+            assignment_id: "g1".into(),
+            task_id: "g".into(),
+            grant,
+            allowance_set_at_unix_ms: allowance,
+            started_unix_ms: started,
+        }]
+    };
+    assert_eq!(store.unprotected_runs().unwrap(), listed(None, None));
+    cedegrid::state::record_grant(dir.path(), "g", 7, 5, 20).unwrap();
+    assert_eq!(store.unprotected_runs().unwrap(), listed(Some(5), Some(20)));
+    candidate.phase = ExecutionPhase::Running;
+    store.transition(&candidate).unwrap();
+    assert_eq!(store.unprotected_runs().unwrap().len(), 1);
+    candidate.phase = ExecutionPhase::Released;
+    store.transition(&candidate).unwrap();
+    assert!(store.unprotected_runs().unwrap().is_empty());
+}

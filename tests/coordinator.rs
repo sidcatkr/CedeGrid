@@ -4903,3 +4903,77 @@ fn a_granted_request_is_placed_against_the_unprotected_budget() {
     };
     assert_eq!(run(Some(room)), ["granted"]);
 }
+
+/// 004 FR-016: status marks an allocation unprotected, with its grant, once it was authorized,
+/// which the agent asks for only after its grant check; other allocations are not marked.
+#[test]
+fn status_marks_a_started_granted_allocation_unprotected() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    let mut granted = task("granted");
+    granted.contention = Some(JobContention {
+        modes: BTreeMap::from([
+            (ResourceKind::Cpu, ContentionMode::Aggressive),
+            (ResourceKind::GpuCompute, ContentionMode::Aggressive),
+        ]),
+        unprotected_aggressive: Some(UnprotectedGrant {
+            confirmed: true,
+            requested_unix_ms: 7,
+        }),
+    });
+    submit_tasks(&mut c, "job", 0, vec![granted, task("plain")], 100);
+    let mut r = negotiated(100, &[]);
+    r.contention.as_mut().unwrap().unprotected_budget = Some(Resources {
+        cpu_millicores: 4000,
+        ram_mib: 1000,
+        gpu_memory_mib: BTreeMap::new(),
+    });
+    let reply = report_reply(&mut c, &r, 100);
+    assert_eq!(placed(&reply), ["granted", "plain"]);
+    let marks = |c: &mut Coordinator, now| {
+        let Response::Status { allocations, .. } = c
+            .handle_at(&Principal::Operator, Request::Status { job_id: None }, now)
+            .unwrap()
+        else {
+            panic!()
+        };
+        let mut marks: Vec<(String, serde_json::Value, serde_json::Value)> = allocations
+            .iter()
+            .map(|a| {
+                (
+                    a["task_id"].as_str().unwrap().to_owned(),
+                    a["unprotected"].clone(),
+                    a.get("unprotected_grant").cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
+        marks.sort_by(|a, b| a.0.cmp(&b.0));
+        marks
+    };
+    // Offered, not yet authorized: nothing is marked.
+    let none = serde_json::Value::Null;
+    assert_eq!(
+        marks(&mut c, 101),
+        [
+            ("granted".into(), json!(false), none.clone()),
+            ("plain".into(), json!(false), none.clone()),
+        ]
+    );
+    for assignment in &reply.assignments {
+        authorize(&mut c, assignment, 102);
+    }
+    assert_eq!(
+        marks(&mut c, 103),
+        [
+            (
+                "granted".into(),
+                json!(true),
+                json!({"confirmed": true, "requested_unix_ms": 7})
+            ),
+            ("plain".into(), json!(false), none),
+        ]
+    );
+}

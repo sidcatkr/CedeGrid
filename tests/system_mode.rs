@@ -3321,6 +3321,19 @@ c.submit('{job}', 'pool', [t])
             }) {
                 return Err(format!("job-d did not start: {}", state("job-d")));
             }
+            // Status marks the started run unprotected, with its grant (004 FR-016).
+            let marks = || {
+                stdout(&operator(
+                    "print([a.get('unprotected') for a in c.status('job-d').get('allocations', [])])",
+                ))
+            };
+            // The warning comes at the grant check; the mark follows authorization.
+            if !wait_until(Duration::from_secs(30), || marks().contains("True")) {
+                return Err(format!(
+                    "status does not mark job-d unprotected: {}",
+                    marks()
+                ));
+            }
             let cleared = python_as(
                 MEMBER,
                 &home,
@@ -3354,6 +3367,10 @@ c.submit('{job}', 'pool', [t])
                     state("job-d"),
                     refusals()
                 ));
+            }
+            // The mark ends with the run, once its node reports the allocation released.
+            if !wait_until(Duration::from_secs(30), || !marks().contains("True")) {
+                return Err(format!("job-d is still marked after it ended: {}", marks()));
             }
             if warnings() < started + 2 || refusals().len() != refused {
                 return Err(format!(

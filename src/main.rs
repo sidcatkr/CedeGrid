@@ -823,7 +823,16 @@ async fn async_main(cli: Cli) -> Result<()> {
                     .as_ref()
                     .map(|s| s.append_observation(&snapshot, &decision))
                     .transpose()?;
-                emit(&cedegrid::explain::observation(&snapshot, &decision, id))?;
+                let mut observation = cedegrid::explain::observation(&snapshot, &decision, id);
+                // Runs started under an unprotected grant, until they end (004 FR-016).
+                observation["unprotected"] = serde_json::to_value(
+                    store
+                        .as_ref()
+                        .map(StateStore::unprotected_runs)
+                        .transpose()?
+                        .unwrap_or_default(),
+                )?;
+                emit(&observation)?;
                 count = count.saturating_add(1);
                 if samples != 0 && count >= samples {
                     break;

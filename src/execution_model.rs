@@ -77,6 +77,20 @@ pub struct UnprotectedGrant {
     pub requested_unix_ms: u64,
 }
 
+/// A run of this node that started under an unprotected grant and has not ended, as `observe`
+/// lists it (004 FR-016).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnprotectedRun {
+    pub assignment_id: String,
+    pub task_id: String,
+    pub grant: UnprotectedGrant,
+    /// The allowance and start of the run's first unprotected start here, where recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowance_set_at_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_unix_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,

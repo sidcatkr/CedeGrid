@@ -285,6 +285,8 @@ fn observation_without_state_is_read_only_and_honest_about_enforcement() {
     assert!(value["observation_id"].is_null());
     assert_eq!(value["decision"]["observe_only"], true);
     assert_eq!(value["decision"]["would_drain"], serde_json::json!([]));
+    // 004 FR-016: the list of unprotected runs is always present; without state it is empty.
+    assert_eq!(value["unprotected"], serde_json::json!([]));
     for capability in value["snapshot"]["capabilities"]
         .as_object()
         .unwrap()
@@ -304,6 +306,7 @@ fn observation_is_persisted_and_history_round_trips() {
     let path = setup(dir.path());
     let observed = success_json(run(&path, &["observe"]));
     assert!(observed["observation_id"].as_i64().unwrap() > 0);
+    assert_eq!(observed["unprotected"], serde_json::json!([]));
     let history = success_json(run(&path, &["history"]));
     assert_eq!(history.as_array().unwrap().len(), 1);
     assert!(dir.path().join("state/state.sqlite3").is_file());
