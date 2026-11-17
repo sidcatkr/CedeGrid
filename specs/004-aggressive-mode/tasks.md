@@ -89,7 +89,9 @@ Aggressive.
     Performance and in Aggressive. Aggressive admits up to `max(fair share, available)` and the
     other principal keeps the lesser of its demand and its fair share;
   - P6: no compute cap, pause or drain on an Aggressive allocation for external demand;
-  - P7: no hint, drain, TERM or OOM mark at a floor breach in Aggressive.
+  - P7: no hint, drain, TERM or OOM mark at a floor breach in Aggressive;
+  - FR-017: neither form changes own priority or thread counts: every launch in Aggressive keeps
+    the nice value and scheduling class it would have in Performance.
 - [ ] T008 [P] [US1] (now) In `python/tests` and `npm/tests`, test that the per-resource mode
   value `"aggressive"` is accepted by both SDKs and serialized as in
   `contracts/cli-sdk-wire.md`.
@@ -147,8 +149,9 @@ principal contends. Nothing else changes.
   refused before Authorized with its line from `contracts/cli-sdk-wire.md` "Refusals at
   launch", and nothing starts. With every condition met, the run is Authorized and logs the
   warning line once. A drained and retried attempt keeps the grant, and a new run without the
-  fields is protected. The node-cap case needs `ContentionMode::Aggressive`, so add it with
-  T005.
+  fields is protected. Turning the allowance off while the run is active keeps its grant and
+  refuses new grants. Lowering the node cap below Aggressive ends the grant for tasks admitted
+  after it. The node-cap cases need `ContentionMode::Aggressive`, so add them with T005.
 - [ ] T020 [P] [US2] (now) In `tests/system_mode.rs`, test:
   - `admin_policy` parses `modes.unprotected_aggressive` (default `false`, `deny_unknown_fields`);
   - `launch_refusal_with` refuses a grant while it is false or absent, with
@@ -170,7 +173,8 @@ principal contends. Nothing else changes.
   would enable unprotected Aggressive. Passes T017.
 - [ ] T024 [US2] (now) In `src/setup.rs` and `src/setup/interface.rs`, add the allowance step.
   The numbers screen (R11) shows other active principals, their CPU use and an estimated
-  light-user slowdown, labelled "estimate", from the agent's latest observation. Then a yes/no
+  light-user slowdown, labelled "estimate", from the agent's latest observation, and says that
+  memory floors and OOM handling are unchanged by it (FR-006). Then a yes/no
   question with no default, then the fixed phrase. Add `--disallow-unprotected-aggressive`.
   Writes go through T003. Passes T018.
 - [ ] T025 [US2] (now) In `src/protocol.rs` and `src/coordinator.rs`, add the grant object. The

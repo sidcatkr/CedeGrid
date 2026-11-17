@@ -32,7 +32,7 @@ A per-run request for unprotected Aggressive goes through the SDK and the wire. 
 `status`, `observe` and `doctor` carry the rest. Where the text below and this note differ,
 this note applies.
 
-**Note (2026-10-29, constitution 7.0.0, 001 item 029)**: in both forms, memory floors are kept
+**Note (2026-10-29, constitution 7.0.0, 001 item 029; superseded on 2026-11-17 by the rework note below, which removes the floor path, the save-progress signal and the OOM order by fault for Aggressive)**: in both forms, memory floors are kept
 down to the fair share (001 FR-023): at a breach others' growth caused, own memory above its
 fair share takes the floor path and in-share own memory gets the save-progress signal (001
 FR-075). Out-of-memory order by fault replaces the OOM-victim rule, and Performance is 001's
@@ -113,8 +113,8 @@ default mode and no caution option. Where this spec says otherwise, the note app
 - **Principal**: a user whose processes use a resource, as in 001. Own work is one principal.
 - **Fair share**: a principal's max-min fair share of a compute resource, as in 001.
 - **Protected share**: for another active principal, the lesser of its demand and its fair share.
-- **Waiting**: a principal that wants more compute than it gets: run-queue wait for CPU, or
-  demand the growth probe reveals.
+- **Demand**: what a principal would use if it got it: its usage, its recorded demand when it is
+  starved, or what the growth probe reveals; 003's run-queue wait adds to it later.
 - **Shared-cgroup host**: a host where all users share one CPU cgroup. On a **per-user-cgroup
   host**, each user has their own cgroup.
 - **Unprotected grant**: the per-run permission that turns the protection off, with its
