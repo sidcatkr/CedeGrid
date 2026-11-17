@@ -482,7 +482,7 @@ fn oom_loop() {
     use super::peer::{Accounts, HostAccounts};
     use super::score::{Lowering, OverShareMarking};
     use super::systemd::SystemctlRunner;
-    use super::units::unit_name;
+    use super::units::{removed_members_to_stop, unit_name};
 
     // SAFETY: sysconf has no preconditions.
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -541,6 +541,33 @@ fn oom_loop() {
                     }
                     if let Some(&(_, Some(gid))) = markers.get(&unit.cgroup) {
                         units.push(ScoredUnit { unit, gid });
+                    }
+                }
+                // N2 A: a removed member's units stop once no job runs in them.
+                let busy: Vec<(u32, bool)> = units
+                    .iter()
+                    .map(|scored| {
+                        let jobs = format!("{}/{}", scored.unit.cgroup, super::oom::JOBS_DIR);
+                        (scored.unit.uid, !unit_pids(cgroup_root, &jobs).is_empty())
+                    })
+                    .collect();
+                for uid in removed_members_to_stop(&busy, &|uid| accounts.is_member(uid).ok()) {
+                    let Some(gid) = units.iter().find(|s| s.unit.uid == uid).map(|s| s.gid) else {
+                        continue;
+                    };
+                    let caller = super::units::Caller {
+                        uid,
+                        primary_gid: gid,
+                    };
+                    match super::systemd::stop_units(&systemd, caller) {
+                        Ok(_) => journal(&format!(
+                            "stopped units: uid={uid} is not in group {} and no job runs",
+                            super::GROUP
+                        )),
+                        Err(refusal) => report(format!(
+                            "units of uid={uid} not stopped: {}",
+                            refusal.message
+                        )),
                     }
                 }
                 let writes = oom.pass(

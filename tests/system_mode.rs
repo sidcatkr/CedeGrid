@@ -3904,3 +3904,32 @@ fn an_agent_in_a_unit_runs_at_the_full_level_on_its_jobs_cgroup() {
     assert_eq!(controls.len(), UNIT_CONTROLS.len() + 1);
     config.cgroup.validate().unwrap();
 }
+
+#[test]
+fn a_removed_members_units_stop_once_no_job_runs() {
+    use cedegrid::broker::units::removed_members_to_stop;
+    // 1500 removed, idle; 1501 removed, a job in its ordinary unit; 1502 a member; 1503 unknown.
+    let units = [
+        (1500, false),
+        (1500, false),
+        (1501, true),
+        (1501, false),
+        (1502, false),
+        (1503, false),
+    ];
+    let member = |uid: u32| match uid {
+        1500 | 1501 => Some(false),
+        1502 => Some(true),
+        _ => None,
+    };
+    assert_eq!(
+        removed_members_to_stop(&units, &member),
+        [1500].into_iter().collect()
+    );
+    // Once the job ends, the second user's units stop too.
+    let units = [(1501, false), (1501, false)];
+    assert_eq!(
+        removed_members_to_stop(&units, &member),
+        [1501].into_iter().collect()
+    );
+}

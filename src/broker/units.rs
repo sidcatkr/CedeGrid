@@ -265,3 +265,20 @@ pub fn systemd_run_args(spec: &UnitSpec) -> Vec<OsString> {
     args.extend(spec.command.iter().map(OsString::from));
     args
 }
+
+/// Decision N2 A: a user removed from the group keeps their units while a job runs in either of
+/// them; once none does, both stop. Takes each unit's user ID and whether a job runs in it, and
+/// returns the users whose units stop now. Unknown membership stops nothing.
+pub fn removed_members_to_stop(
+    units: &[(u32, bool)],
+    member: &dyn Fn(u32) -> Option<bool>,
+) -> std::collections::BTreeSet<u32> {
+    let mut busy = std::collections::BTreeMap::<u32, bool>::new();
+    for &(uid, running) in units {
+        *busy.entry(uid).or_default() |= running;
+    }
+    busy.into_iter()
+        .filter(|&(uid, running)| !running && member(uid) == Some(false))
+        .map(|(uid, _)| uid)
+        .collect()
+}
