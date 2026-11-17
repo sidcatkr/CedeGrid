@@ -2,6 +2,7 @@ pub mod actuation;
 pub mod agent;
 pub mod artifacts;
 pub mod backup;
+pub mod broker;
 pub mod cgroup;
 pub mod config;
 pub mod config_migration;
