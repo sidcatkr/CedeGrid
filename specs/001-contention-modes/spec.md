@@ -958,6 +958,16 @@ back more.
   contention floor. A moved pause does not count as a step down for admission. What own work
   holds beyond the operator envelope pauses a task whatever else the resource waits on. A pause
   that ends because contention has ended leaves no step to dwell on (implementation, 2026-11-17).
+- Q: Run E8 at the D2 commit put Tracked below the former cap: covering a moved pause whole when
+  the host would fill left own work about 770 m under its target, and rounding the other way
+  swings own work by a task every bound. Which is it? → A: Neither: if the other user's share is
+  kept, own work's must be too, without swinging. The paused tasks are the ones whose usage comes
+  nearest the excess, each side losing at most half the smallest task; the held amount stays when
+  a pause moves; an own-over-target pause holds while resuming would overshoot more than it
+  undershoots; and paused tasks have the first claim on the room below the target before new work
+  is admitted. E8 in Tracked: own 11959-12057 units/s (former cap 10559-11573), the other user
+  5977-6114 req/s (former cap 5884-6018), own more than 2% below its target in at most 4 of 100
+  intervals, the error's p95 64-112 m (user, 2026-11-17).
 
 ## Terms
 
@@ -2159,22 +2169,30 @@ node reports with the expected per-resource values at each step.
 - **FR-089**: Yield First and Neutral MUST hold running own work back by whole tasks on CPU and
   GPU compute (report 057 C2, C3 and D2). No rate cap applies to either at either level: in Full,
   `cpu.max` is a launch setting only, and a pause freezes the leaf.
-  - A task is paused, in FR-016's order and its mode tiers, only while the own work left running
-    stays at or above own work's target: on CPU, own usage less the paused task's usage; on GPU
-    compute, the own contexts left running on the time-slice path (FR-021), else own work's
-    measured amount less the task's equal part of it. A task whose pause would go below the target
-    is skipped for the next in the order, so rounding favours own work. Yield First on a contended
-    resource pauses every own task, down to the first-come floor on GPU compute (FR-090).
-  - A pause ends as FR-014 says: at the bound it moves to the next task, which covers what the
-    paused one used as far as own work with it running would be over its target, rounding toward
-    own work unless own work a task over its target would fill the host; where no running task is
-    left to cover it, the moved pauses take turns, one resuming at a time. A paused task resumes
-    when the demand it answered falls back past the reversal threshold, at the mode's pace, or at
-    once when contention has ended (FR-034), and a returning contender is answered without the
-    step dwell. A pause held for own usage over its target holds while own work is not below its
-    target by the contention floor (FR-013). A moved pause is not a step down for admission
-    (FR-028). What own work holds beyond the operator envelope pauses a task whatever else the
-    resource waits on (FR-057). A task that is draining makes no other task hold.
+  - On CPU, the tasks paused are those whose usage together comes nearest what own work holds
+    over its target, so that neither own work nor the other principals lose more than half the
+    smallest task's usage: in FR-016's order and its mode tiers, each task that fits what is left,
+    then, if a part is left, the smallest other task whose pause leaves own work less below its
+    target than running leaves it above. A pause already held counts first, and a task whose step
+    changed within the step dwell waits. On GPU compute a task is paused only while the own work
+    left running stays at or above its target: the own contexts left running on the time-slice
+    path (FR-021), else own work's measured amount less the task's equal part of it. Yield First
+    on a contended resource pauses every own task, down to the first-come floor on GPU compute
+    (FR-090).
+  - A pause ends as FR-014 says: at the bound it moves to other tasks, chosen the same way to
+    cover what the paused one used as far as own work with it running would be over its target, so
+    the held amount stays while the excess does; a task that takes its place holds for the cause
+    and the demand the moved pause answered. Where too few running tasks are left to cover it, the
+    moved pauses take turns, one resuming at a time. A paused task resumes when the demand it
+    answered falls back past the reversal threshold, at the mode's pace, or at once when
+    contention has ended (FR-034), and a returning contender is answered without the step dwell.
+    A pause held for own usage over its target holds while resuming it would leave own work further
+    over its target than the pause leaves it below, and at least while own work is not below its
+    target by the contention floor (FR-013). A pause at its bound moves even while own usage over
+    its target waits its dwell. While own tasks are paused on CPU, the room below the target is
+    theirs first: admission counts what they used, and a moved pause is not a step down (FR-028).
+    What own work holds beyond the operator envelope pauses a task whatever else the resource waits
+    on (FR-057). A task that is draining makes no other task hold.
   - No duty cycle runs: the supervisor neither stops nor continues own work by period, and a
     worker's CPU hint is a request only.
   - On a time-sliced GPU, in every mode, one more own process is admitted only while
@@ -2444,7 +2462,7 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   returned within 2 monitor intervals of the demand appearing, including on a host that own work
   saturates: own CPU usage reaches the mode's contended target, which in Yield First is
   opportunistic work paused, then as FR-014 says after `pause_bound_s`, and in Neutral the fair
-  share to within one task's usage (FR-089). Where own work saturated the resource before its
+  share to within half the smallest task's usage (FR-089). Where own work saturated the resource before its
   first step, Yield First's first step holds it to the margin within the fair share, so at least
   the fair share is back within the same bound; a demand smaller than one margin step is probed
   instead (FR-021). Where whole tasks left own work just over Yield First's margin, the user's
@@ -2452,13 +2470,13 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   later. In Performance own CPU is not
   stepped for another principal's demand (SC-019), and no new own work is admitted while it
   would take that principal below the lesser of its demand and its fair share. With demand that
-  fits in the margin, Yield First keeps its 15% margin free, to within one task. No work is drained or terminated
+  fits in the margin, Yield First keeps its 15% margin free, to within half a task. No work is drained or terminated
   when CPU is the only contended resource, except as SC-007 allows. A principal whose demand is on record as satisfied
   gets that demand back within the same bound when it returns. These bounds are for other
   principals' demand: unmanaged processes of the account that runs CedeGrid share that account's
   fair share with own work, so they are served as own work's margin frees capacity.
 - **SC-003**: In Neutral, with one contending principal, own share converges to the fair share,
-  to within one task's usage (FR-089), within the Neutral convergence time. The fair share is
+  to within half the smallest task's usage (FR-089), within the Neutral convergence time. The fair share is
   50% here; the defaults are a tolerance of ±15 percentage points and a convergence time of 60 s.
 - **SC-004**: In Performance:
   - On an idle host, own work reaches the Performance ramp target within the ramp time, on CPU

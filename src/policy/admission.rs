@@ -430,6 +430,16 @@ impl Interval<'_> {
         // Recommendations are not release confirmation: subtract ALL allocations,
         // including existing draining work and everything just recommended for drain.
         headroom.subtract_saturating(&self.charged);
+        // Paused own tasks have the first claim on the room below the CPU target: new work is not
+        // admitted into what they would take back (FR-028, FR-089).
+        let paused: u64 = self
+            .next
+            .ladder
+            .iter()
+            .filter(|((_, key), state)| *key == ResourceKey::Cpu && state.step == YieldStep::Pause)
+            .map(|(_, state)| state.paused_usage.unwrap_or(0))
+            .fold(0, u64::saturating_add);
+        headroom.cpu_millicores = headroom.cpu_millicores.saturating_sub(paused);
         headroom.gpu_memory_mib.retain(|uuid, _| {
             !input.explicit_drain
                 && !self.blocked_gpus.contains(uuid)

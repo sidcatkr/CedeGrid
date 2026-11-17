@@ -1966,9 +1966,9 @@ mod scenarios {
     }
 
     /// With own work held to its margin by whole tasks, Yield First pauses all of it only once
-    /// external demand outgrows the margin: a small blip fits in it, and own work keeps at
-    /// least its target and at most one task more, while demand beyond the margin pauses every
-    /// task (FR-020, FR-089).
+    /// external demand outgrows the margin: a small blip fits in it, and own work stays within
+    /// half a task of its target, while demand beyond the margin pauses every task (FR-020,
+    /// FR-089).
     #[test]
     fn yield_first_pauses_only_when_external_demand_exceeds_its_margin() {
         let mut world = World::new(ContentionMode::YieldFirst, (64, 8000));
@@ -1986,24 +1986,27 @@ mod scenarios {
             assert!(world.paused < TASKS, "at {now}: own {own}");
             assert_eq!(external, 400);
             // After the step applies, own work keeps the margin free beside the blip, to
-            // within one task.
+            // within half a task either way (FR-089).
             if interval >= 2 {
-                assert!(own + 400 + margin <= CAPACITY + task, "{own}");
-                assert!(own + CAPACITY / 100 >= CAPACITY - 400 - margin, "{own}");
+                assert!(
+                    own.abs_diff(CAPACITY - 400 - margin) <= task / 2 + CAPACITY / 100,
+                    "{own}"
+                );
             }
             now += INTERVAL;
         }
-        // Demand beyond the margin is contention: own work pauses within 2 intervals.
+        // Demand beyond the margin is contention: own work pauses within 2 intervals, all but
+        // a task whose pause, held since the blip, reached its bound and takes its turn (FR-014).
         world.external = (5, 4000);
         world.tick(now);
         now += INTERVAL;
         world.tick(now);
-        assert_eq!(world.paused, TASKS);
+        assert!(world.paused + 1 >= TASKS, "{:?}", world.steps);
         assert!(!world.drained);
     }
 
     /// Own work that saturates the host itself is held to the margin by whole tasks, to within
-    /// one task, not paused altogether, when a small external user appears beside it (FR-020,
+    /// half a task, not paused altogether, when a small external user appears beside it (FR-020,
     /// FR-089).
     #[test]
     fn yield_first_holds_own_saturation_to_the_margin_for_a_small_external_user() {
@@ -2020,10 +2023,9 @@ mod scenarios {
         let margin = CAPACITY * 15 / 100;
         assert_eq!(external, 400);
         assert!(
-            own + 400 + margin <= CAPACITY + CAPACITY / TASKS as u64,
+            own.abs_diff(CAPACITY - 400 - margin) <= CAPACITY / TASKS as u64 / 2 + CAPACITY / 100,
             "{own}"
         );
-        assert!(own + CAPACITY / 100 >= CAPACITY - 400 - margin, "{own}");
         assert!(!world.drained);
     }
 
@@ -4179,7 +4181,10 @@ mod t178_contender {
             let paused = caps.iter().filter(|(s, _)| *s == YieldStep::Pause).count();
             if now >= 25_000 {
                 assert_eq!(*held.get_or_insert(paused), paused, "at {now}");
-                assert!(own <= target + floor, "at {now}: own {own} beside {target}");
+                assert!(
+                    own <= target + TASK + floor,
+                    "at {now}: own {own} beside {target}"
+                );
                 assert!(
                     own + TASK + floor >= target,
                     "at {now}: own {own} lost beside {target}"

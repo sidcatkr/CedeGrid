@@ -314,12 +314,12 @@ holds more than capacity minus Yield First's margin, saturation may be its own d
 Yield First first holds it to the margin within the fair share and pauses all of it only if
 the contention remains. Neutral holds the max-min fair share. No CPU rate cap applies, in
 Tracked or in Full (where `cpu.max` is a launch setting only): Yield First and Neutral pause
-whole tasks, in victim order, only while the own work left running stays at or above the
-target, so a task whose pause would go below it is skipped and rounding favours own work; a
-task larger than the excess is therefore not held, and the other user then gets what plain
-Linux gives it. A pause still answering its demand at `pause_bound_s` (10 s) moves to another
-task: the paused task resumes and the next one in the order takes its place, as far as own work
-with it running would be over its target, so no task is drained for CPU. Where every task is
+the whole tasks whose usage together comes nearest what own work holds over its target, so
+neither own work nor the other user loses more than half the smallest task; a task more than
+twice the excess is therefore not held, and the other user then gets what plain Linux gives it.
+A pause still answering its demand at `pause_bound_s` (10 s) moves to other tasks chosen the
+same way, so the held amount stays and no task is drained for CPU. While own tasks are paused,
+new own work is admitted only beyond the room they would take back. Where every task is
 paused, as in Yield First, the pauses take turns, one task running at a time. A task that is
 draining makes no other task hold. A pause for the operator envelope drains at the bound. A job's own mode, within
 the node cap, decides how that job gives back: a job in Performance or Aggressive is never held

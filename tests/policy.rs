@@ -6536,7 +6536,8 @@ mod whole_tasks {
     #[test]
     fn a_moving_pause_does_not_close_admission() {
         // Six tasks of 1000m beside a user wanting 4000m: two paused hold own work exactly at
-        // its 4000m target, so nothing else closes admission.
+        // its 4000m target. Admission may still wait its cooldown while tasks are paused, since
+        // they have the first claim on any room; it never reads the move as own work yielding.
         const SIX: [(&str, u64); 6] = [
             ("a", 1000),
             ("b", 1000),
@@ -6549,7 +6550,12 @@ mod whole_tasks {
         let mut moved = 0;
         for pair in held[20..].windows(2) {
             assert_eq!(pair[1].steps.len(), 2, "at {}", pair[1].now);
-            assert_eq!(pair[1].admission, None, "at {}", pair[1].now);
+            assert_ne!(
+                pair[1].admission.as_deref(),
+                Some("admission_own_work_yielding"),
+                "at {}",
+                pair[1].now
+            );
             if pair[0].steps.keys().ne(pair[1].steps.keys()) {
                 moved += 1;
             }
@@ -6714,19 +6720,21 @@ mod gpu_cooldown_alone {
             "job",
             AllocationPhase::Running,
             resources(1000, 100, 2000),
-            Some(resources(4000, 100, 2000)),
+            Some(resources(2000, 100, 2000)),
         );
-        let cpu = allocation(
-            "cpu",
-            AllocationPhase::Running,
-            resources(1000, 100, 0),
-            Some(resources(2000, 100, 0)),
-        );
+        let cpu = |id| {
+            allocation(
+                id,
+                AllocationPhase::Running,
+                resources(1000, 100, 0),
+                Some(resources(2000, 100, 0)),
+            )
+        };
         (
             snap,
             PolicyInput {
-                allocations: vec![job, cpu],
-                facts: rootless(&["job", "cpu"]),
+                allocations: vec![job, cpu("cpu-a"), cpu("cpu-b")],
+                facts: rootless(&["job", "cpu-a", "cpu-b"]),
                 ..PolicyInput::default()
             },
         )

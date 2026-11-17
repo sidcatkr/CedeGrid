@@ -28,10 +28,11 @@
   unknown amount, Neutral holds the fair share and Performance admits nothing new there.
 - **Whole-task holds.** Yield First and Neutral hold own CPU and GPU compute work back by
   pausing whole tasks, in Tracked and in Full, with no rate cap and no stop-and-resume duty
-  cycle; in Full a pause freezes the leaf, and `cpu.max` is a launch setting only. A task is
-  paused only while the own work left running stays at or above the mode's target, so a single
-  job is never paused below it, and a task larger than the excess is not held. A pause still
-  answering its demand after `pause_bound_s` (10 s) moves to another task, so no task is drained
+  cycle; in Full a pause freezes the leaf, and `cpu.max` is a launch setting only. On CPU the
+  paused tasks are those whose usage comes nearest the excess, so neither own work nor the other
+  user loses more than half the smallest task; on GPU compute a task is paused only while the
+  own work left running stays at or above the target. A pause still answering its demand after
+  `pause_bound_s` (10 s) moves to other tasks with the held amount kept, so no task is drained
   for CPU; where every task is paused, as in Yield First, the pauses take turns. Guaranteed CPU
   work above its request only gets a lower share. On a time-sliced GPU, own tasks are paused
   down to the share of the busy
