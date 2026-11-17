@@ -190,8 +190,8 @@ share, not their tail latency. Keeping own threads off a contended CPU, by affin
 
 | Gate | Requirement | Commit | Measured | Figures | Result |
 |---|---|---|---|---|---|
-| 150 tasks at once, an operator drain, then TERM, at the test's request budget of 1 MiB/s | FR-074, FR-080 | `5163c1a` | 2026-11-15 | 150 of 150 ran. Longest gap between observations 637 ms (bound 1 s). None running 4449 ms after the drain began, all released by 5677 ms; 145 of 150 recorded Draining. Longest supervisor journal wait 1467 ms. No lease expired, no supervisor error | pass |
-| The same at the default 10 MiB/s | FR-074, FR-080 | `5163c1a` | 2026-11-15 | 150 of 150 ran. Longest gap 828 ms. None running 2628 ms after the drain began, all released by 5691 ms; 150 of 150 recorded Draining. One `coordinator_disconnected` event. No lease expired, no supervisor error | pass |
+| 150 tasks at once, an operator drain, then TERM, at the test's request budget of 1 MiB/s | FR-074, FR-080 | `10b784f` | 2026-11-17 | 150 of 150 ran. Longest gap between observations 548 ms (bound 1 s). None running 1619 ms after the drain began, all released by 4276 ms; 150 of 150 recorded Draining. Longest supervisor journal wait 292 ms, no `journal_busy` event. No lease expired, no supervisor error | pass |
+| The same at the default 10 MiB/s | FR-074, FR-080 | `10b784f` | 2026-11-17 | 150 of 150 ran. Longest gap 552 ms. None running 1620 ms after the drain began, all released by 4274 ms; 150 of 150 recorded Draining. Longest supervisor journal wait 288 ms. No `coordinator_disconnected` event (the run directories were kept to read one). No lease expired, no supervisor error | pass |
 | Descriptors in a 150-task burst | FR-077 | `fc5e330` | 2026-10-30 | the agent's soft descriptor limit raised to 524288, 1079 open at the peak; all 150 ran, no agent exit, no lease expired, no refusal and no supervisor error | pass |
 
 A supervisor writes a drain's notice and signals before its Draining record. A run whose
