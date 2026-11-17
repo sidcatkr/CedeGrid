@@ -65,6 +65,7 @@ pub fn parse_runtime<T: DeserializeOwned>(
         );
         let parsed: toml::Value = toml::from_str(contents)?;
         let mut value = toml_to_json(parsed)?;
+        refuse_unprotected_keys(&value, "")?;
         let object = value
             .as_object_mut()
             .context("configuration must be a table")?;
@@ -87,6 +88,37 @@ pub fn parse_runtime<T: DeserializeOwned>(
         Ok(serde_json::from_value(normalized)?)
     })();
     result.map_err(|error: anyhow::Error| config_error(format!("{error:#}")))
+}
+
+/// Keys that would turn on unprotected Aggressive (004 FR-012): it is requested per submission
+/// only, so a file holding one, at any depth, fails to load naming it.
+const UNPROTECTED_KEYS: &[&str] = &["unprotected_aggressive", "allow_unprotected_aggressive"];
+
+fn refuse_unprotected_keys(value: &Value, path: &str) -> Result<()> {
+    match value {
+        Value::Object(table) => {
+            for (key, inner) in table {
+                let here = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if UNPROTECTED_KEYS.contains(&key.as_str()) {
+                    anyhow::bail!(
+                        "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {here} cannot be stored; unprotected Aggressive is requested per submission only"
+                    );
+                }
+                refuse_unprotected_keys(inner, &here)?;
+            }
+        }
+        Value::Array(items) => {
+            for (index, inner) in items.iter().enumerate() {
+                refuse_unprotected_keys(inner, &format!("{path}[{index}]"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // Convert integers as signed i64, never through f64. TOML 1.0's datetime type

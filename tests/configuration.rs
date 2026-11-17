@@ -1841,3 +1841,71 @@ fn a_reload_applies_contention_changes_and_refuses_the_rest() {
 }
 
 include!("support/state_dir.rs");
+
+#[test]
+fn a_file_can_never_store_unprotected_aggressive() {
+    // 004 FR-012: the request is per submission only; any file that holds it fails to load.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let cases = [
+        ("unprotected_aggressive = true\n", "unprotected_aggressive"),
+        (
+            "[contention]\nallow_unprotected_aggressive = true\n",
+            "contention.allow_unprotected_aggressive",
+        ),
+        (
+            "[contention.cpu]\nunprotected_aggressive = false\n",
+            "contention.cpu.unprotected_aggressive",
+        ),
+    ];
+    for (body, path) in cases {
+        let error = config::parse_runtime::<Config>(
+            &format!("config_version=1\n{body}"),
+            &root.join("node.toml"),
+            RuntimeConfigKind::Node,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {path} cannot be stored; unprotected Aggressive is requested per submission only"
+            )),
+            "{error}"
+        );
+    }
+    let client = config::example(RuntimeConfigKind::Client).unwrap();
+    let error = config::parse_runtime::<RuntimeClientConfig>(
+        &format!("{client}\nunprotected_aggressive = true\n"),
+        &root.join("client.toml"),
+        RuntimeConfigKind::Client,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_migrated_file_that_holds_unprotected_aggressive_is_refused() {
+    let fixtures = contract();
+    let case = fixtures["config_cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "CFG-04-moved-legacy-default")
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let mut options = options(&root, RuntimeConfigKind::Node);
+    options.input = root.join(case["legacy_path"].as_str().unwrap());
+    options.output = root.join(case["output_path"].as_str().unwrap());
+    let source = format!(
+        "{}unprotected_aggressive: true\n",
+        case["legacy_text"].as_str().unwrap()
+    );
+    stage(&options, &source);
+    assert!(config_migration::migrate(&options).is_err());
+    assert!(!options.output.exists());
+}
