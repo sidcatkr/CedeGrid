@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the cedegrid and cedegrid-system Debian packages from a built binary (005 FR-033)."""
 import argparse
+import re
 import shutil
 import subprocess
 import tempfile
@@ -46,11 +47,26 @@ def write_control(root, text):
     target.chmod(0o644)
 
 
+def glibc_floor(binary):
+    """The newest GLIBC symbol version the binary names; 2.35 at least (the project's floor)."""
+    versions = [int(minor) for minor in re.findall(rb'GLIBC_2\.(\d+)', Path(binary).read_bytes())]
+    return f'2.{max(versions + [35])}'
+
+
+def fix_directories(root):
+    # dpkg records directory modes too; the build host's umask must not leak into them.
+    for path in root.rglob('*'):
+        if path.is_dir():
+            path.chmod(0o755)
+    root.chmod(0o755)
+
+
 def stage_cli(root, binary, version, arch):
     place(root, 'usr/bin/cedegrid', binary, 0o755)
     write_control(root, control(
-        'cedegrid', version, arch, 'libc6 (>= 2.35)',
+        'cedegrid', version, arch, f'libc6 (>= {glibc_floor(binary)})',
         'resource manager for shared Linux servers'))
+    fix_directories(root)
 
 
 def stage_system(root, packaging, version, arch):
@@ -61,6 +77,7 @@ def stage_system(root, packaging, version, arch):
     write_control(root, control(
         'cedegrid-system', version, arch, f'cedegrid (= {version}), systemd (>= 249)',
         'root broker that gives cedegrid group members System mode'))
+    fix_directories(root)
 
 
 def build(root, output, name):

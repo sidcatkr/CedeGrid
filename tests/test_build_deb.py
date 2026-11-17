@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,8 +23,12 @@ class BuildDebTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             work = Path(work)
             binary = work / 'cedegrid'
-            binary.write_bytes(b'\x7fELF')
-            build_deb.stage_cli(work / 'cli', binary, '0.3.0', 'amd64')
+            binary.write_bytes(b'\x7fELF GLIBC_2.17\0GLIBC_2.39\0GLIBC_2.4\0')
+            old = os.umask(0o002)
+            try:
+                build_deb.stage_cli(work / 'cli', binary, '0.3.0', 'amd64')
+            finally:
+                os.umask(old)
             self.assertEqual(
                 tree(work / 'cli'),
                 [('DEBIAN/control', 0o644), ('usr/bin/cedegrid', 0o755)],
@@ -32,6 +37,10 @@ class BuildDebTest(unittest.TestCase):
             self.assertIn('Package: cedegrid\n', control)
             self.assertIn('Version: 0.3.0\n', control)
             self.assertIn('Architecture: amd64\n', control)
+            self.assertIn('Depends: libc6 (>= 2.39)\n', control)
+            for path in (work / 'cli').rglob('*'):
+                if path.is_dir():
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o755, path)
 
     def test_system_package_holds_the_contract_files_and_scripts(self):
         with tempfile.TemporaryDirectory() as work:
@@ -57,3 +66,13 @@ class BuildDebTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GlibcFloorTest(unittest.TestCase):
+    def test_floor_is_the_newest_named_version_and_never_below_2_35(self):
+        with tempfile.TemporaryDirectory() as work:
+            binary = Path(work) / 'b'
+            binary.write_bytes(b'GLIBC_2.2.5\0GLIBC_2.17\0')
+            self.assertEqual(build_deb.glibc_floor(binary), '2.35')
+            binary.write_bytes(b'GLIBC_2.38\0GLIBC_2.39\0')
+            self.assertEqual(build_deb.glibc_floor(binary), '2.39')
