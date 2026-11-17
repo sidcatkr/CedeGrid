@@ -2120,7 +2120,12 @@ impl AgentLoop<'_> {
                     let task_config = config.clone();
                     let task_agent = agent.clone();
                     let task_assignment = assignment.clone();
-                    let task_capacity = schedulable_budget(decision);
+                    let task_capacity = launch_capacity(
+                        schedulable_budget(decision),
+                        decision.unprotected_budget.as_ref(),
+                        grant.is_some()
+                            && matches!(allowance, Some(crate::state::Allowance::On { .. })),
+                    );
                     let task_snapshot = snapshot.clone();
                     let task_executable = executable.to_path_buf();
                     let task_client = self.client.clone();
@@ -2908,4 +2913,44 @@ pub(super) fn allocation_charge(allocations: &[crate::model::Allocation]) -> Res
         ));
     }
     used
+}
+
+/// The capacity a launch reserves against: the schedulable budget, with CPU raised to the
+/// unprotected budget for a grant that passed its check (004 R12). Without this the coordinator
+/// places a granted task the agent then cannot reserve.
+pub(crate) fn launch_capacity(
+    mut budget: Resources,
+    unprotected: Option<&Resources>,
+    granted: bool,
+) -> Resources {
+    if granted && let Some(unprotected) = unprotected {
+        budget.cpu_millicores = budget.cpu_millicores.max(unprotected.cpu_millicores);
+    }
+    budget
+}
+
+#[cfg(test)]
+mod launch_capacity_tests {
+    use super::launch_capacity;
+    use crate::model::Resources;
+
+    #[test]
+    fn a_granted_launch_reserves_against_the_unprotected_budget_only() {
+        let cpu = |millicores| Resources {
+            cpu_millicores: millicores,
+            ram_mib: 4096,
+            ..Resources::default()
+        };
+        assert_eq!(launch_capacity(cpu(1000), None, true), cpu(1000));
+        assert_eq!(
+            launch_capacity(cpu(1000), Some(&cpu(3900)), false),
+            cpu(1000)
+        );
+        assert_eq!(
+            launch_capacity(cpu(1000), Some(&cpu(3900)), true),
+            cpu(3900)
+        );
+        // The unprotected budget never lowers what a launch may reserve.
+        assert_eq!(launch_capacity(cpu(1000), Some(&cpu(500)), true), cpu(1000));
+    }
 }
