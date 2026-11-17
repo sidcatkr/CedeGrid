@@ -706,8 +706,18 @@ async fn async_main(cli: Cli) -> Result<()> {
                 // Unprotected Aggressive is shown where the configuration names Aggressive or the
                 // allowance is on; on a System mode host the administrator key applies too.
                 let allowance = cedegrid::state::read_allowance(&config.state_dir);
+                let (runs, unreadable) =
+                    match cedegrid::state::read_unprotected_runs(&config.state_dir) {
+                        Ok(runs) => (runs, None),
+                        Err(error) => (
+                            Vec::new(),
+                            Some(format!("the state database cannot be read: {error:#}")),
+                        ),
+                    };
                 let unprotected = if config.contention.names_aggressive()
                     || matches!(allowance, cedegrid::state::Allowance::On { .. })
+                    || !runs.is_empty()
+                    || unreadable.is_some()
                 {
                     let policy = std::path::Path::new(cedegrid::broker::admin_policy::POLICY_DIR)
                         .join(cedegrid::broker::admin_policy::POLICY_FILE)
@@ -719,11 +729,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                         })
                         .flatten()
                         .map(|(_, gap)| gap);
-                    cedegrid::explain::unprotected_text(&cedegrid::system_mode::host_gaps(
-                        config.contention.max_mode(),
-                        allowance,
-                        policy,
-                    ))
+                    cedegrid::explain::unprotected_text(
+                        &cedegrid::system_mode::host_gaps(
+                            config.contention.max_mode(),
+                            allowance,
+                            policy,
+                        ),
+                        &runs,
+                        unreadable.as_deref(),
+                    )
                 } else {
                     String::new()
                 };
@@ -739,6 +753,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     "{}",
                     text.replace("[caution]", &style.caution("[caution]"))
                         .replace("[Aggressive]", &style.refusal("[Aggressive]"))
+                        .replace("UNPROTECTED", &style.refusal("UNPROTECTED"))
                 );
             } else {
                 emit(&json!({

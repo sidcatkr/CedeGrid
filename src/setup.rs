@@ -1205,7 +1205,7 @@ impl AllowanceChange {
 }
 
 /// A Unix time in milliseconds as `YYYY-MM-DD HH:MM UTC`.
-fn utc_minute(unix_ms: u64) -> String {
+pub fn utc_minute(unix_ms: u64) -> String {
     let minutes = unix_ms / 60_000;
     let (days, minute) = (minutes / 1440, minutes % 1440);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).

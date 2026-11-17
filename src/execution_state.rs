@@ -91,61 +91,9 @@ impl StateStore {
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
 
-    /// Runs that started under an unprotected grant and have not been released (004 FR-016):
-    /// authorized or later, or awaiting reconciliation with a process identity.
+    /// Runs that started under an unprotected grant and have not been released (004 FR-016).
     pub fn unprotected_runs(&self) -> Result<Vec<UnprotectedRun>> {
-        let mut runs = Vec::new();
-        for record in self.executions()? {
-            let started = match record.phase {
-                ExecutionPhase::Authorized | ExecutionPhase::Running | ExecutionPhase::Draining => {
-                    true
-                }
-                ExecutionPhase::NeedsReconciliation => record.identity.is_some(),
-                _ => false,
-            };
-            if !started {
-                continue;
-            }
-            let Some(grant) = self
-                .execution_request(&record.assignment_id)?
-                .contention
-                .and_then(|contention| contention.unprotected_aggressive)
-            else {
-                continue;
-            };
-            let recorded = self.recorded_grant(&record.task_id, grant.requested_unix_ms)?;
-            runs.push(UnprotectedRun {
-                assignment_id: record.assignment_id,
-                task_id: record.task_id,
-                grant,
-                allowance_set_at_unix_ms: recorded.map(|(allowance, _)| allowance),
-                started_unix_ms: recorded.map(|(_, started)| started),
-            });
-        }
-        Ok(runs)
-    }
-
-    /// The allowance time and start of a run's first unprotected start here, if recorded.
-    fn recorded_grant(&self, task_id: &str, requested_unix_ms: u64) -> Result<Option<(u64, u64)>> {
-        let exists: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unprotected_grants')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            return Ok(None);
-        }
-        let row: Option<(i64, i64)> = self
-            .connection
-            .query_row(
-                "SELECT allowance_set_at_unix_ms, started_unix_ms FROM unprotected_grants
-                 WHERE task_id = ?1 AND requested_unix_ms = ?2",
-                params![task_id, i64::try_from(requested_unix_ms)?],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        row.map(|(allowance, started)| Ok((u64::try_from(allowance)?, u64::try_from(started)?)))
-            .transpose()
+        unprotected_runs_on(&self.connection)
     }
 
     /// Unknown surviving usage cannot be treated as zero. Original reservations persist.
@@ -791,4 +739,67 @@ fn recovery_marker(control: &str, detail: &str, effective: Option<String>) -> Co
         effective,
         detail: detail.into(),
     }
+}
+
+/// Runs on `connection`'s journal that started under an unprotected grant and have not been
+/// released (004 FR-016): authorized or later, or awaiting reconciliation with a process
+/// identity. Reads only.
+pub(crate) fn unprotected_runs_on(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<UnprotectedRun>> {
+    let recorded = |task_id: &str, requested_unix_ms: u64| -> Result<Option<(u64, u64)>> {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unprotected_grants')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let row: Option<(i64, i64)> = connection
+            .query_row(
+                "SELECT allowance_set_at_unix_ms, started_unix_ms FROM unprotected_grants
+                 WHERE task_id = ?1 AND requested_unix_ms = ?2",
+                params![task_id, i64::try_from(requested_unix_ms)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(allowance, started)| Ok((u64::try_from(allowance)?, u64::try_from(started)?)))
+            .transpose()
+    };
+    let mut statement = connection
+        .prepare("SELECT record_json, request_json FROM executions ORDER BY assignment_id")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut runs = Vec::new();
+    for (record, request) in rows {
+        let record: ExecutionRecord = serde_json::from_str(&record)?;
+        let started = match record.phase {
+            ExecutionPhase::Authorized | ExecutionPhase::Running | ExecutionPhase::Draining => true,
+            ExecutionPhase::NeedsReconciliation => record.identity.is_some(),
+            _ => false,
+        };
+        if !started {
+            continue;
+        }
+        let request: LaunchRequest = serde_json::from_str(&request)?;
+        let Some(grant) = request
+            .contention
+            .and_then(|contention| contention.unprotected_aggressive)
+        else {
+            continue;
+        };
+        let recorded = recorded(&record.task_id, grant.requested_unix_ms)?;
+        runs.push(UnprotectedRun {
+            assignment_id: record.assignment_id,
+            task_id: record.task_id,
+            grant,
+            allowance_set_at_unix_ms: recorded.map(|(allowance, _)| allowance),
+            started_unix_ms: recorded.map(|(_, started)| started),
+        });
+    }
+    Ok(runs)
 }

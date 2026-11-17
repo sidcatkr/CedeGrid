@@ -108,18 +108,42 @@ pub fn table(rows: &[Vec<String>], indent: usize) -> Vec<String> {
 
 /// Whether unprotected Aggressive may start on this host, for `doctor`: what is missing and
 /// how to fix each (004 FR-014, FR-015, FR-015a).
-pub fn unprotected_text(gaps: &[crate::system_mode::Gap]) -> String {
+pub fn unprotected_text(
+    gaps: &[crate::system_mode::Gap],
+    runs: &[crate::execution_model::UnprotectedRun],
+    unreadable: Option<&str>,
+) -> String {
     let mut out = String::from("\nUnprotected Aggressive\n");
     if gaps.is_empty() {
         out.push_str("  available: a run that sends both SDK fields may start unprotected\n");
-        return out;
-    }
-    out.push_str("  not available on this host\n");
-    for gap in gaps {
-        let _ = writeln!(out, "  - {}", gap.what);
-        if !gap.fix.is_empty() {
-            let _ = writeln!(out, "    fix: {}", gap.fix);
+    } else {
+        out.push_str("  not available on this host\n");
+        for gap in gaps {
+            let _ = writeln!(out, "  - {}", gap.what);
+            if !gap.fix.is_empty() {
+                let _ = writeln!(out, "    fix: {}", gap.fix);
+            }
         }
+    }
+    // Runs that started unprotected keep their grant until they end (004 FR-016).
+    if let Some(reason) = unreadable {
+        let _ = writeln!(out, "  running unprotected: unknown, {reason}");
+    }
+    let rows: Vec<Vec<String>> = runs
+        .iter()
+        .map(|run| {
+            vec![
+                "UNPROTECTED".to_owned(),
+                run.task_id.clone(),
+                run.started_unix_ms
+                    .map_or("since an earlier start".to_owned(), |at| {
+                        format!("since {}", crate::setup::utc_minute(at))
+                    }),
+            ]
+        })
+        .collect();
+    for line in table(&rows, 2) {
+        let _ = writeln!(out, "{line}");
     }
     out
 }

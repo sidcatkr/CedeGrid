@@ -691,6 +691,18 @@ fn unprotected_runs_are_listed_from_authorization_until_release() {
     assert_eq!(store.unprotected_runs().unwrap(), listed(None, None));
     cedegrid::state::record_grant(dir.path(), "g", 7, 5, 20).unwrap();
     assert_eq!(store.unprotected_runs().unwrap(), listed(Some(5), Some(20)));
+    // doctor reads the same list without the store's locks, and marks each run.
+    let runs = cedegrid::state::read_unprotected_runs(dir.path()).unwrap();
+    assert_eq!(runs, listed(Some(5), Some(20)));
+    let text = cedegrid::explain::unprotected_text(&[], &runs, None);
+    assert!(
+        text.contains("  UNPROTECTED   g   since 1970-01-01 00:00 UTC"),
+        "{text}"
+    );
+    assert!(
+        cedegrid::explain::unprotected_text(&[], &[], Some("unknown reason"))
+            .contains("running unprotected: unknown, unknown reason")
+    );
     candidate.phase = ExecutionPhase::Running;
     store.transition(&candidate).unwrap();
     assert_eq!(store.unprotected_runs().unwrap().len(), 1);

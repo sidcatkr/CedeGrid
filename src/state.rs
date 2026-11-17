@@ -1334,6 +1334,19 @@ pub fn allowance_for_run(state_dir: &Path, task_id: &str, requested_unix_ms: u64
     }
 }
 
+/// The node's started, unreleased unprotected runs, read without the store's locks so `doctor`
+/// can show them beside a running agent. No database yet has none.
+pub fn read_unprotected_runs(
+    state_dir: &Path,
+) -> Result<Vec<crate::execution_model::UnprotectedRun>> {
+    if std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(Vec::new());
+    }
+    crate::execution_state::unprotected_runs_on(&allowance_connection(state_dir)?)
+}
+
 /// Forgets every started grant; a restore calls this. A missing database or table has none.
 pub fn clear_grants(state_dir: &Path) -> Result<()> {
     if std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME))
