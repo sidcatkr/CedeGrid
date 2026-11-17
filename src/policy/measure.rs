@@ -1239,6 +1239,7 @@ impl<'a> Interval<'a> {
             self.gpu_memory_unknown.insert(gpu.uuid.clone());
         }
         let mut time_slice = None;
+        let mut slice_admission_held = false;
         if !telemetry_unknown {
             let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
             time_slice = self.time_slice(gpu, measured.is_some(), budget.unattributed);
@@ -1255,17 +1256,30 @@ impl<'a> Interval<'a> {
                     demand.slice = None;
                 }
             }
-            // On the time-slice duty Neutral, Performance and Aggressive run at the duty, and own
-            // work's share is the duty's part of the busy contexts, the listed ones while the
-            // amounts are unknown (FR-021, Q27, Q29).
-            if let Some((duty, share)) = time_slice.as_ref().and_then(|slice| {
-                let duty = slice.duty?;
-                let own = u64::from(slice.own);
-                let external = slice
-                    .external
-                    .unwrap_or_else(|| slice.bound.iter().map(|b| b.contexts).sum());
-                Some((duty, duty * own / (own + u64::from(external)).max(1)))
-            }) {
+            // Performance and Aggressive set no duty: a slice-bound principal holds GPU admission
+            // instead, and own work keeps the driver's slices (FR-021, FR-022).
+            let performance =
+                governing(self.config, ResourceKind::GpuCompute) >= ContentionMode::Performance;
+            slice_admission_held = performance
+                && time_slice
+                    .as_ref()
+                    .is_some_and(|slice| !slice.bound.is_empty());
+            // On the time-slice duty Neutral runs at the duty, and own work's share is the duty's
+            // part of the busy contexts, the listed ones while the amounts are unknown (FR-021,
+            // Q27, Q29).
+            if let Some((duty, share)) =
+                time_slice
+                    .as_ref()
+                    .filter(|_| !performance)
+                    .and_then(|slice| {
+                        let duty = slice.duty?;
+                        let own = u64::from(slice.own);
+                        let external = slice
+                            .external
+                            .unwrap_or_else(|| slice.bound.iter().map(|b| b.contexts).sum());
+                        Some((duty, duty * own / (own + u64::from(external)).max(1)))
+                    })
+            {
                 self.time_slice_duty.insert(gpu.uuid.clone(), duty);
                 if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
                     budget.share = share;
@@ -1318,6 +1332,8 @@ impl<'a> Interval<'a> {
             .map(|budget| budget.share);
         compute_status.admission = Some(if telemetry_unknown {
             Admission::held("gpu_observation_unknown")
+        } else if slice_admission_held {
+            Admission::held("gpu_time_slice_admission_held")
         } else {
             compute_admission
         });
@@ -1846,7 +1862,9 @@ impl<'a> Interval<'a> {
     /// allocation there is in Yield First, nor while one there holds a CPU step of cap or more
     /// (FR-021, Q19, Q37).
     fn windows_can_open(&self, uuid: &str) -> bool {
-        governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst
+        // Only Neutral caps for the time slice, so only it needs uncapped windows; Performance's
+        // intervals are all uncapped (FR-021, FR-022).
+        governing(self.config, ResourceKind::GpuCompute) == ContentionMode::Neutral
             && self
                 .input
                 .allocations
