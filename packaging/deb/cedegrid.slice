@@ -1,0 +1,7 @@
+# Root-level slice for ordinary System mode work where decision N4 places it here (005 FR-016).
+[Unit]
+Description=CedeGrid ordinary work
+Before=slices.target
+
+[Slice]
+CPUWeight=100

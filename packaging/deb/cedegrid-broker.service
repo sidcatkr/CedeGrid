@@ -1,0 +1,17 @@
+# The System mode broker: starts and stops members' units, moves their jobs between them and
+# writes OOM scores inside them (005 FR-002 to FR-011). Started only by its socket.
+[Unit]
+Description=CedeGrid System mode broker
+Requires=cedegrid-broker.socket
+After=cedegrid-broker.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cedegrid __system-broker
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+# T033 adds CapabilityBoundingSet= once the container run shows what scores, moves and
+# cpu.idle need on systemd 249.

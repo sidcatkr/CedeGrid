@@ -1,0 +1,15 @@
+# The only socket the System mode broker serves (005 FR-002).
+[Unit]
+Description=CedeGrid System mode broker socket
+
+[Socket]
+ListenStream=/run/cedegrid/broker.sock
+SocketUser=root
+SocketGroup=cedegrid
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

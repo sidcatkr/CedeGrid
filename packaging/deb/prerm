@@ -1,0 +1,7 @@
+#!/bin/sh
+# cedegrid-system: stop the broker before its files go (005 T053 completes this).
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    systemctl disable --now cedegrid-broker.socket || true
+    systemctl stop cedegrid-broker.service || true
+fi

@@ -1,0 +1,9 @@
+#!/bin/sh
+# cedegrid-system: create the group and start listening (005 T053 completes this).
+set -e
+if [ "$1" = "configure" ]; then
+    systemd-sysusers cedegrid-system.conf
+    install -d -o root -g root -m 0755 /etc/cedegrid
+    systemctl daemon-reload
+    systemctl enable --now cedegrid-broker.socket
+fi
