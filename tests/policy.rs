@@ -6466,36 +6466,13 @@ mod whole_tasks {
         assert!(seen.iter().any(|s| s.steps.len() == 1));
     }
 
-    /// A pause still contended at `pause_bound_s` drains the task, which leaves as a yield; one
-    /// whose demand has gone resumes instead and nothing drains (FR-014, FR-089).
+    /// A pause still answering its demand at `pause_bound_s` moves to another task: the paused
+    /// task resumes and the next in the order takes its place, so the hold stays and no task is
+    /// drained; a hint-ready task is treated the same. One whose demand has gone resumes and
+    /// nothing replaces it (FR-014, FR-089).
     #[test]
-    fn a_pause_drains_at_its_bound_only_while_contended() {
-        let facts = tracked_facts(&FOUR);
-        let cfg = tracked();
-        let held = run(&cfg, &FOUR, &facts, |_| 4000, 20_000);
-        let drains: Vec<(u64, String)> = held
-            .iter()
-            .flat_map(|s| s.drains.iter().map(|id| (s.now, id.clone())))
-            .collect();
-        assert_eq!(drains.len(), 1, "{drains:?}");
-        assert!(drains[0].0 >= 10_000, "{drains:?}");
-        let gone = run(
-            &cfg,
-            &FOUR,
-            &facts,
-            |now| if now < 6_000 { 4000 } else { 0 },
-            20_000,
-        );
-        assert!(gone.iter().all(|s| s.drains.is_empty()));
-        let last = gone.last().unwrap();
-        assert!(last.steps.is_empty(), "{:?}", last.steps);
-    }
-
-    /// A hint-ready task paused to its bound gets its hint, a request with no cap, and drains
-    /// once the hint's deadline has passed with the resource still contended (FR-014, FR-089).
-    #[test]
-    fn a_hint_ready_task_gets_its_hint_at_the_bound_then_drains() {
-        let facts: BTreeMap<String, AllocationFacts> = names(&FOUR)
+    fn a_pause_moves_to_another_task_at_its_bound() {
+        let hinted: BTreeMap<String, AllocationFacts> = names(&FOUR)
             .into_iter()
             .map(|id| {
                 let facts = AllocationFacts {
@@ -6510,17 +6487,87 @@ mod whole_tasks {
                 (id, facts)
             })
             .collect();
-        let seen = run(&tracked(), &FOUR, &facts, |_| 4000, 40_000);
-        let hinted = seen
-            .iter()
-            .find(|s| s.steps.values().any(|step| *step == YieldStep::Hint))
-            .expect("a hint");
-        assert!(hinted.now >= 10_000, "at {}", hinted.now);
-        assert!(
-            seen.iter()
-                .all(|s| s.steps.values().all(|step| *step != YieldStep::Cap))
+        for facts in [tracked_facts(&FOUR), hinted] {
+            let held = run(&tracked(), &FOUR, &facts, |_| 4000, 40_000);
+            assert!(held.iter().all(|s| s.drains.is_empty()));
+            assert!(
+                held.iter()
+                    .all(|s| s.steps.values().all(|step| *step == YieldStep::Pause)),
+                "only pauses"
+            );
+            let paused: Vec<(u64, Vec<String>)> = held
+                .iter()
+                .map(|s| (s.now, s.steps.keys().cloned().collect()))
+                .collect();
+            let tasks: BTreeSet<String> = paused.iter().flat_map(|(_, ids)| ids.clone()).collect();
+            assert!(tasks.len() >= 2, "the pause moves: {paused:?}");
+            for seen in &held[6..] {
+                assert!(seen.steps.len() <= 2, "at {}: {:?}", seen.now, seen.steps);
+                let own: u64 = seen.usage.values().sum();
+                assert!(own + 100 >= 4000, "at {}: own {own}", seen.now);
+            }
+        }
+        let gone = run(
+            &tracked(),
+            &FOUR,
+            &tracked_facts(&FOUR),
+            |now| if now < 6_000 { 4000 } else { 0 },
+            20_000,
         );
-        assert!(seen.iter().any(|s| !s.drains.is_empty()));
+        assert!(gone.iter().all(|s| s.drains.is_empty()));
+        assert!(gone.last().unwrap().steps.is_empty());
+    }
+
+    /// A draining task's usage does not make the others hold: own work below its target beside
+    /// it pauses nothing (FR-089).
+    #[test]
+    fn a_draining_task_does_not_make_the_others_hold() {
+        let mut draining = allocation(
+            "c",
+            AllocationPhase::Draining,
+            resources(1000, 100, 0),
+            Some(resources(2500, 100, 0)),
+        );
+        draining.class = AllocationClass::Opportunistic;
+        let jobs = vec![
+            allocation(
+                "a",
+                AllocationPhase::Running,
+                resources(1000, 100, 0),
+                Some(resources(400, 100, 0)),
+            ),
+            allocation(
+                "b",
+                AllocationPhase::Running,
+                resources(1000, 100, 0),
+                Some(resources(1600, 100, 0)),
+            ),
+            draining,
+        ];
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = Some(8000);
+        snap.principals = Some(vec![
+            cpu_principal(1000, true, 4500),
+            cpu_principal(2001, false, 3500),
+        ]);
+        let input = PolicyInput {
+            allocations: jobs,
+            facts: rootless(&["a", "b", "c"]),
+            ..PolicyInput::default()
+        };
+        // The first intervals, before the principal window turns the user into a watched demand.
+        let mut engine = PolicyEngine::new();
+        for now in (0..1_500).step_by(500) {
+            let decision = engine.evaluate(&tracked(), &snap, &input, now).unwrap();
+            assert!(
+                decision
+                    .actions
+                    .iter()
+                    .all(|a| a.resource != ResourceKey::Cpu || a.allocation_id == "c"),
+                "at {now}: {:?}",
+                decision.actions
+            );
+        }
     }
 
     /// The operator envelope is own work's hard limit: in Tracked a task over it is paused even

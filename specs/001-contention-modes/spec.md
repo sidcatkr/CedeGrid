@@ -911,17 +911,15 @@ back more.
   tasks, with no rate cap: the stop-and-resume duty cycle goes. A task is paused in FR-016's order
   only while the own tasks left running keep own usage at or above its target, so rounding
   favours own work; a task that cannot be paused without going below the target is left alone. A
-  pause still ends at `pause_bound_s`: a hint-ready task then gets its hint as a request with no
-  CPU cap, and a task still contended at the hint's deadline, or one that cannot take a hint,
-  drains and is requeued as a yield without using an attempt, so CPU contention alone can drain
-  in Tracked (report 057 C2 A).
+  pause still ends at `pause_bound_s` (report 057 C2 A; at the bound the pause moves to another
+  task, below).
 - Q: How do Yield First and Neutral hold running own GPU compute work back? → A: By whole tasks
   at both levels, with no duty cycle and no rate cap. On a time-sliced device whose counts are
   known, own tasks are paused until the own contexts left running, each own task counted as one,
   are at most what the time-slice rule allows beside the slice-bound principals and never fewer
   than ⌊E_b ÷ k_b⌋; elsewhere a task is paused only while the others keep at least own work's
   target. Yield First pauses every own task on a contended device, down to the first-come floor.
-  A pause ends at `pause_bound_s` with a drain and requeue, as on CPU. In every mode, GPU
+  A pause ends at `pause_bound_s` as on CPU (it moves to another task, below). In every mode, GPU
   admission on a time-sliced device admits one more own process only while (m + 1) × k ≤ E or no
   counted principal is slice-bound (report 057 C3 A).
 - Q: What does the first-come GPU floor keep? → A: In Yield First and Neutral, own work that was
@@ -939,6 +937,18 @@ back more.
   Neutral, Tracked) and E9 (two own GPU probes in Neutral beside a saturating user: own at or
   above 0.42 of alone, the other user at or above 753.4 req/s) gate the whole-task holds
   (SC-020); a miss in E9 is reported before another GPU target is chosen.
+- Q: What happens at `pause_bound_s` to a whole-task pause still answering its demand, after
+  run E8 showed the drain there costing own work 5-25% against the former cap? → A: It moves to
+  another task: the paused task resumes and the next task in the order takes its place, held to
+  cover what the paused one used, so no task is drained and none stays stopped past the bound; a
+  task that is draining makes no other task hold. A pause for the operator envelope still drains
+  at the bound. E8 runs again; if own throughput stays below the former cap's, that is reported
+  before going further (user, 2026-11-17, D1 A').
+- Q: Does Full keep a CPU rate cap through `cpu.max`? → A: No. Run E1 showed `cpu.max` not
+  clearly closer to its target than stop-and-resume, so by the user's rule no rate cap applies at
+  either level and Full holds CPU work back by whole tasks, paused through the leaf's freeze; the
+  fork gate is not built. Known gap, for the next version: one task larger than the excess is not
+  held, so the other user gets what plain Linux gives (user, 2026-11-17, D2 A'; report 057 C1).
 
 ## Terms
 
@@ -1536,10 +1546,11 @@ node reports with the expected per-resource values at each step.
   is not hint-ready gets a cap at the same minimum duty instead. Either is the last CPU step while
   the contention lasts: it does not pause again, and CPU contention alone never drains there
   (SC-007). Where no rate cap applies (CPU in Tracked, GPU compute at both levels, FR-089), a
-  hint-ready worker on CPU gets its hint as a request with no cap, and drains once the hint's
-  deadline has passed with the resource still contended; a worker without the hint, and any task
-  on GPU compute, drains at the bound. That drain is a yield: the task is requeued without using
-  an attempt. Jobs in Performance and Aggressive take no compute step for other principals
+  pause that reaches the bound still answering its demand moves to another task: the paused task
+  resumes and the next task in FR-016's order takes its place, held to cover what the paused one
+  used, so the hold stays, no task stays stopped longer than the bound, and nothing is drained.
+  A pause for the operator envelope drains at the bound instead, as a yield that uses no
+  attempt. Jobs in Performance and Aggressive take no compute step for other principals
   (FR-022, FR-030), so nothing escalates for them.
 - **FR-015**: Each node MUST have exactly one authoritative policy state that decides yield steps.
   Supervisors MUST carry out that authority's steps and enforce deadlines. They MUST NOT make
@@ -1601,8 +1612,8 @@ node reports with the expected per-resource values at each step.
   - step down within the mode's response time on any external increase beyond the measurement
     tolerance;
   - on a contended compute resource (see Terms), take opportunistic work down: for CPU, paused,
-    then after `pause_bound_s` as FR-014 says, at the minimum duty in Full and by the hint or a
-    drain and requeue where no rate cap applies; on GPU compute, every own task paused down to
+    then after `pause_bound_s` as FR-014 says, at the minimum duty in Full and, where no rate cap
+    applies, with the pause moved from task to task; on GPU compute, every own task paused down to
     the first-come floor (FR-090); Guaranteed work keeps its CPU request
     (FR-024). With own work held to its margin, the resource saturates only once external demand
     outgrows the margin. While own work holds more than capacity minus the margin, saturation
@@ -2151,9 +2162,9 @@ node reports with the expected per-resource values at each step.
     measured amount less the task's equal part of it. A task whose pause would go below the target
     is skipped for the next in the order, so rounding favours own work. Yield First on a contended
     resource pauses every own task, down to the first-come floor on GPU compute (FR-090).
-  - A pause ends as FR-014 says. A paused task resumes when the demand it answered falls back
-    past the reversal threshold, at the mode's pace, or at once when contention has ended
-    (FR-034).
+  - A pause ends as FR-014 says: at the bound it moves to the next task. A paused task resumes
+    when the demand it answered falls back past the reversal threshold, at the mode's pace, or at
+    once when contention has ended (FR-034). A task that is draining makes no other task hold.
   - No duty cycle runs: the supervisor neither stops nor continues own work by period, and a
     worker's CPU hint is a request only.
   - On a time-sliced GPU, in every mode, one more own process is admitted only while
@@ -2455,10 +2466,8 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-006**: A GPU job runs to completion on a device already occupied by an external context,
   under Neutral and under Performance, with native evidence on at least one supported NVIDIA
   device.
-- **SC-007**: When CPU is the only contended resource, zero terminations occur in any mode, and
-  zero drains in Full and in Performance and Aggressive. In Tracked, Yield First and Neutral drain
-  a task only when its pause reaches `pause_bound_s` with the resource still contended (FR-014),
-  as a yield that uses no attempt.
+- **SC-007**: When CPU is the only contended resource, zero drains or terminations occur in any
+  mode, except for the operator envelope (FR-014).
 - **SC-008**:
   - 100% of 0.2 example configurations and recorded policy inputs load and replay.
   - Every combination of 0.2 and new agent and coordinator completes the existing distributed
@@ -2520,8 +2529,11 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   is reported, since it means own work gave something back. At a host-wide OOM, the kernel's
   victim is the one the baseline shows, or own work.
 - **SC-020**: Whole-task holds (FR-089), at least 3 runs each way on the test host. On CPU (run
-  E8, F2's shape in Neutral, Tracked): own usage is at or above its target in every interval, and
-  the other user's rate is reported against plain Linux and against the former cap. On GPU
+  E8, F2's shape in Neutral, Tracked and Full): own usage is within 2% of its target or above it
+  in at least 95% of intervals, own throughput is at least the former stop-and-resume cap's
+  less its spread, and the other user's rate is at its fair-share rate, reported against plain
+  Linux and against the former cap; one run with a single task larger than the excess records
+  the known gap (a task that cannot be paused without going below the target is left alone). On GPU
   compute (run E9, two own probes beside one saturating user in Neutral): own work ÷ alone is at
   least 0.42 and the other user's rate at least 753.4 req/s, SC-017's bounds for that shape. A
   miss in E9 is reported before another GPU target is chosen. Beside a later user in Yield First,

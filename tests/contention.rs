@@ -349,6 +349,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             asked_target: None,
+            paused_usage: None,
         };
         let before = plan_step(
             Some(&paused),
@@ -383,6 +384,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             asked_target: None,
+            paused_usage: None,
         };
         let plain = |excess| LadderInput {
             room: None,
@@ -426,6 +428,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             asked_target: None,
+            paused_usage: None,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
         let (held, changes) = run(Some(capped.clone()), &cpu, 1..40, |_| {
@@ -459,6 +462,7 @@ mod ladder {
                 after_pause: false,
                 pending: false,
                 asked_target: None,
+                paused_usage: None,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
                 input(ResourceKind::Cpu, 0, 0)
@@ -6128,8 +6132,8 @@ mod gpu_demand {
 
         /// Run E9's shape in Neutral: two own tasks beside one saturating context. One task is
         /// paused, so own work keeps half of the device and the other user its fair share; no cap
-        /// or duty is sent, GPU admission holds, the paused task drains at its bound and the other
-        /// then runs unheld (FR-021, FR-089, SC-020).
+        /// or duty is sent, GPU admission holds, and at the pause bound the hold moves to the
+        /// other task (FR-021, FR-089, SC-020).
         #[test]
         fn two_own_tasks_beside_a_saturating_one_pause_one_whole_task() {
             let run = two_tasks(&mode_config(ContentionMode::Neutral), None, 1, 60);
@@ -6155,15 +6159,26 @@ mod gpu_demand {
                 );
                 assert_eq!(slice_of(&t.decision).hold, Some(1), "interval {i}");
             }
-            let drains: Vec<(usize, String)> = run
+            // At the pause bound the hold moves to the other task; no task is drained.
+            assert!(run.iter().all(|t| t.drains.is_empty()));
+            let paused: Vec<String> = run
                 .iter()
-                .enumerate()
-                .flat_map(|(i, t)| t.drains.iter().map(move |id| (i, id.clone())))
+                .skip(2)
+                .flat_map(|t| {
+                    t.steps
+                        .iter()
+                        .filter(|(_, s)| **s == YieldStep::Pause)
+                        .map(|(id, _)| id.clone())
+                })
                 .collect();
-            assert_eq!(drains.len(), 1, "{drains:?}");
-            assert!(drains[0].0 >= 20, "{drains:?}");
-            for (i, t) in run.iter().enumerate().skip(drains[0].0 + 1) {
-                assert!(t.steps.is_empty(), "interval {i}: {:?}", t.steps);
+            let first = paused.first().cloned().unwrap();
+            assert!(
+                paused.iter().any(|id| *id != first),
+                "the hold moves: {paused:?}"
+            );
+            for (i, t) in run.iter().enumerate().skip(2) {
+                let held = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
+                assert!(held <= 1, "interval {i}: {:?}", t.steps);
             }
         }
 

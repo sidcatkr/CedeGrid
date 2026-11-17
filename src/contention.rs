@@ -870,6 +870,10 @@ pub struct StepState {
     /// the larger of it and the current target (FR-037).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_target: Option<u64>,
+    /// A whole-task pause's task usage when it was paused, which the task that takes its place
+    /// at the pause bound must cover (FR-089).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_usage: Option<u64>,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -1058,6 +1062,7 @@ pub fn plan_step(
             asked_target: (step == YieldStep::Hint && input.kind.is_memory())
                 .then_some(input.target)
                 .flatten(),
+            paused_usage: None,
         }),
         skipped,
     };

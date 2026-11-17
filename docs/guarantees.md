@@ -100,8 +100,8 @@ while the own work left running stays at or above own work's target, so rounding
 work; a lone job, and one whose pause would go below the target, is left alone. A pause reaches
 only the verified family: through pidfds without a delegated cgroup, and through a freeze of the
 workload's leaf, confirmed through `cgroup.events`, where `cgroup.freeze` is authorized. A pause
-still answering its demand at `pause_bound_s` (10 s) drains the task, which is requeued without
-using an attempt. Guaranteed work takes no GPU compute step. On a
+still answering its demand at `pause_bound_s` (10 s) moves to another task, so no task is drained
+for GPU compute. Guaranteed work takes no GPU compute step. On a
 time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
 time-slicing: in Neutral own work is not capped while it holds no
 more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the
@@ -318,9 +318,10 @@ in Full with `cpu.max` authorized, own work is capped to its target, and after
 lasts. In Tracked no rate cap applies: Yield First and Neutral pause whole tasks, in victim
 order, only while the own work left running stays at or above the target, so a task whose
 pause would go below it is skipped and rounding favours own work. A pause still answering its
-demand at `pause_bound_s` gives a hint-ready task its hint, as a request with no cap, and drains
-a task still contended at the hint's deadline or without the hint; the task is requeued without
-using an attempt. So in Tracked, CPU contention alone can drain a task. A job's own mode, within
+demand at `pause_bound_s` moves to another task: the paused task resumes and the next one in the
+order takes its place, so no task is drained for CPU and none stays stopped past the bound. A
+task that is draining makes no other task hold. A pause for the operator envelope drains at the
+bound. A job's own mode, within
 the node cap, decides how that job gives back: a job in Performance or Aggressive is never held
 for another principal, for unknown activity or at a floor breach, whatever the node's mode, and
 only the operator's envelope steps it. The node's other jobs then give what its target needs as

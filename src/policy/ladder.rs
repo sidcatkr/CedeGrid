@@ -660,8 +660,50 @@ impl<'a> Interval<'a> {
             // The operator envelope is own work's hard limit, not a yield: it pauses a task even
             // where that goes below it (FR-057).
             let envelope = frame.cause == YieldCause::EnvelopeBreach;
-            let mut remaining = needed;
+            // A draining task is leaving: its usage makes no other task hold (FR-089).
+            let draining: u64 = input
+                .allocations
+                .iter()
+                .filter(|a| a.phase == AllocationPhase::Draining)
+                .map(cpu_usage_of)
+                .fold(0, u64::saturating_add);
+            let mut remaining = if envelope {
+                needed
+            } else {
+                needed.min(
+                    frame
+                        .own_usage
+                        .saturating_sub(draining)
+                        .saturating_sub(self.budget.cpu_millicores),
+                )
+            };
+            // A pause still answering its demand at its bound moves to another task: it resumes,
+            // and what it used is to be held back by the next tasks in the order, so the hold
+            // stays and no task is drained for CPU (FR-014, FR-089). The envelope's pauses drain.
+            let bound = frame.timing.pause_bound_ms;
+            let mut rotated = BTreeSet::new();
+            for victim in &victims {
+                if let Some(state) = self.prev.ladder.get(&(victim.id.clone(), key.clone()))
+                    && state.step == YieldStep::Pause
+                    && state.cause != YieldCause::EnvelopeBreach
+                    && now.saturating_sub(state.entered_at_ms) >= bound
+                {
+                    rotated.insert(victim.id.clone());
+                    remaining = remaining.saturating_add(state.paused_usage.unwrap_or(0));
+                }
+            }
             for victim in victims {
+                if rotated.contains(&victim.id) {
+                    planned.insert(victim.id.clone());
+                    let mut resumed = self.prev.ladder[&(victim.id.clone(), key.clone())].clone();
+                    resumed.step = YieldStep::None;
+                    resumed.entered_at_ms = now;
+                    resumed.paused_usage = None;
+                    self.next
+                        .ladder
+                        .insert((victim.id.clone(), key.clone()), resumed);
+                    continue;
+                }
                 let fits = victim.amount <= remaining || envelope && remaining > 0;
                 let mut share = if victim.amount > 0 && fits {
                     victim.amount
@@ -1011,23 +1053,14 @@ impl<'a> Interval<'a> {
             .map(|(level, held)| level.max(held));
         victim_timing.returning =
             returning.is_some() || whole && frame.contention_ended && frame.usage_excess == 0;
-        // A whole-task pause goes on at its bound, to the hint and then a drain, only while the
-        // demand it answered is still there; a hint goes on to a drain at its deadline (FR-014).
+        // Whole tasks take no CPU hint and drain only for the envelope, at the pause bound
+        // (FR-014, FR-057, FR-089).
         let escalates = whole
             && !victim.guaranteed
-            && state.is_some_and(|s| match s.step {
-                YieldStep::Pause => {
-                    s.cause == YieldCause::EnvelopeBreach
-                        || s.cause == YieldCause::ExternalGrowth
-                            && frame.external
-                                >= s.trigger_external
-                                    .saturating_mul(u64::from(victim_timing.hysteresis_percent))
-                                    / 100
-                }
-                YieldStep::Hint => true,
-                _ => false,
+            && state.is_some_and(|s| {
+                s.step == YieldStep::Pause && s.cause == YieldCause::EnvelopeBreach
             });
-        if whole && state.is_some_and(|s| s.step == YieldStep::Pause) && !escalates {
+        if whole {
             unavailable.insert(YieldStep::Hint);
         }
         // A whole-task pause for the envelope holds to its bound: that the breach cleared with the
@@ -1131,6 +1164,13 @@ impl<'a> Interval<'a> {
             next.target = next
                 .target
                 .map(|target| target.max(allocation.requested.ram_mib));
+        }
+        if whole
+            && let Some(next) = decision.state.as_mut()
+            && next.step == YieldStep::Pause
+            && state.is_none_or(|s| s.step != YieldStep::Pause)
+        {
+            next.paused_usage = Some(victim.amount.saturating_add(kept));
         }
         if let Some(next) = &decision.state
             && next.step == YieldStep::Hint
@@ -1416,10 +1456,42 @@ impl<'a> Interval<'a> {
         let mut own_now = frame.share.saturating_mul(frame.running.len() as u64);
         let target = own_now.saturating_sub(frame.excess);
         let mut remaining = frame.excess;
+        // A pause at its bound moves to another task: it resumes, and its part is to be held back
+        // by the next task in the order, so no task is drained for GPU compute (FR-014, FR-089).
+        let bound = config
+            .contention
+            .thresholds(kind)
+            .pause_bound_s
+            .saturating_mul(1000);
+        let mut rotated = BTreeSet::new();
+        for victim in &victims {
+            if let Some(state) = prev.ladder.get(&(victim.id.clone(), key.clone()))
+                && state.step == YieldStep::Pause
+                && now.saturating_sub(state.entered_at_ms) >= bound
+            {
+                rotated.insert(victim.id.clone());
+                let usage = state.paused_usage.unwrap_or(part);
+                running = running.saturating_add(1);
+                own_now = own_now.saturating_add(usage);
+                remaining = remaining.saturating_add(usage);
+            }
+        }
         let mut planned = BTreeSet::new();
         for victim in victims {
             planned.insert(victim.id.clone());
             let state = prev.ladder.get(&(victim.id.clone(), key.clone()));
+            if rotated.contains(&victim.id)
+                && let Some(state) = state
+            {
+                let mut resumed = state.clone();
+                resumed.step = YieldStep::None;
+                resumed.entered_at_ms = now;
+                resumed.paused_usage = None;
+                self.next
+                    .ladder
+                    .insert((victim.id.clone(), key.clone()), resumed);
+                continue;
+            }
             let held = paused(&victim.id);
             // A job above its own mode's share yields the difference even
             // while the aggregate has room.
@@ -1453,17 +1525,6 @@ impl<'a> Interval<'a> {
                 own_excess
             };
             let contended_victim = excess > 0;
-            // A pause still answering the demand it was entered for drains at its bound (FR-014).
-            let escalates = held
-                && !victim.guaranteed
-                && state.is_some_and(|s| {
-                    s.step == YieldStep::Pause
-                        && s.cause == YieldCause::ExternalGrowth
-                        && frame.external
-                            >= s.trigger_external.saturating_mul(u64::from(
-                                config.contention.thresholds(kind).hysteresis_percent,
-                            )) / 100
-                });
             let decision = plan_step(
                 state,
                 &LadderInput {
@@ -1471,7 +1532,7 @@ impl<'a> Interval<'a> {
                     room: None,
                     kind,
                     guaranteed: victim.guaranteed,
-                    allow_drain: escalates,
+                    allow_drain: false,
                     unavailable: compute_unavailable(
                         input,
                         key,
@@ -1515,7 +1576,7 @@ impl<'a> Interval<'a> {
                 );
             }
             let before = state.map_or(YieldStep::None, |s| s.step);
-            if let Some(next) = decision.state {
+            if let Some(mut next) = decision.state {
                 if next.step > before {
                     let freed = match next.step {
                         YieldStep::Cap => frame
@@ -1528,6 +1589,7 @@ impl<'a> Interval<'a> {
                     if next.step == YieldStep::Pause {
                         running = running.saturating_sub(1);
                         own_now = left;
+                        next.paused_usage = Some(part);
                     }
                 }
                 self.next
@@ -1707,15 +1769,23 @@ impl<'a> Interval<'a> {
             .thresholds(kind)
             .pause_bound_s
             .saturating_mul(1000);
+        // A held pause stays while the hold lasts; at its bound it moves to the next task in the
+        // order, and the paused task resumes (FR-014, FR-089).
+        let at_bound = |id: &str| {
+            prev.ladder
+                .get(&(id.to_string(), key.clone()))
+                .is_some_and(|s| {
+                    s.step == YieldStep::Pause
+                        && now.saturating_sub(s.entered_at_ms) >= pause_bound_ms
+                })
+        };
+        running = running.saturating_add(victims.iter().filter(|v| at_bound(&v.id)).count() as u32);
         for victim in victims {
             let id = (victim.id.clone(), key.clone());
             if let Some(state) = prev.ladder.get(&id).filter(|s| s.step >= YieldStep::Pause) {
-                // A held pause stays while the hold lasts; at its bound it drains (FR-014).
                 let mut next = state.clone();
-                if state.step == YieldStep::Pause
-                    && now.saturating_sub(state.entered_at_ms) >= pause_bound_ms
-                {
-                    next.step = YieldStep::Drain;
+                if at_bound(&victim.id) {
+                    next.step = YieldStep::None;
                     next.entered_at_ms = now;
                 }
                 self.next.ladder.insert(id, next);
@@ -1741,6 +1811,7 @@ impl<'a> Interval<'a> {
                         to_free: None,
                         pending: false,
                         asked_target: None,
+                        paused_usage: None,
                     },
                 );
             }

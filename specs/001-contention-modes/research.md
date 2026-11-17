@@ -1524,6 +1524,10 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   cores, misses fractional targets); keep a paused task stopped while contention lasts (no
   progress lost, but no bound and the slot stays held); resume it at the bound (the other user
   then gets plain Linux after 10 s). The last two remain open if the user prefers them.
+- **Revision (2026-11-17, after run E8)**: the drain at the pause bound cost own work 5-25%
+  against the former cap; the pause now moves to another task at the bound instead, and a
+  draining task makes no other task hold. Run E1 showed `cpu.max` not clearly more exact, so
+  Full takes no CPU rate cap either (D2 A').
 
 ## R90. The first-come GPU floor (constitution 8.1.0)
 

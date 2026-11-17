@@ -30,9 +30,8 @@
   Tracked, back by pausing whole tasks, with no rate cap and no stop-and-resume duty cycle. A
   task is paused only while the own work left running stays at or above the mode's target, so a
   single job is never paused below it. A pause still answering its demand after
-  `pause_bound_s` (10 s) gives a hint-ready CPU task its hint and otherwise drains the task,
-  which is requeued without using an attempt. In Full with `cpu.max` authorized, CPU work is
-  still capped. On a time-sliced GPU, own tasks are paused down to the share of the busy
+  `pause_bound_s` (10 s) moves to another task, so no task is drained and none stays stopped
+  past the bound. In Full with `cpu.max` authorized, CPU work is still capped. On a time-sliced GPU, own tasks are paused down to the share of the busy
   processes the time-slice rule allows beside a principal that reads at least
   `contention.gpu_compute.slice_bound_percent` (75) percent of its slices.
   `contention.gpu_compute.slice_step_percent` still loads and has no effect.
