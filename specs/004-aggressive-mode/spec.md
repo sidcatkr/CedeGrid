@@ -94,6 +94,17 @@ default mode and no caution option. Where this spec says otherwise, the note app
   floors.
 - Q: How does GPU compute behave? → A: As CPU does, with no duty cycle (item 057 Part C). The
   first-come GPU floor is an exception for Yield First and Neutral and is unchanged here.
+- Q: What ships in this release? → A: Both forms (user, 2026-11-17, choice 1 A). Unprotected
+  Aggressive goes through the SDK and the wire only and gets the security review before release.
+- Q: Where is the typed confirmation, with no `run` command yet? → A: In interactive setup, when a
+  person turns the host's allowance on: the numbers screen, then the fixed phrase. Each SDK
+  submission carries two explicit fields (user, choice 2 A).
+- Q: Where is the allowance kept? → A: In the agent's state database, written only by
+  interactive setup, so no configuration file can turn it on (user, choice 3 A). It fails closed:
+  a missing, corrupt or unreadable database, or one on another schema, counts as off. Turning it
+  off needs no confirmation, and restoring a backup resets it to off.
+- Q: May a System mode administrator forbid unprotected Aggressive? → A: Yes, with its own
+  administrator policy key, off by default, separate from the allowed modes (user, choice 4 A).
 
 ## Terms
 
@@ -279,7 +290,14 @@ Only the permitted path starts an unprotected run.
   second explicit confirmation field is present, and the host's allowance is on. A refusal MUST
   name what is missing.
 - **FR-015**: The allowance MUST be off by default and MUST be recorded with the time a person
-  turned it on. Non-interactive setup, the SDK and agent tooling MUST NOT turn it on.
+  turned it on, in the agent's state database. Non-interactive setup, the SDK and agent tooling
+  MUST NOT turn it on; any of them MAY turn it off, with no confirmation. It MUST count as off
+  when the database is missing, corrupt or unreadable, or its schema is not one this build
+  reads, and a restored backup MUST reset it to off.
+- **FR-015a**: On a System mode host, the administrator policy MUST have its own key, off by
+  default, that permits members to request unprotected Aggressive; while it is off, the agent
+  in a member's unit refuses such a request in one line naming the policy, whatever the
+  allowance says. The allowed modes list governs protected Aggressive as it governs every mode.
 - **FR-016**: While a run is unprotected, logs, `status`, `observe` and their JSON MUST show a red
   `UNPROTECTED` marker, and `ps` and `top` once 003 adds them; one warning line MUST be logged at
   its start. The grant MUST end with the run; a new run needs new fields.
@@ -321,7 +339,9 @@ Only the permitted path starts an unprotected run.
   (and never into unknown activity or the floors), and the memory floors bound admission as in
   001.
 - **SC-005**: Every refusal path (configuration, environment, migration, a missing field, the
-  allowance off, a wrong phrase, a non-interactive attempt to turn the allowance on) refuses
+  allowance off, a missing, corrupt or other-schema state database, a restored backup, the
+  System mode policy key off, a wrong phrase, a non-interactive attempt to turn the allowance
+  on) refuses
   with a message naming the missing condition, and no run starts unprotected through it.
 - **SC-006**: The `[Aggressive]` label and the `UNPROTECTED` marker appear in every listed output
   for every active run, and nowhere when the run is not in that mode.
