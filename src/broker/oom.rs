@@ -177,9 +177,16 @@ pub fn leaf_in_unit(unit_cgroup: &str, process_cgroup: &str) -> Option<Option<St
     let rest = process_cgroup
         .strip_prefix(unit_cgroup)?
         .strip_prefix('/')?;
+    // Jobs sit one level down, in the unit's jobs cgroup (T023).
+    let rest = rest
+        .strip_prefix(JOBS_DIR)
+        .map_or(rest, |below| below.strip_prefix('/').unwrap_or(below));
     let first = rest.split('/').next().filter(|part| !part.is_empty())?;
     Some(Some(first.to_owned()))
 }
+
+/// The cgroup inside each unit that holds its jobs' leaves; the agent sits in `agent`.
+pub const JOBS_DIR: &str = "jobs";
 
 /// A task's mode. The idle unit holds Yield First work only. In the ordinary unit the agent names
 /// each task's leaf `cedegrid-<mode>-<id>`; a leaf without a readable mode counts as Neutral, so

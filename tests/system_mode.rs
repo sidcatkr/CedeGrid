@@ -2103,6 +2103,14 @@ mod oom_pass {
             None
         );
         assert_eq!(leaf_in_unit(unit, &format!("{unit}/")), None);
+        assert_eq!(
+            leaf_in_unit(unit, &format!("{unit}/jobs/cedegrid-neutral-a.00ff")),
+            Some(Some("cedegrid-neutral-a.00ff".to_owned()))
+        );
+        assert_eq!(
+            leaf_in_unit(unit, &format!("{unit}/agent")),
+            Some(Some("agent".to_owned()))
+        );
     }
 
     #[test]
@@ -2792,30 +2800,30 @@ mod job_moves {
 
     fn world() -> Fake {
         let fake = Fake::default();
-        fake.cgroup(ORDINARY, &[]);
-        fake.cgroup(IDLE, &[]);
-        fake.cgroup(&format!("{ORDINARY}/cedegrid-neutral-j1"), &[11, 12]);
-        fake.cgroup(&format!("{IDLE}/cedegrid-yield_first-j1"), &[]);
+        fake.cgroup(&format!("{ORDINARY}/jobs"), &[]);
+        fake.cgroup(&format!("{IDLE}/jobs"), &[]);
+        fake.cgroup(&format!("{ORDINARY}/jobs/cedegrid-neutral-j1"), &[11, 12]);
+        fake.cgroup(&format!("{IDLE}/jobs/cedegrid-yield_first-j1"), &[]);
         fake
     }
 
     #[test]
     fn leaves_with_a_nonce_move_too() {
         let fake = Fake::default();
-        fake.cgroup(ORDINARY, &[]);
-        fake.cgroup(IDLE, &[]);
+        fake.cgroup(&format!("{ORDINARY}/jobs"), &[]);
+        fake.cgroup(&format!("{IDLE}/jobs"), &[]);
         fake.cgroup(
-            &format!("{ORDINARY}/cedegrid-neutral-j1.0a0b0c0d0e0f1011"),
+            &format!("{ORDINARY}/jobs/cedegrid-neutral-j1.0a0b0c0d0e0f1011"),
             &[21],
         );
         fake.cgroup(
-            &format!("{IDLE}/cedegrid-yield_first-j1.1213141516171819"),
+            &format!("{IDLE}/jobs/cedegrid-yield_first-j1.1213141516171819"),
             &[],
         );
         let moved = move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst).unwrap();
         assert_eq!(
             moved.to,
-            format!("{IDLE}/cedegrid-yield_first-j1.1213141516171819")
+            format!("{IDLE}/jobs/cedegrid-yield_first-j1.1213141516171819")
         );
         assert_eq!(moved.pids, vec![21]);
     }
@@ -2828,8 +2836,8 @@ mod job_moves {
     fn a_job_moves_whole_and_the_source_is_thawed() {
         let fake = world();
         let moved = move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst).unwrap();
-        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
-        let target = format!("{IDLE}/cedegrid-yield_first-j1");
+        let source = format!("{ORDINARY}/jobs/cedegrid-neutral-j1");
+        let target = format!("{IDLE}/jobs/cedegrid-yield_first-j1");
         assert_eq!(moved.pids, vec![11, 12]);
         assert_eq!(fake.procs(&target), vec![11, 12]);
         assert!(fake.procs(&source).is_empty());
@@ -2854,7 +2862,7 @@ mod job_moves {
             RefusalCode::MoveRefused
         );
         let fake = world();
-        fake.cgroup(&format!("{IDLE}/cedegrid-yield_first-j1"), &[99]);
+        fake.cgroup(&format!("{IDLE}/jobs/cedegrid-yield_first-j1"), &[99]);
         assert_eq!(
             move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
                 .unwrap_err()
@@ -2862,7 +2870,7 @@ mod job_moves {
             RefusalCode::MoveRefused
         );
         assert_eq!(
-            fake.procs(&format!("{ORDINARY}/cedegrid-neutral-j1")),
+            fake.procs(&format!("{ORDINARY}/jobs/cedegrid-neutral-j1")),
             vec![11, 12]
         );
     }
@@ -2871,7 +2879,7 @@ mod job_moves {
     fn another_users_process_in_the_job_refuses_the_move() {
         let fake = world();
         fake.0.lock().unwrap().procs.get_mut(&12).unwrap().uid = 0;
-        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        let source = format!("{ORDINARY}/jobs/cedegrid-neutral-j1");
         assert_eq!(
             move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
                 .unwrap_err()
@@ -2886,7 +2894,7 @@ mod job_moves {
     fn a_failed_write_puts_moved_processes_back() {
         let fake = world();
         fake.0.lock().unwrap().refuse_pid = Some(12);
-        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        let source = format!("{ORDINARY}/jobs/cedegrid-neutral-j1");
         assert_eq!(
             move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
                 .unwrap_err()
@@ -2902,7 +2910,7 @@ mod job_moves {
     #[test]
     fn a_job_with_child_cgroups_or_that_never_freezes_is_refused() {
         let fake = world();
-        fake.cgroup(&format!("{ORDINARY}/cedegrid-neutral-j1/inner"), &[]);
+        fake.cgroup(&format!("{ORDINARY}/jobs/cedegrid-neutral-j1/inner"), &[]);
         assert_eq!(
             move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
                 .unwrap_err()
@@ -2911,7 +2919,7 @@ mod job_moves {
         );
         let fake = world();
         fake.0.lock().unwrap().never_freezes = true;
-        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        let source = format!("{ORDINARY}/jobs/cedegrid-neutral-j1");
         assert_eq!(
             move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
                 .unwrap_err()
@@ -3448,6 +3456,37 @@ mod container {
         } else {
             eprintln!("CPU bound not checked: debug build; rerun with CEDEGRID_TEST_RELEASE=1");
         }
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn units_lay_out_an_agent_cgroup_and_a_jobs_cgroup() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        for unit in [ordinary(MEMBER_UID), idle(MEMBER_UID)] {
+            let group = show(&unit, "ControlGroup")["ControlGroup"].clone();
+            let dir = format!("/sys/fs/cgroup{group}");
+            assert!(
+                wait_until(Duration::from_secs(10), || {
+                    std::fs::read_to_string(format!("{dir}/agent/cgroup.procs"))
+                        .is_ok_and(|procs| !procs.trim().is_empty())
+                }),
+                "{unit}: no agent process"
+            );
+            let own = std::fs::read_to_string(format!("{dir}/cgroup.procs")).unwrap();
+            assert!(own.trim().is_empty(), "{unit} root holds {own}");
+            let jobs = std::fs::read_to_string(format!("{dir}/jobs/cgroup.subtree_control"))
+                .unwrap_or_default();
+            for controller in ["cpu", "memory", "pids"] {
+                assert!(
+                    jobs.split_whitespace().any(|c| c == controller),
+                    "{unit}: {jobs}"
+                );
+            }
+        }
+        stop_units(MEMBER);
     }
 
     #[test]

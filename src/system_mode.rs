@@ -202,9 +202,90 @@ pub fn run(request: &Request, require_system: bool) -> anyhow::Result<SystemRepo
 }
 
 /// What the two units run until the agent and the idle executor are built into them (T022):
-/// the process holds the unit, and with it the user's delegated cgroup, until systemd stops it.
-pub fn hold_unit() -> anyhow::Result<()> {
+/// the process lays out the unit's cgroups, then holds the unit, and with it the user's
+/// delegated cgroup, until systemd stops it.
+#[cfg(target_os = "linux")]
+pub fn hold_unit(kind: crate::broker::units::UnitKind) -> anyhow::Result<()> {
+    let jobs = prepare_unit(kind)?;
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "cedegrid: System mode unit ready; jobs go to {}",
+        jobs.display()
+    );
     loop {
         std::thread::park();
     }
+}
+
+/// Lays out a System mode unit's cgroups as the user (T022, T023): this process moves into
+/// `<unit>/agent`, the cpu, memory and pids controllers are passed down, and `<unit>/jobs` is
+/// made for the jobs' leaves. Returns the jobs' directory.
+#[cfg(target_os = "linux")]
+pub fn prepare_unit(kind: crate::broker::units::UnitKind) -> anyhow::Result<std::path::PathBuf> {
+    use crate::broker::units::{IDLE_SLICE, UnitKind, marker_value, unit_name};
+    use anyhow::{Context, ensure};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let mount = Path::new("/sys/fs/cgroup");
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let own = std::fs::read_to_string("/proc/self/cgroup").context("cannot read own cgroup")?;
+    let own = crate::broker::process_handle::parse_cgroup_v2(&own)
+        .context("not in a cgroup v2 hierarchy")?;
+    let marker = std::env::var(crate::broker::units::MARKER_VARIABLE).ok();
+    let owner = |path: &Path| std::fs::metadata(path).ok().map(|meta| meta.uid());
+    let jobs = match kind {
+        UnitKind::Ordinary => {
+            crate::cgroup::system_unit_jobs_root(&own, uid, marker.as_deref(), mount, owner)?
+        }
+        UnitKind::Idle => {
+            ensure!(
+                marker.as_deref() == Some(marker_value(UnitKind::Idle, uid).as_str()),
+                "not started by the System mode broker for this user"
+            );
+            let unit = format!("/{IDLE_SLICE}/{}", unit_name(UnitKind::Idle, uid));
+            let base = own.strip_suffix("/agent").unwrap_or(&own);
+            ensure!(base == unit, "cgroup {own} is not this user's idle unit");
+            let dir = mount.join(unit.trim_start_matches('/'));
+            ensure!(
+                owner(&dir) == Some(uid),
+                "{} is not delegated to user ID {uid}",
+                dir.display()
+            );
+            dir.join(crate::broker::oom::JOBS_DIR)
+        }
+    };
+    let unit_dir = jobs
+        .parent()
+        .context("jobs directory has no parent")?
+        .to_owned();
+    let agent = unit_dir.join("agent");
+    for dir in [&agent, &jobs] {
+        match std::fs::DirBuilder::new().mode(0o755).create(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot create {}", dir.display()));
+            }
+        }
+    }
+    if !own.ends_with("/agent") {
+        // "0" moves the writing process; no other process is named.
+        std::fs::write(agent.join("cgroup.procs"), "0")
+            .context("cannot move into the unit's agent cgroup")?;
+    }
+    for dir in [&unit_dir, &jobs] {
+        let available = std::fs::read_to_string(dir.join("cgroup.controllers")).unwrap_or_default();
+        let wanted: Vec<String> = ["cpu", "memory", "pids"]
+            .into_iter()
+            .filter(|name| available.split_whitespace().any(|have| have == *name))
+            .map(|name| format!("+{name}"))
+            .collect();
+        if !wanted.is_empty() {
+            std::fs::write(dir.join("cgroup.subtree_control"), wanted.join(" "))
+                .with_context(|| format!("cannot pass controllers down in {}", dir.display()))?;
+        }
+    }
+    Ok(jobs)
 }

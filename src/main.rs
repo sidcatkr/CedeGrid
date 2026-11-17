@@ -327,11 +327,18 @@ fn main() -> Result<()> {
         return cedegrid::broker::server::run();
     }
     #[cfg(target_os = "linux")]
-    if std::env::args_os().nth(1).as_deref().is_some_and(|arg| {
-        arg == std::ffi::OsStr::new(cedegrid::broker::AGENT_SUBCOMMAND)
-            || arg == std::ffi::OsStr::new(cedegrid::broker::IDLE_EXECUTOR_SUBCOMMAND)
-    }) {
-        return cedegrid::system_mode::hold_unit();
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(cedegrid::broker::AGENT_SUBCOMMAND))
+    {
+        return cedegrid::system_mode::hold_unit(cedegrid::broker::units::UnitKind::Ordinary);
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            cedegrid::broker::IDLE_EXECUTOR_SUBCOMMAND,
+        ))
+    {
+        return cedegrid::system_mode::hold_unit(cedegrid::broker::units::UnitKind::Idle);
     }
     // Only the process the npm launcher started takes over its terminal. Internal
     // gates and supervisors inherit the launcher variable but have another parent.

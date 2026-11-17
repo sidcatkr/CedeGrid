@@ -118,6 +118,8 @@ pub fn move_job(
     } else {
         (&units.idle, &units.ordinary)
     };
+    let source_unit = &format!("{source_unit}/{}", super::oom::JOBS_DIR);
+    let target_unit = &format!("{target_unit}/{}", super::oom::JOBS_DIR);
     let matches: Vec<String> = fs
         .children(source_unit)
         .map_err(|_| refused("cannot read the source unit's cgroups"))?
