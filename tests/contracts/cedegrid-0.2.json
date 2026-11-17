@@ -1310,7 +1310,7 @@
       "modes": {
         "cpu": "aggressive"
       },
-      "accepted": false
+      "accepted": true
     }
   ],
   "lease_batch_cases": [

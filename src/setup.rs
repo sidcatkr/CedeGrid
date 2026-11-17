@@ -261,8 +261,9 @@ fn parse_mode(text: &str, flag: &str) -> Result<ContentionMode> {
         "yield_first" => Ok(ContentionMode::YieldFirst),
         "neutral" => Ok(ContentionMode::Neutral),
         "performance" => Ok(ContentionMode::Performance),
+        "aggressive" => Ok(ContentionMode::Aggressive),
         _ => Err(argument(format!(
-            "{flag} takes yield_first, neutral or performance, not {text:?}"
+            "{flag} takes yield_first, neutral, performance or aggressive, not {text:?}"
         ))),
     }
 }
@@ -757,6 +758,8 @@ fn margin_of(thresholds: &ResourceThresholds, mode: ContentionMode) -> (&'static
         ContentionMode::YieldFirst => "yield_first_margin_percent",
         ContentionMode::Neutral => "neutral_margin_percent",
         ContentionMode::Performance => "performance_margin_percent",
+        // Never written: callers iterate `ContentionMode::MARGINED`; the margin is fixed at 0%.
+        ContentionMode::Aggressive => "aggressive_margin_percent",
     };
     (key, thresholds.margin_percent(mode))
 }
@@ -829,7 +832,7 @@ fn edit_node(
             }
         }
         let thresholds = contention.thresholds(kind);
-        for mode in ContentionMode::ALL {
+        for mode in ContentionMode::MARGINED {
             let (key, current) = margin_of(&thresholds, mode);
             if let Some(percent) = choices.margins.get(&(kind, mode))
                 && *percent != current
@@ -1290,7 +1293,7 @@ pub fn node_fields() -> Vec<Field> {
     fields.extend(ResourceKind::ALL.map(Field::Mode));
     fields.extend([Field::MaxMode, Field::RamFloor, Field::GpuFloor]);
     for kind in ResourceKind::ALL {
-        for mode in ContentionMode::ALL {
+        for mode in ContentionMode::MARGINED {
             // Memory keeps only the floor under Neutral and Performance.
             if !kind.is_memory() || mode == ContentionMode::YieldFirst {
                 fields.push(Field::Margin(kind, mode));
@@ -1377,7 +1380,8 @@ impl Field {
 
     /// The options shown for the field, including its current value.
     pub fn options(self, config: &Config, fresh: bool) -> Vec<Pick> {
-        let modes = ContentionMode::ALL.map(Pick::Mode);
+        // Aggressive is offered with its own confirmed step (004 T014), not in these lists.
+        let modes = ContentionMode::MARGINED.map(Pick::Mode);
         let numbers = |mut values: Vec<u64>, ascending: bool| -> Vec<Pick> {
             if let Pick::Number(current) = self.current(config) {
                 values.push(current);
@@ -1407,7 +1411,7 @@ impl Field {
                     .unwrap_or(ContentionMode::Neutral);
                 std::iter::once(Pick::Inherit)
                     .chain(
-                        ContentionMode::ALL
+                        ContentionMode::MARGINED
                             .into_iter()
                             .filter(|mode| *mode >= highest)
                             .map(Pick::Mode),
@@ -1588,6 +1592,7 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
         ContentionMode::YieldFirst => "pauses under contention",
         ContentionMode::Neutral => "holds the fair share under contention",
         ContentionMode::Performance => "follows what external work takes",
+        ContentionMode::Aggressive => "fills idle compute at once; holds back at admission only",
     };
     let margin = |kind: ResourceKind, mode: ContentionMode| -> u64 {
         u64::from(margin_of(&config.contention.thresholds(kind), mode).1)

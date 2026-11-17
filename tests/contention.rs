@@ -904,12 +904,17 @@ mod ordered_targets {
     use proptest::prelude::*;
 
     fn targets(view: &ModeInput) -> [u64; 3] {
-        [
-            ContentionMode::YieldFirst,
-            ContentionMode::Neutral,
-            ContentionMode::Performance,
-        ]
-        .map(|mode| {
+        ContentionMode::MARGINED.map(|mode| {
+            allowance(&ModeInput {
+                mode,
+                ..view.clone()
+            })
+        })
+    }
+
+    /// Every mode's target, Aggressive included (004).
+    fn all_targets(view: &ModeInput) -> [u64; 4] {
+        ContentionMode::ALL.map(|mode| {
             allowance(&ModeInput {
                 mode,
                 ..view.clone()
@@ -949,9 +954,15 @@ mod ordered_targets {
                 probe,
                 ..input(kind, ContentionMode::Neutral, capacity, external)
             };
-            let [yield_first, neutral, performance] = targets(&view);
+            let [yield_first, neutral, performance, aggressive] = all_targets(&view);
             prop_assert!(yield_first <= neutral, "{view:?}: {yield_first} > {neutral}");
             prop_assert!(neutral <= performance, "{view:?}: {neutral} > {performance}");
+            // 004 P1 and P2: Aggressive is at least Performance and at most its margin above.
+            prop_assert!(performance <= aggressive, "{view:?}: {performance} > {aggressive}");
+            prop_assert!(
+                aggressive - performance <= capacity * 2 / 100 + 1,
+                "{view:?}: {aggressive} - {performance} beyond the 2% margin"
+            );
         }
     }
 
@@ -1922,7 +1933,9 @@ mod scenarios {
                     ContentionMode::Neutral => {
                         own <= 4000 + CAPACITY / 100 && external + CAPACITY / 100 >= 4000
                     }
-                    ContentionMode::Performance => unreachable!("not in this loop"),
+                    ContentionMode::Performance | ContentionMode::Aggressive => {
+                        unreachable!("not in this loop")
+                    }
                 };
                 assert!(returned, "{mode:?} at {now}: own {own} external {external}");
             }
@@ -7244,6 +7257,113 @@ mod gpu_demand {
                 reasons.iter().any(|r| r.code == "gpu_time_slice_hold"),
                 "{reasons:?}"
             );
+        }
+    }
+}
+
+/// 004: Aggressive is Performance's admission path with no margin (contracts/policy-protection.md).
+mod aggressive {
+    use super::modes::*;
+
+    fn contended(mode: ContentionMode, external: u64, own: u64) -> ModeInput {
+        let mut input = input(ResourceKind::Cpu, mode, 4000, external);
+        input.own = own;
+        input.saturated = true;
+        input.principals = Some(vec![principal(Some(1500), external)]);
+        input
+    }
+
+    #[test]
+    fn the_mode_value_is_the_fourth_and_most_aggressive() {
+        assert_eq!(ContentionMode::ALL.len(), 4);
+        assert_eq!(ContentionMode::ALL[3], ContentionMode::Aggressive);
+        assert!(ContentionMode::Performance < ContentionMode::Aggressive);
+        assert_eq!(ContentionMode::Aggressive.name(), "aggressive");
+        assert_eq!(ContentionMode::Aggressive.label(), "Aggressive");
+        assert_eq!(
+            serde_json::to_string(&ContentionMode::Aggressive).unwrap(),
+            "\"aggressive\""
+        );
+        assert_eq!(
+            ContentionMode::Aggressive.memory_allowance_step_percent(),
+            ContentionMode::Performance.memory_allowance_step_percent()
+        );
+    }
+
+    #[test]
+    fn no_margin_and_fill_at_once_on_compute_but_memory_paces_as_performance() {
+        let cpu = ResourceThresholds::defaults(ResourceKind::Cpu);
+        let ram = ResourceThresholds::defaults(ResourceKind::Ram);
+        assert_eq!(cpu.margin_percent(ContentionMode::Aggressive), 0);
+        assert_eq!(cpu.scale_up_interval_ms(ContentionMode::Aggressive, 500), 0);
+        assert_eq!(
+            ram.scale_up_interval_ms(ContentionMode::Aggressive, 500),
+            2000
+        );
+        assert_eq!(
+            ram.scale_up_interval_ms(ContentionMode::Performance, 500),
+            ram.scale_up_interval_ms(ContentionMode::Aggressive, 500)
+        );
+    }
+
+    #[test]
+    fn uncontended_it_admits_all_that_is_available() {
+        for external in [0, 1000, 3990] {
+            let aggressive = input(
+                ResourceKind::Cpu,
+                ContentionMode::Aggressive,
+                4000,
+                external,
+            );
+            assert_eq!(allowance(&aggressive), 4000 - external);
+            let performance = input(
+                ResourceKind::Cpu,
+                ContentionMode::Performance,
+                4000,
+                external,
+            );
+            assert!(allowance(&aggressive) >= allowance(&performance));
+            assert!(allowance(&aggressive) - allowance(&performance) <= 4000 * 2 / 100);
+        }
+    }
+
+    #[test]
+    fn contended_it_is_performance_without_the_margin() {
+        // The other user takes 1000 of 4000; own work holds 3000.
+        let aggressive = allowance(&contended(ContentionMode::Aggressive, 1000, 3000));
+        let performance = allowance(&contended(ContentionMode::Performance, 1000, 3000));
+        assert_eq!(aggressive, 3000);
+        assert_eq!(performance, 3000 - 80);
+        // The other user wants two of four CPUs: own work's fair share is all it is admitted.
+        let aggressive = allowance(&contended(ContentionMode::Aggressive, 2000, 2000));
+        assert_eq!(aggressive, 2000);
+    }
+
+    #[test]
+    fn unknown_activity_holds_it_where_performance_holds() {
+        let mut input = contended(ContentionMode::Aggressive, 1000, 3000);
+        input.unknown_activity = true;
+        let mut performance = input.clone();
+        performance.mode = ContentionMode::Performance;
+        assert_eq!(allowance(&input), allowance(&performance));
+    }
+
+    #[test]
+    fn memory_is_performances() {
+        for external in [0, 2048, 8192] {
+            let aggressive = input(
+                ResourceKind::Ram,
+                ContentionMode::Aggressive,
+                16384,
+                external,
+            );
+            let performance = input(
+                ResourceKind::Ram,
+                ContentionMode::Performance,
+                16384,
+                external,
+            );
+            assert_eq!(allowance(&aggressive), allowance(&performance));
         }
     }
 }

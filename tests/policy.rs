@@ -5857,7 +5857,8 @@ mod allowance {
                 .collect();
             let plain: Vec<Allocation> = jobs.iter().cloned().map(|mut j| { j.modes.clear(); j }).collect();
             let mut previous: Option<BTreeMap<String, ResourceAmounts>> = None;
-            for node in ContentionMode::ALL {
+            // The cap here is Performance, so the node modes stop there.
+            for node in ContentionMode::MARGINED {
                 let decision = mixed(jobs.clone(), (external_cpu, external_ram), node);
                 if !decision.actions.is_empty() {
                     previous = None;
@@ -8742,6 +8743,13 @@ mod floors_by_mode {
     fn config_in(mode: ContentionMode) -> Config {
         let mut cfg = config();
         cfg.contention.default_mode = mode;
+        if mode == ContentionMode::Aggressive {
+            // 004: Aggressive runs only under its acknowledgement and an explicit cap.
+            cfg.contention.max_mode = Some(ContentionMode::Aggressive);
+            cfg.contention
+                .acknowledge_caution
+                .insert("aggressive_mode".into());
+        }
         cfg
     }
 

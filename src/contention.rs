@@ -11,6 +11,9 @@ pub enum ContentionMode {
     YieldFirst,
     Neutral,
     Performance,
+    /// Performance with no admission margin, filling idle compute at once (004). A caution
+    /// option the node cap admits only when raised to it explicitly.
+    Aggressive,
 }
 
 impl ContentionMode {
@@ -20,6 +23,7 @@ impl ContentionMode {
             ContentionMode::YieldFirst => "yield_first",
             ContentionMode::Neutral => "neutral",
             ContentionMode::Performance => "performance",
+            ContentionMode::Aggressive => "aggressive",
         }
     }
 
@@ -29,6 +33,7 @@ impl ContentionMode {
             ContentionMode::YieldFirst => "Yield First",
             ContentionMode::Neutral => "Neutral",
             ContentionMode::Performance => "Performance",
+            ContentionMode::Aggressive => "Aggressive",
         }
     }
 
@@ -39,11 +44,19 @@ impl ContentionMode {
         match self {
             ContentionMode::YieldFirst => 20,
             ContentionMode::Neutral => 5,
-            ContentionMode::Performance => 2,
+            ContentionMode::Performance | ContentionMode::Aggressive => 2,
         }
     }
 
-    pub const ALL: [ContentionMode; 3] = [
+    pub const ALL: [ContentionMode; 4] = [
+        ContentionMode::YieldFirst,
+        ContentionMode::Neutral,
+        ContentionMode::Performance,
+        ContentionMode::Aggressive,
+    ];
+
+    /// The modes with a configurable margin; Aggressive's is fixed at 0%.
+    pub const MARGINED: [ContentionMode; 3] = [
         ContentionMode::YieldFirst,
         ContentionMode::Neutral,
         ContentionMode::Performance,
@@ -794,6 +807,8 @@ impl ResourceThresholds {
             ContentionMode::YieldFirst => self.yield_first_margin_percent,
             ContentionMode::Neutral => self.neutral_margin_percent,
             ContentionMode::Performance => self.performance_margin_percent,
+            // A constant, not a setting: the constitution fixes Aggressive's margin at 0%.
+            ContentionMode::Aggressive => 0,
         }
     }
 
@@ -809,7 +824,9 @@ impl ResourceThresholds {
             ContentionMode::YieldFirst => 30_000,
             ContentionMode::Neutral => 10_000,
             ContentionMode::Performance if self.compute => interval_ms,
-            ContentionMode::Performance => 2000,
+            // Aggressive fills idle compute at once; memory paces as Performance.
+            ContentionMode::Aggressive if self.compute => 0,
+            ContentionMode::Performance | ContentionMode::Aggressive => 2000,
         }
     }
 
@@ -926,7 +943,7 @@ impl LadderTiming {
             ContentionMode::YieldFirst => {
                 u64::from(thresholds.yield_first_response_intervals).saturating_mul(interval_ms)
             }
-            ContentionMode::Neutral | ContentionMode::Performance => {
+            ContentionMode::Neutral | ContentionMode::Performance | ContentionMode::Aggressive => {
                 thresholds.reclaim_s.saturating_mul(1000)
             }
         };
@@ -1469,17 +1486,19 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
         _ if input.kind.is_memory() => available,
         // Performance gives back what external demand takes, never below the fair
         // share; activity of unknown amount holds it to the share.
-        ContentionMode::Performance if contended && !input.unknown_activity => {
+        ContentionMode::Performance | ContentionMode::Aggressive
+            if contended && !input.unknown_activity =>
+        {
             neutral_share(input, thresholds)
-                .max(available.saturating_sub(margin(thresholds.performance_margin_percent)))
+                .max(available.saturating_sub(margin(thresholds.margin_percent(input.mode))))
                 .max(probe.unwrap_or(0))
         }
         _ if contended => neutral_share(input, thresholds).max(probe.unwrap_or(0)),
         ContentionMode::Neutral => {
             available.saturating_sub(margin(thresholds.neutral_margin_percent))
         }
-        ContentionMode::Performance => {
-            available.saturating_sub(margin(thresholds.performance_margin_percent))
+        ContentionMode::Performance | ContentionMode::Aggressive => {
+            available.saturating_sub(margin(thresholds.margin_percent(input.mode)))
         }
     }
 }

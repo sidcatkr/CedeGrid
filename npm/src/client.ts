@@ -67,7 +67,7 @@ export interface CommandOptions {
     contentionModes?: Partial<Record<ContentionResource, ContentionMode>>;
 }
 export const CONTENTION_RESOURCES = ['cpu', 'ram', 'gpu_compute', 'gpu_memory'] as const;
-export const CONTENTION_MODES = ['yield_first', 'neutral', 'performance'] as const;
+export const CONTENTION_MODES = ['yield_first', 'neutral', 'performance', 'aggressive'] as const;
 export type ContentionResource = typeof CONTENTION_RESOURCES[number];
 export type ContentionMode = typeof CONTENTION_MODES[number];
 export function textField(value: unknown, name: string, nonempty = false): asserts value is string { if (typeof value !== 'string' || value.includes('\0') || (nonempty && !value))

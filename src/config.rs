@@ -685,7 +685,8 @@ fn default_mode_notice(contents: &str) -> Option<String> {
 
 /// Caution options a file acknowledges by name (FR-051, FR-054). `performance_mode` still
 /// loads, though Performance is the default and needs no confirmation.
-pub const ACKNOWLEDGEMENTS: [&str; 4] = [
+pub const ACKNOWLEDGEMENTS: [&str; 5] = [
+    "aggressive_mode",
     "performance_mode",
     "small_floor",
     "reduced_margin",
@@ -777,8 +778,27 @@ impl ContentionConfig {
     }
 
     /// The node's mode for a resource before any per-job override.
+    /// The mode a resource runs in: its configured mode within the node cap (004 FR-008).
     pub fn mode(&self, kind: crate::contention::ResourceKind) -> crate::contention::ContentionMode {
+        self.configured_mode(kind).min(self.max_mode())
+    }
+
+    /// The mode a resource is configured with, before the node cap.
+    pub fn configured_mode(
+        &self,
+        kind: crate::contention::ResourceKind,
+    ) -> crate::contention::ContentionMode {
         self.resource(kind).mode.unwrap_or(self.default_mode)
+    }
+
+    /// Whether any setting names Aggressive, which needs the `aggressive_mode` acknowledgement.
+    pub fn names_aggressive(&self) -> bool {
+        use crate::contention::{ContentionMode::Aggressive, ResourceKind};
+        self.default_mode == Aggressive
+            || self.max_mode == Some(Aggressive)
+            || ResourceKind::ALL
+                .into_iter()
+                .any(|kind| self.resource(kind).mode == Some(Aggressive))
     }
 
     /// Effective thresholds for a resource with defaults applied.
@@ -868,14 +888,16 @@ impl ContentionConfig {
         }
     }
 
-    /// The node cap: the configured `max_mode`, else the most aggressive node mode.
+    /// The node cap: the configured `max_mode`, else the most aggressive node mode, stopping at
+    /// Performance: only an explicit `max_mode` raises it to Aggressive (004 FR-008).
     pub fn max_mode(&self) -> crate::contention::ContentionMode {
         self.max_mode.unwrap_or_else(|| {
             crate::contention::ResourceKind::ALL
                 .into_iter()
-                .map(|kind| self.mode(kind))
+                .map(|kind| self.configured_mode(kind))
                 .max()
                 .unwrap_or(self.default_mode)
+                .min(crate::contention::ContentionMode::Performance)
         })
     }
 
@@ -933,7 +955,12 @@ impl ContentionConfig {
             );
         }
         ensure!(
-            self.default_mode <= self.max_mode(),
+            !self.names_aggressive() || self.acknowledge_caution.contains("aggressive_mode"),
+            "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED: Aggressive requires acknowledge_caution = [\"aggressive_mode\"]"
+        );
+        // A derived cap stops at Performance, so only an explicit cap below a mode is an error.
+        ensure!(
+            self.max_mode.is_none() || self.default_mode <= self.max_mode(),
             "contention.default_mode cannot be more aggressive than contention.max_mode"
         );
         ensure!(
@@ -1056,7 +1083,7 @@ impl ContentionConfig {
                 applies(field, &[Ram, GpuMemory], present)?;
             }
             ensure!(
-                self.mode(kind) <= self.max_mode(),
+                self.max_mode.is_none() || self.configured_mode(kind) <= self.max_mode(),
                 "contention.{name}.mode cannot be more aggressive than contention.max_mode"
             );
             let t = self.thresholds(kind);
@@ -1704,6 +1731,12 @@ impl Config {
     /// Clamp settings older files may still carry and describe active caution options.
     fn apply_compatibility(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        if self.contention.names_aggressive() && self.contention.max_mode.is_none() {
+            warnings.push(
+                "Aggressive runs as Performance (mode_capped) until contention.max_mode = \"aggressive\" is set"
+                    .to_owned(),
+            );
+        }
         if self.cpu.nice < 0 {
             warnings.push(format!(
                 "cpu.nice = {} would raise priority above the default; treated as 0",

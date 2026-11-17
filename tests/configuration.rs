@@ -1712,11 +1712,12 @@ fn job_contention_cases_parse_and_validate_alike() {
     }
 }
 
-/// No configuration can name Aggressive: the mode is not implemented, and its
-/// unprotected form may never come from configuration (constitution II, 4.0.0).
-/// The job field is pinned by the contract's JC-05 in Rust and both SDKs.
+/// Aggressive is a caution option (004 FR-007): a configuration names it only with its
+/// acknowledgement. Its unprotected form never comes from configuration (FR-012). The job
+/// field is pinned by the contract's JC-05 in Rust and both SDKs.
 #[test]
-fn no_configuration_can_name_aggressive() {
+fn no_configuration_can_name_aggressive_without_its_acknowledgement() {
+    // 004: Aggressive exists; naming it without `aggressive_mode` still fails to load.
     for body in [
         "[contention]\ndefault_mode = \"aggressive\"",
         "[contention]\nmax_mode = \"aggressive\"",
@@ -1724,6 +1725,15 @@ fn no_configuration_can_name_aggressive() {
         "[contention.gpu_compute]\nmode = \"aggressive\"",
     ] {
         assert!(parse_node(body).is_err(), "{body}");
+        let acknowledged = if body.starts_with("[contention]") {
+            format!(
+                "[contention]\nacknowledge_caution = [\"aggressive_mode\"]\n{}",
+                body.trim_start_matches("[contention]\n")
+            )
+        } else {
+            format!("[contention]\nacknowledge_caution = [\"aggressive_mode\"]\n{body}")
+        };
+        assert!(parse_node(&acknowledged).is_ok(), "{acknowledged}");
     }
 }
 
@@ -1908,4 +1918,55 @@ fn a_migrated_file_that_holds_unprotected_aggressive_is_refused() {
     stage(&options, &source);
     assert!(config_migration::migrate(&options).is_err());
     assert!(!options.output.exists());
+}
+
+#[test]
+fn aggressive_needs_its_acknowledgement_and_an_explicit_cap() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let load = |body: &str| {
+        let path = root.join("node.toml");
+        fs::write(&path, format!("config_version=1\n{body}")).unwrap();
+        config::load_for_run(&path)
+    };
+    // Without the acknowledgement, any Aggressive setting fails to load naming it.
+    for body in [
+        "[contention]\ndefault_mode = \"aggressive\"\n",
+        "[contention]\nmax_mode = \"aggressive\"\n",
+        "[contention.cpu]\nmode = \"aggressive\"\n",
+    ] {
+        let error = format!("{:#}", load(body).unwrap_err());
+        assert!(error.contains("aggressive_mode"), "{body}: {error}");
+    }
+    // Acknowledged but uncapped: the derived cap stops at Performance, and a warning says so.
+    let (config, warnings) = load(
+        "[contention]\ndefault_mode = \"aggressive\"\nacknowledge_caution = [\"aggressive_mode\"]\n",
+    )
+    .unwrap();
+    assert_eq!(config.contention.max_mode(), ContentionMode::Performance);
+    assert_eq!(
+        config.contention.mode(ResourceKind::Cpu),
+        ContentionMode::Performance
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("mode_capped") && w.contains("max_mode")),
+        "{warnings:?}"
+    );
+    // Raised explicitly, it runs.
+    let (config, _) = load(
+        "[contention]\ndefault_mode = \"aggressive\"\nmax_mode = \"aggressive\"\nacknowledge_caution = [\"aggressive_mode\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.contention.mode(ResourceKind::Cpu),
+        ContentionMode::Aggressive
+    );
+    // An explicit cap below a configured mode still fails, as in 001.
+    assert!(
+        load("[contention]\nmax_mode = \"neutral\"\n[contention.cpu]\nmode = \"performance\"\n")
+            .is_err()
+    );
 }

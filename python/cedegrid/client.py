@@ -50,7 +50,7 @@ def _resolve_config_tls_path(config_path: Path, value: str | Path) -> Path:
 TASK_STATUSES = ("queued", "assigned", "completed", "needs_reconciliation", "cancelled")
 TERMINAL_TASK_STATUSES = ("completed", "cancelled")
 CONTENTION_RESOURCES = ("cpu", "ram", "gpu_compute", "gpu_memory")
-CONTENTION_MODES = ("yield_first", "neutral", "performance")
+CONTENTION_MODES = ("yield_first", "neutral", "performance", "aggressive")
 
 
 def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int = 1000,

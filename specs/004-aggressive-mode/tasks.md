@@ -55,7 +55,7 @@ must fail before its implementation task.
   - *Done:* `state::{Allowance, read_allowance, set_allowance, clear_allowance}`. Reads also
     count a row not set by interactive setup, or a database reached through a link, as off.
     `backup::restore` clears it, and `tests/backup.rs` fails without that.
-- [ ] T004 [P] (after T622) Write the mode-value tests in `tests/contention.rs` and
+- [x] T004 [P] (after T622) Write the mode-value tests in `tests/contention.rs` and
   `tests/configuration.rs`:
   - `aggressive` parses and names in configuration, jobs and the wire, with order 3 and the red
     `[Aggressive]` label, and is the last entry of `ContentionMode::ALL`;
@@ -64,10 +64,14 @@ must fail before its implementation task.
   - `aggressive` without `aggressive_mode` in `contention.acknowledge_caution` fails to load, and
     with it, loads;
   - `max_mode` stops at `performance` unless it is set to `aggressive` explicitly.
-- [ ] T005 (after T622) Implement `ContentionMode::Aggressive` in `src/contention.rs` (name,
+- [x] T005 (after T622) Implement `ContentionMode::Aggressive` in `src/contention.rs` (name,
   label, order, `ALL`, margin, scale-up interval, Performance's response timing). In
   `src/config.rs`, implement the `aggressive_mode` acknowledgement and the explicit `max_mode`
   rule, with `mode_capped` below Aggressive. Fix every `match` the compiler flags. Passes T004.
+  - *Done:* `ContentionConfig::mode` is the configured mode within the cap
+    (`configured_mode` is the raw one), the derived cap stops at Performance with a load warning
+    naming `mode_capped`, and setup's mode and margin lists stay at the three margined modes
+    until T014.
 
 **Checkpoint**: the allowance and the mode value exist; both stories can proceed.
 
@@ -95,13 +99,13 @@ Aggressive.
   - P7: no hint, drain, TERM or OOM mark at a floor breach in Aggressive;
   - FR-017: neither form changes own priority or thread counts: every launch in Aggressive keeps
     the nice value and scheduling class it would have in Performance.
-- [ ] T008 [P] [US1] (now) In `python/tests` and `npm/tests`, test that the per-resource mode
+- [x] T008 [P] [US1] (now) In `python/tests` and `npm/tests`, test that the per-resource mode
   value `"aggressive"` is accepted by both SDKs and serialized as in
   `contracts/cli-sdk-wire.md`.
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] (after T622) In `src/contention.rs` `own_allowance`, give Aggressive
+- [x] T009 [US1] (after T622) In `src/contention.rs` `own_allowance`, give Aggressive
   Performance's arms with the 0% margin. Contended compute is `max(neutral_share, available,
   probe)`, uncontended compute is `available`, unknown activity goes to the shared unknown arm,
   and memory shares Performance's arm. Passes T006.
@@ -114,7 +118,7 @@ Aggressive.
 - [ ] T012 [P] [US1] (after T622) In `src/protocol.rs` and `src/coordinator.rs`, accept the job
   mode `aggressive`, with the node cap deciding the effective mode. Flip contract case JC-05 to
   accepted in `tests/contracts/cedegrid-0.2.json`, with `mode_capped` below Aggressive.
-- [ ] T013 [P] [US1] (now) In `python/cedegrid/` and `npm/src/`, add the mode value
+- [x] T013 [P] [US1] (now) In `python/cedegrid/` and `npm/src/`, add the mode value
   `"aggressive"`. Passes T008.
 - [ ] T014 [US1] (after T622) In `src/setup.rs` and `src/setup/interface.rs`, add the cap step to
   Aggressive with its own confirmation and the red `[Aggressive]` label. Non-interactively, it
