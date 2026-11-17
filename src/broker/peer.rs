@@ -149,6 +149,31 @@ fn group() -> Result<(u32, Vec<CString>)> {
     Ok((entry.gr_gid, members))
 }
 
+/// An account's name and primary group ID, from the passwd database.
+pub fn account(uid: u32) -> Result<(CString, u32)> {
+    let entry = passwd(uid)?;
+    Ok((entry.name, entry.gid))
+}
+
+/// The `cedegrid` group as read once, so a pass over many units reads the database once.
+#[derive(Clone, Debug)]
+pub struct GroupSnapshot {
+    gid: u32,
+    members: Vec<CString>,
+}
+
+impl GroupSnapshot {
+    pub fn read() -> Result<Self> {
+        let (gid, members) = group()?;
+        Ok(Self { gid, members })
+    }
+
+    /// Whether an account with this name and primary group is in the group.
+    pub fn contains(&self, name: &CStr, primary_gid: u32) -> bool {
+        primary_gid == self.gid || self.members.iter().any(|member| member.as_c_str() == name)
+    }
+}
+
 impl Accounts for HostAccounts {
     fn primary_gid(&self, uid: u32) -> Result<u32> {
         Ok(passwd(uid)?.gid)

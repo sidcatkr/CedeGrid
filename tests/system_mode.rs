@@ -3114,6 +3114,29 @@ mod container {
 
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_removed_members_units_stop_once_no_job_runs() {
+        assert!(enabled(), "{GATE}");
+        install();
+        assert!(cedegrid_as(SECOND, &["system", "start"]).status.success());
+        let (unit, idle_unit) = (ordinary(SECOND_UID), idle(SECOND_UID));
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&unit, "ActiveState")["ActiveState"] == "active"
+        }));
+        ok("gpasswd", &["-d", SECOND, "cedegrid"]);
+        let refused = cedegrid_as(SECOND, &["system", "status", "--require-system"]);
+        // N2 A: no job runs in either unit, so the broker's next full pass stops both.
+        let stopped = wait_until(Duration::from_secs(45), || {
+            [&unit, &idle_unit]
+                .iter()
+                .all(|name| show(name, "ActiveState")["ActiveState"] != "active")
+        });
+        ok("usermod", &["-aG", "cedegrid", SECOND]);
+        assert!(!refused.status.success(), "{}", stdout(&refused));
+        assert!(stopped, "a removed member's idle units still run");
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn an_upgrade_restarts_a_running_broker_and_keeps_the_units() {
         assert!(enabled(), "{GATE}");
         install();

@@ -479,7 +479,6 @@ const OOM_INTERVAL_AT_REST: Duration = Duration::from_secs(30);
 fn oom_loop() {
     use super::admin_policy;
     use super::oom::{OomLoop, PidfdAccess, ScoredUnit, find_units, read_host, unit_pids};
-    use super::peer::{Accounts, HostAccounts};
     use super::score::{Lowering, OverShareMarking};
     use super::systemd::SystemctlRunner;
     use super::units::{removed_members_to_stop, unit_name};
@@ -490,10 +489,9 @@ fn oom_loop() {
     let cgroup_root = std::path::Path::new("/sys/fs/cgroup");
     let proc_root = std::path::Path::new("/proc");
     let systemd = SystemctlRunner::default();
-    let accounts = HostAccounts;
     let mut oom = OomLoop::default();
-    // A unit's marker and its user's group, by cgroup path, checked once per cgroup ID.
-    let mut markers: HashMap<String, (u64, Option<u32>)> = HashMap::new();
+    // A unit's marker and its user's name and group, by cgroup path, checked once per cgroup ID.
+    let mut markers: HashMap<String, (u64, Option<(u32, std::ffi::CString)>)> = HashMap::new();
     let mut last_error: Option<Instant> = None;
     let mut report = |message: String| {
         if last_error.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
@@ -532,26 +530,40 @@ fn oom_loop() {
                                     show.is_ours(unit.kind, unit.uid)
                                         && show.control_group == unit.cgroup
                                 });
-                        let gid = if ours {
-                            accounts.primary_gid(unit.uid).ok()
+                        let account = if ours {
+                            super::peer::account(unit.uid)
+                                .ok()
+                                .map(|(name, gid)| (gid, name))
                         } else {
                             None
                         };
-                        markers.insert(unit.cgroup.clone(), (unit.id, gid));
+                        markers.insert(unit.cgroup.clone(), (unit.id, account));
                     }
-                    if let Some(&(_, Some(gid))) = markers.get(&unit.cgroup) {
+                    if let Some((_, Some((gid, _)))) = markers.get(&unit.cgroup) {
+                        let gid = *gid;
                         units.push(ScoredUnit { unit, gid });
                     }
                 }
-                // N2 A: a removed member's units stop once no job runs in them.
+                // N2 A: a removed member's units stop once no job runs in them. The group is read
+                // once a pass; only a removed member's units have their jobs cgroup walked.
+                let group = (!units.is_empty())
+                    .then(super::peer::GroupSnapshot::read)
+                    .and_then(Result::ok);
+                let member = |uid: u32| -> Option<bool> {
+                    let group = group.as_ref()?;
+                    let scored = units.iter().find(|s| s.unit.uid == uid)?;
+                    let (gid, name) = markers.get(&scored.unit.cgroup)?.1.as_ref()?;
+                    Some(group.contains(name, *gid))
+                };
                 let busy: Vec<(u32, bool)> = units
                     .iter()
+                    .filter(|scored| member(scored.unit.uid) == Some(false))
                     .map(|scored| {
                         let jobs = format!("{}/{}", scored.unit.cgroup, super::oom::JOBS_DIR);
                         (scored.unit.uid, !unit_pids(cgroup_root, &jobs).is_empty())
                     })
                     .collect();
-                for uid in removed_members_to_stop(&busy, &|uid| accounts.is_member(uid).ok()) {
+                for uid in removed_members_to_stop(&busy, &member) {
                     let Some(gid) = units.iter().find(|s| s.unit.uid == uid).map(|s| s.gid) else {
                         continue;
                     };
