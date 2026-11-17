@@ -386,8 +386,104 @@ pub fn run() -> anyhow::Result<()> {
         user_slice_splits_cpu: Box::new(super::units::user_slice_splits_cpu),
         rate: Mutex::new(RateLimiter::new(RATE_BURST, RATE_PER_SECOND)),
     });
+    std::thread::Builder::new()
+        .name("broker-oom".to_owned())
+        .spawn(oom_loop)?;
     journal("started");
     serve(listener, state)
+}
+
+/// How often the OOM pass runs (research R10).
+#[cfg(target_os = "linux")]
+const OOM_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long a unit's marker check is reused before `systemctl show` runs again.
+#[cfg(target_os = "linux")]
+const MARKER_RECHECK: Duration = Duration::from_secs(10);
+
+/// The OOM loop: one pass per second over the broker's units (FR-022 to FR-026). The user's
+/// decisions of 2026-11-17 fix lowering to N1 B and marking to D2 case A.
+#[cfg(target_os = "linux")]
+fn oom_loop() {
+    use super::admin_policy;
+    use super::oom::{OomLoop, PidfdAccess, ScoredUnit, find_units, read_host, unit_pids};
+    use super::peer::{Accounts, HostAccounts};
+    use super::score::{Lowering, OverShareMarking};
+    use super::systemd::SystemctlRunner;
+    use super::units::unit_name;
+
+    // SAFETY: sysconf has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_kb = u64::try_from(page_size).map_or(4, |bytes| (bytes / 1024).max(1));
+    let cgroup_root = std::path::Path::new("/sys/fs/cgroup");
+    let proc_root = std::path::Path::new("/proc");
+    let systemd = SystemctlRunner::default();
+    let accounts = HostAccounts;
+    let mut oom = OomLoop::default();
+    let mut markers: HashMap<String, (bool, Instant)> = HashMap::new();
+    let mut last_error: Option<Instant> = None;
+    let mut report = |message: String| {
+        if last_error.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+            journal(&message);
+            last_error = Some(Instant::now());
+        }
+    };
+    loop {
+        let started = Instant::now();
+        match (admin_policy::load(), read_host(proc_root, page_kb)) {
+            (Ok(policy), Ok(host)) => {
+                let found = find_units(cgroup_root);
+                markers.retain(|cgroup, _| found.iter().any(|unit| &unit.cgroup == cgroup));
+                let mut units = Vec::new();
+                for unit in found {
+                    let fresh = markers
+                        .get(&unit.cgroup)
+                        .is_some_and(|(_, at)| at.elapsed() < MARKER_RECHECK);
+                    if !fresh {
+                        let ours =
+                            systemd
+                                .show(&unit_name(unit.kind, unit.uid))
+                                .is_ok_and(|show| {
+                                    show.is_ours(unit.kind, unit.uid)
+                                        && show.control_group == unit.cgroup
+                                });
+                        markers.insert(unit.cgroup.clone(), (ours, Instant::now()));
+                    }
+                    if !markers.get(&unit.cgroup).is_some_and(|(ours, _)| *ours) {
+                        continue;
+                    }
+                    let Ok(gid) = accounts.primary_gid(unit.uid) else {
+                        continue;
+                    };
+                    let pids = unit_pids(cgroup_root, &unit.cgroup);
+                    units.push(ScoredUnit { unit, gid, pids });
+                }
+                let writes = oom.pass(
+                    Instant::now(),
+                    &host,
+                    &units,
+                    &PidfdAccess,
+                    policy.uid_min.value,
+                    policy.principal_min_percent.value,
+                    Lowering::WhileAnotherOverShare,
+                    OverShareMarking::YieldFirstAndNeutral,
+                );
+                for write in writes {
+                    let result = match &write.result {
+                        Ok(()) => "ok".to_owned(),
+                        Err(error) => format!("failed: {error:#}"),
+                    };
+                    journal(&format!(
+                        "oom_score_adj uid={} pid={} start={} old={} new={} result={result}",
+                        write.uid, write.key.pid, write.key.start_time, write.old, write.new
+                    ));
+                }
+            }
+            (Err(error), _) => report(format!("OOM pass skipped: policy refused: {error:#}")),
+            (_, Err(error)) => report(format!("OOM pass skipped: {error:#}")),
+        }
+        std::thread::sleep(OOM_INTERVAL.saturating_sub(started.elapsed()));
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -6,12 +6,17 @@
 //! even if its PID is reused. This module only reads and writes the files it is asked to; the
 //! broker decides what to write.
 
+#[cfg(target_os = "linux")]
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// A live process, its pidfd and its `/proc/<pid>` directory.
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct ProcessHandle {
     pid: u32,
@@ -36,6 +41,7 @@ impl ProcessIds {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessHandle {
     /// Opens `pid`. When `expected_start_time` is given, a process that started at another time
     /// is refused: its PID was reused.

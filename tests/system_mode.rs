@@ -996,7 +996,7 @@ mod process_handles {
     }
 
     #[test]
-    fn proc_text_parsers() {
+    fn proc_text_parsers_on_linux() {
         let stat =
             "1234 (a) b (c)) S 1 1234 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 50";
         assert_eq!(parse_start_time(stat), Some(98765));
@@ -2133,5 +2133,338 @@ mod oom_pass {
         // User 1001 is not over its share, so nothing of 1000's is lowered under N1 B; the
         // Neutral task past the share is marked and the Performance one is not.
         assert_eq!(writes, vec![(2, 1000)]);
+    }
+}
+
+// T047, T048: the OOM loop's host readers and pass, against a fake /proc, cgroup tree and
+// process access.
+
+mod oom_loop {
+    use cedegrid::broker::oom::{
+        FoundUnit, HeldProcess, HostReadings, OomLoop, PRINCIPAL_JOIN, ProcessAccess,
+        ProcessSample, ScannedProcess, ScoredUnit, find_units, parse_meminfo, parse_status_memory,
+        read_host, unit_pids,
+    };
+    use cedegrid::broker::process_handle::{
+        ProcessIds, parse_cgroup_v2, parse_ids, parse_start_time,
+    };
+    use cedegrid::broker::score::{Lowering, OverShareMarking};
+    use cedegrid::broker::units::UnitKind;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(name: &str) -> Self {
+            let base = std::env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let path = base.join(format!(".sm-oom-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Dir(path)
+        }
+
+        fn write(&self, relative: &str, text: &str) {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn stat(pid: u32, start: u64) -> String {
+        format!("{pid} (x y) S 1 1 1 0 -1 0 0 0 0 0 1 1 0 0 20 0 1 0 {start} 1000 10\n")
+    }
+
+    #[test]
+    fn proc_text_parsers() {
+        assert_eq!(parse_start_time(&stat(5, 777)), Some(777));
+        assert_eq!(
+            parse_ids("Uid:\t1\t1\t1\t1\nGid:\t2\t2\t2\t2\n").map(|ids| ids.all_are(1, 2)),
+            Some(true)
+        );
+        assert_eq!(parse_cgroup_v2("0::/a/b\n"), Some("/a/b".to_owned()));
+        assert_eq!(
+            parse_meminfo("MemTotal:  1000 kB\nMemFree: 1 kB\nSwapTotal:  24 kB\n"),
+            Some((1000, 24))
+        );
+        assert_eq!(parse_meminfo("MemFree: 1 kB\n"), None);
+        assert_eq!(
+            parse_status_memory("Uid:\t1000\t1000\t1000\t1000\nVmRSS:\t  400 kB\nVmSwap:\t 8 kB\n"),
+            (Some(1000), Some(408))
+        );
+        // A kernel thread has no VmRSS and no memory of its own.
+        assert_eq!(
+            parse_status_memory("Uid:\t0\t0\t0\t0\n"),
+            (Some(0), Some(0))
+        );
+        assert_eq!(parse_status_memory("VmRSS:\t x kB\n"), (None, None));
+    }
+
+    #[test]
+    fn the_host_scan_reads_owners_memory_and_start_times() {
+        let proc = Dir::new("proc");
+        proc.write("meminfo", "MemTotal: 4000 kB\nSwapTotal: 400 kB\n");
+        proc.write("10/stat", &stat(10, 100));
+        proc.write(
+            "10/status",
+            "Uid:\t1000\t1000\t1000\t1000\nVmRSS:\t 40 kB\nVmSwap:\t 4 kB\n",
+        );
+        proc.write("11/stat", &stat(11, 101));
+        proc.write("11/status", "Uid:\tbad\nVmRSS:\t 8 kB\n");
+        proc.write("12/status", "Uid:\t1\t1\t1\t1\n");
+        proc.write("self/stat", &stat(1, 1));
+        let host = read_host(&proc.0, 4).unwrap();
+        assert_eq!(host.total_pages, 1100);
+        assert_eq!(host.capacity_pages, 1000);
+        assert_eq!(host.processes.len(), 2);
+        assert_eq!(host.processes[&10].start_time, 100);
+        assert_eq!(
+            host.processes[&10].sample,
+            ProcessSample {
+                uid: Some(1000),
+                pages: Some(11)
+            }
+        );
+        assert_eq!(host.processes[&11].sample.uid, None);
+    }
+
+    #[test]
+    fn units_are_found_by_name_and_slice() {
+        let cg = Dir::new("cgroup");
+        for dir in [
+            "cedegrid-idle.slice/cedegrid-idle-u1000.service",
+            "cedegrid-idle.slice/other.service",
+            "cedegrid.slice/cedegrid-u1001.service",
+            "user.slice/user-1000.slice/cedegrid-u1000.service",
+            "user.slice/user-1000.slice/cedegrid-u1002.service",
+            "user.slice/user-1000.slice/session-1.scope",
+        ] {
+            std::fs::create_dir_all(cg.0.join(dir)).unwrap();
+        }
+        let mut units = find_units(&cg.0);
+        units.sort_by(|a, b| a.cgroup.cmp(&b.cgroup));
+        assert_eq!(
+            units,
+            vec![
+                FoundUnit {
+                    kind: UnitKind::Idle,
+                    uid: 1000,
+                    cgroup: "/cedegrid-idle.slice/cedegrid-idle-u1000.service".into()
+                },
+                FoundUnit {
+                    kind: UnitKind::Ordinary,
+                    uid: 1001,
+                    cgroup: "/cedegrid.slice/cedegrid-u1001.service".into()
+                },
+                FoundUnit {
+                    kind: UnitKind::Ordinary,
+                    uid: 1000,
+                    cgroup: "/user.slice/user-1000.slice/cedegrid-u1000.service".into()
+                },
+            ]
+        );
+        cg.write("cedegrid.slice/cedegrid-u1001.service/cgroup.procs", "7\n");
+        cg.write(
+            "cedegrid.slice/cedegrid-u1001.service/agent/cgroup.procs",
+            "8\n",
+        );
+        cg.write(
+            "cedegrid.slice/cedegrid-u1001.service/cedegrid-neutral-a/cgroup.procs",
+            "9\n10\n",
+        );
+        assert_eq!(
+            unit_pids(&cg.0, "/cedegrid.slice/cedegrid-u1001.service"),
+            vec![7, 8, 9, 10]
+        );
+    }
+
+    struct FakeProcess {
+        start_time: u64,
+        cgroup: String,
+        uid: u32,
+        gid: u32,
+        score: Mutex<i32>,
+    }
+
+    struct Fake(BTreeMap<u32, std::sync::Arc<FakeProcess>>);
+
+    struct Held(std::sync::Arc<FakeProcess>);
+
+    impl HeldProcess for Held {
+        fn start_time(&self) -> u64 {
+            self.0.start_time
+        }
+        fn cgroup(&self) -> anyhow::Result<String> {
+            Ok(self.0.cgroup.clone())
+        }
+        fn ids(&self) -> anyhow::Result<ProcessIds> {
+            Ok(ProcessIds {
+                uids: [self.0.uid; 4],
+                gids: [self.0.gid; 4],
+            })
+        }
+        fn oom_score_adj(&self) -> anyhow::Result<i32> {
+            Ok(*self.0.score.lock().unwrap())
+        }
+        fn set_oom_score_adj(&self, value: i32) -> anyhow::Result<()> {
+            *self.0.score.lock().unwrap() = value;
+            Ok(())
+        }
+    }
+
+    impl ProcessAccess for Fake {
+        fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>> {
+            let process = self.0.get(&pid).ok_or_else(|| anyhow::anyhow!("gone"))?;
+            anyhow::ensure!(process.start_time == start_time, "reused");
+            Ok(Box::new(Held(std::sync::Arc::clone(process))))
+        }
+    }
+
+    fn fake(pid: u32, start: u64, cgroup: &str, uid: u32) -> (u32, std::sync::Arc<FakeProcess>) {
+        (
+            pid,
+            std::sync::Arc::new(FakeProcess {
+                start_time: start,
+                cgroup: cgroup.into(),
+                uid,
+                gid: uid + 100,
+                score: Mutex::new(0),
+            }),
+        )
+    }
+
+    const UNIT: &str = "/cedegrid.slice/cedegrid-u1000.service";
+
+    fn scan(pid: u32, start: u64, uid: u32, pages: u64) -> (u32, ScannedProcess) {
+        (
+            pid,
+            ScannedProcess {
+                start_time: start,
+                sample: ProcessSample {
+                    uid: Some(uid),
+                    pages: Some(pages),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn a_pass_writes_only_verified_unit_processes() {
+        let access = Fake(BTreeMap::from([
+            fake(1, 10, &format!("{UNIT}/cedegrid-neutral-a"), 1000),
+            // Same user, but outside the unit.
+            fake(2, 20, "/user.slice/user-1000.slice/session-1.scope", 1000),
+            // Inside the unit but another user's IDs (a setuid program, say).
+            fake(3, 30, &format!("{UNIT}/cedegrid-neutral-a"), 0),
+            // Its PID was reused since the scan.
+            fake(4, 99, &format!("{UNIT}/cedegrid-neutral-a"), 1000),
+        ]));
+        let host = HostReadings {
+            total_pages: 2000,
+            capacity_pages: 1000,
+            processes: BTreeMap::from([
+                scan(1, 10, 1000, 300),
+                scan(2, 20, 1000, 50),
+                scan(3, 30, 1000, 10),
+                scan(4, 40, 1000, 10),
+                scan(9, 90, 1001, 900),
+            ]),
+        };
+        let units = [ScoredUnit {
+            unit: FoundUnit {
+                kind: UnitKind::Ordinary,
+                uid: 1000,
+                cgroup: UNIT.into(),
+            },
+            gid: 1100,
+            pids: vec![1, 2, 3, 4],
+        }];
+        let mut oom = OomLoop::default();
+        let start = Instant::now();
+        let run = |oom: &mut OomLoop, now| {
+            oom.pass(
+                now,
+                &host,
+                &units,
+                &access,
+                1000,
+                1,
+                Lowering::WhileAnotherOverShare,
+                OverShareMarking::YieldFirstAndNeutral,
+            )
+        };
+        // Principals have not joined yet: nobody has a share, nothing is lowered.
+        assert!(run(&mut oom, start).is_empty());
+        let writes = run(&mut oom, start + PRINCIPAL_JOIN);
+        let written: Vec<(u32, i32)> = writes
+            .iter()
+            .map(|write| (write.key.pid, write.new))
+            .collect();
+        // User 1001 holds 900 of 1000 pages; user 1000's 300 are within its share, and only the
+        // verified process 1 is lowered.
+        assert_eq!(written, vec![(1, -150)]);
+        assert!(writes.iter().all(|write| write.result.is_ok()));
+        assert_eq!(access.0[&1].score.lock().unwrap().clone(), -150);
+        for pid in [2, 3, 4] {
+            assert_eq!(access.0[&pid].score.lock().unwrap().clone(), 0, "{pid}");
+        }
+        // Nothing changed: no write.
+        assert!(run(&mut oom, start + PRINCIPAL_JOIN * 2).is_empty());
+    }
+
+    #[test]
+    fn unreadable_memory_returns_scores_after_the_window() {
+        let access = Fake(BTreeMap::from([fake(
+            1,
+            10,
+            &format!("{UNIT}/cedegrid-neutral-a"),
+            1000,
+        )]));
+        *access.0[&1].score.lock().unwrap() = -150;
+        let mut host = HostReadings {
+            total_pages: 2000,
+            capacity_pages: 1000,
+            processes: BTreeMap::from([scan(1, 10, 1000, 300), scan(9, 90, 1001, 900)]),
+        };
+        host.processes.get_mut(&1).unwrap().sample.pages = None;
+        let units = [ScoredUnit {
+            unit: FoundUnit {
+                kind: UnitKind::Ordinary,
+                uid: 1000,
+                cgroup: UNIT.into(),
+            },
+            gid: 1100,
+            pids: vec![1],
+        }];
+        let mut oom = OomLoop::default();
+        let start = Instant::now();
+        let run = |oom: &mut OomLoop, now| {
+            oom.pass(
+                now,
+                &host,
+                &units,
+                &access,
+                1000,
+                1,
+                Lowering::WhileAnotherOverShare,
+                OverShareMarking::YieldFirstAndNeutral,
+            )
+        };
+        assert!(run(&mut oom, start).is_empty());
+        assert!(run(&mut oom, start + std::time::Duration::from_secs(5)).is_empty());
+        let writes = run(&mut oom, start + std::time::Duration::from_secs(10));
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].new, 0);
+        let _ = Path::new("/");
     }
 }

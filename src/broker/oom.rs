@@ -268,3 +268,399 @@ pub fn user_writes(
         tasks: &tasks,
     })
 }
+
+/// A process the loop holds while it reads and writes it.
+pub trait HeldProcess {
+    fn start_time(&self) -> u64;
+    fn cgroup(&self) -> anyhow::Result<String>;
+    fn ids(&self) -> anyhow::Result<super::process_handle::ProcessIds>;
+    fn oom_score_adj(&self) -> anyhow::Result<i32>;
+    fn set_oom_score_adj(&self, value: i32) -> anyhow::Result<()>;
+}
+
+/// Opens processes for the loop.
+pub trait ProcessAccess {
+    fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>>;
+}
+
+#[cfg(target_os = "linux")]
+impl HeldProcess for super::process_handle::ProcessHandle {
+    fn start_time(&self) -> u64 {
+        super::process_handle::ProcessHandle::start_time(self)
+    }
+
+    fn cgroup(&self) -> anyhow::Result<String> {
+        super::process_handle::ProcessHandle::cgroup(self)
+    }
+
+    fn ids(&self) -> anyhow::Result<super::process_handle::ProcessIds> {
+        super::process_handle::ProcessHandle::ids(self)
+    }
+
+    fn oom_score_adj(&self) -> anyhow::Result<i32> {
+        super::process_handle::ProcessHandle::oom_score_adj(self)
+    }
+
+    fn set_oom_score_adj(&self, value: i32) -> anyhow::Result<()> {
+        super::process_handle::ProcessHandle::set_oom_score_adj(self, value)
+    }
+}
+
+/// Processes held through pidfds and their `/proc/<pid>` directories.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PidfdAccess;
+
+#[cfg(target_os = "linux")]
+impl ProcessAccess for PidfdAccess {
+    fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>> {
+        Ok(Box::new(super::process_handle::ProcessHandle::open(
+            pid,
+            Some(start_time),
+        )?))
+    }
+}
+
+/// One process in the host scan: its start time and memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScannedProcess {
+    pub start_time: u64,
+    pub sample: ProcessSample,
+}
+
+/// What one pass read from the host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostReadings {
+    /// RAM plus swap in pages, the kernel's total for the OOM score.
+    pub total_pages: u64,
+    /// RAM in pages, the capacity the fair shares divide.
+    pub capacity_pages: u64,
+    pub processes: BTreeMap<u32, ScannedProcess>,
+}
+
+/// `MemTotal` and `SwapTotal` from `/proc/meminfo`, in kB.
+pub fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    Some((field("MemTotal:")?, field("SwapTotal:").unwrap_or(0)))
+}
+
+/// The real user ID and resident plus swapped kB from a `/proc/<pid>/status` text. A process
+/// without `VmRSS` (a kernel thread) has no memory of its own.
+pub fn parse_status_memory(text: &str) -> (Option<u32>, Option<u64>) {
+    let uid = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse::<u32>().ok());
+    let kb = |name: &str| -> Option<Option<u64>> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+    };
+    let memory = match (kb("VmRSS:"), kb("VmSwap:")) {
+        (None, _) => Some(0),
+        (Some(Some(rss)), None) => Some(rss),
+        (Some(Some(rss)), Some(Some(swap))) => Some(rss.saturating_add(swap)),
+        _ => None,
+    };
+    (uid, memory)
+}
+
+/// Reads the host: memory totals and every process's owner, start time and memory, from
+/// `proc_root` (normally `/proc`). A process that exits during the scan is left out.
+pub fn read_host(proc_root: &std::path::Path, page_kb: u64) -> anyhow::Result<HostReadings> {
+    use anyhow::Context;
+    let page_kb = page_kb.max(1);
+    let meminfo =
+        std::fs::read_to_string(proc_root.join("meminfo")).context("cannot read meminfo")?;
+    let (mem_kb, swap_kb) = parse_meminfo(&meminfo).context("meminfo has no MemTotal")?;
+    let mut processes = BTreeMap::new();
+    for entry in std::fs::read_dir(proc_root).context("cannot list processes")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let dir = entry.path();
+        let stat = match std::fs::read_to_string(dir.join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => String::new(),
+        };
+        let Some(start_time) = super::process_handle::parse_start_time(&stat) else {
+            // Gone, or unreadable: without a start time the process cannot be matched later.
+            continue;
+        };
+        let (uid, kb) = match std::fs::read_to_string(dir.join("status")) {
+            Ok(status) => parse_status_memory(&status),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => (None, None),
+        };
+        processes.insert(
+            pid,
+            ScannedProcess {
+                start_time,
+                sample: ProcessSample {
+                    uid,
+                    pages: kb.map(|kb| kb / page_kb),
+                },
+            },
+        );
+    }
+    Ok(HostReadings {
+        total_pages: (mem_kb + swap_kb) / page_kb,
+        capacity_pages: mem_kb / page_kb,
+        processes,
+    })
+}
+
+/// A unit of the broker's the loop found in the cgroup tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundUnit {
+    pub kind: UnitKind,
+    pub uid: u32,
+    /// The unit's cgroup path, as `/proc/<pid>/cgroup` shows it.
+    pub cgroup: String,
+}
+
+/// The broker's units under `cgroup_root` (normally `/sys/fs/cgroup`), by their fixed names and
+/// slices. Whether each one carries the broker's marker is checked separately.
+pub fn find_units(cgroup_root: &std::path::Path) -> Vec<FoundUnit> {
+    let names = |dir: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let uid_of = |name: &str, prefix: &str| -> Option<u32> {
+        name.strip_prefix(prefix)?
+            .strip_suffix(".service")?
+            .parse()
+            .ok()
+    };
+    let mut units = Vec::new();
+    for name in names(&cgroup_root.join("cedegrid-idle.slice")) {
+        if let Some(uid) = uid_of(&name, "cedegrid-idle-u") {
+            units.push(FoundUnit {
+                kind: UnitKind::Idle,
+                uid,
+                cgroup: format!("/cedegrid-idle.slice/{name}"),
+            });
+        }
+    }
+    for name in names(&cgroup_root.join("cedegrid.slice")) {
+        if let Some(uid) = uid_of(&name, "cedegrid-u") {
+            units.push(FoundUnit {
+                kind: UnitKind::Ordinary,
+                uid,
+                cgroup: format!("/cedegrid.slice/{name}"),
+            });
+        }
+    }
+    for slice in names(&cgroup_root.join("user.slice")) {
+        let Some(slice_uid) = slice
+            .strip_prefix("user-")
+            .and_then(|rest| rest.strip_suffix(".slice"))
+            .and_then(|uid| uid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        for name in names(&cgroup_root.join("user.slice").join(&slice)) {
+            if uid_of(&name, "cedegrid-u") == Some(slice_uid) {
+                units.push(FoundUnit {
+                    kind: UnitKind::Ordinary,
+                    uid: slice_uid,
+                    cgroup: format!("/user.slice/{slice}/{name}"),
+                });
+            }
+        }
+    }
+    units
+}
+
+/// Every PID in a unit's cgroup and the cgroups below it, read from `cgroup.procs`.
+pub fn unit_pids(cgroup_root: &std::path::Path, unit_cgroup: &str) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let mut stack = vec![(
+        cgroup_root.join(unit_cgroup.trim_start_matches('/')),
+        0usize,
+    )];
+    while let Some((dir, depth)) = stack.pop() {
+        if let Ok(text) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+            pids.extend(
+                text.lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok()),
+            );
+        }
+        if depth >= 16 {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                // Directories only, never through a link.
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    stack.push((entry.path(), depth + 1));
+                }
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// A unit the pass may score: found in the tree, carrying the broker's marker, with the user's
+/// primary group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScoredUnit {
+    pub unit: FoundUnit,
+    pub gid: u32,
+    pub pids: Vec<u32>,
+}
+
+/// One write the pass made, for the journal.
+#[derive(Debug)]
+pub struct PassWrite {
+    pub uid: u32,
+    pub key: ProcessKey,
+    pub old: i32,
+    pub new: i32,
+    pub result: anyhow::Result<()>,
+}
+
+/// State the loop keeps between passes.
+#[derive(Debug, Default)]
+pub struct OomLoop {
+    principals: Principals,
+    unknown_since: BTreeMap<u32, Instant>,
+}
+
+impl OomLoop {
+    /// One pass: computes each unit user's writes and makes them through `access`.
+    ///
+    /// Only processes inside a scored unit, with the unit's user and group IDs, matching the scan
+    /// by start time, are read or written (Principle I, N6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pass(
+        &mut self,
+        now: Instant,
+        host: &HostReadings,
+        units: &[ScoredUnit],
+        access: &dyn ProcessAccess,
+        uid_min: u32,
+        principal_min_percent: u8,
+        lowering: Lowering,
+        marking: OverShareMarking,
+    ) -> Vec<PassWrite> {
+        let samples: Vec<ProcessSample> = host
+            .processes
+            .values()
+            .map(|process| process.sample)
+            .collect();
+        let memory = memory_by_user(&samples);
+        let principals = self
+            .principals
+            .update(
+                now,
+                &memory,
+                host.capacity_pages,
+                uid_min,
+                principal_min_percent,
+            )
+            .clone();
+        let shares = fair_shares(host.capacity_pages, &memory, &principals);
+        let view = PassView {
+            total_pages: host.total_pages,
+            memory: &memory,
+            shares: &shares,
+            lowering,
+            marking,
+        };
+        let users: BTreeSet<u32> = units.iter().map(|unit| unit.unit.uid).collect();
+        self.unknown_since.retain(|uid, _| users.contains(uid));
+        let mut writes = Vec::new();
+        for uid in users {
+            let unknown_for = match memory.by_user.get(&uid) {
+                Some(None) => {
+                    let since = *self.unknown_since.entry(uid).or_insert(now);
+                    Some(now.saturating_duration_since(since))
+                }
+                _ => {
+                    self.unknown_since.remove(&uid);
+                    None
+                }
+            };
+            let mut held: BTreeMap<ProcessKey, Box<dyn HeldProcess>> = BTreeMap::new();
+            let mut processes = Vec::new();
+            for scored in units.iter().filter(|scored| scored.unit.uid == uid) {
+                for &pid in &scored.pids {
+                    let Some(scan) = host.processes.get(&pid) else {
+                        continue;
+                    };
+                    let Ok(process) = access.open(pid, scan.start_time) else {
+                        continue;
+                    };
+                    let Ok(cgroup) = process.cgroup() else {
+                        continue;
+                    };
+                    let Some(leaf) = leaf_in_unit(&scored.unit.cgroup, &cgroup) else {
+                        continue;
+                    };
+                    if !process.ids().is_ok_and(|ids| ids.all_are(uid, scored.gid)) {
+                        continue;
+                    }
+                    let Ok(current) = process.oom_score_adj() else {
+                        continue;
+                    };
+                    let key = ProcessKey {
+                        pid,
+                        start_time: process.start_time(),
+                    };
+                    processes.push(UnitProcess {
+                        uid,
+                        kind: scored.unit.kind,
+                        leaf,
+                        key,
+                        pages: scan.sample.pages.unwrap_or(0),
+                        current,
+                    });
+                    held.insert(key, process);
+                }
+            }
+            for write in user_writes(&view, uid, &processes, unknown_for) {
+                let Some(process) = held.get(&write.key) else {
+                    continue;
+                };
+                let old = processes
+                    .iter()
+                    .find(|process| process.key == write.key)
+                    .map_or(0, |process| process.current);
+                writes.push(PassWrite {
+                    uid,
+                    key: write.key,
+                    old,
+                    new: write.value,
+                    result: process.set_oom_score_adj(write.value),
+                });
+            }
+        }
+        writes
+    }
+}

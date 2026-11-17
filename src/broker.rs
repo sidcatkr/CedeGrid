@@ -10,7 +10,6 @@ pub mod admin_policy;
 pub mod oom;
 #[cfg(unix)]
 pub mod peer;
-#[cfg(target_os = "linux")]
 pub mod process_handle;
 pub mod request;
 pub mod score;

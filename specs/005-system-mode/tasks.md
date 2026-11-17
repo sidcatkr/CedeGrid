@@ -247,16 +247,17 @@ the task list.
 
 - [x] T046 [US4] Implement the pure score function in `src/broker/score.rs`, taking the mode's floor rule (D2) and N1's option as inputs (passes T042)
   - The share is handed out over the units' tasks only; the user's processes outside the units do not use it up. T047 may revisit this with the measured counters.
-- [ ] T047 [US4] Implement memory reading in `src/broker/oom.rs` (passes T043):
+- [x] T047 [US4] Implement memory reading in `src/broker/oom.rs` (passes T043):
   - per-account cgroup counters where present, else per-process sums by user ID from `/proc`;
   - the measure 001 uses for RAM;
   - 001's max-min fair share with the policy's thresholds.
-  - *In part:* the pure steps (memory by user, principals, fair shares, tasks by leaf, writes per user) are in `src/broker/oom.rs`; the `/proc` and cgroup reading is not written yet. Per-account counters are follow-up SYS-2.
+  - `src/broker/oom.rs`: memory by user from `/proc/<pid>/status` (VmRSS plus VmSwap), principals, fair shares, tasks by leaf, and the writes per user; tested against fake `/proc` and cgroup trees. Per-account counters are follow-up SYS-2.
 - [ ] T048 [US4] Implement the loop in `src/broker/oom.rs` (passes T044):
   - one pass per second;
   - only processes in the broker's verified set (N6), each checked by unit cgroup, user and group IDs, pidfd and start time;
   - writes through the `/proc/<pid>` directory handle, only on change, each read back;
   - one journal line per write.
+  - *Written, not yet run on Linux:* the pass driver is tested with fake process access; the loop thread in `broker::server::run` (marker recheck every 10 s, one journal line per write) compiles only on Linux and has not been built there yet.
 - [ ] T049 [US4] Switch off the agent's own OOM score writes in System mode in `src/agent/oom.rs` and the supervisor's mark path in `src/supervision/unix.rs` (passes T045)
 
 **Checkpoint**: US4 passes in the container; SC-006 and SC-007 wait on T072.
