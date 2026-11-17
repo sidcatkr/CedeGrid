@@ -50,5 +50,6 @@ candidate's commit, and this list is updated at that commit.
 ## Open before the review
 
 - T033: the full checks at the release candidate's commit.
-- T035, the rest: a same-cgroup contender and the GPU compute runs. The CPU gates passed on
-  2026-11-17 (`docs/validation.md`, feature 004).
+- T035, the rest: a same-cgroup contender, and the GPU compute runs again after 001's fix for
+  two own GPU tasks placed together past the time-slice rule. The CPU gates passed on 2026-11-17
+  (`docs/validation.md`, feature 004).

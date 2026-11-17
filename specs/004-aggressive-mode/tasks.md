@@ -276,6 +276,11 @@ refuses (SC-005).
     cross-cgroup contender, and no step on running own work. Open: a same-cgroup contender (needs
     root on this host) and the GPU compute runs. The first smoke run found the agent reserving
     granted launches against the protected budget (fixed in `9647d21`).
+  - *GPU compute (2026-11-17, `7d220ed`):* run with `tools/aggressive_gates.py`, three runs of each
+    arm. Protected admission placed two own GPU tasks together beside a saturating second
+    account, which fell to 26% of its alone rate: the one-more-process time-slice rule counts
+    only running processes. Passed to 001's GPU admission; rerun after its fix. The same-cgroup
+    run waits for the user's sudo step.
 
 ---
 
