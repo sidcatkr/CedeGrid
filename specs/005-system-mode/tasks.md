@@ -330,6 +330,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
   - what logind's `RemoveIPC=` does at the user's last logout (R18);
   - the CPU split change on hosts without per-account slices (R2).
 - [ ] T063 [P] Write the administrator page in `docs/system-mode.md`: install, policy, group, removal, and the exact root commands
+  - *Drafted:* `docs/system-mode.md` describes the finished feature; recheck it against moves (T039), the OOM loop (T048), doctor (T025) and purge (T053) before release.
 - [ ] T064 [P] Fix SUP-9 (a busy journal blocks the supervisor in an off phase) with a bounded lock wait and a test in `src/supervision/unix.rs` and `tests/supervision.rs`
 - [ ] T065 [P] Fix AGT-15 (a failed Authorize or renewal send is never resent): resend until delivered, as AGT-16 was, with a test in `src/agent/service.rs` and `tests/agent.rs`
 - [ ] T066 Change AGT-17's target from 005 to 002 in `specs/001-contention-modes/follow-ups.md`, with research R16's reason (replay is not used in System mode), and start `specs/005-system-mode/follow-ups.md` for this feature's own deferred items

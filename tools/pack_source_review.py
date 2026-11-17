@@ -42,6 +42,7 @@ ALLOWLIST = (
     'docs/release.md',
     'docs/sdk-adapter-work.md',
     'docs/soak-harness.md',
+    'docs/system-mode.md',
     'docs/validation.md',
     'docs/worker-protocol.md',
     'examples/agent.toml',
