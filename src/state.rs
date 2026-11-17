@@ -1150,6 +1150,111 @@ impl StateStore {
     }
 }
 
+/// The host's allowance for unprotected Aggressive (004 FR-015): one row in its own table of the
+/// state database, set only by interactive setup. Every read fails closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowance {
+    On {
+        set_at_unix_ms: u64,
+    },
+    /// Off, with the reason when the record could not be read.
+    Off {
+        reason: Option<String>,
+    },
+}
+
+const ALLOWANCE_SET_BY: &str = "interactive_setup";
+
+/// Opens the existing database for the allowance only: a regular file, never through a link, on
+/// a schema this build reads.
+fn allowance_connection(state_dir: &Path) -> Result<Connection> {
+    ensure_existing_state(state_dir)?;
+    let connection = Connection::open_with_flags(
+        state_dir.join(DATABASE_FILENAME),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    ensure!(
+        (IN_PLACE_SCHEMA_VERSION..=MAX_SCHEMA_VERSION).contains(&version),
+        "state schema version {version} is not one this build reads"
+    );
+    Ok(connection)
+}
+
+/// Reads the allowance. A missing, corrupt or unreadable database, a missing table or row, a
+/// schema this build does not read, or a row not set by interactive setup all read as off.
+pub fn read_allowance(state_dir: &Path) -> Allowance {
+    let read = || -> Result<Option<u64>> {
+        let connection = allowance_connection(state_dir)?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unprotected_allowance')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let row: Option<(i64, Option<i64>, String)> = connection
+            .query_row(
+                "SELECT enabled, set_at_unix_ms, set_by FROM unprotected_allowance WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((1, Some(at), by)) if by == ALLOWANCE_SET_BY && at >= 0 => Some(at as u64),
+            _ => None,
+        })
+    };
+    match read() {
+        Ok(Some(set_at_unix_ms)) => Allowance::On { set_at_unix_ms },
+        Ok(None) => Allowance::Off { reason: None },
+        Err(error) => Allowance::Off {
+            reason: Some(format!("the allowance record cannot be read: {error:#}")),
+        },
+    }
+}
+
+/// Turns the allowance on. Only interactive setup calls this, after its two steps.
+pub fn set_allowance(state_dir: &Path, at_unix_ms: u64) -> Result<()> {
+    let mut connection = allowance_connection(state_dir)?;
+    let at = i64::try_from(at_unix_ms).context("allowance time out of range")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS unprotected_allowance (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            set_at_unix_ms INTEGER,
+            set_by TEXT NOT NULL
+        );",
+    )?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO unprotected_allowance (id, enabled, set_at_unix_ms, set_by) VALUES (1, 1, ?1, ?2)",
+        params![at, ALLOWANCE_SET_BY],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Turns the allowance off. Any caller may; a missing database or table is already off.
+pub fn clear_allowance(state_dir: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    let connection = allowance_connection(state_dir)?;
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unprotected_allowance')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists {
+        connection.execute("DELETE FROM unprotected_allowance", [])?;
+    }
+    Ok(())
+}
+
 fn ensure_existing_state(state_dir: &Path) -> Result<()> {
     let directory =
         std::fs::symlink_metadata(state_dir).context("existing state directory is missing")?;

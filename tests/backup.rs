@@ -131,6 +131,8 @@ fn snapshot_restore_preserves_ledger_artifacts_and_fences_uncertain_capacity() {
     )
     .unwrap();
     let snapshot = d.path().join("snapshot");
+    // 004 FR-015: an allowance in the source never survives a restore.
+    cedegrid::state::set_allowance(&source, 1_794_000_000_000).unwrap();
     let manifest = backup::create(&source, &snapshot, limits()).unwrap();
     assert_eq!(manifest.retained_allocations, 1);
     assert!(!snapshot.join("operator-private-key.pem").exists());
@@ -146,6 +148,10 @@ fn snapshot_restore_preserves_ledger_artifacts_and_fences_uncertain_capacity() {
     assert!(backup::restore(&snapshot, &restored, limits(), false).is_err());
     assert!(!restored.exists());
     let result = backup::restore(&snapshot, &restored, limits(), true).unwrap();
+    assert!(matches!(
+        cedegrid::state::read_allowance(&restored),
+        cedegrid::state::Allowance::Off { .. }
+    ));
     assert_eq!(result.fenced_allocations, 1);
     assert!(result.coordinator_epoch > manifest.coordinator_epoch);
     let state = StateStore::open_read_only(&restored).unwrap();

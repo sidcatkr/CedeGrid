@@ -439,6 +439,8 @@ pub fn restore(
     checkpoint(&restored.connection)?;
     integrity(&restored.connection)?;
     drop(restored);
+    // A restored state never carries the unprotected Aggressive allowance (004 FR-015).
+    crate::state::clear_allowance(&destination)?;
     open_regular(&destination.join(DATABASE_FILENAME))?.sync_all()?;
     let report = RestoreReport {
         state_dir: destination.clone(),

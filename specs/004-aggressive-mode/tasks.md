@@ -41,17 +41,20 @@ must fail before its implementation task.
 
 ## Phase 2: Foundational (blocks both stories)
 
-- [ ] T002 [P] (now) Write the allowance tests in `tests/state.rs`. Cover: no table, no row, a
+- [x] T002 [P] (now) Write the allowance tests in `tests/state.rs`. Cover: no table, no row, a
   corrupt database file, an unreadable file, a schema version this build does not read. Each
   case reads as off and produces a one-line reason. Also: set with `set_by = "interactive_setup"`
   reads on, with its `set_at_unix_ms`; clearing works from any caller; a restore through
   `cedegrid::backup::restore` reads off afterwards. Data model: "`enabled`: off by default",
   "`set_by`: always `interactive_setup`".
-- [ ] T003 (now) Implement the allowance in `src/state.rs`: an additive table
+- [x] T003 (now) Implement the allowance in `src/state.rs`: an additive table
   `unprotected_allowance(enabled INTEGER NOT NULL, set_at_unix_ms INTEGER, set_by TEXT)` created
   if absent, a read that returns `Off` with a reason on every error, `set_on(at)` for interactive
   setup only, and `clear()`. In `src/backup.rs` `restore`, reset it to off after the restore.
   Passes T002.
+  - *Done:* `state::{Allowance, read_allowance, set_allowance, clear_allowance}`. Reads also
+    count a row not set by interactive setup, or a database reached through a link, as off.
+    `backup::restore` clears it, and `tests/backup.rs` fails without that.
 - [ ] T004 [P] (after T622) Write the mode-value tests in `tests/contention.rs` and
   `tests/configuration.rs`:
   - `aggressive` parses and names in configuration, jobs and the wire, with order 3 and the red

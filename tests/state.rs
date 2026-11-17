@@ -1822,3 +1822,102 @@ fn observations_are_pruned_by_age_and_row_count() {
     assert_eq!(cedegrid::state::OBSERVATION_RETENTION_MS, day);
     assert_eq!(cedegrid::state::OBSERVATION_ROWS, 200_000);
 }
+
+mod unprotected_allowance {
+    //! 004 FR-015: the host's allowance for unprotected Aggressive fails closed.
+    use super::storage_dir;
+    use cedegrid::state::{
+        Allowance, DATABASE_FILENAME, StateStore, clear_allowance, read_allowance, set_allowance,
+    };
+
+    fn off(allowance: &Allowance) -> bool {
+        matches!(allowance, Allowance::Off { .. })
+    }
+
+    #[test]
+    fn a_new_store_reads_off_and_a_set_reads_on_with_its_time() {
+        let directory = storage_dir();
+        drop(StateStore::open(directory.path()).unwrap());
+        assert!(off(&read_allowance(directory.path())));
+        set_allowance(directory.path(), 1_794_000_000_000).unwrap();
+        assert_eq!(
+            read_allowance(directory.path()),
+            Allowance::On {
+                set_at_unix_ms: 1_794_000_000_000
+            }
+        );
+        // The store still opens and works with the table present.
+        drop(StateStore::open(directory.path()).unwrap());
+        clear_allowance(directory.path()).unwrap();
+        assert!(off(&read_allowance(directory.path())));
+        // Clearing twice, or with no table, is fine.
+        clear_allowance(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn a_missing_database_reads_off_and_clears_without_error() {
+        let directory = storage_dir();
+        let allowance = read_allowance(directory.path());
+        assert!(off(&allowance), "{allowance:?}");
+        clear_allowance(directory.path()).unwrap();
+        assert!(set_allowance(directory.path(), 1).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_database_reads_off() {
+        let directory = storage_dir();
+        drop(StateStore::open(directory.path()).unwrap());
+        set_allowance(directory.path(), 1).unwrap();
+        let path = directory.path().join(DATABASE_FILENAME);
+        for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
+            let _ = std::fs::remove_file(directory.path().join(name));
+        }
+        std::fs::write(&path, b"not a database at all, just bytes").unwrap();
+        let allowance = read_allowance(directory.path());
+        assert!(off(&allowance), "{allowance:?}");
+    }
+
+    #[test]
+    fn another_schema_version_reads_off() {
+        let directory = storage_dir();
+        drop(StateStore::open(directory.path()).unwrap());
+        set_allowance(directory.path(), 1).unwrap();
+        let connection =
+            rusqlite::Connection::open(directory.path().join(DATABASE_FILENAME)).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+        let allowance = read_allowance(directory.path());
+        assert!(off(&allowance), "{allowance:?}");
+    }
+
+    #[test]
+    fn a_row_set_by_anything_but_interactive_setup_reads_off() {
+        let directory = storage_dir();
+        drop(StateStore::open(directory.path()).unwrap());
+        set_allowance(directory.path(), 1).unwrap();
+        let connection =
+            rusqlite::Connection::open(directory.path().join(DATABASE_FILENAME)).unwrap();
+        connection
+            .execute("UPDATE unprotected_allowance SET set_by = 'script'", [])
+            .unwrap();
+        drop(connection);
+        assert!(off(&read_allowance(directory.path())));
+    }
+
+    #[test]
+    fn a_database_symlink_reads_off() {
+        let directory = storage_dir();
+        let real = storage_dir();
+        drop(StateStore::open(real.path()).unwrap());
+        set_allowance(real.path(), 1).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                real.path().join(DATABASE_FILENAME),
+                directory.path().join(DATABASE_FILENAME),
+            )
+            .unwrap();
+            assert!(off(&read_allowance(directory.path())));
+        }
+    }
+}
