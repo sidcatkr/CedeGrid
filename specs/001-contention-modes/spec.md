@@ -854,6 +854,52 @@ back more.
   supervisor takes it so; a grant still needs time left. One that cannot be handed on is
   reported once (`drain_undelivered`) (item 062 Part B).
 
+### Session 2026-11-17
+
+- Q: When has a task complied with a memory hint at its deadline? → A: When its usage of the
+  resource is at or below the larger of two targets: the one sent when the hint began and the
+  current one. There is no tolerance. A target the task cannot reach, such as 0 for a task that
+  holds memory it cannot free, is not complied with (report 056 Decision 1 C).
+- Q: What happens at the deadline to a task that complied while own memory is still above its
+  share, because another own task grew? → A: It is not drained or terminated for that hint. If
+  the over-share order still selects it, it gets a new hint with the current target and a new
+  deadline counted from that interval; if not, its hint is lifted as before. A task above its
+  target at the deadline escalates as before. The same holds for Guaranteed work, which passes
+  its excess on (FR-024) only once the new hint's wait is over, and on the critical path with the
+  critical hint deadline (report 056 Decision 1 C).
+- Q: From when does SC-012's reclaim bound count for the excess a new hint answers? → A: From the
+  interval that first shows that excess. Memory own work takes after a hint was sent is new
+  demand, so each part of the excess has the bound from when it appeared. The floor can therefore
+  stay breached one hint deadline longer for each growth of another own task, in exchange for not
+  draining the task that complied (report 056 Decision 1 C).
+- Q: Does Performance cap, pause or drain running own work on CPU or GPU compute for another
+  principal's demand? → A: No. Running own work in Performance and Aggressive is not stepped for
+  another principal, for own usage above its admission target, or for activity of unknown amount,
+  in Tracked and Full and on every GPU device; what another principal gets is the kernel's and
+  the driver's split beside the same own work without CedeGrid. Performance holds back at
+  admission only: its 2% margin, and no new own work where it would take a contending principal
+  below the lesser of its demand and its fair share (constitution 8.0.0 Principle II; report 057
+  points 3 and 6, A).
+- Q: What does Performance do at a memory floor breach? → A: It gives no own memory back: no
+  hint, drain or TERM, on the critical path and for Guaranteed memory too, and no OOM mark except
+  under `ram.prefer_own_oom_victim`. Every own task gets the save-progress signal, admission stays
+  closed while the floor is breached, and the kernel decides at exhaustion, as it would beside
+  the same own work without CedeGrid. Yield First and Neutral keep giving memory way (report 057
+  point 1 B).
+- Q: What does Performance do while CPU telemetry is unknown or a compute resource has activity
+  of unknown amount? → A: It admits no new own work there and holds every step; it takes no new
+  compute step (report 057 point 2 A).
+- Q: Does Performance keep the GPU time-slice duty? → A: No. In Performance and Aggressive the
+  context counts, the slice-bound readings and the external estimate are kept for the record and
+  for admission, no duty is set and no re-measure window opens, and one more own process is
+  admitted on a time-sliced device only while (m + 1) × k ≤ E or no counted principal is
+  slice-bound, recorded as `gpu_time_slice_admission_held` otherwise. Neutral keeps its duty
+  (report 057 point 4).
+- Q: Does this change how jobs of different modes on one node are held, or the caps of Yield
+  First and Neutral? → A: No. A Performance job on a node governed by Neutral is held as before,
+  and Yield First and Neutral keep their caps; both are open decisions (report 057 point 7, C1 to
+  C3).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -865,6 +911,9 @@ back more.
   principal, whatever its user ID; its share covers own work plus its unmanaged processes. Usage
   by lower user IDs is *background* demand, subtracted from capacity. A change that forms no
   principal does not restart Yield First's scale-up cooldown (FR-034).
+- **Baseline**: the same own work started plainly without CedeGrid in the same place: the same
+  account, control group and session layout. Harm to other workloads and loss to own work are
+  measured against it (constitution Principle II).
 - **Fair share**: a work-conserving, equal split of a contended resource among active
   principals. Capacity a principal does not use is available to the others.
 - **Margin**: capacity own work leaves unused for external demand to grow into, justified only
@@ -1018,11 +1067,12 @@ compare own usage over time with that mode's definition, including unknown and o
    block admission.
 3. **Given** Performance on an idle host, **When** own work ramps up, **Then** it uses all
    capacity external demand is not using, minus a small safety margin, and scales up quickly.
-   **When** external demand grows, **Then** own work yields what is needed to restore the margin
-   and floors. **When** the resource is contended, **Then** compute keeps what external demand
-   does not take, minus the margin, and never goes below the Neutral fair share.
-4. **Given** any mode, **When** a no-harm floor would be crossed, **Then** own work steps down
-   until the floor holds, whatever the mode would otherwise allow.
+   **When** external demand grows, **Then** running own work is not stepped, and no new own work
+   is admitted while it would take that demand below its fair share. **When** a floor is
+   breached, **Then** own memory is not given up and the kernel decides, as without CedeGrid.
+4. **Given** Yield First or Neutral, **When** a no-harm floor would be crossed, **Then** own work
+   steps down until the floor holds; **given** any mode, **when** new work would cross a floor,
+   **then** it is not admitted.
 5. **Given** any mode, **When** CedeGrid acts, **Then** it acts only on own processes. No external
    process is signalled, reprioritized, throttled, paused, moved or adopted.
 6. **Given** any resource and any observation, **When** the three modes compute own work's
@@ -1060,6 +1110,10 @@ the target is drained after the bounded wait.
 6. **Given** own memory above its fair share and an over-share task that does not free its
    excess, **When** its hint wait passes, **Then** that task is drained, in-share tasks receive
    no hint, and the task starts again once its memory fits.
+7. **Given** an over-share task that reaches its target while another own task grows, so own
+   memory stays above its share, **When** its hint wait passes, **Then** it is not drained; it
+   receives the current target with a new deadline, and it is drained only if it is above its
+   target when that deadline passes.
 
 ---
 
@@ -1248,10 +1302,9 @@ node reports with the expected per-resource values at each step.
   follows its class rules and FR-057, not a node-wide stop.
 - **A finer-grained control is unavailable on the host** (for example, no delegated control
   subtree). The ladder uses the steps that are available and reports which ones it skipped.
-- **Others' growth breaches a memory floor in Performance while own memory is within its fair
-  share.** Own memory is not hinted or drained; in-share tasks get one save-progress signal
-  (FR-075). If memory keeps filling, the kernel's out-of-memory killer decides, with in-share own
-  work at its launch baseline (FR-023).
+- **Others' growth breaches a memory floor in Performance.** Own memory is not hinted or
+  drained; every own task gets one save-progress signal (FR-075). If memory keeps filling, the
+  kernel's out-of-memory killer decides, with own work at its launch baseline (FR-023).
 - **An own task is killed by the out-of-memory killer.** Within its fair share it is requeued
   once free memory is back above the floor, without using a retry; above it, it fails as usual
   (FR-076).
@@ -1334,9 +1387,10 @@ node reports with the expected per-resource values at each step.
 - **FR-008**: An unknown measurement for one allocation or one resource MUST affect only that
   allocation's or resource's admission and steps. In every mode it MUST first hold the current
   step and block expansion. It MAY escalate only after a bounded, configurable unknown window,
-  and MUST NOT by itself drain unrelated work. In Performance and Aggressive, compute escalation
-  stops at FR-022's fair-share limit, and unknown CPU telemetry holds own CPU at Neutral's fair
-  share (FR-022); Yield First and Neutral keep a CPU budget of 0 while CPU is unknown.
+  and MUST NOT by itself drain unrelated work. In Performance and Aggressive an unknown compute
+  measurement, or activity of unknown amount, blocks admission on that resource and holds every
+  step; it does not escalate to a compute step (FR-022). Yield First and Neutral keep a CPU budget
+  of 0 while CPU is unknown.
 - **FR-009**: GPU memory headroom MUST account for memory the device reserves for itself.
 - **FR-010**: Each external GPU context MUST be classified as quiet, active or unknown. Quiet
   requires positive evidence over a sustained, configurable window of healthy observation.
@@ -1381,13 +1435,14 @@ node reports with the expected per-resource values at each step.
   - Otherwise memory contention MUST start at the hint step for hint-ready allocations, and at
     drain for the others. GPU memory never takes a cap, and pause MUST NOT be used to resolve
     memory contention.
-  - When own CPU usage is over its target and the budget did not fall (external usage did not
+  - In Yield First and Neutral, when own CPU usage is over its target and the budget did not fall (external usage did not
     rise and no contention lowered the target), the actuator first holds each capped allocation
     at its cap from its last measured rate, which is not a new step. Own work steps down only when usage stays over the target for
     `min_step_dwell_intervals` with caps applied. The cause is `own_over_target`, and the
     scale-up interval does not restart for it once enforcement holds. A budget that fell, because
     external usage rose or contention lowered the target, keeps the steps and bounds above
-    (SC-002).
+    (SC-002). In Performance and Aggressive own usage above the admission target takes no step;
+    it closes admission until usage is back within it (FR-022).
   - Running CPU work MUST yield an excess tier by tier in FR-016's order. Within a tier, caps
     already held MUST be lowered at one level, the highest first, as held caps rise equally
     (FR-013), and own usage over its target MUST be shared the same way, so no single cap falls
@@ -1419,8 +1474,8 @@ node reports with the expected per-resource values at each step.
   bound MUST escalate to the next step. For CPU alone that is the hint, whose target also caps
   CPU, at the 5% minimum duty for a target of zero; a worker that is not hint-ready gets a cap at
   the same minimum duty instead. Either is the last CPU step while the contention lasts: it does
-  not pause again, and CPU contention alone never drains (SC-007). In Performance and Aggressive,
-  FR-022's compute rule replaces this escalation.
+  not pause again, and CPU contention alone never drains (SC-007). Performance and Aggressive take
+  no compute step for other principals (FR-022), so nothing escalates there.
 - **FR-015**: Each node MUST have exactly one authoritative policy state that decides yield steps.
   Supervisors MUST carry out that authority's steps and enforce deadlines. They MUST NOT make
   contradicting yield decisions. When the authority is lost, supervisors MUST hold the current
@@ -1516,7 +1571,7 @@ node reports with the expected per-resource values at each step.
     time-sliced GPU's time-slice path it escalates no further than the cap.
 
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
-  memory; in Performance and Aggressive FR-023's in-share rule applies. On GPU compute, a share
+  memory; in Performance and Aggressive FR-023's floor rule applies. On GPU compute, a share
   is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
   the granularity, is documented. While a GPU compute cap sets an allocation's duty, its on- and
   off-phases follow a clock every supervisor on the node shares, CLOCK_MONOTONIC modulo the
@@ -1527,7 +1582,7 @@ node reports with the expected per-resource values at each step.
   phase. A device is time-sliced when it is neither under MPS (an MPS
   control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
   MIG state cannot be read is not taken as time-sliced. On a time-sliced device the driver gives
-  each busy context its slice, so in Performance, Aggressive and Neutral own work MUST NOT be
+  each busy context its slice, so in Neutral own work MUST NOT be
   capped on GPU compute while m × k ≤ E (the time-slice rule), m being own work's processes with
   the owner's unmanaged ones (the owner is one principal, FR-059), E the external processes and k
   the external principals, each counted while it is still listed on the device and has a compute
@@ -1542,7 +1597,7 @@ node reports with the expected per-resource values at each step.
   holds when m ≤ 1, m counting the processes listed there, since unseen external contexts can only
   add to E and k. VRAM is unaffected,
   and Yield First keeps its targets and duties. When m × k > E, own work at full duty holds more
-  slices than its fair share, and in Performance, Aggressive and Neutral its GPU compute MUST be
+  slices than its fair share, and in Neutral its GPU compute MUST be
   capped from the context counts (the time-slice duty):
   - An external principal j with E_j busy contexts is slice-bound when its reading in the
     external estimate (uncapped intervals and re-measure windows only) is at least
@@ -1552,8 +1607,7 @@ node reports with the expected per-resource values at each step.
     counts as one with one context.
   - With no slice-bound principal there is no GPU compute cap. Otherwise each own process runs at
     the base duty d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), E_b and k_b being the
-    slice-bound principals' contexts and number and the margin the mode's (Performance 2%, Neutral
-    5%, Aggressive 0), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
+    slice-bound principals' contexts and number and the margin the mode's (Neutral 5%), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
     time the slice-bound principals want, less the margin the mode's target holds; principals that
     are not slice-bound keep their slices.
   - Own work pays for the re-measure windows, which hold it at full duty so CedeGrid can read
@@ -1562,7 +1616,7 @@ node reports with the expected per-resource values at each step.
     included, averages d0 and others keep their share over time. w is the window's
     `GPU_DEMAND_WINDOW_DECISIONS` decisions of full duty in each cycle of those decisions and the
     `GPU_DEMAND_WINDOW_EVERY_MS` gap before the next window: 6 of 66 decisions at the default
-    500 ms, so d0' is 725 with no margin, 692 in Performance and 643 in Neutral at m = 2, E_b = 1.
+    500 ms, so d0' is 725 with no margin and 643 in Neutral at m = 2, E_b = 1.
     Where no window can open (the governing mode or an allocation on the device in Yield First, or
     an allocation there held by a CPU step of cap or more), d0' = d0.
   - From the device's own utilization alone, averaged over the step dwell in per mille, rounded
@@ -1598,7 +1652,7 @@ node reports with the expected per-resource values at each step.
     slice-bound principals with their readings and thresholds, d0, w and d0', the duty
     and the step-up state.
 
-  On a device not known to be time-sliced, in Performance, Aggressive and Neutral, the duty is
+  On a device not known to be time-sliced, in Neutral, the duty is
   the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in
   which it ran on the device, at least 6 and at most 60, restarted with the external estimate and
   when own work's allocations there change), clamped to the minimum duty and 1. While the share
@@ -1644,7 +1698,7 @@ node reports with the expected per-resource values at each step.
   `saturation_percent` of device utilization, and probing and satisfied records apply;
   admission still follows FR-026 and FR-027. On a time-sliced device a process's reading follows
   where the sampler caught its context, so gaps in own work raise another user's reading at the
-  same demand; in Performance, Aggressive and Neutral, the external amount that sets own work's
+  same demand; in Neutral, the external amount that sets own work's
   GPU compute target, per principal and in total (the owner's unmanaged usage left out, the
   interval's own amount of it counting as in the interval's view), MUST therefore be the average
   of the amounts measured in the last 60 intervals in which own work ran uncapped on the device (no cap below full
@@ -1663,36 +1717,30 @@ node reports with the expected per-resource values at each step.
   interval count and the time since the last uncapped interval. The node report's held-back breakdown
   states, per device, whether the amount was measured or why it is unknown.
 - **FR-022**: Performance MUST:
-  - let own work use all capacity external demand is not using, minus a small safety margin
-    (default 2%) on CPU and GPU compute; memory keeps the floors, and own memory within its fair
-    share is not given up for a floor breach that others' growth caused (FR-023); on a
-    time-sliced GPU while FR-021's time-slice rule holds, no GPU compute margin is held;
+  - let own work use all capacity external demand is not using, minus a small admission margin
+    (default 2%) on CPU and GPU compute; running own work is not capped for the margin. Memory
+    keeps the floors as FR-023 states for this mode;
   - scale up quickly;
-  - when external demand grows, yield what is needed to restore the margin and floors within the
-    mode's response time;
-  - on a contended compute resource, keep the larger of the Neutral fair share and capacity
-    minus observed external usage minus the margin: give back what external demand takes, and
-    never go below the fair share; on GPU compute, observed external usage is FR-021's average
-    over intervals in which own work ran uncapped, and on a time-sliced device own work is not
-    capped while FR-021's time-slice rule holds and takes FR-021's time-slice duty, not this
-    target, while it does not;
-  - on CPU and GPU compute, in Tracked and Full, never take a step that targets below the fair
-    share: a cap that misses its target after the hold window (the step dwell) is recomputed from the measured
-    rate and applied again, without escalating to pause; only a cap already at the minimum duty
-    with own usage still above the fair share may pause, for at most one monitor interval, before
-    returning to the cap, and on a time-sliced GPU's time-slice path no GPU compute step pauses
-    (FR-021);
-  - while external activity of unknown amount exists, hold own work to Neutral's fair share,
-    counting that activity as one active principal, except on a time-sliced GPU, where FR-021's
-    time-slice rule or its time-slice duty applies;
-  - while CPU telemetry is unknown, hold own CPU at Neutral's fair share, counting the unknown as
-    one active principal, and with no fair share known yet take no new step.
+  - not cap, pause or drain running own work on CPU or GPU compute for another principal's
+    demand, for own usage above its admission target, or for activity of unknown amount, in
+    Tracked and Full and on every GPU device. What another principal gets beside it is the
+    kernel's and the driver's split, as beside the same own work without CedeGrid;
+  - admit new own work on a compute resource only within max(S, A − margin), S being own work's
+    fair share counting each contending principal at the lesser of its demand and its share, so
+    that new own work never takes a contending principal below that. On a time-sliced GPU it
+    admits one more own process only while (m + 1) × k ≤ E (FR-021's counts) or no counted
+    principal is slice-bound, and records `gpu_time_slice_admission_held` otherwise;
+  - while CPU telemetry is unknown, or a compute resource has activity of unknown amount, admit
+    no new own work there and hold every step (FR-008);
+  - keep the operator envelope (FR-057), the Guaranteed rules (FR-024) and explicit operator
+    drain, as every mode does.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
   Yield First ≤ Neutral ≤ Performance. Configuration enforces it by construction: the margins
-  are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance,
-  Neutral and Performance share the fair share under contention, and floors bound every mode on
-  memory: own memory above its fair share in every mode, and all own memory in Yield First and
-  Neutral, so own memory in Yield First ≤ Neutral ≤ Performance still holds.
+  are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance.
+  Under contention Neutral holds the fair share and Performance takes no compute step, so its
+  running target is the whole capacity and its admission target, max(S, A − m_P·C), is at least
+  Neutral's S. On memory, Yield First and Neutral give way at the floors and Performance does not
+  (FR-023), so Yield First ≤ Neutral ≤ Performance still holds.
 - **FR-023**: No-harm floors MUST apply in every mode:
   - a minimum available host RAM;
   - a minimum free memory per GPU device, so that other workloads' allocations do not fail;
@@ -1700,8 +1748,8 @@ node reports with the expected per-resource values at each step.
     `oom_score_adj`: each own task's value at launch, and each family member's when it joins, is
     its baseline, never written below; a member that started while its run was marked takes its
     parent member's baseline instead, since its value then is CedeGrid's mark. Own
-    work within its memory fair share stays at its baseline. While own memory is above its fair
-    share, the own tasks that make up the excess, in the ladder's memory victim order, are at
+    work within its memory fair share stays at its baseline. In Yield First and Neutral, while own
+    memory is above its fair share, the own tasks that make up the excess, in the ladder's memory victim order, are at
     1000 for every process of their family, children started later included, and return to
     their baseline once own memory is back within its share. `ram.prefer_own_oom_victim = true`
     (default false; setup marks it as a risk to own work) puts every own task at 1000. Every
@@ -1709,16 +1757,16 @@ node reports with the expected per-resource values at each step.
     its fair share. Without privileges, in-share own work is protected only up to everyone
     else's baseline: the kernel can still take it as the largest process.
 
-  Own memory above its fair share MUST give way at the floors in every mode, and in Yield First
-  and Neutral all own memory does. In Performance and Aggressive, a floor breach steps own memory
-  only down to its fair share: own memory within its fair share MUST NOT be hinted, drained or
-  sent TERM for a breach that others' growth caused, on the critical path (FR-063) and for
-  Guaranteed memory (FR-024) too. It gets the save-progress signal (FR-075) instead, and the
-  kernel's out-of-memory killer may then take another workload's process, as it would without
-  CedeGrid. Own memory above its fair share is stepped as in the other modes, and the operator's
-  envelope (FR-057) applies in every mode. In every mode an over-share task gives back first: it
-  is hinted, and drained when its wait passes without the excess freed. No more over-share tasks
-  are drained than bring own memory within its share, counting drains already decided, and
+  In Yield First and Neutral own memory gives way at the floors: the over-share tasks first, as
+  below, then the in-share ones. In Performance and Aggressive own memory MUST NOT be hinted,
+  drained or sent TERM for a floor breach, on the critical path (FR-063) and for Guaranteed
+  memory (FR-024) too, and no own task is marked for the OOM killer, except under
+  `ram.prefer_own_oom_victim`. Every own task gets the save-progress signal (FR-075), and the
+  kernel decides at exhaustion, as it would beside the same own work without CedeGrid. The floors
+  still close admission (FR-066), and the operator's envelope (FR-057) applies in every mode. In
+  Yield First and Neutral an over-share task gives back first: it
+  is hinted, and drained when its wait passes and it has not complied (FR-037). No more
+  over-share tasks are drained than bring own memory within its share, counting drains already decided, and
   in-share tasks are not capped, hinted or drained for that excess. The over-share tasks are asked
   for the excess and no more, the last of them only for the part that completes it, and while
   their hint or drain wait runs that part is not passed to anyone. What the floor or the mode's
@@ -1741,8 +1789,8 @@ node reports with the expected per-resource values at each step.
   - MAY be lowered in share and hinted;
   - MAY have CPU usage above their request capped, but MUST NOT be capped below their request;
   - MUST NOT be drained by automatic yielding, except to restore a RAM or GPU memory floor or the
-    envelope under floor policy A (for a floor in Performance and Aggressive, only memory above
-    own work's fair share, FR-023), as the last step: after all opportunistic work on the
+    envelope under floor policy A (never for a floor in Performance and Aggressive,
+    FR-023), as the last step: after all opportunistic work on the
     resource that anyone can act on has been released (in Yield First and Neutral, by the
     resource's governing mode, an opportunistic allocation that holds none of the resource is not
     such work, and one whose reading is missing counts by its charge), after a hint whose
@@ -1895,10 +1943,12 @@ node reports with the expected per-resource values at each step.
   fixed number of items under the request size limit, larger sets split, and a retried batch MUST
   be idempotent per item. Per-item events MUST be the same as for single requests. Against a peer
   without the feature, the node MUST send single requests (FR-032).
-- **FR-075**: When free memory on a resource falls below its floor, the node MUST send the
-  in-share own tasks on that resource a save-progress signal through both SDKs, once per episode,
-  whoever caused the breach. It is not a drain and asks for no memory back. Tasks above the fair
-  share get no signal: they get their hint, and a drain gives them their drain time.
+- **FR-075**: When free memory on a resource falls below its floor, the node MUST send a
+  save-progress signal through both SDKs, once per episode, whoever caused the breach, to the
+  in-share own tasks on that resource in Yield First and Neutral and to every own task on it in
+  Performance and Aggressive. It is not a drain and asks for no memory back. In Yield First and
+  Neutral tasks above the fair share get no signal: they get their hint, and a drain gives them
+  their drain time.
 - **FR-076**: An own task MUST count as killed by the out-of-memory killer when it ended by
   SIGKILL in an interval in which the host's `/proc/vmstat` `oom_kill` count rose, or, in Full,
   its leaf's `memory.events` `oom_kill` count rose. The node MUST record whether own memory was
@@ -1909,6 +1959,10 @@ node reports with the expected per-resource values at each step.
     retries. Its status and report MUST say that an out-of-memory condition it did not cause
     killed it.
   - Above its share: the kill is own fault and a normal failure, with no requeue.
+  - In Performance and Aggressive, which give no memory back at a floor breach (FR-023), a kill
+    counts as within its share when free memory was below the floor before the kill and own
+    memory grew by no more than `noise_tolerance_mib` over that breach episode; otherwise, or with
+    that growth unknown, it is own fault.
 - **FR-077**: The agent MUST raise its own soft `RLIMIT_NOFILE` to the hard limit at start, and the
   child MUST restore the original soft limit before the user's command runs. A launch whose
   descriptors do not fit under the limit with headroom MUST be refused with a reason. `EMFILE` or
@@ -2053,8 +2107,13 @@ node reports with the expected per-resource values at each step.
 - **FR-037**: A hint MUST carry the deadline the policy enforces for it: the resource's hint
   deadline, the Guaranteed hint deadline for Guaranteed work, or the critical hint deadline on the
   critical path. When the deadline passes without compliance, the ladder escalates; a memory hint
-  waits for its deadline in every mode. While an over-share task's hint or drain wait runs, its
-  excess is not passed to in-share tasks.
+  waits for its deadline in every mode. A memory hint is complied with when, at its deadline, the
+  task's usage is at or below the larger of the target sent when the hint began and the current
+  target; a target the task cannot reach is not complied with. A task that complied is not
+  drained or terminated for that hint: while own memory is still above its share and the
+  over-share order still selects it, it gets a new hint with the current target and a new
+  deadline, and otherwise its hint is lifted. While an over-share task's hint or drain wait runs,
+  its excess is not passed to in-share tasks.
 - **FR-062**: Each supervisor MUST report, per allocation, whether the worker has acknowledged its
   target file (`hint_ready`) and whether it observes the drain file (`observes_drain`), in its
   `adjusted` and `state` events and when either changes. The agent MUST include both in the
@@ -2071,9 +2130,8 @@ node reports with the expected per-resource values at each step.
     the pass that reads the step and records the step and the drain after it; KILL follows the
     grace counted from the TERM that was sent.
 
-  In Performance and Aggressive the critical path acts only on own memory above its fair share
-  when others' growth caused the breach; in-share allocations get the save-progress signal
-  (FR-075). The over-share order (FR-016) holds on the critical path. Out-of-memory order by fault
+  In Performance and Aggressive the critical path takes no step on own memory; every own task
+  gets the save-progress signal (FR-075). The over-share order (FR-016) holds on the critical path. Out-of-memory order by fault
   (FR-023) stays the final backstop.
 
 **Observability**
@@ -2111,7 +2169,7 @@ node reports with the expected per-resource values at each step.
   - MUST appear in `doctor`, `status` and node reports while active, with their marker.
 - **FR-044**: No option MAY permit acting on an external process, raising own priority, or
   putting another workload at risk of an out-of-memory kill, swap thrash or a failed GPU
-  allocation. FR-023's in-share memory rule in Performance and Aggressive is a rule of those
+  allocation. FR-023's floor rule in Performance and Aggressive is a rule of those
   modes, not an option.
 - **FR-045**: The risk markers are justified as follows.
 
@@ -2284,10 +2342,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   paused, then at the minimum duty after `pause_bound_s`, and in Neutral the fair share. Where own
   work saturated the resource before its first cap, Yield First's first step is a cap to the
   margin within the fair share, so at least the fair share is back within the same bound; a
-  demand smaller than one margin step is probed instead (FR-021). In Performance, own CPU usage
-  falls by at least its margin per interval while external demand grows into the freed
-  capacity, so it reaches the fair share within ⌈(own usage − fair share) ÷ margin⌉ intervals
-  (24 intervals, 12 s, from 98% with the 2% margin), and never goes below it. With demand that
+  demand smaller than one margin step is probed instead (FR-021). In Performance own CPU is not
+  stepped for another principal's demand (SC-019), and no new own work is admitted while it
+  would take that principal below the lesser of its demand and its fair share. With demand that
   fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
   when CPU is the only contended resource. A principal whose demand is on record as satisfied
   gets that demand back within the same bound when it returns. These bounds are for other
@@ -2300,14 +2357,16 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   - On an idle host, own work reaches the Performance ramp target within the ramp time, on CPU
     and on GPU compute. The defaults are 90% of available capacity minus the margin, within
     10 s.
-  - When an external workload starts, it gets its demanded usage, up to its fair share, within
-    the reclaim bounds of SC-012.
+  - When an external workload starts, no new own work is admitted on that resource while it
+    would take the workload below the lesser of its demand and its fair share, and the workload
+    gets no less from running own work than beside the same own work without CedeGrid (SC-019).
 - **SC-005**: In every mode and with every caution option active:
   - Zero signals, priority changes or control-group changes are applied to external processes,
     as verified by an audit of every actuation in the test and pressure suites.
   - Zero external out-of-memory kills or external GPU allocation failures attributable to
-    CedeGrid in the pressure suite. A kill while own memory was within its fair share in
-    Performance or Aggressive is not attributable to CedeGrid (FR-023).
+    CedeGrid in the pressure suite. A kill in Performance or Aggressive at a floor breach
+    own growth did not cause is not attributable to CedeGrid, nor is a kill the baseline run
+    shows too (FR-023).
 - **SC-006**: A GPU job runs to completion on a device already occupied by an external context,
   under Neutral and under Performance, with native evidence on at least one supported NVIDIA
   device.
@@ -2329,8 +2388,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   - With `NO_COLOR` set, no color escape sequence is emitted.
 - **SC-012**: Reclaim bounds, each measured from the first observation of the demand or breach to
   the step that frees the resource, for memory the forced termination of own work that has not
-  released it:
-  - CPU: 2 monitor intervals in Yield First and Neutral; Performance as SC-002 states.
+  released it. Memory own work takes after a hint was sent is new demand, measured from the
+  interval that first shows it (FR-037):
+  - CPU: 2 monitor intervals in Yield First and Neutral; Performance takes no CPU step for others (FR-022).
   - RAM and GPU memory, opportunistic work: at most hint deadline + drain timeout + termination
     grace + 1 monitor interval (defaults 5 + 3 + 2 + 0.5 = 10.5 s); without a hint, drain
     timeout + grace + 1 interval (5.5 s).
@@ -2361,7 +2421,17 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   mode's margin: 480 in Performance, 450 in Neutral, 500 in Aggressive), not the recorded one, and
   the other user's
   rate with CedeGrid is at least min(its rate without CedeGrid, its fair share × its rate alone) −
-  3%. The ratio with CedeGrid ÷ without CedeGrid beside the same user is reported beside them.
+  3%. The ratio with CedeGrid ÷ without CedeGrid beside the same user is reported beside them. In Performance and Aggressive SC-018 and SC-019 replace this
+  bound.
+- **SC-018**: In Performance, against the baseline (the same own work started without CedeGrid
+  in the same place): in each gate shape, in Tracked and in Full, at least 3 repeats with
+  CedeGrid and 3 without, own work's throughput with CedeGrid is at least its throughput without
+  less the spread, the spread being the larger of the two sets' max − min. At a floor breach no
+  own task is hinted, drained or sent TERM.
+- **SC-019**: In the same runs, the other user's rate with CedeGrid is at least its rate without
+  less the spread, and its p99 at most its p99 without plus the spread. A gain beyond the spread
+  is reported, since it means own work gave something back. At a host-wide OOM, the kernel's
+  victim is the one the baseline shows, or own work.
 
 ### Provisional thresholds
 

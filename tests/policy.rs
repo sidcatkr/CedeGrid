@@ -3303,7 +3303,7 @@ fn an_unreadable_list_with_no_readable_one_before_it_is_unchanged() {
 fn own_memory_above_the_last_readable_share_gives_way_under_an_unreadable_list() {
     use cedegrid::contention::{ContentionMode, ResourceKey};
     let mut cfg = config();
-    cfg.contention.default_mode = ContentionMode::Performance;
+    cfg.contention.default_mode = ContentionMode::Neutral;
     cfg.contention
         .acknowledge_caution
         .insert("performance_mode".into());
@@ -8428,9 +8428,9 @@ mod oom_order {
     #[test]
     fn a_new_memory_mark_on_an_estimate_is_read_fresh_first() {
         use std::cell::Cell;
-        // In Performance own memory within its share is not given up for others' growth.
+        // Neutral, since Performance marks no task (FR-023).
         let mut cfg = config();
-        cfg.contention.default_mode = cedegrid::contention::ContentionMode::Performance;
+        cfg.contention.default_mode = cedegrid::contention::ContentionMode::Neutral;
         let estimated = std::collections::BTreeSet::from(["b".to_string()]);
         let reads = Cell::new(0);
         let interval = |engine: &mut PolicyEngine, available, now, fresh: Option<u64>| {
@@ -8491,7 +8491,6 @@ mod oom_order {
                 .map(|a| a.allocation_id.clone())
                 .collect()
         };
-        assert!(ram_steps(&refuted).is_empty(), "{:?}", refuted.actions);
         assert_eq!(observed.map(|o| o.ram_mib), Some(4_000));
         // Fresh confirms the estimate: the mark stands, and held unchanged it reads nothing.
         let mut engine = PolicyEngine::new();
@@ -8502,7 +8501,7 @@ mod oom_order {
             confirmed.oom_preferred,
             std::collections::BTreeSet::from(["b".to_string()])
         );
-        assert_eq!(ram_steps(&confirmed), vec!["b".to_string()]);
+        assert!(ram_steps(&confirmed).contains(&"b".to_string()));
         let (held, _) = interval(&mut engine, 0, 1_000, Some(6_000));
         assert_eq!(held.oom_preferred, confirmed.oom_preferred);
         assert_eq!(reads.get(), 2, "a held mark needs no new read");
@@ -8646,6 +8645,74 @@ mod floors_by_mode {
             .collect()
     }
 
+    /// In Performance a floor breach others caused takes no step on own memory: no hint, drain or
+    /// TERM, for an over-share task, for Guaranteed work and on the critical path, and no task is
+    /// marked for the OOM killer. Every own task gets the save-progress signal once, and admission
+    /// stays closed (FR-023, FR-063, FR-075, R87).
+    #[test]
+    fn in_performance_a_floor_breach_steps_and_marks_no_own_task() {
+        for (class, available) in [
+            (AllocationClass::Opportunistic, 700),
+            (AllocationClass::Guaranteed, 700),
+            (AllocationClass::Opportunistic, 100),
+        ] {
+            let jobs = vec![
+                ram_job("a", class, 3_000),
+                ram_job("b", class, 3_000),
+                ram_job("c", class, 3_000),
+                ram_job("z", class, 7_000),
+            ];
+            let mut facts = over_share_facts(&["a", "b", "z"], &["c"], &[("z", 1_000)]);
+            facts.get_mut("c").unwrap().observes_drain = false;
+            let cfg = config_in(ContentionMode::Performance);
+            let run = scripted(&cfg, &facts, 12_000, |_| (jobs.clone(), available));
+            for interval in &run {
+                let label = format!("{class:?} with {available} MiB free at {}", interval.now);
+                assert!(interval.steps.is_empty(), "{label}: {:?}", interval.steps);
+                assert!(interval.drains.is_empty(), "{label}: {:?}", interval.drains);
+                assert!(interval.marked.is_empty(), "{label}: {:?}", interval.marked);
+                assert_eq!(interval.headroom, 0, "{label}");
+            }
+            let saved: std::collections::BTreeSet<String> =
+                run.iter().flat_map(|i| i.saved.clone()).collect();
+            assert_eq!(
+                saved,
+                ["a", "b", "c", "z"].map(String::from).into(),
+                "{class:?} with {available} MiB free"
+            );
+            let signals: usize = run.iter().map(|i| i.saved.len()).sum();
+            assert_eq!(signals, 4, "each task is signalled once");
+        }
+    }
+
+    /// The operator envelope still applies in Performance: own memory above it gives way at a
+    /// floor breach too (FR-057, FR-023).
+    #[test]
+    fn in_performance_the_envelope_still_steps_own_memory() {
+        let class = AllocationClass::Opportunistic;
+        let jobs = vec![ram_job("a", class, 3_000), ram_job("z", class, 7_000)];
+        let facts = over_share_facts(&["a", "z"], &[], &[("z", 1_000)]);
+        let cfg = config_in(ContentionMode::Performance);
+        let mut engine = PolicyEngine::new();
+        let mut snap = snapshot();
+        snap.available_ram_mib = Some(700);
+        let input = PolicyInput {
+            allocations: jobs,
+            facts,
+            envelope: Some(resources(16_000, 8_000, 0)),
+            ..PolicyInput::default()
+        };
+        let decision = engine.evaluate(&cfg, &snap, &input, 0).unwrap();
+        assert!(
+            decision
+                .actions
+                .iter()
+                .any(|a| a.resource == ResourceKey::Ram && a.allocation_id == "z"),
+            "{:?}",
+            decision.actions
+        );
+    }
+
     /// Facts for an over-share run: `ready` tasks take hints, `plain` ones do not, and `first`
     /// have lost the least progress, so the victim order starts with them.
     fn over_share_facts(
@@ -8680,11 +8747,7 @@ mod floors_by_mode {
             ram_job("z", class, 7_000),
         ];
         let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
-        for mode in [
-            ContentionMode::YieldFirst,
-            ContentionMode::Neutral,
-            ContentionMode::Performance,
-        ] {
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
             let run = scripted(&config_in(mode), &facts, 6_000, |_| (jobs.clone(), 700));
             for interval in &run {
                 // In Yield First the 6 200 MiB of margin beyond the excess are asked by the cost
@@ -8764,10 +8827,7 @@ mod floors_by_mode {
                 ContentionMode::Neutral,
                 BTreeMap::from([("p".to_string(), (YieldStep::Hint, Some(1_600)))]),
             ),
-            (
-                ContentionMode::Performance,
-                BTreeMap::from([("p".to_string(), (YieldStep::Hint, Some(1_600)))]),
-            ),
+            (ContentionMode::Performance, BTreeMap::new()),
         ] {
             let run = scripted(&config_in(mode), &facts, 0, |_| (jobs.clone(), 600));
             assert_eq!(run[0].steps, expected, "{mode:?}");
@@ -8776,8 +8836,8 @@ mod floors_by_mode {
 
     /// Neutral, when the floor needs more than the excess: 400 MiB to free, 300 MiB of it over
     /// the fair share, in `z`. `z` is asked for its 300 MiB and `a` for the 100 MiB beyond it in
-    /// the same interval; nobody pays any part of `z`'s excess. In Performance in-share memory is
-    /// kept for a breach others caused, so only `z` is asked (FR-016, FR-023).
+    /// the same interval; nobody pays any part of `z`'s excess. In Performance no own memory is
+    /// given up at a floor breach, so nobody is asked (FR-016, FR-023).
     #[test]
     fn the_floor_beyond_the_excess_is_asked_in_the_same_interval_where_in_share_memory_gives_way() {
         let class = AllocationClass::Opportunistic;
@@ -8795,10 +8855,7 @@ mod floors_by_mode {
                     ("a".to_string(), (YieldStep::Hint, Some(7_600))),
                 ]),
             ),
-            (
-                ContentionMode::Performance,
-                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(50)))]),
-            ),
+            (ContentionMode::Performance, BTreeMap::new()),
         ] {
             let run = scripted(&config_in(mode), &facts, 0, |_| (jobs.clone(), 600));
             assert_eq!(run[0].steps, expected, "{mode:?}");
@@ -8808,13 +8865,16 @@ mod floors_by_mode {
     /// The need pauses with `z`'s hint held, free memory exactly at the floor from 500 to
     /// 5 000 ms, and returns at 5 500 ms. The hint's wait starts again with the need, on the
     /// clock its step escalates by, and the hint counts what it was asked through that renewed
-    /// wait: the 200 MiB excess is asked of `z` alone, `z` is drained when the renewed deadline
-    /// passes, and the in-share tasks are never stepped for it (FR-016, FR-023, R76).
+    /// wait: the 200 MiB excess is asked of `z` alone, and the in-share tasks are never stepped
+    /// for it. `z` freed what it was first asked, so at the renewed deadline it is hinted again
+    /// with a new deadline, and drained when that one passes without the 200 MiB (FR-016,
+    /// FR-023, FR-037, R76, R86).
     #[test]
     fn a_held_hint_counts_through_its_renewed_wait_when_the_need_returns() {
         let class = AllocationClass::Opportunistic;
         let facts = over_share_facts(&["a", "b", "z"], &[], &[("z", 1_000)]);
-        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+        {
+            let mode = ContentionMode::Neutral;
             let at = |now: u64| match now {
                 0 => (
                     vec![
@@ -8841,7 +8901,7 @@ mod floors_by_mode {
                     800,
                 ),
             };
-            let run = scripted(&config_in(mode), &facts, 10_500, at);
+            let run = scripted(&config_in(mode), &facts, 15_500, at);
             assert_eq!(
                 run[0].steps,
                 BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(5_700)))]),
@@ -8860,7 +8920,7 @@ mod floors_by_mode {
                     interval.now,
                     interval.steps
                 );
-                if interval.now < 10_500 {
+                if interval.now < 15_500 {
                     assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
                 }
             }
@@ -8869,11 +8929,14 @@ mod floors_by_mode {
         }
     }
 
-    /// `random::242`'s shape in Performance with free memory at 0: `z`, Guaranteed and the
-    /// over-share task, is hinted for its 1 000 MiB excess; at 1 000 ms its wait is over, but it
-    /// may not be drained while Opportunistic `o` is left (FR-024), so its excess passes on. It
-    /// is asked for those 1 000 MiB once, not again in the remainder, and the next task in the
-    /// cost order is asked for them (FR-016, FR-023, R76).
+    /// `random::242`'s shape, in Neutral since Performance gives no memory back at a floor: free
+    /// memory at 0; `z`, Guaranteed and the over-share task, is hinted for its excess and frees it
+    /// by its deadline at 1 000 ms, while free memory stays at 0, so it is hinted again with a new
+    /// deadline. Opportunistic `o` holds 1 MiB, is asked for all of it and drained at its
+    /// deadline. When `z`'s new wait is over at 2 000 ms it may not be drained while `o` is left
+    /// (FR-024), so its excess passes on: it is asked for its part once, not again in the
+    /// remainder, and the next task in the cost order is asked for it (FR-016, FR-023, FR-037,
+    /// R76, R86).
     #[test]
     fn an_over_share_task_is_asked_for_its_own_part_once() {
         let facts = over_share_facts(&["z", "x", "o"], &[], &[("z", 1_000)]);
@@ -8881,7 +8944,7 @@ mod floors_by_mode {
             "o",
             AllocationPhase::Running,
             resources(100, 1_000, 0),
-            Some(resources(100, 0, 0)),
+            Some(resources(100, 1, 0)),
         );
         o.class = AllocationClass::Opportunistic;
         let at = |now: u64| {
@@ -8895,22 +8958,30 @@ mod floors_by_mode {
                 0,
             )
         };
-        let run = scripted(&config_in(ContentionMode::Performance), &facts, 1_000, at);
-        for interval in &run[..2] {
+        let run = scripted(&config_in(ContentionMode::Neutral), &facts, 2_000, at);
+        let step = |id: &str, step, target| (id.to_string(), (step, target));
+        for (interval, z) in run.iter().zip([11_290, 11_290, 10_290, 10_290]) {
+            let o = if interval.now >= 1_000 {
+                step("o", YieldStep::Drain, None)
+            } else {
+                step("o", YieldStep::Hint, Some(0))
+            };
             assert_eq!(
                 interval.steps,
-                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(11_289)))]),
+                BTreeMap::from([o, step("z", YieldStep::Hint, Some(z))]),
                 "at {}",
                 interval.now
             );
         }
         assert_eq!(
-            run[2].steps,
+            run[4].steps,
             BTreeMap::from([
-                ("z".to_string(), (YieldStep::Hint, Some(10_289))),
-                ("x".to_string(), (YieldStep::Hint, Some(14_342))),
+                step("o", YieldStep::Drain, None),
+                step("x", YieldStep::Hint, Some(14_343)),
+                step("z", YieldStep::Hint, Some(10_290)),
             ])
         );
+        assert!(run.iter().all(|i| i.drains.iter().all(|id| id == "o")));
     }
 
     /// `random::378`'s shape: Guaranteed `g` holds all of own memory, takes no hint and does not
@@ -9056,7 +9127,6 @@ mod floors_by_mode {
         for (mode, asked) in [
             (ContentionMode::YieldFirst, 6_500),
             (ContentionMode::Neutral, 300),
-            (ContentionMode::Performance, 300),
         ] {
             let at = |now: u64| {
                 let freed = if now >= 2_000 { asked } else { 0 };
@@ -9091,6 +9161,57 @@ mod floors_by_mode {
         }
     }
 
+    /// `random::193`'s shape: `z`, 300 MiB over own work's share, is hinted and frees its 300
+    /// MiB at 2 s, while `a` grows by 300 MiB, so free RAM stays 700 MiB. At the deadline `z`
+    /// is at its target, so it is hinted again with a new deadline instead of being drained; it
+    /// does not free the new ask, so it is drained when that deadline passes (FR-037, US4/AC7).
+    #[test]
+    fn an_over_share_task_that_met_its_target_is_hinted_again_and_not_drained() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        {
+            let mode = ContentionMode::Neutral;
+            let at = |now: u64| {
+                let moved = if now >= 2_000 { 300 } else { 0 };
+                (
+                    vec![
+                        ram_job("a", class, 3_000 + moved),
+                        ram_job("b", class, 3_000),
+                        ram_job("c", class, 3_000),
+                        ram_job("z", class, 7_000 - moved),
+                    ],
+                    700,
+                )
+            };
+            let run = scripted(&config_in(mode), &facts, 12_000, at);
+            assert_eq!(
+                run[0].steps.get("z"),
+                Some(&(YieldStep::Hint, Some(6_700))),
+                "{mode:?}"
+            );
+            let at_deadline = run.iter().find(|i| i.now == 5_000).unwrap();
+            assert!(
+                at_deadline.drains.is_empty(),
+                "{mode:?}: {:?}",
+                at_deadline.drains
+            );
+            assert_eq!(
+                at_deadline.steps.get("z"),
+                Some(&(YieldStep::Hint, Some(6_400))),
+                "{mode:?}: hinted again for the current excess"
+            );
+            let drained = run
+                .iter()
+                .find(|interval| !interval.drains.is_empty())
+                .map(|interval| (interval.now, interval.drains.clone()));
+            assert_eq!(
+                drained,
+                Some((10_000, vec!["z".to_string()])),
+                "{mode:?}: drained only at the new deadline"
+            );
+        }
+    }
+
     /// Two plain tasks could each cover what own work holds over its target: 300 MiB, or
     /// 6 500 MiB in Yield First. Only the first in victim order is drained, also while it still
     /// runs: a drain already decided counts in full, so no second task is drained for the same
@@ -9105,11 +9226,7 @@ mod floors_by_mode {
             ram_job("z2", class, 7_000),
         ];
         let facts = over_share_facts(&["a", "b"], &["z1", "z2"], &[("z1", 1_000), ("z2", 2_000)]);
-        for mode in [
-            ContentionMode::YieldFirst,
-            ContentionMode::Neutral,
-            ContentionMode::Performance,
-        ] {
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
             let run = scripted(&config_in(mode), &facts, 1_500, |_| (jobs.clone(), 700));
             assert_eq!(run[0].drains, ["z1"], "{mode:?}");
             for interval in &run {
@@ -9152,10 +9269,8 @@ mod floors_by_mode {
                 if now >= 1_000 { 600 } else { 700 },
             )
         };
-        for (mode, asked) in [
-            (ContentionMode::Performance, 5_100),
-            (ContentionMode::Neutral, 5_100),
-        ] {
+        {
+            let (mode, asked) = (ContentionMode::Neutral, 5_100);
             let run = scripted(&config_in(mode), &facts, 1_000, at);
             assert_eq!(run[0].drains, ["z"], "{mode:?}");
             assert!(
@@ -9187,12 +9302,9 @@ mod floors_by_mode {
             ram_job("z", class, 7_000),
         ];
         let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
-        let run = scripted(
-            &config_in(ContentionMode::Performance),
-            &facts,
-            2_000,
-            |now| (jobs.clone(), if now >= 2_000 { 0 } else { 700 }),
-        );
+        let run = scripted(&config_in(ContentionMode::Neutral), &facts, 2_000, |now| {
+            (jobs.clone(), if now >= 2_000 { 0 } else { 700 })
+        });
         for interval in &run {
             assert!(
                 interval.steps.keys().all(|id| id == "z"),
@@ -9225,12 +9337,9 @@ mod floors_by_mode {
         ];
         let facts = over_share_facts(&["a", "b", "c"], &["z"], &[("z", 1_000)]);
         let free = [700, 700, 10_000, 700, 700];
-        let run = scripted(
-            &config_in(ContentionMode::Performance),
-            &facts,
-            2_000,
-            |now| (jobs.clone(), free[(now / 500) as usize]),
-        );
+        let run = scripted(&config_in(ContentionMode::Neutral), &facts, 2_000, |now| {
+            (jobs.clone(), free[(now / 500) as usize])
+        });
         let saved: Vec<_> = run.iter().map(|interval| interval.saved.clone()).collect();
         let abc = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(saved, [abc.clone(), vec![], vec![], abc, vec![]]);
@@ -9254,7 +9363,7 @@ mod floors_by_mode {
             // The other user leaves as the drain completes.
             (jobs, if now < 1_000 { 700 } else { 22_000 })
         };
-        let run = scripted(&config_in(ContentionMode::Performance), &facts, 400_000, at);
+        let run = scripted(&config_in(ContentionMode::Neutral), &facts, 400_000, at);
         assert_eq!(run[0].drains, ["z"]);
         assert!(
             run.iter().any(|interval| interval.headroom >= 7_000),
@@ -9376,10 +9485,7 @@ mod floors_by_mode {
                 .map(|(_, a)| (a.allocation_id, a.step, a.target))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            first(ContentionMode::Performance),
-            [("b".to_string(), YieldStep::Hint, Some(5_700))]
-        );
+        assert_eq!(first(ContentionMode::Performance), []);
         assert_eq!(
             first(ContentionMode::Neutral),
             [("b".to_string(), YieldStep::Hint, Some(5_600))]
@@ -9584,7 +9690,7 @@ mod save_progress {
         let a = BTreeSet::from(["a".to_string()]);
         let none = BTreeSet::new();
         assert_eq!(
-            listed(ContentionMode::Performance, [10_000, 6_000], &[0, 0, 0]),
+            listed(ContentionMode::Neutral, [10_000, 6_000], &[0, 0, 0]),
             [&a, &none, &none].map(Clone::clone)
         );
     }

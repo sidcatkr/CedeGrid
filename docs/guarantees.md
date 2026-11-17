@@ -513,7 +513,13 @@ Own tasks give memory back by fault as well. While own memory is above its fair 
 over-share tasks, those that make up the excess in the memory victim order, come first in every
 mode. They are asked together for the excess and no more, the last only for the part that
 completes it. Each is hinted if it takes hints and drained when its hint deadline passes with the
-excess still held, or drained without the hint if it takes none. A drain already decided counts
+excess still held, or drained without the hint if it takes none. A task whose usage at the
+deadline is at or below the larger of the target its hint began with and the current target has
+complied and is not drained for that hint: while own memory is still above its share, as when
+another own task grew meanwhile, and the victim order still selects it, it gets a new hint with
+the current target and a new deadline. The reclaim bound then counts that new excess from the
+interval that first shows it, so the floor can stay breached one more hint deadline for each
+such growth. A target a task cannot reach, such as 0, is not complied with. A drain already decided counts
 in full while the task still runs, and a hint within its deadline, or a Guaranteed task whose
 drain waits for the breach window, counts what was asked, so the excess is passed to nobody
 meanwhile. A hint's deadline runs from the later of its last change and the need's return, for

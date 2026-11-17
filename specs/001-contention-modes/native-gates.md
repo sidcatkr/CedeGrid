@@ -1077,6 +1077,16 @@ Gates: in every run, no window refused on the in-window even/odd ratio; the mana
 least 0.99 of the unmanaged probe's CPU in every window; own throughput with CedeGrid at least the
 mode's bound of without it. A window refused in both runs of a mode stops the item.
 
+The default allocator cache refused windows in every gate run at `4f6830d`, managed and
+unmanaged alike, while the cache-off control refused none. The gate therefore runs with the cache
+off in both probes, the same variable in both:
+
+```sh
+bash runs-037.sh <commit> <second account uid> core058c
+#   = same_core_029.py --mode performance|neutral --load saturating \
+#       --probe-env GLIBC_TUNABLES=glibc.malloc.tcache_count=0, twice each
+```
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

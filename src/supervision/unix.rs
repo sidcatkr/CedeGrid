@@ -291,11 +291,23 @@ impl DrainDirectory {
         Self::create_with_candidates(|| {
             // Wall-clock nanoseconds are not unique on every platform. This
             // sequence separates concurrent launches even at a frozen clock.
-            let sequence = NEXT_DIRECTORY
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| anyhow::anyhow!("drain directory sequence exhausted"))?;
+            // A plain CAS loop: `fetch_update` is deprecated on current stable
+            // and its replacement is newer than the MSRV.
+            let mut current = NEXT_DIRECTORY.load(Ordering::Relaxed);
+            let sequence = loop {
+                let next = current
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("drain directory sequence exhausted"))?;
+                match NEXT_DIRECTORY.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(previous) => break previous,
+                    Err(actual) => current = actual,
+                }
+            };
             Ok(parent.join(format!(
                 "cedegrid-drain-{}-{nonce}-{sequence}",
                 std::process::id()

@@ -50,6 +50,11 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
+        // Performance and Aggressive mark none of their tasks, so the kernel chooses as it
+        // would without CedeGrid (FR-023).
+        if governing(config, ResourceKind::Ram) >= ContentionMode::Performance {
+            victims.retain(|v| v.mode < ContentionMode::Performance);
+        }
         victim_order(&mut victims, excess);
         let mut covered = 0u64;
         for victim in victims {
@@ -430,13 +435,11 @@ impl<'a> Interval<'a> {
         } else {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
-        // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes only own
-        // memory above its fair share, while a measurement is held too; in-share memory of work
-        // in those modes stays. The envelope still applies in full.
-        if floor_breach
-            && governing(config, kind) >= ContentionMode::Performance
-            && let Some(fair) = self.memory_fair_share.get(&key).copied()
-        {
+        // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes no memory
+        // of work in those modes, as without CedeGrid; the kernel decides at exhaustion. The
+        // envelope still applies in full.
+        let mut keeps_mode_memory = false;
+        if floor_breach && governing(config, kind) >= ContentionMode::Performance {
             let protected = input
                 .allocations
                 .iter()
@@ -446,11 +449,11 @@ impl<'a> Interval<'a> {
                         && self.allocation_modes[&a.id][&kind] >= ContentionMode::Performance
                 })
                 .map(|a| judged(input, &self.charges, &key, a))
-                .fold(0u64, u64::saturating_add)
-                .min(fair);
+                .fold(0u64, u64::saturating_add);
             let envelope_excess = input.envelope.as_ref().map_or(0, |envelope| {
                 judged_total.saturating_sub(amount_of(&key, envelope))
             });
+            keeps_mode_memory = envelope_excess == 0;
             usage_excess =
                 usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
         }
@@ -571,6 +574,7 @@ impl<'a> Interval<'a> {
             contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
             return_level,
             save_progress,
+            keeps_mode_memory,
         }
     }
 
@@ -732,6 +736,9 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
+        if frame.keeps_mode_memory {
+            victims.retain(|v| v.mode < ContentionMode::Performance);
+        }
         victim_order(&mut victims, needed);
         if !pending_pass && kind == ResourceKind::Cpu && self.cpu_own_hold {
             // While own usage over its target is enforced, only a job above its own mode's
@@ -1124,6 +1131,7 @@ impl<'a> Interval<'a> {
                 cause: frame.cause,
                 usage: (kind == ResourceKind::Cpu && !pending_pass)
                     .then(|| victim.amount.saturating_add(kept)),
+                memory_usage: kind.is_memory().then_some(victim.amount),
                 compute_floor: if kind == ResourceKind::Cpu && !pending_pass {
                     self.compute_floor(key, victim.mode, frame.own_usage)
                 } else {
@@ -1282,6 +1290,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
+                    memory_usage: None,
                     room: if kind.is_memory() {
                         self.floor_room.get(key).copied()
                     } else {
@@ -1457,6 +1466,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 state,
                 &LadderInput {
+                    memory_usage: None,
                     room: None,
                     kind,
                     guaranteed: victim.guaranteed,
@@ -1549,6 +1559,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
+                    memory_usage: None,
                     room: None,
                     kind,
                     guaranteed: is_guaranteed(allocation),
@@ -1705,6 +1716,7 @@ impl<'a> Interval<'a> {
                     to_free: None,
                     pending: false,
                     recomputed: false,
+                    asked_target: None,
                 },
             );
         }
@@ -1846,6 +1858,9 @@ struct Frame {
     /// A memory floor is breached with a known fair share: in-share tasks not yet asked in the
     /// episode get the save-progress signal (FR-075).
     save_progress: bool,
+    /// A floor breach where work in Performance or Aggressive keeps its memory (FR-023): it is
+    /// no victim, gets the save-progress signal and no OOM mark.
+    keeps_mode_memory: bool,
 }
 
 impl Frame {

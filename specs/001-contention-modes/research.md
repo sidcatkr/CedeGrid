@@ -1469,3 +1469,28 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   left could be dropped with no event.
 - **Alternatives**: drop only the time test for a lease that says drain, on both sides (leaves an
   older supervisor's gap).
+
+## R86. A memory hint that was complied with is renewed, not escalated (report 056 Decision 1 C)
+
+- **Decision**: at a memory hint's deadline, a task whose reading is at or below the larger of the
+  target the hint began with and the current target gets a new hint with the current target and a
+  new deadline; any other task escalates as before.
+- **Rationale**: the deadline counted time only, so a task that shrank to its target was drained
+  when another own task grew during the wait. Over the 500 benchmark sequences 20 of 87 memory
+  stops were such tasks. Plain Linux would stop none of them.
+- **Alternatives**: keep the order as built (the user declined); return to the order before item
+  051 (in-share tasks pay for another task's excess again, ruled out on 2026-11-03); ask the task
+  that grew (needs a per-task baseline and redefines the victim order and the OOM mark).
+
+## R87. Performance holds back at admission only (report 057 Part B)
+
+- **Decision**: in Performance and Aggressive no step is taken on running own work for another
+  principal, for own usage above the admission target, for unknown activity or for a memory floor
+  breach; what is held back is held at admission (the margin, contending principals, unknown
+  activity, the floors). The operator envelope, explicit drain and the Guaranteed rules stay.
+- **Rationale**: constitution 8.0.0 measures harm against the same own work without CedeGrid.
+  Measured against plain Linux, Performance's steps cost own work 3-11% CPU many against one, 27%
+  with two GPU probes against one, and about 4 GiB of 9 in the OOM shape, and in that shape did
+  not save the other user's allocator.
+- **Alternatives**: keep the give-back (contradicts the constitution); give back only memory own
+  work grew during a breach (report 057 point 1 C, harder to explain and test).
