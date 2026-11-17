@@ -31,11 +31,12 @@ must fail before its implementation task.
 
 ## Phase 1: Setup
 
-- [ ] T001 (after T622) Merge 001 at the coordinator's commit into the branch. Then write the
+- [x] T001 (after T622) Merge 001 at the coordinator's commit into the branch. Then write the
   decision snapshot of the merged tip into a scratch directory with
   `CEDEGRID_DECISION_SNAPSHOT=<dir> cargo test --locked --test decision_snapshot -- --ignored --exact decision_snapshot`,
   and record the commit in `specs/004-aggressive-mode/tasks.md` under this task. This is the
   baseline for P9.
+  - *Done:* the baseline is `4e01e93`, the merged tip before any 004 policy change.
 
 ---
 
@@ -132,8 +133,10 @@ Aggressive.
   - *Done:* `[Aggressive]` in the mode lines, and doctor's caution list names `aggressive_mode`
     with the settings that call for it. Decision JSON carries `"aggressive"`. `explain.rs` has no
     color today, so the marker is the bracketed text; color comes with 003's terminal outputs.
-- [ ] T016 [US1] (after T622) Compare the decision snapshot against T001's baseline. With the
+- [x] T016 [US1] (after T622) Compare the decision snapshot against T001's baseline. With the
   `aggressive` entries filtered out, every decision is byte-identical (P9, FR-020).
+  - *Done:* the policy, contention, observability and decision_snapshot scenarios at `4e01e93`
+    and at `860f82d`: 42,449 lines, none different once the `aggressive` entries are removed.
 
 **Checkpoint**: protected Aggressive works through configuration, setup, the SDKs and the wire.
 
