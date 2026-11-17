@@ -269,8 +269,9 @@ the owner's side: it comes out of external usage and the owner's unmanaged usage
 forms an unattributed principal, and lowers own tasks' budget and targets by its amount, so
 own tasks and CedeGrid together stay within the owner's share. Where the agent runs in a CPU
 cgroup of the owner's own (its user slice, or its System mode unit, with the `cpu`
-controller), the kernel already charges that CPU to the owner, so own work's kept share below
-is not lowered by it a second time. `doctor` shows it as
+controller), the kernel splits CPU between users and charges CedeGrid and the owner's other
+processes to the owner's slice, so own work's kept share below is counted on own tasks'
+requests alone and is not lowered by them a second time. `doctor` shows it as
 `in use (CedeGrid)` and the node report carries it per resource. The agent reports its
 loop's own CPU by stage once a minute (`loop_cost`).
 

@@ -932,18 +932,42 @@ impl<'a> Interval<'a> {
         self.note_fair_share(&ResourceKey::Cpu, &view, &thresholds);
         self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
-        // Own work keeps an equal share while the others keep theirs. CedeGrid's own CPU comes
-        // out of it only where the kernel does not already charge it to the owner's own CPU
-        // cgroup (user, 2026-11-17).
+        // Own work keeps an equal share while the others keep theirs (user, 2026-11-17). Where
+        // the agent runs in a CPU cgroup of the owner's own, the kernel splits CPU between users,
+        // so CedeGrid and the owner's other processes share the owner's slice and the share is
+        // counted on own tasks' requests alone; elsewhere both still come out of it.
+        let owner_cgroup = owner_cpu_cgroup(self.snapshot);
+        let owner_other: u64 = view
+            .principals
+            .iter()
+            .flatten()
+            .filter(|(principal, _)| principal.is_owner)
+            .map(|(_, usage)| *usage)
+            .sum();
+        let requests_only = owner_cgroup.then(|| ModeInput {
+            principals: view.principals.as_ref().map(|list| {
+                list.iter()
+                    .map(|(principal, usage)| {
+                        (*principal, if principal.is_owner { 0 } else { *usage })
+                    })
+                    .collect()
+            }),
+            ..view.clone()
+        });
         let kept = crate::contention::kept_share(
-            &view,
+            requests_only.as_ref().unwrap_or(&view),
             &thresholds,
             self.cpu_capacity
                 .saturating_sub(self.cpu_reserve)
                 .min(self.cpu_ceiling),
-            self.budget.cpu_millicores,
+            // The owner's other processes leave the room they use in the owner's slice.
+            if owner_cgroup {
+                self.budget.cpu_millicores.saturating_add(owner_other)
+            } else {
+                self.budget.cpu_millicores
+            },
         );
-        let kept = if owner_cpu_cgroup(self.snapshot) {
+        let kept = if owner_cgroup {
             kept
         } else {
             kept.saturating_sub(cedegrid)

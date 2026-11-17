@@ -57,8 +57,14 @@ fn level(path: &str, cpu: bool) -> CgroupLevel {
 /// F2c on a four-CPU scope: one own task of 1000 m running, CedeGrid at `cedegrid` m, and the
 /// other user at `other` m on two of the CPUs. `per_user` places the agent in the owner's own
 /// CPU cgroup, as on a host that enables the `cpu` controller down to each user slice.
-fn reading(other: u64, cedegrid: u64, per_user: Option<bool>) -> (Snapshot, PolicyInput) {
-    let busy = 1000 + cedegrid + other;
+/// The owner's other processes, outside own tasks and CedeGrid, run at `owner` m.
+fn reading_with(
+    other: u64,
+    cedegrid: u64,
+    owner: u64,
+    per_user: Option<bool>,
+) -> (Snapshot, PolicyInput) {
+    let busy = 1000 + cedegrid + owner + other;
     let hierarchy = per_user.map(|cpu| {
         let user = format!("/sys/fs/cgroup/user.slice/user-{OWNER}.slice");
         CgroupHierarchy {
@@ -136,11 +142,11 @@ fn reading(other: u64, cedegrid: u64, per_user: Option<bool>) -> (Snapshot, Poli
             limitations: vec![],
         }),
         principals: Some(vec![
-            // The owner's processes outside own tasks: CedeGrid's alone.
+            // The owner's processes outside own tasks: CedeGrid's and the others'.
             PrincipalUsage {
                 uid: Some(OWNER),
                 is_owner: true,
-                cpu_millicores: cedegrid,
+                cpu_millicores: cedegrid + owner,
                 ..PrincipalUsage::default()
             },
             PrincipalUsage {
@@ -178,7 +184,17 @@ fn reading(other: u64, cedegrid: u64, per_user: Option<bool>) -> (Snapshot, Poli
 }
 
 fn budget(mode: ContentionMode, other: u64, cedegrid: u64, per_user: Option<bool>) -> u64 {
-    let (snapshot, input) = reading(other, cedegrid, per_user);
+    budget_with(mode, other, cedegrid, 0, per_user)
+}
+
+fn budget_with(
+    mode: ContentionMode,
+    other: u64,
+    cedegrid: u64,
+    owner: u64,
+    per_user: Option<bool>,
+) -> u64 {
+    let (snapshot, input) = reading_with(other, cedegrid, owner, per_user);
     let decision = PolicyEngine::new()
         .evaluate(&config(mode), &snapshot, &input, 0)
         .unwrap();
@@ -252,4 +268,20 @@ fn a_principal_under_its_share_leaves_the_margin_as_before() {
 fn the_kept_share_never_takes_from_the_other_principals_share() {
     // The other user over its share by more than the floor: own work gets what is left.
     assert!(budget(ContentionMode::Performance, 2400, 50, Some(true)) < 2000);
+}
+
+/// The owner's other processes, such as a shell or the coordinator, share the owner's slice
+/// with own work where the owner has a CPU cgroup of its own, so own tasks still get the equal
+/// share on their requests; where it has none, they come out of the share as before.
+#[test]
+fn the_owners_other_processes_share_its_slice_where_it_has_one() {
+    assert_eq!(
+        budget_with(ContentionMode::Performance, 2000, 30, 200, Some(true)),
+        2000
+    );
+    // The equal 2000 m less the owner's other 200 m and CedeGrid's 30 m.
+    assert_eq!(
+        budget_with(ContentionMode::Performance, 2000, 30, 200, None),
+        1770
+    );
 }
