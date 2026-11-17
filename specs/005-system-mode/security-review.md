@@ -42,4 +42,4 @@ case A, item 057 Part C's files (the fork-gate module, `src/supervision/unix.rs`
 ## Open before the review
 
 - `CapabilityBoundingSet=` on the broker's service (T033) is not set yet.
-- The idle executor and the agent inside the units (T022) are not built; the units run a holder.
+- The ordinary unit runs the user's agent; the idle unit runs a holder until the idle executor (follow-up SYS-3, a later version).

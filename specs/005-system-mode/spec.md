@@ -406,9 +406,12 @@ it, but the feature can be tested before packaging exists.
 - **FR-016**: Installing MUST create `cedegrid.slice` and `cedegrid_idle.slice` directly below
   the root cgroup, with `cpu.idle` on `cedegrid_idle.slice`. Other users' areas, such as the SSH
   service and login sessions, MUST be left as they are.
-- **FR-017**: Yield First work MUST run in the caller's `cedegrid-idle-u<uid>.service`, started
-  there by the idle executor at the agent's request, and every other mode's work in
-  `cedegrid-u<uid>.service`.
+- **FR-017**: *Deferred to a later version (user decision of 2026-11-17, follow-up SYS-3).* Yield
+  First work MUST run in the caller's `cedegrid-idle-u<uid>.service`, started there by the idle
+  executor at the agent's request, and every other mode's work in `cedegrid-u<uid>.service`.
+  Until then, all work, Yield First included, runs in `cedegrid-u<uid>.service` with 001's Full
+  steps (FR-018's fallback); the idle unit and its slice are installed and started but run no
+  work.
 - **FR-018**: When a running job's mode changes between Yield First and another mode, the broker
   MUST move that job, as a whole, between the caller's two units, and only if each of its
   processes is in the caller's source unit, runs with the caller's user ID and is in the
@@ -420,7 +423,7 @@ it, but the feature can be tested before packaging exists.
   contention than the baseline gives the same work, and MUST NOT give any other account less, on
   each host layout the plan names. The rule for `cedegrid.slice`'s CPU weight, fixed or following
   the number of users, MUST be chosen from measurements in the plan (research point 2).
-- **FR-020**: In System mode, Yield First's CPU margin MUST be measured and lowered toward 0%,
+- **FR-020**: *Deferred with FR-017 (SYS-3).* In System mode, Yield First's CPU margin MUST be measured and lowered toward 0%,
   down to the lowest value at which the second account loses nothing measurable (SC-005). Yield
   First's memory and GPU rules stay as in 001.
 - **FR-021**: `doctor` and the docs MUST say that `cpu.idle` gives way on CPU time only, not on SMT

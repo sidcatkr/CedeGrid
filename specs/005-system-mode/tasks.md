@@ -208,6 +208,7 @@ the task list.
   - an explicit setting still wins;
   - the CPU range admits the value T061 measures (today it is 1 to 90, so 0% needs the range widened, in System mode only);
   - at every other level nothing changes.
+  - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
 
 ### Implementation
 
@@ -221,7 +222,9 @@ the task list.
   - Under (c), agreed 2026-11-17: the agent names each task leaf `cedegrid-<mode>-<id>` (with T023), and the OOM pass reads each ordinary-unit task's mode from it.
   - *Written:* `src/broker/moves.rs`, tested against a fake cgroup tree (whole move, missing job or destination, another user's process, a failed write put back, child cgroups, no freeze); the broker resolves both units through their markers first. Not yet run on Linux.
 - [ ] T040 [US3] Make the agent ask for a move when a running job's mode changes between Yield First and another, and make an empty destination leaf first; on a refusal, apply the new mode where the job is with 001's Full steps and say so in one line. In `src/agent/` (FR-017, FR-018)
+  - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
 - [ ] T041 [US3] Implement the level-dependent CPU default and range of `yield_first_margin_percent` in `src/contention.rs` (`ResourceThresholds::defaults`) and `src/config.rs` (where defaults are applied and validated), chosen once the agent knows it runs in a broker-made unit; no new key (Principle VII) (passes T037)
+  - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
 
 **Checkpoint**: US3 passes in the container; its margin waits on T061.
 
@@ -332,6 +335,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
 - [ ] T059 Host run R16-run on the test host (SC-012, EFF-6 to EFF-10), recorded in `docs/validation.md`: the broker's and both agents' CPU and memory, idle and busy. The 50-user bound runs in the container (T030's harness).
 - [ ] T060 Host run for the removed-member case (N2) on the test host, after root step 5, recorded in `docs/validation.md`: the next request is refused, and the running units behave as N2's chosen option says
 - [ ] T061 Host run R3-run on the test host (FR-020, SC-004, SC-005), recorded in `docs/validation.md`: Yield First own work against the second account's CPU-bound and cache-sensitive work, and the second account alone, with the margin stepped from today's value down to 0%. Then set the System mode CPU default to the measured value in `src/contention.rs`
+  - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
 
 ---
 

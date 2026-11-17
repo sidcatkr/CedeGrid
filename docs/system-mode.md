@@ -13,8 +13,8 @@ One process, the broker (`cedegrid-broker.service`), started on demand by
 - starts and stops two transient units, `cedegrid-u<uid>.service` and
   `cedegrid-idle-u<uid>.service`, which run the installed `cedegrid` binary as that user with a
   delegated cgroup;
-- moves one of the caller's jobs between those two units when its mode changes to or from Yield
-  First;
+- moves one of the caller's jobs between those two units on the caller's request (used by a
+  later version, in which Yield First work runs in the idle unit);
 - writes `oom_score_adj` for processes inside those units.
 
 The caller is identified by the socket's peer credentials. A request that names a user, unit,
@@ -96,9 +96,10 @@ runs inside their own `user-<uid>.slice`, so each account's CPU share is unchang
 competes as one group beside `user.slice` and `system.slice`, which changes how CPU is split
 between those groups; `cedegrid doctor` reports which applies.
 
-Yield First work runs in `cedegrid_idle.slice`, which has `cpu.idle` set. It gets CPU time only
-when its neighbours leave some free. `cpu.idle` does not cover SMT siblings, caches or memory
-bandwidth.
+In this version all work, Yield First included, runs in the ordinary unit, and Yield First yields
+with the same steps as on a delegated Full host. `cedegrid_idle.slice` (with `cpu.idle` set) and
+the idle unit are installed and started for a later version that runs Yield First work there;
+`cpu.idle` gives way on CPU time only, not on SMT siblings, caches or memory bandwidth.
 
 ## Memory and OOM scores
 

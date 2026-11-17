@@ -1062,7 +1062,8 @@ Limits:
   the limits the kernel enforces are the units' properties (`TasksMax=` and the process limits).
 - With `units.pam_session = "none"`, the default, login limits from PAM do not apply to System
   mode work.
-- `cpu.idle` gives way on CPU time only, not on SMT siblings, caches or memory bandwidth.
+- Yield First work runs in the ordinary unit in this version and yields with the delegated Full
+  steps; the idle slice and unit run no work yet.
 - Where the host does not split CPU by account, or with `units.ordinary_slice = "cedegrid"`,
   System mode work competes in `cedegrid.slice` beside `user.slice` and `system.slice`, which
   changes the CPU split between those groups.
