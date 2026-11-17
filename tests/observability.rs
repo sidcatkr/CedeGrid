@@ -18,8 +18,14 @@ mod snapshot {
 const CPU: u64 = 32_000;
 const GPU: &str = "GPU-a";
 
+/// Neutral in Full, with `cpu.max` authorized, so the CPU cap these runs show applies (FR-089).
 fn config() -> Config {
     let mut cfg = Config::default();
+    cfg.cgroup.enabled = true;
+    cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
+    cfg.cgroup.authorized_controls = ["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]
+        .map(String::from)
+        .to_vec();
     cfg.contention.default_mode = ContentionMode::Neutral;
     cfg
 }

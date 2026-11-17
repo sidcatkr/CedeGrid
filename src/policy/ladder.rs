@@ -37,7 +37,7 @@ impl<'a> Interval<'a> {
         let mut victims: Vec<VictimFacts> = running()
             .map(|a| {
                 let amount = judged(input, &self.charges, &key, a);
-                let facts = ladder_facts(input, &key, &a.id);
+                let facts = ladder_facts(input, &key, &a.id, cpu_rate_cap(config));
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -738,7 +738,7 @@ impl<'a> Interval<'a> {
                     (ResourceKind::Cpu, false) => cpu_usage_of(a).saturating_sub(kept_cpu(kind, a)),
                     (_, false) => judged(input, &self.charges, key, a),
                 };
-                let facts = ladder_facts(input, key, &a.id);
+                let facts = ladder_facts(input, key, &a.id, cpu_rate_cap(config));
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -751,9 +751,11 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        // A job in Performance or Aggressive yields running work only for the operator envelope,
-        // whatever the governing mode (FR-030).
-        if frame.keeps_mode_memory || !pending_pass && frame.envelope_excess == 0 {
+        // A job in Performance or Aggressive keeps its memory at a floor breach, and yields running
+        // CPU only for the operator envelope, whatever the governing mode (FR-023, FR-030).
+        if frame.keeps_mode_memory
+            || kind == ResourceKind::Cpu && !pending_pass && frame.envelope_excess == 0
+        {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);
@@ -771,6 +773,27 @@ impl<'a> Interval<'a> {
                     planned.insert(victim.id.clone());
                     self.plan_victim(frame, victim, pending_pass, false, &mut 0);
                 }
+            }
+            return;
+        }
+        // Where no rate cap applies, running CPU work yields whole tasks: in victim order, each
+        // only while the excess left is at least its usage, so the own work left running stays at
+        // or above its target; a paused task frees nothing more and keeps its step (FR-089).
+        if !pending_pass && kind == ResourceKind::Cpu && !cpu_rate_cap(config) {
+            // The operator envelope is own work's hard limit, not a yield: it pauses a task even
+            // where that goes below it (FR-057).
+            let envelope = frame.cause == YieldCause::EnvelopeBreach;
+            let mut remaining = needed;
+            for victim in victims {
+                let fits = victim.amount <= remaining || envelope && remaining > 0;
+                let mut share = if victim.amount > 0 && fits {
+                    victim.amount
+                } else {
+                    0
+                };
+                remaining = remaining.saturating_sub(share);
+                planned.insert(victim.id.clone());
+                self.plan_victim(frame, victim, pending_pass, false, &mut share);
             }
             return;
         }
@@ -1088,6 +1111,14 @@ impl<'a> Interval<'a> {
         if own_excess > 0 {
             note_excess(&mut self.over_target, key, own_excess);
         }
+        // Whole tasks where no CPU rate cap applies (FR-089): a job above its own mode's target is
+        // paused for it only when that target leaves it nothing to run.
+        let whole = kind == ResourceKind::Cpu && !pending_pass && !cpu_rate_cap(config);
+        let own_excess = if whole && own_excess < victim.amount {
+            0
+        } else {
+            own_excess
+        };
         let excess = (*remaining).max(own_excess);
         let mut state = prev.ladder.get(&(victim.id.clone(), key.clone()));
         // A CPU drain planned while the allocation was pending cancelled its reservation; if
@@ -1104,7 +1135,7 @@ impl<'a> Interval<'a> {
                 .guaranteed_hint_deadline_s
                 .saturating_mul(1000);
         }
-        let facts = ladder_facts(input, key, &victim.id);
+        let facts = ladder_facts(input, key, &victim.id, cpu_rate_cap(config));
         let mut unavailable = facts.unavailable.get(key).cloned().unwrap_or_default();
         if pending_pass {
             // Nothing runs yet: cancelling the reservation is the only step.
@@ -1124,7 +1155,41 @@ impl<'a> Interval<'a> {
             .zip(state.and_then(returning_target))
             .filter(|(_, held)| victim.amount.saturating_mul(100) >= held.saturating_mul(95))
             .map(|(level, held)| level.max(held));
-        victim_timing.returning = returning.is_some();
+        victim_timing.returning =
+            returning.is_some() || whole && frame.contention_ended && frame.usage_excess == 0;
+        // A whole-task pause goes on at its bound, to the hint and then a drain, only while the
+        // demand it answered is still there; a hint goes on to a drain at its deadline (FR-014).
+        let escalates = whole
+            && !victim.guaranteed
+            && state.is_some_and(|s| match s.step {
+                YieldStep::Pause => {
+                    s.cause == YieldCause::EnvelopeBreach
+                        || s.cause == YieldCause::ExternalGrowth
+                            && frame.external
+                                >= s.trigger_external
+                                    .saturating_mul(u64::from(victim_timing.hysteresis_percent))
+                                    / 100
+                }
+                YieldStep::Hint => true,
+                _ => false,
+            });
+        if whole && state.is_some_and(|s| s.step == YieldStep::Pause) && !escalates {
+            unavailable.insert(YieldStep::Hint);
+        }
+        // A whole-task pause for the envelope holds to its bound: that the breach cleared with the
+        // task paused does not show it would stay clear with the task running again.
+        if whole
+            && let Some(held) = state.filter(|s| {
+                s.step == YieldStep::Pause
+                    && s.cause == YieldCause::EnvelopeBreach
+                    && now.saturating_sub(s.entered_at_ms) < victim_timing.pause_bound_ms
+            })
+        {
+            self.next
+                .ladder
+                .insert((victim.id.clone(), key.clone()), held.clone());
+            return;
+        }
         if kind == ResourceKind::Cpu
             && !pending_pass
             && !contended
@@ -1150,7 +1215,7 @@ impl<'a> Interval<'a> {
                 allow_drain: if victim.guaranteed {
                     frame.guaranteed_drain
                 } else {
-                    pending_pass || kind != ResourceKind::Cpu
+                    pending_pass || kind != ResourceKind::Cpu || escalates
                 },
                 unavailable,
                 excess: if contended { excess } else { 0 },
@@ -1327,7 +1392,7 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: is_guaranteed(allocation),
                     allow_drain: false,
-                    unavailable: ladder_facts(input, key, id)
+                    unavailable: ladder_facts(input, key, id, cpu_rate_cap(config))
                         .unavailable
                         .get(key)
                         .cloned()
@@ -1956,8 +2021,21 @@ fn unknown_window(config: &Config, kind: ResourceKind) -> u64 {
 /// acknowledged its target file takes a hint (FR-062); recordings without facts
 /// have no target channel. A RAM cap needs a backend that reports it can apply
 /// one.
-fn ladder_facts(input: &PolicyInput, key: &ResourceKey, id: &str) -> AllocationFacts {
+fn ladder_facts(
+    input: &PolicyInput,
+    key: &ResourceKey,
+    id: &str,
+    cpu_cap: bool,
+) -> AllocationFacts {
     let mut facts = input.facts.get(id).cloned().unwrap_or_default();
+    // Without a CPU rate cap, CPU work is held back by whole tasks (FR-089).
+    if *key == ResourceKey::Cpu && !cpu_cap {
+        facts
+            .unavailable
+            .entry(key.clone())
+            .or_default()
+            .insert(YieldStep::Cap);
+    }
     if !facts.hint_ready {
         facts
             .unavailable

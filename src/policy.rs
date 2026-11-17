@@ -745,6 +745,17 @@ impl<'a> Interval<'a> {
     }
 }
 
+/// Whether a CPU rate cap applies: the node's cgroup backend is enabled with `cpu.max`
+/// authorized (Full). Elsewhere CPU work is held back by whole tasks (FR-089).
+fn cpu_rate_cap(config: &Config) -> bool {
+    config.cgroup.enabled
+        && config
+            .cgroup
+            .authorized_controls
+            .iter()
+            .any(|control| control == "cpu.max")
+}
+
 /// The mode that sets own work's aggregate on a resource: the node mode within
 /// the node cap. Per-job modes only order who yields inside it and bound each job.
 fn governing(config: &Config, kind: ResourceKind) -> ContentionMode {

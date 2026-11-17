@@ -7,8 +7,15 @@ use cedegrid::{config::Config, execution_model::AllocationClass, model::*, polic
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
+/// The node in Full, with `cpu.max` authorized, so the CPU caps these runs model apply; whole-task
+/// holds without a cap are tested in tests/policy.rs (FR-089).
 pub fn config() -> Config {
     let mut result = Config::default();
+    result.cgroup.enabled = true;
+    result.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
+    result.cgroup.authorized_controls = ["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]
+        .map(String::from)
+        .to_vec();
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
@@ -404,6 +411,34 @@ mod ladder {
         );
         assert_eq!(first.state.unwrap().step, YieldStep::Drain);
         assert_eq!(first.skipped, [YieldStep::Cap, YieldStep::Hint]);
+    }
+
+    /// Where no rate cap applies, a pause held for external growth ends in the interval that
+    /// contention has ended, not after the mode's scale-up interval (FR-034, FR-089).
+    #[test]
+    fn without_a_cap_a_pause_ends_in_one_move_when_contention_ends() {
+        let mut whole = input(ResourceKind::Cpu, 1000, 4000);
+        whole.unavailable = [YieldStep::LowerShare, YieldStep::Cap, YieldStep::Hint].into();
+        let paused = plan_step(
+            None,
+            &whole,
+            &timing(ResourceKind::Cpu, ContentionMode::YieldFirst),
+            0,
+        )
+        .state
+        .unwrap();
+        assert_eq!(paused.step, YieldStep::Pause);
+        let mut calm = whole.clone();
+        calm.excess = 0;
+        calm.external = 0;
+        calm.target = Some(4000);
+        let mut returning = timing(ResourceKind::Cpu, ContentionMode::YieldFirst);
+        returning.returning = true;
+        let next = plan_step(Some(&paused), &calm, &returning, 1000).state;
+        assert!(
+            next.as_ref().is_none_or(|s| s.step == YieldStep::None),
+            "{next:?}"
+        );
     }
 
     #[test]

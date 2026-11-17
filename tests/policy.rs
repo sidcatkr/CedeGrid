@@ -12,8 +12,10 @@ use cedegrid::{
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
+/// The node in Full, with `cpu.max` authorized, so the CPU caps these tests model apply; the
+/// `whole_tasks` tests run without it (FR-089).
 fn config() -> Config {
-    let mut result = Config::default();
+    let mut result = whole_tasks::full(Config::default());
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
@@ -6278,7 +6280,7 @@ mod per_job_modes {
                     .find(|a| a.allocation_id == id)
                     .map_or(CPU, |a| match a.step {
                         YieldStep::Cap => a.target.unwrap_or(CPU),
-                        YieldStep::Pause => 0,
+                        YieldStep::Pause | YieldStep::Drain | YieldStep::Terminate => 0,
                         _ => CPU,
                     })
             };
@@ -6551,6 +6553,289 @@ mod per_job_modes {
     }
 }
 
+/// Whole-task holds where no CPU rate cap applies (FR-089, R89).
+mod whole_tasks {
+    use super::*;
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    use std::collections::BTreeSet;
+
+    const CPU: u64 = 8000;
+
+    /// The node in Full: a delegated cgroup with `cpu.max` authorized, so a CPU cap applies.
+    pub(super) fn full(mut cfg: Config) -> Config {
+        cfg.cgroup.enabled = true;
+        cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
+        cfg.cgroup.authorized_controls = ["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]
+            .map(String::from)
+            .to_vec();
+        cfg
+    }
+
+    struct Seen {
+        now: u64,
+        usage: BTreeMap<String, u64>,
+        steps: BTreeMap<String, YieldStep>,
+        drains: Vec<String>,
+    }
+
+    /// Runs `jobs` (id, what each would use) beside one external principal wanting
+    /// `external(now)` on 8 000 millicores, each step applied at once; a drained task leaves.
+    fn run(
+        cfg: &Config,
+        jobs: &[(&str, u64)],
+        facts: &BTreeMap<String, AllocationFacts>,
+        external: impl Fn(u64) -> u64,
+        until: u64,
+    ) -> Vec<Seen> {
+        let mut engine = PolicyEngine::new();
+        let mut steps: BTreeMap<String, (YieldStep, Option<u64>)> = BTreeMap::new();
+        let mut gone: BTreeSet<String> = BTreeSet::new();
+        let mut out = vec![];
+        for now in (0..=until).step_by(500) {
+            let live: Vec<(&str, u64)> = jobs
+                .iter()
+                .filter(|(id, _)| !gone.contains(*id))
+                .copied()
+                .collect();
+            let limit = |id: &str, wants: u64| match steps.get(id) {
+                Some((YieldStep::Pause, _)) => 0,
+                Some((YieldStep::Cap, target)) => wants.min(target.unwrap_or(wants)),
+                _ => wants,
+            };
+            let mut demands = vec![external(now)];
+            demands.extend(live.iter().map(|(id, wants)| limit(id, *wants)));
+            let given = per_job_modes::schedule(&demands);
+            let allocations = live
+                .iter()
+                .zip(&given[1..])
+                .map(|((id, _), used)| {
+                    allocation(
+                        id,
+                        AllocationPhase::Running,
+                        resources(1000, 100, 0),
+                        Some(resources(*used, 100, 0)),
+                    )
+                })
+                .collect();
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = Some(given.iter().sum::<u64>().min(CPU));
+            let mut principals = vec![cpu_principal(1000, true, 0)];
+            if given[0] > 0 {
+                principals.push(cpu_principal(2001, false, given[0]));
+            }
+            snap.principals = Some(principals);
+            let input = PolicyInput {
+                allocations,
+                facts: facts.clone(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(cfg, &snap, &input, now).unwrap();
+            steps = decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Cpu)
+                .map(|a| (a.allocation_id.clone(), (a.step, a.target)))
+                .collect();
+            gone.extend(decision.would_drain.iter().cloned());
+            out.push(Seen {
+                now,
+                usage: live
+                    .iter()
+                    .zip(&given[1..])
+                    .map(|((id, _), used)| (id.to_string(), *used))
+                    .collect(),
+                steps: steps
+                    .iter()
+                    .map(|(id, (step, _))| (id.clone(), *step))
+                    .collect(),
+                drains: decision.would_drain.clone(),
+            });
+        }
+        out
+    }
+
+    /// `tracked()` in Tracked: no delegated cgroup, so no CPU rate cap.
+    fn tracked() -> Config {
+        let mut cfg = per_job_modes::cfg();
+        cfg.cgroup = Default::default();
+        cfg
+    }
+
+    fn names(jobs: &[(&str, u64)]) -> Vec<String> {
+        jobs.iter().map(|(id, _)| id.to_string()).collect()
+    }
+
+    fn tracked_facts(jobs: &[(&str, u64)]) -> BTreeMap<String, AllocationFacts> {
+        let ids = names(jobs);
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        rootless(&ids)
+    }
+
+    const FOUR: [(&str, u64); 4] = [("a", 1500), ("b", 1500), ("c", 1500), ("d", 1500)];
+
+    /// In Tracked, Neutral holds own work back by pausing whole tasks, only while the tasks left
+    /// running keep own usage at or above the fair share; no cap is planned. In Full the cap
+    /// still applies (FR-089).
+    #[test]
+    fn without_a_cpu_cap_neutral_pauses_whole_tasks() {
+        let facts = tracked_facts(&FOUR);
+        let held = run(&tracked(), &FOUR, &facts, |_| 4000, 9_500);
+        for seen in &held {
+            assert!(
+                seen.steps.values().all(|step| *step == YieldStep::Pause),
+                "at {}: {:?}",
+                seen.now,
+                seen.steps
+            );
+        }
+        for seen in &held[6..] {
+            assert_eq!(seen.steps.len(), 1, "at {}: {:?}", seen.now, seen.steps);
+            let own: u64 = seen.usage.values().sum();
+            assert!(own >= 4000, "at {}: own {own}", seen.now);
+        }
+        let capped = run(&full(tracked()), &FOUR, &facts, |_| 4000, 9_500);
+        assert!(
+            capped
+                .iter()
+                .any(|seen| seen.steps.values().any(|step| *step == YieldStep::Cap)),
+            "Full keeps its cap"
+        );
+    }
+
+    /// A task whose pause would take own work below its target is skipped for the next in the
+    /// order, so rounding favours own work (FR-089).
+    #[test]
+    fn a_task_that_would_overshoot_the_target_is_skipped() {
+        let jobs = [("big", 3000), ("b", 1000), ("c", 1000)];
+        let seen = run(&tracked(), &jobs, &tracked_facts(&jobs), |_| 4000, 9_500);
+        assert!(
+            seen.iter().all(|s| !s.steps.contains_key("big")),
+            "{:?}",
+            seen.iter().map(|s| &s.steps).collect::<Vec<_>>()
+        );
+        assert!(seen.iter().any(|s| s.steps.len() == 1));
+    }
+
+    /// A pause still contended at `pause_bound_s` drains the task, which leaves as a yield; one
+    /// whose demand has gone resumes instead and nothing drains (FR-014, FR-089).
+    #[test]
+    fn a_pause_drains_at_its_bound_only_while_contended() {
+        let facts = tracked_facts(&FOUR);
+        let cfg = tracked();
+        let held = run(&cfg, &FOUR, &facts, |_| 4000, 20_000);
+        let drains: Vec<(u64, String)> = held
+            .iter()
+            .flat_map(|s| s.drains.iter().map(|id| (s.now, id.clone())))
+            .collect();
+        assert_eq!(drains.len(), 1, "{drains:?}");
+        assert!(drains[0].0 >= 10_000, "{drains:?}");
+        let gone = run(
+            &cfg,
+            &FOUR,
+            &facts,
+            |now| if now < 6_000 { 4000 } else { 0 },
+            20_000,
+        );
+        assert!(gone.iter().all(|s| s.drains.is_empty()));
+        let last = gone.last().unwrap();
+        assert!(last.steps.is_empty(), "{:?}", last.steps);
+    }
+
+    /// A hint-ready task paused to its bound gets its hint, a request with no cap, and drains
+    /// once the hint's deadline has passed with the resource still contended (FR-014, FR-089).
+    #[test]
+    fn a_hint_ready_task_gets_its_hint_at_the_bound_then_drains() {
+        let facts: BTreeMap<String, AllocationFacts> = names(&FOUR)
+            .into_iter()
+            .map(|id| {
+                let facts = AllocationFacts {
+                    hint_ready: true,
+                    observes_drain: true,
+                    unavailable: BTreeMap::from([(
+                        ResourceKey::Cpu,
+                        BTreeSet::from([YieldStep::LowerShare]),
+                    )]),
+                    ..AllocationFacts::default()
+                };
+                (id, facts)
+            })
+            .collect();
+        let seen = run(&tracked(), &FOUR, &facts, |_| 4000, 40_000);
+        let hinted = seen
+            .iter()
+            .find(|s| s.steps.values().any(|step| *step == YieldStep::Hint))
+            .expect("a hint");
+        assert!(hinted.now >= 10_000, "at {}", hinted.now);
+        assert!(
+            seen.iter()
+                .all(|s| s.steps.values().all(|step| *step != YieldStep::Cap))
+        );
+        assert!(seen.iter().any(|s| !s.drains.is_empty()));
+    }
+
+    /// The operator envelope is own work's hard limit: in Tracked a task over it is paused even
+    /// where that goes below the envelope, the pause holds to its bound, and the task then
+    /// drains (FR-057, FR-089).
+    #[test]
+    fn a_task_over_the_envelope_is_paused_then_drained() {
+        let mut engine = PolicyEngine::new();
+        let mut steps = vec![];
+        for now in (0..=12_000).step_by(500) {
+            let paused = steps
+                .last()
+                .is_some_and(|(_, step)| *step == YieldStep::Pause);
+            let used = if paused { 0 } else { 2500 };
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "c",
+                    AllocationPhase::Running,
+                    resources(500, 100, 0),
+                    Some(resources(used, 100, 0)),
+                )],
+                facts: rootless(&["c"]),
+                envelope: Some(resources(2000, 16_000, 0)),
+                ..PolicyInput::default()
+            };
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = Some(used + 500);
+            snap.principals = Some(vec![cpu_principal(1000, true, used)]);
+            let decision = engine.evaluate(&tracked(), &snap, &input, now).unwrap();
+            let step = decision
+                .actions
+                .iter()
+                .find(|a| a.resource == ResourceKey::Cpu)
+                .map_or(YieldStep::None, |a| a.step);
+            steps.push((now, step));
+            if step >= YieldStep::Drain {
+                break;
+            }
+        }
+        assert_eq!(steps[0].1, YieldStep::Pause, "{steps:?}");
+        let drained = steps.iter().find(|(_, step)| *step >= YieldStep::Drain);
+        assert!(drained.is_some_and(|(now, _)| *now >= 10_000), "{steps:?}");
+        assert!(
+            steps
+                .iter()
+                .take_while(|(_, step)| *step < YieldStep::Drain)
+                .all(|(_, step)| *step == YieldStep::Pause),
+            "{steps:?}"
+        );
+    }
+
+    /// Yield First in Tracked pauses every own task while contended, with no cap (FR-020).
+    #[test]
+    fn yield_first_pauses_every_task_without_a_cap() {
+        let mut cfg = tracked();
+        cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
+        let seen = run(&cfg, &FOUR, &tracked_facts(&FOUR), |_| 4000, 9_500);
+        assert!(
+            seen.iter()
+                .all(|s| s.steps.values().all(|step| *step == YieldStep::Pause))
+        );
+        assert!(seen.iter().any(|s| s.steps.len() == 4));
+    }
+}
+
 /// Each GPU's memory admission opens on its own cooldown, whatever CPU and RAM do
 /// (FR-034).
 mod gpu_cooldown_alone {
@@ -6715,8 +7000,9 @@ mod reclaim_admission {
 
     const CPU: u64 = 32_000;
 
+    /// In Full, where the cap these runs hold applies (FR-089).
     fn cfg(mode: ContentionMode) -> Config {
-        let mut cfg = Config::default();
+        let mut cfg = super::whole_tasks::full(Config::default());
         cfg.contention.default_mode = mode;
         cfg.contention
             .acknowledge_caution
