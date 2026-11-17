@@ -6990,5 +6990,68 @@ mod gpu_demand {
                 "{reasons:?}"
             );
         }
+
+        /// NVML's per-process samples can be readable only every other interval. An interval
+        /// without them counts what the last readable one did, for up to the sample age, so a
+        /// quiet listed context of another user and the owner's idle desktop context do not hold
+        /// GPU admission every other interval; past the sample age the listing counts again
+        /// (FR-021, FR-028).
+        #[test]
+        fn samples_readable_every_other_interval_do_not_flap_admission() {
+            let gpu_key = ResourceKey::GpuCompute(GPU.into());
+            let sliced_quiet = |i: u64, readable: bool| {
+                let mut snap = interval(Some(0), 0, i + 1);
+                let gpu = &mut snap.gpus[0];
+                gpu.time_sliced = Some(true);
+                gpu.utilization_percent = Some(0);
+                gpu.external_compute = ComputeActivity::Quiet;
+                gpu.external_process_ids = Some(vec![50, 900]);
+                if !readable {
+                    gpu.compute_sample_id = None;
+                }
+                gpu.compute_contexts = Some(GpuComputeContexts {
+                    own: vec![],
+                    owner: vec![50],
+                    sampled: vec![],
+                    listed: vec![(900, Some(PEER))],
+                    samples_readable: readable,
+                    others_quiet: true,
+                });
+                snap
+            };
+            for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+                let config = mode_config(mode);
+                let mut engine = PolicyEngine::new();
+                let mut codes = vec![];
+                for i in 0..40u64 {
+                    let decision = engine
+                        .evaluate(
+                            &config,
+                            &sliced_quiet(i, i % 2 == 1),
+                            &PolicyInput::default(),
+                            i * INTERVAL,
+                        )
+                        .unwrap();
+                    let admission = decision.resources[&gpu_key].admission.clone().unwrap();
+                    codes.push(admission.code().map(str::to_string));
+                }
+                assert!(
+                    codes[1..].iter().all(Option::is_none),
+                    "{mode:?}: {codes:?}"
+                );
+                // With no readable sample for longer than the sample age, the listing counts.
+                let after = 40 * INTERVAL + config.gpu_sample_max_age_ms() + INTERVAL;
+                let stale = engine
+                    .evaluate(
+                        &config,
+                        &sliced_quiet(41, false),
+                        &PolicyInput::default(),
+                        after,
+                    )
+                    .unwrap();
+                let slice = stale.resources[&gpu_key].time_slice.clone().unwrap();
+                assert_eq!(slice.source, Some(SliceSource::Listing), "{mode:?}");
+            }
+        }
     }
 }

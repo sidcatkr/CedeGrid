@@ -1702,7 +1702,9 @@ node reports with the expected per-resource values at each step.
     are slice-bound, even in an interval whose amounts are unknown or inconsistent. When the
     estimate has no uncapped interval since it restarted, or when the samples themselves are
     unreadable and the counts are the listed processes, every counted external principal is
-    slice-bound. An own process that holds a context without computing counts for at most one
+    slice-bound. An interval without readable samples within `gpu.process_sample_max_age_ms` of
+    the last readable one keeps that one's counts, since NVML can have no new sample every other
+    interval; only past that age do the listed processes count. An own process that holds a context without computing counts for at most one
     counting window after its listing; for that time it counts toward t, so one fewer own task
     may be held beside a slice-bound principal, and no other workload pays beyond that window.
     When the listing itself is unknown on a device last read as time-sliced, nothing new is

@@ -1642,6 +1642,13 @@ impl<'a> Interval<'a> {
             demand.pids = Some(pids);
         }
         note_contexts(&mut demand.seen, gpu);
+        if gpu
+            .compute_contexts
+            .as_ref()
+            .is_some_and(|contexts| contexts.samples_readable)
+        {
+            demand.last_readable_ms = Some(self.now);
+        }
         let mut running: Vec<String> = self
             .input
             .allocations
@@ -1746,9 +1753,16 @@ impl<'a> Interval<'a> {
         let demand = self.next.gpu_demand.get(&gpu.uuid)?;
         // While the samples are readable the counts are the contexts within one counting window
         // of their last sample, and own work's also of their first listing, capped intervals
-        // included; the listing only while the samples are not readable (Q33).
+        // included; the listing only while the samples are not readable (Q33). An interval without
+        // samples within the sample age of the last readable one keeps those counts: NVML can
+        // have none every other interval, and the listing would count every listed context as
+        // busy by turns.
+        let readable = contexts.samples_readable
+            || demand.last_readable_ms.is_some_and(|at| {
+                self.now.saturating_sub(at) <= self.config.gpu_sample_max_age_ms()
+            });
         let mut own_counted = Vec::new();
-        let (own, mut principals, source) = if contexts.samples_readable {
+        let (own, mut principals, source) = if readable {
             let seen = |pid: &u32| demand.seen.get(pid).filter(|context| context.counts());
             for pid in &contexts.own {
                 if let Some(context) = seen(pid) {
