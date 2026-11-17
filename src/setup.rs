@@ -151,6 +151,13 @@ pub struct SetupArgs {
     pub certificate: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub private_key: Option<String>,
+    /// Allow unprotected Aggressive on this host: on a terminal only, after the host's numbers
+    /// and the fixed phrase (004 FR-013).
+    #[arg(long, conflicts_with = "disallow_unprotected_aggressive")]
+    pub allow_unprotected_aggressive: bool,
+    /// Turn that allowance off; no confirmation.
+    #[arg(long)]
+    pub disallow_unprotected_aggressive: bool,
 }
 
 /// What an operator chose. Unset fields keep the current configuration.
@@ -1009,6 +1016,33 @@ pub struct Report {
 
 /// Run setup and print its result; returns the exit status.
 pub fn main(config: &Path, args: &SetupArgs) -> i32 {
+    if args.allow_unprotected_aggressive || args.disallow_unprotected_aggressive {
+        return match allowance(config, args) {
+            Ok(state) => {
+                if args.json {
+                    println!("{}", serde_json::json!({ "unprotected_aggressive": state }));
+                } else {
+                    println!("unprotected Aggressive allowance: {state}");
+                }
+                0
+            }
+            Err(error) => {
+                let (exit, code, message) = match error.downcast_ref::<SetupError>() {
+                    Some(error) => (error.exit, error.code, error.message.clone()),
+                    None => (1, "ERR_CEDEGRID_SETUP", format!("{error:#}")),
+                };
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error": {"code": code, "message": message}})
+                    );
+                } else {
+                    eprintln!("{code}: {message}");
+                }
+                exit
+            }
+        };
+    }
     match run(config, args) {
         Ok(report) => {
             if args.json {
@@ -1081,6 +1115,120 @@ pub fn run(config: &Path, args: &SetupArgs) -> Result<Report> {
         choices: plan.changes,
         exceptions: plan.exceptions,
     })
+}
+
+/// The fixed phrase that turns the allowance on (004 R6).
+pub const ALLOWANCE_PHRASE: &str = "slow other users' compute on this host";
+
+/// What the allowance's numbers screen shows (004 FR-013, R11).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllowanceNumbers {
+    /// Other principals at or above 1% of the host's CPU; `None` when telemetry is unavailable.
+    pub other_principals: Option<usize>,
+    pub other_cpu_millicores: u64,
+    pub capacity_millicores: u64,
+}
+
+impl AllowanceNumbers {
+    pub fn from_snapshot(snapshot: &crate::model::Snapshot) -> Self {
+        let floor = (snapshot.cpu_capacity_millicores / 100).max(1);
+        let others: Vec<u64> = snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|principal| !principal.is_owner && principal.cpu_millicores >= floor)
+            .map(|principal| principal.cpu_millicores)
+            .collect();
+        Self {
+            other_principals: snapshot.principals.as_ref().map(|_| others.len()),
+            other_cpu_millicores: others.iter().sum(),
+            capacity_millicores: snapshot.cpu_capacity_millicores,
+        }
+    }
+}
+
+/// The two steps on the given streams: the numbers and a yes/no question with no default, then
+/// the fixed phrase. Returns whether both passed; anything else cancels with one line.
+pub fn allowance_dialog(
+    numbers: &AllowanceNumbers,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<bool> {
+    writeln!(
+        output,
+        "Unprotected Aggressive lets a run start compute work where other users already run."
+    )?;
+    match numbers.other_principals {
+        Some(count) => writeln!(
+            output,
+            "Other users active now: {count}, using {} m of {} m CPU.",
+            numbers.other_cpu_millicores, numbers.capacity_millicores
+        )?,
+        None => writeln!(output, "Other users active now: unknown (no telemetry).")?,
+    }
+    writeln!(
+        output,
+        "A light user on a CPU this host's own work fills may run about 2x slower (estimate)."
+    )?;
+    writeln!(output, "Memory floors and OOM handling do not change.")?;
+    write!(output, "Allow unprotected Aggressive on this host? [y/n] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "yes") {
+        writeln!(output, "cancelled: the allowance stays off")?;
+        return Ok(false);
+    }
+    write!(output, "Type \"{ALLOWANCE_PHRASE}\" to continue: ")?;
+    output.flush()?;
+    let mut phrase = String::new();
+    input.read_line(&mut phrase)?;
+    if phrase.trim_end_matches(['\r', '\n']) != ALLOWANCE_PHRASE {
+        writeln!(
+            output,
+            "cancelled: the phrase did not match; the allowance stays off"
+        )?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// `setup --allow-unprotected-aggressive` or `--disallow-unprotected-aggressive`: returns the
+/// allowance's state afterwards. Turning it on needs a terminal; turning it off needs nothing.
+fn allowance(config: &Path, args: &SetupArgs) -> Result<&'static str> {
+    let target = locate(config)?;
+    let (_, node) = node_base(&target)?;
+    if args.disallow_unprotected_aggressive {
+        crate::state::clear_allowance(&node.state_dir)?;
+        return Ok("off");
+    }
+    let interactive = !args.non_interactive
+        && !args.json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
+    if !interactive {
+        return Err(SetupError {
+            exit: 2,
+            code: "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
+            message: "unprotected Aggressive is allowed only from a terminal, after its numbers and phrase".into(),
+        }
+        .into());
+    }
+    let numbers = crate::telemetry::Collector::for_config(&node)
+        .and_then(|mut collector| collector.sample())
+        .map(|snapshot| AllowanceNumbers::from_snapshot(&snapshot))
+        .unwrap_or_default();
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    if !allowance_dialog(&numbers, &mut stdin.lock(), &mut stdout)? {
+        return Ok("off");
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the clock is before 1970")?
+        .as_millis();
+    crate::state::set_allowance(&node.state_dir, u64::try_from(now)?)?;
+    Ok("on")
 }
 
 /// On a terminal, offer setup for a command whose configuration is missing

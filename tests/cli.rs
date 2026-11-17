@@ -1604,6 +1604,47 @@ mod setup_terminal {
         }
     }
 
+    /// 004 FR-013: the allowance turns on only on a terminal, after the numbers, a yes and the
+    /// exact phrase.
+    #[test]
+    fn the_allowance_needs_a_yes_and_the_exact_phrase_on_a_terminal() {
+        use cedegrid::state::{Allowance, StateStore, read_allowance};
+        for (answer, phrase, on) in [
+            ("y", "slow other users' compute on this host", true),
+            ("y", "slow other users", false),
+            ("n", "", false),
+            ("", "", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = setup(dir.path());
+            let state = dir.path().join("state");
+            drop(StateStore::open(&state).unwrap());
+            let mut pty = Pty::spawn(&path, &["setup", "--allow-unprotected-aggressive"], &[]);
+            pty.wait_for("Allow unprotected Aggressive on this host? [y/n]");
+            pty.key(format!("{answer}\r").as_bytes());
+            if answer == "y" {
+                pty.wait_for("to continue:");
+                pty.key(format!("{phrase}\r").as_bytes());
+            }
+            let (status, text, _) = pty.finish();
+            assert!(status.success(), "{text}");
+            assert!(text.contains("Other users active now:"), "{text}");
+            assert!(text.contains("(estimate)"), "{text}");
+            assert!(
+                text.contains("Memory floors and OOM handling do not change."),
+                "{text}"
+            );
+            assert_eq!(
+                matches!(read_allowance(&state), Allowance::On { .. }),
+                on,
+                "{answer:?} {phrase:?}: {text}"
+            );
+            if !on {
+                assert!(text.contains("cancelled:"), "{text}");
+            }
+        }
+    }
+
     /// Terminals without cursor control get line prompts with the same choices,
     /// markers and confirmation (FR-055).
     #[test]
@@ -1649,6 +1690,46 @@ mod setup_terminal {
         assert!(!status.success(), "{text}");
         assert!(!path.exists());
     }
+}
+
+#[test]
+fn the_allowance_never_turns_on_without_a_terminal_and_turns_off_anywhere() {
+    use cedegrid::state::{Allowance, StateStore, read_allowance, set_allowance};
+    let dir = tempfile::tempdir().unwrap();
+    let path = setup(dir.path());
+    let state = dir.path().join("state");
+    drop(StateStore::open(&state).unwrap());
+    for extra in [&["--non-interactive"][..], &["--json"][..], &[][..]] {
+        let mut args = vec!["setup", "--allow-unprotected-aggressive"];
+        args.extend_from_slice(extra);
+        let output = run(&path, &args);
+        assert!(!output.status.success());
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY"),
+            "{text}"
+        );
+        assert!(matches!(read_allowance(&state), Allowance::Off { .. }));
+    }
+    set_allowance(&state, 1).unwrap();
+    let output = run(
+        &path,
+        &[
+            "setup",
+            "--non-interactive",
+            "--disallow-unprotected-aggressive",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(read_allowance(&state), Allowance::Off { .. }));
 }
 
 include!("support/state_dir.rs");

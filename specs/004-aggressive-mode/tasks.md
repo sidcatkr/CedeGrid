@@ -142,7 +142,7 @@ principal contends. Nothing else changes.
   `allow_unprotected_aggressive` at any table depth fail to load with
   `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: <key> cannot be stored; unprotected Aggressive is requested per submission only`,
   and that the same happens after `config_migration` migrates a 0.2 file that holds one.
-- [ ] T018 [P] [US2] (now) In `tests/cli.rs`, test interactive setup with a scripted terminal:
+- [x] T018 [P] [US2] (now) In `tests/cli.rs`, test interactive setup with a scripted terminal:
   - "yes" plus the exact phrase `slow other users' compute on this host` turns the allowance on;
   - "no", an empty answer or a wrong phrase leaves it off and prints `cancelled: the phrase did not match; the allowance stays off` where it applies;
   - non-interactive setup refuses to turn it on with `ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY`;
@@ -174,7 +174,7 @@ principal contends. Nothing else changes.
 
 - [ ] T023 [US2] (now) In `src/config.rs` and `src/config_migration.rs`, refuse every key that
   would enable unprotected Aggressive. Passes T017.
-- [ ] T024 [US2] (now) In `src/setup.rs` and `src/setup/interface.rs`, add the allowance step.
+- [x] T024 [US2] (now) In `src/setup.rs` and `src/setup/interface.rs`, add the allowance step.
   The numbers screen (R11) shows other active principals, their CPU use and an estimated
   light-user slowdown, labelled "estimate", from the agent's latest observation, and says that
   memory floors and OOM handling are unchanged by it (FR-006). Then a yes/no
