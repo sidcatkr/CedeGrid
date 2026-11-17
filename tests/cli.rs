@@ -1765,3 +1765,30 @@ fn doctor_marks_aggressive_and_its_caution() {
         "{text}"
     );
 }
+
+#[test]
+fn setup_flags_set_aggressive_only_with_its_acknowledgement() {
+    // 004 T014: the flags path; the interface keeps the three margined modes for now.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    let base = ["setup", "--non-interactive", "--role", "node"];
+    let mut refused = base.to_vec();
+    refused.extend(["--default-mode", "aggressive", "--max-mode", "aggressive"]);
+    let output = run(&path, &refused);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("aggressive_mode"),
+        "{output:?}"
+    );
+    let mut accepted = refused.clone();
+    accepted.extend(["--acknowledge-caution", "aggressive_mode"]);
+    let output = run(&path, &accepted);
+    assert!(output.status.success(), "{output:?}");
+    let config = Config::load(&path).unwrap();
+    assert_eq!(
+        config
+            .contention
+            .mode(cedegrid::contention::ResourceKind::Cpu),
+        cedegrid::contention::ContentionMode::Aggressive
+    );
+}

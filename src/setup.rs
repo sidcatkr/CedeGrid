@@ -1380,7 +1380,8 @@ impl Field {
 
     /// The options shown for the field, including its current value.
     pub fn options(self, config: &Config, fresh: bool) -> Vec<Pick> {
-        // Aggressive is offered with its own confirmed step (004 T014), not in these lists.
+        // The interface offers the three margined modes; Aggressive is set with the flags and
+        // its `aggressive_mode` acknowledgement until the interface gains its own step (004 T014).
         let modes = ContentionMode::MARGINED.map(Pick::Mode);
         let numbers = |mut values: Vec<u64>, ascending: bool| -> Vec<Pick> {
             if let Pick::Number(current) = self.current(config) {
@@ -1818,15 +1819,28 @@ mod tests {
         let host = host();
         let risk = |target: &Target, field, pick| risk(target, field, pick, Some(&host));
         for kind in ResourceKind::ALL {
-            for mode in ContentionMode::ALL {
+            for mode in ContentionMode::MARGINED {
                 assert_eq!(risk(&plain, Field::Mode(kind), Pick::Mode(mode)), None);
             }
+            assert_eq!(
+                risk(
+                    &plain,
+                    Field::Mode(kind),
+                    Pick::Mode(ContentionMode::Aggressive)
+                ),
+                Some("aggressive_mode")
+            );
             assert_eq!(risk(&plain, Field::Mode(kind), Pick::Inherit), None);
         }
         for field in [Field::DefaultMode, Field::MaxMode] {
-            for mode in ContentionMode::ALL {
+            for mode in ContentionMode::MARGINED {
                 assert_eq!(risk(&plain, field, Pick::Mode(mode)), None);
             }
+            // 004: Aggressive and a cap at it each take the caution step.
+            assert_eq!(
+                risk(&plain, field, Pick::Mode(ContentionMode::Aggressive)),
+                Some("aggressive_mode")
+            );
         }
         // Default floors carry no marker. With percentages, 5% of this host is
         // the floor whatever the fixed part says.

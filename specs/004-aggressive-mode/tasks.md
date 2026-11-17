@@ -128,6 +128,11 @@ Aggressive.
 - [ ] T014 [US1] (after T622) In `src/setup.rs` and `src/setup/interface.rs`, add the cap step to
   Aggressive with its own confirmation and the red `[Aggressive]` label. Non-interactively, it
   needs `--max-mode aggressive --acknowledge aggressive_mode`.
+  - *Done in part:* the flags path (`--default-mode aggressive --max-mode aggressive
+    --acknowledge-caution aggressive_mode`) and the caution mapping (`risk` returns
+    `aggressive_mode` for Aggressive in every mode field). The interactive interface still lists
+    the three margined modes; offering Aggressive there means re-pinning the interface tests'
+    row and option positions.
 - [x] T015 [US1] (after T622) In `src/explain.rs`, show the red `[Aggressive]` in `observe`,
   `doctor` and `status` and their JSON (`"mode": "aggressive"`), plain under `NO_COLOR`.
   - *Done:* `[Aggressive]` in the mode lines, and doctor's caution list names `aggressive_mode`
