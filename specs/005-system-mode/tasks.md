@@ -119,6 +119,7 @@ the task list.
   - the cgroup is its own unit's path (both N4 placements);
   - it is owned by its user ID;
   - the broker's marker reads back.
+  - *In part:* the tests are in `tests/system_mode.rs` (module `agent_in_unit`): both placements, the `agent` leaf, another user's unit, the idle unit, a session, a nested path, a missing or wrong marker and a directory not owned by the user.
   Every other path is refused.
 
 ### Implementation
@@ -141,6 +142,7 @@ the task list.
   - Both units' markers are checked before either is touched. Tested against a systemd stand-in only; the container run is T031.
 - [ ] T022 [US1] Implement the idle executor subcommand: a fixed CedeGrid subcommand with no policy of its own, started in the idle unit and driven by the user's agent over a socket in the ordinary unit's runtime directory `/run/cedegrid/u<uid>/`, never the user's own runtime directory (research R9, R18). In `src/agent/` and `src/main.rs`.
 - [ ] T023 [US1] Implement delegated-root detection inside a unit in `src/cgroup.rs` (passes T018)
+  - *In part:* `cgroup::system_unit_jobs_root` accepts the unit and returns `<unit>/jobs` as the jobs' delegated root; job leaves are named `cedegrid-<mode>-<job>.<nonce>` from the job's RAM mode and task ID (`cgroup::leaf_label`). Moving the agent into `<unit>/agent` and making `jobs` is T022's.
 - [x] T024 [US1] Implement the client in `src/system_mode.rs`, with `cedegrid system start|stop|status` added to `src/main.rs`:
   - detect the socket and check the protocol;
   - start the units and wait;

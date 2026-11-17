@@ -185,6 +185,59 @@ impl CgroupConfig {
     }
 }
 
+/// `<mode>-<job>` for a job's leaf name, from the job's RAM mode and its task ID, when both can
+/// be named: System mode's broker reads them back to mark and move the job. `None` keeps the
+/// plain random name.
+pub fn leaf_label(request: &LaunchRequest) -> Option<String> {
+    let mode = request
+        .contention
+        .as_ref()?
+        .modes
+        .get(&ResourceKind::Ram)?
+        .name();
+    let job = &request.task_id;
+    let plain = !job.is_empty()
+        && job.len() <= 128
+        && job
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    plain.then(|| format!("{mode}-{job}"))
+}
+
+/// The jobs' delegated root inside System mode's ordinary unit (005 T023), when the agent runs
+/// there: its own cgroup is `cedegrid-u<uid>.service` (or that unit's `agent` leaf) in
+/// `user-<uid>.slice` or `cedegrid.slice`, the broker's marker is in its environment, and the
+/// unit's directory belongs to the user. Anything else is refused.
+pub fn system_unit_jobs_root(
+    self_cgroup: &str,
+    uid: u32,
+    marker: Option<&str>,
+    mount: &Path,
+    owner_of: impl Fn(&Path) -> Option<u32>,
+) -> Result<PathBuf> {
+    ensure!(
+        marker == Some(format!("ordinary:{uid}").as_str()),
+        "not started by the System mode broker for this user"
+    );
+    let unit = format!("cedegrid-u{uid}.service");
+    let unit_path = self_cgroup.strip_suffix("/agent").unwrap_or(self_cgroup);
+    let placements = [
+        format!("/user.slice/user-{uid}.slice/{unit}"),
+        format!("/cedegrid.slice/{unit}"),
+    ];
+    ensure!(
+        placements.iter().any(|placement| placement == unit_path),
+        "cgroup {self_cgroup} is not this user's System mode unit"
+    );
+    let unit_dir = mount.join(unit_path.trim_start_matches('/'));
+    ensure!(
+        owner_of(&unit_dir) == Some(uid),
+        "{} is not delegated to user ID {uid}",
+        unit_dir.display()
+    );
+    Ok(unit_dir.join("jobs"))
+}
+
 fn validate_absolute_path(path: &Path) -> Result<()> {
     ensure!(
         path.is_absolute() && path != Path::new("/"),
@@ -1323,7 +1376,7 @@ impl LaunchBackend for CgroupBackend {
         );
         #[cfg(target_os = "linux")]
         {
-            self.runtime.create_leaf()?;
+            self.runtime.create_leaf(leaf_label(request).as_deref())?;
             self.assignment = Some(request.assignment_id.clone());
             let path = self.runtime.leaf_path()?.to_owned();
             self.evidence.clear();
@@ -1766,7 +1819,7 @@ mod linux {
             Ok(())
         }
 
-        pub(super) fn create_leaf(&mut self) -> Result<()> {
+        pub(super) fn create_leaf(&mut self, label: Option<&str>) -> Result<()> {
             ensure!(
                 self.leaf.is_none() && self.unreconciled_leaf.is_none(),
                 "existing owned cgroup requires reconciliation"
@@ -1778,13 +1831,13 @@ mod linux {
             );
             let mut random = [0_u8; 16];
             File::open("/dev/urandom")?.read_exact(&mut random)?;
-            let name = format!(
-                "cedegrid-{}",
-                random
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            );
+            let nonce: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            // A label names the job's mode and ID for System mode's broker; the random part
+            // keeps every leaf new, even for a retry of the same job.
+            let name = match label {
+                Some(label) => format!("cedegrid-{label}.{}", &nonce[..16]),
+                None => format!("cedegrid-{nonce}"),
+            };
             let c_name = CString::new(name.clone())?;
             // SAFETY: retained verified root fd, fresh random component; exclusive
             // mkdir never adopts an existing leaf, even for the same assignment.

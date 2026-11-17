@@ -5,7 +5,7 @@
 //! the source is thawed. On any failure the job stays where it was.
 
 use super::ModeName;
-use super::oom::{HeldProcess, ProcessAccess, leaf_name, parse_leaf};
+use super::oom::{HeldProcess, ProcessAccess, parse_leaf};
 use super::request::{JobId, Refusal, RefusalCode};
 use super::units::Caller;
 use std::time::{Duration, Instant};
@@ -134,15 +134,27 @@ pub fn move_job(
         [one] => format!("{source_unit}/{one}"),
         _ => return Err(refused("more than one cgroup carries this job's ID")),
     };
-    let target = format!("{target_unit}/{}", leaf_name(to, job));
-    let target_ready = fs
+    let targets: Vec<String> = fs
         .children(target_unit)
-        .is_ok_and(|names| names.contains(&leaf_name(to, job)))
-        && fs.children(&target).is_ok_and(|names| names.is_empty())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| parse_leaf(name) == Some((to, job.as_str())))
+        .collect();
+    let target = match targets.as_slice() {
+        [one] => format!("{target_unit}/{one}"),
+        _ => {
+            return Err(refused(format!(
+                "no single empty destination cgroup for job {} in mode {}; the agent creates it before a move",
+                job.as_str(),
+                to.name()
+            )));
+        }
+    };
+    let target_ready = fs.children(&target).is_ok_and(|names| names.is_empty())
         && pids_in(fs, &target).is_ok_and(|pids| pids.is_empty());
     if !target_ready {
         return Err(refused(format!(
-            "destination cgroup {target} is missing or not empty; the agent creates it before a move"
+            "destination cgroup {target} is not empty; the agent creates an empty one before a move"
         )));
     }
     if !fs.children(&source).is_ok_and(|names| names.is_empty()) {

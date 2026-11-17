@@ -2799,6 +2799,27 @@ mod job_moves {
         fake
     }
 
+    #[test]
+    fn leaves_with_a_nonce_move_too() {
+        let fake = Fake::default();
+        fake.cgroup(ORDINARY, &[]);
+        fake.cgroup(IDLE, &[]);
+        fake.cgroup(
+            &format!("{ORDINARY}/cedegrid-neutral-j1.0a0b0c0d0e0f1011"),
+            &[21],
+        );
+        fake.cgroup(
+            &format!("{IDLE}/cedegrid-yield_first-j1.1213141516171819"),
+            &[],
+        );
+        let moved = move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst).unwrap();
+        assert_eq!(
+            moved.to,
+            format!("{IDLE}/cedegrid-yield_first-j1.1213141516171819")
+        );
+        assert_eq!(moved.pids, vec![21]);
+    }
+
     fn job() -> JobId {
         JobId::parse("j1").unwrap()
     }
@@ -3442,5 +3463,131 @@ mod container {
         stop_units(MEMBER);
         assert_eq!(group, "/cedegrid_idle.slice");
         assert_eq!(value.trim(), "1", "cpu.idle on cedegrid_idle.slice");
+    }
+}
+
+// T018, T023: the agent's side of the unit (leaf names and the jobs' delegated root).
+
+mod agent_in_unit {
+    use cedegrid::broker::ModeName;
+    use cedegrid::broker::oom::parse_leaf;
+    use cedegrid::cgroup::{leaf_label, system_unit_jobs_root};
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::{AllocationClass, JobContention, LaunchRequest};
+    use std::path::{Path, PathBuf};
+
+    fn request(task_id: &str, ram: Option<ContentionMode>) -> LaunchRequest {
+        LaunchRequest {
+            task_id: task_id.into(),
+            assignment_id: "a".into(),
+            argv: vec!["true".into()],
+            cwd: PathBuf::from("/"),
+            env: Default::default(),
+            resources: Default::default(),
+            replay_safe: true,
+            class: AllocationClass::Opportunistic,
+            no_escape: true,
+            single_process: true,
+            managed_child_limit: 0,
+            max_attempts: None,
+            input_artifacts: vec![],
+            required_controls: vec![],
+            allow_fallback: false,
+            contention: ram.map(|mode| JobContention {
+                modes: [(ResourceKind::Ram, mode)].into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn leaf_labels_carry_the_ram_mode_and_job_and_parse_back() {
+        let label = leaf_label(&request("job-7", Some(ContentionMode::Performance))).unwrap();
+        assert_eq!(label, "performance-job-7");
+        let leaf = format!("cedegrid-{label}.0011223344556677");
+        assert_eq!(parse_leaf(&leaf), Some((ModeName::Performance, "job-7")));
+        assert_eq!(
+            parse_leaf("cedegrid-yield_first-a-b-c"),
+            Some((ModeName::YieldFirst, "a-b-c"))
+        );
+        // No mode, or a task ID that cannot be named, keeps the plain random leaf.
+        assert_eq!(leaf_label(&request("job-7", None)), None);
+        assert_eq!(
+            leaf_label(&request("job/7", Some(ContentionMode::Neutral))),
+            None
+        );
+        assert_eq!(
+            leaf_label(&request("", Some(ContentionMode::Neutral))),
+            None
+        );
+        assert_eq!(
+            parse_leaf("cedegrid-00112233445566778899aabbccddeeff"),
+            None
+        );
+    }
+
+    fn owner(uid: u32) -> impl Fn(&Path) -> Option<u32> {
+        move |_| Some(uid)
+    }
+
+    #[test]
+    fn the_jobs_root_is_accepted_only_inside_the_users_own_unit() {
+        let mount = Path::new("/sys/fs/cgroup");
+        for cgroup in [
+            "/user.slice/user-1000.slice/cedegrid-u1000.service",
+            "/user.slice/user-1000.slice/cedegrid-u1000.service/agent",
+            "/cedegrid.slice/cedegrid-u1000.service",
+        ] {
+            let root =
+                system_unit_jobs_root(cgroup, 1000, Some("ordinary:1000"), mount, owner(1000))
+                    .unwrap_or_else(|error| panic!("{cgroup}: {error:#}"));
+            assert!(root.ends_with("cedegrid-u1000.service/jobs"), "{root:?}");
+        }
+        let refused = [
+            // Another user's unit, the idle unit, a session, a nested path.
+            (
+                "/cedegrid.slice/cedegrid-u1001.service",
+                "ordinary:1000",
+                1000,
+            ),
+            (
+                "/cedegrid_idle.slice/cedegrid-idle-u1000.service",
+                "ordinary:1000",
+                1000,
+            ),
+            (
+                "/user.slice/user-1000.slice/session-3.scope",
+                "ordinary:1000",
+                1000,
+            ),
+            (
+                "/cedegrid.slice/cedegrid-u1000.service/jobs/x",
+                "ordinary:1000",
+                1000,
+            ),
+            // Without the broker's marker, or not delegated to the user.
+            ("/cedegrid.slice/cedegrid-u1000.service", "idle:1000", 1000),
+            (
+                "/cedegrid.slice/cedegrid-u1000.service",
+                "ordinary:1001",
+                1000,
+            ),
+            ("/cedegrid.slice/cedegrid-u1000.service", "ordinary:1000", 0),
+        ];
+        for (cgroup, marker, dir_owner) in refused {
+            assert!(
+                system_unit_jobs_root(cgroup, 1000, Some(marker), mount, owner(dir_owner)).is_err(),
+                "{cgroup} {marker} {dir_owner}"
+            );
+        }
+        assert!(
+            system_unit_jobs_root(
+                "/cedegrid.slice/cedegrid-u1000.service",
+                1000,
+                None,
+                mount,
+                owner(1000)
+            )
+            .is_err()
+        );
     }
 }

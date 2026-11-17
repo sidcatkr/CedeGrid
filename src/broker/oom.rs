@@ -193,17 +193,13 @@ pub fn task_mode(kind: UnitKind, leaf: Option<&str>) -> ModeName {
         .unwrap_or(ModeName::Neutral)
 }
 
-/// The mode and job of a task leaf named `cedegrid-<mode>-<job>`. Mode names hold no `-`, so
-/// the first `-` after the mode ends it.
+/// The mode and job of a task leaf named `cedegrid-<mode>-<job>.<nonce>` (the nonce optional).
+/// Mode names hold no `-` and job IDs no `.`, so both split points are unambiguous.
 pub fn parse_leaf(leaf: &str) -> Option<(ModeName, &str)> {
-    let (mode, job) = leaf.strip_prefix("cedegrid-")?.split_once('-')?;
+    let (mode, rest) = leaf.strip_prefix("cedegrid-")?.split_once('-')?;
+    let job = rest.split_once('.').map_or(rest, |(job, _)| job);
     let mode = ModeName::from_name(mode)?;
     super::request::JobId::parse(job).map(|_| (mode, job))
-}
-
-/// The leaf name the agent gives a job's cgroup in a unit.
-pub fn leaf_name(mode: ModeName, job: &super::request::JobId) -> String {
-    format!("cedegrid-{}-{}", mode.name(), job.as_str())
 }
 
 /// Groups one user's unit processes into tasks, one per leaf, each started at its oldest process.
