@@ -1124,6 +1124,7 @@ impl<'a> Interval<'a> {
                 cause: frame.cause,
                 usage: (kind == ResourceKind::Cpu && !pending_pass)
                     .then(|| victim.amount.saturating_add(kept)),
+                memory_usage: kind.is_memory().then_some(victim.amount),
                 compute_floor: if kind == ResourceKind::Cpu && !pending_pass {
                     self.compute_floor(key, victim.mode, frame.own_usage)
                 } else {
@@ -1282,6 +1283,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
+                    memory_usage: None,
                     room: if kind.is_memory() {
                         self.floor_room.get(key).copied()
                     } else {
@@ -1457,6 +1459,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 state,
                 &LadderInput {
+                    memory_usage: None,
                     room: None,
                     kind,
                     guaranteed: victim.guaranteed,
@@ -1549,6 +1552,7 @@ impl<'a> Interval<'a> {
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
+                    memory_usage: None,
                     room: None,
                     kind,
                     guaranteed: is_guaranteed(allocation),
@@ -1705,6 +1709,7 @@ impl<'a> Interval<'a> {
                     to_free: None,
                     pending: false,
                     recomputed: false,
+                    asked_target: None,
                 },
             );
         }

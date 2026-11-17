@@ -105,6 +105,7 @@ mod ladder {
             cause: YieldCause::ExternalGrowth,
             target: None,
             usage: None,
+            memory_usage: None,
             compute_floor: None,
             at_minimum_duty: false,
         }
@@ -321,6 +322,7 @@ mod ladder {
                 after_pause: false,
                 pending: false,
                 recomputed: false,
+                asked_target: None,
             };
             for excess in [0, 500] {
                 let after = plan_step(
@@ -453,6 +455,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             recomputed: false,
+            asked_target: None,
         };
         let before = plan_step(
             Some(&paused),
@@ -487,6 +490,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             recomputed: false,
+            asked_target: None,
         };
         let plain = |excess| LadderInput {
             room: None,
@@ -530,6 +534,7 @@ mod ladder {
             after_pause: false,
             pending: false,
             recomputed: false,
+            asked_target: None,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
         let (held, changes) = run(Some(capped.clone()), &cpu, 1..40, |_| {
@@ -563,6 +568,7 @@ mod ladder {
                 after_pause: false,
                 pending: false,
                 recomputed: false,
+                asked_target: None,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
                 input(ResourceKind::Cpu, 0, 0)
@@ -570,6 +576,66 @@ mod ladder {
             assert!(changes.is_empty());
             assert_eq!(after.unwrap().step, step);
         }
+    }
+
+    /// At its deadline a memory hint whose reading is at or below what it was asked is entered
+    /// again with the current target and a new deadline; one above it, or one asked for a
+    /// target it cannot reach, goes on to the drain (FR-037).
+    #[test]
+    fn a_complied_memory_hint_is_renewed_at_its_deadline() {
+        let ram = timing(ResourceKind::Ram, ContentionMode::Neutral);
+        let deadline = ram.hint_deadline_ms;
+        let ask = |target: u64, usage: u64| LadderInput {
+            unavailable: [YieldStep::Cap].into(),
+            cause: YieldCause::FloorBreach,
+            target: Some(target),
+            memory_usage: Some(usage),
+            ..input(ResourceKind::Ram, 300, 0)
+        };
+        let step = |state: &StepState, input: &LadderInput, now: u64| {
+            plan_step(Some(state), input, &ram, now).state.unwrap()
+        };
+        let hinted = plan_step(None, &ask(6_700, 7_000), &ram, 0).state.unwrap();
+        assert_eq!(
+            (hinted.step, hinted.target, hinted.asked_target),
+            (YieldStep::Hint, Some(6_700), Some(6_700))
+        );
+        // The task freed what it was asked, and another task's growth left 300 MiB more.
+        let renewed = step(&hinted, &ask(6_400, 6_700), deadline);
+        assert_eq!(
+            (renewed.step, renewed.target, renewed.asked_target),
+            (YieldStep::Hint, Some(6_400), Some(6_400))
+        );
+        assert_eq!(renewed.entered_at_ms, deadline);
+        assert_eq!(
+            step(&renewed, &ask(6_400, 6_700), deadline + 500).step,
+            YieldStep::Hint
+        );
+        assert_eq!(
+            step(&renewed, &ask(6_400, 6_700), 2 * deadline).step,
+            YieldStep::Drain
+        );
+        // One MiB above both targets has not complied.
+        assert_eq!(
+            step(&hinted, &ask(6_400, 6_701), deadline).step,
+            YieldStep::Drain
+        );
+        // A target of 0 for a task that holds memory it cannot free.
+        let empty = plan_step(None, &ask(0, 100), &ram, 0).state.unwrap();
+        assert_eq!(step(&empty, &ask(0, 100), deadline).step, YieldStep::Drain);
+        // State written before `asked_target` is judged against the current target alone.
+        let older = StepState {
+            asked_target: None,
+            ..hinted.clone()
+        };
+        assert_eq!(
+            step(&older, &ask(6_400, 6_700), deadline).step,
+            YieldStep::Drain
+        );
+        assert_eq!(
+            step(&older, &ask(6_400, 6_400), deadline).step,
+            YieldStep::Hint
+        );
     }
 
     proptest! {

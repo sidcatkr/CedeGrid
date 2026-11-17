@@ -426,6 +426,7 @@ impl PolicyEngine {
                 to_free: None,
                 pending: false,
                 recomputed: false,
+                asked_target: None,
             },
         );
     }

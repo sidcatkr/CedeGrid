@@ -8808,8 +8808,10 @@ mod floors_by_mode {
     /// The need pauses with `z`'s hint held, free memory exactly at the floor from 500 to
     /// 5 000 ms, and returns at 5 500 ms. The hint's wait starts again with the need, on the
     /// clock its step escalates by, and the hint counts what it was asked through that renewed
-    /// wait: the 200 MiB excess is asked of `z` alone, `z` is drained when the renewed deadline
-    /// passes, and the in-share tasks are never stepped for it (FR-016, FR-023, R76).
+    /// wait: the 200 MiB excess is asked of `z` alone, and the in-share tasks are never stepped
+    /// for it. `z` freed what it was first asked, so at the renewed deadline it is hinted again
+    /// with a new deadline, and drained when that one passes without the 200 MiB (FR-016,
+    /// FR-023, FR-037, R76, R86).
     #[test]
     fn a_held_hint_counts_through_its_renewed_wait_when_the_need_returns() {
         let class = AllocationClass::Opportunistic;
@@ -8841,7 +8843,7 @@ mod floors_by_mode {
                     800,
                 ),
             };
-            let run = scripted(&config_in(mode), &facts, 10_500, at);
+            let run = scripted(&config_in(mode), &facts, 15_500, at);
             assert_eq!(
                 run[0].steps,
                 BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(5_700)))]),
@@ -8860,7 +8862,7 @@ mod floors_by_mode {
                     interval.now,
                     interval.steps
                 );
-                if interval.now < 10_500 {
+                if interval.now < 15_500 {
                     assert!(interval.drains.is_empty(), "{mode:?} at {}", interval.now);
                 }
             }
@@ -8870,10 +8872,12 @@ mod floors_by_mode {
     }
 
     /// `random::242`'s shape in Performance with free memory at 0: `z`, Guaranteed and the
-    /// over-share task, is hinted for its 1 000 MiB excess; at 1 000 ms its wait is over, but it
-    /// may not be drained while Opportunistic `o` is left (FR-024), so its excess passes on. It
-    /// is asked for those 1 000 MiB once, not again in the remainder, and the next task in the
-    /// cost order is asked for them (FR-016, FR-023, R76).
+    /// over-share task, is hinted for its 1 000 MiB excess and frees it by its deadline at
+    /// 1 000 ms, while free memory stays at 0. Having met its target, it is hinted again for
+    /// the current excess with a new deadline. When that wait is over at 2 000 ms it may not be
+    /// drained while Opportunistic `o` is left (FR-024), so its excess passes on: it is asked
+    /// for those 1 000 MiB once, not again in the remainder, and the next task in the cost
+    /// order is asked for them (FR-016, FR-023, FR-037, R76, R86).
     #[test]
     fn an_over_share_task_is_asked_for_its_own_part_once() {
         let facts = over_share_facts(&["z", "x", "o"], &[], &[("z", 1_000)]);
@@ -8895,22 +8899,23 @@ mod floors_by_mode {
                 0,
             )
         };
-        let run = scripted(&config_in(ContentionMode::Performance), &facts, 1_000, at);
-        for interval in &run[..2] {
+        let run = scripted(&config_in(ContentionMode::Performance), &facts, 2_000, at);
+        for (interval, target) in run.iter().zip([11_289, 11_289, 10_289, 10_289]) {
             assert_eq!(
                 interval.steps,
-                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(11_289)))]),
+                BTreeMap::from([("z".to_string(), (YieldStep::Hint, Some(target)))]),
                 "at {}",
                 interval.now
             );
         }
         assert_eq!(
-            run[2].steps,
+            run[4].steps,
             BTreeMap::from([
                 ("z".to_string(), (YieldStep::Hint, Some(10_289))),
                 ("x".to_string(), (YieldStep::Hint, Some(14_342))),
             ])
         );
+        assert!(run.iter().all(|interval| interval.drains.is_empty()));
     }
 
     /// `random::378`'s shape: Guaranteed `g` holds all of own memory, takes no hint and does not
@@ -9088,6 +9093,56 @@ mod floors_by_mode {
                     interval.steps
                 );
             }
+        }
+    }
+
+    /// `random::193`'s shape: `z`, 300 MiB over own work's share, is hinted and frees its 300
+    /// MiB at 2 s, while `a` grows by 300 MiB, so free RAM stays 700 MiB. At the deadline `z`
+    /// is at its target, so it is hinted again with a new deadline instead of being drained; it
+    /// does not free the new ask, so it is drained when that deadline passes (FR-037, US4/AC7).
+    #[test]
+    fn an_over_share_task_that_met_its_target_is_hinted_again_and_not_drained() {
+        let class = AllocationClass::Opportunistic;
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+            let at = |now: u64| {
+                let moved = if now >= 2_000 { 300 } else { 0 };
+                (
+                    vec![
+                        ram_job("a", class, 3_000 + moved),
+                        ram_job("b", class, 3_000),
+                        ram_job("c", class, 3_000),
+                        ram_job("z", class, 7_000 - moved),
+                    ],
+                    700,
+                )
+            };
+            let run = scripted(&config_in(mode), &facts, 12_000, at);
+            assert_eq!(
+                run[0].steps.get("z"),
+                Some(&(YieldStep::Hint, Some(6_700))),
+                "{mode:?}"
+            );
+            let at_deadline = run.iter().find(|i| i.now == 5_000).unwrap();
+            assert!(
+                at_deadline.drains.is_empty(),
+                "{mode:?}: {:?}",
+                at_deadline.drains
+            );
+            assert_eq!(
+                at_deadline.steps.get("z"),
+                Some(&(YieldStep::Hint, Some(6_400))),
+                "{mode:?}: hinted again for the current excess"
+            );
+            let drained = run
+                .iter()
+                .find(|interval| !interval.drains.is_empty())
+                .map(|interval| (interval.now, interval.drains.clone()));
+            assert_eq!(
+                drained,
+                Some((10_000, vec!["z".to_string()])),
+                "{mode:?}: drained only at the new deadline"
+            );
         }
     }
 

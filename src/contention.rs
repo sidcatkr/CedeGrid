@@ -865,6 +865,10 @@ pub struct StepState {
     /// A Performance compute cap applied again after it missed its target (FR-022).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recomputed: bool,
+    /// The target a memory hint was entered with; compliance at its deadline is judged against
+    /// the larger of it and the current target (FR-037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_target: Option<u64>,
 }
 
 /// Own work's fair share and usage on a compute resource in Performance (FR-022).
@@ -893,6 +897,9 @@ pub struct LadderInput {
     pub target: Option<u64>,
     /// The allocation's measured usage of the resource, when known.
     pub usage: Option<u64>,
+    /// The allocation's reading of a memory resource, for a hint's compliance (FR-037); `None`
+    /// for CPU and GPU compute.
+    pub memory_usage: Option<u64>,
     /// Free memory above the floor, for a memory resource, when known.
     pub room: Option<u64>,
     /// Performance and Aggressive compute: no pause below the fair share (FR-022).
@@ -1073,6 +1080,9 @@ pub fn plan_step(
             to_free: (input.excess > 0).then_some(input.excess),
             pending: false,
             recomputed: false,
+            asked_target: (step == YieldStep::Hint && input.kind.is_memory())
+                .then_some(input.target)
+                .flatten(),
         }),
         skipped,
     };
@@ -1164,6 +1174,19 @@ pub fn plan_step(
                 capped.contended_since_ms = Some(contended_since);
             }
             return decision;
+        }
+        // A memory hint met at its deadline is entered again with the current target and a new
+        // deadline; only a task above what it was asked goes on (FR-037).
+        if due
+            && current == YieldStep::Hint
+            && input.kind.is_memory()
+            && !input.unavailable.contains(&YieldStep::Hint)
+            && let Some(state) = state
+            && hint_wait_over(state, timing, now_ms)
+            && let (Some(usage), Some(target)) = (input.memory_usage, input.target)
+            && usage <= state.asked_target.unwrap_or(target).max(target)
+        {
+            return enter(YieldStep::Hint, Vec::new());
         }
         if due && !after_pause {
             let (next, skipped) = input.next_step(current);
