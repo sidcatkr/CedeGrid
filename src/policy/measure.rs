@@ -1252,50 +1252,21 @@ impl<'a> Interval<'a> {
                     }
                     None => {}
                 }
-                if time_slice.as_ref().is_none_or(|slice| slice.d0.is_none()) {
-                    demand.slice = None;
-                }
             }
-            // Performance and Aggressive set no duty: a slice-bound principal holds GPU admission
-            // instead, and own work keeps the driver's slices (FR-021, FR-022).
-            let performance =
-                governing(self.config, ResourceKind::GpuCompute) >= ContentionMode::Performance;
-            slice_admission_held = performance
-                && time_slice
-                    .as_ref()
-                    .is_some_and(|slice| !slice.bound.is_empty());
-            // On the time-slice duty Neutral runs at the duty, and own work's share is the duty's
-            // part of the busy contexts, the listed ones while the amounts are unknown (FR-021,
-            // Q27, Q29).
-            if let Some((duty, share)) =
-                time_slice
-                    .as_ref()
-                    .filter(|_| !performance)
-                    .and_then(|slice| {
-                        let duty = slice.duty?;
-                        let own = u64::from(slice.own);
-                        let external = slice
-                            .external
-                            .unwrap_or_else(|| slice.bound.iter().map(|b| b.contexts).sum());
-                        Some((duty, duty * own / (own + u64::from(external)).max(1)))
-                    })
-            {
-                self.time_slice_duty.insert(gpu.uuid.clone(), duty);
-                if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
-                    budget.share = share;
-                }
-                for (mode, target) in budget.targets.iter_mut() {
-                    if *mode != ContentionMode::YieldFirst {
-                        *target = share;
-                    }
-                }
-                note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_duty");
+            // No mode sets a duty: a slice-bound principal holds GPU admission in every mode, and
+            // in Yield First and Neutral own tasks there are held by whole tasks (FR-021, FR-089).
+            slice_admission_held = time_slice
+                .as_ref()
+                .is_some_and(|slice| !slice.bound.is_empty());
+            if let Some(hold) = time_slice.as_ref().and_then(|slice| slice.hold) {
+                self.slice_hold.insert(gpu.uuid.clone(), hold);
+                note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_hold");
             }
             // Under the time-slice rule, or with no slice-bound principal, Neutral, Performance
             // and Aggressive hold the device; Yield First keeps its target (FR-021, Q22, Q27).
             if time_slice
                 .as_ref()
-                .is_some_and(|slice| slice.holds || slice.d0.is_none())
+                .is_some_and(|slice| slice.holds || slice.hold.is_none())
             {
                 self.time_slice_holds.insert(gpu.uuid.clone());
                 if governing(self.config, ResourceKind::GpuCompute) != ContentionMode::YieldFirst {
@@ -1853,57 +1824,25 @@ impl<'a> Interval<'a> {
             ..TimeSliceRecord::default()
         };
         if !holds {
-            self.slice_duty(gpu, &principals, read, &mut record);
+            self.slice_hold(&principals, read, &gpu.uuid, &mut record);
         }
         Some(record)
     }
 
-    /// Whether a re-measure window can open on the device: not while the governing mode or an own
-    /// allocation there is in Yield First, nor while one there holds a CPU step of cap or more
-    /// (FR-021, Q19, Q37).
-    fn windows_can_open(&self, uuid: &str) -> bool {
-        // Only Neutral caps for the time slice, so only it needs uncapped windows; Performance's
-        // intervals are all uncapped (FR-021, FR-022).
-        governing(self.config, ResourceKind::GpuCompute) == ContentionMode::Neutral
-            && self
-                .input
-                .allocations
-                .iter()
-                .filter(|a| {
-                    a.phase == AllocationPhase::Running
-                        && a.requested.gpu_memory_mib.contains_key(uuid)
-                })
-                .all(|a| {
-                    let yield_first = self
-                        .allocation_modes
-                        .get(&a.id)
-                        .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
-                        .is_some_and(|mode| *mode == ContentionMode::YieldFirst);
-                    let cpu = self
-                        .prev
-                        .ladder
-                        .get(&(a.id.clone(), ResourceKey::Cpu))
-                        .map_or(YieldStep::None, |state| state.step);
-                    !yield_first && cpu < YieldStep::Cap
-                })
-    }
-
-    /// The time-slice duty at m × k > E (FR-021, Q27, Q28): the slice-bound principals from the
-    /// external estimate's readings when `read`, else every counted principal, d0 from their
-    /// counts, and one step up or down from the device's utilization.
-    fn slice_duty(
+    /// The time-slice hold at m × k > E (FR-021, FR-089): the slice-bound principals, from the
+    /// external estimate's readings when `read`, else every counted principal, and the own tasks
+    /// that keep running, ⌊E_b ÷ k_b⌋, at least one.
+    fn slice_hold(
         &mut self,
-        gpu: &GpuSnapshot,
         principals: &BTreeMap<Option<u32>, u32>,
         read: bool,
+        uuid: &str,
         record: &mut TimeSliceRecord,
     ) {
-        let config = self.config;
-        let thresholds = config.contention.thresholds(ResourceKind::GpuCompute);
+        let thresholds = self.config.contention.thresholds(ResourceKind::GpuCompute);
         let own = u64::from(record.own);
         let external: u64 = principals.values().map(|n| u64::from(*n)).sum();
-        let windows = self.windows_can_open(&gpu.uuid);
-        let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) else {
+        let Some(demand) = self.next.gpu_demand.get_mut(uuid) else {
             return;
         };
         let estimate = demand.estimate();
@@ -1933,109 +1872,10 @@ impl<'a> Interval<'a> {
             .filter(|bound| !read || bound.reading >= bound.threshold)
             .collect();
         if record.bound.is_empty() {
-            demand.slice = None;
             return;
         }
-        let bound_contexts: u64 = record.bound.iter().map(|b| u64::from(b.contexts)).sum();
-        let bound_principals = record.bound.len() as u64;
-        // Own work's share at d0 is its part of the slice-bound principals' time less the mode's
-        // margin, held where the mode's target would hold it (Q32).
-        let mode = governing(config, ResourceKind::GpuCompute);
-        let margin = u64::from(thresholds.margin_percent(mode)) * 10;
-        let share = (GPU_COMPUTE_CAPACITY / (bound_principals + 1)).saturating_sub(margin);
-        let d0 = ((own + bound_contexts).saturating_mul(share) / own.max(1))
-            .clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY);
-        // Own work pays for its re-measure windows, which hold it at full duty for their
-        // decisions in each cycle: the duty starts lower by their share, so its held duty, windows
-        // included, averages d0 (Q37). The window's first interval counts as full duty, since its
-        // decision lifts the cap at once.
-        let (window_share, floor) = if windows {
-            let window = u64::from(GPU_DEMAND_WINDOW_DECISIONS);
-            let gap = GPU_DEMAND_WINDOW_EVERY_MS.div_ceil(config.monitor.interval_ms.max(1));
-            let cycle = window + gap;
-            let floor =
-                ((d0 * cycle).saturating_sub(GPU_COMPUTE_CAPACITY * window) + gap / 2) / gap.max(1);
-            (
-                (GPU_COMPUTE_CAPACITY * window + cycle / 2) / cycle,
-                floor.clamp(GPU_MIN_DUTY_MILLI, GPU_COMPUTE_CAPACITY),
-            )
-        } else {
-            (0, d0)
-        };
-        let now = self.now;
-        let state = demand.slice.get_or_insert(SliceDuty {
-            d0: floor,
-            duty: floor,
-            since_ms: now,
-            ..SliceDuty::default()
-        });
-        // More slice-bound demand takes own work back to d0' at once; less raises the floor.
-        if floor != state.d0 {
-            state.duty = if floor < state.d0 {
-                floor
-            } else {
-                state.duty.max(floor)
-            };
-            state.d0 = floor;
-            state.since_ms = now;
-            state.utilization.clear();
-        }
-        let dwell = thresholds.min_step_dwell_intervals.max(1);
-        let dwell_ms = u64::from(dwell).saturating_mul(config.monitor.interval_ms);
-        let mut step = SliceStep::Holding;
-        // A re-measure window's uncapped intervals say nothing about the duty, and an interval
-        // without a reading leaves the older ones no longer fresh: a whole new dwell follows.
-        match gpu.utilization_percent.filter(|_| demand.window.is_none()) {
-            Some(busy) => {
-                state.utilization.push_back(busy.min(100));
-                while state.utilization.len() > dwell as usize {
-                    state.utilization.pop_front();
-                }
-            }
-            None => state.utilization.clear(),
-        }
-        // The dwell's average in per mille, rounded, so one reading's dip is not a whole percent
-        // of spare time (Q35).
-        let average = (state.utilization.len() >= dwell as usize).then(|| {
-            let len = state.utilization.len() as u64;
-            (state
-                .utilization
-                .iter()
-                .map(|busy| u64::from(*busy))
-                .sum::<u64>()
-                * 10
-                + len / 2)
-                / len
-        });
-        if let Some(busy) = average {
-            let spare = GPU_COMPUTE_CAPACITY.saturating_sub(busy);
-            let since = now.saturating_sub(state.since_ms);
-            let step_milli = u64::from(thresholds.slice_step_percent) * 10;
-            let rise_ms = thresholds
-                .scale_up_interval_ms(mode, config.monitor.interval_ms)
-                .max(dwell_ms);
-            // Spare time under one reading's quantum can't be told from the dips as own work's
-            // phases switch, whatever the margin (Q35).
-            let floor = margin.max(UTILIZATION_QUANTUM_MILLI);
-            let saturated = spare * 2 < floor;
-            if spare > floor && state.duty < GPU_COMPUTE_CAPACITY && since >= rise_ms {
-                state.duty = (state.duty + step_milli).min(GPU_COMPUTE_CAPACITY);
-                step = SliceStep::Rising;
-            } else if saturated && state.duty > state.d0 && since >= dwell_ms {
-                state.duty = state.duty.saturating_sub(step_milli).max(state.d0);
-                step = SliceStep::Falling;
-            }
-            if step != SliceStep::Holding {
-                state.since_ms = now;
-                state.utilization.clear();
-            }
-        }
-        record.d0 = Some(d0);
-        record.window_share = Some(window_share);
-        record.d0_windows = Some(floor);
-        record.duty = Some(state.duty);
-        record.step = Some(step);
-        record.utilization_milli = average;
+        let contexts: u32 = record.bound.iter().map(|b| b.contexts).sum();
+        record.hold = Some((contexts / record.bound.len() as u32).max(1));
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU
@@ -2359,12 +2199,6 @@ fn raised_note(floor: &crate::config::FloorStatus, what: &str) -> String {
 fn critical_level(config: &Config, floor: u64, minimum: u64) -> u64 {
     (floor.saturating_mul(u64::from(config.contention.critical_floor_percent)) / 100).max(minimum)
 }
-
-/// The busy contexts an uncapped interval keeps for the time-slice rule (FR-021, Q22): own
-/// work's and the owner's unmanaged sampled PIDs on one side, every other sampled PID with its
-/// UID on the other.
-/// One device utilization reading's quantum, a whole percent, in per mille (FR-021, Q35).
-const UTILIZATION_QUANTUM_MILLI: u64 = 10;
 
 /// Advance a device's contexts by one interval (FR-021): a context no longer listed
 /// goes; with the samples readable each one's quiet count rises, own work's newly listed ones enter

@@ -684,7 +684,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `satisfied_demand` | An external user's demand is recorded as satisfied, so it no longer contends below that demand. |
 | `gpu_time_slice_fair` | Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap. |
 | `gpu_time_slice_unbound` | Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap. |
-| `gpu_time_slice_duty` | Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause. |
+| `gpu_time_slice_hold` | Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals. |
 | `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
 | `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |

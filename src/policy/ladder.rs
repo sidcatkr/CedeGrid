@@ -97,7 +97,7 @@ impl<'a> Interval<'a> {
             } else {
                 self.plan_gpu_compute(uuid, budget);
             }
-            self.hold_slice_duty(uuid, budget);
+            self.plan_slice_holds(uuid, budget);
         }
         self.hold_unbudgeted_gpu_compute(&budgets);
         self.gpu_compute_budget = budgets;
@@ -158,7 +158,7 @@ impl<'a> Interval<'a> {
         // Until own work's share exists a window opens at once, and one ending short opens the
         // next, since a window feeds only 4–5 uncapped intervals (FR-021, Q24). The time-slice
         // duty needs no own share, so there a window opens at once only with none (Q28).
-        let bootstrap = if self.time_slice_duty.contains_key(uuid) {
+        let bootstrap = if self.slice_hold.contains_key(uuid) {
             demand.uncapped.is_empty()
         } else {
             demand.own_share().is_none()
@@ -1551,11 +1551,26 @@ impl<'a> Interval<'a> {
         // governing mode (FR-022, FR-030).
         victims.retain(|v| v.mode < ContentionMode::Performance);
         victim_order(&mut victims, frame.excess);
+        // Whole tasks (FR-089): pausing one more running task frees own work's part on the device
+        // divided among the tasks still running.
+        let paused = |id: &str| {
+            prev.ladder
+                .get(&(id.to_string(), key.clone()))
+                .is_some_and(|s| s.step >= YieldStep::Pause)
+        };
+        let unpaused = frame
+            .running
+            .iter()
+            .filter(|a| !paused(&a.id))
+            .count()
+            .max(1) as u64;
+        let part = frame.share.saturating_mul(frame.running.len() as u64) / unpaused;
         let mut remaining = frame.excess;
         let mut planned = BTreeSet::new();
         for victim in victims {
             planned.insert(victim.id.clone());
             let state = prev.ladder.get(&(victim.id.clone(), key.clone()));
+            let held = paused(&victim.id);
             // A job above its own mode's share yields the difference even
             // while the aggregate has room.
             let limit = (victim.mode < ContentionMode::Performance
@@ -1566,8 +1581,33 @@ impl<'a> Interval<'a> {
             if own_excess > 0 {
                 note_excess(&mut self.over_target, key, own_excess);
             }
-            let excess = remaining.max(own_excess);
+            // A running task is paused only while the others keep at least the target, and for
+            // its own mode's target only when that leaves it nothing; a paused one frees nothing
+            // more and keeps its step to its bound.
+            let own_excess = if own_excess >= frame.share {
+                own_excess
+            } else {
+                0
+            };
+            let excess = if held {
+                0
+            } else if part <= remaining {
+                remaining.max(own_excess)
+            } else {
+                own_excess
+            };
             let contended_victim = excess > 0;
+            // A pause still answering the demand it was entered for drains at its bound (FR-014).
+            let escalates = held
+                && !victim.guaranteed
+                && state.is_some_and(|s| {
+                    s.step == YieldStep::Pause
+                        && s.cause == YieldCause::ExternalGrowth
+                        && frame.external
+                            >= s.trigger_external.saturating_mul(u64::from(
+                                config.contention.thresholds(kind).hysteresis_percent,
+                            )) / 100
+                });
             let decision = plan_step(
                 state,
                 &LadderInput {
@@ -1575,7 +1615,7 @@ impl<'a> Interval<'a> {
                     room: None,
                     kind,
                     guaranteed: victim.guaranteed,
-                    allow_drain: false,
+                    allow_drain: escalates,
                     unavailable: compute_unavailable(
                         input,
                         key,
@@ -1634,7 +1674,7 @@ impl<'a> Interval<'a> {
                         YieldStep::Cap => frame
                             .share
                             .saturating_sub(next.target.unwrap_or(frame.share)),
-                        YieldStep::Pause => frame.share,
+                        YieldStep::Pause => part,
                         _ => 0,
                     };
                     remaining = remaining.saturating_sub(freed);
@@ -1762,12 +1802,8 @@ impl<'a> Interval<'a> {
             {
                 continue;
             }
-            let duty = match key {
-                ResourceKey::GpuCompute(uuid) if state.step == YieldStep::Cap => {
-                    self.gpu_duty(id, uuid, state)
-                }
-                _ => None,
-            };
+            // No duty cycle runs: GPU compute takes whole-task pauses only (FR-089).
+            let duty = None;
             self.actions.push(YieldAction {
                 allocation_id: id.clone(),
                 resource: key.clone(),
@@ -1781,52 +1817,91 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// On the time-slice duty each Neutral, Performance and Aggressive allocation on the device
-    /// holds a cap at the duty, which `gpu_duty` sends, and never a pause; a re-measure window
-    /// lifts it without a step change (FR-021, Q27, Q28).
-    fn hold_slice_duty(&mut self, uuid: &str, budget: &GpuComputeBudget) {
-        if !self.time_slice_duty.contains_key(uuid) {
+    /// The time-slice hold (FR-021, FR-089): on a device where the rule fails beside a slice-bound
+    /// principal, own tasks in Yield First and Neutral are paused in victim order while the own
+    /// tasks left running, each counted as one context, stay at or above the hold count. A held
+    /// pause stays while the hold lasts and drains at its bound; Guaranteed work is never paused.
+    fn plan_slice_holds(&mut self, uuid: &str, budget: &GpuComputeBudget) {
+        let Some(hold) = self.slice_hold.get(uuid).copied() else {
             return;
-        }
-        let input = self.input;
+        };
+        let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
+        let kind = ResourceKind::GpuCompute;
         let key = ResourceKey::GpuCompute(uuid.to_string());
-        let exempt: Vec<&Allocation> = input
+        let on_device: Vec<&Allocation> = input
             .allocations
             .iter()
             .filter(|a| {
-                a.phase == AllocationPhase::Running
-                    && a.requested.gpu_memory_mib.contains_key(uuid)
-                    && self.time_slice_exempt(&a.id, uuid)
-                    // Jobs in Performance and Aggressive keep the driver's slices (FR-030).
-                    && self.allocation_modes[&a.id][&ResourceKind::GpuCompute]
-                        < ContentionMode::Performance
+                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
             })
             .collect();
-        let target = budget.share / exempt.len().max(1) as u64;
-        for allocation in exempt {
-            let id = (allocation.id.clone(), key.clone());
-            let previous = self
-                .prev
-                .ladder
-                .get(&id)
-                .filter(|state| state.step == YieldStep::Cap);
-            self.next.ladder.insert(
-                id,
-                StepState {
-                    step: YieldStep::Cap,
-                    entered_at_ms: previous.map_or(self.now, |state| state.entered_at_ms),
-                    cause: YieldCause::ExternalGrowth,
-                    target: Some(target),
-                    trigger_external: previous.map_or(budget.external, |s| s.trigger_external),
-                    calm_since_ms: None,
-                    contended_since_ms: previous.and_then(|s| s.contended_since_ms),
-                    after_pause: false,
-                    to_free: None,
-                    pending: false,
-                    recomputed: false,
-                    asked_target: None,
-                },
-            );
+        let paused = |id: &str| {
+            prev.ladder
+                .get(&(id.to_string(), key.clone()))
+                .is_some_and(|state| state.step >= YieldStep::Pause)
+        };
+        let mut running = on_device.iter().filter(|a| !paused(&a.id)).count() as u32;
+        let mut victims: Vec<VictimFacts> = on_device
+            .iter()
+            .filter(|a| {
+                self.time_slice_exempt(&a.id, uuid)
+                    && self.allocation_modes[&a.id][&kind] < ContentionMode::Performance
+            })
+            .map(|a| VictimFacts {
+                id: a.id.clone(),
+                controllable: !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable),
+                frees: true,
+                pending: false,
+                mode: self.allocation_modes[&a.id][&kind],
+                guaranteed: is_guaranteed(a),
+                progress_lost_ms: input.facts.get(&a.id).map_or(0, |f| f.progress_lost_ms),
+                amount: 1,
+            })
+            .collect();
+        victim_order(&mut victims, u64::from(running.saturating_sub(hold)));
+        let pause_bound_ms = config
+            .contention
+            .thresholds(kind)
+            .pause_bound_s
+            .saturating_mul(1000);
+        for victim in victims {
+            let id = (victim.id.clone(), key.clone());
+            if let Some(state) = prev.ladder.get(&id).filter(|s| s.step >= YieldStep::Pause) {
+                // A held pause stays while the hold lasts; at its bound it drains (FR-014).
+                let mut next = state.clone();
+                if state.step == YieldStep::Pause
+                    && now.saturating_sub(state.entered_at_ms) >= pause_bound_ms
+                {
+                    next.step = YieldStep::Drain;
+                    next.entered_at_ms = now;
+                }
+                self.next.ladder.insert(id, next);
+                continue;
+            }
+            let pausable = !victim.guaranteed
+                && victim.controllable
+                && !self.no_gpu_pause(&victim.id, &key)
+                && !compute_unavailable(input, &key, &victim.id, false).contains(&YieldStep::Pause);
+            if running > hold && pausable {
+                running -= 1;
+                self.next.ladder.insert(
+                    id,
+                    StepState {
+                        step: YieldStep::Pause,
+                        entered_at_ms: now,
+                        cause: YieldCause::ExternalGrowth,
+                        target: None,
+                        trigger_external: budget.external,
+                        calm_since_ms: None,
+                        contended_since_ms: Some(now),
+                        after_pause: false,
+                        to_free: None,
+                        pending: false,
+                        recomputed: false,
+                        asked_target: None,
+                    },
+                );
+            }
         }
     }
 
@@ -1848,66 +1923,12 @@ impl<'a> Interval<'a> {
     /// rule holds there or the time-slice duty sets its cap, and the allocation runs in Neutral,
     /// Performance or Aggressive (FR-021, Q22, Q27).
     fn time_slice_exempt(&self, id: &str, uuid: &str) -> bool {
-        (self.time_slice_holds.contains(uuid) || self.time_slice_duty.contains_key(uuid))
+        (self.time_slice_holds.contains(uuid) || self.slice_hold.contains_key(uuid))
             && self
                 .allocation_modes
                 .get(id)
                 .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
                 .is_some_and(|mode| *mode != ContentionMode::YieldFirst)
-    }
-
-    /// A GPU compute cap's duty in thousandths, which the supervisor applies: in Neutral,
-    /// Performance and Aggressive, on a device measured this interval and for a cap not set for
-    /// unknown activity, the share target over the allocation's part of own work's uncapped share,
-    /// since own work at full duty beside another busy context holds only its slices (FR-021,
-    /// Q20, R49). On the time-slice duty it is that duty (Q27), and on a device last read as
-    /// time-sliced whose listing is unknown it is none (Q29). None leaves the duty at the share
-    /// target, target ÷ 1000.
-    fn gpu_duty(&self, id: &str, uuid: &str, state: &StepState) -> Option<u64> {
-        let yield_first = self
-            .allocation_modes
-            .get(id)
-            .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
-            .is_none_or(|mode| *mode == ContentionMode::YieldFirst);
-        if let Some(duty) = self.time_slice_duty.get(uuid)
-            && !yield_first
-        {
-            return Some(*duty);
-        }
-        let measured = self
-            .gpu_compute_budget
-            .get(uuid)
-            .is_some_and(|budget| budget.own.is_some());
-        if yield_first
-            || !measured
-            || state.cause == YieldCause::UnknownMeasurement
-            || self.no_gpu_pause.contains(uuid)
-        {
-            return None;
-        }
-        let share = self
-            .next
-            .gpu_demand
-            .get(uuid)?
-            .own_share()
-            .filter(|share| *share > 0)?;
-        let running = self
-            .input
-            .allocations
-            .iter()
-            .filter(|a| {
-                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
-            })
-            .count()
-            .max(1) as u64;
-        let target = state.target?;
-        Some(
-            (target
-                .saturating_mul(GPU_COMPUTE_CAPACITY)
-                .saturating_mul(running)
-                / share)
-                .min(GPU_COMPUTE_CAPACITY),
-        )
     }
 
     /// The allocations a step would drain, each once, and charges beyond the
@@ -2166,7 +2187,8 @@ fn compute_unavailable(
         .and_then(|f| f.unavailable.get(key))
         .cloned()
         .unwrap_or_default();
-    steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
+    // No rate cap: GPU compute is held back by whole tasks (FR-089).
+    steps.extend([YieldStep::LowerShare, YieldStep::Cap, YieldStep::Hint]);
     if no_pause {
         steps.insert(YieldStep::Pause);
     }

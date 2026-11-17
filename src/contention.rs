@@ -367,8 +367,8 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap.",
     ),
     (
-        "gpu_time_slice_duty",
-        "Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause.",
+        "gpu_time_slice_hold",
+        "Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals.",
     ),
     (
         "gpu_time_slice_admission_held",
@@ -1355,9 +1355,6 @@ pub fn plan_step(
 pub const GPU_DEMAND_WINDOW_DECISIONS: u32 = 6;
 /// A window opens when the device's last uncapped interval is this old (FR-021, R48).
 pub const GPU_DEMAND_WINDOW_EVERY_MS: u64 = 30_000;
-
-/// FR-014's minimum duty, in thousandths: the floor of a GPU compute duty (FR-021, Q27).
-pub const GPU_MIN_DUTY_MILLI: u64 = 50;
 
 /// Uncapped intervals of own work from which its uncapped share sets a GPU compute duty
 /// (FR-021, Q24); with fewer, re-measure windows open at once.

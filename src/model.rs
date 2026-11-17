@@ -718,6 +718,10 @@ pub struct TimeSliceRecord {
     /// Each own process counted in m, and whether by its listing or by a sample.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_counted: Vec<OwnCounted>,
+    /// At m × k > E with a slice-bound principal, the own tasks that keep running,
+    /// ⌊E_b ÷ k_b⌋; the rest are paused by whole tasks (FR-021, FR-089).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<u32>,
 }
 
 /// An own process counted in the time-slice rule's m (FR-021).

@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Config;
 use crate::contention::{
     Admission, ComputeFloor, ContentionMode, GPU_DEMAND_WINDOW_DECISIONS,
-    GPU_DEMAND_WINDOW_EVERY_MS, GPU_MIN_DUTY_MILLI, LadderInput, LadderTiming, Measurement,
-    ModeInput, Principal, RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState,
-    VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, hint_wait_over, own_allowance,
-    plan_step, remeasure_window_allowed, victim_order,
+    GPU_DEMAND_WINDOW_EVERY_MS, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
+    RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts,
+    YieldCause, YieldStep, guaranteed_may_drain, hint_wait_over, own_allowance, plan_step,
+    remeasure_window_allowed, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -186,8 +186,6 @@ struct GpuDemand {
     last_uncapped_ms: Option<u64>,
     /// An open re-measure window (FR-021, Q19).
     window: Option<RemeasureWindow>,
-    /// The time-slice duty on the device and its steps (FR-021, Q27, Q28).
-    slice: Option<SliceDuty>,
     /// Whether the device was last read as time-sliced, for an interval whose listing is
     /// unknown (FR-021, Q29).
     last_time_sliced: bool,
@@ -210,16 +208,6 @@ impl SeenContext {
     fn counts(&self) -> bool {
         self.quiet < GPU_DEMAND_INTERVALS
     }
-}
-
-/// The time-slice duty's state: the base duty it started from, the duty sent, when it last
-/// stepped, and the device's utilization since then (FR-021, Q28).
-#[derive(Debug, Clone, Default)]
-struct SliceDuty {
-    d0: u64,
-    duty: u64,
-    since_ms: u64,
-    utilization: std::collections::VecDeque<u32>,
 }
 
 /// One uncapped interval on a device: the external total, each principal UID's and own work's
@@ -563,8 +551,8 @@ struct Interval<'a> {
     /// Devices where Neutral, Performance and Aggressive set no GPU compute step this decision:
     /// the time-slice rule holds, or no external principal is slice-bound (FR-021, Q22, Q27).
     time_slice_holds: BTreeSet<String>,
-    /// Devices on the time-slice duty, with the duty those modes' allocations run at (Q27).
-    time_slice_duty: BTreeMap<String, u64>,
+    /// Devices on the time-slice hold, with the own tasks that keep running there (FR-089).
+    slice_hold: BTreeMap<String, u32>,
     /// Devices last read as time-sliced whose listing is unknown: no GPU compute pause (Q29).
     no_gpu_pause: BTreeSet<String>,
     cooled_down: bool,
@@ -665,7 +653,7 @@ impl<'a> Interval<'a> {
             gpu_block_reasons: BTreeMap::new(),
             remeasured: BTreeSet::new(),
             time_slice_holds: BTreeSet::new(),
-            time_slice_duty: BTreeMap::new(),
+            slice_hold: BTreeMap::new(),
             no_gpu_pause: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),

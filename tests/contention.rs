@@ -5427,36 +5427,6 @@ mod gpu_demand {
             .unwrap_or(0)
     }
 
-    /// T368's loop, closed: 60 intervals of the light user alone, then own work beside it for
-    /// `intervals`. The light user reads its full-duty amounts in an interval set by two
-    /// decisions without a cap, else its amounts under caps; own work takes the rest of a busy
-    /// device within its cap. Returns each own interval's target and cap.
-    pub(super) fn light_loop(mode: ContentionMode, intervals: u64) -> Vec<(u64, u64)> {
-        closed_loop(mode, None, intervals, &|i, capped| {
-            if capped {
-                BESIDE_CAPS[(i % 60) as usize]
-            } else {
-                BESIDE_FULL_DUTY[(i % 60) as usize]
-            }
-        })
-    }
-
-    /// The light user alone for 60 intervals, then own work beside the other user, whose reading
-    /// in own interval `i` is `reading(i, capped)`, capped when either decision that set the
-    /// interval sent own work a cap. Returns each own interval's target and cap.
-    pub(super) fn closed_loop(
-        mode: ContentionMode,
-        job_mode: Option<ContentionMode>,
-        intervals: u64,
-        reading: &dyn Fn(u64, bool) -> u64,
-    ) -> Vec<(u64, u64)> {
-        loop_decisions(mode, job_mode, intervals, reading)
-            .1
-            .iter()
-            .map(|decision| (target_of(decision), cap_of(decision)))
-            .collect()
-    }
-
     /// `closed_loop`'s decisions: the light user's alone, then own work's beside the other user.
     pub(super) fn loop_decisions(
         mode: ContentionMode,
@@ -5499,92 +5469,6 @@ mod gpu_demand {
         values[values.len() / 2]
     }
 
-    /// The loop from T368's Performance light trace: a cap, a higher reading under it, a deeper
-    /// cap. Read where own work ran uncapped, the light user's demand holds own work's target at
-    /// the device less that demand and the margin, and the target does not fall over the run.
-    #[test]
-    fn a_capped_light_user_does_not_deepen_the_cap() {
-        let run = light_loop(ContentionMode::Performance, 240);
-        let targets: Vec<u64> = run[20..].iter().map(|(target, _)| *target).collect();
-        let late = median(targets[targets.len() - 60..].to_vec());
-        assert!(
-            median(targets.clone()) >= 800,
-            "Performance's target fell to {} beside a light user",
-            median(targets.clone())
-        );
-        assert!(
-            late + 30 >= median(targets[..60].to_vec()),
-            "the target fell over the run to {late}"
-        );
-        let low = targets.iter().filter(|target| **target < 760).count();
-        assert!(
-            low * 20 <= targets.len(),
-            "{low} of {} targets below 760",
-            targets.len()
-        );
-        let neutral = light_loop(ContentionMode::Neutral, 240);
-        let neutral: Vec<u64> = neutral[20..].iter().map(|(target, _)| *target).collect();
-        assert!(
-            median(neutral.clone()) >= 770,
-            "Neutral's target fell to {}",
-            median(neutral)
-        );
-    }
-
-    /// A light user that turns saturating while own work is capped (FR-021, Q19): the next
-    /// window, 30 s after the last uncapped interval, lifts the GPU compute cap for 6 decisions,
-    /// its intervals read the new demand 200 or more above the estimate, and the target falls to
-    /// the fair share. Beside full duty a saturating user reads half the device, beside caps more.
-    #[test]
-    fn a_light_user_turning_saturating_is_seen_at_the_next_window() {
-        const RISE: u64 = 100;
-        let (_, decisions) =
-            loop_decisions(ContentionMode::Neutral, None, 260, &|i, capped| match (
-                i >= RISE,
-                capped,
-            ) {
-                (false, true) => BESIDE_CAPS[(i % 60) as usize],
-                (false, false) => BESIDE_FULL_DUTY[(i % 60) as usize],
-                (true, true) => 600,
-                (true, false) => 500,
-            });
-        let run: Vec<(u64, u64)> = decisions
-            .iter()
-            .map(|decision| (target_of(decision), cap_of(decision)))
-            .collect();
-        let caps: Vec<u64> = run.iter().map(|(_, cap)| *cap).collect();
-        let windowed: Vec<bool> = decisions.iter().map(|d| record_of(d).window).collect();
-        // A window: 6 decisions in a row that send no GPU compute cap, after own work was capped.
-        let window = (RISE as usize..caps.len() - 6).find(|&i| {
-            windowed[i] && caps[i - 1] < 1000 && caps[i..i + 6].iter().all(|c| *c == 1000)
-        });
-        let window = window.expect("no window lifted the cap after the rise");
-        assert!(
-            window as u64 - RISE <= 61 + 6,
-            "the first window after the rise came {} intervals later",
-            window as u64 - RISE
-        );
-        let fallen = (window..run.len())
-            .find(|&i| run[i].0 <= 520)
-            .expect("the target never fell to the fair share");
-        assert!(
-            fallen <= window + 8,
-            "the target fell {} intervals after the window opened",
-            fallen - window
-        );
-        assert!(
-            run[fallen..].iter().all(|(target, _)| *target <= 520),
-            "the target rose again beside the saturating user"
-        );
-        // Windows hold own work uncapped at most 10% of the time.
-        let lifted = windowed[20..].iter().filter(|w| **w).count();
-        assert!(
-            lifted * 10 <= windowed.len() - 20,
-            "{lifted} of {} decisions were in a window",
-            windowed.len() - 20
-        );
-    }
-
     /// A window opens only while own work on the device is held back by GPU compute caps alone,
     /// and never with a Yield First allocation there (FR-021, Q19).
     #[test]
@@ -5621,32 +5505,6 @@ mod gpu_demand {
         ] {
             assert!(!remeasure_window_allowed(&blocked), "{blocked:?}");
         }
-    }
-
-    /// Yield First takes no window: its allocation's cap never lifts while the light user stays.
-    #[test]
-    fn yield_first_takes_no_window() {
-        let run = closed_loop(
-            ContentionMode::Performance,
-            Some(ContentionMode::YieldFirst),
-            200,
-            &|i, capped| {
-                if capped {
-                    BESIDE_CAPS[(i % 60) as usize]
-                } else {
-                    BESIDE_FULL_DUTY[(i % 60) as usize]
-                }
-            },
-        );
-        let caps: Vec<u64> = run.iter().map(|(_, cap)| *cap).collect();
-        let first = caps
-            .iter()
-            .position(|c| *c < 1000)
-            .expect("Yield First never capped");
-        assert!(
-            !(first..caps.len() - 6).any(|i| caps[i..i + 6].iter().all(|c| *c == 1000)),
-            "a window lifted Yield First's cap"
-        );
     }
 
     /// Each decision records how the device's GPU demand was read (FR-021, Q19): whether the
@@ -5695,52 +5553,15 @@ mod gpu_demand {
         let fed = &ALONE[start..];
         let mean = (fed.iter().sum::<u64>() + fed.len() as u64 / 2) / fed.len() as u64;
         assert_eq!(record(&alone[59]).estimate, Some(mean));
-        // The job's first interval is set by decisions that sent no cap. Its share's bootstrap
-        // windows come first (Q24); the cap that follows holds until the next window.
-        assert!(record(&own[0]).fed);
-        let capped = own
-            .iter()
-            .position(|d| !record(d).uncapped && record(d).own_uncapped.is_some())
-            .expect("never capped");
-        let read = record(&own[capped + 4]);
-        assert!(!read.fed && !read.uncapped, "{read:?}");
-        assert!(read.since_uncapped_ms.unwrap() >= 4 * INTERVAL);
-        assert_eq!(
-            read.intervals,
-            record(&own[capped - 1]).intervals,
-            "capped intervals do not feed it"
-        );
-        let window = (capped..own.len())
-            .find(|&i| record(&own[i]).window)
-            .expect("no window recorded");
-        assert_eq!(cap_of(&own[window]), 1000, "a window sends no cap");
-        let fed = (window..window + 7)
-            .filter(|&i| record(&own[i]).fed)
-            .count();
-        assert_eq!(fed, 5, "a window feeds its 5 uncapped intervals");
-        let (_, yield_first) = loop_decisions(ContentionMode::YieldFirst, None, 40, &light);
-        assert_eq!(record(&yield_first[39]).source, GpuDemandSource::Larger);
-        let config = mode_config(ContentionMode::Neutral);
-        let report = cedegrid::agent::node_contention_report(&config, &own[window], 1);
-        let report = serde_json::to_string(&report).unwrap();
-        assert!(
-            report.contains("gpu_compute") && !report.contains("gpu_demand"),
-            "{report}"
-        );
-    }
-
-    /// One interval with the device's external PIDs and its background contexts given.
-    fn interval_listing(
-        own: Option<u64>,
-        external: u64,
-        sample: u64,
-        pids: &[u32],
-        background: &[u32],
-    ) -> Snapshot {
-        let mut snap = interval(own, external, sample);
-        snap.gpus[0].external_process_ids = Some(pids.to_vec());
-        snap.gpus[0].background_process_ids = background.to_vec();
-        snap
+        // A lone Neutral job beside the light user is never held (FR-089): every interval it runs
+        // in stays uncapped and feeds the estimate, and no window opens.
+        for (i, decision) in own.iter().enumerate() {
+            let read = record(decision);
+            assert!(
+                read.uncapped && read.fed && !read.window,
+                "own {i}: {read:?}"
+            );
+        }
     }
 
     fn record_of(decision: &Decision) -> cedegrid::model::GpuDemandRecord {
@@ -5748,253 +5569,6 @@ mod gpu_demand {
             .gpu_demand
             .clone()
             .expect("no gpu_demand record")
-    }
-
-    /// Runs `steps` intervals on `engine` from `now`, the light user reading `external(i)` and own
-    /// work, when `input` runs the job, taking the rest within its last cap.
-    fn steps(
-        engine: &mut PolicyEngine,
-        config: &Config,
-        input: &PolicyInput,
-        now: &mut u64,
-        sample: &mut u64,
-        count: u64,
-        snap: &dyn Fn(u64, u64) -> Snapshot,
-    ) -> Vec<Decision> {
-        let mut out = vec![];
-        let mut cap = 1000;
-        for i in 0..count {
-            *sample += 1;
-            let decision = engine.evaluate(config, &snap(i, cap), input, *now).unwrap();
-            cap = cap_of(&decision);
-            out.push(decision);
-            *now += INTERVAL;
-        }
-        out
-    }
-
-    /// The edges (FR-021, FR-065, Q19): a changed list of external PIDs restarts the estimate, a
-    /// background context's arrival does not, and with no uncapped interval since then the
-    /// interval's amount sets the target; own work idle on the device feeds it; an interval of
-    /// unknown amount feeds nothing and keeps its unknown path; a new engine starts without one.
-    #[test]
-    fn gpu_demand_edges() {
-        use cedegrid::model::GpuDemandSource;
-        let config = mode_config(ContentionMode::Neutral);
-        let mut engine = PolicyEngine::new();
-        let (mut now, mut sample) = (0, 0);
-        let idle = PolicyInput::default();
-        let busy = PolicyInput {
-            allocations: vec![job(None)],
-            ..PolicyInput::default()
-        };
-        let alone = steps(
-            &mut engine,
-            &config,
-            &idle,
-            &mut now,
-            &mut sample,
-            60,
-            &|i, _| interval_listing(None, ALONE[i as usize], 1 + i, &[987], &[]),
-        );
-        let settled = record_of(alone.last().unwrap()).intervals;
-        assert!(settled > 30, "{settled}");
-        // An interval of unknown amount feeds nothing and keeps the unknown path.
-        let mut unknown = interval_listing(None, 150, 61, &[987], &[]);
-        unknown.gpus[0].external_compute_milli = None;
-        unknown.gpus[0].own_compute_milli = None;
-        unknown.gpus[0].compute_amount_unknown =
-            Some("summed per-process utilization differs".into());
-        let decision = engine.evaluate(&config, &unknown, &idle, now).unwrap();
-        now += INTERVAL;
-        let read = record_of(&decision);
-        assert!(!read.fed && read.intervals == settled, "{read:?}");
-        let path = decision.resources[&ResourceKey::GpuCompute(GPU.into())]
-            .held_back
-            .as_ref()
-            .and_then(|held| held.compute_path.clone());
-        assert!(
-            matches!(path, Some(ComputePath::Unknown { .. })),
-            "{path:?}"
-        );
-        // Back on the measured path after `quiet_window_intervals` measured intervals.
-        sample = 61;
-        steps(
-            &mut engine,
-            &config,
-            &idle,
-            &mut now,
-            &mut sample,
-            25,
-            &|i, _| interval_listing(None, 150, 62 + i, &[987], &[]),
-        );
-        // A background context arriving is not another demand.
-        let before = record_of(
-            &engine
-                .clone()
-                .evaluate(
-                    &config,
-                    &interval_listing(None, 150, 87, &[987], &[]),
-                    &idle,
-                    now,
-                )
-                .unwrap(),
-        )
-        .intervals;
-        let background = steps(
-            &mut engine,
-            &config,
-            &idle,
-            &mut now,
-            &mut sample,
-            1,
-            &|_, _| interval_listing(None, 150, 87, &[50, 987], &[50]),
-        );
-        assert_eq!(record_of(&background[0]).intervals, before);
-        // Another external process is: the estimate restarts from this interval.
-        let changed = steps(
-            &mut engine,
-            &config,
-            &idle,
-            &mut now,
-            &mut sample,
-            1,
-            &|_, _| interval_listing(None, 300, 88, &[50, 987, 988], &[50]),
-        );
-        let read = record_of(&changed[0]);
-        assert_eq!((read.intervals, read.estimate), (1, Some(300)), "{read:?}");
-        // Own work runs, its share forms through the bootstrap windows (Q24), and it is capped;
-        // another process restarts the estimate a few seconds later, before a 30 s window is due,
-        // so the interval's amount sets the target, and with the share restarted a window opens
-        // at once.
-        let pids = [50, 987, 988];
-        let running = steps(
-            &mut engine,
-            &config,
-            &busy,
-            &mut now,
-            &mut sample,
-            24,
-            &|i, cap| {
-                let external = if cap < 1000 { 300 } else { 150 };
-                interval_listing(
-                    Some(cap.min(990 - external)),
-                    external,
-                    89 + i,
-                    &pids,
-                    &[50],
-                )
-            },
-        );
-        assert!(
-            cap_of(running.last().unwrap()) < 1000,
-            "own work is not capped"
-        );
-        let restarted = steps(
-            &mut engine,
-            &config,
-            &busy,
-            &mut now,
-            &mut sample,
-            3,
-            &|i, cap| {
-                interval_listing(Some(cap.min(690)), 300, 95 + i, &[50, 987, 988, 989], &[50])
-            },
-        );
-        let read = record_of(&restarted[1]);
-        assert_eq!(
-            (read.intervals, read.estimate, read.source, read.window),
-            (0, None, GpuDemandSource::Interval, true),
-            "{read:?}"
-        );
-        // Neutral holds the fair share while the other principal is not yet recorded as
-        // satisfied; Performance takes no GPU compute step here (FR-021, FR-022).
-        assert_eq!(
-            target_of(&restarted[1]),
-            500,
-            "the interval's 300 leaves Neutral at its fair share"
-        );
-        // The window's first uncapped interval feeds the restarted estimate.
-        let read = record_of(&restarted[2]);
-        assert!(read.window && read.fed, "{read:?}");
-        assert_eq!((read.intervals, read.estimate), (1, Some(300)), "{read:?}");
-        // Own work idle on the device: the job gone, the next interval feeds the estimate even
-        // though the last decision capped it.
-        let gone = steps(
-            &mut engine,
-            &config,
-            &idle,
-            &mut now,
-            &mut sample,
-            1,
-            &|_, _| interval_listing(None, 150, 98, &[50, 987, 988, 989], &[50]),
-        );
-        let read = record_of(&gone[0]);
-        assert!(read.uncapped && read.fed, "{read:?}");
-        // A new engine starts without an estimate.
-        let fresh = PolicyEngine::new()
-            .evaluate(
-                &config,
-                &interval_listing(None, 150, 1, &[987], &[]),
-                &idle,
-                0,
-            )
-            .unwrap();
-        assert_eq!(record_of(&fresh).estimate, None);
-        assert_eq!(record_of(&fresh).intervals, 0);
-    }
-
-    /// Yield First's targets on T434's and T436's fixtures, with the node in Yield First, are
-    /// those it had from the interval's amount alone or lower, per interval (FR-021, FR-065):
-    /// pinned from the code before the change (`15aa96e`), which repeats with the readings every
-    /// 60 intervals, and holds 250 beside the saturating user.
-    #[test]
-    fn yield_first_targets_are_the_intervals_or_lower() {
-        const BEFORE: [u64; 61] = [
-            0, 690, 690, 690, 520, 1000, 1000, 1000, 520, 700, 580, 490, 590, 530, 540, 210, 540,
-            540, 210, 540, 540, 0, 430, 540, 540, 540, 220, 550, 550, 220, 550, 550, 220, 430, 550,
-            550, 430, 560, 560, 430, 560, 560, 570, 570, 570, 570, 570, 580, 580, 580, 580, 580,
-            590, 590, 590, 600, 670, 680, 690, 700, 700,
-        ];
-        let before = |i: usize| {
-            if i < 61 {
-                BEFORE[i]
-            } else {
-                BEFORE[1 + (i - 1) % 60]
-            }
-        };
-        let light = |i: u64, capped: bool| {
-            if capped {
-                BESIDE_CAPS[(i % 60) as usize]
-            } else {
-                BESIDE_FULL_DUTY[(i % 60) as usize]
-            }
-        };
-        let rise = |i: u64, capped: bool| match (i >= 100, capped) {
-            (false, _) => light(i, capped),
-            (true, true) => 600,
-            (true, false) => 500,
-        };
-        let light_run = closed_loop(ContentionMode::YieldFirst, None, 200, &light);
-        let rise_run = closed_loop(ContentionMode::YieldFirst, None, 260, &rise);
-        for (i, (target, _)) in light_run.iter().enumerate() {
-            assert!(
-                *target <= before(i),
-                "light {i}: {target} above {}",
-                before(i)
-            );
-        }
-        for (i, (target, _)) in rise_run.iter().enumerate() {
-            let old = if i < 100 { before(i) } else { 250 };
-            assert!(*target <= old, "rise {i}: {target} above {old}");
-        }
-        assert!(
-            light_run
-                .iter()
-                .zip(0..)
-                .any(|((target, _), i)| *target < before(i)),
-            "the estimate never lowered Yield First"
-        );
     }
 
     /// Replays a recorded run's GPU readings through the policy, open loop:
@@ -6446,18 +6020,6 @@ mod gpu_demand {
         }
     }
 
-    /// Two own contexts beside one saturating context hold two slices, 667, at full duty; Neutral's
-    /// fair share, 500, then needs a duty near 0.75, and own work settles at 500 (FR-021, Q20).
-    #[test]
-    fn two_own_contexts_settle_at_the_fair_share() {
-        let run = saturating_loop(ContentionMode::Neutral, &|_| 2, 300);
-        let late = &run[100..];
-        let duty = median(late.iter().map(|(duty, _, _)| *duty).collect());
-        let own = median(late.iter().map(|(_, own, _)| *own).collect());
-        assert!((700..=800).contains(&duty), "duty {duty}");
-        assert!(own.abs_diff(500) <= 30, "own work holds {own}");
-    }
-
     /// 039's light loop (FR-021, Q20): beside a light user own work holds the device less that
     /// user's slices at full duty, so a cap at capacity less the estimate and the margin leaves a
     /// duty near 1, where a duty of target ÷ 1000 left about 0.81.
@@ -6503,177 +6065,11 @@ mod gpu_demand {
         );
     }
 
-    /// A window that measures a changed own share updates the duty within that window (FR-021,
-    /// Q20): in Performance own work drops from three contexts to one while capped, so its share
-    /// falls from 750 to 500 and the other user's rises; the window restarts both, and the fair
-    /// share then needs a duty near 1, where the old share would give 667.
-    #[test]
-    fn a_window_that_changes_own_share_updates_the_duty() {
-        const DROP: u64 = 120;
-        let run = saturating_loop(
-            ContentionMode::Neutral,
-            &|i| if i < DROP { 3 } else { 1 },
-            300,
-        );
-        let before = median(
-            run[60..DROP as usize]
-                .iter()
-                .map(|(duty, _, _)| *duty)
-                .collect(),
-        );
-        assert!(
-            before < 1000,
-            "own work is not capped before the drop: {before}"
-        );
-        let window = (DROP as usize..run.len())
-            .find(|&i| run[i].2)
-            .expect("no window after the drop");
-        let after = window + 7;
-        assert!(after < run.len());
-        assert!(
-            run[after].0 >= 950,
-            "the duty after the window is {}",
-            run[after].0
-        );
-        assert!(
-            run[after].1.abs_diff(500) <= 30,
-            "own work holds {}",
-            run[after].1
-        );
-    }
-
-    /// The duty's edges and its record (FR-021, Q20): the record shows own work's uncapped share
-    /// and the duty sent; a share at or below the target sends a full duty; Yield First's caps
-    /// carry no duty, so their duty stays target ÷ 1000; after a restart while own work is capped
-    /// there is no share, and the cap goes out at its target; a new engine has no share.
-    #[test]
-    fn the_duty_edges_and_its_record() {
-        let key = ResourceKey::GpuCompute(GPU.into());
-        let duty_of = |decision: &Decision| {
-            decision
-                .actions
-                .iter()
-                .find(|a| a.resource == key && a.step == YieldStep::Cap)
-                .and_then(|a| a.duty)
-        };
-        let light = |i: u64, capped: bool| {
-            if capped {
-                BESIDE_CAPS[(i % 60) as usize]
-            } else {
-                BESIDE_FULL_DUTY[(i % 60) as usize]
-            }
-        };
-        let (_, performance) = loop_decisions(ContentionMode::Neutral, None, 200, &light);
-        let mut checked = 0;
-        for decision in &performance[20..] {
-            let read = record_of(decision);
-            let (Some(share), Some(duty)) = (read.own_uncapped, duty_of(decision)) else {
-                continue;
-            };
-            checked += 1;
-            assert_eq!(read.duty, Some(duty), "the record shows the duty sent");
-            let target = decision
-                .actions
-                .iter()
-                .find(|a| a.resource == key && a.step == YieldStep::Cap)
-                .and_then(|a| a.target)
-                .unwrap();
-            let expected = (target * 1000 / share).min(1000);
-            assert!(
-                duty.abs_diff(expected) <= 1,
-                "duty {duty} for target {target} over share {share}"
-            );
-            if share <= target {
-                assert_eq!(duty, 1000);
-            }
-        }
-        assert!(checked > 100, "{checked} capped decisions carried a duty");
-        // Yield First's caps carry no duty.
-        let (_, yield_first) = loop_decisions(
-            ContentionMode::Neutral,
-            Some(ContentionMode::YieldFirst),
-            120,
-            &light,
-        );
-        assert!(
-            yield_first.iter().any(|d| cap_of(d) < 1000),
-            "Yield First never capped"
-        );
-        assert!(
-            yield_first
-                .iter()
-                .all(|d| duty_of(d).is_none() && record_of(d).duty.is_none())
-        );
-        // A restart while own work is capped leaves no share: a window opens at once (Q24), and no
-        // cap goes out with a duty.
-        let config = mode_config(ContentionMode::Neutral);
-        let mut engine = PolicyEngine::new();
-        let busy = PolicyInput {
-            allocations: vec![job(None)],
-            ..PolicyInput::default()
-        };
-        let (mut now, mut sample) = (0, 0);
-        steps(
-            &mut engine,
-            &config,
-            &PolicyInput::default(),
-            &mut now,
-            &mut sample,
-            60,
-            &|i, _| interval_listing(None, ALONE[i as usize], 1 + i, &[987], &[]),
-        );
-        let running = steps(
-            &mut engine,
-            &config,
-            &busy,
-            &mut now,
-            &mut sample,
-            30,
-            &|i, cap| {
-                let external = if cap < 1000 { 300 } else { 150 };
-                interval_listing(Some(cap.min(990 - external)), external, 61 + i, &[987], &[])
-            },
-        );
-        assert!(
-            cap_of(running.last().unwrap()) < 1000,
-            "own work is not capped"
-        );
-        let restarted = steps(
-            &mut engine,
-            &config,
-            &busy,
-            &mut now,
-            &mut sample,
-            3,
-            &|i, cap| interval_listing(Some(cap.min(690)), 300, 91 + i, &[987, 988], &[]),
-        );
-        for decision in &restarted[1..] {
-            assert_eq!(record_of(decision).own_uncapped, None);
-            assert_eq!(duty_of(decision), None, "no share: no duty");
-            assert!(
-                record_of(decision).window && cap_of(decision) == 1000,
-                "no share: a window opens at once"
-            );
-        }
-        // A new engine has no share.
-        let fresh = PolicyEngine::new()
-            .evaluate(
-                &config,
-                &interval_listing(None, 150, 1, &[987], &[]),
-                &PolicyInput::default(),
-                0,
-            )
-            .unwrap();
-        assert_eq!(record_of(&fresh).own_uncapped, None);
-    }
-
     /// A time-sliced device, with its contexts listed and sampled: each busy context
     /// gets an equal slice of the time the device is busy (FR-021, Q22).
     mod time_slice {
         use super::*;
-        use cedegrid::model::{
-            GpuComputeContexts, SliceSource, SliceStep, TimeSliceRecord, YieldAction,
-        };
+        use cedegrid::model::{GpuComputeContexts, SliceSource, TimeSliceRecord, YieldAction};
         use std::collections::BTreeSet;
 
         const OWN_PIDS: [u32; 3] = [100, 101, 102];
@@ -6798,6 +6194,154 @@ mod gpu_demand {
             out
         }
 
+        /// One interval of a two-task run: each live task's GPU compute step, the drains decided
+        /// and own work's share of the device.
+        pub(super) struct TaskTick {
+            pub decision: Decision,
+            pub steps: BTreeMap<String, YieldStep>,
+            pub drains: Vec<String>,
+            pub own: u64,
+        }
+
+        /// Run E9's shape: the other user's `peer` saturating contexts alone for 60 intervals, then
+        /// own tasks "a" and "b", one context each, every busy context an equal slice of 990; a
+        /// paused task's context stays listed, unsampled, and a drained task leaves.
+        pub(super) fn two_tasks(
+            config: &Config,
+            job_mode: Option<ContentionMode>,
+            peer: usize,
+            intervals: u64,
+        ) -> Vec<TaskTick> {
+            let mut engine = PolicyEngine::new();
+            let mut now = 0;
+            for i in 0..60u64 {
+                engine
+                    .evaluate(
+                        config,
+                        &sliced(None, 990, i + 1, 0, peer),
+                        &PolicyInput::default(),
+                        now,
+                    )
+                    .unwrap();
+                now += INTERVAL;
+            }
+            let tasks = [("a", OWN_PIDS[0]), ("b", OWN_PIDS[1])];
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let (mut steps, mut gone): (BTreeMap<String, YieldStep>, BTreeSet<String>) =
+                Default::default();
+            let mut out = vec![];
+            for i in 0..intervals {
+                let live: Vec<(&str, u32)> = tasks
+                    .iter()
+                    .copied()
+                    .filter(|(id, _)| !gone.contains(*id))
+                    .collect();
+                let running: Vec<u32> = live
+                    .iter()
+                    .filter(|(id, _)| steps.get(*id).is_none_or(|s| *s < YieldStep::Pause))
+                    .map(|(_, pid)| *pid)
+                    .collect();
+                let r = running.len() as u64;
+                let own = 990 * r / (r + peer as u64);
+                let mut snap = sliced(Some(own), 990 - own, 61 + i, live.len(), peer);
+                let contexts = snap.gpus[0].compute_contexts.as_mut().unwrap();
+                contexts.own = live.iter().map(|(_, pid)| *pid).collect();
+                contexts.sampled.retain(|(pid, _)| !OWN_PIDS.contains(pid));
+                contexts
+                    .sampled
+                    .extend(running.iter().map(|pid| (*pid, Some(1000))));
+                let input = PolicyInput {
+                    allocations: live
+                        .iter()
+                        .map(|(id, _)| {
+                            let mut allocation = job(job_mode);
+                            allocation.id = id.to_string();
+                            allocation
+                        })
+                        .collect(),
+                    ..PolicyInput::default()
+                };
+                let decision = engine.evaluate(config, &snap, &input, now).unwrap();
+                steps = decision
+                    .actions
+                    .iter()
+                    .filter(|a| a.resource == key)
+                    .map(|a| (a.allocation_id.clone(), a.step))
+                    .collect();
+                gone.extend(decision.would_drain.iter().cloned());
+                out.push(TaskTick {
+                    drains: decision.would_drain.clone(),
+                    steps: steps.clone(),
+                    decision,
+                    own,
+                });
+                now += INTERVAL;
+            }
+            out
+        }
+
+        /// Run E9's shape in Neutral: two own tasks beside one saturating context. One task is
+        /// paused, so own work keeps half of the device and the other user its fair share; no cap
+        /// or duty is sent, GPU admission holds, the paused task drains at its bound and the other
+        /// then runs unheld (FR-021, FR-089, SC-020).
+        #[test]
+        fn two_own_tasks_beside_a_saturating_one_pause_one_whole_task() {
+            let run = two_tasks(&mode_config(ContentionMode::Neutral), None, 1, 60);
+            for (i, t) in run.iter().enumerate() {
+                assert!(
+                    t.decision
+                        .actions
+                        .iter()
+                        .all(|a| a.step != YieldStep::Cap && a.duty.is_none()),
+                    "interval {i}: {:?}",
+                    t.decision.actions
+                );
+            }
+            for (i, t) in run.iter().enumerate().take(19).skip(2) {
+                let paused = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
+                assert_eq!(paused, 1, "interval {i}: {:?}", t.steps);
+                assert!(t.own >= 416, "interval {i}: own {}", t.own);
+                let status = &t.decision.resources[&ResourceKey::GpuCompute(GPU.into())];
+                assert_eq!(
+                    status.admission.as_ref().and_then(|a| a.code()),
+                    Some("gpu_time_slice_admission_held"),
+                    "interval {i}"
+                );
+                assert_eq!(slice_of(&t.decision).hold, Some(1), "interval {i}");
+            }
+            let drains: Vec<(usize, String)> = run
+                .iter()
+                .enumerate()
+                .flat_map(|(i, t)| t.drains.iter().map(move |id| (i, id.clone())))
+                .collect();
+            assert_eq!(drains.len(), 1, "{drains:?}");
+            assert!(drains[0].0 >= 20, "{drains:?}");
+            for (i, t) in run.iter().enumerate().skip(drains[0].0 + 1) {
+                assert!(t.steps.is_empty(), "interval {i}: {:?}", t.steps);
+            }
+        }
+
+        /// Yield First on a contended time-sliced device pauses every own task, with no cap
+        /// (FR-020, FR-089).
+        #[test]
+        fn yield_first_pauses_every_own_task_on_a_contended_device() {
+            let run = two_tasks(&mode_config(ContentionMode::YieldFirst), None, 1, 16);
+            assert!(
+                run.iter()
+                    .all(|t| t.steps.values().all(|s| *s == YieldStep::Pause)),
+                "{:?}",
+                run.iter().map(|t| &t.steps).collect::<Vec<_>>()
+            );
+            assert!(run.iter().any(|t| t.steps.len() == 2));
+        }
+
+        /// In Performance no own task is held; GPU admission holds instead (FR-022).
+        #[test]
+        fn performance_holds_no_own_task_on_the_time_sliced_device() {
+            let run = two_tasks(&mode_config(ContentionMode::Performance), None, 1, 30);
+            assert!(run.iter().all(|t| t.steps.is_empty()));
+        }
+
         pub(super) fn gpu_steps(decision: &Decision) -> Vec<&YieldAction> {
             let key = ResourceKey::GpuCompute(GPU.into());
             decision
@@ -6848,7 +6392,9 @@ mod gpu_demand {
                         ],
                         "interval {i}"
                     );
-                    assert!(!gpu_steps(decision).is_empty(), "interval {i}: capped");
+                    // A lone job is not held, whatever its contexts (FR-089).
+                    assert_eq!(slice.hold, Some(1), "interval {i}");
+                    assert!(gpu_steps(decision).is_empty(), "interval {i}");
                 } else {
                     assert_eq!(slice.own, 1, "interval {i}");
                     assert!(slice.holds, "interval {i}");
@@ -6865,24 +6411,20 @@ mod gpu_demand {
                     "interval {i}: no pause"
                 );
             }
-            assert_eq!(
-                slice_of(&run[0].0).duty,
-                Some(643),
-                "d0' from the first own interval"
-            );
         }
 
         /// The counts come from every interval whose samples are readable, also while own work is
-        /// capped and no uncapped interval feeds the estimate: a second own process that starts
-        /// computing under the cap counts at once (FR-021).
+        /// held and no uncapped interval feeds the estimate: a second own process that starts
+        /// computing while the job is paused counts at once (FR-021). Checked before the pause's
+        /// bound.
         #[test]
-        fn the_counts_update_while_own_work_is_capped() {
+        fn the_counts_update_while_own_work_is_held() {
             let run = saturating_with(
                 ContentionMode::Neutral,
                 Some(ContentionMode::YieldFirst),
-                &|i| if i < 20 { 1 } else { 2 },
+                &|i| if i < 10 { 1 } else { 2 },
                 1,
-                40,
+                19,
                 &|snap| snap,
             );
             for (i, (decision, _)) in run.iter().enumerate().skip(5) {
@@ -6890,7 +6432,7 @@ mod gpu_demand {
                     !record_of(decision).uncapped,
                     "interval {i}: the feed is shut"
                 );
-                let want = if i < 20 { 1 } else { 2 };
+                let want = if i < 10 { 1 } else { 2 };
                 assert_eq!(slice_of(decision).own, want, "interval {i}");
             }
         }
@@ -6971,12 +6513,12 @@ mod gpu_demand {
             }
         }
 
-        /// Two own contexts beside one saturating context hold two slices of three, more than
-        /// the fair share: m × k = 2 > E = 1, so the counts duty caps own work to half less
-        /// Neutral's margin, 450. Once one own context leaves the device, m counts only the
-        /// processes still listed, the rule holds and the cap is gone at once (FR-021, Q22, Q32).
+        /// One job with two contexts beside one saturating context holds two slices of three, more
+        /// than the fair share: the rule fails and the hold count is 1, but pausing the job would
+        /// leave none running, so it is left alone, as plain Linux leaves it. Once one context
+        /// leaves the device, the rule holds (FR-021, FR-089).
         #[test]
-        fn two_own_contexts_are_capped_until_one_leaves() {
+        fn one_job_with_two_contexts_is_not_held() {
             const LEAVE: usize = 300;
             let run = saturating(
                 ContentionMode::Neutral,
@@ -6984,18 +6526,17 @@ mod gpu_demand {
                 1,
                 400,
             );
-            let capped = &run[100..LEAVE];
-            let own = median(capped.iter().map(|(_, share)| *share).collect());
-            assert!(own.abs_diff(450) <= 30, "own work holds {own}");
-            for (decision, _) in capped {
-                let slice = slice_of(decision);
-                assert_eq!((slice.own, slice.holds), (2, false));
-            }
-            for (i, (decision, _)) in run.iter().enumerate().skip(LEAVE) {
+            for (i, (decision, share)) in run.iter().enumerate() {
                 let steps = gpu_steps(decision);
                 assert!(steps.is_empty(), "interval {i}: {steps:?}");
                 let slice = slice_of(decision);
-                assert_eq!((slice.own, slice.holds), (1, true), "interval {i}");
+                if (100..LEAVE).contains(&i) {
+                    assert_eq!((slice.own, slice.holds, slice.hold), (2, false, Some(1)));
+                    assert_eq!(*share, 666, "interval {i}");
+                }
+                if i >= LEAVE {
+                    assert_eq!((slice.own, slice.holds), (1, true), "interval {i}");
+                }
             }
         }
 
@@ -7091,97 +6632,11 @@ mod gpu_demand {
             assert_eq!(estimate(740), estimate(0));
         }
 
-        /// Own work's share needs 6 uncapped intervals (FR-021, Q24, T471): until it has them a
-        /// cap goes out at target ÷ 1000 and opens a re-measure window at once, a window that
-        /// ends short opens the next at once, and once the share exists windows keep their 30 s.
-        #[test]
-        fn own_works_share_bootstraps_through_windows_at_once() {
-            // Not time-sliced, so the rule leaves the caps to the estimate and the duty.
-            let config = mode_config(ContentionMode::Neutral);
-            let mut engine = PolicyEngine::new();
-            let mut now = 0;
-            for i in 0..60u64 {
-                engine
-                    .evaluate(
-                        &config,
-                        &interval(None, 990, i + 1),
-                        &PolicyInput::default(),
-                        now,
-                    )
-                    .unwrap();
-                now += INTERVAL;
-            }
-            let input = PolicyInput {
-                allocations: vec![job(None)],
-                ..PolicyInput::default()
-            };
-            let key = ResourceKey::GpuCompute(GPU.into());
-            let (mut duty, mut fed, mut first_share, mut windows) = (1000u64, 0, None, vec![]);
-            for i in 0..200u64 {
-                // Two own contexts beside one saturating context hold two thirds at full duty.
-                let own = duty * 2 / 3;
-                let decision = engine
-                    .evaluate(
-                        &config,
-                        &interval(Some(own), 990 - own, 61 + i),
-                        &input,
-                        now,
-                    )
-                    .unwrap();
-                let read = record_of(&decision);
-                fed += usize::from(read.fed);
-                let cap = decision
-                    .actions
-                    .iter()
-                    .find(|a| a.resource == key && a.step == YieldStep::Cap);
-                if read.own_uncapped.is_none() {
-                    assert!(
-                        fed < 6 + 1,
-                        "decision {i}: {fed} intervals fed and no share"
-                    );
-                    assert_eq!(cap.and_then(|a| a.duty), None, "decision {i}");
-                } else if first_share.is_none() {
-                    first_share = Some(i);
-                }
-                if read.window {
-                    windows.push(i);
-                }
-                duty = cap_of(&decision);
-                now += INTERVAL;
-            }
-            let share_at = first_share.expect("own work's share never formed");
-            let first_window = windows[0];
-            assert!(
-                first_window <= 2,
-                "the first window opened at decision {first_window}"
-            );
-            // Until the share exists, every decision after the first window is in a window.
-            for i in first_window..share_at {
-                assert!(
-                    windows.contains(&i),
-                    "decision {i} is capped outside a window"
-                );
-            }
-            // Then the usual rhythm: the window running when the share formed ends, and the next
-            // starts 30 s after the last uncapped interval.
-            let starts: Vec<u64> = windows
-                .iter()
-                .copied()
-                .filter(|w| !windows.contains(&(w.wrapping_sub(1))))
-                .collect();
-            let next = starts.iter().find(|w| **w > share_at);
-            assert!(
-                next.is_none_or(|w| w - share_at >= 55),
-                "a window from {next:?} right after the share formed at {share_at}"
-            );
-            assert!(next.is_some(), "no window after the share formed");
-        }
-
         /// The rule needs a device known to be time-sliced (FR-021, Q22): under MPS, or with the
         /// MPS or MIG state unknown, one own context beside a saturating user keeps today's caps
         /// and no time-slice record.
         #[test]
-        fn mps_or_an_unknown_mode_keeps_the_caps() {
+        fn mps_or_an_unknown_mode_keeps_the_measured_path() {
             for slicing in [Some(false), None] {
                 let run = saturating_with(
                     ContentionMode::Neutral,
@@ -7194,11 +6649,12 @@ mod gpu_demand {
                         snap
                     },
                 );
-                assert!(
-                    run.iter().any(|(d, _)| !gpu_steps(d).is_empty()),
-                    "{slicing:?}: no cap"
-                );
                 let key = ResourceKey::GpuCompute(GPU.into());
+                assert!(
+                    run.iter()
+                        .any(|(d, _)| d.resources[&key].target_share.is_some_and(|s| s < 1000)),
+                    "{slicing:?}: the measured path sets a target"
+                );
                 assert!(
                     run.iter()
                         .all(|(d, _)| d.resources[&key].time_slice.is_none())
@@ -7277,7 +6733,7 @@ mod gpu_demand {
                 "E never fell"
             );
             assert!(
-                after.iter().any(|d| !gpu_steps(d).is_empty()),
+                after.iter().any(|d| slice_of(d).hold.is_some()),
                 "never capped"
             );
         }
@@ -7298,7 +6754,7 @@ mod gpu_demand {
                     allocations: vec![job(None)],
                     ..PolicyInput::default()
                 };
-                let (mut last, mut capped) = (None, None);
+                let (mut last, mut held) = (None, None);
                 for i in 0..200u64 {
                     let mut snap = sliced(Some(500), 490, i + 1, own_n, 1);
                     let gpu = &mut snap.gpus[0];
@@ -7313,12 +6769,12 @@ mod gpu_demand {
                     if own_n == 1 {
                         assert!(gpu_steps(&decision).is_empty(), "interval {i}");
                     }
-                    if let Some(cap) = decision
-                        .actions
-                        .iter()
-                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
-                    {
-                        capped.get_or_insert((cap.target, cap.duty));
+                    assert!(
+                        decision.actions.iter().all(|a| a.resource != key),
+                        "interval {i}: a lone job is not held"
+                    );
+                    if slice_of(&decision).hold.is_some() {
+                        held.get_or_insert(slice_of(&decision).hold);
                     }
                     last = Some(decision);
                 }
@@ -7336,14 +6792,11 @@ mod gpu_demand {
                 assert_eq!(slice.source, Some(source), "readable {readable}");
                 if own_n == 2 {
                     assert_eq!(
-                        capped,
-                        Some((Some(428), Some(643))),
-                        "two own processes on the unknown path take d0 from the listed counts"
+                        held,
+                        Some(Some(1)),
+                        "two own processes on the unknown path take the hold from the listed counts"
                     );
-                    assert_eq!(
-                        (slice.d0, slice.d0_windows, slice.bound.len()),
-                        (Some(675), Some(643), 1)
-                    );
+                    assert_eq!((slice.hold, slice.bound.len()), (Some(1), 1));
                 }
             }
         }
@@ -7489,13 +6942,10 @@ mod gpu_demand {
             snap
         }
 
-        /// One interval of the tick loop: the decision, own work's share, each principal's and
-        /// the device's busy percent.
+        /// One interval of the tick loop: the decision and own work's share.
         pub(super) struct Tick {
             pub(super) decision: Decision,
             pub(super) own: u64,
-            pub(super) others: Vec<u64>,
-            pub(super) util: u32,
         }
 
         /// The tick loop: the external principals alone for 60 intervals, then own work's m(i)
@@ -7567,51 +7017,16 @@ mod gpu_demand {
                 adjust(i, &mut snap);
                 let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
                 duty = cap_of(&decision);
-                out.push(Tick {
-                    decision,
-                    own,
-                    others: got,
-                    util,
-                });
+                out.push(Tick { decision, own });
                 now += INTERVAL;
             }
             out
-        }
-
-        pub(super) fn mean(values: impl Iterator<Item = u64>) -> u64 {
-            let values: Vec<u64> = values.collect();
-            values.iter().sum::<u64>() / values.len().max(1) as u64
         }
 
         pub(super) fn paused(decision: &Decision) -> bool {
             gpu_steps(decision)
                 .iter()
                 .any(|a| a.step == YieldStep::Pause)
-        }
-
-        /// Two own contexts beside a saturating one hold two slices of three: the time-slice duty
-        /// d0 = (2 + 1) ÷ 2 × (½ − the margin) gives own work its fair share less the mode's
-        /// margin, 450 in Neutral, with no pause (Performance and Aggressive set no duty), and
-        /// quantized own readings of 0, 330, 660 and 990 do not move the duty (FR-021, Q27, Q32).
-        #[test]
-        fn two_own_contexts_beside_a_saturating_one_take_the_counts_duty() {
-            // The duty starts at d0' = (d0 × 66 − 6000) ÷ 60, own work paying for its windows (Q37).
-            {
-                let (mode, config, want, d0) =
-                    ("Neutral", mode_config(ContentionMode::Neutral), 450, 643);
-                let run =
-                    tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 240, &|_, _| {});
-                assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
-                let late = &run[40..];
-                let own = mean(late.iter().map(|t| t.own));
-                assert!(own.abs_diff(want) <= 30, "{mode:?}: own work holds {own}");
-                let duties: BTreeSet<u64> = late
-                    .iter()
-                    .filter(|t| !record_of(&t.decision).window)
-                    .map(|t| cap_of(&t.decision))
-                    .collect();
-                assert_eq!(duties, BTreeSet::from([d0]), "{mode:?}: duties {duties:?}");
-            }
         }
 
         /// In Performance two own contexts beside a saturating one set no duty and open no
@@ -7661,293 +7076,9 @@ mod gpu_demand {
             }
         }
 
-        /// Stale readings never raise the duty: where the scale-up interval is longer than the
-        /// dwell the window fills first, and when readings stop before the rise is due, the
-        /// readings left in it are not fresh evidence (Principle III, FR-021). They resume with a
-        /// whole new dwell.
-        #[test]
-        fn the_duty_does_not_rise_on_readings_older_than_the_interval() {
-            let config = mode_config(ContentionMode::Neutral);
-            let run = |gap: Option<(u64, u64)>| {
-                // The other user's alone part comes first, 60 snapshots, with its readings.
-                let calls = std::cell::Cell::new(0u64);
-                tick_loop_with(
-                    &config,
-                    &|_| 2,
-                    &|_| vec![(PEER, 1, 400)],
-                    200,
-                    &|_, snap: &mut Snapshot| {
-                        let i = calls.get();
-                        calls.set(i + 1);
-                        if let Some((from, to)) = gap
-                            && (60 + from..60 + to).contains(&i)
-                        {
-                            snap.gpus[0].utilization_percent = None;
-                        }
-                    },
-                )
-            };
-            let rises = |ticks: &[Tick]| -> Vec<u64> {
-                ticks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| slice_of(&t.decision).step == Some(SliceStep::Rising))
-                    .map(|(i, _)| i as u64)
-                    .collect()
-            };
-            let first = rises(&run(None))[0];
-            assert!(first > 4, "the first rise comes after the dwell: {first}");
-            // Readings stop two intervals before that rise, with the window already full.
-            let silent = (first - 2, first + 60);
-            let ticks = run(Some(silent));
-            let again = rises(&ticks);
-            assert!(
-                again.iter().all(|i| !(silent.0..silent.1).contains(i)),
-                "the duty rose without a reading: rises at {again:?}, no readings in {silent:?}"
-            );
-            assert!(
-                again.iter().any(|i| *i >= silent.1),
-                "the rises resume once readings do: {again:?}"
-            );
-        }
-
-        /// Beside a partial context that wants 40%, more than its slice: slice-bound, so the duty
-        /// starts at d0 and steps up while the device idles beyond the margin, until own work
-        /// holds the device less that user and the margin, and the user keeps its 400 (FR-021,
-        /// Q27, Q28).
-        #[test]
-        fn beside_a_partial_user_the_duty_steps_up_to_the_idle_time() {
-            // A zero margin settles at the measurement floor, one reading's quantum (Q35).
-            {
-                let (mode, config, margin, d0) =
-                    ("Neutral", mode_config(ContentionMode::Neutral), 50, 643);
-                let run =
-                    tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 400)], 400, &|_, _| {});
-                assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?}: paused");
-                let first = run
-                    .iter()
-                    .find(|t| cap_of(&t.decision) < 1000)
-                    .map(|t| cap_of(&t.decision));
-                assert_eq!(first, Some(d0), "{mode:?}: the first duty");
-                let late = &run[250..];
-                let own = mean(late.iter().map(|t| t.own));
-                assert!(
-                    own.abs_diff(1000 - 400 - margin) <= 30,
-                    "{mode:?}: own work holds {own}"
-                );
-                let user = mean(late.iter().map(|t| t.others[0]));
-                assert!(
-                    user * 100 >= 97 * 400,
-                    "{mode:?}: the partial user gets {user}"
-                );
-                let busy = mean(late.iter().map(|t| u64::from(t.util) * 10));
-                assert!(
-                    busy + margin + 30 >= 1000,
-                    "{mode:?}: the device is {busy} busy"
-                );
-                // Outside windows the duty moves at most one step around where it settles.
-                let duties: BTreeSet<u64> = late
-                    .iter()
-                    .filter(|t| !record_of(&t.decision).window)
-                    .map(|t| cap_of(&t.decision))
-                    .collect();
-                assert!(duties.len() <= 2, "{mode:?}: duties {duties:?}");
-            }
-        }
-
-        /// Shapes of the counts beside saturating and light principals, in Performance and
-        /// Neutral, each less the mode's margin: m = 3 beside one saturating context takes half the
-        /// device; m = 2 beside two saturating principals takes a third; beside a saturating and a
-        /// light principal only the saturating one is slice-bound, so own work holds about half of
-        /// what the light one leaves (FR-021, Q27, Q32). Read once the estimate holds its 60
-        /// window intervals: from a few windows of 5 readings in 330 steps the light one reads 132
-        /// or 198 against its threshold of 187.
-        #[test]
-        fn the_counts_duty_follows_the_slice_bound_principals() {
-            const SECOND: u32 = 2002;
-            // Each shape: its name, m, the external principals, own work's share and how many
-            // principals are slice-bound.
-            type Shape = (&'static str, usize, Vec<(u32, usize, u64)>, u64, usize);
-            let shapes: [Shape; 3] = [
-                ("m = 3, one saturating", 3, vec![(PEER, 1, 1000)], 500, 1),
-                (
-                    "m = 2, two saturating",
-                    2,
-                    vec![(PEER, 1, 1000), (SECOND, 1, 1000)],
-                    333,
-                    2,
-                ),
-                (
-                    "m = 2, saturating and light",
-                    2,
-                    vec![(PEER, 1, 1000), (SECOND, 1, 158)],
-                    (1000 - 158) / 2,
-                    1,
-                ),
-            ];
-            {
-                let (mode, margin) = (ContentionMode::Neutral, 50);
-                for (name, m, externals, share, bound) in &shapes {
-                    let want = share - margin;
-                    let run = tick_loop(mode, &|_| *m, &|_| externals.clone(), 1000);
-                    assert!(
-                        run.iter().all(|t| !paused(&t.decision)),
-                        "{mode:?} {name}: paused"
-                    );
-                    let late = &run[700..];
-                    let own = mean(late.iter().map(|t| t.own));
-                    assert!(
-                        own.abs_diff(want) <= 30,
-                        "{mode:?} {name}: own work holds {own}"
-                    );
-                    let slice = slice_of(&late.last().unwrap().decision);
-                    assert_eq!(slice.bound.len(), *bound, "{mode:?} {name}: {slice:?}");
-                    assert!(
-                        slice
-                            .bound
-                            .iter()
-                            .all(|b| b.uid == Some(PEER) || *bound == 2),
-                        "{mode:?} {name}: {slice:?}"
-                    );
-                }
-            }
-        }
-
-        /// A light context that turns saturating is slice-bound once the estimate shows it, and
-        /// own work is back at d0 within 33 s; a stepped-up partial user that rises to saturating
-        /// takes own work back to d0 a step per dwell, within 30 s (FR-021, Q28).
-        #[test]
-        fn a_rising_user_returns_own_work_to_d0_within_the_bound() {
-            const TURN: u64 = 300;
-            {
-                let (mode, margin, d0) = (ContentionMode::Neutral, 50, 643);
-                for (name, before) in [("light", 158), ("partial", 400)] {
-                    let run = tick_loop(
-                        mode,
-                        &|_| 2,
-                        &|i| vec![(PEER, 1, if i < TURN { before } else { 1000 })],
-                        TURN + 160,
-                    );
-                    assert!(run.iter().all(|t| !paused(&t.decision)), "{mode:?} {name}");
-                    let bound = if name == "light" { 33_000 } else { 30_000 } / INTERVAL;
-                    let back = run[TURN as usize..]
-                        .iter()
-                        .position(|t| !record_of(&t.decision).window && cap_of(&t.decision) == d0)
-                        .map(|i| i as u64);
-                    assert!(
-                        back.is_some_and(|i| i <= bound),
-                        "{mode:?} {name}: back at d0 after {back:?} intervals"
-                    );
-                    let late = &run[(TURN + 100) as usize..];
-                    let own = mean(late.iter().map(|t| t.own));
-                    assert!(
-                        own.abs_diff(500 - margin) <= 30,
-                        "{mode:?} {name}: own work holds {own}"
-                    );
-                }
-            }
-        }
-
-        /// A slice-bound principal that leaves ends the cap within one averaged window, 30 s
-        /// (FR-021, Q28).
-        #[test]
-        fn a_saturating_user_that_leaves_ends_the_cap() {
-            const LEAVE: u64 = 200;
-            {
-                let mode = ContentionMode::Neutral;
-                let run = tick_loop(
-                    mode,
-                    &|_| 2,
-                    &|i| {
-                        if i < LEAVE {
-                            vec![(PEER, 1, 1000)]
-                        } else {
-                            vec![]
-                        }
-                    },
-                    LEAVE + 100,
-                );
-                assert!(
-                    cap_of(&run[LEAVE as usize - 1].decision) < 1000,
-                    "{mode:?}: no cap"
-                );
-                let ended = run[LEAVE as usize..]
-                    .iter()
-                    .position(|t| gpu_steps(&t.decision).is_empty())
-                    .map(|i| i as u64);
-                assert!(
-                    ended.is_some_and(|i| i <= 30_000 / INTERVAL),
-                    "{mode:?}: the cap ended after {ended:?} intervals"
-                );
-                let rest = &run[(LEAVE + 60) as usize..];
-                assert!(
-                    rest.iter().all(|t| gpu_steps(&t.decision).is_empty()),
-                    "{mode:?}: capped again"
-                );
-            }
-        }
-
-        /// With the listing known and the samples unreadable, d0 comes from the listed counts with
-        /// every listed principal slice-bound, (2 + 2) ÷ 2 × (⅓ − Neutral's 5%), and without
-        /// a utilization reading the duty never steps up; with one showing idle time it does
-        /// (FR-021, Q29, Q32, Q33).
-        #[test]
-        fn unknown_amounts_take_d0_from_the_listed_principals() {
-            const SECOND_PID: u32 = 950;
-            let key = ResourceKey::GpuCompute(GPU.into());
-            let config = mode_config(ContentionMode::Neutral);
-            for utilization in [None, Some(10)] {
-                let mut engine = PolicyEngine::new();
-                let input = PolicyInput {
-                    allocations: vec![job(None)],
-                    ..PolicyInput::default()
-                };
-                let mut duties = BTreeSet::new();
-                let mut last = None;
-                for i in 0..120u64 {
-                    let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
-                    let gpu = &mut snap.gpus[0];
-                    gpu.external_compute_milli = None;
-                    gpu.own_compute_milli = None;
-                    gpu.compute_amount_unknown =
-                        Some("summed per-process utilization differs from the device".into());
-                    gpu.utilization_percent = utilization;
-                    gpu.external_process_ids.as_mut().unwrap().push(SECOND_PID);
-                    let contexts = gpu.compute_contexts.as_mut().unwrap();
-                    contexts.listed.push((SECOND_PID, Some(2002)));
-                    contexts.samples_readable = false;
-                    let decision = engine
-                        .evaluate(&config, &snap, &input, i * INTERVAL)
-                        .unwrap();
-                    assert!(!paused(&decision), "{utilization:?} interval {i}");
-                    if let Some(cap) = decision
-                        .actions
-                        .iter()
-                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
-                    {
-                        duties.insert(cap.duty);
-                    }
-                    last = Some(decision);
-                }
-                let slice = slice_of(&last.unwrap());
-                assert_eq!(slice.d0, Some(566), "{utilization:?}");
-                let uids: Vec<Option<u32>> = slice.bound.iter().map(|b| b.uid).collect();
-                assert_eq!(uids, vec![Some(PEER), Some(2002)], "{utilization:?}");
-                if utilization.is_none() {
-                    assert_eq!(duties, BTreeSet::from([Some(523)]));
-                    assert_eq!(
-                        (slice.step, slice.utilization_milli),
-                        (Some(SliceStep::Holding), None)
-                    );
-                } else {
-                    assert!(duties.iter().any(|d| d > &Some(523)), "{duties:?}");
-                }
-            }
-        }
-
-        /// After the estimate restarts on a new external PID, its window is empty: d0 comes from
-        /// the interval's sampled busy contexts, every counted principal bound, and a re-measure
-        /// window opens at once (FR-021, Q29, Q33).
+        /// After the estimate restarts on a new external PID, its window is empty: the hold comes
+        /// from the interval's sampled busy contexts, every counted principal bound (FR-021, Q29,
+        /// Q33).
         #[test]
         fn an_empty_window_after_a_restart_takes_the_listed_counts() {
             const CHANGE: u64 = 61 + 120;
@@ -7971,122 +7102,21 @@ mod gpu_demand {
             };
             let run = saturating_with(ContentionMode::Neutral, None, &|_| 2, 1, 200, &renamed);
             let before = slice_of(&run[118].0);
-            assert_eq!((before.external, before.d0), (Some(1), Some(675)));
+            assert_eq!((before.external, before.hold), (Some(1), Some(1)));
             let after = slice_of(&run[120].0);
             assert_eq!(
                 (
                     after.external,
                     after.principals,
-                    after.d0,
+                    after.hold,
                     after.bound.len()
                 ),
-                (Some(1), Some(1), Some(675), 1),
+                (Some(1), Some(1), Some(1), 1),
                 "{after:?}"
             );
-            assert_eq!(after.source, Some(SliceSource::Interval));
-            assert!(
-                run[120..123].iter().any(|(d, _)| record_of(d).window),
-                "no window opened"
-            );
+            // A lone job is not held, so the interval itself feeds the new estimate at once.
+            assert!(after.source.is_some());
             assert!(run[120..].iter().all(|(d, _)| !paused(d)));
-        }
-
-        /// When a device last read as time-sliced can no longer be read so, its contexts' listing
-        /// unknown with the amounts still measured, the cap is target ÷ 1000 and never a pause, own
-        /// work reading above its target; on a device never read as time-sliced the same readings
-        /// end in a pause (FR-021, Q25, Q29).
-        #[test]
-        fn an_unknown_listing_on_a_sliced_device_caps_without_a_pause() {
-            const UNKNOWN: u64 = 40;
-            let key = ResourceKey::GpuCompute(GPU.into());
-            let config = mode_config(ContentionMode::Neutral);
-            let input = PolicyInput {
-                allocations: vec![job(None)],
-                ..PolicyInput::default()
-            };
-            let mut pauses = vec![];
-            for last_sliced in [true, false] {
-                let mut engine = PolicyEngine::new();
-                let (mut paused_at, mut duties) = (None, BTreeSet::new());
-                for i in 0..400u64 {
-                    // The control starts with the unknown listing, never read as time-sliced.
-                    if !last_sliced && i < UNKNOWN {
-                        continue;
-                    }
-                    let mut snap = if i < UNKNOWN {
-                        sliced(Some(500), 490, i + 1, 2, 1)
-                    } else {
-                        sliced(Some(600), 390, i + 1, 2, 1)
-                    };
-                    let gpu = &mut snap.gpus[0];
-                    if i >= UNKNOWN {
-                        gpu.time_sliced = None;
-                        gpu.compute_contexts = None;
-                    }
-                    let decision = engine
-                        .evaluate(&config, &snap, &input, i * INTERVAL)
-                        .unwrap();
-                    if i < UNKNOWN {
-                        continue;
-                    }
-                    if paused(&decision) {
-                        paused_at.get_or_insert(i);
-                    }
-                    if let Some(cap) = decision
-                        .actions
-                        .iter()
-                        .find(|a| a.resource == key && a.step == YieldStep::Cap)
-                    {
-                        duties.insert(cap.duty);
-                    }
-                }
-                if last_sliced {
-                    assert_eq!(duties, BTreeSet::from([None]), "target ÷ 1000");
-                }
-                pauses.push(paused_at);
-            }
-            assert_eq!(pauses[0], None, "a device last read as time-sliced paused");
-            assert!(pauses[1].is_some(), "the control never paused");
-        }
-
-        /// The dwell's readings average in per mille: 100, 100 and 99 read 997, three per mille of
-        /// spare time, under one reading's quantum. In Neutral, above d0, the duty falls back
-        /// rather than holding (FR-021, Q35).
-        #[test]
-        fn a_dip_of_one_reading_neither_raises_nor_holds_the_duty() {
-            let input = PolicyInput {
-                allocations: vec![job(None)],
-                ..PolicyInput::default()
-            };
-            let run = |config: &Config, busy: &dyn Fn(u64) -> u32| {
-                let mut engine = PolicyEngine::new();
-                (0..300u64)
-                    .map(|i| {
-                        let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
-                        snap.gpus[0].utilization_percent = Some(busy(i));
-                        let decision = engine
-                            .evaluate(config, &snap, &input, i * INTERVAL)
-                            .unwrap();
-                        slice_of(&decision)
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let dips = |i: u64| if i % 3 == 2 { 99 } else { 100 };
-            // Neutral steps above d0 while the device idles, then the dips set in; Performance and
-            // Aggressive set no duty (FR-022).
-            let neutral = run(&mode_config(ContentionMode::Neutral), &|i| {
-                if i < 100 { 50 } else { dips(i) }
-            });
-            let peak = neutral[..100].iter().filter_map(|s| s.duty).max();
-            assert!(peak > Some(643), "Neutral never stepped up: {peak:?}");
-            let last = neutral.last().unwrap();
-            assert_eq!(last.duty, Some(643), "Neutral holds above d0': {last:?}");
-            assert!(
-                neutral[100..]
-                    .iter()
-                    .any(|s| s.step == Some(SliceStep::Falling)),
-                "no fall"
-            );
         }
 
         /// The owner's unmanaged processes are listed among the device's external PIDs, but their
@@ -8131,71 +7161,6 @@ mod gpu_demand {
             );
         }
 
-        /// Own work pays for its re-measure windows: over the whole run, windows included, the
-        /// saturating context keeps its half less 3% at a zero margin, and its half and the
-        /// margin less 3 points in Performance and Neutral, while own work's held duty averages
-        /// d0 and its share the mode's target (FR-021, Q37).
-        #[test]
-        fn own_work_pays_for_its_windows() {
-            {
-                let (mode, config, d0, own_want, other_least) = (
-                    "Neutral",
-                    mode_config(ContentionMode::Neutral),
-                    675,
-                    450,
-                    520,
-                );
-                let run =
-                    tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 460, &|_, _| {});
-                let late = &run[60..];
-                let other = mean(late.iter().map(|t| t.others[0]));
-                assert!(
-                    other >= other_least,
-                    "{mode}: the saturating context gets {other}"
-                );
-                let own = mean(late.iter().map(|t| t.own));
-                assert!(own.abs_diff(own_want) <= 30, "{mode}: own work holds {own}");
-                // Each interval runs at the duty the decision before it sent.
-                let held = mean(late.windows(2).map(|pair| cap_of(&pair[0].decision)));
-                assert!(
-                    held.abs_diff(d0) <= 5,
-                    "{mode}: own work's held duty {held}"
-                );
-            }
-        }
-
-        /// A Yield First allocation beside the duty's allocation on the device keeps any window
-        /// from opening, so own work pays for none and the duty starts at d0 itself (FR-021, Q37).
-        #[test]
-        fn without_windows_the_duty_starts_at_d0() {
-            let config = mode_config(ContentionMode::Performance);
-            let mut neighbour = job(Some(ContentionMode::YieldFirst));
-            neighbour.id = "neighbour".into();
-            let input = PolicyInput {
-                allocations: vec![job(None), neighbour],
-                ..PolicyInput::default()
-            };
-            let mut engine = PolicyEngine::new();
-            let mut slices = vec![];
-            for i in 0..200u64 {
-                let snap = sliced(Some(500), 490, i + 1, 2, 1);
-                let decision = engine
-                    .evaluate(&config, &snap, &input, i * INTERVAL)
-                    .unwrap();
-                assert!(!record_of(&decision).window, "a window opened at {i}");
-                slices.push(slice_of(&decision));
-            }
-            let duty: Vec<_> = slices.iter().filter(|s| s.d0.is_some()).collect();
-            assert!(!duty.is_empty(), "never on the duty");
-            for slice in duty {
-                assert_eq!(
-                    (slice.d0, slice.window_share, slice.d0_windows),
-                    (Some(720), Some(0), Some(720)),
-                    "{slice:?}"
-                );
-            }
-        }
-
         /// An idle context of another principal, listed throughout but never sampled busy, does
         /// not count while the samples are readable, even in intervals whose amounts are
         /// inconsistent: the counts come from the busy contexts, the window's or, while every
@@ -8206,20 +7171,22 @@ mod gpu_demand {
         fn an_idle_listed_context_counts_only_when_the_samples_are_unreadable() {
             const IDLE: u32 = 950;
             let config = mode_config(ContentionMode::Performance);
-            for (readable, d0, sources_wanted) in [
+            // Readable, the idle context is not counted and only the busy user is slice-bound;
+            // from the listing both principals are.
+            for (readable, bound, sources_wanted) in [
                 (
                     true,
-                    720,
+                    1,
                     BTreeSet::from([SliceSource::Window, SliceSource::Interval]),
                 ),
-                (false, 626, BTreeSet::from([SliceSource::Listing])),
+                (false, 2, BTreeSet::from([SliceSource::Listing])),
             ] {
                 let mut engine = PolicyEngine::new();
                 let input = PolicyInput {
                     allocations: vec![job(None)],
                     ..PolicyInput::default()
                 };
-                let (mut sources, mut d0s) = (BTreeSet::new(), BTreeSet::new());
+                let (mut sources, mut bounds) = (BTreeSet::new(), BTreeSet::new());
                 for i in 0..240u64 {
                     let mut snap = sliced(Some(500), 490, i + 1, 2, 1);
                     let gpu = &mut snap.gpus[0];
@@ -8240,14 +7207,14 @@ mod gpu_demand {
                     if i >= 120 {
                         let slice = slice_of(&decision);
                         sources.extend(slice.source);
-                        d0s.extend(slice.d0);
+                        bounds.insert(slice.bound.len());
                     }
                 }
                 assert!(
                     sources.is_subset(&sources_wanted),
                     "readable {readable}: {sources:?}"
                 );
-                assert_eq!(d0s, BTreeSet::from([d0]), "readable {readable}");
+                assert_eq!(bounds, BTreeSet::from([bound]), "readable {readable}");
             }
         }
 
@@ -8290,7 +7257,7 @@ mod gpu_demand {
         /// Each decision on the duty records the slice-bound principals with their readings and
         /// thresholds, d0, the duty, the step and the utilization the step read (FR-021, Q30).
         #[test]
-        fn the_record_states_the_slice_bound_principals_and_the_duty() {
+        fn the_record_states_the_slice_bound_principals_and_the_hold() {
             let run = tick_loop(
                 ContentionMode::Neutral,
                 &|_| 2,
@@ -8299,7 +7266,7 @@ mod gpu_demand {
             );
             let t = run[60..]
                 .iter()
-                .find(|t| slice_of(&t.decision).utilization_milli.is_some())
+                .find(|t| slice_of(&t.decision).hold.is_some())
                 .unwrap();
             let slice = slice_of(&t.decision);
             let [bound] = slice.bound.as_slice() else {
@@ -8315,18 +7282,13 @@ mod gpu_demand {
                 (2, Some(1), Some(1), false)
             );
             assert_eq!(
-                (slice.d0, slice.window_share, slice.d0_windows, slice.duty),
-                (Some(675), Some(91), Some(643), Some(643))
+                (slice.hold, slice.d0, slice.duty, slice.step),
+                (Some(1), None, None, None)
             );
             assert_eq!(slice.source, Some(SliceSource::Window));
-            // The device is saturated, so the duty holds at d0.
-            assert_eq!(
-                (slice.step, slice.utilization_milli),
-                (Some(SliceStep::Holding), Some(1000))
-            );
             let reasons = &t.decision.resources[&ResourceKey::GpuCompute(GPU.into())].reasons;
             assert!(
-                reasons.iter().any(|r| r.code == "gpu_time_slice_duty"),
+                reasons.iter().any(|r| r.code == "gpu_time_slice_hold"),
                 "{reasons:?}"
             );
         }
