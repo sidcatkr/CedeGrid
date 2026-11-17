@@ -2634,3 +2634,46 @@ that a task that complied is hinted again, not drained.
 
 **Native**: C3's floor breach in Neutral and C4 run 2 (`runs-037.sh <commit> <uid> c3n c4b`) on
 the test host at the last commit, as in item 056.
+
+## Report 057 Part B: Performance gives nothing back beyond the baseline (2026-11-17)
+
+**Input**: constitution 8.0.0 Principle II; spec Session 2026-11-17's answers on Performance;
+the spec delta and code-path list of report 057 (drafts on the 057/059 design branch).
+
+**Technical Context**: Rust 1.88; no dependency, config key, wire field or SDK change. Steps are
+removed, not added; one admission reason code is added. Replays of recorded inputs give
+different Performance decisions, which the snapshot comparison lists.
+
+**Constitution Check**: Principles I to IV and VI.
+- *Principle I.* No actuator is added; fewer steps reach the supervisors.
+- *Principle II.* Performance takes no compute step for others and gives no memory back at a
+  floor; it holds back at admission only (margin, contending principals, unknown activity, the
+  floors). Yield First and Neutral are unchanged.
+- *Principle III.* Unknown is never free: in Performance it closes admission and holds every
+  step; it never escalates, so nothing waits on an unbounded timer.
+- *Principle IV.* The change stays in the pure policy, plus the agent's OOM classification.
+- *Principle VI.* Each part is test first, seen failing.
+
+**Memory (R87, part 1)**. In `src/policy/ladder.rs`: the floors-by-mode block protects all memory
+of work whose mode is Performance or Aggressive where the governing mode is one of them (not
+only its fair share); such work is left out of the floor-breach victims unless the operator
+envelope is breached; `oom_order` marks no task of those modes; the save-progress listing
+signals every such task. In `src/agent/oom.rs` `classify`, FR-076's Performance rule.
+
+**Compute (R87, part 2)**. In `src/policy/measure.rs` and `src/policy/ladder.rs`: where the CPU's
+or a device's governing mode is Performance or Aggressive, an external-growth, own-over-target or
+unknown excess plans no step on running work of those modes, and the budget sets admission only;
+`cpu_unknown_hold` is not applied there (admission holds instead); `compute_floor` and the
+time-slice duty are Neutral's only; in `src/contention.rs` the Performance pause bound and the
+recomputed cap go with them. In `src/policy/admission.rs` the time-slice admission hold with
+`gpu_time_slice_admission_held` in the reason catalog.
+
+**Docs**: `docs/guarantees.md` (modes, floors by mode, OOM order, GPU sharing, reason table),
+the data model's mode-target table, `contracts/decision-output.md` and
+`contracts/resource-target-file.md` as the spec delta lists them.
+
+**Tests and gates**: tests first in `tests/policy.rs` and `tests/contention.rs` for each part;
+tests that assert today's Performance steps are rewritten to the new expectation; the mode-order
+property test and the 500-sequence snapshot comparison by mode. Native: C4's shape in
+Performance (no own task hinted, drained or sent TERM; the kernel's victim as in the baseline)
+and the baseline-comparison gates SC-018 and SC-019 on the test host.

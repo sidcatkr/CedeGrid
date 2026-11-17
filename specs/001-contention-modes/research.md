@@ -1481,3 +1481,16 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: keep the order as built (the user declined); return to the order before item
   051 (in-share tasks pay for another task's excess again, ruled out on 2026-11-03); ask the task
   that grew (needs a per-task baseline and redefines the victim order and the OOM mark).
+
+## R87. Performance holds back at admission only (report 057 Part B)
+
+- **Decision**: in Performance and Aggressive no step is taken on running own work for another
+  principal, for own usage above the admission target, for unknown activity or for a memory floor
+  breach; what is held back is held at admission (the margin, contending principals, unknown
+  activity, the floors). The operator envelope, explicit drain and the Guaranteed rules stay.
+- **Rationale**: constitution 8.0.0 measures harm against the same own work without CedeGrid.
+  Measured against plain Linux, Performance's steps cost own work 3-11% CPU many against one, 27%
+  with two GPU probes against one, and about 4 GiB of 9 in the OOM shape, and in that shape did
+  not save the other user's allocator.
+- **Alternatives**: keep the give-back (contradicts the constitution); give back only memory own
+  work grew during a breach (report 057 point 1 C, harder to explain and test).
