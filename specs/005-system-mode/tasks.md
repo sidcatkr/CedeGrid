@@ -47,8 +47,8 @@ the task list.
 
 **Purpose**: module and packaging skeletons, export lists, CI job.
 
-- [ ] T001 Declare `pub mod broker;` and `pub mod system_mode;` in `src/lib.rs`, and create `src/broker.rs` declaring `pub mod request; pub mod admin_policy; pub mod units; pub mod score; pub mod oom;` (reached from `tests/`) and `mod peer; mod moves;`, with empty files under `src/broker/` (no `#[path]`)
-- [ ] T002 [P] Add every new shipped file (`src/broker.rs`, `src/broker/*.rs`, `src/system_mode.rs`, `packaging/deb/*`) to `ALLOWLIST` in `tools/pack_source_review.py` and to `include` in `Cargo.toml`
+- [x] T001 Declare `pub mod broker;` and `pub mod system_mode;` in `src/lib.rs`, and create `src/broker.rs` declaring `pub mod request; pub mod admin_policy; pub mod units; pub mod score; pub mod oom;` (reached from `tests/`) and `mod peer; mod moves;`, with empty files under `src/broker/` (no `#[path]`)
+- [x] T002 [P] Add every new shipped file (`src/broker.rs`, `src/broker/*.rs`, `src/system_mode.rs`, `packaging/deb/*`) to `ALLOWLIST` in `tools/pack_source_review.py` and to `include` in `Cargo.toml`
   - *In progress:* every file added so far is listed; the list grows with each task.
 - [x] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid_idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
 - [ ] T004 [P] Add a CI job on `ubuntu-22.04` in `.github/workflows/ci.yml` that builds both `.deb` files and starts a container with systemd as PID 1, running only `tests/system_mode.rs` with `CEDEGRID_TEST_SYSTEM_CONTAINER=1` (never `--ignored` across the suite)
@@ -368,9 +368,11 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
 - [ ] T068 Update `CHANGELOG.md` and `README.md`'s install section for the two packages
 - [ ] T069 Apply the approved amendment (D4, N5, N6) to `.specify/memory/constitution.md` with its version change, in the same pull request as `docs/guarantees.md`'s System mode section (T062) and the tests it relies on (Governance)
 - [ ] T070 Run `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked -- --test-threads=1` and `cargo +1.88.0 check --locked --all-targets` once, both Python suites and the npm suite (Principle VI), and the Windows client checks (`cargo check --all-targets`, `cargo test --lib --test policy --test telemetry --test cli`)
-- [ ] T071 Run the source pack (`tools/pack_source_review.py`) and check that every new file is exported and no exported text names a host, an account or a private path
+- [x] T071 Run the source pack (`tools/pack_source_review.py`) and check that every new file is exported and no exported text names a host, an account or a private path
+  - *Done:* the public-candidate pack passes its disclosure checks at 29f11fc (254 files); a scan of the export for host, account and path names finds only the product's default port and fixtures that test the scanner. Rerun at the release candidate.
 - [ ] T072 Rerun T058 at the release candidate's commit, and record SC-006 to SC-008 there in `docs/validation.md`
-- [ ] T073 Prepare the pre-release security review package listing the files of research R14 at the release candidate's commit, in `specs/005-system-mode/security-review.md`. The review runs separately, before release.
+- [x] T073 Prepare the pre-release security review package listing the files of research R14 at the release candidate's commit, in `specs/005-system-mode/security-review.md`. The review runs separately, before release.
+  - *Done:* `specs/005-system-mode/security-review.md` lists what the review checks and, per file, the tests that pin it; it is updated again at the release candidate's commit.
   - *Drafted* at the branch's current state; it is refreshed at the release candidate's commit.
 
 ---

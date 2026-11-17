@@ -3046,7 +3046,20 @@ mod container {
         ok("truncate", &["-s", "256M", image]);
         ok("mkfs.ext4", &["-q", "-F", image]);
         std::fs::create_dir_all(&base).unwrap();
-        ok("mount", &["-o", "loop", image, &base]);
+        // The fixture attaches the loop device itself and detaches it at the end: a device that
+        // `mount -o loop` attaches can outlive the unmount and use up the container's few. A
+        // privileged container sees only the loop nodes /dev had when it started, so the node
+        // the kernel hands out next is made if it is missing.
+        let free = ok("losetup", &["--find"]).trim().to_owned();
+        if let Some(minor) = free.strip_prefix("/dev/loop")
+            && !std::path::Path::new(&free).exists()
+        {
+            ok("mknod", &[&free, "b", "7", minor]);
+        }
+        let device = ok("losetup", &["--find", "--show", image])
+            .trim()
+            .to_owned();
+        ok("mount", &[&device, &base]);
         std::fs::create_dir_all(format!("{base}/tools")).unwrap();
         std::fs::create_dir_all(format!("{base}/python")).unwrap();
         for tool in ["make_test_pki.py", "validation_runtime.py"] {
@@ -3184,6 +3197,9 @@ mod container {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        // Units an earlier fixture left holding without a configuration would be reused as
+        // they are; start fresh ones that read the configuration written above.
+        stop_units(MEMBER);
         let started = cedegrid_as(MEMBER, &["system", "start"]);
         let submit = |job: &str, seconds: u32, attempts: u32| {
             python_as(
@@ -3397,10 +3413,23 @@ c.submit('{job}', 'pool', [t])
             Ok(())
         })();
         stop_units(MEMBER);
+        // runuser keeps a PAM session open around its child, so killing it leaves the
+        // coordinator running and the image busy; end the coordinator itself.
+        let _ = run(
+            "pkill",
+            &[
+                "-KILL",
+                "-u",
+                MEMBER,
+                "-f",
+                &format!("cedegrid coordinator --deployment {base}/"),
+            ],
+        );
         let _ = coordinator.kill();
         let _ = coordinator.wait();
         let _ = std::fs::remove_file("/etc/cedegrid/policy.toml");
         let _ = run("umount", &[&base]);
+        let _ = run("losetup", &["-d", &device]);
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_file(image);
         let _ = std::fs::remove_dir_all(&configs);
