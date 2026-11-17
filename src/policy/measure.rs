@@ -640,6 +640,7 @@ impl<'a> Interval<'a> {
     pub(super) fn unknown_budgets(&mut self) {
         if self.cpu_unknown {
             self.budget.cpu_millicores = 0;
+            self.unprotected_cpu = None;
             self.unsafe_now = true;
         }
         if self.ram_unknown {
@@ -942,6 +943,27 @@ impl<'a> Interval<'a> {
             // Capacity minus the reserve and external usage, within the ancestor quota.
             .min(self.budget.cpu_millicores)
             .saturating_sub(cedegrid);
+        // An unprotected grant's budget, only where the cap reaches Aggressive (004 R12).
+        self.unprotected_cpu =
+            (config.contention.max_mode() == ContentionMode::Aggressive).then(|| {
+                own_allowance(
+                    &ModeInput {
+                        mode: ContentionMode::Aggressive,
+                        unprotected: true,
+                        ..view.clone()
+                    },
+                    &thresholds,
+                )
+                // Capacity minus the reserve within the ancestor quota: the grant starts beside
+                // others' usage, which the protected budget leaves out.
+                .min(
+                    self.cpu_capacity
+                        .saturating_sub(self.cpu_reserve)
+                        .min(self.cpu_ceiling),
+                )
+                .saturating_sub(cedegrid)
+                .max(self.budget.cpu_millicores)
+            });
     }
 
     /// While a resource is unknown or held, its principals, satisfied records and probes
@@ -1150,6 +1172,9 @@ impl<'a> Interval<'a> {
     pub(super) fn envelope_and_floors(&mut self) {
         if let Some(envelope) = &self.input.envelope {
             self.budget.cpu_millicores = self.budget.cpu_millicores.min(envelope.cpu_millicores);
+            self.unprotected_cpu = self
+                .unprotected_cpu
+                .map(|cpu| cpu.min(envelope.cpu_millicores));
             self.budget.ram_mib = self.budget.ram_mib.min(envelope.ram_mib);
             for (key, limit) in [
                 (ResourceKey::Cpu, envelope.cpu_millicores),

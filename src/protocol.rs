@@ -195,6 +195,11 @@ pub struct NodeContentionReport {
     /// from one that paces its growth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_workers: Option<u32>,
+    /// The budget an unprotected Aggressive grant is placed against (004 R12): sent only while
+    /// the node cap is Aggressive, the host's allowance is on and, in a System mode unit, the
+    /// administrator policy permits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unprotected_budget: Option<crate::model::Resources>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

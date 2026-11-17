@@ -4857,3 +4857,49 @@ fn a_preparing_offer_does_not_expire_while_its_node_reports_it() {
 }
 
 include!("support/state_dir.rs");
+
+/// 004 R12: a granted request is placed against the node's unprotected budget; a request without
+/// a grant, or a node that reports no such budget, is placed as before.
+#[test]
+fn a_granted_request_is_placed_against_the_unprotected_budget() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    let granted = |id: &str| {
+        let mut t = task(id);
+        t.contention = Some(JobContention {
+            modes: BTreeMap::from([
+                (ResourceKind::Cpu, ContentionMode::Aggressive),
+                (ResourceKind::GpuCompute, ContentionMode::Aggressive),
+            ]),
+            unprotected_aggressive: Some(UnprotectedGrant {
+                confirmed: true,
+                requested_unix_ms: 1,
+            }),
+        });
+        t
+    };
+    let run = |unprotected: Option<Resources>| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(
+            &mut c,
+            "job",
+            0,
+            vec![granted("granted"), task("plain")],
+            100,
+        );
+        let mut r = negotiated(100, &[]);
+        // Others' use leaves own work no CPU under the protected budget.
+        r.managed_budget.cpu_millicores = 0;
+        r.contention.as_mut().unwrap().unprotected_budget = unprotected;
+        placed(&report_reply(&mut c, &r, 100))
+    };
+    assert!(run(None).is_empty());
+    let room = Resources {
+        cpu_millicores: 4000,
+        ram_mib: 1000,
+        gpu_memory_mib: BTreeMap::new(),
+    };
+    assert_eq!(run(Some(room)), ["granted"]);
+}

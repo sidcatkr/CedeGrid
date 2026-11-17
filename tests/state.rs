@@ -53,6 +53,7 @@ fn observation() -> (Snapshot, Decision) {
         node_id: snapshot.node_id.clone(),
         observe_only: true,
         managed_budget: Resources::default(),
+        unprotected_budget: None,
         admission_headroom: Resources::default(),
         expansion_allowed: false,
         cpu_ram_expansion_allowed: false,

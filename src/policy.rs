@@ -494,6 +494,8 @@ struct Interval<'a> {
     allocation_modes: BTreeMap<String, BTreeMap<ResourceKind, ContentionMode>>,
     // Measurement and budgets.
     budget: Resources,
+    /// The CPU an unprotected grant may be placed against, where the cap reaches Aggressive.
+    unprotected_cpu: Option<u64>,
     unsafe_now: bool,
     cpu_unknown: bool,
     ram_unknown: bool,
@@ -625,6 +627,7 @@ impl<'a> Interval<'a> {
             held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
+            unprotected_cpu: None,
             unsafe_now: false,
             cpu_unknown: false,
             ram_unknown: false,
@@ -698,6 +701,10 @@ impl<'a> Interval<'a> {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
             observe_only: true,
+            unprotected_budget: self.unprotected_cpu.map(|cpu| Resources {
+                cpu_millicores: cpu.max(self.budget.cpu_millicores),
+                ..self.budget.clone()
+            }),
             managed_budget: self.budget,
             admission_headroom: self.headroom,
             expansion_allowed: self.expansion_allowed,

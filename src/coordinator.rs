@@ -2341,13 +2341,27 @@ fn placement(
     {
         return Placement::Closed;
     }
+    // An unprotected Aggressive grant (004 R12) is placed against the node's unprotected budget,
+    // and a GPU hold for another principal's slice counts as open for it; every other hold,
+    // and every request without a grant, is placed as before.
+    let granted = request
+        .contention
+        .as_ref()
+        .is_some_and(|contention| contention.unprotected_aggressive.is_some());
+    let unprotected = report
+        .contention
+        .as_ref()
+        .and_then(|contention| contention.unprotected_budget.as_ref())
+        .filter(|_| granted);
     let admitted = match &report.contention {
         Some(contention) => {
             let open = |key: ResourceKey| {
-                contention
-                    .resources
-                    .get(&key)
-                    .is_some_and(|state| state.admission == Admission::Open)
+                contention.resources.get(&key).is_some_and(|state| {
+                    state.admission == Admission::Open
+                        || (unprotected.is_some()
+                            && matches!(key, ResourceKey::GpuCompute(_))
+                            && state.admission.code() == Some("gpu_time_slice_admission_held"))
+                })
             };
             (resources.cpu_millicores == 0 || open(ResourceKey::Cpu))
                 && (resources.ram_mib == 0 || open(ResourceKey::Ram))
@@ -2373,7 +2387,7 @@ fn placement(
     };
     if !admitted {
         Placement::Closed
-    } else if total.fits(&report.managed_budget, resources) {
+    } else if total.fits(unprotected.unwrap_or(&report.managed_budget), resources) {
         Placement::Fits
     } else {
         Placement::Exhausted

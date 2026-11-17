@@ -126,5 +126,20 @@ pub fn node_contention_report(
         exceptions: decision.exceptions.clone(),
         max_mode: Some(config.contention.max_mode()),
         max_workers: Some(u32::try_from(max_workers).unwrap_or(u32::MAX)),
+        unprotected_budget: decision
+            .unprotected_budget
+            .clone()
+            .filter(|_| unprotected_permitted(config)),
     }
+}
+
+/// Whether this node may offer an unprotected grant's budget: the host's allowance reads on and,
+/// inside a System mode unit, the administrator policy permits it. Both fail closed.
+fn unprotected_permitted(config: &Config) -> bool {
+    matches!(
+        crate::state::read_allowance(&config.state_dir),
+        crate::state::Allowance::On { .. }
+    ) && (!crate::system_mode::in_unit()
+        || crate::system_mode::unprotected_refusal_with(crate::broker::admin_policy::load())
+            .is_none())
 }

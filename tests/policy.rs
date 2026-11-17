@@ -9977,3 +9977,61 @@ mod save_progress {
 }
 
 include!("support/state_dir.rs");
+
+/// 004 R12: the unprotected budget exists only under an Aggressive cap, raises CPU alone, and
+/// is gone while CPU is unknown.
+#[test]
+fn the_unprotected_budget_exists_only_under_an_aggressive_cap() {
+    use cedegrid::contention::ContentionMode;
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(2000, 0, 0),
+            Some(resources(2000, 0, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let decide = |mode: ContentionMode, busy: Option<u64>| {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        if mode == ContentionMode::Aggressive {
+            cfg.contention.max_mode = Some(mode);
+            cfg.contention
+                .acknowledge_caution
+                .insert("aggressive_mode".into());
+        }
+        let mut snap = snapshot();
+        snap.cpu_busy_millicores = busy;
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        for now in (0..3000).step_by(500) {
+            last = Some(engine.evaluate(&cfg, &snap, &input, now).unwrap());
+        }
+        last.unwrap()
+    };
+    let performance = decide(ContentionMode::Performance, Some(7000));
+    assert!(performance.unprotected_budget.is_none());
+    let aggressive = decide(ContentionMode::Aggressive, Some(7000));
+    let unprotected = aggressive
+        .unprotected_budget
+        .clone()
+        .expect("an Aggressive cap");
+    assert!(
+        unprotected.cpu_millicores > aggressive.managed_budget.cpu_millicores,
+        "{unprotected:?} against {:?}",
+        aggressive.managed_budget
+    );
+    assert_eq!(unprotected.ram_mib, aggressive.managed_budget.ram_mib);
+    assert_eq!(
+        unprotected.gpu_memory_mib,
+        aggressive.managed_budget.gpu_memory_mib
+    );
+    // Unknown CPU leaves no budget, protected or not.
+    assert!(
+        decide(ContentionMode::Aggressive, None)
+            .unprotected_budget
+            .is_none()
+    );
+}

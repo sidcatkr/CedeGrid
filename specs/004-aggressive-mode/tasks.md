@@ -211,9 +211,14 @@ principal contends. Nothing else changes.
     check calls it in T026; the container fixture comes with T026.
 - [x] T028 [P] [US2] (now) In `python/cedegrid/` and `npm/src/`, add the two fields and the wire
   object. Passes the SDK half of T021.
-- [ ] T029 [US2] (after T622) In `src/contention.rs` (`ModeInput.unprotected`, the unprotected
+- [x] T029 [US2] (after T622) In `src/contention.rs` (`ModeInput.unprotected`, the unprotected
   arm of `own_allowance`) and `src/policy/admission.rs` and `src/policy/measure.rs` (set from
   the allocation's grant), raise admission for granted allocations only. Passes T022.
+  - *Done as R12:* the policy computes `Decision.unprotected_budget` where the cap is Aggressive;
+    the agent reports it while the allowance (and, in a unit, the key) permits; the coordinator
+    places a granted request against it. Tests: `tests/policy.rs`
+    `the_unprotected_budget_exists_only_under_an_aggressive_cap`, `tests/coordinator.rs`
+    `a_granted_request_is_placed_against_the_unprotected_budget`.
 - [ ] T030 [US2] (after T622) In `src/explain.rs`, show the red `UNPROTECTED` marker in
   `observe`, `doctor` and `status`. JSON gains `"unprotected": true` and the grant; the marker is
   plain under `NO_COLOR` and absent once the run ends (SC-006).
