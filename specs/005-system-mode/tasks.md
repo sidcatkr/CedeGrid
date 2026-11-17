@@ -333,10 +333,11 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
   - whether the unit in `user-<uid>.slice` survives the last logout;
   - after that logout, whether the agent still reaches the idle executor, and whether a job using POSIX shared memory keeps it under the host's `RemoveIPC=` value (R18).
   - *Done (2026-11-17):* F1 and F2 under N4 A and N4 B, 3 or more runs each way with plain Linux and a Tracked control: SC-011 holds in every arm (`docs/validation.md`, feature 005). The unit in the user slice survived the last logout, and logind's `RemoveIPC=yes` removed a job's POSIX shared memory name about 10 s later. The idle executor part waits for SYS-3.
-- [ ] T058 Host run R10-run on the test host (SC-006, SC-007, SC-008, N1 and D2 cases), recorded in `docs/validation.md`:
+- [x] T058 Host run R10-run on the test host (SC-006, SC-007, SC-008, N1 and D2 cases), recorded in `docs/validation.md`:
   - item 054's OOM shape with own work in share, then over share;
   - `systemd-oomd` left as it is;
   - a user write below a root-written score.
+  - *Done (2026-11-17):* 3 runs each way in share and over share, with plain Linux: no in-share own task killed (SC-006); over share, Neutral drained own work before the OOM and the kernel then took the side over its share (SC-007, recorded as such); every write below a root-written score refused (SC-008). `docs/validation.md`, feature 005.
 - [x] T059 Host run R16-run on the test host (SC-012, EFF-6 to EFF-10), recorded in `docs/validation.md`: the broker's and both agents' CPU and memory, idle and busy. The 50-user bound runs in the container (T030's harness).
   - *Done (2026-11-17):* idle: the broker 0.03% of one CPU and 7.7 MiB, each agent 2.8% and 37–39 MiB at a 500 ms monitor interval; busy: the broker at most 0.03%, the agent 2.2–2.7%.
 - [ ] T060 Host run for the removed-member case (N2) on the test host, after root step 5, recorded in `docs/validation.md`: the next request is refused, and the running units behave as N2's chosen option says
