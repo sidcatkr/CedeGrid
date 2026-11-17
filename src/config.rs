@@ -791,6 +791,27 @@ impl ContentionConfig {
         self.resource(kind).mode.unwrap_or(self.default_mode)
     }
 
+    /// The settings that name Aggressive, for the caution list (004 FR-007).
+    pub fn aggressive_settings(&self) -> Vec<(String, String)> {
+        use crate::contention::{ContentionMode::Aggressive, ResourceKind};
+        let mut settings = Vec::new();
+        if self.default_mode == Aggressive {
+            settings.push(("contention.default_mode".into(), "aggressive".into()));
+        }
+        if self.max_mode == Some(Aggressive) {
+            settings.push(("contention.max_mode".into(), "aggressive".into()));
+        }
+        for kind in ResourceKind::ALL {
+            if self.resource(kind).mode == Some(Aggressive) {
+                settings.push((
+                    format!("contention.{}.mode", kind.name()),
+                    "aggressive".into(),
+                ));
+            }
+        }
+        settings
+    }
+
     /// Whether any setting names Aggressive, which needs the `aggressive_mode` acknowledgement.
     pub fn names_aggressive(&self) -> bool {
         use crate::contention::{ContentionMode::Aggressive, ResourceKind};
@@ -2044,6 +2065,7 @@ impl Config {
             ]));
         }
         [
+            ("aggressive_mode", self.contention.aggressive_settings()),
             ("small_floor", small_floor),
             ("reduced_margin", self.contention.reduced_margins()),
             ("relaxed_detection", self.contention.relaxed_detection()),

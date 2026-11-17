@@ -127,8 +127,11 @@ Aggressive.
 - [ ] T014 [US1] (after T622) In `src/setup.rs` and `src/setup/interface.rs`, add the cap step to
   Aggressive with its own confirmation and the red `[Aggressive]` label. Non-interactively, it
   needs `--max-mode aggressive --acknowledge aggressive_mode`.
-- [ ] T015 [US1] (after T622) In `src/explain.rs`, show the red `[Aggressive]` in `observe`,
+- [x] T015 [US1] (after T622) In `src/explain.rs`, show the red `[Aggressive]` in `observe`,
   `doctor` and `status` and their JSON (`"mode": "aggressive"`), plain under `NO_COLOR`.
+  - *Done:* `[Aggressive]` in the mode lines, and doctor's caution list names `aggressive_mode`
+    with the settings that call for it. Decision JSON carries `"aggressive"`. `explain.rs` has no
+    color today, so the marker is the bracketed text; color comes with 003's terminal outputs.
 - [ ] T016 [US1] (after T622) Compare the decision snapshot against T001's baseline. With the
   `aggressive` entries filtered out, every decision is byte-identical (P9, FR-020).
 

@@ -8,6 +8,14 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// Large numbers with a space between thousands.
+/// A mode as people read it; Aggressive carries its caution label (004 FR-007).
+fn shown(mode: ContentionMode) -> String {
+    match mode {
+        ContentionMode::Aggressive => "[Aggressive]".to_owned(),
+        mode => mode.label().to_owned(),
+    }
+}
+
 pub fn group(value: u64) -> String {
     let digits = value.to_string();
     if value < 10_000 {
@@ -181,16 +189,14 @@ pub fn doctor_text(
     let _ = writeln!(
         out,
         "modes: default {}, node cap {}",
-        config.contention.default_mode.label(),
-        decision.max_mode.map_or("none", ContentionMode::label)
+        shown(config.contention.default_mode),
+        decision.max_mode.map_or("none".to_owned(), shown)
     );
     for (key, status) in &decision.resources {
         let kind = key.kind();
         let _ = writeln!(out);
-        let mode = status.mode.map_or("unknown", ContentionMode::label);
-        let effective = status
-            .effective_mode
-            .map_or("unknown", ContentionMode::label);
+        let mode = status.mode.map_or("unknown".to_owned(), shown);
+        let effective = status.effective_mode.map_or("unknown".to_owned(), shown);
         let _ = writeln!(out, "{key}: {mode} (effective {effective})");
         let mut usage = Vec::new();
         if let Some((own, upper)) = status.own {

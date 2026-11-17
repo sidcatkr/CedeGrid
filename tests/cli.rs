@@ -1733,3 +1733,35 @@ fn the_allowance_never_turns_on_without_a_terminal_and_turns_off_anywhere() {
 }
 
 include!("support/state_dir.rs");
+
+#[test]
+fn doctor_marks_aggressive_and_its_caution() {
+    // 004 FR-007: the [Aggressive] label and the caution it needs show in doctor's text.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    let mut config = Config {
+        node_id: "test-node".into(),
+        state_dir: "state".into(),
+        ..Config::default()
+    };
+    config.contention.default_mode = cedegrid::contention::ContentionMode::Aggressive;
+    config.contention.max_mode = Some(cedegrid::contention::ContentionMode::Aggressive);
+    config
+        .contention
+        .acknowledge_caution
+        .insert("aggressive_mode".into());
+    fs::write(
+        &path,
+        serialize_runtime(&config, RuntimeConfigKind::Node).unwrap(),
+    )
+    .unwrap();
+    let text = String::from_utf8(run(&path, &["doctor", "--text"]).stdout).unwrap();
+    assert!(
+        text.contains("modes: default [Aggressive], node cap [Aggressive]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[caution] aggressive_mode: contention.default_mode = aggressive"),
+        "{text}"
+    );
+}
