@@ -32,7 +32,7 @@ pub const MARKER_VARIABLE: &str = "CEDEGRID_SYSTEM_UNIT";
 pub const PAM_SERVICE: &str = "cedegrid";
 
 /// The two units a caller has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
     /// Every mode's work except Yield First, and the user's agent.

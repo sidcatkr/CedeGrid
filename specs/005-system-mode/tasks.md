@@ -17,6 +17,11 @@ test file are not marked [P] against each other.
 
 ## Gate before any task
 
+**Status, 2026-11-17**: the user decided D4 A, N5 A, N6 A, N1 B, N2 A, N3 (A by default; B and
+C as the policy's `units.pam_session`), N4 (A by default as `units.ordinary_slice = "auto"`; B as
+`"cedegrid"`; C deferred to the first release after 005, follow-up SYS-1) and D1 to D3 (057's
+recommendations). The combined 8.0.0 amendment is applied (T069's constitution part).
+
 No task below starts until the user has approved D4 and decided N5 and N6:
 
 - **D4**: the Principle V amendment ([drafts/amendment-principle-v.md](drafts/amendment-principle-v.md));
@@ -79,8 +84,8 @@ the task list.
   - `PAMName=` and the process limits are parameterized by N3.
 - [ ] T009 [P] Tests for the pidfd and `/proc` directory helpers in `tests/kernel.rs`: a write through a directory handle whose start time no longer matches reaches nothing; an exited PID fails closed.
   - *Written, not yet run:* the tests are in `tests/system_mode.rs` (Linux only), not `tests/kernel.rs`, beside T014's new location.
-- [ ] T010 [P] CLI tests in `tests/cli.rs`: every command run with effective user ID 0 refuses in one line saying to run it as the user without `sudo` (003 FR-082, built here first); the broker's hidden subcommand is dispatched before argument parsing and is the one exception.
-  - *In part:* the refusal is a pure check, `system_mode::root_refusal`, tested in `tests/system_mode.rs`; `main.rs` does not call it yet (T015).
+- [x] T010 [P] CLI tests in `tests/cli.rs`: every command run with effective user ID 0 refuses in one line saying to run it as the user without `sudo` (003 FR-082, built here first); the broker's hidden subcommand is dispatched before argument parsing and is the one exception.
+  - The refusal is `system_mode::root_refusal`, called first in `main()`; tested in `tests/system_mode.rs`, not `tests/cli.rs`.
 
 ### Implementation
 
@@ -89,7 +94,8 @@ the task list.
 - [x] T013 [P] Implement the pure property builder in `src/broker/units.rs`, taking N3 and N4 as inputs, with `RuntimeDirectory=cedegrid/u<uid>` (0700) on the ordinary unit and `Restart=on-failure` on both (passes T008)
 - [ ] T014 [P] Implement the pidfd and `/proc/<pid>` directory helpers with the start-time check in `src/kernel.rs` (passes T009)
   - *Moved:* written as `src/broker/process_handle.rs`, because kernel code stays read-only (contributor notes) and this handle writes `oom_score_adj`. Its Linux tests have not run yet.
-- [ ] T015 Add the hidden dispatch for the broker and the idle executor subcommands, and the root refusal for every other command, in `src/main.rs`, before argument parsing, threads and terminal handoff (passes T010)
+- [x] T015 Add the hidden dispatch for the broker and the idle executor subcommands, and the root refusal for every other command, in `src/main.rs`, before argument parsing, threads and terminal handoff (passes T010)
+  - Done for the broker's dispatch and the root refusal; the idle executor's dispatch comes with T022.
 
 **Checkpoint**: parsing, policy, properties and kernel helpers pass their tests; nothing runs as root yet.
 
@@ -113,27 +119,29 @@ the task list.
 
 ### Implementation
 
-- [ ] T019 [US1] Implement peer credentials in `src/broker/peer.rs`:
+- [x] T019 [US1] Implement peer credentials in `src/broker/peer.rs`:
   - `SO_PEERCRED` only;
   - group membership from the group database at each request;
   - refuse user ID 0 and IDs below `UID_MIN`;
   - `SO_PEERPIDFD` where present (Linux 6.5), for the log only.
-- [ ] T020 [US1] Implement the listener in `src/broker.rs`:
+- [x] T020 [US1] Implement the listener in `src/broker.rs`:
   - take the socket from socket activation and stop if its owner, group and mode are not root, `cedegrid`, 0660;
   - a bounded worker pool, a 2 s read timeout, one reply per connection;
   - one journal line per request (FR-011).
-- [ ] T021 [US1] Implement start, stop and status in `src/broker/units.rs`:
+  - The broker's entry (`broker::server::run`) checks root, socket activation and the socket's owner and mode; it has not run under systemd yet (container, T016).
+- [x] T021 [US1] Implement start, stop and status in `src/broker/units.rs`:
   - `systemd-run` and `systemctl` at fixed paths, argument vectors only, a timeout on each call;
   - the marker is set at start and checked with `systemctl show` before every stop;
   - `unit_not_ours` when a unit with the caller's name has no marker;
   - under N4 C only, `cedegrid.slice`'s weight set from the count of busy accounts at each start and stop, read back.
+  - Both units' markers are checked before either is touched. Tested against a systemd stand-in only; the container run is T031.
 - [ ] T022 [US1] Implement the idle executor subcommand: a fixed CedeGrid subcommand with no policy of its own, started in the idle unit and driven by the user's agent over a socket in the ordinary unit's runtime directory `/run/cedegrid/u<uid>/`, never the user's own runtime directory (research R9, R18). In `src/agent/` and `src/main.rs`.
 - [ ] T023 [US1] Implement delegated-root detection inside a unit in `src/cgroup.rs` (passes T018)
-- [ ] T024 [US1] Implement the client in `src/system_mode.rs`, with `cedegrid system start|stop|status` added to `src/main.rs`:
+- [x] T024 [US1] Implement the client in `src/system_mode.rs`, with `cedegrid system start|stop|status` added to `src/main.rs`:
   - detect the socket and check the protocol;
   - start the units and wait;
   - fall back after 2 s (provisional) with one line, or refuse under `--require-system` (FR-013).
-  - *In part:* `src/system_mode.rs` has the request, the 2 s timeout and the fallback decision, tested against a stand-in socket; `cedegrid system` is not added to `main.rs` yet.
+  - `src/system_mode.rs` has the request, the 2 s timeout and the fallback decision; `cedegrid system start|stop|status` is in `main.rs`. Not run against a real broker yet.
 - [ ] T025 [US1] Add System mode lines to `doctor` in `src/explain.rs` (FR-014):
   - the level and why;
   - the effective policy;
@@ -164,12 +172,12 @@ the task list.
 
 ### Implementation
 
-- [ ] T032 [US2] Implement the per-user token bucket, the per-user unit count (2) and the bounded worker queue in `src/broker.rs` and `src/broker/peer.rs` (passes T030)
+- [x] T032 [US2] Implement the per-user token bucket, the per-user unit count (2) and the bounded worker queue in `src/broker.rs` and `src/broker/peer.rs` (passes T030)
 - [ ] T033 [US2] Confine the broker's unit in `packaging/deb/cedegrid-broker.service`:
   - set `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes` and `RestrictAddressFamilies=AF_UNIX`;
   - add the smallest `CapabilityBoundingSet=` that lets it write scores, make moves and write `cpu.idle`;
   - record each setting against systemd 249 in a comment.
-- [ ] T034 [US2] Log every refusal at warning level with the caller's user ID and code in `src/broker.rs` (FR-011)
+- [x] T034 [US2] Log every refusal at warning level with the caller's user ID and code in `src/broker.rs` (FR-011)
 
 **Checkpoint**: US1 and US2 pass. These files are the core of the security review package (T073).
 
@@ -200,6 +208,7 @@ the task list.
   - check each member's user and group IDs and that nothing else is there (the broker's verified set, N6), and open a pidfd on each;
   - move each member into the agent-made empty leaf in the other unit, and read back each member's cgroup;
   - thaw. Refuse and thaw the source on any failure; the job stays in its unit.
+  - Under (c), agreed 2026-11-17: the agent names each task leaf `cedegrid-<mode>-<id>` (with T023), and the OOM pass reads each ordinary-unit task's mode from it.
 - [ ] T040 [US3] Make the agent ask for a move when a running job's mode changes between Yield First and another, and make an empty destination leaf first; on a refusal, apply the new mode where the job is with 001's Full steps and say so in one line. In `src/agent/` (FR-017, FR-018)
 - [ ] T041 [US3] Implement the level-dependent CPU default and range of `yield_first_margin_percent` in `src/contention.rs` (`ResourceThresholds::defaults`) and `src/config.rs` (where defaults are applied and validated), chosen once the agent knows it runs in a broker-made unit; no new key (Principle VII) (passes T037)
 
@@ -221,10 +230,11 @@ the task list.
   - the in-share amount is handed out oldest task first;
   - no write when the value is unchanged;
   - one case per N1 option (A at all times, B only while another principal is over its share, C never).
-- [ ] T043 [US4] Fair-share tests in `tests/system_mode.rs`:
+- [x] T043 [US4] Fair-share tests in `tests/system_mode.rs`:
   - principals follow 001 FR-059 with the policy's `uid_min` and `principal_min_percent`;
   - user IDs below `uid_min` are background;
   - an unreadable counter makes the user's memory unknown: no score is lowered, and lowered scores return to 0 after 10 s (provisional, FR-026).
+  - Principal windows and fair shares are in `src/broker/oom.rs` with their tests; 001's per-resource window settings are fixed values there for now.
 - [ ] T044 [US4] Container fixture in `tests/system_mode.rs`:
   - a score written by the broker sets `oom_score_adj_min`, and the user's lower write fails (SC-008);
   - a process outside the units keeps its score;
@@ -241,6 +251,7 @@ the task list.
   - per-account cgroup counters where present, else per-process sums by user ID from `/proc`;
   - the measure 001 uses for RAM;
   - 001's max-min fair share with the policy's thresholds.
+  - *In part:* the pure steps (memory by user, principals, fair shares, tasks by leaf, writes per user) are in `src/broker/oom.rs`; the `/proc` and cgroup reading is not written yet. Per-account counters are follow-up SYS-2.
 - [ ] T048 [US4] Implement the loop in `src/broker/oom.rs` (passes T044):
   - one pass per second;
   - only processes in the broker's verified set (N6), each checked by unit cgroup, user and group IDs, pidfd and start time;

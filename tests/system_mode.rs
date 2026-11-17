@@ -1899,3 +1899,239 @@ fn system_command_without_the_package() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not installed"));
 }
+
+// T043, T047: the OOM pass's pure steps.
+
+mod oom_pass {
+    use cedegrid::broker::ModeName;
+    use cedegrid::broker::oom::{
+        PRINCIPAL_JOIN, PRINCIPAL_LEAVE, PassView, Principals, ProcessSample, UnitProcess,
+        UserMemoryMap, another_over_share, fair_shares, group_tasks, leaf_in_unit, memory_by_user,
+        task_mode, user_writes,
+    };
+    use cedegrid::broker::score::{Lowering, OverShareMarking, ProcessKey};
+    use cedegrid::broker::units::UnitKind;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::{Duration, Instant};
+
+    fn sample(uid: Option<u32>, pages: Option<u64>) -> ProcessSample {
+        ProcessSample { uid, pages }
+    }
+
+    #[test]
+    fn memory_is_summed_per_user_and_unknown_spreads() {
+        let map = memory_by_user(&[
+            sample(Some(1000), Some(10)),
+            sample(Some(1000), Some(5)),
+            sample(Some(1001), Some(7)),
+            sample(Some(1001), None),
+            sample(None, Some(3)),
+        ]);
+        assert_eq!(map.by_user[&1000], Some(15));
+        assert_eq!(map.by_user[&1001], None);
+        assert_eq!(map.unattributed, Some(3));
+        let map = memory_by_user(&[sample(None, None)]);
+        assert_eq!(map.unattributed, None);
+    }
+
+    fn memory(entries: &[(u32, Option<u64>)]) -> UserMemoryMap {
+        UserMemoryMap {
+            by_user: entries.iter().copied().collect(),
+            unattributed: Some(0),
+        }
+    }
+
+    #[test]
+    fn principals_join_after_the_window_and_leave_after_a_minute() {
+        let mut principals = Principals::default();
+        let start = Instant::now();
+        let busy = memory(&[(1000, Some(50)), (999, Some(500)), (1001, Some(0))]);
+        // 1% of 1000 pages is 10 pages.
+        principals.update(start, &busy, 1000, 1000, 1);
+        assert!(principals.members().is_empty());
+        principals.update(start + PRINCIPAL_JOIN, &busy, 1000, 1000, 1);
+        assert_eq!(principals.members(), &BTreeSet::from([1000]));
+        // Below the threshold: stays until the leave window ends.
+        let idle = memory(&[(1000, Some(1)), (1001, Some(0))]);
+        let t = start + PRINCIPAL_JOIN + Duration::from_secs(1);
+        principals.update(t, &idle, 1000, 1000, 1);
+        principals.update(
+            t + PRINCIPAL_LEAVE - Duration::from_secs(1),
+            &idle,
+            1000,
+            1000,
+            1,
+        );
+        assert!(principals.members().contains(&1000));
+        principals.update(t + PRINCIPAL_LEAVE, &idle, 1000, 1000, 1);
+        assert!(principals.members().is_empty());
+        // Unknown memory counts as at the threshold.
+        let unknown = memory(&[(1002, None)]);
+        principals.update(t, &unknown, 1000, 1000, 1);
+        principals.update(t + PRINCIPAL_JOIN, &unknown, 1000, 1000, 1);
+        assert!(principals.members().contains(&1002));
+        // A user whose processes are all gone leaves at once.
+        principals.update(t + PRINCIPAL_JOIN, &memory(&[]), 1000, 1000, 1);
+        assert!(principals.members().is_empty());
+    }
+
+    #[test]
+    fn fair_shares_are_max_min_of_what_others_leave() {
+        let mem = memory(&[
+            (1000, Some(600)),
+            (1001, Some(600)),
+            (1002, Some(100)),
+            (500, Some(100)),
+        ]);
+        let principals = BTreeSet::from([1000, 1001, 1002]);
+        let shares = fair_shares(1000, &mem, &principals);
+        // 900 pages after user 500's 100: 1002 keeps its 100, the rest split 400 and 400.
+        assert_eq!(shares[&1002], 100);
+        assert_eq!(shares[&1000], 400);
+        assert_eq!(shares[&1001], 400);
+        assert!(another_over_share(1000, &mem, &shares));
+        assert!(another_over_share(1002, &mem, &shares));
+        // Room for everyone: nobody is over.
+        let roomy = fair_shares(10_000, &mem, &principals);
+        assert!(!another_over_share(1000, &mem, &roomy));
+        // An unknown principal never enlarges another's share and is never "over".
+        let unknown = memory(&[(1000, Some(600)), (1001, None)]);
+        let shares = fair_shares(1000, &unknown, &BTreeSet::from([1000, 1001]));
+        assert_eq!(shares[&1000], 500);
+        assert!(!another_over_share(1000, &unknown, &shares));
+    }
+
+    #[test]
+    fn leaves_are_found_only_inside_the_unit() {
+        let unit = "/user.slice/user-1000.slice/cedegrid-u1000.service";
+        assert_eq!(leaf_in_unit(unit, unit), Some(None));
+        assert_eq!(
+            leaf_in_unit(unit, &format!("{unit}/cedegrid-neutral-ab/sub")),
+            Some(Some("cedegrid-neutral-ab".to_owned()))
+        );
+        assert_eq!(leaf_in_unit(unit, &format!("{unit}x/leaf")), None);
+        assert_eq!(
+            leaf_in_unit(unit, "/user.slice/user-1000.slice/session-3.scope"),
+            None
+        );
+        assert_eq!(leaf_in_unit(unit, &format!("{unit}/")), None);
+    }
+
+    #[test]
+    fn task_modes_come_from_the_unit_and_leaf_names() {
+        assert_eq!(
+            task_mode(UnitKind::Idle, Some("cedegrid-performance-1")),
+            ModeName::YieldFirst
+        );
+        assert_eq!(
+            task_mode(UnitKind::Ordinary, Some("cedegrid-performance-0a1b")),
+            ModeName::Performance
+        );
+        assert_eq!(
+            task_mode(UnitKind::Ordinary, Some("cedegrid-yield_first-0a1b")),
+            ModeName::YieldFirst
+        );
+        for leaf in [
+            Some("cedegrid-0a1b"),
+            Some("other"),
+            Some("cedegrid-turbo-1"),
+            None,
+        ] {
+            assert_eq!(
+                task_mode(UnitKind::Ordinary, leaf),
+                ModeName::Neutral,
+                "{leaf:?}"
+            );
+        }
+    }
+
+    fn unit_process(kind: UnitKind, leaf: &str, pid: u32, start: u64, pages: u64) -> UnitProcess {
+        UnitProcess {
+            uid: 1000,
+            kind,
+            leaf: Some(leaf.to_owned()),
+            key: ProcessKey {
+                pid,
+                start_time: start,
+            },
+            pages,
+            current: 0,
+        }
+    }
+
+    #[test]
+    fn tasks_are_grouped_by_leaf_and_start_at_their_oldest_process() {
+        let tasks = group_tasks(&[
+            unit_process(UnitKind::Ordinary, "cedegrid-neutral-a", 1, 50, 10),
+            unit_process(UnitKind::Ordinary, "cedegrid-neutral-a", 2, 40, 10),
+            unit_process(UnitKind::Idle, "cedegrid-neutral-a", 3, 10, 10),
+        ]);
+        assert_eq!(tasks.len(), 2);
+        let ordinary = tasks.iter().find(|task| task.processes.len() == 2).unwrap();
+        assert_eq!(ordinary.started, 40);
+        assert_eq!(ordinary.mode, ModeName::Neutral);
+        let idle = tasks.iter().find(|task| task.processes.len() == 1).unwrap();
+        assert_eq!(idle.mode, ModeName::YieldFirst);
+    }
+
+    #[test]
+    fn a_pass_lowers_in_share_work_while_another_user_is_over() {
+        let mem = memory(&[(1000, Some(300)), (1001, Some(900))]);
+        let principals = BTreeSet::from([1000, 1001]);
+        let shares = fair_shares(1000, &mem, &principals);
+        assert_eq!(shares[&1000], 300);
+        let view = PassView {
+            total_pages: 2000,
+            memory: &mem,
+            shares: &shares,
+            lowering: Lowering::WhileAnotherOverShare,
+            marking: OverShareMarking::YieldFirstAndNeutral,
+        };
+        let processes = [unit_process(
+            UnitKind::Ordinary,
+            "cedegrid-performance-a",
+            1,
+            10,
+            300,
+        )];
+        let writes = user_writes(&view, 1000, &processes, None);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].value, -150);
+        // Memory unknown for longer than the window: everything returns to 0.
+        let mut lowered = processes.clone();
+        lowered[0].current = -150;
+        let writes = user_writes(&view, 1000, &lowered, Some(Duration::from_secs(11)));
+        assert_eq!(writes[0].value, 0);
+        // Not a principal: nothing is lowered or marked.
+        let writes = user_writes(&view, 1002, &processes, None);
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn a_pass_marks_over_share_neutral_work_but_not_performance() {
+        let mem = memory(&[(1000, Some(900)), (1001, Some(500))]);
+        let principals = BTreeSet::from([1000, 1001]);
+        let shares: BTreeMap<u32, u64> = fair_shares(1000, &mem, &principals);
+        assert_eq!(shares[&1000], 500);
+        let view = PassView {
+            total_pages: 2000,
+            memory: &mem,
+            shares: &shares,
+            lowering: Lowering::WhileAnotherOverShare,
+            marking: OverShareMarking::YieldFirstAndNeutral,
+        };
+        let processes = [
+            unit_process(UnitKind::Ordinary, "cedegrid-neutral-a", 1, 10, 500),
+            unit_process(UnitKind::Ordinary, "cedegrid-neutral-b", 2, 20, 200),
+            unit_process(UnitKind::Ordinary, "cedegrid-performance-c", 3, 30, 200),
+        ];
+        let mut writes: Vec<(u32, i32)> = user_writes(&view, 1000, &processes, None)
+            .into_iter()
+            .map(|write| (write.key.pid, write.value))
+            .collect();
+        writes.sort();
+        // User 1001 is not over its share, so nothing of 1000's is lowered under N1 B; the
+        // Neutral task past the share is marked and the Performance one is not.
+        assert_eq!(writes, vec![(2, 1000)]);
+    }
+}
