@@ -330,7 +330,7 @@ fn main() -> Result<()> {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(cedegrid::broker::AGENT_SUBCOMMAND))
     {
-        return cedegrid::system_mode::hold_unit(cedegrid::broker::units::UnitKind::Ordinary);
+        return cedegrid::system_mode::run_system_agent();
     }
     #[cfg(target_os = "linux")]
     if std::env::args_os().nth(1).as_deref()
@@ -625,7 +625,15 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         _ => {}
     }
-    let (config, config_warnings) = read_config_reporting(&cli.config)?;
+    #[allow(unused_mut)]
+    let (mut config, config_warnings) = read_config_reporting(&cli.config)?;
+    // Inside a System mode unit, the agent's jobs go to the unit's jobs cgroup (005 T022).
+    #[cfg(target_os = "linux")]
+    if matches!(cli.command, Command::Agent { .. })
+        && let Some(jobs) = cedegrid::system_mode::unit_jobs_root()?
+    {
+        config.cgroup.delegated_root = Some(jobs);
+    }
     // Load-time warnings go to stderr, where they never mix with JSON output.
     for warning in &config_warnings {
         eprintln!("cedegrid: warning: {warning}");

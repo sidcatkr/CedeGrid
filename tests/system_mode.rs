@@ -3491,6 +3491,22 @@ mod container {
 
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn without_a_configuration_the_unit_holds_and_says_why() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        let unit = ordinary(MEMBER_UID);
+        assert!(wait_until(Duration::from_secs(10), || {
+            ok("journalctl", &["-u", &unit, "--no-pager", "-o", "cat"])
+                .contains("no agent configuration")
+        }));
+        assert_eq!(show(&unit, "ActiveState")["ActiveState"], "active");
+        stop_units(MEMBER);
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn the_idle_slice_has_cpu_idle() {
         assert!(enabled(), "{GATE}");
         install();
@@ -3629,4 +3645,28 @@ mod agent_in_unit {
             .is_err()
         );
     }
+}
+
+#[test]
+fn the_unit_agent_reads_its_configuration_from_the_users_config_dir() {
+    use cedegrid::system_mode::unit_config_dir;
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+    assert_eq!(
+        unit_config_dir(
+            Some(OsStr::new("/home/test/.xdg")),
+            Some(OsStr::new("/home/test"))
+        ),
+        Some(PathBuf::from("/home/test/.xdg/cedegrid"))
+    );
+    assert_eq!(
+        unit_config_dir(None, Some(OsStr::new("/home/test"))),
+        Some(PathBuf::from("/home/test/.config/cedegrid"))
+    );
+    assert_eq!(
+        unit_config_dir(Some(OsStr::new("")), Some(OsStr::new("/home/test"))),
+        Some(PathBuf::from("/home/test/.config/cedegrid"))
+    );
+    assert_eq!(unit_config_dir(None, None), None);
+    assert_eq!(unit_config_dir(Some(OsStr::new("relative")), None), None);
 }

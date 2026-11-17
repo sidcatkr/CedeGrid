@@ -218,6 +218,79 @@ pub fn hold_unit(kind: crate::broker::units::UnitKind) -> anyhow::Result<()> {
     }
 }
 
+/// Where the agent in the ordinary unit reads its configuration, as the user: `cedegrid.toml`
+/// and `deployment.toml` in `$XDG_CONFIG_HOME/cedegrid`, else `~/.config/cedegrid`.
+pub fn unit_config_dir(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<std::path::PathBuf> {
+    let base = match xdg_config_home.filter(|value| !value.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::path::PathBuf::from(home.filter(|value| !value.is_empty())?).join(".config"),
+    };
+    base.is_absolute().then(|| base.join("cedegrid"))
+}
+
+/// The ordinary unit's process (T022): lays out the unit, then runs the user's agent with the
+/// user's own configuration, its jobs in the unit's jobs cgroup. Without a configuration it holds
+/// the unit and says so once.
+#[cfg(target_os = "linux")]
+pub fn run_system_agent() -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    prepare_unit(crate::broker::units::UnitKind::Ordinary)?;
+    let dir = unit_config_dir(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
+    let files = dir.map(|dir| (dir.join("cedegrid.toml"), dir.join("deployment.toml")));
+    match files {
+        Some((node, deployment)) if node.is_file() && deployment.is_file() => {
+            let error = std::process::Command::new(std::env::current_exe()?)
+                .arg("--config")
+                .arg(&node)
+                .arg("agent")
+                .arg("--deployment")
+                .arg(&deployment)
+                .exec();
+            Err(anyhow::Error::new(error).context("cannot start the agent in the System mode unit"))
+        }
+        _ => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "cedegrid: no agent configuration in ~/.config/cedegrid (cedegrid.toml and deployment.toml); the unit holds its cgroups"
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+}
+
+/// The jobs' delegated root when this process is the agent in a System mode unit, checked as
+/// `cgroup::system_unit_jobs_root` checks it; `None` outside System mode.
+#[cfg(target_os = "linux")]
+pub fn unit_jobs_root() -> anyhow::Result<Option<std::path::PathBuf>> {
+    use anyhow::Context;
+    use std::os::unix::fs::MetadataExt;
+    let Some(marker) = std::env::var_os(crate::broker::units::MARKER_VARIABLE) else {
+        return Ok(None);
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let own = std::fs::read_to_string("/proc/self/cgroup").context("cannot read own cgroup")?;
+    let own = crate::broker::process_handle::parse_cgroup_v2(&own)
+        .context("not in a cgroup v2 hierarchy")?;
+    let jobs = crate::cgroup::system_unit_jobs_root(
+        &own,
+        uid,
+        marker.to_str(),
+        Path::new("/sys/fs/cgroup"),
+        |path| std::fs::metadata(path).ok().map(|meta| meta.uid()),
+    )?;
+    Ok(Some(jobs))
+}
+
 /// Lays out a System mode unit's cgroups as the user (T022, T023): this process moves into
 /// `<unit>/agent`, the cpu, memory and pids controllers are passed down, and `<unit>/jobs` is
 /// made for the jobs' leaves. Returns the jobs' directory.
