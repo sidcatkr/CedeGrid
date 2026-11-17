@@ -34,9 +34,13 @@ dist/
 /npm/node_modules/
 /npm/*.tgz
 
-# Local Docker validation files; only the Linux check image is tracked.
+# Local Docker validation files; only the Linux check and System mode images are tracked.
 /tools/docker-validation/*
 !/tools/docker-validation/linux-check/
 /tools/docker-validation/linux-check/*
 !/tools/docker-validation/linux-check/Dockerfile
 !/tools/docker-validation/linux-check/run.sh
+!/tools/docker-validation/system-mode/
+/tools/docker-validation/system-mode/*
+!/tools/docker-validation/system-mode/Dockerfile
+!/tools/docker-validation/system-mode/run.sh
