@@ -465,13 +465,13 @@ pub fn run() -> anyhow::Result<()> {
     serve(listener, state)
 }
 
-/// How often the OOM pass runs (research R10).
+/// How often the OOM pass runs while memory is short or a score is held (research R10).
 #[cfg(target_os = "linux")]
 const OOM_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long a unit's marker check is reused before `systemctl show` runs again.
+/// How often it runs while memory is plentiful and every score is 0 (SC-012).
 #[cfg(target_os = "linux")]
-const MARKER_RECHECK: Duration = Duration::from_secs(10);
+const OOM_INTERVAL_AT_REST: Duration = Duration::from_secs(30);
 
 /// The OOM loop: one pass per second over the broker's units (FR-022 to FR-026). The user's
 /// decisions of 2026-11-17 fix lowering to N1 B and marking to D2 case A.
@@ -492,7 +492,8 @@ fn oom_loop() {
     let systemd = SystemctlRunner::default();
     let accounts = HostAccounts;
     let mut oom = OomLoop::default();
-    let mut markers: HashMap<String, (bool, Instant)> = HashMap::new();
+    // A unit's marker and its user's group, by cgroup path, checked once per cgroup ID.
+    let mut markers: HashMap<String, (u64, Option<u32>)> = HashMap::new();
     let mut last_error: Option<Instant> = None;
     let mut report = |message: String| {
         if last_error.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
@@ -500,18 +501,30 @@ fn oom_loop() {
             last_error = Some(Instant::now());
         }
     };
+    let mut last_pass: Option<Instant> = None;
     loop {
         let started = Instant::now();
+        // At rest, one small read a second; the full scan waits for pressure or the rest interval.
+        let plentiful = std::fs::read_to_string(proc_root.join("meminfo"))
+            .is_ok_and(|meminfo| super::oom::memory_is_plentiful(&meminfo));
+        if plentiful
+            && oom.quiet()
+            && last_pass.is_some_and(|at| at.elapsed() < OOM_INTERVAL_AT_REST)
+        {
+            std::thread::sleep(OOM_INTERVAL.saturating_sub(started.elapsed()));
+            continue;
+        }
+        last_pass = Some(started);
         match (admin_policy::load(), read_host(proc_root, page_kb)) {
             (Ok(policy), Ok(host)) => {
                 let found = find_units(cgroup_root);
                 markers.retain(|cgroup, _| found.iter().any(|unit| &unit.cgroup == cgroup));
                 let mut units = Vec::new();
                 for unit in found {
-                    let fresh = markers
+                    let known = markers
                         .get(&unit.cgroup)
-                        .is_some_and(|(_, at)| at.elapsed() < MARKER_RECHECK);
-                    if !fresh {
+                        .is_some_and(|(id, _)| *id == unit.id && unit.id != 0);
+                    if !known {
                         let ours =
                             systemd
                                 .show(&unit_name(unit.kind, unit.uid))
@@ -519,21 +532,22 @@ fn oom_loop() {
                                     show.is_ours(unit.kind, unit.uid)
                                         && show.control_group == unit.cgroup
                                 });
-                        markers.insert(unit.cgroup.clone(), (ours, Instant::now()));
+                        let gid = if ours {
+                            accounts.primary_gid(unit.uid).ok()
+                        } else {
+                            None
+                        };
+                        markers.insert(unit.cgroup.clone(), (unit.id, gid));
                     }
-                    if !markers.get(&unit.cgroup).is_some_and(|(ours, _)| *ours) {
-                        continue;
+                    if let Some(&(_, Some(gid))) = markers.get(&unit.cgroup) {
+                        units.push(ScoredUnit { unit, gid });
                     }
-                    let Ok(gid) = accounts.primary_gid(unit.uid) else {
-                        continue;
-                    };
-                    let pids = unit_pids(cgroup_root, &unit.cgroup);
-                    units.push(ScoredUnit { unit, gid, pids });
                 }
                 let writes = oom.pass(
                     Instant::now(),
                     &host,
                     &units,
+                    &|scored: &ScoredUnit| unit_pids(cgroup_root, &scored.unit.cgroup),
                     &PidfdAccess,
                     policy.uid_min.value,
                     policy.principal_min_percent.value,

@@ -362,3 +362,23 @@ the supervisor's tree then keep the default score and are never marked.
 | R3-run | the Yield First margin (FR-020, SC-004, SC-005) | Yield First own work against the second account's CPU-bound and cache-sensitive work, and the second account alone; margin from today's down to 0% |
 | R10-run | SC-006, SC-007, SC-008 | item 054's OOM shape with own work in share, then over share; `systemd-oomd` left as it is; plus a user write below a root-written score |
 | R16-run | SC-012 and EFF-6 to EFF-10 | on the test host, the broker's and both accounts' agents' CPU and memory, idle and busy. The 50-user bound is measured in the container (R17), where accounts can be made without touching a host |
+
+## Findings of 2026-11-17 (container run and read-only test-host checks)
+
+- **R1, settled.** systemd 249 (Ubuntu 22.04, the CI container) rejects `CPUWeight=idle`
+  ("Invalid weight, ignoring"); the broker writes `cpu.idle` and reads it back. systemd 259 on the
+  test host accepts it: a transient scope with `CPUWeight=idle` reads `cpu.idle` = 1.
+- **Slice names.** A `-` in a slice name means nesting: `cedegrid-idle.slice` is created inside
+  `cedegrid.slice`. The Yield First slice is `cedegrid_idle.slice`, directly below the root.
+- **R2 / N4 on the test host.** `user.slice` passes the cpu controller to its account slices, so
+  `units.ordinary_slice = "auto"` places the ordinary unit in `user-<uid>.slice` there.
+- **R18 on the test host.** Lingering is off for the user and logind's `RemoveIPC=` is at its
+  default (`yes`), so the logout questions of T057 apply as written.
+- **User namespaces.** The test host and the local VM restrict unprivileged user namespaces through
+  AppArmor; the security fixture's user-namespace case runs where they are allowed (CI on
+  `ubuntu-22.04`).
+- **Broker cost (SC-012, provisional bounds).** With 50 members and 100 units, a release build
+  (thin LTO) of the broker uses 0.067% of one CPU and 7.5 MB at rest, after each unit's one-time
+  marker check, with the full OOM scan every 30 s while memory is plentiful (a quarter of RAM
+  free, swap use under 5% of RAM) and no score is held, and every second otherwise. A debug build
+  measures 0.17%.

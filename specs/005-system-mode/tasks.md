@@ -171,8 +171,8 @@ the task list.
   - Passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM). The user-namespace case skips where unprivileged user namespaces are forbidden, as in this VM (Ubuntu 24.04's AppArmor rule); CI on ubuntu-22.04 runs it.
 - [x] T028 [US2] Container fixture in `tests/system_mode.rs`: one member asks to stop, start, status or move the second member's units by every request form; each is refused, and the second member's units are unchanged
 - [x] T029 [US2] Container fixture in `tests/system_mode.rs`: the socket reads root, group `cedegrid`, mode 0660; a non-member account cannot connect
-- [ ] T030 [US2] Container fixture in `tests/system_mode.rs`: one member floods requests; another member is answered within 1 s (provisional, SC-003); the flooder gets `rate_limited`; with 50 member accounts, the broker's CPU stays below 0.1% of one CPU and its memory below 32 MiB (provisional, SC-012)
-  - *In part:* the flood case passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the 50-account resource bound is not written yet.
+- [x] T030 [US2] Container fixture in `tests/system_mode.rs`: one member floods requests; another member is answered within 1 s (provisional, SC-003); the flooder gets `rate_limited`; with 50 member accounts, the broker's CPU stays below 0.1% of one CPU and its memory below 32 MiB (provisional, SC-012)
+  - The flood case passes; with 50 accounts (100 units) a release build of the broker uses 0.067% of one CPU and 7.5 MB at rest, within the provisional bound (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM; research, findings of 2026-11-17).
 - [x] T031 [US2] Container fixture in `tests/system_mode.rs`: every unit the broker starts has exactly the properties of `contracts/units-and-slices.md`, read back with `systemctl show`, whatever the request said
 
 ### Implementation

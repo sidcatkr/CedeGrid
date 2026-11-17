@@ -361,6 +361,26 @@ pub fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
     Some((field("MemTotal:")?, field("SwapTotal:").unwrap_or(0)))
 }
 
+/// Whether memory is plentiful: at least a quarter of RAM available and swap use under 5% of
+/// RAM. Then total use is below RAM, so no principal can be over its share. Unreadable counts
+/// are not plentiful.
+pub fn memory_is_plentiful(meminfo: &str) -> bool {
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let (Some(total), Some(available)) = (field("MemTotal:"), field("MemAvailable:")) else {
+        return false;
+    };
+    let swap_used = field("SwapTotal:")
+        .unwrap_or(0)
+        .saturating_sub(field("SwapFree:").unwrap_or(0));
+    total > 0 && available.saturating_mul(4) >= total && swap_used.saturating_mul(20) <= total
+}
+
 /// The real user ID and resident plus swapped kB from a `/proc/<pid>/status` text. A process
 /// without `VmRSS` (a kernel thread) has no memory of its own.
 pub fn parse_status_memory(text: &str) -> (Option<u32>, Option<u64>) {
@@ -445,6 +465,9 @@ pub struct FoundUnit {
     pub uid: u32,
     /// The unit's cgroup path, as `/proc/<pid>/cgroup` shows it.
     pub cgroup: String,
+    /// The cgroup directory's inode, the kernel's cgroup ID: a new unit of the same name has
+    /// another, so its marker is checked again.
+    pub id: u64,
 }
 
 /// The broker's units under `cgroup_root` (normally `/sys/fs/cgroup`), by their fixed names and
@@ -461,6 +484,19 @@ pub fn find_units(cgroup_root: &std::path::Path) -> Vec<FoundUnit> {
             })
             .unwrap_or_default()
     };
+    let id_of = |relative: &str| -> u64 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(cgroup_root.join(relative.trim_start_matches('/')))
+                .map_or(0, |meta| meta.ino())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = relative;
+            0
+        }
+    };
     let uid_of = |name: &str, prefix: &str| -> Option<u32> {
         name.strip_prefix(prefix)?
             .strip_suffix(".service")?
@@ -470,19 +506,23 @@ pub fn find_units(cgroup_root: &std::path::Path) -> Vec<FoundUnit> {
     let mut units = Vec::new();
     for name in names(&cgroup_root.join("cedegrid_idle.slice")) {
         if let Some(uid) = uid_of(&name, "cedegrid-idle-u") {
+            let cgroup = format!("/cedegrid_idle.slice/{name}");
             units.push(FoundUnit {
                 kind: UnitKind::Idle,
                 uid,
-                cgroup: format!("/cedegrid_idle.slice/{name}"),
+                id: id_of(&cgroup),
+                cgroup,
             });
         }
     }
     for name in names(&cgroup_root.join("cedegrid.slice")) {
         if let Some(uid) = uid_of(&name, "cedegrid-u") {
+            let cgroup = format!("/cedegrid.slice/{name}");
             units.push(FoundUnit {
                 kind: UnitKind::Ordinary,
                 uid,
-                cgroup: format!("/cedegrid.slice/{name}"),
+                id: id_of(&cgroup),
+                cgroup,
             });
         }
     }
@@ -496,10 +536,12 @@ pub fn find_units(cgroup_root: &std::path::Path) -> Vec<FoundUnit> {
         };
         for name in names(&cgroup_root.join("user.slice").join(&slice)) {
             if uid_of(&name, "cedegrid-u") == Some(slice_uid) {
+                let cgroup = format!("/user.slice/{slice}/{name}");
                 units.push(FoundUnit {
                     kind: UnitKind::Ordinary,
                     uid: slice_uid,
-                    cgroup: format!("/user.slice/{slice}/{name}"),
+                    id: id_of(&cgroup),
+                    cgroup,
                 });
             }
         }
@@ -544,7 +586,6 @@ pub fn unit_pids(cgroup_root: &std::path::Path, unit_cgroup: &str) -> Vec<u32> {
 pub struct ScoredUnit {
     pub unit: FoundUnit,
     pub gid: u32,
-    pub pids: Vec<u32>,
 }
 
 /// One write the pass made, for the journal.
@@ -562,9 +603,20 @@ pub struct PassWrite {
 pub struct OomLoop {
     principals: Principals,
     unknown_since: BTreeMap<u32, Instant>,
+    /// Users whose processes may hold a value other than 0, so they get a full pass even when
+    /// no principal is over its share.
+    dirty: BTreeSet<u32>,
+    /// Whether the last pass found a principal over its share.
+    anyone_over: bool,
 }
 
 impl OomLoop {
+    /// Whether the last pass found nothing to hold: nobody over its share and no value other
+    /// than 0 left on any unit process.
+    pub fn quiet(&self) -> bool {
+        !self.anyone_over && self.dirty.is_empty()
+    }
+
     /// One pass: computes each unit user's writes and makes them through `access`.
     ///
     /// Only processes inside a scored unit, with the unit's user and group IDs, matching the scan
@@ -575,6 +627,7 @@ impl OomLoop {
         now: Instant,
         host: &HostReadings,
         units: &[ScoredUnit],
+        pids_of: &dyn Fn(&ScoredUnit) -> Vec<u32>,
         access: &dyn ProcessAccess,
         uid_min: u32,
         principal_min_percent: u8,
@@ -607,8 +660,21 @@ impl OomLoop {
         };
         let users: BTreeSet<u32> = units.iter().map(|unit| unit.unit.uid).collect();
         self.unknown_since.retain(|uid, _| users.contains(uid));
+        self.dirty.retain(|uid| users.contains(uid));
+        // While no principal is over its share every target is 0, so only users who may still
+        // hold another value need their processes read.
+        let anyone_over = shares.iter().any(|(uid, &share)| {
+            memory
+                .by_user
+                .get(uid)
+                .copied()
+                .flatten()
+                .is_some_and(|pages| pages > share)
+        });
+        self.anyone_over = anyone_over;
         let mut writes = Vec::new();
         for uid in users {
+            // The unknown clock runs on every pass, read or not.
             let unknown_for = match memory.by_user.get(&uid) {
                 Some(None) => {
                     let since = *self.unknown_since.entry(uid).or_insert(now);
@@ -619,10 +685,13 @@ impl OomLoop {
                     None
                 }
             };
+            if !anyone_over && !self.dirty.contains(&uid) {
+                continue;
+            }
             let mut held: BTreeMap<ProcessKey, Box<dyn HeldProcess>> = BTreeMap::new();
             let mut processes = Vec::new();
             for scored in units.iter().filter(|scored| scored.unit.uid == uid) {
-                for &pid in &scored.pids {
+                for pid in pids_of(scored) {
                     let Some(scan) = host.processes.get(&pid) else {
                         continue;
                     };
@@ -656,7 +725,21 @@ impl OomLoop {
                     held.insert(key, process);
                 }
             }
-            for write in user_writes(&view, uid, &processes, unknown_for) {
+            let planned = user_writes(&view, uid, &processes, unknown_for);
+            let mut settled_zero = true;
+            for process in &processes {
+                let target = planned
+                    .iter()
+                    .find(|write| write.key == process.key)
+                    .map_or(process.current, |write| write.value);
+                settled_zero &= target == 0;
+            }
+            if settled_zero {
+                self.dirty.remove(&uid);
+            } else {
+                self.dirty.insert(uid);
+            }
+            for write in planned {
                 let Some(process) = held.get(&write.key) else {
                     continue;
                 };

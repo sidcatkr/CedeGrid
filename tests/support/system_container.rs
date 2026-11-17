@@ -91,6 +91,8 @@ pub fn install() {
         ],
     );
     ok("sh", &[&format!("{packaging}/postinst"), "configure"]);
+    // A running broker keeps the old binary; the next request starts the new one.
+    let _ = run("systemctl", &["stop", "cedegrid-broker.service"]);
     ensure_account(MEMBER, Some(MEMBER_UID));
     ensure_account(SECOND, Some(SECOND_UID));
     ensure_account(OUTSIDER, None);

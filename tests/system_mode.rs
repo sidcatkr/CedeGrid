@@ -2299,6 +2299,22 @@ mod oom_loop {
     }
 
     #[test]
+    fn plentiful_memory_is_a_quarter_free_and_little_swap() {
+        use cedegrid::broker::oom::memory_is_plentiful;
+        let meminfo = |available: u64, swap_free: u64| {
+            format!(
+                "MemTotal: 1000 kB\nMemAvailable: {available} kB\nSwapTotal: 100 kB\nSwapFree: {swap_free} kB\n"
+            )
+        };
+        assert!(memory_is_plentiful(&meminfo(250, 100)));
+        assert!(memory_is_plentiful(&meminfo(250, 50)));
+        assert!(!memory_is_plentiful(&meminfo(249, 100)));
+        assert!(!memory_is_plentiful(&meminfo(900, 49)));
+        assert!(!memory_is_plentiful("MemTotal: 1000 kB\n"));
+        assert!(!memory_is_plentiful(""));
+    }
+
+    #[test]
     fn the_host_scan_reads_owners_memory_and_start_times() {
         let proc = Dir::new("proc");
         proc.write("meminfo", "MemTotal: 4000 kB\nSwapTotal: 400 kB\n");
@@ -2341,24 +2357,29 @@ mod oom_loop {
         }
         let mut units = find_units(&cg.0);
         units.sort_by(|a, b| a.cgroup.cmp(&b.cgroup));
+        assert!(units.iter().all(|unit| unit.id != 0));
+        let found: Vec<(UnitKind, u32, &str)> = units
+            .iter()
+            .map(|unit| (unit.kind, unit.uid, unit.cgroup.as_str()))
+            .collect();
         assert_eq!(
-            units,
+            found,
             vec![
-                FoundUnit {
-                    kind: UnitKind::Ordinary,
-                    uid: 1001,
-                    cgroup: "/cedegrid.slice/cedegrid-u1001.service".into()
-                },
-                FoundUnit {
-                    kind: UnitKind::Idle,
-                    uid: 1000,
-                    cgroup: "/cedegrid_idle.slice/cedegrid-idle-u1000.service".into()
-                },
-                FoundUnit {
-                    kind: UnitKind::Ordinary,
-                    uid: 1000,
-                    cgroup: "/user.slice/user-1000.slice/cedegrid-u1000.service".into()
-                },
+                (
+                    UnitKind::Ordinary,
+                    1001,
+                    "/cedegrid.slice/cedegrid-u1001.service"
+                ),
+                (
+                    UnitKind::Idle,
+                    1000,
+                    "/cedegrid_idle.slice/cedegrid-idle-u1000.service"
+                ),
+                (
+                    UnitKind::Ordinary,
+                    1000,
+                    "/user.slice/user-1000.slice/cedegrid-u1000.service"
+                ),
             ]
         );
         cg.write("cedegrid.slice/cedegrid-u1001.service/cgroup.procs", "7\n");
@@ -2476,10 +2497,11 @@ mod oom_loop {
                 kind: UnitKind::Ordinary,
                 uid: 1000,
                 cgroup: UNIT.into(),
+                id: 0,
             },
             gid: 1100,
-            pids: vec![1, 2, 3, 4],
         }];
+        let pids = |_: &ScoredUnit| vec![1, 2, 3, 4];
         let mut oom = OomLoop::default();
         let start = Instant::now();
         let run = |oom: &mut OomLoop, now| {
@@ -2487,6 +2509,7 @@ mod oom_loop {
                 now,
                 &host,
                 &units,
+                &pids,
                 &access,
                 1000,
                 1,
@@ -2514,6 +2537,46 @@ mod oom_loop {
     }
 
     #[test]
+    fn a_quiet_host_reads_no_unit_process() {
+        struct Refuse;
+        impl ProcessAccess for Refuse {
+            fn open(&self, _: u32, _: Option<u64>) -> anyhow::Result<Box<dyn HeldProcess>> {
+                panic!("no process should be opened while nobody is over its share")
+            }
+        }
+        let host = HostReadings {
+            total_pages: 2000,
+            capacity_pages: 1000,
+            processes: BTreeMap::from([scan(1, 10, 1000, 300), scan(9, 90, 1001, 300)]),
+        };
+        let units = [ScoredUnit {
+            unit: FoundUnit {
+                kind: UnitKind::Ordinary,
+                uid: 1000,
+                cgroup: UNIT.into(),
+                id: 0,
+            },
+            gid: 1100,
+        }];
+        let mut oom = OomLoop::default();
+        let start = Instant::now();
+        for step in 0..3 {
+            let writes = oom.pass(
+                start + PRINCIPAL_JOIN * step,
+                &host,
+                &units,
+                &|_: &ScoredUnit| vec![1],
+                &Refuse,
+                1000,
+                1,
+                Lowering::WhileAnotherOverShare,
+                OverShareMarking::YieldFirstAndNeutral,
+            );
+            assert!(writes.is_empty());
+        }
+    }
+
+    #[test]
     fn unreadable_memory_returns_scores_after_the_window() {
         let access = Fake(BTreeMap::from([fake(
             1,
@@ -2533,10 +2596,11 @@ mod oom_loop {
                 kind: UnitKind::Ordinary,
                 uid: 1000,
                 cgroup: UNIT.into(),
+                id: 0,
             },
             gid: 1100,
-            pids: vec![1],
         }];
+        let pids = |_: &ScoredUnit| vec![1];
         let mut oom = OomLoop::default();
         let start = Instant::now();
         let run = |oom: &mut OomLoop, now| {
@@ -2544,6 +2608,7 @@ mod oom_loop {
                 now,
                 &host,
                 &units,
+                &pids,
                 &access,
                 1000,
                 1,
@@ -3294,6 +3359,74 @@ mod container {
             inventory()
         );
         install();
+    }
+
+    /// The broker's CPU time, its reaped children's included, in clock ticks, and its RSS in kB.
+    fn broker_cost() -> (u64, u64) {
+        let pid = show("cedegrid-broker.service", "MainPID")["MainPID"].clone();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        // utime, stime, cutime and cstime are fields 14 to 17; the first after ')' is field 3.
+        let ticks: u64 = (14..=17)
+            .map(|n| fields[n - 3].parse::<u64>().unwrap())
+            .sum();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let rss = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|kb| kb.parse().ok())
+            .unwrap();
+        (ticks, rss)
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn fifty_members_cost_the_broker_little() {
+        assert!(enabled(), "{GATE}");
+        install();
+        let names: Vec<String> = (0..50).map(|n| format!("load{n:02}")).collect();
+        for name in &names {
+            if !run("id", &["-u", name]).status.success() {
+                ok("useradd", &["-m", "-U", name]);
+            }
+            ok("usermod", &["-aG", "cedegrid", name]);
+            let output = cedegrid_as(name, &["system", "start"]);
+            assert!(
+                stdout(&output).contains(r#""system":true"#),
+                "{name}: {output:?}"
+            );
+        }
+        // Let the starts settle and the OOM loop check each new unit's marker once (a one-time
+        // cost per unit), then measure 60 s of the broker at rest.
+        std::thread::sleep(Duration::from_secs(35));
+        let (before, _) = broker_cost();
+        let window = Duration::from_secs(60);
+        std::thread::sleep(window);
+        let (after, rss_kb) = broker_cost();
+        // SAFETY: sysconf has no preconditions.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+        let cpu_share = (after - before) as f64 / hz / window.as_secs_f64();
+        for name in &names {
+            stop_units(name);
+        }
+        eprintln!(
+            "broker with 100 units: {:.4}% of one CPU, {rss_kb} kB RSS",
+            cpu_share * 100.0
+        );
+        // Provisional bounds (SC-012): 0.1% of one CPU and 32 MiB, for the shipped (release)
+        // build; a debug build only reports its figure.
+        assert!(rss_kb < 32 * 1024, "{rss_kb} kB");
+        if std::env::var("CEDEGRID_TEST_RELEASE").as_deref() == Ok("1") {
+            assert!(cpu_share < 0.001, "{:.4}% of one CPU", cpu_share * 100.0);
+        } else {
+            eprintln!("CPU bound not checked: debug build; rerun with CEDEGRID_TEST_RELEASE=1");
+        }
     }
 
     #[test]
