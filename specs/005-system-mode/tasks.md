@@ -111,8 +111,8 @@ the task list.
 
 ### Tests first
 
-- [ ] T016 [P] [US1] Container fixture in `tests/system_mode.rs` (opt-in): after install, 20 of 20 member starts land in `cedegrid-u<uid>.service` with the member's IDs at the Full level, and `doctor` says System (SC-001); two starts at once start each unit once
-  - *In part:* one member start, a repeat start and two starts at once pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the 20-of-20 loop is not written yet.
+- [x] T016 [P] [US1] Container fixture in `tests/system_mode.rs` (opt-in): after install, 20 of 20 member starts land in `cedegrid-u<uid>.service` with the member's IDs at the Full level, and `doctor` says System (SC-001); two starts at once start each unit once
+  - One member start, a repeat start, two starts at once and 20 of 20 start-stop rounds pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM). `doctor` saying System is T025's.
 - [ ] T017 [US1] Container fixture in `tests/system_mode.rs`: with the package removed, 20 of 20 starts behave as before the install (SC-001); a non-member is refused with `not_a_member` and falls back; with the broker stopped and the socket present, the client says so in one line and falls back, and `--require-system` refuses; after a broker restart with units running, the units and their work keep running and `status` lists them by marker
   - *In part:* a non-member falls back, a silent broker falls back in one line, `--require-system` refuses, and units survive a broker restart (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the uninstalled case is covered by `system_command_without_the_package` outside the container.
 - [ ] T018 [P] [US1] Delegated-root detection tests in `tests/cgroup.rs`. The agent accepts its cgroup only when all of these hold:
@@ -290,8 +290,8 @@ the task list.
 
 ### Tests first
 
-- [ ] T050 [P] [US5] Container fixture in `tests/system_mode.rs`: the inventory after install differs from before only by `contracts/units-and-slices.md`'s list; after runs and purge it equals the inventory before install (SC-009)
-  - *In part:* purge returns the inventory to the one before the install (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the install's exact difference is not compared yet.
+- [x] T050 [P] [US5] Container fixture in `tests/system_mode.rs`: the inventory after install differs from before only by `contracts/units-and-slices.md`'s list; after runs and purge it equals the inventory before install (SC-009)
+  - The install adds only the contract's items (unit files, the group, `/etc/cedegrid`, `/run/cedegrid`, the binary, the sysusers file) and purge returns the inventory to the one before (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [ ] T051 [US5] Container fixture in `tests/system_mode.rs`: a policy allowing only Yield First and Neutral refuses Performance with `mode_not_allowed`, naming the key; the agent refuses a job in a mode the policy does not allow and a job past `tasks_per_user`, each in one line naming the key; `doctor` shows the effective policy and where each value came from (FR-010)
 - [ ] T052 [US5] Container fixture in `tests/system_mode.rs`: a broker and a client of different protocol versions refuse with `protocol_mismatch`, naming the side to upgrade (FR-035)
 

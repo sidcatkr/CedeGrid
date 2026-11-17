@@ -3375,6 +3375,42 @@ mod container {
         purge();
         let before = inventory();
         install();
+        // The install adds exactly the contract's items (contracts/units-and-slices.md).
+        let added: Vec<String> = inventory()
+            .into_iter()
+            .filter(|item| !before.contains(item))
+            .collect();
+        let expected = [
+            "group cedegrid",
+            "path /etc/cedegrid",
+            "path /run/cedegrid",
+            "path /usr/bin/cedegrid",
+            "path /usr/lib/sysusers.d/cedegrid-system.conf",
+            "unit cedegrid-broker.service",
+            "unit cedegrid-broker.socket",
+            "unit cedegrid.slice",
+            "unit cedegrid_idle.slice",
+            "unit-file cedegrid-broker.service",
+            "unit-file cedegrid-broker.socket",
+            "unit-file cedegrid.slice",
+            "unit-file cedegrid_idle.slice",
+        ];
+        for item in &added {
+            assert!(
+                expected.contains(&item.as_str()),
+                "unexpected after install: {item}"
+            );
+        }
+        for item in [
+            "group cedegrid",
+            "unit-file cedegrid-broker.socket",
+            "path /usr/bin/cedegrid",
+        ] {
+            assert!(
+                added.iter().any(|added| added == item),
+                "missing after install: {item}"
+            );
+        }
         assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
         let installed = inventory();
         assert!(
@@ -3566,6 +3602,34 @@ mod container {
             &["-u", "cedegrid-broker.service", "--no-pager", "-o", "cat"],
         );
         assert!(journal.contains("move uid="), "no move line in the journal");
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn twenty_starts_all_land_in_the_members_units() {
+        assert!(enabled(), "{GATE}");
+        install();
+        let unit = ordinary(MEMBER_UID);
+        for round in 0..20 {
+            stop_units(MEMBER);
+            let output = cedegrid_as(MEMBER, &["system", "start"]);
+            assert!(
+                stdout(&output).contains(r#""system":true"#),
+                "round {round}: {output:?}"
+            );
+            assert!(
+                wait_until(Duration::from_secs(10), || {
+                    show(&unit, "ActiveState")["ActiveState"] == "active"
+                }),
+                "round {round}"
+            );
+            assert_eq!(
+                show(&unit, "User")["User"],
+                MEMBER_UID.to_string(),
+                "round {round}"
+            );
+        }
+        stop_units(MEMBER);
     }
 
     #[test]
