@@ -113,6 +113,24 @@ pub fn job_modes(
         .collect()
 }
 
+/// Why the administrator policy refuses an unprotected Aggressive grant in a System mode unit
+/// (004 FR-015a), or `None` when it permits one. A policy that cannot be read refuses.
+pub fn unprotected_refusal_with(
+    policy: anyhow::Result<crate::broker::admin_policy::AdminPolicy>,
+) -> Option<(&'static str, String)> {
+    match policy {
+        Ok(policy) if policy.unprotected_aggressive.value => None,
+        Ok(_) => Some((
+            "unprotected_policy",
+            "ERR_CEDEGRID_UNPROTECTED_POLICY: this host's System mode policy does not permit unprotected Aggressive (modes.unprotected_aggressive)".to_owned(),
+        )),
+        Err(error) => Some((
+            "policy_refused",
+            format!("/etc/cedegrid/policy.toml rejected: {error:#}"),
+        )),
+    }
+}
+
 /// Why the administrator policy refuses a launch, as an event code and one line naming the
 /// policy key (FR-010); `None` when it may start. `active` counts the tasks already running or
 /// preparing. A policy that cannot be read refuses every launch.

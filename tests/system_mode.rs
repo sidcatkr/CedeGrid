@@ -330,6 +330,7 @@ policy_version = 1
 
 [modes]
 allowed = ["yield_first", "neutral", "aggressive"]
+unprotected_aggressive = true
 
 [limits]
 tasks_per_user = 8
@@ -351,6 +352,7 @@ ordinary_slice = "cedegrid"
     .unwrap();
     assert!(policy.allows(ModeName::Aggressive));
     assert!(!policy.allows(ModeName::Performance));
+    assert!(policy.unprotected_aggressive.value);
     assert_eq!(policy.tasks_per_user.value, 8);
     assert_eq!(policy.tasks_max.value, 512);
     assert_eq!(policy.open_files.value, Some(65536));
@@ -3887,6 +3889,41 @@ mod policy_in_unit {
 
     fn policy(text: &str) -> anyhow::Result<AdminPolicy> {
         AdminPolicy::parse(text, 1000)
+    }
+
+    #[test]
+    fn unprotected_aggressive_needs_its_own_policy_key() {
+        use cedegrid::system_mode::unprotected_refusal_with;
+        // Absent or false: refused, naming the key; true: permitted.
+        for text in ["", "[modes]\nunprotected_aggressive = false\n"] {
+            let (code, line) = unprotected_refusal_with(policy(text)).unwrap();
+            assert_eq!(code, "unprotected_policy");
+            assert!(
+                line.starts_with("ERR_CEDEGRID_UNPROTECTED_POLICY:"),
+                "{line}"
+            );
+            assert!(line.contains("modes.unprotected_aggressive"), "{line}");
+        }
+        assert_eq!(
+            unprotected_refusal_with(policy("[modes]\nunprotected_aggressive = true\n")),
+            None
+        );
+        // The allowed modes do not grant it, and an unreadable policy refuses.
+        let all =
+            "[modes]\nallowed = [\"yield_first\", \"neutral\", \"performance\", \"aggressive\"]\n";
+        assert!(unprotected_refusal_with(policy(all)).is_some());
+        let (code, _) = unprotected_refusal_with(policy("unknown = 1\n")).unwrap();
+        assert_eq!(code, "policy_refused");
+        let (code, _) =
+            unprotected_refusal_with(policy("[modes]\nunprotected_aggressive = \"yes\"\n"))
+                .unwrap();
+        assert_eq!(code, "policy_refused");
+        let entries = policy("").unwrap().entries();
+        assert!(
+            entries
+                .iter()
+                .any(|(key, value, _)| *key == "modes.unprotected_aggressive" && value == "false")
+        );
     }
 
     #[test]

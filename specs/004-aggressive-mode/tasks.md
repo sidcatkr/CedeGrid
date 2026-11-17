@@ -188,10 +188,12 @@ principal contends. Nothing else changes.
   Aggressive, and inside a System mode unit the administrator key (T027). Record the grant with
   the attempt so retries keep it, and log `warning: this run is UNPROTECTED: other users' compute may slow down until it ends`
   once at start. Passes T019. Add the node-cap condition after T005.
-- [ ] T027 [US2] (now) In `src/broker/admin_policy.rs`, add the key `modes.unprotected_aggressive`
+- [x] T027 [US2] (now) In `src/broker/admin_policy.rs`, add the key `modes.unprotected_aggressive`
   (default `false`). In `src/system_mode.rs` `launch_refusal_with`, refuse a grant while it is
   false. Update `specs/005-system-mode/contracts/admin-policy.md` and the policy section of
   `docs/system-mode.md`. Passes T020.
+  - *Done in part:* the key, `system_mode::unprotected_refusal_with` and its unit test. The launch
+    check calls it in T026; the container fixture comes with T026.
 - [ ] T028 [P] [US2] (now) In `python/cedegrid/` and `npm/src/`, add the two fields and the wire
   object. Passes the SDK half of T021.
 - [ ] T029 [US2] (after T622) In `src/contention.rs` (`ModeInput.unprotected`, the unprotected

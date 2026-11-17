@@ -41,6 +41,7 @@ struct PolicyFile {
 #[serde(default, deny_unknown_fields)]
 struct ModesSection {
     allowed: Option<Vec<ModeName>>,
+    unprotected_aggressive: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,6 +111,8 @@ impl<T> Setting<T> {
 pub struct AdminPolicy {
     pub policy_version: u32,
     pub allowed_modes: Setting<Vec<ModeName>>,
+    /// Whether members may request unprotected Aggressive (004 FR-015a); off by default.
+    pub unprotected_aggressive: Setting<bool>,
     pub tasks_per_user: Setting<u32>,
     pub tasks_max: Setting<u32>,
     /// `LimitNOFILE=`; `None` keeps systemd's default.
@@ -193,9 +196,11 @@ impl AdminPolicy {
             "principals.principal_min_percent must be between 1 and 50"
         );
         let pam_session = Setting::pick(file.units.pam_session, PamSession::None);
+        let unprotected_aggressive = Setting::pick(file.modes.unprotected_aggressive, false);
         Ok(Self {
             policy_version,
             allowed_modes,
+            unprotected_aggressive,
             tasks_per_user,
             tasks_max,
             open_files,
@@ -228,6 +233,11 @@ impl AdminPolicy {
                     .collect::<Vec<_>>()
                     .join(", "),
                 self.allowed_modes.source,
+            ),
+            (
+                "modes.unprotected_aggressive",
+                self.unprotected_aggressive.value.to_string(),
+                self.unprotected_aggressive.source,
             ),
             (
                 "limits.tasks_per_user",
