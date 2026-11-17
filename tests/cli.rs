@@ -1524,6 +1524,39 @@ mod setup_terminal {
         pty.finish();
     }
 
+    /// 004 FR-007, FR-008: raising the cap to Aggressive in the interface takes its own caution
+    /// confirmation and records `aggressive_mode`.
+    #[test]
+    fn the_interface_raises_the_cap_to_aggressive_only_after_its_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let mut pty = interface(&path, &[]);
+        open(&mut pty, MAX_MODE);
+        pty.keys(DOWN, 2);
+        pty.key(b" ");
+        pty.key(b"\r");
+        pty.wait_for("Confirm a caution option");
+        pty.wait_for("record aggressive_mode");
+        // No is preselected; choose Yes.
+        pty.key(DOWN);
+        pty.key(b" ");
+        pty.key(b"\r");
+        write_from(&mut pty, MAX_MODE);
+        let (status, text, _) = pty.finish();
+        assert!(status.success(), "{text}");
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.contention.max_mode,
+            Some(cedegrid::contention::ContentionMode::Aggressive)
+        );
+        assert!(
+            config
+                .contention
+                .acknowledge_caution
+                .contains("aggressive_mode")
+        );
+    }
+
     /// SC-011: the interface and the flags write byte-identical files.
     #[test]
     fn the_interface_and_flags_write_identical_files() {
@@ -1535,10 +1568,10 @@ mod setup_terminal {
                 "performance cap",
                 Some(start),
                 |pty| {
-                    // Options: no explicit cap (current), Neutral, Performance; Performance
+                    // Options: no explicit cap (current), Performance, Aggressive; Performance
                     // needs no confirmation.
                     open(pty, MAX_MODE);
-                    pty.keys(DOWN, 2);
+                    pty.key(DOWN);
                     pty.key(b" ");
                     pty.key(b"\r");
                     write_from(pty, MAX_MODE);

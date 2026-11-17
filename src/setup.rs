@@ -1380,9 +1380,9 @@ impl Field {
 
     /// The options shown for the field, including its current value.
     pub fn options(self, config: &Config, fresh: bool) -> Vec<Pick> {
-        // The interface offers the three margined modes; Aggressive is set with the flags and
-        // its `aggressive_mode` acknowledgement until the interface gains its own step (004 T014).
-        let modes = ContentionMode::MARGINED.map(Pick::Mode);
+        // Aggressive is offered too; choosing it, or a cap at it, asks for `aggressive_mode`
+        // through the caution step (004 FR-007, FR-008).
+        let modes = ContentionMode::ALL.map(Pick::Mode);
         let numbers = |mut values: Vec<u64>, ascending: bool| -> Vec<Pick> {
             if let Pick::Number(current) = self.current(config) {
                 values.push(current);
@@ -1412,7 +1412,7 @@ impl Field {
                     .unwrap_or(ContentionMode::Neutral);
                 std::iter::once(Pick::Inherit)
                     .chain(
-                        ContentionMode::MARGINED
+                        ContentionMode::ALL
                             .into_iter()
                             .filter(|mode| *mode >= highest)
                             .map(Pick::Mode),
@@ -1704,6 +1704,9 @@ pub fn justification(option: &str) -> &'static str {
         }
         "reduced_margin" => {
             "Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold."
+        }
+        "aggressive_mode" => {
+            "Own work is admitted to all idle CPU and GPU compute at once, with no margin. New work still starts only where others keep their fair share, and floors still hold."
         }
         _ => {
             "Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold."
