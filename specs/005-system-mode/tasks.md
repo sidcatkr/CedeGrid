@@ -327,16 +327,18 @@ the task list.
 Each run below records plain Linux too, at least 3 times each way, with the spread. No result is
 estimated in advance. Results go to `docs/validation.md` with the commit.
 
-- [ ] T057 Host run R2-run on the test host (N4, FR-019, SC-011), recorded in `docs/validation.md`:
+- [x] T057 Host run R2-run on the test host (N4, FR-019, SC-011), recorded in `docs/validation.md`:
   - F1 and F2 of item 057 in plain Linux and in System mode under N4 A and N4 B;
   - own CPU, and the second account's rate and p99;
   - whether the unit in `user-<uid>.slice` survives the last logout;
   - after that logout, whether the agent still reaches the idle executor, and whether a job using POSIX shared memory keeps it under the host's `RemoveIPC=` value (R18).
+  - *Done (2026-11-17):* F1 and F2 under N4 A and N4 B, 3 or more runs each way with plain Linux and a Tracked control: SC-011 holds in every arm (`docs/validation.md`, feature 005). The unit in the user slice survived the last logout, and logind's `RemoveIPC=yes` removed a job's POSIX shared memory name about 10 s later. The idle executor part waits for SYS-3.
 - [ ] T058 Host run R10-run on the test host (SC-006, SC-007, SC-008, N1 and D2 cases), recorded in `docs/validation.md`:
   - item 054's OOM shape with own work in share, then over share;
   - `systemd-oomd` left as it is;
   - a user write below a root-written score.
-- [ ] T059 Host run R16-run on the test host (SC-012, EFF-6 to EFF-10), recorded in `docs/validation.md`: the broker's and both agents' CPU and memory, idle and busy. The 50-user bound runs in the container (T030's harness).
+- [x] T059 Host run R16-run on the test host (SC-012, EFF-6 to EFF-10), recorded in `docs/validation.md`: the broker's and both agents' CPU and memory, idle and busy. The 50-user bound runs in the container (T030's harness).
+  - *Done (2026-11-17):* idle: the broker 0.03% of one CPU and 7.7 MiB, each agent 2.8% and 37–39 MiB at a 500 ms monitor interval; busy: the broker at most 0.03%, the agent 2.2–2.7%.
 - [ ] T060 Host run for the removed-member case (N2) on the test host, after root step 5, recorded in `docs/validation.md`: the next request is refused, and the running units behave as N2's chosen option says
 - [ ] T061 Host run R3-run on the test host (FR-020, SC-004, SC-005), recorded in `docs/validation.md`: Yield First own work against the second account's CPU-bound and cache-sensitive work, and the second account alone, with the margin stepped from today's value down to 0%. Then set the System mode CPU default to the measured value in `src/contention.rs`
   - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
