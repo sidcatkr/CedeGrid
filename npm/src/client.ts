@@ -65,6 +65,10 @@ export interface CommandOptions {
     maxAttempts?: IntegerInput;
     /** Requested mode per resource; the node's max_mode still caps it. */
     contentionModes?: Partial<Record<ContentionResource, ContentionMode>>;
+    /** Request unprotected Aggressive for this submission (004); needs the confirmation too. */
+    unprotectedAggressive?: boolean;
+    /** The second explicit confirmation for unprotected Aggressive. */
+    confirmUnprotectedAggressive?: boolean;
 }
 export const CONTENTION_RESOURCES = ['cpu', 'ram', 'gpu_compute', 'gpu_memory'] as const;
 export const CONTENTION_MODES = ['yield_first', 'neutral', 'performance', 'aggressive'] as const;
@@ -116,6 +120,22 @@ export function commandTask(taskId: string, argv: string[], cwd: string, options
         if (!entries.length || entries.some(([k, v]) => !(CONTENTION_RESOURCES as readonly string[]).includes(k) || !(CONTENTION_MODES as readonly unknown[]).includes(v)))
             throw new ValidationError('contentionModes must map resources to modes');
         result.contention = { modes: Object.fromEntries(entries) as Record<string, string> };
+    }
+    const unprotected = options.unprotectedAggressive ?? false;
+    const confirmed = options.confirmUnprotectedAggressive ?? false;
+    if (typeof unprotected !== 'boolean' || typeof confirmed !== 'boolean')
+        throw new ValidationError('unprotectedAggressive and confirmUnprotectedAggressive must be booleans');
+    if (unprotected) {
+        // 004: both fields, sent as one grant; the launching agent still checks the host.
+        if (!confirmed)
+            throw new ValidationError('ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing');
+        const modes: Record<string, string> = { ...((options.contentionModes ?? {}) as Record<string, string>) };
+        for (const resource of ['cpu', 'gpu_compute']) {
+            modes[resource] ??= 'aggressive';
+            if (modes[resource] !== 'aggressive')
+                throw new ValidationError('unprotected Aggressive needs mode aggressive on cpu and gpu_compute');
+        }
+        result.contention = { modes, unprotected_aggressive: { confirmed: true, requested_unix_ms: Date.now() } };
     }
     return result;
 }

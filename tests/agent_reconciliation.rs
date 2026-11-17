@@ -196,6 +196,7 @@ fn requested_modes_travel_from_the_request_to_the_policy_allocation() {
         allow_fallback: true,
         contention: Some(JobContention {
             modes: modes.clone(),
+            unprotected_aggressive: None,
         }),
     };
     let record = store.reserve(&request, &resources).unwrap();

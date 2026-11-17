@@ -61,6 +61,20 @@ pub struct LaunchRequest {
 #[serde(deny_unknown_fields)]
 pub struct JobContention {
     pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
+    /// A submission's request for unprotected Aggressive (004 FR-011, FR-014). An agent without
+    /// it rejects the job, since this type denies unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unprotected_aggressive: Option<UnprotectedGrant>,
+}
+
+/// The per-submission grant the two SDK fields produce; the launching agent checks it against
+/// the host's allowance before Authorized (004 R7).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UnprotectedGrant {
+    /// Set only when the second confirmation field was set too.
+    pub confirmed: bool,
+    pub requested_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -119,7 +119,7 @@ Aggressive.
   `src/policy/measure.rs` gains the `aggressive` target. Passes T007.
 - [x] T011 [US1] (after T622) In `src/agent/service.rs`, `fill` is true for an effective mode at
   or above Performance, Aggressive included.
-- [ ] T012 [P] [US1] (after T622) In `src/protocol.rs` and `src/coordinator.rs`, accept the job
+- [x] T012 [P] [US1] (after T622) In `src/protocol.rs` and `src/coordinator.rs`, accept the job
   mode `aggressive`, with the node cap deciding the effective mode. Flip contract case JC-05 to
   accepted in `tests/contracts/cedegrid-0.2.json`, with `mode_capped` below Aggressive.
 - [x] T013 [P] [US1] (now) In `python/cedegrid/` and `npm/src/`, add the mode value
@@ -168,7 +168,7 @@ principal contends. Nothing else changes.
   - `launch_refusal_with` refuses a grant while it is false or absent, with
     `ERR_CEDEGRID_UNPROTECTED_POLICY`, and allows it when true;
   - a container fixture `container::unprotected_aggressive_follows_the_policy_key`.
-- [ ] T021 [P] [US2] (now) In `python/tests`, `npm/tests` and `tests/contracts/cedegrid-0.2.json`,
+- [x] T021 [P] [US2] (now) In `python/tests`, `npm/tests` and `tests/contracts/cedegrid-0.2.json`,
   test the two SDK fields `unprotected_aggressive` and `confirm_unprotected_aggressive` (bool,
   default false). The wire object `unprotected_aggressive: { "confirmed": true,
   "requested_unix_ms": <u64> }` is set only when both are true. Add the new contract cases:
@@ -188,7 +188,7 @@ principal contends. Nothing else changes.
   memory floors and OOM handling are unchanged by it (FR-006). Then a yes/no
   question with no default, then the fixed phrase. Add `--disallow-unprotected-aggressive`.
   Writes go through T003. Passes T018.
-- [ ] T025 [US2] (now) In `src/protocol.rs` and `src/coordinator.rs`, add the grant object. The
+- [x] T025 [US2] (now) In `src/protocol.rs` and `src/coordinator.rs`, add the grant object. The
   coordinator rejects a grant without `confirmed: true` at submission and otherwise passes it to
   the agent unchanged. Passes the Rust half of T021.
 - [ ] T026 [US2] (now) In `src/agent/launch.rs`, check the grant before the launch barrier
@@ -196,13 +196,17 @@ principal contends. Nothing else changes.
   Aggressive, and inside a System mode unit the administrator key (T027). Record the grant with
   the attempt so retries keep it, and log `warning: this run is UNPROTECTED: other users' compute may slow down until it ends`
   once at start. Passes T019. Add the node-cap condition after T005.
+  - *Done in part:* `system_mode::grant_refusal` names every missing condition in one line, and
+    the agent calls it before launching, with the administrator key inside a unit, and emits
+    the warning event. The pure function is tested in `tests/system_mode.rs`. The end-to-end
+    agent test (T019) and the attempt record for retries are open.
 - [x] T027 [US2] (now) In `src/broker/admin_policy.rs`, add the key `modes.unprotected_aggressive`
   (default `false`). In `src/system_mode.rs` `launch_refusal_with`, refuse a grant while it is
   false. Update `specs/005-system-mode/contracts/admin-policy.md` and the policy section of
   `docs/system-mode.md`. Passes T020.
   - *Done in part:* the key, `system_mode::unprotected_refusal_with` and its unit test. The launch
     check calls it in T026; the container fixture comes with T026.
-- [ ] T028 [P] [US2] (now) In `python/cedegrid/` and `npm/src/`, add the two fields and the wire
+- [x] T028 [P] [US2] (now) In `python/cedegrid/` and `npm/src/`, add the two fields and the wire
   object. Passes the SDK half of T021.
 - [ ] T029 [US2] (after T622) In `src/contention.rs` (`ModeInput.unprotected`, the unprotected
   arm of `own_allowance`) and `src/policy/admission.rs` and `src/policy/measure.rs` (set from

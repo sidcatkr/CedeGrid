@@ -1313,6 +1313,33 @@
       "accepted": true
     }
   ],
+  "unprotected_grant_cases": [
+    {
+      "id": "UG-01",
+      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": true},
+      "wire": {"modes": {"cpu": "aggressive", "gpu_compute": "aggressive"}, "unprotected_aggressive": {"confirmed": true, "requested_unix_ms": 1}},
+      "accepted": true
+    },
+    {
+      "id": "UG-02",
+      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": false},
+      "wire": {"modes": {"cpu": "aggressive", "gpu_compute": "aggressive"}, "unprotected_aggressive": {"confirmed": false, "requested_unix_ms": 1}},
+      "accepted": false,
+      "code": "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION"
+    },
+    {
+      "id": "UG-03",
+      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": true, "contention_modes": {"cpu": "performance"}},
+      "wire": {"modes": {"cpu": "performance"}, "unprotected_aggressive": {"confirmed": true, "requested_unix_ms": 1}},
+      "accepted": false
+    },
+    {
+      "id": "UG-04",
+      "sdk": {"unprotected_aggressive": false, "confirm_unprotected_aggressive": true},
+      "wire": null,
+      "accepted": true
+    }
+  ],
   "lease_batch_cases": [
     {
       "id": "LB-01",

@@ -107,6 +107,26 @@ test('job specs carry contention only when it is set', () => {
             assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: c.modes }), CedeGridError, c.id);
     }
     assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: ['cpu'] } as any));
+    const grants = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).unprotected_grant_cases;
+    for (const c of grants) {
+        const options = {
+            unprotectedAggressive: c.sdk.unprotected_aggressive,
+            confirmUnprotectedAggressive: c.sdk.confirm_unprotected_aggressive,
+            ...(c.sdk.contention_modes ? { contentionModes: c.sdk.contention_modes } : {}),
+        };
+        if (!c.accepted) {
+            assert.throws(() => commandTask('t', ['worker'], '/work', options), CedeGridError, c.id);
+            continue;
+        }
+        const sent = commandTask('t', ['worker'], '/work', options);
+        if (c.wire === null) {
+            assert.equal('contention' in sent, false, c.id);
+            continue;
+        }
+        const contention = sent.contention as Record<string, any>;
+        assert.equal(contention.unprotected_aggressive.confirmed, true, c.id);
+        assert.deepEqual(contention.modes, c.wire.modes, c.id);
+    }
 });
 test('strict HTTPS origin validation', () => {
     for (const origin of ['https://example.test', 'https://example.test/', 'https://[::1]:9443', 'https://localhost:65535'])

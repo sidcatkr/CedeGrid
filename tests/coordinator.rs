@@ -4100,6 +4100,7 @@ fn with_mode(mut request: LaunchRequest) -> LaunchRequest {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     request.contention = Some(cedegrid::execution_model::JobContention {
         modes: BTreeMap::from([(ResourceKind::Cpu, ContentionMode::YieldFirst)]),
+        unprotected_aggressive: None,
     });
     request
 }

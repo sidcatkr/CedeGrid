@@ -2036,6 +2036,44 @@ impl AgentLoop<'_> {
                         }
                         continue;
                     }
+                    // An unprotected Aggressive grant starts only under the host's allowance, a
+                    // node cap at Aggressive and, in a unit, the administrator key (004 FR-014).
+                    if let Some((code, detail)) = crate::system_mode::grant_refusal(
+                        assignment.request.contention.as_ref(),
+                        config.contention.max_mode(),
+                        || crate::state::read_allowance(&config.state_dir),
+                        || {
+                            crate::system_mode::in_unit()
+                                .then(|| {
+                                    crate::system_mode::unprotected_refusal_with(
+                                        crate::broker::admin_policy::load(),
+                                    )
+                                })
+                                .flatten()
+                        },
+                    ) {
+                        if self.policy_refused.insert(id.clone()) {
+                            emit(&serde_json::json!({
+                                "event": "launch_refused",
+                                "code": code,
+                                "assignment_id": id,
+                                "detail": detail,
+                            }))?;
+                        }
+                        continue;
+                    }
+                    if assignment
+                        .request
+                        .contention
+                        .as_ref()
+                        .is_some_and(|contention| contention.unprotected_aggressive.is_some())
+                    {
+                        emit(&serde_json::json!({
+                            "event": "unprotected_aggressive",
+                            "assignment_id": id,
+                            "detail": "warning: this run is UNPROTECTED: other users' compute may slow down until it ends",
+                        }))?;
+                    }
                     // A launch whose descriptors do not fit with headroom is refused and the
                     // offer left to the coordinator (FR-077).
                     if descriptor_room(self.preparations.len() as u64) == 0 {

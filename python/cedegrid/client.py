@@ -59,7 +59,9 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
                  allocation_class: str = "guaranteed", required_controls: list[str] | None = None,
                  single_process: bool = False, no_escape: bool = False, managed_child_limit: int = 0,
                  input_artifacts: list[dict] | None = None, max_attempts: int | None = None,
-                 contention_modes: dict[str, str] | None = None) -> dict:
+                 contention_modes: dict[str, str] | None = None,
+                 unprotected_aggressive: bool = False,
+                 confirm_unprotected_aggressive: bool = False) -> dict:
     """Build a task; callers must explicitly acknowledge the workload contract."""
     _validate_text_field("task_id", task_id)
     _validate_text_field("cwd", cwd)
@@ -115,6 +117,18 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
                 for key, value in contention_modes.items()):
             raise ValidationError("contention_modes must map resources to modes")
         task["contention"] = {"modes": dict(contention_modes)}
+    if type(unprotected_aggressive) is not bool or type(confirm_unprotected_aggressive) is not bool:
+        raise ValidationError("unprotected_aggressive and confirm_unprotected_aggressive must be booleans")
+    if unprotected_aggressive:
+        # 004: both fields, sent as one grant; the launching agent still checks the host.
+        if not confirm_unprotected_aggressive:
+            raise ValidationError("ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing")
+        modes = dict(contention_modes or {})
+        for resource in ("cpu", "gpu_compute"):
+            if modes.setdefault(resource, "aggressive") != "aggressive":
+                raise ValidationError("unprotected Aggressive needs mode aggressive on cpu and gpu_compute")
+        task["contention"] = {"modes": modes, "unprotected_aggressive": {
+            "confirmed": True, "requested_unix_ms": int(time.time() * 1000)}}
     return task
 
 

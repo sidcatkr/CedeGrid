@@ -3753,6 +3753,7 @@ mod agent_in_unit {
             allow_fallback: false,
             contention: ram.map(|mode| JobContention {
                 modes: [(ResourceKind::Ram, mode)].into(),
+                unprotected_aggressive: None,
             }),
         }
     }
@@ -3979,6 +3980,7 @@ fn a_jobs_modes_are_its_requests_capped_by_the_node() {
             (ResourceKind::Cpu, ContentionMode::YieldFirst),
         ]
         .into(),
+        unprotected_aggressive: None,
     };
     let modes = job_modes(&node, Some(&request));
     assert_eq!(modes[0], ContentionMode::YieldFirst);
@@ -4098,4 +4100,72 @@ fn a_stop_waits_for_both_units_and_nothing_else_waits_longer_than_two_seconds() 
         assert_eq!(reply_timeout(&request), CLIENT_TIMEOUT);
     }
     assert_eq!(CLIENT_TIMEOUT, Duration::from_secs(2));
+}
+
+#[test]
+fn an_unprotected_grant_starts_only_with_every_condition_met() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    use cedegrid::state::Allowance;
+    use cedegrid::system_mode::grant_refusal;
+    let grant = |confirmed| JobContention {
+        modes: [
+            (ResourceKind::Cpu, ContentionMode::Aggressive),
+            (ResourceKind::GpuCompute, ContentionMode::Aggressive),
+        ]
+        .into(),
+        unprotected_aggressive: Some(UnprotectedGrant {
+            confirmed,
+            requested_unix_ms: 1,
+        }),
+    };
+    let on = || Allowance::On { set_at_unix_ms: 1 };
+    let off = || Allowance::Off { reason: None };
+    let unreadable = || Allowance::Off {
+        reason: Some("the allowance record cannot be read: corrupt".into()),
+    };
+    let permitted = || None;
+    let aggressive = ContentionMode::Aggressive;
+    // Every condition met: it starts.
+    assert_eq!(
+        grant_refusal(Some(&grant(true)), aggressive, on, permitted),
+        None
+    );
+    // No grant: nothing to check.
+    assert_eq!(
+        grant_refusal(None, ContentionMode::Neutral, off, permitted),
+        None
+    );
+    // Each missing condition is named, all of them in one line.
+    let (code, line) = grant_refusal(
+        Some(&grant(false)),
+        ContentionMode::Performance,
+        off,
+        || {
+            Some((
+                "unprotected_policy",
+                "ERR_CEDEGRID_UNPROTECTED_POLICY: no".to_owned(),
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(code, "unprotected_refused");
+    for needle in [
+        "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION",
+        "ERR_CEDEGRID_UNPROTECTED_CAPPED",
+        "ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED",
+        "ERR_CEDEGRID_UNPROTECTED_POLICY",
+    ] {
+        assert!(line.contains(needle), "{line}");
+    }
+    assert_eq!(line.lines().count(), 1);
+    let (_, line) = grant_refusal(Some(&grant(true)), aggressive, unreadable, permitted).unwrap();
+    assert!(
+        line.contains("ERR_CEDEGRID_UNPROTECTED_ALLOWANCE_UNREADABLE"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED"),
+        "{line}"
+    );
 }

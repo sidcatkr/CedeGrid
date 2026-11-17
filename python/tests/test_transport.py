@@ -76,6 +76,20 @@ class TransportTests(unittest.TestCase):
                 command_task('t',['worker'],'/home/user',contention_modes=case['modes'])
         with self.assertRaises(ValidationError):
             command_task('t',['worker'],'/home/user',contention_modes=['cpu'])
+        for case in fixture['unprotected_grant_cases']:
+            args=dict(case['sdk'])
+            if not case['accepted']:
+                with self.assertRaises(ValidationError,msg=case['id']):
+                    command_task('t',['worker'],'/home/user',**args)
+                continue
+            sent=command_task('t',['worker'],'/home/user',**args)
+            if case['wire'] is None:
+                self.assertNotIn('contention',sent,case['id']);continue
+            grant=sent['contention'].pop('unprotected_aggressive')
+            self.assertEqual(set(grant),{'confirmed','requested_unix_ms'},case['id'])
+            self.assertTrue(grant['confirmed'],case['id'])
+            wire=dict(case['wire']);wire.pop('unprotected_aggressive')
+            self.assertEqual(sent['contention'],wire,case['id'])
     def test_wrong_ca_wrong_hostname_and_unauthorized_leaf(self):
         with self.assertRaises(RemoteError):self.client(ca=self.root/'wrong.pem').request('echo')
         original=self.endpoint;self.endpoint=original.replace('127.0.0.1','localhost')

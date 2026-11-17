@@ -113,6 +113,44 @@ pub fn job_modes(
         .collect()
 }
 
+/// Why an unprotected Aggressive grant may not start (004 FR-014, FR-015, FR-015a), naming every
+/// missing condition in one line, or `None` when it may (or carries no grant). The allowance and,
+/// in a System mode unit, the administrator policy are read only when a grant is present.
+pub fn grant_refusal(
+    contention: Option<&crate::execution_model::JobContention>,
+    cap: crate::contention::ContentionMode,
+    allowance: impl FnOnce() -> crate::state::Allowance,
+    unit_policy: impl FnOnce() -> Option<(&'static str, String)>,
+) -> Option<(&'static str, String)> {
+    let grant = contention.and_then(|contention| contention.unprotected_aggressive)?;
+    let mut missing = Vec::new();
+    if !grant.confirmed {
+        missing.push(
+            "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing"
+                .to_owned(),
+        );
+    }
+    if cap < crate::contention::ContentionMode::Aggressive {
+        missing.push(
+            "ERR_CEDEGRID_UNPROTECTED_CAPPED: the node cap does not include Aggressive".to_owned(),
+        );
+    }
+    match allowance() {
+        crate::state::Allowance::On { .. } => {}
+        crate::state::Allowance::Off { reason: None } => missing.push(
+            "ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED: the host's \"allow unprotected Aggressive\" setting is off"
+                .to_owned(),
+        ),
+        crate::state::Allowance::Off { reason: Some(reason) } => missing.push(format!(
+            "ERR_CEDEGRID_UNPROTECTED_ALLOWANCE_UNREADABLE: {reason}; treated as off"
+        )),
+    }
+    if let Some((_, line)) = unit_policy() {
+        missing.push(line);
+    }
+    (!missing.is_empty()).then(|| ("unprotected_refused", missing.join("; ")))
+}
+
 /// Why the administrator policy refuses an unprotected Aggressive grant in a System mode unit
 /// (004 FR-015a), or `None` when it permits one. A policy that cannot be read refuses.
 pub fn unprotected_refusal_with(

@@ -700,6 +700,21 @@ pub fn validate_launch_request(request: &LaunchRequest) -> anyhow::Result<()> {
             .is_none_or(|contention| !contention.modes.is_empty()),
         "ERR_CEDEGRID_ARGUMENT: a per-job contention override needs at least one mode"
     );
+    if let Some(contention) = &request.contention
+        && let Some(grant) = contention.unprotected_aggressive
+    {
+        use crate::contention::{ContentionMode::Aggressive, ResourceKind};
+        anyhow::ensure!(
+            grant.confirmed,
+            "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing"
+        );
+        anyhow::ensure!(
+            [ResourceKind::Cpu, ResourceKind::GpuCompute]
+                .iter()
+                .all(|kind| contention.modes.get(kind) == Some(&Aggressive)),
+            "ERR_CEDEGRID_ARGUMENT: unprotected Aggressive needs mode aggressive on cpu and gpu_compute"
+        );
+    }
     Ok(())
 }
 

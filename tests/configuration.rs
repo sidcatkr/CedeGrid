@@ -1993,3 +1993,44 @@ fn an_aggressive_job_launches_at_the_default_priority() {
         assert_eq!(config.launch_nice(&request), 0, "{mode}");
     }
 }
+
+#[test]
+fn unprotected_grant_cases_parse_and_validate_alike() {
+    // 004 FR-011, FR-014: the grant is on the wire only when both SDK fields were set.
+    use cedegrid::execution_model::LaunchRequest;
+    let reply: Value =
+        serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
+    let base = reply["assignments"][0]["request"].clone();
+    for case in contract()["unprotected_grant_cases"].as_array().unwrap() {
+        if case["wire"].is_null() {
+            continue;
+        }
+        let mut task = base.clone();
+        task["contention"] = case["wire"].clone();
+        let accepted = serde_json::from_value::<LaunchRequest>(task.clone())
+            .map_err(anyhow::Error::from)
+            .and_then(|request| {
+                cedegrid::protocol::validate_launch_request(&request)?;
+                Ok(request)
+            });
+        assert_eq!(
+            accepted.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "{}: {accepted:?}",
+            case["id"]
+        );
+        if let (Err(error), Some(code)) = (&accepted, case["code"].as_str()) {
+            assert!(
+                format!("{error:#}").contains(code),
+                "{}: {error:#}",
+                case["id"]
+            );
+        }
+        if let Ok(request) = accepted {
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["contention"],
+                task["contention"]
+            );
+        }
+    }
+}
