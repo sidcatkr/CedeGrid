@@ -1243,7 +1243,10 @@ impl<'a> Interval<'a> {
         let mut slice_admission_held = false;
         if !telemetry_unknown {
             let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
-            time_slice = self.time_slice(gpu, measured.is_some(), budget.unattributed);
+            let (slice, next_held) = self
+                .time_slice(gpu, measured.is_some(), budget.unattributed)
+                .unzip();
+            time_slice = slice;
             if let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) {
                 match gpu.time_sliced {
                     Some(sliced) => demand.last_time_sliced = sliced,
@@ -1258,7 +1261,8 @@ impl<'a> Interval<'a> {
             // in Yield First and Neutral own tasks there are held by whole tasks (FR-021, FR-089).
             slice_admission_held = time_slice
                 .as_ref()
-                .is_some_and(|slice| !slice.bound.is_empty());
+                .is_some_and(|slice| !slice.bound.is_empty())
+                || next_held == Some(true);
             if let Some(hold) = time_slice.as_ref().and_then(|slice| slice.hold) {
                 self.slice_hold.insert(gpu.uuid.clone(), hold);
                 note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_hold");
@@ -1722,7 +1726,7 @@ impl<'a> Interval<'a> {
         gpu: &GpuSnapshot,
         measured: bool,
         unattributed: bool,
-    ) -> Option<TimeSliceRecord> {
+    ) -> Option<(TimeSliceRecord, bool)> {
         if gpu.time_sliced != Some(true) {
             return None;
         }
@@ -1826,7 +1830,23 @@ impl<'a> Interval<'a> {
         if !holds {
             self.slice_hold(&principals, read, &gpu.uuid, &mut record);
         }
-        Some(record)
+        // One more own process is admitted only while (m + 1) × k ≤ E or no counted principal
+        // would be slice-bound beside it, so a task is not admitted only to be held (FR-022,
+        // FR-089).
+        let next_holds = if counted {
+            own.saturating_add(1).saturating_mul(count) <= external
+        } else {
+            own == 0
+        };
+        let next_held = holds && !next_holds && {
+            let mut beside = TimeSliceRecord {
+                own: own.saturating_add(1),
+                ..TimeSliceRecord::default()
+            };
+            self.slice_hold(&principals, read, &gpu.uuid, &mut beside);
+            !beside.bound.is_empty()
+        };
+        Some((record, next_held))
     }
 
     /// Own work's and each listed UID's arrival on the device, and the first-come floor's state

@@ -6188,6 +6188,41 @@ mod gpu_demand {
             assert!(run.iter().all(|t| t.steps.is_empty()));
         }
 
+        /// One own process beside one saturating context holds the rule, but one more would not:
+        /// GPU admission already holds at m = 1, in Neutral and Performance, so a second task is
+        /// not admitted only to be paused, drained and admitted again. Beside a principal with two
+        /// contexts one more own process keeps the rule, and admission stays open (FR-022,
+        /// FR-089).
+        #[test]
+        fn admission_holds_where_one_more_process_would_break_the_rule() {
+            let code = |decision: &Decision| {
+                decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string)
+            };
+            for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+                let run = saturating(mode, &|_| 1, 1, 30);
+                for (i, (decision, _)) in run.iter().enumerate().skip(2) {
+                    assert!(slice_of(decision).holds, "{mode:?} interval {i}");
+                    assert_eq!(
+                        code(decision).as_deref(),
+                        Some("gpu_time_slice_admission_held"),
+                        "{mode:?} interval {i}"
+                    );
+                }
+                let run = saturating(mode, &|_| 1, 2, 30);
+                for (i, (decision, _)) in run.iter().enumerate().skip(2) {
+                    assert_ne!(
+                        code(decision).as_deref(),
+                        Some("gpu_time_slice_admission_held"),
+                        "{mode:?} interval {i}"
+                    );
+                }
+            }
+        }
+
         /// The first-come record of the device (FR-090).
         pub(super) fn first_come(decision: &Decision) -> Option<String> {
             decision.resources[&ResourceKey::GpuCompute(GPU.into())]
