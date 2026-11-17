@@ -13,24 +13,32 @@
 - **Per-job modes.** A task may set `contention.modes` per resource (Python
   `command_task(..., contention_modes=...)`, TypeScript `commandTask(..., { contentionModes })`).
   It runs at the less aggressive of that mode and the node cap; a capped request is reported
-  with `mode_capped`. The node mode sets the aggregate on each resource. Inside it, Yield First
-  jobs yield first, then Neutral, then Performance, and each job is held to its own mode's
-  target. Such tasks are placed only on agents that negotiated `contention/1`.
+  with `mode_capped`. A job's mode decides how that job gives back: a job in Performance is
+  never held for another user, for unknown activity or at a memory floor breach, whatever the
+  node's mode; only the operator envelope steps it. The node mode still sets the aggregate and
+  admission, and the node's Yield First and Neutral jobs give what it needs as far as they can,
+  so another user can get less than the node's mode promises (known limitation). Such tasks are
+  placed only on agents that negotiated `contention/1`.
 - **Measured GPU compute.** External GPU compute is measured from per-process samples when
   they account for the device within `contention.gpu_compute.attribution_tolerance_percent`
   (15) points; external users are grouped by UID. While an external process is listed,
   device time not attributed to own processes counts as external. Otherwise, and under MPS,
   the amount is unknown. A device returns to the measured path only after
   `contention.gpu_compute.quiet_window_intervals` consecutive measured intervals. Under an
-  unknown amount, Neutral and Performance hold the fair share once the supervisor applied
-  the duty; Yield First pauses and then keeps the 5% minimum duty.
-- **The time-slice duty.** On a time-sliced GPU where own work holds more than its share of
-  the busy processes, Neutral, Performance and Aggressive cap it only beside a principal that
-  reads at least `contention.gpu_compute.slice_bound_percent` (75) percent of its slices, at a
-  duty from the busy process counts, less the mode's margin, that rises
-  `contention.gpu_compute.slice_step_percent` (5) points at a time while the device idles,
-  never with a pause. Own allocations' GPU duty cycles follow the node's monotonic clock, so
-  they stop and resume together.
+  unknown amount, Neutral holds the fair share and Performance admits nothing new there.
+- **Whole-task holds.** Yield First and Neutral hold own GPU compute work, and CPU work in
+  Tracked, back by pausing whole tasks, with no rate cap and no stop-and-resume duty cycle. A
+  task is paused only while the own work left running stays at or above the mode's target, so a
+  single job is never paused below it. A pause still answering its demand after
+  `pause_bound_s` (10 s) gives a hint-ready CPU task its hint and otherwise drains the task,
+  which is requeued without using an attempt. In Full with `cpu.max` authorized, CPU work is
+  still capped. On a time-sliced GPU, own tasks are paused down to the share of the busy
+  processes the time-slice rule allows beside a principal that reads at least
+  `contention.gpu_compute.slice_bound_percent` (75) percent of its slices.
+  `contention.gpu_compute.slice_step_percent` still loads and has no effect.
+- **First-come GPU floor.** Own GPU work that was on a device before every other user listed
+  there keeps, in Yield First and Neutral, at least the share that leaves none of them more
+  than half of the device. An unreadable user ID or an unknown process list withholds it.
 - **Satisfied demand.** Under saturation, a small external demand is probed and a larger one
   is watched for one response window. A user whose usage stays within its demand is recorded
   as satisfied and no longer contends until its usage grows past it. At most 64 records are

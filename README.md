@@ -204,12 +204,12 @@ Durable coordinator storage requires a qualified local filesystem. An explicitly
 selected replayable burst-agent profile can use weaker storage with authenticated
 recovery and retained uncertain reservations. `doctor` never treats that as strict
 durability. GPU sharing is best effort and does not guarantee an external allocation
-or performance. On a time-sliced GPU, CedeGrid relies on the driver's time-slicing and caps
-a job's compute only while it holds more processes than its share of the busy ones and another
-user wants its slices; the cap's duty then comes from the busy process counts, leaves the
-mode's margin and rises while the device idles, with no pause, and own jobs on one GPU stop and
-resume together. This rests on the driver giving busy contexts equal slices, and MPS and MIG
-devices keep the measured path. Hostile-code isolation, arbitrary descendants, hard VRAM
+or performance. On a time-sliced GPU, CedeGrid relies on the driver's time-slicing. In Yield
+First and Neutral, while own jobs hold more processes than their share of the busy ones and
+another user wants its slices, whole own tasks are paused down to that share; a single job is
+never paused for it, and no duty cycle runs. Own work that was on the device before another user
+keeps at least half of it. This rests on the driver giving busy contexts equal slices, and MPS
+and MIG devices keep the measured path. Hostile-code isolation, arbitrary descendants, hard VRAM
 partitioning, and unqualified optional controls are outside the support claim. See
 [guarantees](docs/guarantees.md).
 
