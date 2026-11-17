@@ -284,6 +284,7 @@ the task list.
   - enable the socket;
   - on purge, stop and remove every unit with the broker's marker, then the slices, the socket, the service and the group.
   - Touch no PAM, login, SSH, other unit, sysctl or kernel module setting.
+  - *Written, not yet run:* `prerm` stops the broker and every unit with the broker's description prefix and marker; `postrm` removes the group and an empty `/etc/cedegrid` on purge. The container run (T050) checks them.
 - [ ] T054 [US5] Make the agent apply the administrator policy to each job in System mode, in `src/agent/` and `src/config.rs`: read `/etc/cedegrid/policy.toml` with the broker's loader, refuse a disallowed mode and a job past `tasks_per_user` (passes T051)
 - [ ] T055 [US5] Add the `.deb` build for `cedegrid` and `cedegrid-system` to the release workflow in `.github/workflows/release.yml`, with checksums in the release (FR-033)
 - [ ] T056 [US5] Add the project's own apt repository publication and its signing to `.github/workflows/release.yml`, behind a separate approval in the workflow (FR-033)

@@ -1,7 +1,33 @@
 #!/bin/sh
-# cedegrid-system: stop the broker before its files go (005 T053 completes this).
+# cedegrid-system: stop the broker and every unit it made before its files go (005 FR-034).
 set -e
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-    systemctl disable --now cedegrid-broker.socket || true
-    systemctl stop cedegrid-broker.service || true
-fi
+
+stop_marked_units() {
+    systemctl list-units --all --plain --no-legend --type=service \
+        'cedegrid-u*.service' 'cedegrid-idle-u*.service' 2>/dev/null |
+    while read -r unit _rest; do
+        case "$unit" in
+            cedegrid-idle-u*.service) kind=idle; uid=${unit#cedegrid-idle-u} ;;
+            cedegrid-u*.service) kind=ordinary; uid=${unit#cedegrid-u} ;;
+            *) continue ;;
+        esac
+        uid=${uid%.service}
+        case "$uid" in ''|*[!0-9]*) continue ;; esac
+        # Only units carrying the broker's marker are stopped.
+        description=$(systemctl show -p Description --value -- "$unit")
+        case "$description" in "CedeGrid System mode unit"*) ;; *) continue ;; esac
+        if systemctl show -p Environment --value -- "$unit" | tr ' ' '\n' |
+            grep -qx "CEDEGRID_SYSTEM_UNIT=$kind:$uid"; then
+            systemctl stop -- "$unit" || true
+            systemctl reset-failed -- "$unit" 2>/dev/null || true
+        fi
+    done
+}
+
+case "$1" in
+    remove|purge)
+        systemctl disable --now cedegrid-broker.socket || true
+        systemctl stop cedegrid-broker.service || true
+        stop_marked_units
+        ;;
+esac

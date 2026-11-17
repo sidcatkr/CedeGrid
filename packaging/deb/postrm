@@ -1,8 +1,16 @@
 #!/bin/sh
 # cedegrid-system: on purge, leave the host as it was before the install (005 FR-034).
-# T053 adds stopping every unit that carries the broker's marker, before the group goes.
 set -e
-if [ "$1" = "purge" ]; then
-    systemctl daemon-reload || true
-    rmdir --ignore-fail-on-non-empty /etc/cedegrid 2>/dev/null || true
-fi
+case "$1" in
+    remove)
+        systemctl daemon-reload || true
+        ;;
+    purge)
+        systemctl daemon-reload || true
+        if getent group cedegrid >/dev/null; then
+            groupdel cedegrid || true
+        fi
+        # Kept only if an administrator added files there.
+        rmdir /etc/cedegrid 2>/dev/null || true
+        ;;
+esac
