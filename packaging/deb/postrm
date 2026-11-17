@@ -4,9 +4,12 @@ set -e
 case "$1" in
     remove)
         systemctl daemon-reload || true
+        # The socket's directory; empty once the socket is gone.
+        rmdir /run/cedegrid 2>/dev/null || true
         ;;
     purge)
         systemctl daemon-reload || true
+        rmdir /run/cedegrid 2>/dev/null || true
         if getent group cedegrid >/dev/null; then
             groupdel cedegrid || true
         fi

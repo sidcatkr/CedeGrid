@@ -29,5 +29,8 @@ case "$1" in
         systemctl disable --now cedegrid-broker.socket || true
         systemctl stop cedegrid-broker.service || true
         stop_marked_units
+        # Stopped while their unit files exist: a newer systemd keeps an emptied slice loaded
+        # and active after its file is gone (seen with systemd 259).
+        systemctl stop cedegrid.slice cedegrid_idle.slice || true
         ;;
 esac
