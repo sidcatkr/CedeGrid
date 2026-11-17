@@ -3873,3 +3873,34 @@ fn a_jobs_modes_are_its_requests_capped_by_the_node() {
     assert_eq!(modes[0], ContentionMode::YieldFirst);
     assert_eq!(modes[1], ContentionMode::Neutral);
 }
+
+#[test]
+fn an_agent_in_a_unit_runs_at_the_full_level_on_its_jobs_cgroup() {
+    use cedegrid::config::Config;
+    use cedegrid::system_mode::{UNIT_CONTROLS, apply_unit};
+    use std::path::PathBuf;
+    let jobs = PathBuf::from("/sys/fs/cgroup/cedegrid.slice/cedegrid-u1500.service/jobs");
+    // A default configuration: the cgroup backend off and nothing authorized.
+    let mut config = Config::default();
+    config.ram.prefer_own_oom_victim = false;
+    assert!(apply_unit(&mut config, jobs.clone()).is_empty());
+    assert!(config.cgroup.enabled);
+    assert_eq!(config.cgroup.authorized_controls, UNIT_CONTROLS);
+    assert_eq!(config.cgroup.delegated_root.as_ref(), Some(&jobs));
+    assert_eq!(config.kernel.delegated_root.as_ref(), Some(&jobs));
+    config.cgroup.validate().unwrap();
+    // A user's own list is kept, with no control twice, and the OOM preference is turned off.
+    let mut config = Config::default();
+    config.cgroup.authorized_controls = vec!["cpu.weight".into(), "memory.max".into()];
+    config.kernel.delegated_root = Some(PathBuf::from("/elsewhere"));
+    config.ram.prefer_own_oom_victim = true;
+    let warnings = apply_unit(&mut config, jobs.clone());
+    assert_eq!(warnings.len(), 1);
+    assert!(!config.ram.prefer_own_oom_victim);
+    assert_eq!(config.kernel.delegated_root.as_ref(), Some(&jobs));
+    let mut controls = config.cgroup.authorized_controls.clone();
+    controls.sort();
+    controls.dedup();
+    assert_eq!(controls.len(), UNIT_CONTROLS.len() + 1);
+    config.cgroup.validate().unwrap();
+}

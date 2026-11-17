@@ -24,6 +24,40 @@ pub fn in_unit() -> bool {
     IN_UNIT.get().copied().unwrap_or(false)
 }
 
+/// The cgroup files the agent in a unit may write: the gate's self-join and Full's runtime steps.
+pub const UNIT_CONTROLS: &[&str] = &[
+    "cgroup.procs",
+    "cpu.weight",
+    "cpu.max",
+    "cgroup.freeze",
+    "memory.high",
+];
+
+/// Points the agent's cgroup backend and kernel readback at the unit's jobs cgroup and turns the
+/// Full level on (FR-012): the unit's subtree is CedeGrid's own, so no operator opt-in is needed.
+/// Returns a warning for each setting that has no effect in a unit.
+pub fn apply_unit(config: &mut crate::config::Config, jobs: std::path::PathBuf) -> Vec<String> {
+    let mut warnings = Vec::new();
+    config.cgroup.enabled = true;
+    let controls = &mut config.cgroup.authorized_controls;
+    for control in UNIT_CONTROLS {
+        if !controls.iter().any(|c| c == control) {
+            controls.push((*control).to_owned());
+        }
+    }
+    config.kernel.delegated_root = Some(jobs.clone());
+    config.cgroup.delegated_root = Some(jobs);
+    // The broker is the only writer of OOM scores in a unit (T049).
+    if config.ram.prefer_own_oom_victim {
+        warnings.push(
+            "ram.prefer_own_oom_victim has no effect in System mode; the broker sets OOM scores"
+                .to_owned(),
+        );
+        config.ram.prefer_own_oom_victim = false;
+    }
+    warnings
+}
+
 /// The modes a job would run at, one per resource: its request or the node's mode, capped by
 /// the node's most aggressive allowed mode (001 FR-030).
 pub fn job_modes(
