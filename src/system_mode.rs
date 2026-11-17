@@ -200,3 +200,11 @@ pub fn run(request: &Request, require_system: bool) -> anyhow::Result<SystemRepo
         Decision::Refuse(line) => anyhow::bail!(line),
     }
 }
+
+/// What the two units run until the agent and the idle executor are built into them (T022):
+/// the process holds the unit, and with it the user's delegated cgroup, until systemd stops it.
+pub fn hold_unit() -> anyhow::Result<()> {
+    loop {
+        std::thread::park();
+    }
+}

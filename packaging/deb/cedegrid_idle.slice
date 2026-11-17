@@ -1,0 +1,10 @@
+# Root-level slice for Yield First work (005 FR-016). A "-" in a slice name means nesting, so
+# the name uses "_" to stay directly below the root. systemd before 252 rejects
+# CPUWeight=idle; the broker then writes cpu.idle itself and reads it back (research R1).
+[Unit]
+Description=CedeGrid Yield First work
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+CPUWeight=idle

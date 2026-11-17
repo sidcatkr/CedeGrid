@@ -29,7 +29,7 @@ This runs only `tests/system_mode.rs`'s opt-in fixtures, never `--ignored` acros
 | Check | Expected |
 |---|---|
 | install, then the file and unit inventory | only what [units-and-slices.md](contracts/units-and-slices.md) lists was added |
-| `cpu.idle` on `cedegrid-idle.slice` | reads 1; `doctor` names the path R1 took on systemd 249 |
+| `cpu.idle` on `cedegrid_idle.slice` | reads 1; `doctor` names the path R1 took on systemd 249 |
 | a member's run | lands in `cedegrid-u<uid>.service` with the member's IDs; `doctor` says System (SC-001) |
 | the security suite (FR-029) | every case refused or held, logged, nothing else changed (SC-002) |
 | a flood from one member | another member answered within SC-003's bound |

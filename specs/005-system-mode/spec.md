@@ -141,8 +141,8 @@ is pending the user's choice.
 - **Idle executor**: a fixed CedeGrid subcommand that runs in the idle unit with no policy of its
   own. The user's agent drives it to start Yield First work there, since a process in one unit
   cannot start a process in the other.
-- **The two slices**: `cedegrid.slice` and `cedegrid-idle.slice`, directly below the root cgroup.
-  `cedegrid-idle.slice` has `cpu.idle` set, so it gets CPU time only when its siblings at the root
+- **The two slices**: `cedegrid.slice` and `cedegrid_idle.slice`, directly below the root cgroup.
+  `cedegrid_idle.slice` has `cpu.idle` set, so it gets CPU time only when its siblings at the root
   leave it.
 - **Administrator policy**: root-owned settings in `/etc/cedegrid/`. They give the allowed modes,
   each user's task limit and `TasksMax=`. A user's settings never exceed them.
@@ -360,7 +360,7 @@ it, but the feature can be tested before packaging exists.
 - **FR-006**: The broker MUST build every unit's name and properties from the caller's user ID and
   the administrator policy only: `cedegrid-u<uid>.service` in the slice decision N4 picks
   (`user-<uid>.slice` or `cedegrid.slice`) and `cedegrid-idle-u<uid>.service` in
-  `cedegrid-idle.slice`, `User=<uid>`, the user's primary group,
+  `cedegrid_idle.slice`, `User=<uid>`, the user's primary group,
   `Delegate=yes`, `TasksMax=` from the policy, and as the command a fixed CedeGrid subcommand at
   the root-owned installed path. No unit MUST get a fixed negative `OOMScoreAdjust=`.
 - **FR-007**: The broker MUST start, stop and move work only in units it made, recognized by name
@@ -403,8 +403,8 @@ it, but the feature can be tested before packaging exists.
 
 **The slices and CPU**
 
-- **FR-016**: Installing MUST create `cedegrid.slice` and `cedegrid-idle.slice` directly below
-  the root cgroup, with `cpu.idle` on `cedegrid-idle.slice`. Other users' areas, such as the SSH
+- **FR-016**: Installing MUST create `cedegrid.slice` and `cedegrid_idle.slice` directly below
+  the root cgroup, with `cpu.idle` on `cedegrid_idle.slice`. Other users' areas, such as the SSH
   service and login sessions, MUST be left as they are.
 - **FR-017**: Yield First work MUST run in the caller's `cedegrid-idle-u<uid>.service`, started
   there by the idle executor at the agent's request, and every other mode's work in
@@ -512,7 +512,7 @@ shared host is not validated by this feature (FR-031).
 | Layout | Kernel 7.0 (EEVDF). The `cpu` controller is enabled below `user.slice` and below each account's slice (weight 100 each); each login has its own session scope. `systemd-oomd` active, 8 GiB swap | Kernel 6.8 (CFS), systemd 249, autogroup on. The `cpu` controller is enabled at the root but not below `user.slice`; an SSH login is placed in `system.slice/ssh.service` |
 | Plain Linux splits CPU | by account, then by session, then by thread | among the root's groups, then by thread among every SSH user's threads in one group |
 | Own work in `cedegrid.slice` | leaves its account's slice and competes at the root beside `user.slice` and `system.slice`. At equal weights it could get as much as all logged-in accounts together, or as little as one account's share in `user.slice`, depending on how many users each side holds. FR-019 makes the weight keep both sides at their baseline | leaves the SSH users' shared group and competes beside `system.slice` at the root. At equal weights own work would get about half the host whatever its thread count: more than the baseline when own work has few threads, less when it has many. FR-019 applies |
-| Yield First in `cedegrid-idle.slice` | gives way to every sibling at the root, so to every other account and to own work in other modes | same |
+| Yield First in `cedegrid_idle.slice` | gives way to every sibling at the root, so to every other account and to own work in other modes | same |
 | Memory | per-account counters exist below `user.slice` | other users' memory has no per-account cgroup, so the broker sums per-process counters by user (FR-022) |
 
 ## Success Criteria *(mandatory)*

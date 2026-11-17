@@ -1,8 +1,0 @@
-# Root-level slice for Yield First work (005 FR-016). Where systemd refuses CPUWeight=idle,
-# the broker writes cpu.idle itself and reads it back (research R1).
-[Unit]
-Description=CedeGrid Yield First work
-Before=slices.target
-
-[Slice]
-CPUWeight=idle

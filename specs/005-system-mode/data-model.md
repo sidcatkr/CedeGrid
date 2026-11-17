@@ -31,7 +31,7 @@ timeout is in the contract.
 |---|---|
 | `name` | `cedegrid-u<uid>.service` or `cedegrid-idle-u<uid>.service` |
 | `kind` | ordinary or idle |
-| `slice` | ordinary: per N4 (`user-<uid>.slice` or `cedegrid.slice`); idle: `cedegrid-idle.slice` |
+| `slice` | ordinary: per N4 (`user-<uid>.slice` or `cedegrid.slice`); idle: `cedegrid_idle.slice` |
 | `user`, `group` | the caller's `uid`, `gid` |
 | `delegate` | yes |
 | `tasks_max`, process limits | from the policy (FR-010, N3) |

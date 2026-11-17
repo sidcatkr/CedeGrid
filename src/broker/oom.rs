@@ -468,12 +468,12 @@ pub fn find_units(cgroup_root: &std::path::Path) -> Vec<FoundUnit> {
             .ok()
     };
     let mut units = Vec::new();
-    for name in names(&cgroup_root.join("cedegrid-idle.slice")) {
+    for name in names(&cgroup_root.join("cedegrid_idle.slice")) {
         if let Some(uid) = uid_of(&name, "cedegrid-idle-u") {
             units.push(FoundUnit {
                 kind: UnitKind::Idle,
                 uid,
-                cgroup: format!("/cedegrid-idle.slice/{name}"),
+                cgroup: format!("/cedegrid_idle.slice/{name}"),
             });
         }
     }

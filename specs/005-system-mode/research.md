@@ -16,10 +16,10 @@ needs a run, the run is listed under "Runs for the other session" with no result
 - **The kernel side.** `cpu.idle` came with "sched: Cgroup SCHED_IDLE support" (commit
   `304000390f88`), which is in 5.15. So the kernel floor has it.
 - **How it is settled without touching the shared host.** Ubuntu 22.04, the repository's CI image
-  (`ubuntu-22.04`), ships systemd 249. The container test (R17) starts `cedegrid-idle.slice` with
+  (`ubuntu-22.04`), ships systemd 249. The container test (R17) starts `cedegrid_idle.slice` with
   `CPUWeight=idle` and reads `cpu.idle` back.
 - **Decision.** At install and at each broker start, the broker's setup checks
-  `/sys/fs/cgroup/cedegrid-idle.slice/cpu.idle`:
+  `/sys/fs/cgroup/cedegrid_idle.slice/cpu.idle`:
   1. `CPUWeight=idle` in the slice file, where systemd accepts it and `cpu.idle` reads 1;
   2. else the broker writes `cpu.idle` = 1 itself, as root, and reads it back. That write is the
      only cgroup write the broker makes outside a move (FR-009). systemd does not manage
@@ -58,7 +58,7 @@ host splits CPU by account, systemd can place `cedegrid-u<uid>.service` in `user
 beside the caller's login sessions. The account's total share is then what it is without
 CedeGrid, by construction, and nobody else's share changes. Only the split inside the account
 changes, between the login sessions and the unit. Yield First stays in the root-level
-`cedegrid-idle.slice`, which `cpu.idle` needs. Open for the host run: whether `systemd-logind`
+`cedegrid_idle.slice`, which `cpu.idle` needs. Open for the host run: whether `systemd-logind`
 stops `user-<uid>.slice`, with the unit in it, when the user's last session ends on a host
 without lingering. The documentation read does not settle it. If it does, this placement fails
 003 FR-015 (a run continues after the SSH session ends).

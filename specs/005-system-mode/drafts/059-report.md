@@ -47,7 +47,7 @@ within 2 s (provisional), CedeGrid runs as today and says so in one line. With
 A request that names a user ID, unit, path, cgroup, mount, device, capability or program is
 refused whole and logged. Every request and every score write goes to the journal.
 
-**Why Yield First gets better.** `cedegrid-idle.slice` sits next to the other users' groups at the
+**Why Yield First gets better.** `cedegrid_idle.slice` sits next to the other users' groups at the
 top of the cgroup tree, with `cpu.idle` set. The kernel then runs it only when its neighbours
 leave a CPU free, about 3/1027 of each contended CPU (reasoned from the kernel's weights). So the
 15% CPU margin Yield First keeps today may go down toward 0%. A run decides how far: `cpu.idle`

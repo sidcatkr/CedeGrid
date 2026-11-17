@@ -50,9 +50,10 @@ the task list.
 - [ ] T001 Declare `pub mod broker;` and `pub mod system_mode;` in `src/lib.rs`, and create `src/broker.rs` declaring `pub mod request; pub mod admin_policy; pub mod units; pub mod score; pub mod oom;` (reached from `tests/`) and `mod peer; mod moves;`, with empty files under `src/broker/` (no `#[path]`)
 - [ ] T002 [P] Add every new shipped file (`src/broker.rs`, `src/broker/*.rs`, `src/system_mode.rs`, `packaging/deb/*`) to `ALLOWLIST` in `tools/pack_source_review.py` and to `include` in `Cargo.toml`
   - *In progress:* every file added so far is listed; the list grows with each task.
-- [x] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid-idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
+- [x] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid_idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
 - [ ] T004 [P] Add a CI job on `ubuntu-22.04` in `.github/workflows/ci.yml` that builds both `.deb` files and starts a container with systemd as PID 1, running only `tests/system_mode.rs` with `CEDEGRID_TEST_SYSTEM_CONTAINER=1` (never `--ignored` across the suite)
-- [ ] T005 [P] Write the container harness in `tests/support/system_container.rs`: start and stop the container, run a command as a named test account, install and purge the packages, and take the inventory SC-009 compares (units, slices, groups, files under `/etc`, `/run`, `/usr`)
+- [x] T005 [P] Write the container harness in `tests/support/system_container.rs`: start and stop the container, run a command as a named test account, install and purge the packages, and take the inventory SC-009 compares (units, slices, groups, files under `/etc`, `/run`, `/usr`)
+  - `tests/support/system_container.rs` and `tools/docker-validation/system-mode/` (image and `run.sh`); all 10 container fixtures pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 
 ---
 
@@ -110,7 +111,9 @@ the task list.
 ### Tests first
 
 - [ ] T016 [P] [US1] Container fixture in `tests/system_mode.rs` (opt-in): after install, 20 of 20 member starts land in `cedegrid-u<uid>.service` with the member's IDs at the Full level, and `doctor` says System (SC-001); two starts at once start each unit once
+  - *In part:* one member start, a repeat start and two starts at once pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the 20-of-20 loop is not written yet.
 - [ ] T017 [US1] Container fixture in `tests/system_mode.rs`: with the package removed, 20 of 20 starts behave as before the install (SC-001); a non-member is refused with `not_a_member` and falls back; with the broker stopped and the socket present, the client says so in one line and falls back, and `--require-system` refuses; after a broker restart with units running, the units and their work keep running and `status` lists them by marker
+  - *In part:* a non-member falls back, a silent broker falls back in one line, `--require-system` refuses, and units survive a broker restart (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the uninstalled case is covered by `system_command_without_the_package` outside the container.
 - [ ] T018 [P] [US1] Delegated-root detection tests in `tests/cgroup.rs`. The agent accepts its cgroup only when all of these hold:
   - the cgroup is its own unit's path (both N4 placements);
   - it is owned by its user ID;
@@ -164,11 +167,13 @@ the task list.
 
 ### Tests first
 
-- [ ] T027 [P] [US2] Container fixtures in `tests/system_mode.rs`: a request with each identity field; odd and overlong names; 65,536 and 65,537 bytes; a message that never ends; user ID 0; a non-member; a member inside a user namespace where it maps to user ID 0, which is served as its real user ID. Each is refused with its code, logged, and nothing changes (SC-002)
-- [ ] T028 [US2] Container fixture in `tests/system_mode.rs`: one member asks to stop, start, status or move the second member's units by every request form; each is refused, and the second member's units are unchanged
-- [ ] T029 [US2] Container fixture in `tests/system_mode.rs`: the socket reads root, group `cedegrid`, mode 0660; a non-member account cannot connect
+- [x] T027 [P] [US2] Container fixtures in `tests/system_mode.rs`: a request with each identity field; odd and overlong names; 65,536 and 65,537 bytes; a message that never ends; user ID 0; a non-member; a member inside a user namespace where it maps to user ID 0, which is served as its real user ID. Each is refused with its code, logged, and nothing changes (SC-002)
+  - Passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM). The user-namespace case skips where unprivileged user namespaces are forbidden, as in this VM (Ubuntu 24.04's AppArmor rule); CI on ubuntu-22.04 runs it.
+- [x] T028 [US2] Container fixture in `tests/system_mode.rs`: one member asks to stop, start, status or move the second member's units by every request form; each is refused, and the second member's units are unchanged
+- [x] T029 [US2] Container fixture in `tests/system_mode.rs`: the socket reads root, group `cedegrid`, mode 0660; a non-member account cannot connect
 - [ ] T030 [US2] Container fixture in `tests/system_mode.rs`: one member floods requests; another member is answered within 1 s (provisional, SC-003); the flooder gets `rate_limited`; with 50 member accounts, the broker's CPU stays below 0.1% of one CPU and its memory below 32 MiB (provisional, SC-012)
-- [ ] T031 [US2] Container fixture in `tests/system_mode.rs`: every unit the broker starts has exactly the properties of `contracts/units-and-slices.md`, read back with `systemctl show`, whatever the request said
+  - *In part:* the flood case passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the 50-account resource bound is not written yet.
+- [x] T031 [US2] Container fixture in `tests/system_mode.rs`: every unit the broker starts has exactly the properties of `contracts/units-and-slices.md`, read back with `systemctl show`, whatever the request said
 
 ### Implementation
 
@@ -191,7 +196,8 @@ the task list.
 
 ### Tests first
 
-- [ ] T035 [P] [US3] Container fixture in `tests/system_mode.rs`: `cedegrid-idle.slice` reads `cpu.idle` = 1 after install on systemd 249, and `doctor` names the path taken: `CPUWeight=idle`, or `cpu.idle` written by the broker (research R1)
+- [x] T035 [P] [US3] Container fixture in `tests/system_mode.rs`: `cedegrid_idle.slice` reads `cpu.idle` = 1 after install on systemd 249, and `doctor` names the path taken: `CPUWeight=idle`, or `cpu.idle` written by the broker (research R1)
+  - systemd 249 rejects `CPUWeight=idle`, so the broker writes `cpu.idle` (T038). The slice was renamed `cedegrid_idle.slice`: a `-` in a slice name nests it below `cedegrid.slice`. Passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [ ] T036 [US3] Container fixture in `tests/system_mode.rs`: a move of a job between the caller's two units moves exactly that job's processes, holds it frozen so no process starts between the check and the move, and refuses a job outside the caller's source unit, a job with a member of another user ID, and a non-empty destination leaf (FR-018)
 - [ ] T037 [P] [US3] Tests in `tests/configuration.rs` and `tests/policy.rs` (FR-020):
   - in System mode, CPU's default `yield_first_margin_percent` is the System mode default, equal to today's 15 until T061 sets it;
@@ -201,7 +207,7 @@ the task list.
 
 ### Implementation
 
-- [ ] T038 [US3] Write `cedegrid-idle.slice` with `CPUWeight=idle` in `packaging/deb/cedegrid-idle.slice`, and implement the broker's fallback write of `cpu.idle` with readback at start in `src/broker/units.rs` (passes T035)
+- [x] T038 [US3] Write `cedegrid_idle.slice` with `CPUWeight=idle` in `packaging/deb/cedegrid_idle.slice`, and implement the broker's fallback write of `cpu.idle` with readback at start in `src/broker/units.rs` (passes T035)
 - [ ] T039 [US3] Implement the move in `src/broker/moves.rs`, as in research R9 (passes T036):
   - resolve the job's leaf inside the caller's source unit;
   - freeze it;
@@ -242,6 +248,7 @@ the task list.
   - a reused PID gets no write;
   - a child inherits its parent's score until the next pass;
   - after a broker restart, the loop resumes and writes nothing for an unchanged value.
+  - *In part:* the kernel rule (a value written as root is the user's floor) passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the loop's scoring under real memory pressure is for the host run (T058).
 - [ ] T045 [P] [US4] Test in `tests/agent.rs`: in System mode the agent writes no OOM score; outside it, 001's marks are unchanged.
 
 ### Implementation
@@ -274,17 +281,18 @@ the task list.
 ### Tests first
 
 - [ ] T050 [P] [US5] Container fixture in `tests/system_mode.rs`: the inventory after install differs from before only by `contracts/units-and-slices.md`'s list; after runs and purge it equals the inventory before install (SC-009)
+  - *In part:* purge returns the inventory to the one before the install (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the install's exact difference is not compared yet.
 - [ ] T051 [US5] Container fixture in `tests/system_mode.rs`: a policy allowing only Yield First and Neutral refuses Performance with `mode_not_allowed`, naming the key; the agent refuses a job in a mode the policy does not allow and a job past `tasks_per_user`, each in one line naming the key; `doctor` shows the effective policy and where each value came from (FR-010)
 - [ ] T052 [US5] Container fixture in `tests/system_mode.rs`: a broker and a client of different protocol versions refuse with `protocol_mismatch`, naming the side to upgrade (FR-035)
 
 ### Implementation
 
-- [ ] T053 [US5] Write `postinst`, `prerm` and `postrm` in `packaging/deb/` (passes T050):
+- [x] T053 [US5] Write `postinst`, `prerm` and `postrm` in `packaging/deb/` (passes T050):
   - create the group through `cedegrid-system.sysusers`;
   - enable the socket;
   - on purge, stop and remove every unit with the broker's marker, then the slices, the socket, the service and the group.
   - Touch no PAM, login, SSH, other unit, sysctl or kernel module setting.
-  - *Written, not yet run:* `prerm` stops the broker and every unit with the broker's description prefix and marker; `postrm` removes the group and an empty `/etc/cedegrid` on purge. The container run (T050) checks them.
+  - `prerm` stops the broker and every unit with the broker's description prefix and marker; `postrm` removes the group and an empty `/etc/cedegrid` on purge. The purge fixture passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [ ] T054 [US5] Make the agent apply the administrator policy to each job in System mode, in `src/agent/` and `src/config.rs`: read `/etc/cedegrid/policy.toml` with the broker's loader, refuse a disallowed mode and a job past `tasks_per_user` (passes T051)
 - [ ] T055 [US5] Add the `.deb` build for `cedegrid` and `cedegrid-system` to the release workflow in `.github/workflows/release.yml`, with checksums in the release (FR-033)
 - [ ] T056 [US5] Add the project's own apt repository publication and its signing to `.github/workflows/release.yml`, behind a separate approval in the workflow (FR-033)

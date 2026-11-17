@@ -33,7 +33,7 @@ sudo apt install ./cedegrid_<version>_amd64.deb ./cedegrid-system_<version>_amd6
 sudo usermod -aG cedegrid <user>      # then the user logs in again
 ```
 
-The package adds the broker's socket and service, `cedegrid.slice` and `cedegrid-idle.slice`,
+The package adds the broker's socket and service, `cedegrid.slice` and `cedegrid_idle.slice`,
 the `cedegrid` group and an empty `/etc/cedegrid/`.
 
 A member starts their units with:
@@ -96,7 +96,7 @@ runs inside their own `user-<uid>.slice`, so each account's CPU share is unchang
 competes as one group beside `user.slice` and `system.slice`, which changes how CPU is split
 between those groups; `cedegrid doctor` reports which applies.
 
-Yield First work runs in `cedegrid-idle.slice`, which has `cpu.idle` set. It gets CPU time only
+Yield First work runs in `cedegrid_idle.slice`, which has `cpu.idle` set. It gets CPU time only
 when its neighbours leave some free. `cpu.idle` does not cover SMT siblings, caches or memory
 bandwidth.
 

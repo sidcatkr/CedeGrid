@@ -38,7 +38,7 @@ ordinary_slice = "auto"      # N4: "auto" (default), "user" or "cedegrid"
   `cedegrid.slice`; `user` and `cedegrid` force one. A weight that follows the number of busy
   accounts (N4 C) is not built; if it is, it reads per-account counters only, writes only
   `cedegrid.slice`'s weight within a clamped range, and falls back to the lowest weight when a
-  counter is unknown. The Yield First unit is always in `cedegrid-idle.slice`.
+  counter is unknown. The Yield First unit is always in `cedegrid_idle.slice`.
 - A user's setting above a limit is refused in one line naming the policy key (FR-010).
 - `doctor` shows the effective values and whether each comes from the file or the default.
 - Aggressive is allowed only when the administrator lists it, and unprotected Aggressive's

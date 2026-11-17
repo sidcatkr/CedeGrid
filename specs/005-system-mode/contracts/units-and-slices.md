@@ -7,7 +7,7 @@
 | `cedegrid-broker.socket` | `ListenStream=/run/cedegrid/broker.sock`, `SocketUser=root`, `SocketGroup=cedegrid`, `SocketMode=0660` |
 | `cedegrid-broker.service` | runs the installed binary's fixed broker subcommand as root; confined as far as the host's systemd allows (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `RestrictAddressFamilies=AF_UNIX`, `CapabilityBoundingSet=` limited to what scores, moves and `cpu.idle` need; the plan lists each against the host's version) |
 | `cedegrid.slice` | root-level slice for ordinary work where N4 places it there; weight 100, or under N4 C a weight the broker sets from the count of busy accounts |
-| `cedegrid-idle.slice` | root-level slice with `CPUWeight=idle` where systemd accepts it, else `cpu.idle` written by the broker (research R1) |
+| `cedegrid_idle.slice` | root-level slice with `CPUWeight=idle` where systemd accepts it, else `cpu.idle` written by the broker (research R1) |
 | the `cedegrid` group | created through `systemd-sysusers` |
 | `/etc/cedegrid/` | root-owned directory for the policy, mode 0755; ships with no policy file, so defaults apply |
 | the binary | at a root-owned fixed path, not writable by users |
@@ -21,7 +21,7 @@ service and the group, and leaves `/etc/cedegrid/` only if the administrator add
 | Property | Ordinary unit | Idle unit |
 |---|---|---|
 | name | `cedegrid-uU.service` | `cedegrid-idle-uU.service` |
-| slice | per N4: `user-U.slice` or `cedegrid.slice` | `cedegrid-idle.slice` |
+| slice | per N4: `user-U.slice` or `cedegrid.slice` | `cedegrid_idle.slice` |
 | `User=`, `Group=` | `U`, `G` | `U`, `G` |
 | `Delegate=` | `yes` | `yes` |
 | `TasksMax=` and process limits | from the policy | from the policy |

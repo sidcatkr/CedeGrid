@@ -124,7 +124,7 @@ src/
 └── explain.rs              # doctor and observe lines for System mode
 packaging/deb/
 ├── cedegrid-broker.service, cedegrid-broker.socket
-├── cedegrid.slice, cedegrid-idle.slice
+├── cedegrid.slice, cedegrid_idle.slice
 ├── cedegrid-system.sysusers   # the group
 └── postinst, prerm, postrm
 tests/

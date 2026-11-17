@@ -18,8 +18,9 @@ pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
 /// Root-level slice for ordinary work where N4 places it there.
 pub const CEDEGRID_SLICE: &str = "cedegrid.slice";
 
-/// Root-level slice with `cpu.idle` for Yield First work (FR-016).
-pub const IDLE_SLICE: &str = "cedegrid-idle.slice";
+/// Root-level slice with `cpu.idle` for Yield First work (FR-016). A `-` in a slice name means
+/// nesting, so `_` keeps it directly below the root.
+pub const IDLE_SLICE: &str = "cedegrid_idle.slice";
 
 /// Every unit the broker makes has a description starting with this.
 pub const DESCRIPTION_PREFIX: &str = "CedeGrid System mode unit";

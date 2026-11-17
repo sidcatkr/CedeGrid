@@ -593,7 +593,7 @@ fn ordinary_slice_follows_n4_and_idle_never_moves() {
         );
         assert_eq!(
             units::build(UnitKind::Idle, CALLER, &policy, place).slice,
-            "cedegrid-idle.slice"
+            "cedegrid_idle.slice"
         );
     }
 }
@@ -1456,17 +1456,32 @@ mod broker_service {
         }
     }
 
-    struct NoCgroups;
+    /// Cgroup files as a map, for the idle slice's `cpu.idle`; `frozen` refuses writes.
+    #[derive(Default)]
+    struct MemCgroups {
+        files: Mutex<BTreeMap<String, String>>,
+        read_only: bool,
+    }
 
-    impl cedegrid::broker::moves::CgroupFs for NoCgroups {
-        fn read(&self, _: &str, _: &str) -> anyhow::Result<String> {
-            anyhow::bail!("no cgroups in this test")
+    impl cedegrid::broker::moves::CgroupFs for MemCgroups {
+        fn read(&self, cgroup: &str, file: &str) -> anyhow::Result<String> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(&format!("{cgroup}/{file}"))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no such file"))
         }
-        fn write(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
-            anyhow::bail!("no cgroups in this test")
+        fn write(&self, cgroup: &str, file: &str, value: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(!self.read_only, "read-only");
+            self.files
+                .lock()
+                .unwrap()
+                .insert(format!("{cgroup}/{file}"), value.to_owned());
+            Ok(())
         }
         fn children(&self, _: &str) -> anyhow::Result<Vec<String>> {
-            anyhow::bail!("no cgroups in this test")
+            Ok(Vec::new())
         }
     }
 
@@ -1648,9 +1663,10 @@ mod broker_service {
             load_policy: Box::new(move || AdminPolicy::parse(policy.unwrap_or(""), 1000)),
             host_uid_min: 1000,
             user_slice_splits_cpu: Box::new(|| true),
-            cgroups: Box::new(NoCgroups),
+            cgroups: Box::new(MemCgroups::default()),
             processes: Box::new(NoProcesses),
             rate: Mutex::new(RateLimiter::new(8, 2)),
+            callers: Mutex::new(Default::default()),
         }
     }
 
@@ -1716,9 +1732,46 @@ mod broker_service {
                 "{calls:?}"
             );
             assert!(
-                calls.contains(&"start cedegrid-idle-u1234.service cedegrid-idle.slice".to_owned())
+                calls.contains(&"start cedegrid-idle-u1234.service cedegrid_idle.slice".to_owned())
             );
         }
+    }
+
+    #[test]
+    fn start_sets_cpu_idle_or_stops_the_idle_unit() {
+        let systemd = Arc::new(FakeSystemd::default());
+        let mut state = state(FakeSystemd::default(), &[1234], None);
+        state.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"start"}"#),
+        );
+        assert!(handled.reply.ok, "{handled:?}");
+        assert_eq!(
+            state
+                .cgroups
+                .read("/cedegrid_idle.slice", "cpu.idle")
+                .unwrap(),
+            "1"
+        );
+        let systemd = Arc::new(FakeSystemd::default());
+        state.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        state.cgroups = Box::new(MemCgroups {
+            read_only: true,
+            ..MemCgroups::default()
+        });
+        let handled = handle(
+            &state,
+            peer(1234),
+            &line(r#"{"protocol":1,"kind":"start"}"#),
+        );
+        assert_eq!(handled.reply.code, Some(RefusalCode::SystemdFailed));
+        assert!(
+            systemd
+                .calls()
+                .contains(&"stop cedegrid-idle-u1234.service".to_owned())
+        );
     }
 
     #[test]
@@ -2277,8 +2330,8 @@ mod oom_loop {
     fn units_are_found_by_name_and_slice() {
         let cg = Dir::new("cgroup");
         for dir in [
-            "cedegrid-idle.slice/cedegrid-idle-u1000.service",
-            "cedegrid-idle.slice/other.service",
+            "cedegrid_idle.slice/cedegrid-idle-u1000.service",
+            "cedegrid_idle.slice/other.service",
             "cedegrid.slice/cedegrid-u1001.service",
             "user.slice/user-1000.slice/cedegrid-u1000.service",
             "user.slice/user-1000.slice/cedegrid-u1002.service",
@@ -2292,14 +2345,14 @@ mod oom_loop {
             units,
             vec![
                 FoundUnit {
-                    kind: UnitKind::Idle,
-                    uid: 1000,
-                    cgroup: "/cedegrid-idle.slice/cedegrid-idle-u1000.service".into()
-                },
-                FoundUnit {
                     kind: UnitKind::Ordinary,
                     uid: 1001,
                     cgroup: "/cedegrid.slice/cedegrid-u1001.service".into()
+                },
+                FoundUnit {
+                    kind: UnitKind::Idle,
+                    uid: 1000,
+                    cgroup: "/cedegrid_idle.slice/cedegrid-idle-u1000.service".into()
                 },
                 FoundUnit {
                     kind: UnitKind::Ordinary,
@@ -2659,7 +2712,7 @@ mod job_moves {
     }
 
     const ORDINARY: &str = "/cedegrid.slice/cedegrid-u1000.service";
-    const IDLE: &str = "/cedegrid-idle.slice/cedegrid-idle-u1000.service";
+    const IDLE: &str = "/cedegrid_idle.slice/cedegrid-idle-u1000.service";
     const CALLER: Caller = Caller {
         uid: 1000,
         primary_gid: 1100,
@@ -2781,5 +2834,480 @@ mod job_moves {
         );
         assert!(!fake.frozen(&source));
         assert_eq!(fake.procs(&source), vec![11, 12]);
+    }
+}
+
+// T016, T017, T029, T031, T035: container fixtures. They run only inside the system-mode
+// image with systemd as PID 1 (tools/docker-validation/system-mode/run.sh), as root.
+
+#[cfg(target_os = "linux")]
+mod container {
+    include!("support/system_container.rs");
+
+    const GATE: &str =
+        "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)";
+
+    fn stdout(output: &Output) -> String {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn stderr(output: &Output) -> String {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
+    fn ordinary(uid: u32) -> String {
+        format!("cedegrid-u{uid}.service")
+    }
+
+    fn idle(uid: u32) -> String {
+        format!("cedegrid-idle-u{uid}.service")
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn socket_is_root_group_cedegrid_0660() {
+        assert!(enabled(), "{GATE}");
+        install();
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::metadata(cedegrid::broker::SOCKET_PATH).unwrap();
+        let group = ok("getent", &["group", "cedegrid"]);
+        let gid: u32 = group.split(':').nth(2).unwrap().parse().unwrap();
+        assert_eq!(meta.uid(), 0);
+        assert_eq!(meta.gid(), gid);
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o660);
+        // A non-member cannot connect, so it continues without System mode.
+        let output = cedegrid_as(OUTSIDER, &["system", "status"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(stdout(&output).contains(r#""system":false"#));
+        assert!(
+            stderr(&output).contains("not a member"),
+            "{}",
+            stderr(&output)
+        );
+        let output = cedegrid_as(OUTSIDER, &["system", "start", "--require-system"]);
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_member_start_makes_both_units_with_the_contract_properties() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        let output = cedegrid_as(MEMBER, &["system", "start"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(
+            stdout(&output).contains(r#""system":true"#),
+            "{}",
+            stdout(&output)
+        );
+        for unit in [ordinary(MEMBER_UID), idle(MEMBER_UID)] {
+            assert!(
+                wait_until(
+                    Duration::from_secs(10),
+                    || show(&unit, "ActiveState")["ActiveState"] == "active"
+                ),
+                "{unit} not active: {:?}",
+                show(&unit, "ActiveState,SubState,Result")
+            );
+            let props = show(
+                &unit,
+                "User,Group,Delegate,TasksMax,OOMScoreAdjust,Restart,Environment,Description,ExecStart,Slice",
+            );
+            assert_eq!(props["User"], MEMBER_UID.to_string(), "{unit}");
+            assert_eq!(props["Delegate"], "yes", "{unit}");
+            assert_eq!(props["TasksMax"], "4096", "{unit}");
+            assert_eq!(props["OOMScoreAdjust"], "0", "{unit}");
+            assert_eq!(props["Restart"], "on-failure", "{unit}");
+            assert!(props["Description"].starts_with("CedeGrid System mode unit"));
+            assert!(
+                props["Environment"].contains("CEDEGRID_SYSTEM_UNIT="),
+                "{props:?}"
+            );
+            assert!(
+                props["ExecStart"].contains("/usr/bin/cedegrid"),
+                "{props:?}"
+            );
+        }
+        assert_eq!(
+            show(&idle(MEMBER_UID), "Slice")["Slice"],
+            "cedegrid_idle.slice"
+        );
+        let slice = show(&ordinary(MEMBER_UID), "Slice")["Slice"].clone();
+        assert!(
+            slice == format!("user-{MEMBER_UID}.slice") || slice == "cedegrid.slice",
+            "{slice}"
+        );
+        assert_eq!(
+            show(&ordinary(MEMBER_UID), "RuntimeDirectory")["RuntimeDirectory"],
+            format!("cedegrid/u{MEMBER_UID}")
+        );
+        // A second start leaves the running units alone.
+        let before = show(&ordinary(MEMBER_UID), "InvocationID")["InvocationID"].clone();
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        assert_eq!(
+            show(&ordinary(MEMBER_UID), "InvocationID")["InvocationID"],
+            before
+        );
+        let status = cedegrid_as(MEMBER, &["system", "status"]);
+        assert!(
+            stdout(&status).contains("\"state\":\"active\""),
+            "{}",
+            stdout(&status)
+        );
+        let stopped = cedegrid_as(MEMBER, &["system", "stop"]);
+        assert!(stopped.status.success(), "{}", stderr(&stopped));
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&ordinary(MEMBER_UID), "ActiveState")["ActiveState"] != "active"
+        }));
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn two_members_get_their_own_units_and_starts_at_once_start_each_once() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        stop_units(SECOND);
+        let first = std::thread::spawn(|| cedegrid_as(SECOND, &["system", "start"]));
+        let second = std::thread::spawn(|| cedegrid_as(SECOND, &["system", "start"]));
+        let (first, second) = (first.join().unwrap(), second.join().unwrap());
+        assert!(
+            stdout(&first).contains(r#""system":true"#)
+                || stdout(&second).contains(r#""system":true"#),
+            "{} / {}",
+            stderr(&first),
+            stderr(&second)
+        );
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&ordinary(SECOND_UID), "ActiveState")["ActiveState"] == "active"
+        }));
+        assert_eq!(show(&ordinary(SECOND_UID), "NRestarts")["NRestarts"], "0");
+        // The first member's status does not list the second member's units.
+        let status = stdout(&cedegrid_as(MEMBER, &["system", "status"]));
+        assert!(!status.contains(&SECOND_UID.to_string()), "{status}");
+        stop_units(SECOND);
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_silent_broker_falls_back_and_running_units_survive_a_restart() {
+        assert!(enabled(), "{GATE}");
+        install();
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        let unit = ordinary(MEMBER_UID);
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&unit, "ActiveState")["ActiveState"] == "active"
+        }));
+        let invocation = show(&unit, "InvocationID")["InvocationID"].clone();
+        ok("systemctl", &["restart", "cedegrid-broker.service"]);
+        assert_eq!(show(&unit, "ActiveState")["ActiveState"], "active");
+        assert_eq!(show(&unit, "InvocationID")["InvocationID"], invocation);
+        // With the service masked, the socket stays but nothing answers.
+        ok(
+            "systemctl",
+            &["mask", "--runtime", "cedegrid-broker.service"],
+        );
+        ok("systemctl", &["stop", "cedegrid-broker.service"]);
+        let output = cedegrid_as(MEMBER, &["system", "status"]);
+        ok(
+            "systemctl",
+            &["unmask", "--runtime", "cedegrid-broker.service"],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(stdout(&output).contains(r#""system":false"#));
+        assert!(
+            stderr(&output).starts_with("cedegrid: System mode unavailable"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(stderr(&output).lines().count(), 1);
+        stop_units(MEMBER);
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn hostile_requests_are_refused_logged_and_change_nothing() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        let status = br#"{"protocol":1,"kind":"status"}"#;
+        for field in [
+            "uid",
+            "user",
+            "unit",
+            "path",
+            "cgroup",
+            "exec",
+            "mount",
+            "device",
+            "capability",
+        ] {
+            let body = format!("{{\"protocol\":1,\"kind\":\"start\",\"{field}\":0}}\n");
+            let reply = raw_request(Some(MEMBER), body.as_bytes(), false);
+            assert_eq!(
+                reply_code(&reply),
+                "identity_in_request",
+                "{field}: {reply}"
+            );
+        }
+        for body in [
+            &b"{\"protocol\":1,\"kind\":\"status\",\"a\\nb\":1}\n"[..],
+            b"{\"protocol\":1,\"kind\":\"../../etc\"}\n",
+            b"not json\n",
+        ] {
+            let reply = raw_request(Some(MEMBER), body, false);
+            assert!(
+                ["unknown_field", "unknown_kind", "malformed"]
+                    .contains(&reply_code(&reply).as_str()),
+                "{reply}"
+            );
+        }
+        // 65,536 bytes with the newline are read; one more is refused.
+        let mut at_limit = status.to_vec();
+        at_limit.resize(65_535, b' ');
+        at_limit.push(b'\n');
+        assert_eq!(
+            reply_code(&raw_request(Some(MEMBER), &at_limit, false)),
+            "ok"
+        );
+        let mut over = status.to_vec();
+        over.resize(65_536, b' ');
+        over.push(b'\n');
+        assert_eq!(
+            reply_code(&raw_request(Some(MEMBER), &over, false)),
+            "request_too_large"
+        );
+        // A message that never ends is cut off after the read timeout.
+        let started = Instant::now();
+        let reply = raw_request(Some(MEMBER), br#"{"protocol":1,"#, true);
+        assert_eq!(reply_code(&reply), "request_timeout", "{reply}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Root is refused; a non-member cannot connect.
+        assert_eq!(
+            reply_code(&raw_request(
+                None,
+                b"{\"protocol\":1,\"kind\":\"status\"}\n",
+                false
+            )),
+            "refused_account"
+        );
+        assert_eq!(
+            raw_request(
+                Some(OUTSIDER),
+                b"{\"protocol\":1,\"kind\":\"status\"}\n",
+                false
+            ),
+            "EACCES"
+        );
+        // Inside a user namespace where the member maps to 0, the broker still sees the member.
+        // Hosts that forbid unprivileged user namespaces skip this part, and say so.
+        let probe = run("runuser", &["-u", MEMBER, "--", "unshare", "-r", "true"]);
+        if probe.status.success() {
+            let output = run(
+                "runuser",
+                &[
+                    "-u",
+                    MEMBER,
+                    "--",
+                    "unshare",
+                    "-r",
+                    "/usr/bin/cedegrid",
+                    "system",
+                    "status",
+                ],
+            );
+            // The client sees itself as root there and refuses before it connects.
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("refusing to run as root"),
+                "{output:?}"
+            );
+            let raw = run(
+                "runuser",
+                &[
+                    "-u",
+                    MEMBER,
+                    "--",
+                    "unshare",
+                    "-r",
+                    "python3",
+                    "-c",
+                    "import socket;s=socket.socket(socket.AF_UNIX);s.connect('/run/cedegrid/broker.sock');s.sendall(b'{\"protocol\":1,\"kind\":\"status\"}\\n');print(s.recv(65536).decode().strip())",
+                ],
+            );
+            assert_eq!(
+                reply_code(String::from_utf8_lossy(&raw.stdout).trim()),
+                "ok",
+                "{raw:?}"
+            );
+        } else {
+            eprintln!(
+                "not tested here: unprivileged user namespaces are not permitted ({})",
+                String::from_utf8_lossy(&probe.stderr).trim()
+            );
+        }
+        // Nothing was started, and every refusal is in the journal.
+        assert_ne!(
+            show(&format!("cedegrid-u{MEMBER_UID}.service"), "ActiveState")["ActiveState"],
+            "active"
+        );
+        let journal = ok(
+            "journalctl",
+            &["-u", "cedegrid-broker.service", "--no-pager", "-o", "cat"],
+        );
+        for code in [
+            "identity_in_request",
+            "request_too_large",
+            "request_timeout",
+            "refused_account",
+        ] {
+            assert!(journal.contains(&format!("result={code}")), "{code}");
+        }
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn one_member_cannot_reach_another_members_units() {
+        assert!(enabled(), "{GATE}");
+        install();
+        assert!(cedegrid_as(SECOND, &["system", "start"]).status.success());
+        let unit = format!("cedegrid-u{SECOND_UID}.service");
+        assert!(wait_until(Duration::from_secs(10), || {
+            show(&unit, "ActiveState")["ActiveState"] == "active"
+        }));
+        let invocation = show(&unit, "InvocationID")["InvocationID"].clone();
+        for body in [
+            format!("{{\"protocol\":1,\"kind\":\"stop\",\"uid\":{SECOND_UID}}}\n"),
+            format!("{{\"protocol\":1,\"kind\":\"stop\",\"user\":\"{SECOND}\"}}\n"),
+            format!("{{\"protocol\":1,\"kind\":\"stop\",\"unit\":\"{unit}\"}}\n"),
+            format!(
+                "{{\"protocol\":1,\"kind\":\"move\",\"job\":\"x\",\"mode\":\"neutral\",\"cgroup\":\"/cedegrid.slice/{unit}\"}}\n"
+            ),
+        ] {
+            let reply = raw_request(Some(MEMBER), body.as_bytes(), false);
+            assert_eq!(reply_code(&reply), "identity_in_request", "{reply}");
+        }
+        // A plain stop stops only the caller's own units.
+        let reply = raw_request(Some(MEMBER), b"{\"protocol\":1,\"kind\":\"stop\"}\n", false);
+        assert_eq!(reply_code(&reply), "ok", "{reply}");
+        assert_eq!(show(&unit, "ActiveState")["ActiveState"], "active");
+        assert_eq!(show(&unit, "InvocationID")["InvocationID"], invocation);
+        stop_units(SECOND);
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_flooding_member_is_rate_limited_and_others_are_still_served() {
+        assert!(enabled(), "{GATE}");
+        install();
+        let status = b"{\"protocol\":1,\"kind\":\"status\"}\n";
+        let flood: Vec<_> = (0..40)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    reply_code(&raw_request_once(Some(MEMBER), status, false))
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        let other = reply_code(&raw_request(Some(SECOND), status, false));
+        let waited = started.elapsed();
+        let codes: Vec<String> = flood.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(other, "ok");
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+        assert!(codes.iter().any(|code| code == "rate_limited"), "{codes:?}");
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_score_written_as_root_is_the_floor_for_the_user() {
+        assert!(enabled(), "{GATE}");
+        install();
+        let mut child = Command::new("runuser")
+            .args(["-u", MEMBER, "--", "sleep", "30"])
+            .spawn()
+            .unwrap();
+        // runuser forks; the member's sleep is its child.
+        let pid = wait_for_child(child.id(), "sleep");
+        let handle = cedegrid::broker::process_handle::ProcessHandle::open(pid, None).unwrap();
+        handle.set_oom_score_adj(-200).unwrap();
+        let write_as_member = |value: i32| {
+            run(
+                "runuser",
+                &[
+                    "-u",
+                    MEMBER,
+                    "--",
+                    "sh",
+                    "-c",
+                    &format!("echo {value} > /proc/{pid}/oom_score_adj"),
+                ],
+            )
+            .status
+            .success()
+        };
+        // The kernel refuses a lower value from the user and accepts a higher one.
+        assert!(!write_as_member(-300));
+        assert_eq!(handle.oom_score_adj().unwrap(), -200);
+        assert!(write_as_member(-100));
+        assert_eq!(handle.oom_score_adj().unwrap(), -100);
+        child.kill().unwrap();
+        let _ = child.wait();
+    }
+
+    fn wait_for_child(parent: u32, name: &str) -> u32 {
+        let mut found = None;
+        assert!(wait_until(Duration::from_secs(5), || {
+            found = std::fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
+                .ok()
+                .and_then(|text| {
+                    text.split_whitespace()
+                        .filter_map(|pid| pid.parse::<u32>().ok())
+                        .find(|pid| {
+                            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                                .is_ok_and(|comm| comm.trim() == name)
+                        })
+                });
+            found.is_some()
+        }));
+        found.unwrap()
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn purge_leaves_the_host_as_before_the_install() {
+        assert!(enabled(), "{GATE}");
+        install();
+        purge();
+        let before = inventory();
+        install();
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        let installed = inventory();
+        assert!(
+            installed.iter().any(|item| item == "group cedegrid"),
+            "{installed:?}"
+        );
+        purge();
+        assert!(
+            wait_until(Duration::from_secs(10), || inventory() == before),
+            "before {before:?}, after {:?}",
+            inventory()
+        );
+        install();
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn the_idle_slice_has_cpu_idle() {
+        assert!(enabled(), "{GATE}");
+        install();
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        // Directly below the root, beside the other top-level groups.
+        let group = show("cedegrid_idle.slice", "ControlGroup")["ControlGroup"].clone();
+        let value = std::fs::read_to_string("/sys/fs/cgroup/cedegrid_idle.slice/cpu.idle")
+            .unwrap_or_default();
+        stop_units(MEMBER);
+        assert_eq!(group, "/cedegrid_idle.slice");
+        assert_eq!(value.trim(), "1", "cpu.idle on cedegrid_idle.slice");
     }
 }

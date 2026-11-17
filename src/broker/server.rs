@@ -84,6 +84,8 @@ pub struct BrokerState {
     /// How moves hold processes.
     pub processes: Box<dyn ProcessAccess + Send + Sync>,
     pub rate: Mutex<RateLimiter>,
+    /// One lock per caller, so a caller's requests run one at a time.
+    pub callers: Mutex<HashMap<u32, Arc<Mutex<()>>>>,
 }
 
 /// One journal line (FR-011). Losing a log line never stops the broker.
@@ -157,6 +159,18 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
         Ok(request) => request,
         Err(refusal) => return refused(refusal, "-"),
     };
+    // Two requests from one caller at once would race on the same unit names.
+    let caller_lock = Arc::clone(
+        state
+            .callers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(caller.uid)
+            .or_default(),
+    );
+    let _serialized = caller_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let kind = request.kind();
     let policy = match (state.load_policy)() {
         Ok(policy) => policy,
@@ -202,7 +216,17 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
                     .resolve((state.user_slice_splits_cpu)()),
                 pam: policy.pam_session.value,
             };
-            start_units(systemd, caller, &policy, placement)
+            start_units(systemd, caller, &policy, placement).and_then(|units| {
+                if let Err(refusal) = ensure_idle_slice(state.cgroups.as_ref()) {
+                    // Without cpu.idle, Yield First work would compete at a normal weight.
+                    let _stopped = systemd.stop(&super::units::unit_name(
+                        super::units::UnitKind::Idle,
+                        caller.uid,
+                    ));
+                    return Err(refusal);
+                }
+                Ok(units)
+            })
         }
         Request::Stop => stop_units(systemd, caller),
         Request::Status => status_units(systemd, caller),
@@ -233,6 +257,28 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
         },
         Err(refusal) => refused(refusal, kind),
     }
+}
+
+/// Sets `cpu.idle` on the Yield First slice where systemd could not (research R1) and reads it
+/// back (Principle V).
+pub fn ensure_idle_slice(cgroups: &dyn CgroupFs) -> Result<(), Refusal> {
+    let slice = format!("/{}", super::units::IDLE_SLICE);
+    let is_idle = |cgroups: &dyn CgroupFs| {
+        cgroups
+            .read(&slice, "cpu.idle")
+            .is_ok_and(|value| value.trim() == "1")
+    };
+    if is_idle(cgroups) {
+        return Ok(());
+    }
+    if cgroups.write(&slice, "cpu.idle", "1").is_ok() && is_idle(cgroups) {
+        journal(&format!("cpu.idle set on {}", super::units::IDLE_SLICE));
+        return Ok(());
+    }
+    Err(Refusal::new(
+        RefusalCode::SystemdFailed,
+        "cannot set cpu.idle on cedegrid_idle.slice; ask an administrator to check the broker journal",
+    ))
 }
 
 fn result_name(reply: &Reply) -> String {
@@ -410,6 +456,7 @@ pub fn run() -> anyhow::Result<()> {
         }),
         processes: Box::new(super::oom::PidfdAccess),
         rate: Mutex::new(RateLimiter::new(RATE_BURST, RATE_PER_SECOND)),
+        callers: Mutex::new(HashMap::new()),
     });
     std::thread::Builder::new()
         .name("broker-oom".to_owned())
