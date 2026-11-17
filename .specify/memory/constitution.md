@@ -70,6 +70,10 @@ never let CedeGrid act on a process it does not own.
   baseline is the kernel's and the GPU driver's split, not CedeGrid's doing.
 - In Yield First and Neutral, own work MUST be the first to give capacity back when external
   demand needs it.
+- **First-come GPU floor.** As the one exception to the rule above, on GPU compute own work that
+  was running on a device before another principal arrived there gives that principal at most
+  half of the device's time. Arrival order is kept per principal; where it cannot be known, the
+  exception does not apply. The only cost to the later principal is slower compute.
 - In Performance and Aggressive, CedeGrid MUST NOT cap, pause or drain running own work to give
   another workload more CPU or GPU compute time than the kernel and the GPU driver would give it
   beside the same own work.
@@ -108,6 +112,10 @@ never let CedeGrid act on a process it does not own.
   with no admission margin, filling idle capacity at once. Its default form, protected
   Aggressive, keeps every rule of this principle, and never holds less than Performance would in
   the same observation.
+- **Modes are per job.** A job's mode, within the node's cap, decides how that job gives back; the
+  node's mode is the default for jobs that set none. A Performance job therefore gives back
+  nothing beyond the baseline on a node whose default is Neutral, and other workloads there can
+  then get less than Neutral's fair share: a known limitation.
 - **Loss by mode.** Yield First and Neutral MAY cost own work compared with the baseline.
   Performance and Aggressive MUST NOT cost running own work anything compared with the baseline
   beyond CedeGrid's measured own overhead. What they hold back is held at admission only: the
@@ -321,4 +329,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 8.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-17
+**Version**: 8.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-17
