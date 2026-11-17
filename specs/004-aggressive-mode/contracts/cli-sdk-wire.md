@@ -17,11 +17,13 @@ under the same names and through the parity test.
 | Step | Rule |
 |---|---|
 | raise the node cap to Aggressive | its own confirmed step interactively; non-interactively `--max-mode aggressive --acknowledge aggressive_mode` |
-| turn the allowance on | interactive only: the numbers screen, `Allow unprotected Aggressive on this host? [y/n]` with no default, then `Type "slow other users' compute on this host" to continue:`. Anything else cancels: `cancelled: the phrase did not match; the allowance stays off`. Non-interactive: `ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY` |
+| turn the allowance on | interactive only: the numbers screen, `Allow unprotected Aggressive on this host? [y/n]` with no default, then `Type "slow other users' compute on this host" to confirm:`. Anything else cancels with one line: `Cancelled. The allowance stays off.`, or `Cancelled: the phrase did not match. The allowance stays off.` Non-interactive: `ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY` |
 | turn the allowance off | no confirmation, interactive or `cedegrid setup --disallow-unprotected-aggressive` |
 
-The numbers screen shows: the number of other active principals, their current CPU use, and an
-estimated slowdown for a light user, marked "estimate".
+The numbers screen shows the number of other active principals and their current CPU use, and
+says that where they contend the kernel splits CPU time, so their work can slow down until the
+run ends. It gives no slowdown figure: that depends on the run's threads and the host's cgroup
+layout. Memory floors and OOM handling do not change.
 
 ## SDKs (Python and TypeScript, the same names)
 

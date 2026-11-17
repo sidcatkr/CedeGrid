@@ -1859,7 +1859,12 @@ mod unprotected_allowance {
     fn a_missing_database_reads_off_and_clears_without_error() {
         let directory = storage_dir();
         let allowance = read_allowance(directory.path());
-        assert!(off(&allowance), "{allowance:?}");
+        // Never set rather than unreadable, so a refusal says the setting is off.
+        assert_eq!(allowance, Allowance::Off { reason: None });
+        assert_eq!(
+            read_allowance(&directory.path().join("absent")),
+            Allowance::Off { reason: None }
+        );
         clear_allowance(directory.path()).unwrap();
         assert!(set_allowance(directory.path(), 1).is_err());
     }

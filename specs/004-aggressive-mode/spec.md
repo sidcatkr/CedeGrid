@@ -105,6 +105,11 @@ default mode and no caution option. Where this spec says otherwise, the note app
   off needs no confirmation, and restoring a backup resets it to off.
 - Q: May a System mode administrator forbid unprotected Aggressive? → A: Yes, with its own
   administrator policy key, off by default, separate from the allowed modes (user, choice 4 A).
+- Q: Does the numbers screen state a slowdown figure for a light user? → A: No. How the kernel
+  splits CPU time depends on the run's thread count and the host's cgroup layout, which setup
+  cannot know, so a figure would be a guess. The screen states the host's numbers and says that
+  where they contend the kernel splits CPU time and other users' work can slow down until the
+  run ends (user, design review).
 
 ## Terms
 
@@ -282,9 +287,9 @@ Only the permitted path starts an unprotected run.
   migrations and the node cap MUST NOT enable it. A configuration that tries MUST fail to load
   with a message naming the key.
 - **FR-013**: The host's allowance MUST be turned on only in interactive setup, in two steps:
-  1. a screen with this host's current numbers (the number of other active principals, their
-     current CPU use, and how much a light user would slow down, stated as an estimate) and a
-     yes/no question with no default;
+  1. a screen with this host's current numbers (the number of other active principals and
+     their current CPU use), a statement that where they contend the kernel splits CPU time so
+     their work can slow down until the run ends, and a yes/no question with no default;
   2. typing a fixed phrase. Anything else cancels.
 - **FR-014**: A submission requesting unprotected Aggressive MUST be refused unless all hold: a
   second explicit confirmation field is present, and the host's allowance is on. A refusal MUST
@@ -359,5 +364,3 @@ Only the permitted path starts an unprotected run.
   carry the feature.
 - Aggressive on RAM and GPU memory behaves as Performance does there: floors at admission only.
 - The fixed confirmation phrase, the field names and the acknowledgement name are set in the plan.
-- The light-user slowdown on the numbers screen is an estimate from current usage and the fair
-  share, stated as an estimate.

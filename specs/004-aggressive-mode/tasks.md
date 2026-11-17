@@ -163,7 +163,7 @@ principal contends. Nothing else changes.
   and that the same happens after `config_migration` migrates a 0.2 file that holds one.
 - [x] T018 [P] [US2] (now) In `tests/cli.rs`, test interactive setup with a scripted terminal:
   - "yes" plus the exact phrase `slow other users' compute on this host` turns the allowance on;
-  - "no", an empty answer or a wrong phrase leaves it off and prints `cancelled: the phrase did not match; the allowance stays off` where it applies;
+  - "no", an empty answer or a wrong phrase leaves it off and prints one line, `Cancelled: the phrase did not match. The allowance stays off.` where it applies;
   - non-interactive setup refuses to turn it on with `ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY`;
   - `cedegrid setup --disallow-unprotected-aggressive` turns it off without confirmation.
 - [x] T019 [P] [US2] (now) In `tests/agent.rs`, test the launch grant check. Each missing
@@ -194,9 +194,9 @@ principal contends. Nothing else changes.
 - [ ] T023 [US2] (now) In `src/config.rs` and `src/config_migration.rs`, refuse every key that
   would enable unprotected Aggressive. Passes T017.
 - [x] T024 [US2] (now) In `src/setup.rs` and `src/setup/interface.rs`, add the allowance step.
-  The numbers screen (R11) shows other active principals, their CPU use and an estimated
-  light-user slowdown, labelled "estimate", from the agent's latest observation, and says that
-  memory floors and OOM handling are unchanged by it (FR-006). Then a yes/no
+  The numbers screen (R11) shows other active principals and their CPU use from a fresh
+  observation, says that where they contend the kernel splits CPU time, with no slowdown
+  figure, and says that memory floors and OOM handling are unchanged by it (FR-006). Then a yes/no
   question with no default, then the fixed phrase. Add `--disallow-unprotected-aggressive`.
   Writes go through T003. Passes T018.
 - [x] T025 [US2] (now) In `src/protocol.rs` and `src/coordinator.rs`, add the grant object. The

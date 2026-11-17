@@ -1021,29 +1021,25 @@ pub struct Report {
 pub fn main(config: &Path, args: &SetupArgs) -> i32 {
     if args.allow_unprotected_aggressive || args.disallow_unprotected_aggressive {
         return match allowance(config, args) {
-            Ok(state) => {
-                if args.json {
-                    println!("{}", serde_json::json!({ "unprotected_aggressive": state }));
-                } else {
-                    println!("unprotected Aggressive allowance: {state}");
-                }
-                0
-            }
-            Err(error) => {
-                let (exit, code, message) = match error.downcast_ref::<SetupError>() {
-                    Some(error) => (error.exit, error.code, error.message.clone()),
-                    None => (1, "ERR_CEDEGRID_SETUP", format!("{error:#}")),
-                };
+            Ok(change) => {
                 if args.json {
                     println!(
                         "{}",
-                        serde_json::json!({"error": {"code": code, "message": message}})
+                        serde_json::json!({
+                            "unprotected_aggressive": if change.on() { "on" } else { "off" },
+                            "changed": change.changed(),
+                        })
                     );
-                } else {
-                    eprintln!("{code}: {message}");
+                } else if let Some(text) = change.text() {
+                    let style = Style::detect();
+                    println!("{}", text.0);
+                    if let Some(note) = text.1 {
+                        println!("{}", style.dim(&note));
+                    }
                 }
-                exit
+                0
             }
+            Err(error) => report_error(&error, args.json),
         };
     }
     match run(config, args) {
@@ -1058,22 +1054,28 @@ pub fn main(config: &Path, args: &SetupArgs) -> i32 {
             }
             0
         }
-        Err(error) => {
-            let (exit, code, message) = match error.downcast_ref::<SetupError>() {
-                Some(error) => (error.exit, error.code, error.message.clone()),
-                None => (1, "ERR_CEDEGRID_SETUP", format!("{error:#}")),
-            };
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::json!({"error": {"code": code, "message": message}})
-                );
-            } else {
-                eprintln!("{code}: {message}");
-            }
-            exit
+        Err(error) => report_error(&error, args.json),
+    }
+}
+
+/// Prints a setup error, as JSON on standard output or for people on standard error, and
+/// returns its exit status.
+fn report_error(error: &anyhow::Error, json: bool) -> i32 {
+    let (exit, code, message) = match error.downcast_ref::<SetupError>() {
+        Some(error) => (error.exit, error.code, error.message.clone()),
+        None => (1, "ERR_CEDEGRID_SETUP", format!("{error:#}")),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"error": {"code": code, "message": message}})
+        );
+    } else {
+        for line in error_lines(code, &message, Style::detect_stderr()) {
+            eprintln!("{line}");
         }
     }
+    exit
 }
 
 fn print_report(report: &Report) {
@@ -1150,60 +1152,160 @@ impl AllowanceNumbers {
     }
 }
 
+/// What `--allow-unprotected-aggressive` or `--disallow-unprotected-aggressive` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AllowanceChange {
+    Allowed,
+    AlreadyAllowed {
+        since_unix_ms: u64,
+    },
+    Disallowed,
+    AlreadyOff,
+    /// The dialog was declined; it already said so.
+    Cancelled,
+}
+
+impl AllowanceChange {
+    fn on(self) -> bool {
+        matches!(self, Self::Allowed | Self::AlreadyAllowed { .. })
+    }
+
+    fn changed(self) -> bool {
+        matches!(self, Self::Allowed | Self::Disallowed)
+    }
+
+    /// The result line and an optional dim note; nothing after a cancel, which printed its own.
+    fn text(self) -> Option<(String, Option<String>)> {
+        let off = "Turn it off with: cedegrid setup --disallow-unprotected-aggressive";
+        Some(match self {
+            Self::Allowed => (
+                "Unprotected Aggressive is now allowed on this host.".into(),
+                Some(format!(
+                    "  A run still needs both SDK fields to use it. {off}"
+                )),
+            ),
+            Self::AlreadyAllowed { since_unix_ms } => (
+                format!(
+                    "Unprotected Aggressive is already allowed on this host (since {}).",
+                    utc_minute(since_unix_ms)
+                ),
+                Some(format!("  {off}")),
+            ),
+            Self::Disallowed => (
+                "Unprotected Aggressive is no longer allowed on this host.".into(),
+                Some("  Runs already started keep their grant until they end.".into()),
+            ),
+            Self::AlreadyOff => (
+                "Unprotected Aggressive is not allowed on this host; nothing changed.".into(),
+                None,
+            ),
+            Self::Cancelled => return None,
+        })
+    }
+}
+
+/// A Unix time in milliseconds as `YYYY-MM-DD HH:MM UTC`.
+fn utc_minute(unix_ms: u64) -> String {
+    let minutes = unix_ms / 60_000;
+    let (days, minute) = (minutes / 1440, minutes % 1440);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        minute / 60,
+        minute % 60
+    )
+}
+
 /// The two steps on the given streams: the numbers and a yes/no question with no default, then
 /// the fixed phrase. Returns whether both passed; anything else cancels with one line.
 pub fn allowance_dialog(
     numbers: &AllowanceNumbers,
+    style: Style,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<bool> {
     writeln!(
         output,
-        "Unprotected Aggressive lets a run start compute work where other users already run."
+        "{}  {}",
+        style.bold("Unprotected Aggressive"),
+        style.caution(CAUTION)
     )?;
-    match numbers.other_principals {
-        Some(count) => writeln!(
-            output,
-            "Other users active now: {count}, using {} m of {} m CPU.",
-            numbers.other_cpu_millicores, numbers.capacity_millicores
-        )?,
-        None => writeln!(output, "Other users active now: unknown (no telemetry).")?,
+    writeln!(output)?;
+    // No slowdown figure: the kernel's split depends on the run's threads and this host's cgroup
+    // layout, which setup cannot know (004 FR-013).
+    for line in wrap(
+        "A run that asks for it may start compute work where other users already run. Where \
+         they contend, the kernel splits CPU time between their work and the run, so theirs can \
+         slow down until the run ends. Memory floors and OOM handling do not change.",
+        76,
+    ) {
+        writeln!(output, "  {line}")?;
     }
-    writeln!(
-        output,
-        "A light user on a CPU this host's own work fills may run about 2x slower (estimate)."
-    )?;
-    writeln!(output, "Memory floors and OOM handling do not change.")?;
+    writeln!(output)?;
+    let rows = match numbers.other_principals {
+        Some(count) => vec![
+            ("Other users active now", count.to_string()),
+            (
+                "Their CPU use",
+                format!(
+                    "{} m of {} m",
+                    group(numbers.other_cpu_millicores),
+                    group(numbers.capacity_millicores)
+                ),
+            ),
+        ],
+        None => vec![(
+            "Other users active now",
+            "unknown: no per-user telemetry on this host".to_string(),
+        )],
+    };
+    for line in key_values(&rows, 2) {
+        writeln!(output, "{line}")?;
+    }
+    writeln!(output)?;
     write!(output, "Allow unprotected Aggressive on this host? [y/n] ")?;
     output.flush()?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
     if !matches!(answer.trim(), "y" | "yes") {
-        writeln!(output, "cancelled: the allowance stays off")?;
+        writeln!(output, "Cancelled. The allowance stays off.")?;
         return Ok(false);
     }
-    write!(output, "Type \"{ALLOWANCE_PHRASE}\" to continue: ")?;
+    write!(output, "Type \"{ALLOWANCE_PHRASE}\" to confirm: ")?;
     output.flush()?;
     let mut phrase = String::new();
     input.read_line(&mut phrase)?;
     if phrase.trim_end_matches(['\r', '\n']) != ALLOWANCE_PHRASE {
         writeln!(
             output,
-            "cancelled: the phrase did not match; the allowance stays off"
+            "Cancelled: the phrase did not match. The allowance stays off."
         )?;
         return Ok(false);
     }
     Ok(true)
 }
 
-/// `setup --allow-unprotected-aggressive` or `--disallow-unprotected-aggressive`: returns the
-/// allowance's state afterwards. Turning it on needs a terminal; turning it off needs nothing.
-fn allowance(config: &Path, args: &SetupArgs) -> Result<&'static str> {
+/// `setup --allow-unprotected-aggressive` or `--disallow-unprotected-aggressive`. Turning it on
+/// needs a terminal; turning it off needs nothing.
+fn allowance(config: &Path, args: &SetupArgs) -> Result<AllowanceChange> {
     let target = locate(config)?;
     let (_, node) = node_base(&target)?;
+    let before = crate::state::read_allowance(&node.state_dir);
     if args.disallow_unprotected_aggressive {
         crate::state::clear_allowance(&node.state_dir)?;
-        return Ok("off");
+        return Ok(match before {
+            crate::state::Allowance::On { .. } => AllowanceChange::Disallowed,
+            crate::state::Allowance::Off { .. } => AllowanceChange::AlreadyOff,
+        });
     }
     let interactive = !args.non_interactive
         && !args.json
@@ -1213,9 +1315,14 @@ fn allowance(config: &Path, args: &SetupArgs) -> Result<&'static str> {
         return Err(SetupError {
             exit: 2,
             code: "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
-            message: "unprotected Aggressive is allowed only from a terminal, after its numbers and phrase".into(),
+            message: "unprotected Aggressive can be allowed only from a terminal".into(),
         }
         .into());
+    }
+    if let crate::state::Allowance::On { set_at_unix_ms } = before {
+        return Ok(AllowanceChange::AlreadyAllowed {
+            since_unix_ms: set_at_unix_ms,
+        });
     }
     let numbers = crate::telemetry::Collector::for_config(&node)
         .and_then(|mut collector| collector.sample())
@@ -1223,15 +1330,15 @@ fn allowance(config: &Path, args: &SetupArgs) -> Result<&'static str> {
         .unwrap_or_default();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    if !allowance_dialog(&numbers, &mut stdin.lock(), &mut stdout)? {
-        return Ok("off");
+    if !allowance_dialog(&numbers, Style::detect(), &mut stdin.lock(), &mut stdout)? {
+        return Ok(AllowanceChange::Cancelled);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("the clock is before 1970")?
         .as_millis();
     crate::state::set_allowance(&node.state_dir, u64::try_from(now)?)?;
-    Ok("on")
+    Ok(AllowanceChange::Allowed)
 }
 
 /// On a terminal, offer setup for a command whose configuration is missing
@@ -1345,6 +1452,16 @@ impl Field {
             Field::HintDeadline => "Guaranteed hint deadline".into(),
             Field::NoiseTolerance => "GPU memory noise tolerance".into(),
             Field::AttributionTolerance => "GPU compute attribution tolerance".into(),
+        }
+    }
+
+    /// A line under the field's title, for fields whose options alone do not say what they
+    /// cover.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Field::DefaultMode => Some("Applies to each resource without a mode of its own."),
+            Field::MaxMode => Some("The highest mode a job may request on this node."),
+            _ => None,
         }
     }
 
@@ -1593,14 +1710,14 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
         ContentionMode::YieldFirst => "pauses under contention",
         ContentionMode::Neutral => "holds the fair share under contention",
         ContentionMode::Performance => "follows what external work takes",
-        ContentionMode::Aggressive => "fills idle compute at once; holds back at admission only",
+        ContentionMode::Aggressive => "fills idle compute at once",
     };
     let margin = |kind: ResourceKind, mode: ContentionMode| -> u64 {
         u64::from(margin_of(&config.contention.thresholds(kind), mode).1)
     };
-    let resource_line = |kind: ResourceKind, mode: ContentionMode| -> String {
+    let resource_line_of = |kind: ResourceKind, mode: ContentionMode| -> String {
         match kind {
-            ResourceKind::Cpu => format!("{}; {}", cpu_free(margin(kind, mode)), behavior(mode)),
+            ResourceKind::Cpu => format!("{} · {}", cpu_free(margin(kind, mode)), behavior(mode)),
             ResourceKind::Ram if mode == ContentionMode::YieldFirst => format!(
                 "keeps {}% beyond the floor free; {}",
                 margin(kind, mode),
@@ -1614,7 +1731,7 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
                 None => "keeps the floor only".into(),
             },
             ResourceKind::GpuCompute => format!(
-                "keeps {}% of each GPU's compute free; {}",
+                "keeps {}% of each GPU's compute free · {}",
                 margin(kind, mode),
                 behavior(mode)
             ),
@@ -1633,6 +1750,17 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
             },
         }
     };
+    // Memory follows Performance under Aggressive (004 FR-006).
+    let resource_line = |kind: ResourceKind, mode: ContentionMode| -> String {
+        if kind.is_memory() && mode == ContentionMode::Aggressive {
+            format!(
+                "same as Performance on memory: {}",
+                resource_line_of(kind, ContentionMode::Performance)
+            )
+        } else {
+            resource_line_of(kind, mode)
+        }
+    };
     let with = |apply: &dyn Fn(&mut Config)| {
         let mut changed = config.clone();
         apply(&mut changed);
@@ -1648,10 +1776,7 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
         (Field::Role, Pick::Role(_)) => {
             "submits and inspects work; asks for the endpoint and TLS files".into()
         }
-        (Field::DefaultMode, Pick::Mode(mode)) => format!(
-            "{} on every resource without its own mode",
-            resource_line(ResourceKind::Cpu, mode)
-        ),
+        (Field::DefaultMode, Pick::Mode(mode)) => behavior(mode).into(),
         (Field::Mode(kind), Pick::Mode(mode)) => resource_line(kind, mode),
         (Field::Mode(kind), _) => format!(
             "follows the default mode: {}",
@@ -1718,18 +1843,23 @@ pub fn justification(option: &str) -> &'static str {
 pub fn host_lines(config: &Config, host: Option<&Host>) -> Vec<String> {
     let mut lines = Vec::new();
     for kind in ResourceKind::ALL {
-        let mode = config.contention.mode(kind);
+        let mode = crate::explain::behaves_as(kind, config.contention.mode(kind));
         lines.push(format!(
-            "{:<12} {}: {}",
+            "{:<12} {:<12} {}",
             resource_label(kind),
             mode.label(),
-            consequence(Field::Mode(kind), Pick::Mode(mode), config, host)
+            capitalize(&consequence(
+                Field::Mode(kind),
+                Pick::Mode(mode),
+                config,
+                host
+            ))
         ));
     }
     if let Some(host) = host {
         for (uuid, total) in host.gpus.iter().skip(1) {
             lines.push(format!(
-                "{:<12} GPU memory floor {} MiB on {uuid}",
+                "{:<25} GPU memory floor {} MiB on {uuid}",
                 "",
                 group(config.vram_floor_mib(*total))
             ));
@@ -1788,6 +1918,185 @@ pub fn summary_lines(plan: &Plan, host: Option<&Host>) -> Vec<String> {
 
 /// The marker text; yellow (SGR 33) is added where color is allowed.
 pub const CAUTION: &str = "[caution]";
+
+/// Color for setup's human output (FR-050): yellow for caution, red for a refusal and dim for
+/// descriptions, only on a terminal that allows color; plain text otherwise.
+#[derive(Clone, Copy, Debug)]
+pub struct Style {
+    pub color: bool,
+}
+
+impl Style {
+    /// Color on standard output when it is a terminal, unless `NO_COLOR` is set or `TERM` is
+    /// `dumb`.
+    pub fn detect() -> Self {
+        Self::on(std::io::stdout().is_terminal())
+    }
+
+    /// The same rule for standard error.
+    pub fn detect_stderr() -> Self {
+        Self::on(std::io::stderr().is_terminal())
+    }
+
+    fn on(terminal: bool) -> Self {
+        Self {
+            color: terminal
+                && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+                && std::env::var("TERM").map_or(true, |term| term != "dumb"),
+        }
+    }
+
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.color && !text.is_empty() {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    pub fn caution(self, text: &str) -> String {
+        self.paint("33", text)
+    }
+
+    pub fn refusal(self, text: &str) -> String {
+        self.paint("1;31", text)
+    }
+
+    pub fn dim(self, text: &str) -> String {
+        self.paint("2", text)
+    }
+
+    pub fn bold(self, text: &str) -> String {
+        self.paint("1", text)
+    }
+}
+
+/// One option in a list: a fixed-width prefix (number or pointer), the label, its description
+/// and whether it is a caution option.
+pub struct OptionRow {
+    pub prefix: String,
+    pub label: String,
+    pub description: String,
+    pub caution: bool,
+    pub selected: bool,
+}
+
+/// Option rows with the labels in one aligned column and dim descriptions beside them; when
+/// `width` cannot hold both, each description goes on its own line under the label.
+pub fn option_lines(rows: &[OptionRow], style: Style, width: Option<usize>) -> Vec<String> {
+    let count = |text: &str| text.chars().count();
+    let label_width = rows.iter().map(|row| count(&row.label)).max().unwrap_or(0);
+    let prefix_width = rows.iter().map(|row| count(&row.prefix)).max().unwrap_or(0);
+    let tag = |caution: bool| {
+        if caution {
+            format!("  {}", style.caution(CAUTION))
+        } else {
+            String::new()
+        }
+    };
+    let widest = rows
+        .iter()
+        .map(|row| count(&row.description) + if row.caution { 11 } else { 0 })
+        .max()
+        .unwrap_or(0);
+    let beside = width.is_none_or(|width| prefix_width + label_width + 2 + widest <= width);
+    let mut lines = Vec::new();
+    for row in rows {
+        let paint = |label: String| {
+            if row.selected {
+                style.bold(&label)
+            } else {
+                label
+            }
+        };
+        let description = style.dim(&capitalize(&row.description));
+        if beside {
+            lines.push(format!(
+                "{:<prefix_width$}{}  {description}{}",
+                row.prefix,
+                paint(format!("{:<label_width$}", row.label)),
+                tag(row.caution)
+            ));
+        } else {
+            lines.push(format!(
+                "{:<prefix_width$}{}{}",
+                row.prefix,
+                paint(row.label.clone()),
+                tag(row.caution)
+            ));
+            lines.push(format!("{:prefix_width$}{description}", ""));
+        }
+    }
+    lines
+}
+
+/// The text with its first letter in upper case.
+pub fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Words wrapped to lines of at most `width` characters; a longer word keeps its own line.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Key/value rows with the keys in one aligned column.
+pub fn key_values(rows: &[(&str, String)], indent: usize) -> Vec<String> {
+    let width = rows
+        .iter()
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|(key, value)| format!("{:indent$}{key:<width$}   {value}", ""))
+        .collect()
+}
+
+/// A setup error as people read it: the headline, an indented fix where one is known, then the
+/// code, dim.
+pub fn error_lines(code: &str, message: &str, style: Style) -> Vec<String> {
+    // A cancel is the person's own choice, not an error.
+    if code == "ERR_CEDEGRID_SETUP_CANCELLED" {
+        return vec!["Cancelled. Nothing was written.".into()];
+    }
+    let mut lines = vec![format!("{} {message}", style.refusal("error:"))];
+    if let Some(fix) = fix_for(code) {
+        lines.push(format!("  - {fix}"));
+    }
+    lines.push(style.dim(&format!("  code: {code}")));
+    lines
+}
+
+/// The fix for a setup error, where the message alone does not say it.
+fn fix_for(code: &str) -> Option<&'static str> {
+    match code {
+        "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY" => Some(
+            "Run cedegrid setup --allow-unprotected-aggressive in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
+        ),
+        "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED" => Some(
+            "Confirm the option in interactive setup, or pass --acknowledge-caution with its name.",
+        ),
+        _ => None,
+    }
+}
 
 /// The interactive paths: the terminal interface and the line prompts.
 mod interface;
@@ -1919,7 +2228,7 @@ mod tests {
                 &config,
                 Some(&host)
             ),
-            "keeps 1600 m of 32 000 m CPU free; holds the fair share under contention"
+            "keeps 1600 m of 32 000 m CPU free · holds the fair share under contention"
         );
         assert_eq!(
             consequence(Field::RamFloor, Pick::Number(8192), &config, Some(&host)),
@@ -1948,11 +2257,74 @@ mod tests {
             ),
             "keeps the floor only (1229 MiB on GPU-a)"
         );
+        // Under Aggressive, memory says it follows Performance (004 FR-006).
+        assert_eq!(
+            consequence(
+                Field::Mode(ResourceKind::Ram),
+                Pick::Mode(ContentionMode::Aggressive),
+                &config,
+                Some(&host)
+            ),
+            "same as Performance on memory: keeps the floor only (13 108 MiB on this host)"
+        );
         for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
             for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
                 assert!(!node_fields().contains(&Field::Margin(kind, mode)));
             }
         }
+    }
+
+    /// Option lists keep labels in one column and descriptions beside them, or under them on a
+    /// narrow terminal; text is wrapped at word boundaries.
+    #[test]
+    fn option_lists_align_and_fall_back_to_two_lines() {
+        let row = |label: &str, description: &str, caution| OptionRow {
+            prefix: "   1  ".into(),
+            label: label.into(),
+            description: description.into(),
+            caution,
+            selected: false,
+        };
+        let rows = [
+            row("Neutral", "holds the fair share", false),
+            row("Aggressive", "fills idle compute at once", true),
+        ];
+        let plain = Style { color: false };
+        assert_eq!(
+            option_lines(&rows, plain, Some(80)),
+            [
+                "   1  Neutral     Holds the fair share",
+                "   1  Aggressive  Fills idle compute at once  [caution]",
+            ]
+        );
+        assert_eq!(
+            option_lines(&rows, plain, Some(40)),
+            [
+                "   1  Neutral",
+                "      Holds the fair share",
+                "   1  Aggressive  [caution]",
+                "      Fills idle compute at once",
+            ]
+        );
+        assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
+        assert_eq!(utc_minute(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_minute(1_795_000_000_000), "2026-11-18 11:06 UTC");
+        assert_eq!(
+            error_lines(
+                "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
+                "no terminal",
+                plain
+            ),
+            [
+                "error: no terminal",
+                "  - Run cedegrid setup --allow-unprotected-aggressive in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
+                "  code: ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
+            ]
+        );
+        assert_eq!(
+            error_lines("ERR_CEDEGRID_SETUP_CANCELLED", "cancelled", plain),
+            ["Cancelled. Nothing was written."]
+        );
     }
 
     /// Every option the interface offers maps to a key the configuration accepts,

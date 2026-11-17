@@ -1395,7 +1395,7 @@ mod setup_terminal {
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
         open(&mut pty, DEFAULT_MODE);
-        pty.wait_for("holds the fair share");
+        pty.wait_for("Holds the fair share");
         // Options: Yield First, Neutral, Performance (current, the default).
         pty.keys(UP, 2);
         pty.key(b" ");
@@ -1656,15 +1656,17 @@ mod setup_terminal {
             pty.wait_for("Allow unprotected Aggressive on this host? [y/n]");
             pty.key(format!("{answer}\r").as_bytes());
             if answer == "y" {
-                pty.wait_for("to continue:");
+                pty.wait_for("to confirm:");
                 pty.key(format!("{phrase}\r").as_bytes());
             }
             let (status, text, _) = pty.finish();
             assert!(status.success(), "{text}");
-            assert!(text.contains("Other users active now:"), "{text}");
-            assert!(text.contains("(estimate)"), "{text}");
+            assert!(text.contains("Other users active now"), "{text}");
+            // No slowdown figure: setup cannot know how the kernel will split CPU time.
+            assert!(!text.contains("slower"), "{text}");
+            let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
-                text.contains("Memory floors and OOM handling do not change."),
+                words.contains("Memory floors and OOM handling do not change."),
                 "{text}"
             );
             assert_eq!(
@@ -1672,8 +1674,19 @@ mod setup_terminal {
                 on,
                 "{answer:?} {phrase:?}: {text}"
             );
-            if !on {
-                assert!(text.contains("cancelled:"), "{text}");
+            // Each outcome is one line: the result, or the cancel and why.
+            let last = text
+                .trim_end()
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .to_owned();
+            if on {
+                assert!(text.contains("is now allowed on this host"), "{text}");
+            } else {
+                assert!(last.starts_with("Cancelled"), "{last}");
+                assert!(last.ends_with("The allowance stays off."), "{last}");
+                assert!(!text.contains("allowance: off"), "{text}");
             }
         }
     }
@@ -1789,8 +1802,29 @@ fn doctor_marks_aggressive_and_its_caution() {
     )
     .unwrap();
     let text = String::from_utf8(run(&path, &["doctor", "--text"]).stdout).unwrap();
+    let row = |key: &str| {
+        text.lines()
+            .find(|line| line.trim_start().starts_with(key))
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(row("Default mode"), "Default mode [Aggressive]", "{text}");
+    assert_eq!(row("Node cap"), "Node cap [Aggressive]", "{text}");
+    // Memory follows Performance under Aggressive (004 FR-006).
     assert!(
-        text.contains("modes: default [Aggressive], node cap [Aggressive]"),
+        text.contains("\nram: Performance (Aggressive covers compute only)"),
+        "{text}"
+    );
+    assert!(row("ram ").starts_with("ram Performance"), "{text}");
+    // Unprotected Aggressive lists what is missing here, each with its fix.
+    assert!(
+        text.contains("Unprotected Aggressive\n  not available on this host\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    fix: run cedegrid setup --allow-unprotected-aggressive on a terminal"),
         "{text}"
     );
     assert!(

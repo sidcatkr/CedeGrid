@@ -1207,6 +1207,12 @@ pub fn read_allowance(state_dir: &Path) -> Allowance {
             _ => None,
         })
     };
+    // No database yet means the allowance was never set: off, with nothing to report.
+    if std::fs::symlink_metadata(state_dir.join(DATABASE_FILENAME))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Allowance::Off { reason: None };
+    }
     match read() {
         Ok(Some(set_at_unix_ms)) => Allowance::On { set_at_unix_ms },
         Ok(None) => Allowance::Off { reason: None },

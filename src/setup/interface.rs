@@ -1,11 +1,56 @@
 use super::*;
 
-/// Whether color may be used (FR-050).
-#[cfg(unix)]
-fn color_allowed() -> bool {
-    std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
-        && std::env::var("TERM").map_or(true, |term| term != "dumb")
-        && std::io::stdout().is_terminal()
+/// The terminal's width in columns, where it can be read.
+fn width() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        terminal::size().map(|(_, columns)| usize::from(columns))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// The value a pick writes, as the confirmation's Setting row shows it.
+fn written(pick: Pick) -> String {
+    match pick {
+        Pick::Mode(mode) => format!("\"{}\"", mode.name()),
+        Pick::Number(value) => value.to_string(),
+        Pick::Role(role) => format!("\"{}\"", role.name()),
+        Pick::Inherit => "(removed)".into(),
+    }
+}
+
+/// The confirmation's rows for a caution pick: the setting, its effect, why it is a caution
+/// option and where the acknowledgement goes, with the reason wrapped to `width`.
+fn confirmation_rows(
+    state: &State,
+    config: &Config,
+    field: Field,
+    pick: Pick,
+    option: &str,
+    width: usize,
+) -> Vec<String> {
+    let mut why = wrap(
+        justification(option),
+        width.saturating_sub(15).clamp(40, 86),
+    )
+    .into_iter();
+    let mut rows = vec![
+        ("Setting", format!("{} = {}", field.key(), written(pick))),
+        (
+            "Effect",
+            capitalize(&consequence(field, pick, config, state.host.as_ref())),
+        ),
+        ("Why", why.next().unwrap_or_default()),
+    ];
+    rows.extend(why.map(|line| ("", line)));
+    rows.push((
+        "Records",
+        format!("{option} in contention.acknowledge_caution"),
+    ));
+    key_values(&rows, 2)
 }
 
 #[cfg(unix)]
@@ -35,7 +80,7 @@ pub fn run(target: &Target, flags: Choices, host: Option<&Host>) -> Result<Optio
         && size.0 as usize >= state.rows().len() + 8
         && size.1 >= 72
     {
-        return match screen::run(&mut state, color_allowed())? {
+        return match screen::run(&mut state, Style::detect().color)? {
             screen::Outcome::Done(choices) => Ok(Some(choices)),
             screen::Outcome::Cancelled => Ok(None),
             screen::Outcome::Role(role) => prompts::connection(target, role, Choices::default()),
@@ -134,33 +179,54 @@ mod prompts {
     }
 
     pub fn node(state: &mut State) -> Result<Option<Choices>> {
-        println!("CedeGrid setup: {} (node)", state.target.path.display());
-        println!("Press Enter to keep the current value. Ctrl-D cancels.");
+        let style = Style::detect();
+        println!(
+            "{}",
+            style.bold(&format!(
+                "CedeGrid setup · node · {}",
+                state.target.path.display()
+            ))
+        );
+        println!(
+            "{}",
+            style.dim("Enter keeps the current value. Ctrl-D cancels.")
+        );
         for field in state.rows() {
             if field == Field::Role {
                 continue;
             }
             let config = state.preview();
             let options = field.options(&config, state.fresh);
+            let current = state.values[&field];
             println!();
             println!(
-                "{}: {}",
-                field.label(),
-                field.show(state.values[&field], &config)
+                "{}",
+                style.bold(&format!(
+                    "{}: {}",
+                    field.label(),
+                    field.show(current, &config)
+                ))
             );
-            for (index, option) in options.iter().enumerate() {
-                let marker = state
-                    .risk(field, *option)
-                    .map_or(String::new(), |_| format!(" {CAUTION}"));
-                println!(
-                    "  {}) {}{marker}: {}",
-                    index + 1,
-                    field.show(*option, &config),
-                    consequence(field, *option, &config, state.host.as_ref())
-                );
+            if let Some(note) = field.note() {
+                println!("{}", style.dim(note));
+            }
+            let rows: Vec<OptionRow> = options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| OptionRow {
+                    prefix: format!("{:>4}  ", index + 1),
+                    label: field.show(*option, &config),
+                    description: consequence(field, *option, &config, state.host.as_ref()),
+                    caution: state.risk(field, *option).is_some(),
+                    selected: false,
+                })
+                .collect();
+            for line in option_lines(&rows, style, width()) {
+                println!("{line}");
             }
             loop {
-                let Some(answer) = ask(&format!("Choose 1-{}: ", options.len()))? else {
+                let Some(answer) = ask(&format!("Choose 1-{}, or Enter to keep: ", options.len()))?
+                else {
                     return Ok(None);
                 };
                 if answer.is_empty() {
@@ -179,14 +245,30 @@ mod prompts {
                 if let Some(option) = state.risk(field, pick)
                     && state.needs_confirmation(option)
                 {
-                    println!("{CAUTION} {}", justification(option));
+                    println!();
+                    println!(
+                        "  {} {}: {}",
+                        style.caution(CAUTION),
+                        field.label(),
+                        field.show(pick, &config)
+                    );
+                    for line in confirmation_rows(
+                        state,
+                        &config,
+                        field,
+                        pick,
+                        option,
+                        width().unwrap_or(80),
+                    ) {
+                        println!("{line}");
+                    }
                     let Some(answer) =
                         ask(&format!("Type yes to record {option} and use this value: "))?
                     else {
                         return Ok(None);
                     };
                     if answer != "yes" {
-                        println!("Kept {}.", field.show(state.values[&field], &config));
+                        println!("Kept {}.", field.show(current, &config));
                         break;
                     }
                     state.acknowledged.insert(option.to_string());
@@ -197,9 +279,11 @@ mod prompts {
         }
         let plan = state.plan()?;
         println!();
+        println!("{}", style.bold("Review before writing"));
         for line in summary_lines(&plan, state.host.as_ref()) {
-            println!("{line}");
+            println!("{}", line.replace(CAUTION, &style.caution(CAUTION)));
         }
+        println!();
         let Some(answer) = ask("Write this configuration? [y/N] ")? else {
             return Ok(None);
         };
@@ -208,9 +292,12 @@ mod prompts {
 
     pub fn connection(target: &Target, role: Role, flags: Choices) -> Result<Option<Choices>> {
         println!(
-            "CedeGrid setup: {} ({})",
-            target.path.display(),
-            role.name()
+            "{}",
+            Style::detect().bold(&format!(
+                "CedeGrid setup · {} · {}",
+                role.name(),
+                target.path.display()
+            ))
         );
         let current: Option<DocumentMut> =
             target.original.as_ref().and_then(|text| text.parse().ok());
@@ -292,12 +379,8 @@ mod screen {
     }
 
     impl Painter {
-        fn caution(&self) -> String {
-            if self.color {
-                format!("\x1b[33m{CAUTION}\x1b[0m")
-            } else {
-                CAUTION.to_string()
-            }
+        fn style(&self) -> Style {
+            Style { color: self.color }
         }
 
         /// One full frame. Without color the frame is plain text, so no
@@ -499,6 +582,8 @@ mod screen {
         }
     }
 
+    const MOVE: &str = "Up/Down move · Space select · Enter confirm · Esc cancel";
+
     fn render(
         state: &State,
         painter: &Painter,
@@ -508,54 +593,68 @@ mod screen {
         notice: Option<&str>,
     ) -> Vec<String> {
         let config = state.preview();
+        let style = painter.style();
+        let width = width().unwrap_or(80);
         let pointer = |selected: bool| if selected { "> " } else { "  " };
         let marker = |risky: bool| {
             if risky {
-                format!(" {}", painter.caution())
+                format!("  {}", style.caution(CAUTION))
             } else {
                 String::new()
             }
         };
+        let title = |text: &str| style.bold(&format!("CedeGrid setup · {text}"));
         let mut lines = Vec::new();
         match view {
             View::Main => {
-                lines.push(format!(
-                    "CedeGrid setup: {} (node)",
-                    state.target.path.display()
-                ));
-                lines.push("Up/Down move, Space or Enter open, Esc or q cancel".into());
+                lines.push(title(&format!("node · {}", state.target.path.display())));
                 lines.push(String::new());
+                let label_width = rows
+                    .iter()
+                    .map(|field| field.label().chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    + 3;
                 for (index, field) in rows.iter().enumerate() {
                     let pick = state.values[field];
                     // Floors also show what applies on this host.
                     let host = match (field, state.host.as_ref()) {
                         (Field::RamFloor, Some(host)) => format!(
-                            "; {} MiB on this host",
+                            " · {} MiB on this host",
                             group(config.ram_floor_mib(host.ram_mib))
                         ),
                         (Field::GpuFloor, Some(host)) => host
                             .gpus
                             .first()
                             .map(|(uuid, total)| {
-                                format!("; {} MiB on {uuid}", group(config.vram_floor_mib(*total)))
+                                format!(" · {} MiB on {uuid}", group(config.vram_floor_mib(*total)))
                             })
-                            .unwrap_or_else(|| "; no GPU on this host".into()),
+                            .unwrap_or_else(|| " · no GPU on this host".into()),
                         _ => String::new(),
                     };
+                    let label = format!("{:<label_width$}", field.label());
                     lines.push(format!(
-                        "{}{:<36}{}{host}{}",
+                        "{}{}{}{}{}",
                         pointer(index == row),
-                        field.label(),
+                        if index == row {
+                            style.bold(&label)
+                        } else {
+                            label
+                        },
                         field.show(pick, &config),
+                        style.dim(&host),
                         marker(state.risk(*field, pick).is_some())
                     ));
                 }
+                lines.push(String::new());
                 lines.push(format!("{}Review and write", pointer(row == rows.len())));
                 lines.push(format!("{}Cancel", pointer(row == rows.len() + 1)));
                 if let Some(notice) = notice {
                     lines.push(String::new());
-                    lines.push(format!("Cannot write: {notice}"));
+                    lines.push(format!("{} {notice}", style.refusal("Cannot write:")));
                 }
+                lines.push(String::new());
+                lines.push(style.dim("Up/Down move · Enter open · Esc cancel"));
             }
             View::Options {
                 field,
@@ -563,22 +662,29 @@ mod screen {
                 cursor,
                 marked,
             } => {
-                lines.push(field.label());
-                lines.push("Up/Down move, Space select, Enter confirm, Esc or q cancel".into());
-                lines.push(String::new());
-                for (index, option) in options.iter().enumerate() {
-                    lines.push(format!(
-                        "{}({}) {}{}",
-                        pointer(index == *cursor),
-                        if index == *marked { '*' } else { ' ' },
-                        field.show(*option, &config),
-                        marker(state.risk(*field, *option).is_some())
-                    ));
-                    lines.push(format!(
-                        "        {}",
-                        consequence(*field, *option, &config, state.host.as_ref())
-                    ));
+                lines.push(title(&field.label()));
+                if let Some(note) = field.note() {
+                    lines.push(style.dim(note));
                 }
+                lines.push(String::new());
+                let rows: Vec<OptionRow> = options
+                    .iter()
+                    .enumerate()
+                    .map(|(index, option)| OptionRow {
+                        prefix: format!(
+                            "{}({}) ",
+                            pointer(index == *cursor),
+                            if index == *marked { '*' } else { ' ' }
+                        ),
+                        label: field.show(*option, &config),
+                        description: consequence(*field, *option, &config, state.host.as_ref()),
+                        caution: state.risk(*field, *option).is_some(),
+                        selected: index == *cursor,
+                    })
+                    .collect();
+                lines.extend(option_lines(&rows, style, Some(width)));
+                lines.push(String::new());
+                lines.push(style.dim(MOVE));
             }
             View::Confirm {
                 field,
@@ -588,46 +694,58 @@ mod screen {
                 marked,
             } => {
                 let kept = state.values[field];
-                lines.push("Confirm a caution option".into());
+                lines.push(title("Confirm a caution option"));
                 lines.push(String::new());
                 lines.push(format!(
-                    "{} {}: {}",
-                    painter.caution(),
+                    "  {} {}: {}",
+                    style.caution(CAUTION),
                     field.label(),
                     field.show(*pick, &config)
                 ));
-                lines.push(consequence(*field, *pick, &config, state.host.as_ref()));
-                lines.push(justification(option).into());
                 lines.push(String::new());
-                lines.push("Up/Down move, Space select, Enter confirm, Esc or q cancel".into());
-                lines.push(format!(
-                    "{}({}) No, keep {}",
-                    pointer(*cursor == 0),
-                    if *marked == 0 { '*' } else { ' ' },
-                    field.show(kept, &config)
+                lines.extend(confirmation_rows(
+                    state, &config, *field, *pick, option, width,
                 ));
-                lines.push(format!(
-                    "{}({}) Yes, use {} and record {option} in contention.acknowledge_caution",
-                    pointer(*cursor == 1),
-                    if *marked == 1 { '*' } else { ' ' },
-                    field.show(*pick, &config)
-                ));
+                lines.push(String::new());
+                for (index, text) in [
+                    format!("No, keep {}", field.show(kept, &config)),
+                    format!(
+                        "Yes, use {} and record {option}",
+                        field.show(*pick, &config)
+                    ),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    lines.push(format!(
+                        "{}({}) {}",
+                        pointer(*cursor == index),
+                        if *marked == index { '*' } else { ' ' },
+                        if *cursor == index {
+                            style.bold(&text)
+                        } else {
+                            text
+                        }
+                    ));
+                }
+                lines.push(String::new());
+                lines.push(style.dim(MOVE));
             }
             View::Summary(plan) => {
-                lines.push("Review before writing".into());
+                lines.push(title("Review before writing"));
                 lines.push(String::new());
                 match plan.as_ref() {
                     Ok(plan) => {
                         for line in summary_lines(plan, state.host.as_ref()) {
-                            lines.push(line.replace(CAUTION, &painter.caution()));
+                            lines.push(line.replace(CAUTION, &style.caution(CAUTION)));
                         }
                         lines.push(String::new());
-                        lines.push("Enter write, Esc or q cancel".into());
+                        lines.push(style.dim("Enter write · Esc cancel"));
                     }
                     Err(error) => {
-                        lines.push(format!("Cannot write: {error}"));
+                        lines.push(format!("{} {error}", style.refusal("Cannot write:")));
                         lines.push(String::new());
-                        lines.push("Enter back, Esc or q cancel".into());
+                        lines.push(style.dim("Enter back · Esc cancel"));
                     }
                 }
             }

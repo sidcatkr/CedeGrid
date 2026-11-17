@@ -7,7 +7,6 @@ use crate::model::{Decision, Resources, Snapshot};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-/// Large numbers with a space between thousands.
 /// A mode as people read it; Aggressive carries its caution label (004 FR-007).
 fn shown(mode: ContentionMode) -> String {
     match mode {
@@ -16,6 +15,116 @@ fn shown(mode: ContentionMode) -> String {
     }
 }
 
+/// The mode whose rules a resource follows: memory follows Performance under Aggressive (004
+/// FR-006).
+pub fn behaves_as(kind: ResourceKind, mode: ContentionMode) -> ContentionMode {
+    if kind.is_memory() && mode == ContentionMode::Aggressive {
+        ContentionMode::Performance
+    } else {
+        mode
+    }
+}
+
+/// A resource's mode as doctor heads its block: memory under Aggressive shows the mode it
+/// follows, and the effective mode only when it differs.
+fn mode_text(kind: ResourceKind, status: &crate::model::ResourceStatus) -> String {
+    let follows = |mode: Option<ContentionMode>| mode.map(|mode| behaves_as(kind, mode));
+    let (mode, effective) = (follows(status.mode), follows(status.effective_mode));
+    let mut text = mode.map_or("unknown".to_owned(), shown);
+    if status.mode == Some(ContentionMode::Aggressive) && mode != status.mode {
+        text.push_str(" (Aggressive covers compute only)");
+    }
+    if effective != mode {
+        let _ = write!(
+            text,
+            " (effective {})",
+            effective.map_or("unknown".to_owned(), shown)
+        );
+    }
+    text
+}
+
+/// One line per resource: mode, admission and the amounts that decide it.
+fn overview(decision: &Decision) -> Vec<String> {
+    let mut rows = vec![
+        [
+            "RESOURCE",
+            "MODE",
+            "ADMISSION",
+            "OWN",
+            "EXTERNAL",
+            "TARGET SHARE",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    ];
+    for (key, status) in &decision.resources {
+        let kind = key.kind();
+        let value = |value: Option<u64>| value.map_or("-".to_owned(), |value| amount(kind, value));
+        let mode = status.mode.map(|mode| behaves_as(kind, mode));
+        rows.push(vec![
+            key.to_string(),
+            mode.map_or("unknown".to_owned(), shown),
+            match &status.admission {
+                Some(crate::contention::Admission::Open) => "open".to_owned(),
+                Some(crate::contention::Admission::Held { .. }) => "held".to_owned(),
+                Some(_) => "blocked".to_owned(),
+                None => "-".to_owned(),
+            },
+            value(status.own.map(|(own, _)| own)),
+            value(status.external),
+            value(status.target_share),
+        ]);
+    }
+    table(&rows, 2)
+}
+
+/// Rows in aligned columns, indented; trailing blank cells add no spaces.
+pub fn table(rows: &[Vec<String>], indent: usize) -> Vec<String> {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..columns)
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let mut line = " ".repeat(indent);
+            for (column, cell) in row.iter().enumerate() {
+                if column + 1 < row.len() {
+                    let _ = write!(line, "{cell:<width$}   ", width = widths[column]);
+                } else {
+                    line.push_str(cell);
+                }
+            }
+            line.trim_end().to_owned()
+        })
+        .collect()
+}
+
+/// Whether unprotected Aggressive may start on this host, for `doctor`: what is missing and
+/// how to fix each (004 FR-014, FR-015, FR-015a).
+pub fn unprotected_text(gaps: &[crate::system_mode::Gap]) -> String {
+    let mut out = String::from("\nUnprotected Aggressive\n");
+    if gaps.is_empty() {
+        out.push_str("  available: a run that sends both SDK fields may start unprotected\n");
+        return out;
+    }
+    out.push_str("  not available on this host\n");
+    for gap in gaps {
+        let _ = writeln!(out, "  - {}", gap.what);
+        if !gap.fix.is_empty() {
+            let _ = writeln!(out, "    fix: {}", gap.fix);
+        }
+    }
+    out
+}
+
+/// Large numbers with a space between thousands.
 pub fn group(value: u64) -> String {
     let digits = value.to_string();
     if value < 10_000 {
@@ -172,32 +281,39 @@ pub fn doctor_text(
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "CedeGrid doctor");
+    let _ = writeln!(out);
     let mut host = format!(
-        "host: {} CPU, {} RAM",
+        "{} CPU · {} RAM",
         amount(ResourceKind::Cpu, snapshot.cpu_capacity_millicores),
         amount(ResourceKind::Ram, snapshot.total_ram_mib)
     );
     for gpu in &snapshot.gpus {
         let _ = write!(
             host,
-            ", {} {}",
+            " · {} {}",
             gpu.uuid,
             amount(ResourceKind::GpuMemory, gpu.total_memory_mib)
         );
     }
-    let _ = writeln!(out, "{host}");
-    let _ = writeln!(
-        out,
-        "modes: default {}, node cap {}",
-        shown(config.contention.default_mode),
-        decision.max_mode.map_or("none".to_owned(), shown)
-    );
+    let header = [
+        ("Host", host),
+        ("Default mode", shown(config.contention.default_mode)),
+        (
+            "Node cap",
+            decision.max_mode.map_or("none".to_owned(), shown),
+        ),
+    ];
+    for line in table(&header.map(|(key, value)| vec![key.to_owned(), value]), 2) {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out);
+    for line in overview(decision) {
+        let _ = writeln!(out, "{line}");
+    }
     for (key, status) in &decision.resources {
         let kind = key.kind();
         let _ = writeln!(out);
-        let mode = status.mode.map_or("unknown".to_owned(), shown);
-        let effective = status.effective_mode.map_or("unknown".to_owned(), shown);
-        let _ = writeln!(out, "{key}: {mode} (effective {effective})");
+        let _ = writeln!(out, "{key}: {}", mode_text(kind, status));
         let mut usage = Vec::new();
         if let Some((own, upper)) = status.own {
             usage.push(if upper > own {
@@ -304,22 +420,30 @@ pub fn doctor_text(
     let _ = writeln!(out);
     let _ = writeln!(out, "Floors");
     let floors = config.floors(snapshot);
-    let floor = |name: &str, status: &crate::config::FloorStatus| {
-        format!(
-            "  {name}: configured {} MiB, minimum {} MiB, effective {} MiB{}",
-            group(status.configured_mib),
-            group(status.minimum_mib),
-            group(status.effective_mib),
+    let floor = |name: String, status: &crate::config::FloorStatus| {
+        vec![
+            name,
+            format!("{} MiB", group(status.configured_mib)),
+            format!("{} MiB", group(status.minimum_mib)),
+            format!("{} MiB", group(status.effective_mib)),
             if status.raised {
-                ", raised to twice the minimum"
+                "raised to twice the minimum".to_owned()
             } else {
-                ""
-            }
-        )
+                String::new()
+            },
+        ]
     };
-    let _ = writeln!(out, "{}", floor("RAM floor", &floors.ram));
+    let mut rows = vec![
+        ["", "CONFIGURED", "MINIMUM", "EFFECTIVE", ""]
+            .map(str::to_owned)
+            .to_vec(),
+        floor("RAM floor".into(), &floors.ram),
+    ];
     for (uuid, status) in &floors.gpus {
-        let _ = writeln!(out, "{}", floor(&format!("{uuid} floor"), status));
+        rows.push(floor(format!("{uuid} floor"), status));
+    }
+    for line in table(&rows, 2) {
+        let _ = writeln!(out, "{line}");
     }
     let _ = writeln!(out);
     let _ = writeln!(out, "Caution options");

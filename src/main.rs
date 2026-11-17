@@ -703,11 +703,42 @@ async fn async_main(cli: Cli) -> Result<()> {
             let decision =
                 PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
             if text {
-                print!(
-                    "{}{}{}",
+                // Unprotected Aggressive is shown where the configuration names Aggressive or the
+                // allowance is on; on a System mode host the administrator key applies too.
+                let allowance = cedegrid::state::read_allowance(&config.state_dir);
+                let unprotected = if config.contention.names_aggressive()
+                    || matches!(allowance, cedegrid::state::Allowance::On { .. })
+                {
+                    let policy = std::path::Path::new(cedegrid::broker::admin_policy::POLICY_DIR)
+                        .join(cedegrid::broker::admin_policy::POLICY_FILE)
+                        .exists()
+                        .then(|| {
+                            cedegrid::system_mode::unprotected_policy_gap(
+                                cedegrid::broker::admin_policy::load(),
+                            )
+                        })
+                        .flatten()
+                        .map(|(_, gap)| gap);
+                    cedegrid::explain::unprotected_text(&cedegrid::system_mode::host_gaps(
+                        config.contention.max_mode(),
+                        allowance,
+                        policy,
+                    ))
+                } else {
+                    String::new()
+                };
+                let text = format!(
+                    "{}{unprotected}{}{}",
                     cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
                     cedegrid::explain::derived_text(&config),
                     cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
+                );
+                // The caution and Aggressive labels in color on a terminal (004 FR-007).
+                let style = cedegrid::setup::Style::detect();
+                print!(
+                    "{}",
+                    text.replace("[caution]", &style.caution("[caution]"))
+                        .replace("[Aggressive]", &style.refusal("[Aggressive]"))
                 );
             } else {
                 emit(&json!({

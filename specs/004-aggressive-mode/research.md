@@ -118,11 +118,13 @@ which protected waiting principals with running steps.
 
 ## R11. The numbers screen without 003
 
-- **Decision**: interactive setup computes the numbers from the agent's latest observation: the
-  number of other active principals, their CPU use, and an estimated slowdown for a light user
-  (labelled an estimate). It shows a yes/no question with no default, then asks for the fixed
-  phrase.
-- **Rationale**: FR-013. 001's setup already has a terminal interface and the agent's state.
+- **Decision**: interactive setup computes the numbers from a fresh observation: the number of
+  other active principals and their CPU use. It states that, where they contend, the kernel
+  splits CPU time and their work can slow down until the run ends, with no slowdown figure. It
+  shows a yes/no question with no default, then asks for the fixed phrase.
+- **Rationale**: FR-013. 001's setup already has a terminal interface and the agent's state. A
+  slowdown figure depends on the run's thread count and the host's cgroup layout, which setup
+  cannot know (design review, 2026-11-17).
 
 ## R12. How the grant reaches placement
 
