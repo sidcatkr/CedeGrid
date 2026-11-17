@@ -65,13 +65,13 @@ These are provisional defaults (spec table). All are configuration values (FR-02
 | `mode` | all | inherits `default_mode` | ≤ `max_mode` |
 | `yield_first_margin_percent` | all | 15 (cpu, gpu_compute), 20 (ram, gpu_memory) | 1–90; on cpu and gpu_compute > `performance_margin_percent`; below its default needs `reduced_margin` |
 | `neutral_margin_percent` | cpu, gpu_compute | 5 | between `performance_margin_percent` and `yield_first_margin_percent`; below 5 needs `reduced_margin` |
-| `performance_margin_percent` | cpu, gpu_compute | 2 | 0–50; below 2 needs `reduced_margin` |
+| `performance_margin_percent` | cpu, gpu_compute | 2 | 0–50; below 2 needs `reduced_margin`; an admission margin only: running work is not capped for it (FR-022) |
 | `yield_first_response_intervals` | cpu, gpu_compute | 3 | 1–10 |
 | `scale_up_step_interval_s` | all | unset: 30 s (Yield First), 10 s (Neutral); in Performance one monitor interval on CPU and GPU compute and 2 s on RAM and GPU memory | ≥ 1; when set, applies to every mode |
 | `neutral_convergence_s` | all | 60 | ≥ 1; a success-criteria parameter read by the scenario tests and validation tools, not by the policy |
 | `neutral_tolerance_points` | all | 15 | 1–50; success-criteria parameter |
 | `performance_ramp_s`, `performance_ramp_percent` | all | 10, 90 | percent 1–100; success-criteria parameters |
-| `reclaim_s` | cpu, gpu_compute | 5 | 1–60; how long a Neutral or Performance step has to free the contended amount before the next step; memory moves on at the hint deadline |
+| `reclaim_s` | cpu, gpu_compute | 5 | 1–60; how long a Neutral step has to free the contended amount before the next step (Performance takes no compute step for others); memory moves on at the hint deadline |
 | `hint_deadline_s` | all | 5 | 1–30 |
 | `unknown_window_intervals` | all | 3 | 1–20 |
 | `hysteresis_percent`, `min_step_dwell_intervals` | all | 50, 3 | percent 1–99; dwell 1–10 |
@@ -156,6 +156,13 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - `cause: YieldCause`
   - `unavailable: set<YieldStep>`
   - `target: Option<u64>` (resource units)
+
+In Performance and Aggressive, where they are the governing mode, the ladder takes no step on
+running work of those modes for another principal, for own usage above the admission target,
+for unknown activity or for a memory floor breach; the mode's target is the admission target
+only, and the operator's envelope, explicit drain and the Guaranteed rules still apply. Yield
+First and Neutral jobs on such a node are held to their own mode's target (FR-016, FR-022,
+FR-023).
 
 ### Transitions (pure, in `contention::plan_steps`)
 

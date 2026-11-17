@@ -3,8 +3,9 @@
 CedeGrid lets own work use a shared server's spare CPU, RAM and GPU capacity, most usefully
 where other people's processes already run and it is unclear how much to take, so that no
 capacity sits idle. Own work runs as fast as it can, efficiently, and the contention mode says
-how much it gives back when others need capacity. Performance is the default; Yield First and
-Neutral give back more, and Yield First is one option among them. Each section below states
+how much it gives back when others need capacity. Performance is the default and gives back
+nothing beyond what the kernel and the GPU driver give beside the same work started without
+CedeGrid; Yield First and Neutral give back more. Each section below states
 what CedeGrid guarantees and where that ends.
 
 ## Replayable burst storage
@@ -63,11 +64,12 @@ sample periods; reading every 500 ms need not produce independent samples.
   noise tolerance block GPU admission on that device. Running work yields only for a real
   floor breach or own usage beyond the budget.
 - External compute activity blocks GPU admission on that device under Yield First;
-  Neutral and Performance admit and share compute. It never drains own work by itself.
+  Neutral and Performance admit and share compute, Performance only while no counted principal
+  is slice-bound on a time-sliced device. It never drains own work by itself.
 - Unsupported, failed, absent-fresh-sample, or otherwise uncertain activity never
-  becomes evidence of idleness: Yield First admits nothing on that device, Neutral and
-  Performance count it as one principal, the current steps hold, and escalation waits
-  for the bounded unknown window. Missing basic observation blocks the device.
+  becomes evidence of idleness: Yield First admits nothing on that device, Neutral counts
+  it as one principal, the current steps hold, and escalation waits for the bounded unknown
+  window; Performance admits nothing new there and holds every step. Missing basic observation blocks the device.
 - Stable headroom permits incremental expansion only after the configured cooldown.
   The coordinator reserves each launch before dispatch, only where every requested
   resource's admission is open, and the agent rechecks locally. Held or blocked
@@ -107,7 +109,7 @@ after a refused freeze, it stops the verified processes, as without a delegated 
 the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
 through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. On a
 time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
-time-slicing: in Neutral, Performance and Aggressive own work is not capped while it holds no
+time-slicing: in Neutral own work is not capped while it holds no
 more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the
 owner's unmanaged ones, E the external busy processes and k their principals, each counted while
 it has a sample within the counting window: the last 60 intervals whose per-process samples
@@ -119,16 +121,17 @@ When own work holds more than its share there, m × k > E, an external principal
 processes is slice-bound when its uncapped reading, averaged as below, is at least
 `contention.gpu_compute.slice_bound_percent` (75) percent of their equal slices, 1000 × E_j ÷
 (m + E). With none, own work is not capped, since the driver already gives every other
-principal what it asks for. Otherwise, in Neutral, Performance and Aggressive, each own process
+principal what it asks for. Otherwise, in Neutral, each own process
 runs at a duty of d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − the mode's margin), at least 50
 thousandths, with E_b and k_b the slice-bound principals' processes and number, which leaves own
-work 1 ÷ (k_b + 1) of what they want less the margin the mode's target holds (Performance 2%,
-Neutral 5%), while the others keep their slices: at m = 2 beside one saturating process, 720 in
-Performance and 675 in Neutral. Own work pays for CedeGrid's re-measure windows, which hold it at
+work 1 ÷ (k_b + 1) of what they want less Neutral's 5% margin, while the others keep their
+slices: 675 at m = 2 beside one saturating process. Performance and Aggressive set no duty and
+open no re-measure window: own work keeps the driver's slices, as beside the same work started
+by hand, and one more own process is admitted on the device only while no counted principal
+is slice-bound (`gpu_time_slice_admission_held`). Own work pays for CedeGrid's re-measure windows, which hold it at
 full duty for 6 decisions in each cycle of about 33 s: the duty starts at d0' = (d0 − w) ÷ (1 −
 w), with w the windows' share of the time, so own work's duty averages d0 with the windows and
-the others keep their share over time. That is 692 in Performance, 643 in Neutral and 725 with no
-margin at the default interval; where no window can open, d0' = d0. The duty rises
+the others keep their share over time. That is 643 in Neutral at the default interval; where no window can open, d0' = d0. The duty rises
 `contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
 dwell, whichever is longer, while the device's utilization averaged over the dwell, in per
 mille, shows more spare time than the mode's margin or one reading's quantum of 1%, whichever is
@@ -164,8 +167,7 @@ without a sample counting as idle, and each observation records the samples
 (`compute_sampling`). When one interval misses the tolerance, as when a busy process's sample is
 late, the shares and the device summed over it and the 3 intervals before it decide, and the
 amounts are then those 4 intervals' averages. On a time-sliced device another user's reading
-rises when own work leaves gaps, at the same demand, so in Neutral, Performance and Aggressive
-the external amount that sets own work's target, the owner's unmanaged usage left out, is the
+rises when own work leaves gaps, at the same demand, so in Neutral the external amount that sets own work's target, the owner's unmanaged usage left out, is the
 average over the last 60 intervals in which own work ran uncapped on the device (no cap or pause
 sent by the decision that set the interval or the one before it), or had no allocation there.
 While own work is held back by GPU compute caps alone, a 6-decision window lifts them every 30 s
@@ -177,8 +179,8 @@ takes no window, and each decision records how the demand was read (`gpu_demand`
 amount takes the CPU paths, with external processes grouped into principals by UID as on CPU and
 device time nobody accounts for counted as external usage while an external process is listed,
 and as one more external principal from the attribution tolerance's 15 points, below which it is
-sampling error, so own work keeps capacity minus that amount minus the mode's margin under
-Performance, and its fair share or a learned satisfied demand under Neutral. A device leaves the
+sampling error, so own work's admission keeps capacity minus that amount minus the margin under
+Performance, and its target is its fair share or a learned satisfied demand under Neutral. A device leaves the
 measured path at once and returns only after `quiet_window_intervals` consecutive measured
 intervals. An interval in which both process queries succeed, every listed process is an own
 verified process checked through its pidfd, no MPS is present, device utilization is known and
@@ -191,8 +193,8 @@ its own utilization stays below `principal_min_percent`: it is neither external 
 unknown activity, its share of device time is nobody's, and its memory still counts as external
 usage, as `never_share_occupied_gpus` still counts the context. Where per-process utilization is
 not readable it stays unknown activity. Unsupported queries, stale samples, an incomplete
-process list or MPS leave it activity of unknown amount, one principal, under which Neutral and
-Performance hold the fair share: once the supervisor reports a duty cycle applied, own work
+process list or MPS leave it activity of unknown amount, one principal, under which Neutral
+holds the fair share and Performance admits nothing new and holds: once the supervisor reports a duty cycle applied, own work
 counts as holding at most that duty, at the larger of the target the supervisor reports applied
 and the current one, so the cap at the share is met and does not escalate. Unknown activity from
 a telemetry failure or a missing observation, and a duty cycle not reported applied, first hold
@@ -327,9 +329,12 @@ contention lasts; while a small demand is probed it steps down with the probe in
 While own work holds more than capacity minus Yield First's margin, saturation may be
 its own doing, so Yield First first caps it to the margin within the fair share and
 pauses only if the contention remains. Neutral holds the max-min fair share. Performance
-keeps the larger of the fair share and capacity minus observed external usage minus its
-margin: it gives back what external demand takes and never goes below the fair share;
-activity of unknown amount holds it to the fair share. Otherwise Yield First keeps 15%
+takes no step on running work for another principal, for own usage above its admission target
+or for activity of unknown amount, and only the operator's envelope still steps it: what
+another principal gets is the kernel's and the driver's split beside the same work. It holds
+back at admission only: new own work starts only within the larger of the fair share and
+capacity minus observed external usage minus its margin, and nothing new starts while
+activity is of unknown amount. Otherwise Yield First keeps 15%
 of capacity free, Neutral 5% and Performance 2%; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
 scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU and GPU
@@ -347,9 +352,8 @@ too, which limits how many running assignments one node keeps renewed: about 117
 test host (`docs/validation.md`, Launch bursts). On memory, Yield
 First keeps 20% free beyond the floor and the other modes only the floor. The CPU idle reserve is the larger of
 `cpu.reserve_physical_cores` (default 0) and the mode's margin; the two never stack. The
-margins are configurable per resource. In every mode, contended CPU returns within 2
-monitor intervals except in Performance, which follows what external work takes: the
-first step applies at once. Own CPU usage over its target while the budget did not fall
+margins are configurable per resource. In Yield First and Neutral, contended CPU returns
+within 2 monitor intervals; Performance takes no CPU step for others. Own CPU usage over its target while the budget did not fall
 (external usage did not rise beyond its per-interval bound and no contention lowered the
 target) is enforced first: held caps keep their targets, which supervisors hold from the
 measured rate, and no step is entered until usage has stayed over the target for
@@ -497,12 +501,15 @@ opportunistic allocation that holds none of the memory does not hold that drain 
 whose reading is missing counts by its charge; in Performance and Aggressive every
 opportunistic allocation charged on the resource still does.
 
-Floors hold by mode. Own memory above its memory fair share (the max-min share beside the
-RAM principals, or beside the device's GPU memory principals) gives way at the floors in every
-mode, and in Yield First and Neutral all own memory does. In Performance and Aggressive a
-floor breach that others' growth caused steps own memory only down to its fair share: memory
-within it is not hinted, drained or sent TERM, on the critical path and for Guaranteed work
-too. In every mode, each in-share task gets one save-progress request per breach episode,
+Floors hold by mode. In Yield First and Neutral own memory gives way at the floors: memory
+above its memory fair share (the max-min share beside the RAM principals, or beside the
+device's GPU memory principals) first, then the rest. In Performance and Aggressive own memory
+is not hinted, drained or sent TERM for a floor breach, on the critical path and for Guaranteed
+work too, and no own task is marked for the OOM killer except under
+`ram.prefer_own_oom_victim`: the kernel decides at exhaustion, as beside the same work started
+without CedeGrid, and the floors still close admission. The operator's envelope applies in
+every mode. In Yield First and Neutral each in-share task, and in Performance and Aggressive
+every own task, gets one save-progress request per breach episode,
 whoever caused the breach: the target file's `save_progress_sequence` rises and both SDKs call
 `on_save_progress`, which is no drain and asks for no memory back. An over-share task gets its
 hint instead. The kernel's out-of-memory killer may then take another
@@ -555,13 +562,11 @@ memory is back above the floor. Above its share, or with the share or the count 
 kill is a normal failure.
 
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
-failed GPU allocation; the in-share memory rule above belongs to Performance and Aggressive
-themselves. The constitution allows one risk to other workloads' compute, slower compute, and
+failed GPU allocation beyond what the same work started without CedeGrid would cause; the
+floor rule of Performance and Aggressive above belongs to those modes themselves. The constitution allows one risk to other workloads' compute, slower compute, and
 only under an unprotected Aggressive mode, which is not implemented: the modes are Yield
 First, Neutral and Performance, and no configuration key or job field can name Aggressive.
-In Performance a compute step never targets own work below its fair share: a cap that misses
-its target is applied again from the measured rate, and only a cap at the minimum duty with own
-usage still above the fair share pauses, for at most one monitor interval. The former floor policies `b` and `c` and Neutral memory policy
+In Performance no compute step is taken for others. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded
 or caution. Three options are marked *caution* because they let own work hold more
@@ -680,6 +685,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `gpu_time_slice_fair` | Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap. |
 | `gpu_time_slice_unbound` | Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap. |
 | `gpu_time_slice_duty` | Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause. |
+| `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
 | `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
 | `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |
@@ -712,8 +718,8 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `report_stale` | The coordinator renews no lease and offers no work while the node's last report is stale. |
 | `single_process_violated` | Processes outside the run's verified family were found; they are not measured as own work or stepped. |
 | `family_members` | The run has more processes than its leader; its verified family is measured and stepped as own work. |
-| `cap_at_minimum_duty` | The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval. |
-| `cpu_unknown_fair_share_hold` | CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view. |
+| `cap_at_minimum_duty` | The cap runs at the minimum duty. |
+| `cpu_unknown_fair_share_hold` | No longer emitted; kept for recorded decisions from before Performance stopped stepping for unknown CPU. |
 | `ram_usage_unknown` | Available RAM is unknown, so RAM admission is blocked. |
 | `kernel_cpu_stale` | The kernel CPU snapshot is stale, and repeated readings do not refresh it. |
 | `cpu_scoped_budget` | The CPU budget uses the effective CPU set's usage and capacity. |

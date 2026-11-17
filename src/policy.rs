@@ -315,9 +315,6 @@ pub struct PolicyEngine {
     /// on CPU and GPU compute the one under contention; it caps the share while the list cannot
     /// be read (FR-059).
     fair_share_readable: BTreeMap<ResourceKey, u64>,
-    /// The last known CPU view, carried through unknown and held intervals, for the hold
-    /// while CPU is unknown (FR-022).
-    cpu_view: Option<CpuView>,
     /// The last known RAM fair share, carried through unknown and held intervals and in
     /// force while RAM is held (FR-023).
     ram_fair_share: Option<u64>,
@@ -365,15 +362,6 @@ pub struct PolicyEngine {
     /// Running opportunistic CPU usage over the admission window, per allocation,
     /// with the time of its first sample.
     cpu_usage: BTreeMap<String, (u64, std::collections::VecDeque<(u64, u64)>)>,
-}
-
-/// A known interval's CPU view: the mode input, the room beside it (capacity less the
-/// reserve, within the ceiling) and CedeGrid's own CPU, which comes out of own targets.
-#[derive(Debug, Clone)]
-struct CpuView {
-    view: ModeInput,
-    room: u64,
-    cedegrid: u64,
 }
 
 /// One user's way into or out of the principals on one resource (FR-059):
@@ -535,9 +523,6 @@ struct Interval<'a> {
     /// The first interval CPU contention has ended: held CPU steps rise to the mode's target in
     /// one move (FR-034, R44).
     cpu_contention_returned: bool,
-    /// CPU is unknown in Performance or Aggressive with no view known yet: steps hold and
-    /// none is taken (FR-022).
-    cpu_unviewed: bool,
     /// CPU and RAM admission, when closed, is closed only by own new allocations.
     cpu_new_only: bool,
     ram_new_only: bool,
@@ -657,7 +642,6 @@ impl<'a> Interval<'a> {
             cedegrid_cpu: 0,
             cpu_contention_ended: false,
             cpu_contention_returned: false,
-            cpu_unviewed: false,
             cpu_new_only: false,
             ram_new_only: false,
             ram_held: false,

@@ -368,9 +368,11 @@ impl<'a> Interval<'a> {
         let (config, input, now) = (self.config, self.input, self.now);
         let kind = key.kind();
         let held = self.next.unknown_since.contains_key(&key);
-        // Unknown CPU with no view to hold to never escalates (FR-022).
+        // Performance and Aggressive hold every step while a measurement is unknown and never
+        // escalate for it; admission stays closed (FR-008, FR-022).
+        let escalates = governing(config, kind) < ContentionMode::Performance;
         let measurement_known = !held
-            || !(kind == ResourceKind::Cpu && self.cpu_unviewed)
+            || escalates
                 && self.next.unknown_since.get(&key).is_some_and(|start| {
                     now.saturating_sub(*start) >= unknown_window(config, kind)
                 });
@@ -456,6 +458,14 @@ impl<'a> Interval<'a> {
             keeps_mode_memory = envelope_excess == 0;
             usage_excess =
                 usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
+        }
+        // Performance and Aggressive take no CPU step for others, for own usage over the
+        // admission target or for unknown activity: the budget sets admission only, and only the
+        // operator's envelope still steps running work (FR-022).
+        if kind == ResourceKind::Cpu && governing(config, kind) >= ContentionMode::Performance {
+            usage_excess = input.envelope.as_ref().map_or(0, |envelope| {
+                cpu_usage.saturating_sub(envelope.cpu_millicores)
+            });
         }
         if usage_excess > 0 {
             note_excess(&mut self.over_target, &key, usage_excess);
@@ -1024,6 +1034,14 @@ impl<'a> Interval<'a> {
     fn ceiling(&self, key: &ResourceKey, allocation: &Allocation) -> Option<u64> {
         let kind = key.kind();
         let mode = self.allocation_modes[&allocation.id][&kind];
+        // A job in Performance or Aggressive under that governing mode is not capped back to its
+        // target on compute (FR-022).
+        if !kind.is_memory()
+            && mode >= ContentionMode::Performance
+            && governing(self.config, kind) >= ContentionMode::Performance
+        {
+            return None;
+        }
         let fair = self
             .memory_fair_share
             .get(key)
@@ -1386,7 +1404,13 @@ impl<'a> Interval<'a> {
             }
         }
         let share = held / running.len() as u64;
-        let excess = held.saturating_sub(budget.share);
+        // Performance and Aggressive take no GPU compute step for others; jobs in Yield First
+        // and Neutral are still held to their own mode's share (FR-016, FR-022).
+        let excess = if governing(config, ResourceKind::GpuCompute) >= ContentionMode::Performance {
+            0
+        } else {
+            held.saturating_sub(budget.share)
+        };
         if excess > 0 {
             note_excess(&mut self.over_target, &key, excess);
         }
@@ -1456,7 +1480,10 @@ impl<'a> Interval<'a> {
             let state = prev.ladder.get(&(victim.id.clone(), key.clone()));
             // A job above its own mode's share yields the difference even
             // while the aggregate has room.
-            let limit = budget.targets.get(&victim.mode).copied();
+            let limit = (victim.mode < ContentionMode::Performance
+                || governing(self.config, ResourceKind::GpuCompute) < ContentionMode::Performance)
+                .then(|| budget.targets.get(&victim.mode).copied())
+                .flatten();
             let own_excess = limit.map_or(0, |limit| frame.share.saturating_sub(limit));
             if own_excess > 0 {
                 note_excess(&mut self.over_target, key, own_excess);

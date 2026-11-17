@@ -371,6 +371,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own work runs at the time-slice duty from the busy contexts' counts, stepped from the device's utilization, without a pause.",
     ),
     (
+        "gpu_time_slice_admission_held",
+        "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
+    ),
+    (
         "applied_duty_credit",
         "Own GPU work is credited at the duty its supervisor applied.",
     ),
@@ -497,13 +501,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "family_members",
         "The run has more processes than its leader; its verified family is measured and stepped as own work.",
     ),
-    (
-        "cap_at_minimum_duty",
-        "The cap runs at the minimum duty, so a Performance cap that still misses its target may pause for one interval.",
-    ),
+    ("cap_at_minimum_duty", "The cap runs at the minimum duty."),
     (
         "cpu_unknown_fair_share_hold",
-        "CPU telemetry is unknown, so Performance and Aggressive hold own CPU at Neutral's fair share of the last known view.",
+        "No longer emitted; kept for recorded decisions from before Performance stopped stepping for unknown CPU.",
     ),
     (
         "ram_usage_unknown",
