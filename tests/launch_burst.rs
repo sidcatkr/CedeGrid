@@ -24,15 +24,17 @@ const TASKS: usize = 150;
 /// The longest gap between two observations the burst may cause: two monitor intervals.
 const GAP_BOUND_MS: u64 = 1000;
 
-/// Keeps the run directory when the test fails, as evidence.
+/// Keeps the run directory when the test fails, or always with `CEDEGRID_TEST_BURST_KEEP=1`,
+/// so the agent's and coordinator's logs can be read after a passing run too.
 struct Evidence(Option<tempfile::TempDir>);
 impl Drop for Evidence {
     fn drop(&mut self) {
-        if std::thread::panicking()
-            && let Some(directory) = self.0.take()
-        {
+        let failed = std::thread::panicking();
+        let keep = failed || std::env::var_os("CEDEGRID_TEST_BURST_KEEP").is_some();
+        if keep && let Some(directory) = self.0.take() {
+            let label = if failed { "failed_" } else { "" };
             eprintln!(
-                "retained_failed_burst_evidence={}",
+                "retained_{label}burst_evidence={}",
                 directory.keep().display()
             );
         } else if let Some(directory) = &self.0
