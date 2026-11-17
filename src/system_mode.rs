@@ -33,6 +33,33 @@ pub const UNIT_CONTROLS: &[&str] = &[
     "memory.high",
 ];
 
+/// The unit's settings in the configuration file's table, before it is validated: the cgroup
+/// backend on, the unit's jobs cgroup as its delegated root and Full's controls authorized. The
+/// file needs no `delegated_root` of its own, and one it has is replaced.
+pub fn unit_table(table: &mut toml::Table, jobs: &Path) -> anyhow::Result<()> {
+    let jobs = jobs
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("the unit's jobs cgroup path is not UTF-8"))?;
+    let cgroup = table
+        .entry("cgroup")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[cgroup] must be a table"))?;
+    cgroup.insert("enabled".into(), toml::Value::Boolean(true));
+    cgroup.insert("delegated_root".into(), toml::Value::String(jobs.into()));
+    let controls = cgroup
+        .entry("authorized_controls")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("cgroup.authorized_controls must be an array"))?;
+    for control in UNIT_CONTROLS {
+        if !controls.iter().any(|c| c.as_str() == Some(control)) {
+            controls.push(toml::Value::String((*control).into()));
+        }
+    }
+    Ok(())
+}
+
 /// Points the agent's cgroup backend and kernel readback at the unit's jobs cgroup and turns the
 /// Full level on (FR-012): the unit's subtree is CedeGrid's own, so no operator opt-in is needed.
 /// Returns a warning for each setting that has no effect in a unit.

@@ -458,7 +458,26 @@ pub fn load_for_run(path: &Path) -> Result<(Config, Vec<String>)> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
-    let loaded = Config::load_reporting(&canonical)?;
+    finish_for_run(&canonical, Config::load_reporting(&canonical)?)
+}
+
+/// [`load_for_run`] with the file's table changed before it is validated: an agent in a System
+/// mode unit takes its delegated root from the unit, not from the file (005 FR-012).
+pub fn load_for_run_with(
+    path: &Path,
+    adjust: impl FnOnce(&mut toml::Table) -> Result<()>,
+) -> Result<(Config, Vec<String>)> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
+    let contents = std::fs::read_to_string(&canonical).map_err(config_error)?;
+    let mut table: toml::Table = toml::from_str(&contents).map_err(config_error)?;
+    adjust(&mut table)?;
+    let contents = toml::to_string(&table)?;
+    finish_for_run(&canonical, Config::parse_reporting(&contents, &canonical)?)
+}
+
+fn finish_for_run(canonical: &Path, loaded: LoadedConfig) -> Result<(Config, Vec<String>)> {
     let (mut config, warnings) = (loaded.config, loaded.warnings);
     config.kernel.monitor_interval_ms = config.monitor.interval_ms;
     if config.kernel.delegated_root.is_none() {

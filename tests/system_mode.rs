@@ -3933,3 +3933,46 @@ fn a_removed_members_units_stop_once_no_job_runs() {
         [1501].into_iter().collect()
     );
 }
+
+#[test]
+fn a_units_config_needs_no_delegated_root_of_its_own() {
+    use cedegrid::config::{load_for_run, load_for_run_with};
+    use cedegrid::system_mode::{UNIT_CONTROLS, unit_table};
+    let dir = std::env::temp_dir().join(format!("cedegrid-unit-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cedegrid.toml");
+    // The backend on, as a member writes it, with no delegated root and one control of its own.
+    std::fs::write(
+        &path,
+        "config_version = 1\nnode_id = \"n1\"\nstate_dir = \"state\"\n\n[cgroup]\nenabled = true\nauthorized_controls = [\"cgroup.procs\", \"memory.max\"]\n",
+    )
+    .unwrap();
+    // Outside a unit the file is refused, as before.
+    assert!(load_for_run(&path).is_err());
+    let jobs = std::path::Path::new("/sys/fs/cgroup/cedegrid.slice/cedegrid-u1500.service/jobs");
+    let (config, _) = load_for_run_with(&path, |table| unit_table(table, jobs)).unwrap();
+    assert!(config.cgroup.enabled);
+    assert_eq!(config.cgroup.delegated_root.as_deref(), Some(jobs));
+    assert_eq!(config.kernel.delegated_root.as_deref(), Some(jobs));
+    for control in UNIT_CONTROLS {
+        assert!(
+            config
+                .cgroup
+                .authorized_controls
+                .iter()
+                .any(|c| c == control)
+        );
+    }
+    assert!(
+        config
+            .cgroup
+            .authorized_controls
+            .iter()
+            .any(|c| c == "memory.max")
+    );
+    assert_eq!(
+        config.state_dir,
+        path.canonicalize().unwrap().parent().unwrap().join("state")
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

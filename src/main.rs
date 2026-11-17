@@ -625,13 +625,23 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         _ => {}
     }
-    #[allow(unused_mut)]
-    let (mut config, config_warnings) = read_config_reporting(&cli.config)?;
-    // Inside a System mode unit, the agent's jobs go to the unit's jobs cgroup (005 T022).
+    // Inside a System mode unit, the agent's jobs go to the unit's jobs cgroup (005 T022), which
+    // the file need not name.
     #[cfg(target_os = "linux")]
-    if matches!(cli.command, Command::Agent { .. })
-        && let Some(jobs) = cedegrid::system_mode::unit_jobs_root()?
-    {
+    let unit_jobs = match &cli.command {
+        Command::Agent { .. } => cedegrid::system_mode::unit_jobs_root()?,
+        _ => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let unit_jobs: Option<PathBuf> = None;
+    #[allow(unused_mut)]
+    let (mut config, config_warnings) = match &unit_jobs {
+        Some(jobs) => cedegrid::config::load_for_run_with(&cli.config, |table| {
+            cedegrid::system_mode::unit_table(table, jobs)
+        })?,
+        None => read_config_reporting(&cli.config)?,
+    };
+    if let Some(jobs) = unit_jobs {
         for warning in cedegrid::system_mode::apply_unit(&mut config, jobs) {
             eprintln!("cedegrid: warning: {warning}");
         }
