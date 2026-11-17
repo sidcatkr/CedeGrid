@@ -896,9 +896,49 @@ back more.
   slice-bound, recorded as `gpu_time_slice_admission_held` otherwise. Neutral keeps its duty
   (report 057 point 4).
 - Q: Does this change how jobs of different modes on one node are held, or the caps of Yield
-  First and Neutral? → A: No. A Performance job on a node governed by Neutral is held as before,
-  and Yield First and Neutral keep their caps; both are open decisions (report 057 point 7, C1 to
-  C3).
+  First and Neutral? → A: Not in Part B. Report 057 point 7 and C1 to C3 were decided afterwards,
+  below.
+- Q: Is a Performance job held for other workloads on a node whose mode is Neutral or Yield
+  First? → A: No. A job's mode within the node cap decides how that job gives back; the node's
+  mode is the default for jobs that set none. A job in Performance or Aggressive is not capped,
+  paused, drained or memory-stepped for another principal, for unknown activity or at a floor
+  breach, and gets no OOM mark beyond `ram.prefer_own_oom_victim`, whatever the node's mode; the
+  operator envelope still steps it. The node's aggregate target and admission do not change, and
+  the node's other jobs give what it needs as far as they can, so another workload can get less
+  than the node's mode promises: a known limitation, to improve in the next version
+  (constitution 8.1.0 "Modes are per job"; report 057 point 7 B).
+- Q: How do Yield First and Neutral hold running own CPU work back in Tracked? → A: By whole
+  tasks, with no rate cap: the stop-and-resume duty cycle goes. A task is paused in FR-016's order
+  only while the own tasks left running keep own usage at or above its target, so rounding
+  favours own work; a task that cannot be paused without going below the target is left alone. A
+  pause still ends at `pause_bound_s`: a hint-ready task then gets its hint as a request with no
+  CPU cap, and a task still contended at the hint's deadline, or one that cannot take a hint,
+  drains and is requeued as a yield without using an attempt, so CPU contention alone can drain
+  in Tracked (report 057 C2 A).
+- Q: How do Yield First and Neutral hold running own GPU compute work back? → A: By whole tasks
+  at both levels, with no duty cycle and no rate cap. On a time-sliced device whose counts are
+  known, own tasks are paused until the own contexts left running, each own task counted as one,
+  are at most what the time-slice rule allows beside the slice-bound principals and never fewer
+  than ⌊E_b ÷ k_b⌋; elsewhere a task is paused only while the others keep at least own work's
+  target. Yield First pauses every own task on a contended device, down to the first-come floor.
+  A pause ends at `pause_bound_s` with a drain and requeue, as on CPU. In every mode, GPU
+  admission on a time-sliced device admits one more own process only while (m + 1) × k ≤ E or no
+  counted principal is slice-bound (report 057 C3 A).
+- Q: What does the first-come GPU floor keep? → A: In Yield First and Neutral, own work that was
+  listed on a device before every principal now listed there keeps at least the share that
+  leaves no single later principal more than half of the device: on the time-slice path at least
+  2 × E_max − E own contexts running, E_max being the most contexts of one principal, and
+  elsewhere, beside exactly one contending principal, at least half the device. Arrival is kept
+  per UID and, for own work, per device; one absent for more than 30 s arrives again when next
+  listed. A listed context whose UID cannot be read, or an unknown listing, means no floor. The
+  only cost to the later principal is slower compute (constitution 8.1.0 "First-come GPU floor").
+- Q: What decides the CPU cap in Full, and what must hold before Part C ships? → A: Full keeps
+  its `cpu.max` cap until runs E1 (own usage against its target per interval, `cpu.max` against
+  stop-and-resume) and E2 (the fork gate's cost per process start) decide report 057 C1; if
+  either fails, the results are reported before Full changes. Runs E8 (CPU, F2's shape in
+  Neutral, Tracked) and E9 (two own GPU probes in Neutral beside a saturating user: own at or
+  above 0.42 of alone, the other user at or above 753.4 req/s) gate the whole-task holds
+  (SC-020); a miss in E9 is reported before another GPU target is chosen.
 
 ## Terms
 
@@ -943,7 +983,7 @@ back more.
   or minimum free memory per GPU device.
 - **Yield step**: one level of the graduated response, applied per allocation and per resource:
   1. lower share or priority
-  2. cap
+  2. cap (on CPU in Full only; GPU compute and Tracked CPU take no rate cap, FR-089)
   3. pause
   4. resource hint (a "use less" target sent to cooperative workers)
   5. cooperative drain with checkpoint
@@ -951,6 +991,11 @@ back more.
 - **Contention mode**: per-resource behavior that decides how much capacity own work may use
   and how fast it gives capacity back. The modes are Yield First, Neutral and Performance;
   Performance is the default.
+- **Whole-task hold**: holding own work back by pausing whole tasks, in victim order, only while
+  the own work left running stays at or above own work's target, so rounding favours own work
+  (FR-089). It replaces a rate cap where none applies.
+- **Arrival**: when a principal, by UID, or own work was first listed on a GPU device without a
+  gap of more than 30 s since (FR-090).
 - **Memory fair share**: own work's share of a memory resource beside the contending principals.
   On RAM it is the share RAM targets use (FR-021); on GPU memory, where principals are not
   formed, it is the equal split of the device among own work and the active external
@@ -1061,8 +1106,9 @@ compare own usage over time with that mode's definition, including unknown and o
 1. **Given** Yield First, **When** external demand rises by any measurable amount beyond noise,
    **Then** own work steps down promptly, keeping the mode's generous margin free. **When** the
    resource is contended, **Then** opportunistic CPU work is paused within 2 monitor intervals,
-   then runs at the minimum duty after `pause_bound_s`, while Guaranteed work keeps its CPU
-   request; own work that saturated the resource itself is first capped to the margin, and a
+   and after `pause_bound_s` runs at the minimum duty in Full, or gets its hint or drains and is
+   requeued in Tracked (FR-014), while Guaranteed work keeps its CPU
+   request; own work that saturated the resource itself is first held to the margin, and a
    demand smaller than one margin step is probed instead (FR-020). **When** external demand fits
    in the margin, **Then** nothing is paused. **When** activity is unknown, **Then** it counts as
    external demand.
@@ -1316,9 +1362,15 @@ node reports with the expected per-resource values at each step.
   (FR-076).
 - **Several own jobs share one GPU device.** Steps and targets are per allocation. The device's
   memory floor covers all of them together. On a time-sliced device their processes together are
-  FR-021's m, so two single-process jobs beside one external process take FR-021's time-slice
-  duty while that process is slice-bound, their off-phases aligned on the node's clock so they
-  stop and resume together, and run uncapped while it is not.
+  FR-021's m, so with two single-process jobs beside one external process, Neutral pauses one of
+  them while that process is slice-bound and runs both while it is not; one job with two
+  processes is left alone (FR-089).
+- **A Performance job on a node whose mode is Neutral.** The job is not held for the other user;
+  the node's Neutral and Yield First jobs give what is needed as far as they can, and the other
+  user can get less than Neutral's fair share (FR-030).
+- **Own GPU work was on the device first.** A user who arrives later gets at most half of the
+  device from Yield First and Neutral; one that arrived first, or whose UID cannot be read, gets
+  the mode's share (FR-090).
 - **Caution option chosen non-interactively without its acknowledgement flag.** Setup refuses
   and writes nothing.
 - **Configuration edited by hand to select Performance.** It loads without an acknowledgement
@@ -1453,7 +1505,9 @@ node reports with the expected per-resource values at each step.
     already held MUST be lowered at one level, the highest first, as held caps rise equally
     (FR-013), and own usage over its target MUST be shared the same way, so no single cap falls
     to the minimum duty and escalates. A lowered cap MUST count what it frees, so held caps give
-    an increase once between them, not each the whole increase.
+    an increase once between them, not each the whole increase. Where no CPU rate cap applies
+    (Tracked), the excess and own usage over its target are held back by whole tasks instead
+    (FR-089), the latter once usage has stayed over the target for `min_step_dwell_intervals`.
 - **FR-012**: Drain MUST be used only when the lower steps cannot free the contended resource
   within a bounded time. Termination MUST be used only after drain fails within its deadline,
   except on the critical floor path for a worker that does not observe the drain file (FR-063).
@@ -1477,11 +1531,16 @@ node reports with the expected per-resource values at each step.
   `noise_tolerance_mib` if larger, for the calm window, and its reversal MUST also wait the
   episode's reclaim backoff (FR-061), so own work that regrows into the floor backs off.
 - **FR-014**: Pause MUST be bounded in time. A pause that does not resolve contention within the
-  bound MUST escalate to the next step. For CPU alone that is the hint, whose target also caps
-  CPU, at the 5% minimum duty for a target of zero; a worker that is not hint-ready gets a cap at
-  the same minimum duty instead. Either is the last CPU step while the contention lasts: it does
-  not pause again, and CPU contention alone never drains (SC-007). Performance and Aggressive take
-  no compute step for other principals (FR-022), so nothing escalates there.
+  bound MUST escalate to the next step. Where a CPU rate cap applies (Full), for CPU alone that is
+  the hint, whose target also caps CPU, at the 5% minimum duty for a target of zero; a worker that
+  is not hint-ready gets a cap at the same minimum duty instead. Either is the last CPU step while
+  the contention lasts: it does not pause again, and CPU contention alone never drains there
+  (SC-007). Where no rate cap applies (CPU in Tracked, GPU compute at both levels, FR-089), a
+  hint-ready worker on CPU gets its hint as a request with no cap, and drains once the hint's
+  deadline has passed with the resource still contended; a worker without the hint, and any task
+  on GPU compute, drains at the bound. That drain is a yield: the task is requeued without using
+  an attempt. Jobs in Performance and Aggressive take no compute step for other principals
+  (FR-022, FR-030), so nothing escalates for them.
 - **FR-015**: Each node MUST have exactly one authoritative policy state that decides yield steps.
   Supervisors MUST carry out that authority's steps and enforce deadlines. They MUST NOT make
   contradicting yield decisions. When the authority is lost, supervisors MUST hold the current
@@ -1502,10 +1561,13 @@ node reports with the expected per-resource values at each step.
   same interval by this order, counting each over-share task at what it holds less what it was
   already asked, and an in-share task is asked for it only where FR-023 gives in-share memory up.
   No in-share task pays any part of another task's excess, and beyond its excess an over-share
-  task is asked only what this order asks of it. Once
+  task is asked only what this order asks of it. Where no rate cap applies, the victims are whole
+  tasks (FR-089). Once
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
-  inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
+  inside it: Yield First, then Neutral, with this cost order within a tier. A job in Performance
+  or Aggressive is never a victim for another principal, for unknown activity or for a floor
+  breach, whatever the governing mode; only the operator envelope steps it (FR-030).
   Where the governing mode is Performance, the aggregate takes no compute step for others, and only
   jobs in Yield First and Neutral are held, each to its own mode's target (FR-022).
   Class rules still win across tiers: every opportunistic allocation is drained before any
@@ -1539,13 +1601,16 @@ node reports with the expected per-resource values at each step.
   - step down within the mode's response time on any external increase beyond the measurement
     tolerance;
   - on a contended compute resource (see Terms), take opportunistic work down: for CPU, paused,
-    then the minimum duty after `pause_bound_s` (FR-014); Guaranteed work keeps its CPU request
+    then after `pause_bound_s` as FR-014 says, at the minimum duty in Full and by the hint or a
+    drain and requeue where no rate cap applies; on GPU compute, every own task paused down to
+    the first-come floor (FR-090); Guaranteed work keeps its CPU request
     (FR-024). With own work held to its margin, the resource saturates only once external demand
     outgrows the margin. While own work holds more than capacity minus the margin, saturation
-    may be its own doing: it is first capped to the margin, within the Neutral fair share, and
+    may be its own doing: it is first held to the margin, within the Neutral fair share, by a cap
+    in Full and by whole tasks elsewhere (FR-089), and all of it is
     paused only if the resource stays contended. While a small demand is probed (FR-021), own
     work steps down with the probe instead. External activity that fits in the margin only
-    lowers the cap by its amount;
+    lowers the target by its amount;
   - count unknown activity as external demand;
   - scale up slowly, except once contention has fully ended (FR-034).
 - **FR-021**: Neutral MUST:
@@ -1572,22 +1637,15 @@ node reports with the expected per-resource values at each step.
     longest ago is dropped. Activity of unknown amount is never recorded;
   - let external demand reclaim anything above fair share;
   - count unknown activity as one active principal without blocking admission. On GPU compute,
-    a duty cycle the supervisor reports applied counts as what own work holds, at the larger of
-    the target it reports applied and the policy's current target, so a cap at the fair share is
-    met and a lowered target counts only once applied; FR-008's hold-then-escalate applies to unknown activity from a telemetry
-    failure or a missing observation and to a duty not reported applied, except that on a
-    time-sliced GPU's time-slice path it escalates no further than the cap.
+    a task whose pause the supervisor reports applied counts as holding nothing, and each other
+    running own task as an equal part of the device; FR-008's hold-then-escalate applies to
+    unknown activity from a telemetry failure or a missing observation, except that on a
+    time-sliced GPU's time-slice path it holds no more own tasks than that path does.
 
   In Yield First and Neutral, no-harm floors take precedence over fair share for RAM and GPU
-  memory; in Performance and Aggressive FR-023's floor rule applies. On GPU compute, a share
-  is approximated by pausing own GPU work for part of each duty cycle; the cycle length, and so
-  the granularity, is documented. While a GPU compute cap sets an allocation's duty, its on- and
-  off-phases follow a clock every supervisor on the node shares, CLOCK_MONOTONIC modulo the
-  period: own work runs while (now mod period) < duty × period, so all own allocations stop and
-  resume together whatever their start times. The phases assume every supervisor shares the
-  agent's time namespace, which holds since supervisors are the agent's children. A duty change mid-period takes effect within the
-  period without a second on-phase or a skipped off-phase. A CPU-only duty cycle keeps its own
-  phase. A device is time-sliced when it is neither under MPS (an MPS
+  memory; in Performance and Aggressive FR-023's floor rule applies. On GPU compute no rate cap
+  and no duty cycle apply at either level: own work gives a share back by whole tasks (FR-089),
+  down to the first-come floor (FR-090). A device is time-sliced when it is neither under MPS (an MPS
   control daemon or server is present) nor a MIG parent (MIG mode enabled); a device whose MPS or
   MIG state cannot be read is not taken as time-sliced. On a time-sliced device the driver gives
   each busy context its slice, so in Neutral own work MUST NOT be
@@ -1604,69 +1662,45 @@ node reports with the expected per-resource values at each step.
   Only when the samples themselves are unreadable do they come from the listing, and then the rule
   holds when m ≤ 1, m counting the processes listed there, since unseen external contexts can only
   add to E and k. VRAM is unaffected,
-  and Yield First keeps its targets and duties. When m × k > E, own work at full duty holds more
-  slices than its fair share, and in Neutral its GPU compute MUST be
-  capped from the context counts (the time-slice duty):
+  and Yield First keeps its targets. When m × k > E, own work holds more slices than its fair
+  share, and in Neutral it MUST give slices back by whole tasks from the context counts (the
+  time-slice hold):
   - An external principal j with E_j busy contexts is slice-bound when its reading in the
-    external estimate (uncapped intervals and re-measure windows only) is at least
+    external estimate (uncapped intervals only) is at least
     `contention.gpu_compute.slice_bound_percent` (default 75) percent of its slice,
     1000 × E_j ÷ (m + E). A lone external principal reads the estimate's total, since usage
     below the attribution tolerance is its sampling error (Q23). An unattributed principal
     counts as one with one context.
-  - With no slice-bound principal there is no GPU compute cap. Otherwise each own process runs at
-    the base duty d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − margin), E_b and k_b being the
-    slice-bound principals' contexts and number and the margin the mode's (Neutral 5%), clamped to the minimum duty and 1. That gives own work 1 ÷ (k_b + 1) of the
-    time the slice-bound principals want, less the margin the mode's target holds; principals that
-    are not slice-bound keep their slices.
-  - Own work pays for the re-measure windows, which hold it at full duty so CedeGrid can read
-    external demand. With w the windows' share of the time while this path caps own work, the
-    duty starts at d0' = (d0 − w) ÷ (1 − w), clamped as d0 is, so own work's held duty, windows
-    included, averages d0 and others keep their share over time. w is the window's
-    `GPU_DEMAND_WINDOW_DECISIONS` decisions of full duty in each cycle of those decisions and the
-    `GPU_DEMAND_WINDOW_EVERY_MS` gap before the next window: 6 of 66 decisions at the default
-    500 ms, so d0' is 725 with no margin and 643 in Neutral at m = 2, E_b = 1.
-    Where no window can open (the governing mode or an allocation on the device in Yield First, or
-    an allocation there held by a CPU step of cap or more), d0' = d0.
-  - From the device's own utilization alone, averaged over the step dwell in per mille, rounded
-    to nearest, and never from per-process readings, the duty rises by
-    `contention.gpu_compute.slice_step_percent` (default 5) points toward 1 while the device's
-    spare time exceeds the mode's margin or one reading's quantum, 10 per mille, whichever is
-    larger, at most once per the mode's scale-up interval and the step dwell, whichever is longer.
-    It falls by a step toward d0' once per step dwell while the spare time is below half of that
-    larger value, and holds between the two. Spare time under one reading's quantum cannot be told
-    from the dips as own work's phases switch, so with a zero margin the duty rises only beyond
-    1% averaged spare. So it settles within
-    one step, and a duty that reaches 1 stays a cap at full duty rather than being lifted and set
-    again.
-  - A principal that turns slice-bound returns own work to d0' within 33 s, the estimate's next
-    window. A stepped-up user that rises returns it within one step dwell per step above d0', at
-    most 30 s. A slice-bound principal that leaves ends the cap within one averaged window.
-  - This path uses no estimate-based target, no ladder excess from one interval's own reading and
-    no pause in any mode; d0', at least the minimum duty, is the floor.
+  - With no slice-bound principal nothing is held. Otherwise own tasks on the device are paused
+    in FR-016's order, each counted as one context, while the own contexts left running stay at
+    or above t = ⌊E_b ÷ k_b⌋, E_b and k_b being the slice-bound principals' contexts and number,
+    and until they are at most t: own work keeps the slices the rule allows it, and rounding
+    favours it. FR-090's floor can raise t. A task whose pause would leave fewer than t running is
+    left alone, so a single job with several contexts is not held. Principals that are not
+    slice-bound keep their slices.
+  - A paused task resumes once no counted principal is slice-bound or the rule holds with it
+    running again, and its pause ends at `pause_bound_s` (FR-014). A principal that turns
+    slice-bound holds own tasks within the estimate's next window, 33 s, and one that leaves
+    releases them within one averaged window. This path uses no estimate-based target and no
+    ladder excess from one interval's own reading.
   - While the per-process samples are readable the counts are those of the counting window, from
-    every interval whose samples are readable, whether own work is capped or not; the amounts,
-    which decide slice-bound and own work's uncapped share, come only from uncapped intervals and
-    re-measure windows. While the estimate holds intervals its readings decide which principals
+    every interval whose samples are readable, whether own work is held or not; the amounts,
+    which decide slice-bound, come only from uncapped intervals. While the estimate holds intervals its readings decide which principals
     are slice-bound, even in an interval whose amounts are unknown or inconsistent. When the
     estimate has no uncapped interval since it restarted, or when the samples themselves are
     unreadable and the counts are the listed processes, every counted external principal is
-    slice-bound, and the duty steps up only with a device utilization reading. An own process
-    that holds a context without computing counts for at most one counting window after its
-    listing; for that time the other own processes on the device may run at d0' beside a
-    slice-bound principal, and no other workload pays. When the listing itself is unknown on a device last read as
-    time-sliced, the cap is target ÷ 1000 (Q25), without a pause.
+    slice-bound. An own process that holds a context without computing counts for at most one
+    counting window after its listing; for that time it counts toward t, so one fewer own task
+    may be held beside a slice-bound principal, and no other workload pays beyond that window.
+    When the listing itself is unknown on a device last read as time-sliced, nothing new is
+    paused there (Q29) and held pauses hold.
   - Each decision's GPU compute status states m, E, k, whether the rule held, the source of its
     counts, for each own process counted whether it counts by its listing or by a sample, the
-    slice-bound principals with their readings and thresholds, d0, w and d0', the duty
-    and the step-up state.
+    slice-bound principals with their readings and thresholds, t, the floor when one applies,
+    and the own tasks held.
 
-  On a device not known to be time-sliced, in Neutral, the duty is
-  the cap's target ÷ own work's uncapped share (its amount averaged over the uncapped intervals in
-  which it ran on the device, at least 6 and at most 60, restarted with the external estimate and
-  when own work's allocations there change), clamped to the minimum duty and 1. While the share
-  has fewer than 6 intervals a re-measure window opens at once rather than 30 s after the last
-  one. Until the share exists, while the device's amount is unknown, for a cap set for unknown
-  activity, and in Yield First, the duty is target ÷ 1000. External GPU compute MUST be measured, in thousandths of
+  On a device not known to be time-sliced, own tasks are held by FR-089 against own work's
+  measured amount there, each running task counting at an equal part of it. External GPU compute MUST be measured, in thousandths of
   device time, from each external process's fresh per-process utilization over the whole
   interval, time without a sample (such as while it was stopped) counting as idle, capped at
   100%: a sample at t, whose process's previous sample was at p, counts in full in the window
@@ -1709,18 +1743,16 @@ node reports with the expected per-resource values at each step.
   same demand; in Neutral, the external amount that sets own work's
   GPU compute target, per principal and in total (the owner's unmanaged usage left out, the
   interval's own amount of it counting as in the interval's view), MUST therefore be the average
-  of the amounts measured in the last 60 intervals in which own work ran uncapped on the device (no cap below full
-  duty and no pause, on GPU compute or CPU, for any own allocation using it, in the decision that
-  set the interval and the one before it), or had no allocation running there; with fewer, the average of what there
-  is, and with none since the average started (the agent's start or a restart), the interval's own
-  amount. Capped intervals and intervals of unknown amount never feed it. While own work is held
-  back by GPU compute steps only, its GPU compute caps on the device MUST be lifted every 30 s for a
-  window of 6 intervals, at most 10% of the capped time; a window whose mean differs from the average
-  before it by 200 thousandths or more restarts the average from it. While a CPU step of cap or
-  more, or a GPU pause, holds own work on the device no window is taken. A change in the device's
+  of the amounts measured in the last 60 intervals in which own work ran uncapped on the device (no
+  pause on GPU compute and no CPU step of cap or more for any own allocation using it, in the
+  decision that set the interval and the one before it), or had no allocation running there; with
+  fewer, the average of what there is, and with none since the average started (the agent's start
+  or a restart), the interval's own amount. Held intervals and intervals of unknown amount never
+  feed it. No re-measure window is taken: with no GPU compute cap there is none to lift, and a
+  paused task resumes only as FR-089 says. A change in the device's
   external PIDs, background contexts and the owner's unmanaged processes left out, restarts the
   average, and an agent restart loses it. Yield First uses the
-  interval's amount, or the average where that is higher, and takes no window. The decision record
+  interval's amount, or the average where that is higher. The decision record
   states per device whether the interval was uncapped and fed the estimate, the estimate, its
   interval count and the time since the last uncapped interval. The node report's held-back breakdown
   states, per device, whether the amount was measured or why it is unknown.
@@ -1792,8 +1824,8 @@ node reports with the expected per-resource values at each step.
   sized by `ram.reserve_percent` or `gpu.reserve_vram_percent` is judged on the host, after the
   percentage is applied; its warning comes when the agent first samples the host.
 - **FR-024**: Guaranteed allocations:
-  - MUST NOT be paused, which also rules out the pause duty cycle that approximates a GPU compute
-    share: GPU compute steps are unavailable for Guaranteed work;
+  - MUST NOT be paused, so GPU compute steps, which are whole-task pauses (FR-089), are
+    unavailable for Guaranteed work;
   - MAY be lowered in share and hinted;
   - MAY have CPU usage above their request capped, but MUST NOT be capped below their request;
   - MUST NOT be drained by automatic yielding, except to restore a RAM or GPU memory floor or the
@@ -1809,14 +1841,15 @@ node reports with the expected per-resource values at each step.
     window is skipped, and a Guaranteed allocation that does not observe the drain file may be
     terminated as that path's last step.
   - The envelope exception applies to RAM and GPU memory only, with the same deadlines and
-    window; a CPU envelope breach caps usage above the request and never drains Guaranteed
-    work.
+    window; a CPU envelope breach caps usage above the request where a rate cap applies, and
+    never drains Guaranteed work.
 
   Explicit operator drain keeps today's behavior.
 - **FR-025**: Every threshold that steers yielding MUST be a configuration value, not a
   hard-coded constant. This covers:
   - margins, response times and scale-up rates
-  - the GPU compute time-slice duty's slice-bound share and step (FR-021)
+  - the GPU compute time-slice hold's slice-bound share (FR-021); `slice_step_percent`, the
+    former duty's step, still loads and has no effect
   - tolerances, windows and deadlines, including the Guaranteed hint deadline, the RAM breach
     window, the critical floor share and hint deadline, the principal window,
     `principal_leave_s` and `uid_min`, the memory peak window and the CPU admission usage window
@@ -1871,6 +1904,14 @@ node reports with the expected per-resource values at each step.
   configured mode. A job runs at the less aggressive of its
   requested mode and the node cap, and the effective mode MUST be reported. A requested mode
   the cap refuses MUST be reported with the reason code `mode_capped` and the node's cap.
+  A job's effective mode decides how that job gives back (constitution 8.1.0): a job in
+  Performance or Aggressive is not capped, paused, drained or memory-stepped for another
+  principal, for unknown activity or at a floor breach, and gets no OOM mark beyond
+  `ram.prefer_own_oom_victim`, whatever the node's mode; the operator envelope still steps it,
+  and an OOM kill of it at a floor breach is judged as FR-076 judges one in Performance. The
+  node's aggregate target and admission do not change, and the node's other jobs give what it
+  needs as far as they can, so another workload can get less than the node's mode promises:
+  a known limitation, to improve in the next version.
 - **FR-031**: Existing `config_version = 1` files MUST load unchanged.
   - Without mode settings, every resource MUST run in Performance. The migration note and
     `doctor` state once that the default changed from Neutral, as for other changed defaults.
@@ -1936,7 +1977,8 @@ node reports with the expected per-resource values at each step.
   contender stopping in Neutral and Performance, and in Yield First, whose quiet count is that
   mode's hysteresis, within 2 intervals of the quiet count being reached: in that interval, while own work holds no excess, every binding CPU cap, hint
   or pause held for external growth rises so that together they hold the mode's target, the
-  lowest first and none lowered, never in steps from the minimum duty; steps held for other causes,
+  lowest first and none lowered, never in steps from the minimum duty, and where no rate cap
+  applies every pause held for external growth ends in that interval; steps held for other causes,
   and caps their work does not reach, keep their own paths. The quiet count is each mode's hysteresis and does not change with
   it, and Performance's and Neutral's return times do not get worse.
   Quiet intervals count each principal's usage and this interval's unattributed external
@@ -2072,9 +2114,10 @@ node reports with the expected per-resource values at each step.
   - Verified descendants are in the managed set, so they are not the owner's unmanaged use and the
     fair share does not subtract them.
 - **FR-086**: In Tracked, a step MUST reach the whole family.
-  - A stop (a duty's off phase, a Pause, a GPU duty's off phase) MUST discover, stop every member
+  - A stop (a Pause) MUST discover, stop every member
     through its pidfd, and repeat until a pass finds no new member, at most 3 passes. A member that
-    appears during an off phase is stopped at once; the family is stopped and continued together.
+    appears while the family is stopped is stopped at once; the family is stopped and continued
+    together.
   - Continue MUST send SIGCONT to every member whatever the state flags say, continue past a
     failing member, and report it. A member that has exited is dropped, not an error.
   - Each member's `oom_score_adj` baseline is recorded when it joins (its parent member's
@@ -2099,6 +2142,39 @@ node reports with the expected per-resource values at each step.
   - The counts (continued, ended, identity mismatch, already gone) go to the run's outcome and an
     event. A member found and stopped in the instant its supervisor dies can be missed, and stays
     stopped until an agent runs. Full keeps its leaf and the thaw on reattach.
+- **FR-089**: Where no rate cap applies, Yield First and Neutral MUST hold running own work back
+  by whole tasks (report 057 C2 and C3). No rate cap applies on CPU in Tracked, and on GPU compute
+  at both levels; Full keeps its `cpu.max` cap on CPU until report 057 C1 is decided.
+  - A task is paused, in FR-016's order and its mode tiers, only while the own work left running
+    stays at or above own work's target: on CPU, own usage less the paused task's usage; on GPU
+    compute, the own contexts left running on the time-slice path (FR-021), else own work's
+    measured amount less the task's equal part of it. A task whose pause would go below the target
+    is skipped for the next in the order, so rounding favours own work. Yield First on a contended
+    resource pauses every own task, down to the first-come floor on GPU compute (FR-090).
+  - A pause ends as FR-014 says. A paused task resumes when the demand it answered falls back
+    past the reversal threshold, at the mode's pace, or at once when contention has ended
+    (FR-034).
+  - No duty cycle runs: the supervisor neither stops nor continues own work by period, and a
+    worker's CPU hint is a request only.
+  - On a time-sliced GPU, in every mode, one more own process is admitted only while
+    (m + 1) × k ≤ E (FR-021's counts) or no counted principal is slice-bound; otherwise admission
+    is held with `gpu_time_slice_admission_held`.
+  - `observe`, `status` and the decision say, per resource, that whole-task holds apply and which
+    tasks are held.
+- **FR-090**: On GPU compute, in Yield First and Neutral, own work that arrived on a device before
+  every principal now listed there MUST keep at least the share that leaves no single later
+  principal more than half of the device (constitution 8.1.0 "First-come GPU floor").
+  - On the time-slice path (FR-021) that is at least 2 × E_max − E own contexts running, E_max
+    being the most contexts of one principal and E all external contexts counted; elsewhere,
+    beside exactly one contending principal, half the device (500 thousandths), and beside more
+    than one, no floor.
+  - Arrival is kept per UID and, for own work, per device: the interval in which it was first
+    listed there, kept while it is listed again within 30 s. One absent for longer arrives again
+    when next listed. An agent restart starts the record again, which only withholds the floor.
+  - A listed external context whose UID cannot be read, an unknown or incomplete listing, or an
+    arrival in the same interval as own work's means no floor on that device.
+  - The floor never pauses own work or starts it; it only limits what Yield First and Neutral
+    hold back. The decision states per device whether the floor applies and, if not, why.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
@@ -2347,14 +2423,15 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   returned within 2 monitor intervals of the demand appearing, including on a host that own work
   saturates: own
   CPU usage reaches the mode's contended target, which in Yield First is opportunistic work
-  paused, then at the minimum duty after `pause_bound_s`, and in Neutral the fair share. Where own
-  work saturated the resource before its first cap, Yield First's first step is a cap to the
+  paused, then as FR-014 says after `pause_bound_s`, and in Neutral the fair share, where no rate
+  cap applies to within one task's usage above it (FR-089). Where own
+  work saturated the resource before its first step, Yield First's first step holds it to the
   margin within the fair share, so at least the fair share is back within the same bound; a
   demand smaller than one margin step is probed instead (FR-021). In Performance own CPU is not
   stepped for another principal's demand (SC-019), and no new own work is admitted while it
   would take that principal below the lesser of its demand and its fair share. With demand that
   fits in the margin, Yield First keeps its 15% margin free. No work is drained or terminated
-  when CPU is the only contended resource. A principal whose demand is on record as satisfied
+  when CPU is the only contended resource, except as SC-007 allows. A principal whose demand is on record as satisfied
   gets that demand back within the same bound when it returns. These bounds are for other
   principals' demand: unmanaged processes of the account that runs CedeGrid share that account's
   fair share with own work, so they are served as own work's margin frees capacity.
@@ -2378,8 +2455,10 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-006**: A GPU job runs to completion on a device already occupied by an external context,
   under Neutral and under Performance, with native evidence on at least one supported NVIDIA
   device.
-- **SC-007**: When CPU is the only contended resource, zero drains or terminations occur in any
-  mode.
+- **SC-007**: When CPU is the only contended resource, zero terminations occur in any mode, and
+  zero drains in Full and in Performance and Aggressive. In Tracked, Yield First and Neutral drain
+  a task only when its pause reaches `pause_bound_s` with the resource still contended (FR-014),
+  as a yield that uses no attempt.
 - **SC-008**:
   - 100% of 0.2 example configurations and recorded policy inputs load and replay.
   - Every combination of 0.2 and new agent and coordinator completes the existing distributed
@@ -2440,6 +2519,13 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   less the spread, and its p99 at most its p99 without plus the spread. A gain beyond the spread
   is reported, since it means own work gave something back. At a host-wide OOM, the kernel's
   victim is the one the baseline shows, or own work.
+- **SC-020**: Whole-task holds (FR-089), at least 3 runs each way on the test host. On CPU (run
+  E8, F2's shape in Neutral, Tracked): own usage is at or above its target in every interval, and
+  the other user's rate is reported against plain Linux and against the former cap. On GPU
+  compute (run E9, two own probes beside one saturating user in Neutral): own work ÷ alone is at
+  least 0.42 and the other user's rate at least 753.4 req/s, SC-017's bounds for that shape. A
+  miss in E9 is reported before another GPU target is chosen. Beside a later user in Yield First,
+  own work keeps at least half the device (FR-090).
 
 ### Provisional thresholds
 
