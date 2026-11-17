@@ -315,7 +315,11 @@ the first account; the second account ran its own load from its own login. The h
 Each own task was a CPU-bound loop counting fixed units, and the second account's load was two
 saturating request loops tied to two of the scope's CPUs, its demand equal to its fair share.
 Every run began with an idle check (every CPU at 0%), and CedeGrid took no action on the second
-account's processes. The first smoke run of the unprotected arm, at `34c936a`, found a bug: the
+account's processes. The first F2c series, at `9647d21`, admitted own work to one task, half its
+share: CedeGrid's own CPU and the owner's other processes (the gate's coordinator and harness)
+came out of it. Own work now keeps its equal share while the others keep theirs, counted on its
+task requests where the owner has a CPU cgroup of its own (`3c44ff8`, `beff659`); the series
+after the fix has its own row below. The first smoke run of the unprotected arm, at `34c936a`, found a bug: the
 coordinator placed eight granted tasks and the agent reserved only one, because it reserved
 against the protected budget; `9647d21` fixes it. Dates are UTC.
 
@@ -324,6 +328,7 @@ against the protected budget; `9647d21` fixes it. Dates are UTC.
 | Fill on an idle scope: eight own tasks of 500 m, 30 s windows, Performance and Aggressive, three runs each | SC-003 | `9647d21` | 2026-11-17 | both modes admitted 7 of the 8 at the first placement after submission (1.40–1.73 s in Performance, 1.41 s in Aggressive) and the same count at every sample after it; the eighth fits neither once CedeGrid's own use is held out, so Aggressive's 0% margin admits no extra 500 m task on four CPUs. Own CPU 3689–3741 m (Performance), 3727–3753 m (Aggressive) | pass: Aggressive never below Performance, full in one placement |
 | F2c, protected: eight own tasks of 1000 m submitted while the second account's two loops run; Performance and protected Aggressive, 60 s windows, three runs each, with the second account alone as the reference | SC-001, SC-008 | `9647d21` | 2026-11-17 | own work admitted one task in both modes (983–988 m): the fair share of 2000 m less CedeGrid's own use leaves room for one, and what the second account leaves is the same. The second account kept 97.8–97.9% of its alone rate in Performance and 96.3–97.9% in Aggressive (alone: 6268–6270 requests a second), p99 0.33–0.35 ms against 0.32 ms alone | pass: its whole demand, which is its fair share, kept its CPUs |
 | F2c, unprotected: the same, with the host's allowance turned on through `setup --allow-unprotected-aggressive` on a terminal and both SDK fields set | SC-004, SC-008 | `9647d21` | 2026-11-17 | own work started three tasks at once beside the second account (2163–2201 m), each logging its `UNPROTECTED` warning, with no refusal; the second account fell to 85.5–87.7% of its alone rate, and its p99 rose to 3.33 ms | pass: own work starts where another principal contends |
+| F2c, protected, after own work's equal share became kept (`3c44ff8`, `beff659`): the same shape, Performance and protected Aggressive, three runs each, with the second account alone as the reference | SC-001, SC-008 | `beff659` | 2026-11-17 | own work held two tasks in every run (1832–1966 m), never fewer once admitted; Aggressive admitted both at the first placement, Performance within 0.1–6.1 s. The second account kept 97.0–97.5% of its alone rate (6261–6269 requests a second), p99 0.34 ms against 0.33 ms alone, and no cap, pause or drain fell on own work | pass: both sides kept their equal share, steadily |
 | Steps on running own work over all 18 runs above | SC-002 | `9647d21` | 2026-11-17 | the agent's decisions held no cap, pause or drain on own work in any run | pass |
 | A same-cgroup contender | SC-008 | — | — | not run: with the `cpu` controller enabled down to each user slice, the second account's processes are always in a cgroup of their own, and putting one into own work's cgroup needs root | open |
 | F2c on GPU compute | SC-001, SC-003 | — | — | not run in this host window | open |
