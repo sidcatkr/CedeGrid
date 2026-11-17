@@ -355,6 +355,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
 - [ ] T071 Run the source pack (`tools/pack_source_review.py`) and check that every new file is exported and no exported text names a host, an account or a private path
 - [ ] T072 Rerun T058 at the release candidate's commit, and record SC-006 to SC-008 there in `docs/validation.md`
 - [ ] T073 Prepare the pre-release security review package listing the files of research R14 at the release candidate's commit, in `specs/005-system-mode/security-review.md`. The review runs separately, before release.
+  - *Drafted* at the branch's current state; it is refreshed at the release candidate's commit.
 
 ---
 
