@@ -4,9 +4,11 @@
 //! workers. A synchronous server with no async runtime, so it can be reviewed line by line.
 
 use super::admin_policy::AdminPolicy;
+use super::moves::{CgroupFs, move_job};
+use super::oom::ProcessAccess;
 use super::peer::{Accounts, PeerCredentials, authorize, peer_credentials};
 use super::request::{MAX_REQUEST_BYTES, Refusal, RefusalCode, Reply, Request, parse_frame};
-use super::systemd::{Systemd, start_units, status_units, stop_units};
+use super::systemd::{Systemd, caller_units, start_units, status_units, stop_units};
 use super::units::Placement;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -77,6 +79,10 @@ pub struct BrokerState {
     pub host_uid_min: u32,
     /// Whether `user.slice` splits CPU between accounts, for `units.ordinary_slice = "auto"`.
     pub user_slice_splits_cpu: Box<dyn Fn() -> bool + Send + Sync>,
+    /// The cgroup files moves read and write.
+    pub cgroups: Box<dyn CgroupFs + Send + Sync>,
+    /// How moves hold processes.
+    pub processes: Box<dyn ProcessAccess + Send + Sync>,
     pub rate: Mutex<RateLimiter>,
 }
 
@@ -200,10 +206,25 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
         }
         Request::Stop => stop_units(systemd, caller),
         Request::Status => status_units(systemd, caller),
-        Request::Move { .. } => Err(Refusal::new(
-            RefusalCode::MoveRefused,
-            "job moves are not supported by this broker version",
-        )),
+        Request::Move { job, mode } => caller_units(systemd, caller).and_then(|units| {
+            let moved = move_job(
+                state.cgroups.as_ref(),
+                state.processes.as_ref(),
+                caller,
+                &units,
+                &job,
+                mode,
+            )?;
+            journal(&format!(
+                "move uid={} job={} from={} to={} pids={}",
+                caller.uid,
+                job.as_str(),
+                moved.from,
+                moved.to,
+                moved.pids.len()
+            ));
+            status_units(systemd, caller)
+        }),
     };
     match result {
         Ok(units) => Handled {
@@ -384,6 +405,10 @@ pub fn run() -> anyhow::Result<()> {
         load_policy: Box::new(admin_policy::load),
         host_uid_min: admin_policy::host_uid_min(),
         user_slice_splits_cpu: Box::new(super::units::user_slice_splits_cpu),
+        cgroups: Box::new(super::moves::HostCgroupFs {
+            root: std::path::PathBuf::from("/sys/fs/cgroup"),
+        }),
+        processes: Box::new(super::oom::PidfdAccess),
         rate: Mutex::new(RateLimiter::new(RATE_BURST, RATE_PER_SECOND)),
     });
     std::thread::Builder::new()

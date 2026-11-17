@@ -1456,6 +1456,32 @@ mod broker_service {
         }
     }
 
+    struct NoCgroups;
+
+    impl cedegrid::broker::moves::CgroupFs for NoCgroups {
+        fn read(&self, _: &str, _: &str) -> anyhow::Result<String> {
+            anyhow::bail!("no cgroups in this test")
+        }
+        fn write(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("no cgroups in this test")
+        }
+        fn children(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("no cgroups in this test")
+        }
+    }
+
+    struct NoProcesses;
+
+    impl cedegrid::broker::oom::ProcessAccess for NoProcesses {
+        fn open(
+            &self,
+            _: u32,
+            _: Option<u64>,
+        ) -> anyhow::Result<Box<dyn cedegrid::broker::oom::HeldProcess>> {
+            anyhow::bail!("no processes in this test")
+        }
+    }
+
     const CALLER: Caller = Caller {
         uid: 1234,
         primary_gid: 1334,
@@ -1622,6 +1648,8 @@ mod broker_service {
             load_policy: Box::new(move || AdminPolicy::parse(policy.unwrap_or(""), 1000)),
             host_uid_min: 1000,
             user_slice_splits_cpu: Box::new(|| true),
+            cgroups: Box::new(NoCgroups),
+            processes: Box::new(NoProcesses),
             rate: Mutex::new(RateLimiter::new(8, 2)),
         }
     }
@@ -1705,7 +1733,7 @@ mod broker_service {
     }
 
     #[test]
-    fn moves_are_refused_until_built() {
+    fn a_move_needs_both_units_running() {
         let state = state(FakeSystemd::default(), &[1234], None);
         let handled = handle(
             &state,
@@ -1713,6 +1741,13 @@ mod broker_service {
             &line(r#"{"protocol":1,"kind":"move","job":"j","mode":"neutral"}"#),
         );
         assert_eq!(handled.reply.code, Some(RefusalCode::MoveRefused));
+        assert!(
+            handled
+                .reply
+                .message
+                .unwrap()
+                .contains("cedegrid system start")
+        );
     }
 
     #[test]
@@ -2323,9 +2358,12 @@ mod oom_loop {
     }
 
     impl ProcessAccess for Fake {
-        fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>> {
+        fn open(&self, pid: u32, start_time: Option<u64>) -> anyhow::Result<Box<dyn HeldProcess>> {
             let process = self.0.get(&pid).ok_or_else(|| anyhow::anyhow!("gone"))?;
-            anyhow::ensure!(process.start_time == start_time, "reused");
+            anyhow::ensure!(
+                start_time.is_none_or(|start| process.start_time == start),
+                "reused"
+            );
             Ok(Box::new(Held(std::sync::Arc::clone(process))))
         }
     }
@@ -2466,5 +2504,282 @@ mod oom_loop {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].new, 0);
         let _ = Path::new("/");
+    }
+}
+
+// T036, T039: moving a job between the caller's two units, against a fake cgroup tree.
+
+mod job_moves {
+    use cedegrid::broker::ModeName;
+    use cedegrid::broker::moves::{CallerUnits, CgroupFs, move_job};
+    use cedegrid::broker::oom::{HeldProcess, ProcessAccess};
+    use cedegrid::broker::process_handle::ProcessIds;
+    use cedegrid::broker::request::{JobId, RefusalCode};
+    use cedegrid::broker::units::Caller;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Node {
+        procs: Vec<u32>,
+        frozen: bool,
+        children: BTreeSet<String>,
+    }
+
+    struct Proc {
+        cgroup: String,
+        uid: u32,
+        gid: u32,
+    }
+
+    #[derive(Default)]
+    struct World {
+        nodes: BTreeMap<String, Node>,
+        procs: BTreeMap<u32, Proc>,
+        never_freezes: bool,
+        refuse_pid: Option<u32>,
+    }
+
+    #[derive(Clone, Default)]
+    struct Fake(Arc<Mutex<World>>);
+
+    impl Fake {
+        fn cgroup(&self, path: &str, procs: &[u32]) {
+            let mut world = self.0.lock().unwrap();
+            if let Some((parent, name)) = path.rsplit_once('/') {
+                world
+                    .nodes
+                    .entry(parent.to_owned())
+                    .or_default()
+                    .children
+                    .insert(name.to_owned());
+            }
+            world.nodes.entry(path.to_owned()).or_default().procs = procs.to_vec();
+            for &pid in procs {
+                world.procs.insert(
+                    pid,
+                    Proc {
+                        cgroup: path.to_owned(),
+                        uid: 1000,
+                        gid: 1100,
+                    },
+                );
+            }
+        }
+
+        fn procs(&self, path: &str) -> Vec<u32> {
+            self.0.lock().unwrap().nodes[path].procs.clone()
+        }
+
+        fn frozen(&self, path: &str) -> bool {
+            self.0.lock().unwrap().nodes[path].frozen
+        }
+    }
+
+    impl CgroupFs for Fake {
+        fn read(&self, cgroup: &str, file: &str) -> anyhow::Result<String> {
+            let world = self.0.lock().unwrap();
+            let node = world
+                .nodes
+                .get(cgroup)
+                .ok_or_else(|| anyhow::anyhow!("no cgroup"))?;
+            Ok(match file {
+                "cgroup.procs" => node.procs.iter().map(|pid| format!("{pid}\n")).collect(),
+                "cgroup.events" => format!(
+                    "populated 1\nfrozen {}\n",
+                    u8::from(node.frozen && !world.never_freezes)
+                ),
+                _ => anyhow::bail!("no such file"),
+            })
+        }
+
+        fn write(&self, cgroup: &str, file: &str, value: &str) -> anyhow::Result<()> {
+            let mut world = self.0.lock().unwrap();
+            anyhow::ensure!(world.nodes.contains_key(cgroup), "no cgroup");
+            match file {
+                "cgroup.freeze" => world.nodes.get_mut(cgroup).unwrap().frozen = value == "1",
+                "cgroup.procs" => {
+                    let pid: u32 = value.parse()?;
+                    anyhow::ensure!(world.refuse_pid != Some(pid), "refused");
+                    let from = world.procs[&pid].cgroup.clone();
+                    world
+                        .nodes
+                        .get_mut(&from)
+                        .unwrap()
+                        .procs
+                        .retain(|p| *p != pid);
+                    world.nodes.get_mut(cgroup).unwrap().procs.push(pid);
+                    world.procs.get_mut(&pid).unwrap().cgroup = cgroup.to_owned();
+                }
+                _ => anyhow::bail!("no such file"),
+            }
+            Ok(())
+        }
+
+        fn children(&self, cgroup: &str) -> anyhow::Result<Vec<String>> {
+            let world = self.0.lock().unwrap();
+            let node = world
+                .nodes
+                .get(cgroup)
+                .ok_or_else(|| anyhow::anyhow!("no cgroup"))?;
+            Ok(node.children.iter().cloned().collect())
+        }
+    }
+
+    struct Held(Fake, u32);
+
+    impl HeldProcess for Held {
+        fn start_time(&self) -> u64 {
+            1
+        }
+        fn cgroup(&self) -> anyhow::Result<String> {
+            Ok(self.0.0.lock().unwrap().procs[&self.1].cgroup.clone())
+        }
+        fn ids(&self) -> anyhow::Result<ProcessIds> {
+            let world = self.0.0.lock().unwrap();
+            let process = &world.procs[&self.1];
+            Ok(ProcessIds {
+                uids: [process.uid; 4],
+                gids: [process.gid; 4],
+            })
+        }
+        fn oom_score_adj(&self) -> anyhow::Result<i32> {
+            Ok(0)
+        }
+        fn set_oom_score_adj(&self, _: i32) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ProcessAccess for Fake {
+        fn open(&self, pid: u32, _: Option<u64>) -> anyhow::Result<Box<dyn HeldProcess>> {
+            anyhow::ensure!(self.0.lock().unwrap().procs.contains_key(&pid), "gone");
+            Ok(Box::new(Held(self.clone(), pid)))
+        }
+    }
+
+    const ORDINARY: &str = "/cedegrid.slice/cedegrid-u1000.service";
+    const IDLE: &str = "/cedegrid-idle.slice/cedegrid-idle-u1000.service";
+    const CALLER: Caller = Caller {
+        uid: 1000,
+        primary_gid: 1100,
+    };
+
+    fn units() -> CallerUnits {
+        CallerUnits {
+            ordinary: ORDINARY.into(),
+            idle: IDLE.into(),
+        }
+    }
+
+    fn world() -> Fake {
+        let fake = Fake::default();
+        fake.cgroup(ORDINARY, &[]);
+        fake.cgroup(IDLE, &[]);
+        fake.cgroup(&format!("{ORDINARY}/cedegrid-neutral-j1"), &[11, 12]);
+        fake.cgroup(&format!("{IDLE}/cedegrid-yield_first-j1"), &[]);
+        fake
+    }
+
+    fn job() -> JobId {
+        JobId::parse("j1").unwrap()
+    }
+
+    #[test]
+    fn a_job_moves_whole_and_the_source_is_thawed() {
+        let fake = world();
+        let moved = move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst).unwrap();
+        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        let target = format!("{IDLE}/cedegrid-yield_first-j1");
+        assert_eq!(moved.pids, vec![11, 12]);
+        assert_eq!(fake.procs(&target), vec![11, 12]);
+        assert!(fake.procs(&source).is_empty());
+        assert!(!fake.frozen(&source));
+    }
+
+    #[test]
+    fn a_missing_job_or_target_is_refused() {
+        let fake = world();
+        let other = JobId::parse("j2").unwrap();
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &other, ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::JobNotFound
+        );
+        // Moving to Neutral moves from the idle unit, where only the empty destination is.
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::Neutral)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        let fake = world();
+        fake.cgroup(&format!("{IDLE}/cedegrid-yield_first-j1"), &[99]);
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        assert_eq!(
+            fake.procs(&format!("{ORDINARY}/cedegrid-neutral-j1")),
+            vec![11, 12]
+        );
+    }
+
+    #[test]
+    fn another_users_process_in_the_job_refuses_the_move() {
+        let fake = world();
+        fake.0.lock().unwrap().procs.get_mut(&12).unwrap().uid = 0;
+        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        assert_eq!(fake.procs(&source), vec![11, 12]);
+        assert!(!fake.frozen(&source));
+    }
+
+    #[test]
+    fn a_failed_write_puts_moved_processes_back() {
+        let fake = world();
+        fake.0.lock().unwrap().refuse_pid = Some(12);
+        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        let mut back = fake.procs(&source);
+        back.sort_unstable();
+        assert_eq!(back, vec![11, 12]);
+        assert!(!fake.frozen(&source));
+    }
+
+    #[test]
+    fn a_job_with_child_cgroups_or_that_never_freezes_is_refused() {
+        let fake = world();
+        fake.cgroup(&format!("{ORDINARY}/cedegrid-neutral-j1/inner"), &[]);
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        let fake = world();
+        fake.0.lock().unwrap().never_freezes = true;
+        let source = format!("{ORDINARY}/cedegrid-neutral-j1");
+        assert_eq!(
+            move_job(&fake, &fake, CALLER, &units(), &job(), ModeName::YieldFirst)
+                .unwrap_err()
+                .code,
+            RefusalCode::MoveRefused
+        );
+        assert!(!fake.frozen(&source));
+        assert_eq!(fake.procs(&source), vec![11, 12]);
     }
 }

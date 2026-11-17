@@ -188,10 +188,22 @@ pub fn task_mode(kind: UnitKind, leaf: Option<&str>) -> ModeName {
     if kind == UnitKind::Idle {
         return ModeName::YieldFirst;
     }
-    leaf.and_then(|leaf| leaf.strip_prefix("cedegrid-"))
-        .and_then(|rest| rest.rsplit_once('-'))
-        .and_then(|(mode, _)| ModeName::from_name(mode))
+    leaf.and_then(parse_leaf)
+        .map(|(mode, _)| mode)
         .unwrap_or(ModeName::Neutral)
+}
+
+/// The mode and job of a task leaf named `cedegrid-<mode>-<job>`. Mode names hold no `-`, so
+/// the first `-` after the mode ends it.
+pub fn parse_leaf(leaf: &str) -> Option<(ModeName, &str)> {
+    let (mode, job) = leaf.strip_prefix("cedegrid-")?.split_once('-')?;
+    let mode = ModeName::from_name(mode)?;
+    super::request::JobId::parse(job).map(|_| (mode, job))
+}
+
+/// The leaf name the agent gives a job's cgroup in a unit.
+pub fn leaf_name(mode: ModeName, job: &super::request::JobId) -> String {
+    format!("cedegrid-{}-{}", mode.name(), job.as_str())
 }
 
 /// Groups one user's unit processes into tasks, one per leaf, each started at its oldest process.
@@ -280,7 +292,8 @@ pub trait HeldProcess {
 
 /// Opens processes for the loop.
 pub trait ProcessAccess {
-    fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>>;
+    /// Opens `pid`; with `start_time`, refuses a process that started at another time.
+    fn open(&self, pid: u32, start_time: Option<u64>) -> anyhow::Result<Box<dyn HeldProcess>>;
 }
 
 #[cfg(target_os = "linux")]
@@ -313,10 +326,9 @@ pub struct PidfdAccess;
 
 #[cfg(target_os = "linux")]
 impl ProcessAccess for PidfdAccess {
-    fn open(&self, pid: u32, start_time: u64) -> anyhow::Result<Box<dyn HeldProcess>> {
+    fn open(&self, pid: u32, start_time: Option<u64>) -> anyhow::Result<Box<dyn HeldProcess>> {
         Ok(Box::new(super::process_handle::ProcessHandle::open(
-            pid,
-            Some(start_time),
+            pid, start_time,
         )?))
     }
 }
@@ -614,7 +626,7 @@ impl OomLoop {
                     let Some(scan) = host.processes.get(&pid) else {
                         continue;
                     };
-                    let Ok(process) = access.open(pid, scan.start_time) else {
+                    let Ok(process) = access.open(pid, Some(scan.start_time)) else {
                         continue;
                     };
                     let Ok(cgroup) = process.cgroup() else {

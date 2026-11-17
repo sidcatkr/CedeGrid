@@ -7,6 +7,7 @@
 //! Moves and the OOM loop land with their tasks.
 
 pub mod admin_policy;
+pub mod moves;
 pub mod oom;
 #[cfg(unix)]
 pub mod peer;

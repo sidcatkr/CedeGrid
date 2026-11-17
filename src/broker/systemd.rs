@@ -273,3 +273,29 @@ pub fn status_units(systemd: &dyn Systemd, caller: Caller) -> Result<Vec<UnitSta
         .map(|(kind, name, show)| status_of(kind, name, &show))
         .collect())
 }
+
+/// The cgroups of the caller's two units for a move: both must carry the marker and run.
+pub fn caller_units(
+    systemd: &dyn Systemd,
+    caller: Caller,
+) -> Result<super::moves::CallerUnits, Refusal> {
+    let shows = checked_shows(systemd, caller)?;
+    let running = |kind: UnitKind| {
+        shows
+            .iter()
+            .find(|(found, _, show)| {
+                *found == kind
+                    && !show.absent()
+                    && show.active_state == "active"
+                    && show.control_group.starts_with('/')
+            })
+            .map(|(_, _, show)| show.control_group.clone())
+    };
+    match (running(UnitKind::Ordinary), running(UnitKind::Idle)) {
+        (Some(ordinary), Some(idle)) => Ok(super::moves::CallerUnits { ordinary, idle }),
+        _ => Err(Refusal::new(
+            RefusalCode::MoveRefused,
+            "both of your units must be running to move a job; run cedegrid system start",
+        )),
+    }
+}

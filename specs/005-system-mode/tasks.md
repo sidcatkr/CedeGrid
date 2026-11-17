@@ -209,6 +209,7 @@ the task list.
   - move each member into the agent-made empty leaf in the other unit, and read back each member's cgroup;
   - thaw. Refuse and thaw the source on any failure; the job stays in its unit.
   - Under (c), agreed 2026-11-17: the agent names each task leaf `cedegrid-<mode>-<id>` (with T023), and the OOM pass reads each ordinary-unit task's mode from it.
+  - *Written:* `src/broker/moves.rs`, tested against a fake cgroup tree (whole move, missing job or destination, another user's process, a failed write put back, child cgroups, no freeze); the broker resolves both units through their markers first. Not yet run on Linux.
 - [ ] T040 [US3] Make the agent ask for a move when a running job's mode changes between Yield First and another, and make an empty destination leaf first; on a refusal, apply the new mode where the job is with 001's Full steps and say so in one line. In `src/agent/` (FR-017, FR-018)
 - [ ] T041 [US3] Implement the level-dependent CPU default and range of `yield_first_margin_percent` in `src/contention.rs` (`ResourceThresholds::defaults`) and `src/config.rs` (where defaults are applied and validated), chosen once the agent knows it runs in a broker-made unit; no new key (Principle VII) (passes T037)
 
