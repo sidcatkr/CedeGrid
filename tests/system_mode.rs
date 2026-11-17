@@ -1369,6 +1369,8 @@ mod broker_service {
         units: Mutex<BTreeMap<String, UnitShow>>,
         calls: Mutex<Vec<String>>,
         fail_start: bool,
+        /// A stopped unit is left failed, as an agent that exits non-zero on TERM leaves it.
+        stop_leaves_failed: bool,
     }
 
     impl FakeSystemd {
@@ -1421,7 +1423,14 @@ mod broker_service {
 
         fn stop(&self, unit: &str) -> Result<(), Refusal> {
             self.calls.lock().unwrap().push(format!("stop {unit}"));
-            self.units.lock().unwrap().remove(unit);
+            let mut units = self.units.lock().unwrap();
+            if self.stop_leaves_failed {
+                if let Some(show) = units.get_mut(unit) {
+                    show.active_state = "failed".into();
+                }
+            } else {
+                units.remove(unit);
+            }
             Ok(())
         }
 
@@ -1653,6 +1662,26 @@ mod broker_service {
                 .iter()
                 .filter(|call| call.starts_with("stop "))
                 .all(|call| call.ends_with("u1234.service"))
+        );
+    }
+
+    #[test]
+    fn a_unit_left_failed_by_a_stop_is_cleared() {
+        let systemd = FakeSystemd {
+            stop_leaves_failed: true,
+            ..FakeSystemd::default()
+        };
+        let policy = AdminPolicy::defaults(1000).unwrap();
+        start_units(&systemd, CALLER, &policy, PLACE).unwrap();
+        let stopped = stop_units(&systemd, CALLER).unwrap();
+        assert!(stopped.iter().all(|unit| unit.state == "absent"));
+        assert_eq!(
+            systemd
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("reset-failed "))
+                .count(),
+            2
         );
     }
 

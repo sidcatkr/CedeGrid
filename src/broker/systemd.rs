@@ -260,7 +260,13 @@ pub fn stop_units(systemd: &dyn Systemd, caller: Caller) -> Result<Vec<UnitStatu
             continue;
         }
         systemd.stop(&name)?;
-        let after = systemd.show(&name)?;
+        let mut after = systemd.show(&name)?;
+        // An agent stopped by signal can exit non-zero; the stop was asked for, so the unit is
+        // cleared rather than left listed as failed.
+        if after.active_state == "failed" {
+            systemd.reset_failed(&name)?;
+            after = systemd.show(&name)?;
+        }
         statuses.push(status_of(kind, name, &after));
     }
     Ok(statuses)
