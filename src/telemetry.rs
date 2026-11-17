@@ -44,6 +44,8 @@ pub struct Collector {
     gpu_cursors: BTreeMap<String, (u64, Instant)>,
     /// Each device's per-process sample state across intervals (FR-021, R46).
     gpu_samples: BTreeMap<String, GpuSampleState>,
+    /// Each device's last readable per-process samples: when, and the busy contexts (FR-021).
+    gpu_last_sampled: BTreeMap<String, LastSampled>,
     gpu_sample_max_age: Duration,
     gpu_config: crate::config::GpuConfig,
     platform_capabilities: BTreeMap<String, Capability>,
@@ -263,6 +265,7 @@ impl Collector {
             gpu: GpuCollector::Uninitialized,
             gpu_cursors: BTreeMap::new(),
             gpu_samples: BTreeMap::new(),
+            gpu_last_sampled: BTreeMap::new(),
             gpu_sample_max_age: Duration::from_millis(
                 crate::config::Config::default().gpu_sample_max_age_ms(),
             ),
@@ -896,6 +899,16 @@ impl Collector {
             if let Some(contexts) = compute_contexts.as_mut() {
                 contexts.others_quiet =
                     self.quiet_window_intervals > 0 && quiet_ticks >= self.quiet_window_intervals;
+                carry_samples(
+                    contexts,
+                    self.gpu_last_sampled.get(&uuid),
+                    Instant::now(),
+                    self.gpu_sample_max_age,
+                );
+                if contexts.samples_readable {
+                    self.gpu_last_sampled
+                        .insert(uuid.clone(), (Instant::now(), contexts.sampled.clone()));
+                }
             }
             // Each listed PID's newest sample starts its next sample's span (FR-021, R46).
             if let (Some(previous), Ok(fresh)) = (activity_baseline, &samples) {
@@ -2414,6 +2427,54 @@ mod tests {
     /// The listing the time-slice duty counts while the amounts are unknown: every listed PID
     /// that is neither own work's, the owner's nor background, with its UID where readable
     /// (FR-021, Q29).
+    /// An interval without readable samples reads as the last readable one within the sample
+    /// age, for the contexts still listed; past the age it stays unreadable (FR-021, T628).
+    #[test]
+    fn unreadable_samples_carry_the_last_readable_ones_for_the_sample_age() {
+        let now = Instant::now();
+        let unreadable = || crate::model::GpuComputeContexts {
+            own: vec![10],
+            owner: vec![50],
+            sampled: vec![],
+            listed: vec![(900, Some(2002))],
+            samples_readable: false,
+            others_quiet: true,
+        };
+        let last = (now, vec![(50, Some(1000)), (77, Some(2003))]);
+        let age = Duration::from_millis(2000);
+        let mut carried = unreadable();
+        carry_samples(
+            &mut carried,
+            Some(&last),
+            now + Duration::from_millis(500),
+            age,
+        );
+        assert!(carried.samples_readable);
+        assert_eq!(
+            carried.sampled,
+            vec![(50, Some(1000))],
+            "77 is no longer listed"
+        );
+        let mut stale = unreadable();
+        carry_samples(
+            &mut stale,
+            Some(&last),
+            now + Duration::from_millis(2500),
+            age,
+        );
+        assert!(!stale.samples_readable);
+        let mut none = unreadable();
+        carry_samples(&mut none, None, now, age);
+        assert!(!none.samples_readable);
+        let mut read = unreadable();
+        read.samples_readable = true;
+        carry_samples(&mut read, Some(&last), now, age);
+        assert!(
+            read.sampled.is_empty(),
+            "a readable interval keeps its own samples"
+        );
+    }
+
     #[test]
     fn compute_contexts_list_the_external_pids_with_their_uids() {
         let uid_of = |pid: u32| match pid {

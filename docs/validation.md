@@ -234,6 +234,7 @@ smaller of its rate without CedeGrid and half its rate alone, less 3% (SC-017).
 | First-come floor: two own probes listed first, then a saturating other user, Yield First | FR-090, SC-020 | `164f0f9` (its runtime code) | 2026-11-17 | the floor applied in every interval beside the user; one probe paused and the other kept running at 0.60 of a probe alone (1435 against 2391 units/s); the other user 1590 req/s | pass |
 | The same with the other user first, Neutral | FR-090 | `164f0f9` (its runtime code) | 2026-11-17 | own work arrived later, so no floor (`own_later`); no probe paused beside the user | pass |
 | GPU admission beside a quiet external context, with per-process samples readable every other interval | FR-021, FR-028 | `164f0f9` (its runtime code) | 2026-11-17 | admission open from 9.3 s on, steady; before `a361ac4` it alternated between open and held every interval and nothing was placed | pass |
+| Two own GPU probes beside a saturating other user, Performance, the managed windows first | FR-022, SC-018 | `164f0f9` (its runtime code) | 2026-11-17 | own work 1526 and 1498 units/s managed against 1516 and 1506 unmanaged (1.0008); the other user 805 and 790 against 798 and 794 req/s; the earlier runs' -1.7% was drift landing on the managed windows, which came second | pass |
 
 ### Memory
 

@@ -502,6 +502,42 @@ pub(super) fn time_sliced(
     }
 }
 
+/// A device's last readable per-process samples: when, and each busy context's PID and UID.
+pub(super) type LastSampled = (std::time::Instant, Vec<(u32, Option<u32>)>);
+
+/// An interval without readable per-process samples reads as the last readable one within the
+/// sample age: NVML can return no new sample every other interval, and the time-slice counts and
+/// Yield First's owner-only rule, at the policy and at the launch recheck alike, would otherwise
+/// turn by turns (FR-021, FR-027). Only contexts still listed carry over; past the age the
+/// samples stay unreadable.
+pub(super) fn carry_samples(
+    contexts: &mut crate::model::GpuComputeContexts,
+    last: Option<&LastSampled>,
+    now: std::time::Instant,
+    max_age: std::time::Duration,
+) {
+    if contexts.samples_readable {
+        return;
+    }
+    let Some((_, sampled)) = last.filter(|(at, _)| now.saturating_duration_since(*at) <= max_age)
+    else {
+        return;
+    };
+    let listed: std::collections::BTreeSet<u32> = contexts
+        .own
+        .iter()
+        .chain(&contexts.owner)
+        .copied()
+        .chain(contexts.listed.iter().map(|(pid, _)| *pid))
+        .collect();
+    contexts.sampled = sampled
+        .iter()
+        .filter(|(pid, _)| listed.contains(pid))
+        .copied()
+        .collect();
+    contexts.samples_readable = true;
+}
+
 /// The interval's compute contexts for the time-slice rule (FR-021, Q22, Q29), with a complete
 /// process inventory: own work's verified PIDs listed, the owner's unmanaged PIDs listed, the
 /// other listed non-background PIDs with their UIDs, and each listed non-background PID with a
