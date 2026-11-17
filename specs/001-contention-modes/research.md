@@ -1494,3 +1494,48 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   not save the other user's allocator.
 - **Alternatives**: keep the give-back (contradicts the constitution); give back only memory own
   work grew during a breach (report 057 point 1 C, harder to explain and test).
+
+## R88. A job's mode decides how that job gives back (report 057 point 7)
+
+- **Decision**: a running job in Performance or Aggressive is never a victim for another
+  principal, for unknown activity or for a floor breach, whatever the node's mode; the envelope
+  still applies. The node's aggregate target and admission come from the node's mode as before,
+  and the node's other jobs pay its excess as far as they can.
+- **Rationale**: constitution 8.1.0. A user who asks for Performance on a job expects that job to
+  lose nothing against plain Linux, on any node.
+- **Alternatives**: the node's mode sets the total and job modes only order who yields (option A,
+  the old rule; the Performance job can lose against plain Linux); computing a separate aggregate
+  per mode (more state, and the node's promise would still not hold).
+
+## R89. Whole tasks where no rate cap applies (report 057 C2 and C3)
+
+- **Decision**: no stop-and-resume duty on Tracked CPU and on GPU compute at both levels. Yield
+  First and Neutral pause whole tasks in victim order, each only while the own work left running
+  stays at or above the target. On a time-sliced device the target is a count of running own
+  tasks, t = ⌊E_b ÷ k_b⌋, each task counted as one context. A pause ends at `pause_bound_s` with
+  the hint (CPU, hint-ready) and then a drain and requeue as a yield. Full keeps `cpu.max` until C1.
+- **Rationale**: the user's rule for a cap: clearly more exact than stop-and-resume, no loss, and
+  nothing restricted before it is verified; otherwise no cap. Stop-and-resume misses its target
+  and stops every request in flight for part of each period; no unprivileged per-process GPU
+  quota exists. Counting each task as one context is the most a pause can be assumed to free, so
+  the count never goes below t. Draining at the bound frees the slot so the coordinator can place
+  the task elsewhere; a pause with no end would hold memory and a worker slot indefinitely.
+- **Alternatives**: keep the duty (fails the user's rule); CPU affinity with a fork gate (whole
+  cores, misses fractional targets); keep a paused task stopped while contention lasts (no
+  progress lost, but no bound and the slot stays held); resume it at the bound (the other user
+  then gets plain Linux after 10 s). The last two remain open if the user prefers them.
+
+## R90. The first-come GPU floor (constitution 8.1.0)
+
+- **Decision**: own work that was listed on a device before every principal now listed there
+  keeps at least the share that leaves no single later principal more than half: 2 × E_max − E
+  running own contexts on the time-slice path, and half the device beside exactly one contending
+  principal elsewhere. Arrival is per UID and per device for own work, restarted after a 30 s
+  gap; an unreadable UID or an unknown listing withholds it. It limits Yield First's and Neutral's
+  holds only.
+- **Rationale**: the user's rule: even in Yield First, a later user that takes the device should
+  not get more than half. Per-UID arrival matches how principals are formed; the gap matches the
+  counting window. Withholding the floor where order is unknown keeps the exception narrow.
+- **Alternatives**: half the device beside any number of later principals (takes more from them
+  than the rule needs); per-process arrival (a restarted process of the same user would count as
+  new).

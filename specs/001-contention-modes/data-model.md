@@ -638,3 +638,21 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
   child carries `owes_record` beside its phase.
 - **ChildSlot (agent)**: `drain_undelivered`, latched when a renewal reply's drain cannot be
   handed to the supervisor and cleared by a later delivery.
+
+## Report 057 Part C additions
+
+- **PolicyEngine (kept across decisions)**: `gpu_arrivals`: per device, own work's arrival and
+  each listed UID's arrival, each as first listed and last listed (ms); an entry whose last
+  listing is more than 30 s old is restarted when next listed; updated only from a complete
+  listing (FR-090).
+- **Interval (per decision)**: `slice_hold`: per device on the time-slice path with a slice-bound
+  principal, the count t of own tasks that keep running (FR-021, FR-089), floor included;
+  `cpu_cap_available`: whether a CPU rate cap applies (cgroup enabled with `cpu.max` authorized).
+- **TimeSliceRecord** gains `hold` (t) and `floor` (`applies`, or the reason it does not:
+  `order_unknown`, `uid_unreadable`, `arrived_later`, `not_one_principal`). `d0`,
+  `window_share`, `d0_windows`, `duty`, `step` and `utilization_milli` stay for recorded
+  decisions and are no longer set.
+- **YieldStep transitions where no rate cap applies**: None → Pause (Cap skipped as unavailable)
+  → Hint (CPU, hint-ready) → Drain; a Pause held for external growth reverses to None in one move
+  when contention has just ended. CPU and GPU compute drains here carry the step's cause and
+  requeue without an attempt.
