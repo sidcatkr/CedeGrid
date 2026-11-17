@@ -17,7 +17,7 @@ candidate's commit, and this list is updated at that commit.
 | `python/cedegrid/client.py`, `npm/src/client.ts` (`command_task`) | the grant is sent only when both fields are set | `python/tests/test_transport.py`, `npm/tests/sdk.test.ts` (UG cases) |
 | `src/system_mode.rs` (`grant_refusal`, `unprotected_refusal_with`) | every missing condition named in one line; the System mode administrator key | `tests/system_mode.rs` `an_unprotected_grant_starts_only_with_every_condition_met`, `unprotected_aggressive_needs_its_own_policy_key` |
 | `src/broker/admin_policy.rs` (`modes.unprotected_aggressive`) | the administrator key, off by default | `tests/system_mode.rs` `policy_file_values_and_sources`, `unprotected_aggressive_needs_its_own_policy_key` |
-| `src/agent/service.rs` (the launch check) | a grant is refused before launch unless every condition holds; the warning event | end-to-end agent test (T019, open) |
+| `src/agent/service.rs` (the launch check) | a grant is refused before launch unless every condition holds; the warning event | `tests/system_mode.rs` `container::an_unprotected_grant_starts_only_under_the_policy_key_and_the_allowance` |
 | `src/contention.rs` (`own_allowance`, `ModeInput.unprotected`) | the unprotected allowance: capacity on compute, never into unknown activity or on memory | `tests/contention.rs` `unprotected::*`, `aggressive::*` |
 | `src/policy/measure.rs`, `src/policy.rs`, `src/model.rs` (`unprotected_budget`) | the grant's budget, only under an Aggressive cap and never while CPU is unknown | `tests/policy.rs` `the_unprotected_budget_exists_only_under_an_aggressive_cap` |
 | `src/agent/report.rs` (`unprotected_permitted`) | the budget is reported only while the allowance reads on and, in a unit, the key permits | `tests/policy.rs` `the_report_carries_the_unprotected_budget_only_under_the_allowance` |
@@ -25,7 +25,5 @@ candidate's commit, and this list is updated at that commit.
 
 ## Open before the review
 
-- T019: the end-to-end agent test of the launch check, and keeping the grant across a retry.
-- A test of `unprotected_permitted` inside a System mode unit (the container).
-- T020's container fixture for the administrator key.
+- Keeping the grant across a drained and retried attempt (an attempt record).
 - The native gates (T035).

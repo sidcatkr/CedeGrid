@@ -2988,6 +2988,324 @@ mod container {
         format!("cedegrid-idle-u{uid}.service")
     }
 
+    /// Runs `python3 -c <code>` as the member with the copied SDK on its path.
+    fn python_as(user: &str, home: &str, base: &str, code: &str) -> Output {
+        run(
+            "runuser",
+            &[
+                "-u",
+                user,
+                "--",
+                "env",
+                &format!("HOME={home}"),
+                &format!("PYTHONPATH={base}/python:{base}/tools"),
+                "PYTHONDONTWRITEBYTECODE=1",
+                &format!("TMPDIR={base}"),
+                "python3",
+                "-c",
+                code,
+            ],
+        )
+    }
+
+    fn unit_log(uid: u32) -> String {
+        stdout(&run(
+            "journalctl",
+            &["-u", &ordinary(uid), "-o", "cat", "--no-pager"],
+        ))
+    }
+
+    /// 004 T019, T020: a member's unprotected grant goes through the agent in its unit and is
+    /// refused while the administrator key or the allowance is missing, naming each, and starts
+    /// once both hold, logging its warning.
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn an_unprotected_grant_starts_only_under_the_policy_key_and_the_allowance() {
+        use cedegrid::agent::AgentConfig;
+        use cedegrid::config::{
+            Config, NodeMode, RuntimeClientConfig, RuntimeConfigKind, serialize_runtime,
+        };
+        use cedegrid::contention::ContentionMode;
+        use cedegrid::protocol::{CoordinatorConfig, TlsIdentity};
+        use std::path::Path;
+        assert!(enabled(), "{GATE}");
+        install();
+        let repo = Path::new(&std::env::var("CEDEGRID_TEST_PACKAGING").unwrap())
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+        let home = format!("/home/{MEMBER}");
+        let base = format!("{home}/agg");
+        // Durable state needs a local disk filesystem, and the container's is an overlay: a
+        // loop-mounted ext4 image holds every state directory of this fixture.
+        let image = "/var/tmp/cedegrid-agg.img";
+        let _ = run("umount", &[&base]);
+        let _ = std::fs::remove_dir_all(&base);
+        ok("truncate", &["-s", "256M", image]);
+        ok("mkfs.ext4", &["-q", "-F", image]);
+        std::fs::create_dir_all(&base).unwrap();
+        ok("mount", &["-o", "loop", image, &base]);
+        std::fs::create_dir_all(format!("{base}/tools")).unwrap();
+        std::fs::create_dir_all(format!("{base}/python")).unwrap();
+        for tool in ["make_test_pki.py", "validation_runtime.py"] {
+            std::fs::copy(
+                repo.join("tools").join(tool),
+                format!("{base}/tools/{tool}"),
+            )
+            .unwrap();
+        }
+        ok(
+            "cp",
+            &[
+                "-r",
+                repo.join("python/cedegrid").to_str().unwrap(),
+                &format!("{base}/python/"),
+            ],
+        );
+        ok("chown", &["-R", &format!("{MEMBER}:{MEMBER}"), &base]);
+        let generated = python_as(
+            MEMBER,
+            &home,
+            &base,
+            &format!(
+                "import runpy, sys; sys.argv=['make_test_pki.py','--node-id','node-a','--output','{base}/pki']; runpy.run_path('{base}/tools/make_test_pki.py', run_name='__main__')"
+            ),
+        );
+        assert!(generated.status.success(), "{}", stderr(&generated));
+        let info: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
+        let tls = |name: &str| TlsIdentity {
+            ca_cert: format!("{base}/pki/ca.pem").into(),
+            certificate: format!("{base}/pki/{name}.pem").into(),
+            private_key: format!("{base}/pki/{name}.key").into(),
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let endpoint = format!("https://{address}");
+        let coordinator: CoordinatorConfig = serde_json::from_value(serde_json::json!({
+            "state_dir": format!("{base}/coordinator"), "listen": address, "tls": tls("server"),
+            "clients": info["clients"], "lease_ms": 3000, "max_artifact_bytes": 1048576,
+            "artifact_quota_bytes": 10485760,
+        }))
+        .unwrap();
+        let write = |path: &str, text: String| {
+            std::fs::write(path, text).unwrap();
+            ok("chown", &[&format!("{MEMBER}:{MEMBER}"), path]);
+        };
+        write(
+            &format!("{base}/coordinator.toml"),
+            serialize_runtime(&coordinator, RuntimeConfigKind::Coordinator).unwrap(),
+        );
+        let operator = RuntimeClientConfig {
+            endpoint: endpoint.clone(),
+            tls: tls("operator"),
+            timeout_seconds: 15.0,
+            max_transfer_bytes_per_second: 1024 * 1024,
+        };
+        write(
+            &format!("{base}/operator.toml"),
+            serialize_runtime(&operator, RuntimeConfigKind::Client).unwrap(),
+        );
+        let mut node = Config {
+            node_id: "node-a".into(),
+            node_mode: NodeMode::Opportunistic,
+            state_dir: format!("{base}/state").into(),
+            ..Config::default()
+        };
+        node.execution.enabled = true;
+        node.cpu.reserve_physical_cores = 0;
+        node.ram.reserve_mib = 512;
+        node.ram.reserve_percent = 0;
+        node.monitor.interval_ms = 500;
+        node.contention.default_mode = ContentionMode::Aggressive;
+        node.contention.max_mode = Some(ContentionMode::Aggressive);
+        node.contention
+            .acknowledge_caution
+            .insert("aggressive_mode".into());
+        let agent = AgentConfig {
+            coordinator_url: endpoint.clone(),
+            tls: tls("node-0"),
+            cpu_affinity: None,
+            max_transfer_bytes_per_second: 1024 * 1024,
+            capacity: cedegrid::model::Resources {
+                cpu_millicores: 1000,
+                ram_mib: 512,
+                gpu_memory_mib: BTreeMap::new(),
+            },
+            max_workers: 1,
+            max_spool_bytes: 10 * 1024 * 1024,
+            max_runtime_seconds: 60,
+        };
+        let configs = format!("{home}/.config/cedegrid");
+        std::fs::create_dir_all(&configs).unwrap();
+        ok(
+            "chown",
+            &[
+                "-R",
+                &format!("{MEMBER}:{MEMBER}"),
+                &format!("{home}/.config"),
+            ],
+        );
+        write(
+            &format!("{configs}/cedegrid.toml"),
+            serialize_runtime(&node, RuntimeConfigKind::Node).unwrap(),
+        );
+        write(
+            &format!("{configs}/deployment.toml"),
+            serialize_runtime(&agent, RuntimeConfigKind::Agent).unwrap(),
+        );
+        // Aggressive is allowed; the unprotected key is absent, so false.
+        let policy = |unprotected: bool| {
+            ok("install", &["-d", "-m", "0755", "/etc/cedegrid"]);
+            std::fs::write(
+                "/etc/cedegrid/policy.toml",
+                format!(
+                    "policy_version = 1\n[modes]\nallowed = [\"yield_first\", \"neutral\", \"performance\", \"aggressive\"]\n{}",
+                    if unprotected { "unprotected_aggressive = true\n" } else { "" }
+                ),
+            )
+            .unwrap();
+            ok("chmod", &["0644", "/etc/cedegrid/policy.toml"]);
+        };
+        policy(false);
+        let mut coordinator = Command::new("runuser")
+            .args([
+                "-u",
+                MEMBER,
+                "--",
+                "/usr/bin/cedegrid",
+                "coordinator",
+                "--deployment",
+            ])
+            .arg(format!("{base}/coordinator.toml"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = cedegrid_as(MEMBER, &["system", "start"]);
+        let submit = |job: &str| {
+            python_as(
+                MEMBER,
+                &home,
+                &base,
+                &format!(
+                    r#"import time
+from cedegrid import Client, command_task
+c = Client.from_config('{base}/operator.toml')
+deadline = time.time() + 60
+while True:
+    try:
+        if c.status().get('nodes'): break
+    except Exception:
+        pass
+    assert time.time() < deadline, 'the agent did not register'
+    time.sleep(0.5)
+c.put_pool('pool', ['node-a'], max_workers=1, min_workers=0, allocation_class='opportunistic')
+t = command_task('{job}', ['/bin/sleep', '1'], '/tmp', cpu_millicores=100, ram_mib=64,
+    allocation_class='opportunistic', single_process=True, no_escape=True, replay_safe=True,
+    max_attempts=1, unprotected_aggressive=True, confirm_unprotected_aggressive=True)
+c.submit('{job}', 'pool', [t])
+"#
+                ),
+            )
+        };
+        let refusals = || {
+            unit_log(MEMBER_UID)
+                .lines()
+                .filter(|line| line.contains("\"unprotected_refused\""))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let state = |job: &str| {
+            stdout(&python_as(
+                MEMBER,
+                &home,
+                &base,
+                &format!(
+                    "from cedegrid import Client\nc = Client.from_config('{base}/operator.toml')\nprint([t['status'] for t in c.status('{job}').get('tasks', [])])"
+                ),
+            ))
+        };
+        let outcome = (|| -> Result<(), String> {
+            if !started.status.success() {
+                return Err(format!("system start: {}", stderr(&started)));
+            }
+            // 1. The key and the allowance are both missing: refused, naming both.
+            let sent = submit("job-a");
+            if !sent.status.success() {
+                let log = unit_log(MEMBER_UID);
+                let tail: Vec<&str> = log.lines().rev().take(15).collect();
+                return Err(format!("submit a: {}\nunit log: {tail:?}", stderr(&sent)));
+            }
+            if !wait_until(Duration::from_secs(60), || !refusals().is_empty()) {
+                return Err(format!("no refusal for job-a: {}", unit_log(MEMBER_UID)));
+            }
+            let first = refusals()[0].clone();
+            for needle in [
+                "ERR_CEDEGRID_UNPROTECTED_POLICY",
+                "ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED",
+            ] {
+                if !first.contains(needle) {
+                    return Err(format!("{needle} missing from {first}"));
+                }
+            }
+            // 2. The allowance is on (as setup records it); the key is still missing.
+            let set = python_as(
+                MEMBER,
+                &home,
+                &base,
+                &format!(
+                    "import sqlite3, time\nc = sqlite3.connect('{base}/state/state.sqlite3')\nc.execute('CREATE TABLE IF NOT EXISTS unprotected_allowance (id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)), set_at_unix_ms INTEGER, set_by TEXT NOT NULL)')\nc.execute('INSERT OR REPLACE INTO unprotected_allowance VALUES (1, 1, ?, ?)', (int(time.time() * 1000), 'interactive_setup'))\nc.commit()"
+                ),
+            );
+            if !set.status.success() {
+                return Err(format!("allowance: {}", stderr(&set)));
+            }
+            let sent = submit("job-b");
+            if !sent.status.success() {
+                return Err(format!("submit b: {}", stderr(&sent)));
+            }
+            if !wait_until(Duration::from_secs(60), || {
+                refusals().iter().any(|line| {
+                    line.contains("ERR_CEDEGRID_UNPROTECTED_POLICY")
+                        && !line.contains("ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED")
+                })
+            }) {
+                return Err(format!("no policy-only refusal: {:?}", refusals()));
+            }
+            // 3. The key permits it: a new grant starts, logs its warning and completes. The
+            // assignments refused above were left to the coordinator, as every launch refusal is.
+            policy(true);
+            let sent = submit("job-c");
+            if !sent.status.success() {
+                return Err(format!("submit c: {}", stderr(&sent)));
+            }
+            if !wait_until(Duration::from_secs(90), || {
+                state("job-c").contains("completed")
+            }) {
+                return Err(format!(
+                    "job-c did not complete: {} {}",
+                    state("job-c"),
+                    unit_log(MEMBER_UID)
+                ));
+            }
+            if !unit_log(MEMBER_UID).contains("this run is UNPROTECTED") {
+                return Err("no warning line for the started grant".into());
+            }
+            Ok(())
+        })();
+        stop_units(MEMBER);
+        let _ = coordinator.kill();
+        let _ = coordinator.wait();
+        let _ = std::fs::remove_file("/etc/cedegrid/policy.toml");
+        let _ = run("umount", &[&base]);
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(image);
+        let _ = std::fs::remove_dir_all(&configs);
+        outcome.unwrap();
+    }
+
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn socket_is_root_group_cedegrid_0660() {

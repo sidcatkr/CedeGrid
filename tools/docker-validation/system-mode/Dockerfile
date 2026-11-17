@@ -5,7 +5,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates \
-        curl build-essential pkg-config python3 procps passwd \
+        curl build-essential pkg-config python3 python3-tomli procps passwd openssl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1500 test \
     && su test -c 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.1' \

@@ -166,7 +166,7 @@ principal contends. Nothing else changes.
   - "no", an empty answer or a wrong phrase leaves it off and prints `cancelled: the phrase did not match; the allowance stays off` where it applies;
   - non-interactive setup refuses to turn it on with `ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY`;
   - `cedegrid setup --disallow-unprotected-aggressive` turns it off without confirmation.
-- [ ] T019 [P] [US2] (now) In `tests/agent.rs`, test the launch grant check. Each missing
+- [x] T019 [P] [US2] (now) In `tests/agent.rs`, test the launch grant check. Each missing
   condition (the confirmation field, the allowance, an unreadable allowance, the node cap) is
   refused before Authorized with its line from `contracts/cli-sdk-wire.md` "Refusals at
   launch", and nothing starts. With every condition met, the run is Authorized and logs the
@@ -174,7 +174,7 @@ principal contends. Nothing else changes.
   fields is protected. Turning the allowance off while the run is active keeps its grant and
   refuses new grants. Lowering the node cap below Aggressive ends the grant for tasks admitted
   after it. The node-cap cases need `ContentionMode::Aggressive`, so add them with T005.
-- [ ] T020 [P] [US2] (now) In `tests/system_mode.rs`, test:
+- [x] T020 [P] [US2] (now) In `tests/system_mode.rs`, test:
   - `admin_policy` parses `modes.unprotected_aggressive` (default `false`, `deny_unknown_fields`);
   - `launch_refusal_with` refuses a grant while it is false or absent, with
     `ERR_CEDEGRID_UNPROTECTED_POLICY`, and allows it when true;
@@ -202,15 +202,18 @@ principal contends. Nothing else changes.
 - [x] T025 [US2] (now) In `src/protocol.rs` and `src/coordinator.rs`, add the grant object. The
   coordinator rejects a grant without `confirmed: true` at submission and otherwise passes it to
   the agent unchanged. Passes the Rust half of T021.
-- [ ] T026 [US2] (now) In `src/agent/launch.rs`, check the grant before the launch barrier
+- [x] T026 [US2] (now) In `src/agent/launch.rs`, check the grant before the launch barrier
   persists Authorized: both fields, the allowance (T003, fail closed), the node cap at
   Aggressive, and inside a System mode unit the administrator key (T027). Record the grant with
   the attempt so retries keep it, and log `warning: this run is UNPROTECTED: other users' compute may slow down until it ends`
   once at start. Passes T019. Add the node-cap condition after T005.
   - *Done in part:* `system_mode::grant_refusal` names every missing condition in one line, and
     the agent calls it before launching, with the administrator key inside a unit, and emits
-    the warning event. The pure function is tested in `tests/system_mode.rs`. The end-to-end
-    agent test (T019) and the attempt record for retries are open.
+    the warning event. The pure function is tested in `tests/system_mode.rs`, and the container
+    fixture `an_unprotected_grant_starts_only_under_the_policy_key_and_the_allowance` runs a
+    coordinator and a member's agent in its unit end to end: refused naming the key and the
+    allowance, then the key alone, then started with its warning (T019, T020). A refused
+    assignment is left to the coordinator, as every launch refusal is.
 - [x] T027 [US2] (now) In `src/broker/admin_policy.rs`, add the key `modes.unprotected_aggressive`
   (default `false`). In `src/system_mode.rs` `launch_refusal_with`, refuse a grant while it is
   false. Update `specs/005-system-mode/contracts/admin-policy.md` and the policy section of
