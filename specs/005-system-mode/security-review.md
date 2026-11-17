@@ -36,10 +36,9 @@ case A, item 057 Part C's files (the fork-gate module, `src/supervision/unix.rs`
 ## Evidence to hand the review
 
 - The container suite (`tools/docker-validation/system-mode/`, `tests/system_mode.rs`, module
-  `container`): eleven fixtures as root under systemd 249 with the packages installed by dpkg.
+  `container`): fourteen fixtures as root under systemd 249 with the packages installed by dpkg.
 - The host runs T057 to T061 and T072, once recorded in `docs/validation.md`.
 
 ## Open before the review
 
-- `CapabilityBoundingSet=` on the broker's service (T033) is not set yet.
 - The ordinary unit runs the user's agent; the idle unit runs a holder until the idle executor (follow-up SYS-3, a later version).

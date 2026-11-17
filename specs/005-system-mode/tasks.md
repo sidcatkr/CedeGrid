@@ -182,10 +182,11 @@ the task list.
 ### Implementation
 
 - [x] T032 [US2] Implement the per-user token bucket, the per-user unit count (2) and the bounded worker queue in `src/broker.rs` and `src/broker/peer.rs` (passes T030)
-- [ ] T033 [US2] Confine the broker's unit in `packaging/deb/cedegrid-broker.service`:
+- [x] T033 [US2] Confine the broker's unit in `packaging/deb/cedegrid-broker.service`:
   - set `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes` and `RestrictAddressFamilies=AF_UNIX`;
   - add the smallest `CapabilityBoundingSet=` that lets it write scores, make moves and write `cpu.idle`;
   - record each setting against systemd 249 in a comment.
+  - `CapabilityBoundingSet=CAP_SYS_RESOURCE CAP_DAC_OVERRIDE`, with `RestrictSUIDSGID=`, `MemoryDenyWriteExecute=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectClock=`, `LockPersonality=`, `RestrictRealtime=` and native system calls only; the confined broker starts units, sets `cpu.idle` and moves a member's job in the container (14 fixtures pass on systemd 249). Its score writes under memory pressure are for T058.
 - [x] T034 [US2] Log every refusal at warning level with the caller's user ID and code in `src/broker.rs` (FR-011)
 
 **Checkpoint**: US1 and US2 pass. These files are the core of the security review package (T073).

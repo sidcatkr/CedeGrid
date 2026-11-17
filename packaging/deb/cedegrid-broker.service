@@ -13,5 +13,15 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX
-# T033 adds CapabilityBoundingSet= once the container run shows what scores, moves and
-# cpu.idle need on systemd 249.
+# CAP_SYS_RESOURCE: write oom_score_adj below a process's own floor (and set that floor).
+# CAP_DAC_OVERRIDE: write oom_score_adj and the cgroup files of users' processes and units,
+# which belong to those users. Nothing else: no ptrace, no setuid, no other capability.
+CapabilityBoundingSet=CAP_SYS_RESOURCE CAP_DAC_OVERRIDE
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native

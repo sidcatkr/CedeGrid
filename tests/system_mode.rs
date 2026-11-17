@@ -3507,6 +3507,69 @@ mod container {
 
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn the_confined_broker_moves_a_members_job() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        assert!(cedegrid_as(MEMBER, &["system", "start"]).status.success());
+        let cgroup_of = |unit: &str| show(unit, "ControlGroup")["ControlGroup"].clone();
+        let (ordinary_cg, idle_cg) = (
+            cgroup_of(&ordinary(MEMBER_UID)),
+            cgroup_of(&idle(MEMBER_UID)),
+        );
+        for dir in [&ordinary_cg, &idle_cg] {
+            assert!(wait_until(Duration::from_secs(10), || {
+                std::path::Path::new(&format!("/sys/fs/cgroup{dir}/jobs")).is_dir()
+            }));
+        }
+        let source = format!("{ordinary_cg}/jobs/cedegrid-neutral-mv1");
+        let target = format!("{idle_cg}/jobs/cedegrid-yield_first-mv1");
+        for leaf in [&source, &target] {
+            ok(
+                "runuser",
+                &[
+                    "-u",
+                    MEMBER,
+                    "--",
+                    "mkdir",
+                    &format!("/sys/fs/cgroup{leaf}"),
+                ],
+            );
+        }
+        let mut child = Command::new("runuser")
+            .args(["-u", MEMBER, "--", "sleep", "300"])
+            .spawn()
+            .unwrap();
+        let pid = wait_for_child(child.id(), "sleep");
+        // Test setup only: the job's process is placed in its leaf as the agent would start it.
+        std::fs::write(
+            format!("/sys/fs/cgroup{source}/cgroup.procs"),
+            pid.to_string(),
+        )
+        .unwrap();
+        let reply = raw_request(
+            Some(MEMBER),
+            b"{\"protocol\":1,\"kind\":\"move\",\"job\":\"mv1\",\"mode\":\"yield_first\"}\n",
+            false,
+        );
+        let now = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+        let freeze = std::fs::read_to_string(format!("/sys/fs/cgroup{source}/cgroup.freeze"))
+            .unwrap_or_default();
+        child.kill().unwrap();
+        let _ = child.wait();
+        stop_units(MEMBER);
+        assert_eq!(reply_code(&reply), "ok", "{reply}");
+        assert_eq!(now.trim(), format!("0::{target}"));
+        assert_eq!(freeze.trim(), "0");
+        let journal = ok(
+            "journalctl",
+            &["-u", "cedegrid-broker.service", "--no-pager", "-o", "cat"],
+        );
+        assert!(journal.contains("move uid="), "no move line in the journal");
+    }
+
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn the_idle_slice_has_cpu_idle() {
         assert!(enabled(), "{GATE}");
         install();
