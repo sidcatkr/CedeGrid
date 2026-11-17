@@ -917,3 +917,391 @@ fn an_empty_task_is_never_marked() {
     );
     assert_eq!(writes(&input), Vec::<(u32, i32)>::new());
 }
+
+// T009: the process handle the broker's writes go through (Linux only).
+
+#[cfg(target_os = "linux")]
+mod process_handles {
+    use cedegrid::broker::process_handle::{
+        ProcessHandle, parse_cgroup_v2, parse_ids, parse_start_time,
+    };
+    use std::process::{Child, Command};
+
+    fn sleeper() -> Child {
+        Command::new("sleep").arg("30").spawn().unwrap()
+    }
+
+    #[test]
+    fn holds_a_live_process_and_reads_it() {
+        let mut child = sleeper();
+        let handle = ProcessHandle::open(child.id(), None).unwrap();
+        assert_eq!(handle.pid(), child.id());
+        assert!(handle.start_time() > 0);
+        assert!(handle.is_alive().unwrap());
+        // SAFETY: getuid and getgid have no preconditions and cannot fail.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let ids = handle.ids().unwrap();
+        assert!(ids.all_are(uid, gid), "{ids:?}");
+        assert!(!ids.all_are(uid.wrapping_add(1), gid));
+        assert!(handle.cgroup().unwrap().starts_with('/'));
+        let again = ProcessHandle::open(child.id(), Some(handle.start_time())).unwrap();
+        assert_eq!(again.start_time(), handle.start_time());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn another_start_time_is_refused() {
+        let mut child = sleeper();
+        let handle = ProcessHandle::open(child.id(), None).unwrap();
+        let error = ProcessHandle::open(child.id(), Some(handle.start_time() + 1)).unwrap_err();
+        assert!(format!("{error:#}").contains("reused"));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn writes_are_read_back() {
+        let mut child = sleeper();
+        let handle = ProcessHandle::open(child.id(), None).unwrap();
+        // Raising a process's own score needs no privilege.
+        handle.set_oom_score_adj(500).unwrap();
+        assert_eq!(handle.oom_score_adj().unwrap(), 500);
+        handle.set_oom_score_adj(300).unwrap();
+        assert_eq!(handle.oom_score_adj().unwrap(), 300);
+        assert!(handle.set_oom_score_adj(1001).is_err());
+        assert!(handle.set_oom_score_adj(-1001).is_err());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_exited_process_fails_closed() {
+        let mut child = sleeper();
+        let pid = child.id();
+        let handle = ProcessHandle::open(pid, None).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!handle.is_alive().unwrap());
+        // The held directory reaches nothing once its process is gone, whatever holds the PID.
+        assert!(handle.set_oom_score_adj(400).is_err());
+        assert!(handle.oom_score_adj().is_err());
+        assert!(handle.ids().is_err());
+        assert!(ProcessHandle::open(pid, None).is_err());
+        assert!(ProcessHandle::open(0, None).is_err());
+    }
+
+    #[test]
+    fn proc_text_parsers() {
+        let stat =
+            "1234 (a) b (c)) S 1 1234 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 50";
+        assert_eq!(parse_start_time(stat), Some(98765));
+        assert_eq!(parse_start_time("1234 (short) S 1"), None);
+        let status = "Name:\tx\nUid:\t1000\t1000\t1000\t1000\nGid:\t100\t100\t100\t101\n";
+        let ids = parse_ids(status).unwrap();
+        assert_eq!(ids.uids, [1000; 4]);
+        assert_eq!(ids.gids, [100, 100, 100, 101]);
+        assert!(!ids.all_are(1000, 100));
+        assert_eq!(parse_ids("Uid:\t1\t1\t1\n"), None);
+        assert_eq!(
+            parse_cgroup_v2("12:cpu:/old\n0::/system.slice/cedegrid-u1000.service/job\n"),
+            Some("/system.slice/cedegrid-u1000.service/job".to_owned())
+        );
+        assert_eq!(parse_cgroup_v2("12:cpu:/old\n"), None);
+    }
+}
+
+// T010 (decision part) and T024: the root refusal and the client.
+
+mod client {
+    use cedegrid::broker::BROKER_SUBCOMMAND;
+    use cedegrid::broker::ModeName;
+    use cedegrid::broker::request::{JobId, Refusal, RefusalCode, Request, parse_frame};
+    use cedegrid::system_mode::{Decision, Outcome, decide, reply_outcome, root_refusal};
+    use std::ffi::OsStr;
+
+    #[test]
+    fn root_is_refused_except_for_the_broker() {
+        let line = root_refusal(0, None).unwrap();
+        assert!(line.contains("without sudo"));
+        assert!(root_refusal(0, Some(OsStr::new("agent"))).is_some());
+        assert!(root_refusal(0, Some(OsStr::new("__worker-gate"))).is_some());
+        assert_eq!(root_refusal(0, Some(OsStr::new(BROKER_SUBCOMMAND))), None);
+        assert_eq!(root_refusal(1000, None), None);
+        assert_eq!(root_refusal(1000, Some(OsStr::new("agent"))), None);
+    }
+
+    #[test]
+    fn client_lines_parse_as_the_broker_reads_them() {
+        for request in [
+            Request::Start { mode: None },
+            Request::Start {
+                mode: Some(ModeName::YieldFirst),
+            },
+            Request::Stop,
+            Request::Status,
+            Request::Move {
+                job: JobId::parse("j-1").unwrap(),
+                mode: ModeName::Performance,
+            },
+        ] {
+            assert_eq!(
+                parse_frame(request.to_line().as_bytes()),
+                Ok(request.clone()),
+                "{request:?}"
+            );
+        }
+    }
+
+    fn refused(code: RefusalCode) -> Outcome {
+        Outcome::Refused(Refusal::new(code, "Reason."))
+    }
+
+    #[test]
+    fn fallback_and_refusals() {
+        assert_eq!(
+            decide(Outcome::NotInstalled, false),
+            Decision::Fallback(None)
+        );
+        assert!(matches!(
+            decide(Outcome::NotInstalled, true),
+            Decision::Refuse(line) if line.contains("not installed")
+        ));
+        assert_eq!(
+            decide(Outcome::NoAnswer("is not running".into()), false),
+            Decision::Fallback(Some(
+                "Running without System mode: The System mode broker is not running.".into()
+            ))
+        );
+        assert!(matches!(
+            decide(Outcome::NoAnswer("is not running".into()), true),
+            Decision::Refuse(line) if line.starts_with("Stopped by --require-system")
+        ));
+        for code in [
+            RefusalCode::NotAMember,
+            RefusalCode::RateLimited,
+            RefusalCode::SystemdFailed,
+            RefusalCode::SystemdTimeout,
+            RefusalCode::ProtocolMismatch,
+        ] {
+            assert!(
+                matches!(decide(refused(code), false), Decision::Fallback(Some(_))),
+                "{code:?}"
+            );
+            assert!(
+                matches!(decide(refused(code), true), Decision::Refuse(_)),
+                "{code:?}"
+            );
+        }
+        // The administrator's policy is never bypassed by falling back.
+        for code in [
+            RefusalCode::ModeNotAllowed,
+            RefusalCode::TaskLimit,
+            RefusalCode::UnitNotOurs,
+        ] {
+            assert_eq!(
+                decide(refused(code), false),
+                Decision::Refuse("Reason.".into()),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            decide(Outcome::Units(Vec::new()), true),
+            Decision::System(Vec::new())
+        );
+    }
+
+    #[test]
+    fn replies_from_another_protocol_or_garbage() {
+        assert_eq!(
+            reply_outcome(b"{\"protocol\":1,\"ok\":true,\"units\":[]}\n"),
+            Outcome::Units(Vec::new())
+        );
+        assert_eq!(
+            reply_outcome(b"{\"protocol\":1,\"ok\":true}\n"),
+            Outcome::Units(Vec::new())
+        );
+        match reply_outcome(b"{\"protocol\":2,\"ok\":false,\"code\":\"protocol_mismatch\"}\n") {
+            Outcome::Refused(refusal) => {
+                assert_eq!(refusal.code, RefusalCode::ProtocolMismatch);
+                assert!(refusal.message.contains("upgrade the cedegrid client"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            reply_outcome(
+                b"{\"protocol\":1,\"ok\":false,\"code\":\"not_a_member\",\"message\":\"Join.\"}\n"
+            ),
+            Outcome::Refused(Refusal::new(RefusalCode::NotAMember, "Join."))
+        );
+        for garbage in [
+            &b"nonsense\n"[..],
+            b"{\"protocol\":1,\"ok\":true,\"code\":\"malformed\"}\n",
+            b"{\"protocol\":1,\"ok\":false}\n",
+            b"{\"protocol\":1,\"ok\":true,\"extra\":1}\n",
+        ] {
+            assert!(
+                matches!(reply_outcome(garbage), Outcome::NoAnswer(_)),
+                "{}",
+                String::from_utf8_lossy(garbage)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    mod socket {
+        use super::*;
+        use cedegrid::system_mode::ask;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        struct Dir(PathBuf);
+
+        impl Dir {
+            fn new(name: &str) -> Self {
+                let base = std::env::var_os("TMPDIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir);
+                let path = base.join(format!(".sm-{name}-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&path);
+                std::fs::create_dir_all(&path).unwrap();
+                Dir(path)
+            }
+
+            fn socket(&self) -> PathBuf {
+                self.0.join("b.sock")
+            }
+        }
+
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// A broker stand-in that reads one line and answers with `reply`, or never answers.
+        fn serve(
+            listener: UnixListener,
+            reply: Option<&'static str>,
+        ) -> std::thread::JoinHandle<String> {
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                match reply {
+                    Some(reply) => (&stream).write_all(reply.as_bytes()).unwrap(),
+                    None => std::thread::sleep(Duration::from_millis(600)),
+                }
+                line
+            })
+        }
+
+        const SHORT: Duration = Duration::from_millis(300);
+
+        #[test]
+        fn no_socket_is_not_installed() {
+            let dir = Dir::new("none");
+            assert_eq!(
+                ask(&dir.socket(), &Request::Status, SHORT),
+                Outcome::NotInstalled
+            );
+        }
+
+        #[test]
+        fn a_plain_file_or_a_dead_socket_is_no_answer() {
+            let dir = Dir::new("dead");
+            std::fs::write(dir.socket(), "").unwrap();
+            assert!(matches!(
+                ask(&dir.socket(), &Request::Status, SHORT),
+                Outcome::NoAnswer(_)
+            ));
+            std::fs::remove_file(dir.socket()).unwrap();
+            drop(UnixListener::bind(dir.socket()).unwrap());
+            assert_eq!(
+                ask(&dir.socket(), &Request::Status, SHORT),
+                Outcome::NoAnswer("is not running".into())
+            );
+        }
+
+        #[test]
+        fn a_served_request_returns_units() {
+            let dir = Dir::new("served");
+            let listener = UnixListener::bind(dir.socket()).unwrap();
+            let server = serve(
+                listener,
+                Some(
+                    "{\"protocol\":1,\"ok\":true,\"units\":[{\"kind\":\"ordinary\",\"name\":\"cedegrid-u1000.service\",\"state\":\"active\",\"cgroup\":\"/user.slice/user-1000.slice/cedegrid-u1000.service\"}]}\n",
+                ),
+            );
+            let request = Request::Start {
+                mode: Some(ModeName::Neutral),
+            };
+            match ask(&dir.socket(), &request, Duration::from_secs(2)) {
+                Outcome::Units(units) => {
+                    assert_eq!(units.len(), 1);
+                    assert_eq!(units[0].name, "cedegrid-u1000.service");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(server.join().unwrap(), request.to_line());
+        }
+
+        #[test]
+        fn a_silent_broker_is_given_up_on_in_time() {
+            let dir = Dir::new("silent");
+            let listener = UnixListener::bind(dir.socket()).unwrap();
+            let server = serve(listener, None);
+            let started = Instant::now();
+            let outcome = ask(&dir.socket(), &Request::Status, SHORT);
+            assert!(
+                started.elapsed() < Duration::from_millis(550),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(
+                matches!(outcome, Outcome::NoAnswer(reason) if reason.contains("did not answer"))
+            );
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn a_refusal_comes_through() {
+            let dir = Dir::new("refused");
+            let listener = UnixListener::bind(dir.socket()).unwrap();
+            let server = serve(
+                listener,
+                Some(
+                    "{\"protocol\":1,\"ok\":false,\"code\":\"mode_not_allowed\",\"message\":\"The policy allows only neutral.\"}\n",
+                ),
+            );
+            assert_eq!(
+                ask(
+                    &dir.socket(),
+                    &Request::Start {
+                        mode: Some(ModeName::Performance)
+                    },
+                    SHORT
+                ),
+                Outcome::Refused(Refusal::new(
+                    RefusalCode::ModeNotAllowed,
+                    "The policy allows only neutral."
+                ))
+            );
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn a_closed_connection_is_no_answer() {
+            let dir = Dir::new("closed");
+            let listener = UnixListener::bind(dir.socket()).unwrap();
+            let server = serve(listener, Some(""));
+            assert!(matches!(
+                ask(&dir.socket(), &Request::Status, SHORT),
+                Outcome::NoAnswer(reason) if reason.contains("without a reply")
+            ));
+            server.join().unwrap();
+        }
+    }
+}

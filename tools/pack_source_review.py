@@ -156,6 +156,7 @@ ALLOWLIST = (
     'src/supervision.rs',
     'src/supervision/family.rs',
     'src/supervision/unix.rs',
+    'src/system_mode.rs',
     'src/telemetry.rs',
     'src/telemetry/gpu.rs',
     'src/telemetry/managed.rs',

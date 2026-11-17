@@ -57,6 +57,22 @@ pub enum Request {
 }
 
 impl Request {
+    /// The request as one JSON line, as the client sends it.
+    pub fn to_line(&self) -> String {
+        let mut fields = Map::new();
+        fields.insert("protocol".to_owned(), Value::from(PROTOCOL));
+        fields.insert("kind".to_owned(), Value::from(self.kind()));
+        if let Some(mode) = self.mode() {
+            fields.insert("mode".to_owned(), Value::from(mode.name()));
+        }
+        if let Request::Move { job, .. } = self {
+            fields.insert("job".to_owned(), Value::from(job.as_str()));
+        }
+        let mut line = Value::Object(fields).to_string();
+        line.push('\n');
+        line
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Request::Start { .. } => "start",

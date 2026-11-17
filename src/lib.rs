@@ -27,5 +27,6 @@ pub mod setup;
 pub mod state;
 pub mod storage_qualification;
 pub mod supervision;
+pub mod system_mode;
 pub mod telemetry;
 pub mod upgrade;
