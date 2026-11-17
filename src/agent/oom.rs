@@ -8,6 +8,17 @@ pub(crate) struct RamView {
     pub fair_share_mib: u64,
     /// External principals above the fair share: UID, or none for unattributed usage, and MiB.
     pub above: Vec<(Option<u32>, u64)>,
+    /// Set where RAM's governing mode keeps own memory at a floor breach (Performance and
+    /// Aggressive): what decides fault there instead of the fair share.
+    pub keeps_memory: Option<Breach>,
+}
+
+/// Own memory's growth over the current floor breach, in a mode that gives no memory back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Breach {
+    /// Own MiB now less own MiB when the breach began; `None` outside a breach or unknown.
+    pub growth_mib: Option<u64>,
+    pub tolerance_mib: u64,
 }
 
 /// What an ended task's outcome says about an out-of-memory kill.
@@ -56,6 +67,20 @@ pub(crate) fn classify(ending: &Ending) -> OomVerdict {
             "killed by the out-of-memory killer while own memory's fair share was unknown".into(),
         );
     };
+    if let Some(breach) = &view.keeps_memory {
+        return match breach.growth_mib {
+            Some(growth) if growth <= breach.tolerance_mib => OomVerdict::NotOwnFault(format!(
+                "killed by an out-of-memory condition it did not cause: own memory grew by {growth} MiB over the floor breach, within the {} MiB tolerance",
+                breach.tolerance_mib
+            )),
+            Some(growth) => OomVerdict::OwnFault(format!(
+                "killed by the out-of-memory killer after own memory grew by {growth} MiB over the floor breach"
+            )),
+            None => OomVerdict::OwnFault(
+                "killed by the out-of-memory killer with no floor breach seen before it, or own memory's growth over it unknown".into(),
+            ),
+        };
+    }
     if view.own_mib > view.fair_share_mib {
         return OomVerdict::OwnFault(format!(
             "killed by the out-of-memory killer while own memory, {} MiB, was above its {} MiB fair share",
@@ -93,7 +118,28 @@ mod tests {
             own_mib,
             fair_share_mib: 15_500,
             above: vec![(Some(1001), 17_500)],
+            keeps_memory: None,
         }
+    }
+
+    /// In Performance own memory is not given up at a floor breach, so a kill there is not own
+    /// fault when own memory grew by no more than the noise tolerance over the breach, whatever
+    /// its fair share; a larger or unknown growth is (FR-076).
+    #[test]
+    fn a_performance_kill_is_judged_by_growth_over_the_breach() {
+        let host = [Some(5), Some(6)];
+        let judged = |growth: Option<u64>| {
+            let mut above_share = view(16_000);
+            above_share.keeps_memory = Some(Breach {
+                growth_mib: growth,
+                tolerance_mib: 64,
+            });
+            classify(&ending(KILL, &host, None, Some(&above_share)))
+        };
+        assert!(matches!(judged(Some(0)), OomVerdict::NotOwnFault(_)));
+        assert!(matches!(judged(Some(64)), OomVerdict::NotOwnFault(_)));
+        assert!(matches!(judged(Some(65)), OomVerdict::OwnFault(_)));
+        assert!(matches!(judged(None), OomVerdict::OwnFault(_)));
     }
 
     fn ending<'a>(

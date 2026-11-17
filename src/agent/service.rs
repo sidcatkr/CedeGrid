@@ -430,6 +430,9 @@ struct AgentLoop<'a> {
     cost: LoopCost,
     policy: PolicyEngine,
     slots: BTreeMap<String, ChildSlot>,
+    /// Own RAM when the current floor breach began, for FR-076's rule in the modes that keep
+    /// own memory at a breach.
+    ram_breach_start: Option<u64>,
     refusals: BTreeMap<String, (Assignment, String)>,
     publications: Vec<Publication>,
     publishing: BTreeSet<(String, bool)>,
@@ -1466,9 +1469,36 @@ impl AgentLoop<'_> {
             .get(&crate::contention::ResourceKey::Ram)
             .and_then(|status| status.own)
             .map(|(lower, _)| lower);
+        let status = decision.resources.get(&crate::contention::ResourceKey::Ram);
+        let breached = status.is_some_and(|status| {
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "floor_breach")
+        });
+        // Own RAM when the current floor breach began, for FR-076's rule in the modes that
+        // keep own memory at a breach.
+        self.ram_breach_start = match (breached, own) {
+            (true, Some(own)) => Some(self.ram_breach_start.unwrap_or(own)),
+            (true, None) => self.ram_breach_start,
+            (false, _) => None,
+        };
+        let keeps = status
+            .and_then(|status| status.effective_mode.or(status.mode))
+            .is_some_and(|mode| mode >= crate::contention::ContentionMode::Performance);
+        let breach_start = self.ram_breach_start;
+        let tolerance_mib = self
+            .config
+            .contention
+            .thresholds(crate::contention::ResourceKind::Ram)
+            .noise_tolerance_mib;
         let view = own
             .zip(decision.ram_fair_share_mib)
             .map(|(own_mib, fair_share_mib)| oom::RamView {
+                keeps_memory: keeps.then(|| oom::Breach {
+                    growth_mib: breach_start.map(|start| own_mib.saturating_sub(start)),
+                    tolerance_mib,
+                }),
                 own_mib,
                 fair_share_mib,
                 above: snapshot
@@ -2378,6 +2408,7 @@ pub async fn run(
         cost: LoopCost::new(start, LOOP_COST_PERIOD),
         policy,
         slots: BTreeMap::new(),
+        ram_breach_start: None,
         refusals,
         publications: Vec::new(),
         publishing: BTreeSet::new(),
