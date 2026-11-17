@@ -113,6 +113,9 @@ account, which started and stopped them; CedeGrid took no action on them. Dates 
 |---|---|---|---|---|---|
 | test host | Linux 7.0.0 (Ubuntu 26.04), cgroup v2 with PSI, `cpu memory pids` delegated to the user manager | 20 logical (Intel Core i5-13500), 1 NUMA node | 31 GiB, 8 GiB swap | NVIDIA GeForce GTX 1060 6 GB | 580.178.04, CUDA 13.0 |
 
+Every GPU row below ran on that GTX 1060. By 2026-11-17 the test host's GPU had been replaced with
+an NVIDIA GeForce RTX 2070 8 GB on the same driver; no GPU gate has run on it yet.
+
 Rows measured before `9916e59` read principal usage from a refresh that listed every thread as a
 process of its own. A process's CPU counted once for the process and again for each thread, its
 resident memory once per thread, and own tasks' threads, not in the managed set, as the owner's
