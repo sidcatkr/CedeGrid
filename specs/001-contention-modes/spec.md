@@ -854,6 +854,25 @@ back more.
   supervisor takes it so; a grant still needs time left. One that cannot be handed on is
   reported once (`drain_undelivered`) (item 062 Part B).
 
+### Session 2026-11-17
+
+- Q: When has a task complied with a memory hint at its deadline? → A: When its usage of the
+  resource is at or below the larger of two targets: the one sent when the hint began and the
+  current one. There is no tolerance. A target the task cannot reach, such as 0 for a task that
+  holds memory it cannot free, is not complied with (report 056 Decision 1 C).
+- Q: What happens at the deadline to a task that complied while own memory is still above its
+  share, because another own task grew? → A: It is not drained or terminated for that hint. If
+  the over-share order still selects it, it gets a new hint with the current target and a new
+  deadline counted from that interval; if not, its hint is lifted as before. A task above its
+  target at the deadline escalates as before. The same holds for Guaranteed work, which passes
+  its excess on (FR-024) only once the new hint's wait is over, and on the critical path with the
+  critical hint deadline (report 056 Decision 1 C).
+- Q: From when does SC-012's reclaim bound count for the excess a new hint answers? → A: From the
+  interval that first shows that excess. Memory own work takes after a hint was sent is new
+  demand, so each part of the excess has the bound from when it appeared. The floor can therefore
+  stay breached one hint deadline longer for each growth of another own task, in exchange for not
+  draining the task that complied (report 056 Decision 1 C).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1060,6 +1079,10 @@ the target is drained after the bounded wait.
 6. **Given** own memory above its fair share and an over-share task that does not free its
    excess, **When** its hint wait passes, **Then** that task is drained, in-share tasks receive
    no hint, and the task starts again once its memory fits.
+7. **Given** an over-share task that reaches its target while another own task grows, so own
+   memory stays above its share, **When** its hint wait passes, **Then** it is not drained; it
+   receives the current target with a new deadline, and it is drained only if it is above its
+   target when that deadline passes.
 
 ---
 
@@ -1717,8 +1740,8 @@ node reports with the expected per-resource values at each step.
   kernel's out-of-memory killer may then take another workload's process, as it would without
   CedeGrid. Own memory above its fair share is stepped as in the other modes, and the operator's
   envelope (FR-057) applies in every mode. In every mode an over-share task gives back first: it
-  is hinted, and drained when its wait passes without the excess freed. No more over-share tasks
-  are drained than bring own memory within its share, counting drains already decided, and
+  is hinted, and drained when its wait passes and it has not complied (FR-037). No more
+  over-share tasks are drained than bring own memory within its share, counting drains already decided, and
   in-share tasks are not capped, hinted or drained for that excess. The over-share tasks are asked
   for the excess and no more, the last of them only for the part that completes it, and while
   their hint or drain wait runs that part is not passed to anyone. What the floor or the mode's
@@ -2053,8 +2076,13 @@ node reports with the expected per-resource values at each step.
 - **FR-037**: A hint MUST carry the deadline the policy enforces for it: the resource's hint
   deadline, the Guaranteed hint deadline for Guaranteed work, or the critical hint deadline on the
   critical path. When the deadline passes without compliance, the ladder escalates; a memory hint
-  waits for its deadline in every mode. While an over-share task's hint or drain wait runs, its
-  excess is not passed to in-share tasks.
+  waits for its deadline in every mode. A memory hint is complied with when, at its deadline, the
+  task's usage is at or below the larger of the target sent when the hint began and the current
+  target; a target the task cannot reach is not complied with. A task that complied is not
+  drained or terminated for that hint: while own memory is still above its share and the
+  over-share order still selects it, it gets a new hint with the current target and a new
+  deadline, and otherwise its hint is lifted. While an over-share task's hint or drain wait runs,
+  its excess is not passed to in-share tasks.
 - **FR-062**: Each supervisor MUST report, per allocation, whether the worker has acknowledged its
   target file (`hint_ready`) and whether it observes the drain file (`observes_drain`), in its
   `adjusted` and `state` events and when either changes. The agent MUST include both in the
@@ -2329,7 +2357,8 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
   - With `NO_COLOR` set, no color escape sequence is emitted.
 - **SC-012**: Reclaim bounds, each measured from the first observation of the demand or breach to
   the step that frees the resource, for memory the forced termination of own work that has not
-  released it:
+  released it. Memory own work takes after a hint was sent is new demand, measured from the
+  interval that first shows it (FR-037):
   - CPU: 2 monitor intervals in Yield First and Neutral; Performance as SC-002 states.
   - RAM and GPU memory, opportunistic work: at most hint deadline + drain timeout + termination
     grace + 1 monitor interval (defaults 5 + 3 + 2 + 0.5 = 10.5 s); without a hint, drain
