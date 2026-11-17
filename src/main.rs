@@ -207,6 +207,31 @@ enum Command {
     /// Choose roles, modes, the node cap, floors and margins; opens the keyboard
     /// interface on a terminal.
     Setup(Box<cedegrid::setup::SetupArgs>),
+    /// Start, stop or show your System mode units (needs cedegrid-system on the host).
+    #[command(subcommand)]
+    System(SystemCommand),
+}
+
+#[derive(Subcommand)]
+enum SystemCommand {
+    /// Start your two units, or report them if they run.
+    Start {
+        #[arg(long, value_parser = ["yield_first", "neutral", "performance", "aggressive"])]
+        mode: Option<String>,
+        /// Fail instead of continuing without System mode.
+        #[arg(long)]
+        require_system: bool,
+    },
+    /// Stop your two units.
+    Stop {
+        #[arg(long)]
+        require_system: bool,
+    },
+    /// Show your two units.
+    Status {
+        #[arg(long)]
+        require_system: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -264,6 +289,14 @@ fn emit(value: &impl Serialize) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    if let Some(line) = cedegrid::system_mode::root_refusal(
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() },
+        std::env::args_os().nth(1).as_deref(),
+    ) {
+        anyhow::bail!(line);
+    }
     #[cfg(windows)]
     ensure!(
         !matches!(
@@ -286,6 +319,12 @@ fn main() -> Result<()> {
             .nth(2)
             .context("missing supervisor spec")?;
         return cedegrid::agent::assignment_supervisor(Path::new(&spec));
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(cedegrid::broker::BROKER_SUBCOMMAND))
+    {
+        return cedegrid::broker::server::run();
     }
     // Only the process the npm launcher started takes over its terminal. Internal
     // gates and supervisors inherit the launcher variable but have another parent.
@@ -314,6 +353,28 @@ fn main() -> Result<()> {
     );
     match &cli.command {
         Command::Setup(args) => std::process::exit(cedegrid::setup::main(&cli.config, args)),
+        Command::System(command) => {
+            let (request, require_system) = match command {
+                SystemCommand::Start {
+                    mode,
+                    require_system,
+                } => (
+                    cedegrid::broker::request::Request::Start {
+                        mode: mode
+                            .as_deref()
+                            .and_then(cedegrid::broker::ModeName::from_name),
+                    },
+                    *require_system,
+                ),
+                SystemCommand::Stop { require_system } => {
+                    (cedegrid::broker::request::Request::Stop, *require_system)
+                }
+                SystemCommand::Status { require_system } => {
+                    (cedegrid::broker::request::Request::Status, *require_system)
+                }
+            };
+            return emit(&cedegrid::system_mode::run(&request, require_system)?);
+        }
         Command::StorageQualify { directory, profile } => {
             let profile = serde_json::from_value(serde_json::Value::String(profile.clone()))?;
             let report = cedegrid::storage_qualification::run(
@@ -583,7 +644,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Supervise { .. }
         | Command::StorageQualify { .. }
         | Command::StorageQualificationChild { .. }
-        | Command::Setup(..) => unreachable!(),
+        | Command::Setup(..)
+        | Command::System(..) => unreachable!(),
         Command::Executions => {
             let store =
                 StateStore::open_read_only_with_profile(&config.state_dir, config.storage_profile)?;

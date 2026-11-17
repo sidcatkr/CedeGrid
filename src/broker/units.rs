@@ -41,13 +41,67 @@ pub enum UnitKind {
     Idle,
 }
 
-/// Where the ordinary unit sits (decision N4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where the ordinary unit sits (decision N4), set by the policy's `units.ordinary_slice`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrdinarySlice {
     /// `user-<uid>.slice`, where the host splits CPU by account (N4 A on such hosts).
+    #[serde(rename = "user")]
     UserSlice,
     /// The root-level `cedegrid.slice` (N4 A elsewhere, N4 B, N4 C).
+    #[serde(rename = "cedegrid")]
     CedegridSlice,
+}
+
+impl OrdinarySlice {
+    pub fn name(self) -> &'static str {
+        match self {
+            OrdinarySlice::UserSlice => "user",
+            OrdinarySlice::CedegridSlice => "cedegrid",
+        }
+    }
+}
+
+/// The policy's `units.ordinary_slice` (decision N4: `auto` by default, the others as options).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SliceChoice {
+    /// `user-<uid>.slice` where `user.slice` splits CPU between accounts, else `cedegrid.slice`.
+    Auto,
+    /// Always `user-<uid>.slice`.
+    User,
+    /// Always the root-level `cedegrid.slice`.
+    Cedegrid,
+}
+
+impl SliceChoice {
+    pub fn name(self) -> &'static str {
+        match self {
+            SliceChoice::Auto => "auto",
+            SliceChoice::User => "user",
+            SliceChoice::Cedegrid => "cedegrid",
+        }
+    }
+
+    /// The slice for this host. `user_slice_splits_cpu` is whether `user.slice` has the cpu
+    /// controller enabled for its children, so that accounts share CPU by weight.
+    pub fn resolve(self, user_slice_splits_cpu: bool) -> OrdinarySlice {
+        match self {
+            SliceChoice::User => OrdinarySlice::UserSlice,
+            SliceChoice::Cedegrid => OrdinarySlice::CedegridSlice,
+            SliceChoice::Auto if user_slice_splits_cpu => OrdinarySlice::UserSlice,
+            SliceChoice::Auto => OrdinarySlice::CedegridSlice,
+        }
+    }
+}
+
+/// Whether `user.slice` passes the cpu controller to its account slices, read from cgroup v2.
+pub fn user_slice_splits_cpu() -> bool {
+    std::fs::read_to_string("/sys/fs/cgroup/user.slice/cgroup.subtree_control")
+        .map(|text| {
+            text.split_whitespace()
+                .any(|controller| controller == "cpu")
+        })
+        .unwrap_or(false)
 }
 
 /// Whether a unit opens a PAM session (decision N3), set by the policy's `units.pam_session`.

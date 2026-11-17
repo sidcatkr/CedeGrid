@@ -4,7 +4,7 @@
 //! root, or that group or others can write, is refused, and the broker then serves no request.
 
 use super::ModeName;
-use super::units::PamSession;
+use super::units::{PamSession, SliceChoice};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
@@ -57,6 +57,7 @@ struct LimitsSection {
 #[serde(default, deny_unknown_fields)]
 struct UnitsSection {
     pam_session: Option<PamSession>,
+    ordinary_slice: Option<SliceChoice>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -121,6 +122,8 @@ pub struct AdminPolicy {
     pub principal_min_percent: Setting<u8>,
     /// Whether the units open a PAM session (N3); `none` by default.
     pub pam_session: Setting<PamSession>,
+    /// Where the ordinary unit sits (N4); `auto` by default.
+    pub ordinary_slice: Setting<SliceChoice>,
 }
 
 impl AdminPolicy {
@@ -201,6 +204,7 @@ impl AdminPolicy {
             uid_min,
             principal_min_percent,
             pam_session,
+            ordinary_slice: Setting::pick(file.units.ordinary_slice, SliceChoice::Auto),
         })
     }
 
@@ -264,6 +268,11 @@ impl AdminPolicy {
                 "units.pam_session",
                 self.pam_session.value.name().to_owned(),
                 self.pam_session.source,
+            ),
+            (
+                "units.ordinary_slice",
+                self.ordinary_slice.value.name().to_owned(),
+                self.ordinary_slice.source,
             ),
         ]
     }

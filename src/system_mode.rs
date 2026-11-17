@@ -165,3 +165,38 @@ pub fn reply_outcome(line: &[u8]) -> Outcome {
         _ => Outcome::NoAnswer("sent an unreadable reply".to_owned()),
     }
 }
+
+/// What `cedegrid system` prints.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SystemReport {
+    /// Whether the request was served in System mode.
+    pub system: bool,
+    pub units: Vec<UnitStatus>,
+}
+
+/// Runs one `cedegrid system` request against the installed broker.
+pub fn run(request: &Request, require_system: bool) -> anyhow::Result<SystemReport> {
+    let outcome = ask(
+        Path::new(crate::broker::SOCKET_PATH),
+        request,
+        CLIENT_TIMEOUT,
+    );
+    match decide(outcome, require_system) {
+        Decision::System(units) => Ok(SystemReport {
+            system: true,
+            units,
+        }),
+        Decision::Fallback(line) => {
+            if let Some(line) = line {
+                use std::io::Write;
+                // A lost notice does not change what runs.
+                let _ = writeln!(std::io::stderr().lock(), "cedegrid: {line}");
+            }
+            Ok(SystemReport {
+                system: false,
+                units: Vec::new(),
+            })
+        }
+        Decision::Refuse(line) => anyhow::bail!(line),
+    }
+}

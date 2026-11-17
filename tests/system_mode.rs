@@ -344,6 +344,7 @@ principal_min_percent = 5
 
 [units]
 pam_session = "cedegrid"
+ordinary_slice = "cedegrid"
 "#,
         1000,
     )
@@ -1410,7 +1411,7 @@ mod broker_service {
             self.calls
                 .lock()
                 .unwrap()
-                .push(format!("start {}", spec.name));
+                .push(format!("start {} {}", spec.name, spec.slice));
             if self.fail_start {
                 return Err(Refusal::new(RefusalCode::SystemdFailed, "failed."));
             }
@@ -1431,6 +1432,27 @@ mod broker_service {
                 .push(format!("reset-failed {unit}"));
             self.units.lock().unwrap().remove(unit);
             Ok(())
+        }
+    }
+
+    /// Lets a test keep a handle on the fake after the broker state takes it.
+    struct Shared(Arc<FakeSystemd>);
+
+    impl Systemd for Shared {
+        fn show(&self, unit: &str) -> Result<UnitShow, Refusal> {
+            self.0.show(unit)
+        }
+
+        fn start(&self, spec: &UnitSpec) -> Result<(), Refusal> {
+            self.0.start(spec)
+        }
+
+        fn stop(&self, unit: &str) -> Result<(), Refusal> {
+            self.0.stop(unit)
+        }
+
+        fn reset_failed(&self, unit: &str) -> Result<(), Refusal> {
+            self.0.reset_failed(unit)
         }
     }
 
@@ -1529,7 +1551,7 @@ mod broker_service {
             .unwrap();
         let start = calls
             .iter()
-            .position(|call| call == "start cedegrid-u1234.service")
+            .position(|call| call.starts_with("start cedegrid-u1234.service "))
             .unwrap();
         assert!(reset < start);
     }
@@ -1597,12 +1619,9 @@ mod broker_service {
         BrokerState {
             systemd: Box::new(systemd),
             accounts: Box::new(accounts(members)),
-            load_policy: Box::new(move || match policy {
-                Some(text) => AdminPolicy::parse(text, 1000),
-                None => AdminPolicy::defaults(1000),
-            }),
+            load_policy: Box::new(move || AdminPolicy::parse(policy.unwrap_or(""), 1000)),
             host_uid_min: 1000,
-            placement: PLACE,
+            user_slice_splits_cpu: Box::new(|| true),
             rate: Mutex::new(RateLimiter::new(8, 2)),
         }
     }
@@ -1648,6 +1667,30 @@ mod broker_service {
         assert!(handled.reply.ok);
         assert_eq!(handled.kind, "start");
         assert_eq!(handled.reply.units.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn auto_places_the_ordinary_unit_by_the_host_layout() {
+        for (splits, slice) in [(true, "user-1234.slice"), (false, "cedegrid.slice")] {
+            let systemd = Arc::new(FakeSystemd::default());
+            let mut state = state(FakeSystemd::default(), &[1234], None);
+            state.systemd = Box::new(Shared(Arc::clone(&systemd)));
+            state.user_slice_splits_cpu = Box::new(move || splits);
+            let handled = handle(
+                &state,
+                peer(1234),
+                &line(r#"{"protocol":1,"kind":"start"}"#),
+            );
+            assert!(handled.reply.ok, "{handled:?}");
+            let calls = systemd.calls();
+            assert!(
+                calls.contains(&format!("start cedegrid-u1234.service {slice}")),
+                "{calls:?}"
+            );
+            assert!(
+                calls.contains(&"start cedegrid-idle-u1234.service cedegrid-idle.slice".to_owned())
+            );
+        }
     }
 
     #[test]
@@ -1804,4 +1847,55 @@ fn pam_session_comes_from_the_policy() {
         assert_eq!(policy.pam_session.source, Source::File);
     }
     assert!(AdminPolicy::parse("[units]\npam_session = \"system-auth\"\n", 1000).is_err());
+}
+
+#[test]
+fn ordinary_slice_choice_follows_n4() {
+    use cedegrid::broker::units::{OrdinarySlice, SliceChoice};
+    let policy = AdminPolicy::defaults(1000).unwrap();
+    assert_eq!(policy.ordinary_slice.value, SliceChoice::Auto);
+    assert_eq!(SliceChoice::Auto.resolve(true), OrdinarySlice::UserSlice);
+    assert_eq!(
+        SliceChoice::Auto.resolve(false),
+        OrdinarySlice::CedegridSlice
+    );
+    assert_eq!(SliceChoice::User.resolve(false), OrdinarySlice::UserSlice);
+    assert_eq!(
+        SliceChoice::Cedegrid.resolve(true),
+        OrdinarySlice::CedegridSlice
+    );
+    for (name, expected) in [
+        ("auto", SliceChoice::Auto),
+        ("user", SliceChoice::User),
+        ("cedegrid", SliceChoice::Cedegrid),
+    ] {
+        let policy =
+            AdminPolicy::parse(&format!("[units]\nordinary_slice = \"{name}\"\n"), 1000).unwrap();
+        assert_eq!(policy.ordinary_slice.value, expected);
+    }
+    assert!(AdminPolicy::parse("[units]\nordinary_slice = \"root\"\n", 1000).is_err());
+}
+
+/// Without the system package, `cedegrid system` changes nothing and prints no notice (FR-013).
+#[test]
+fn system_command_without_the_package() {
+    if std::path::Path::new(cedegrid::broker::SOCKET_PATH).exists() {
+        return;
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+        .args(["system", "status"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        r#"{"system":false,"units":[]}"#
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cedegrid"))
+        .args(["system", "start", "--require-system"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not installed"));
 }

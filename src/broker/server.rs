@@ -75,8 +75,8 @@ pub struct BrokerState {
     /// Loads the administrator policy; called at each request (FR-010).
     pub load_policy: Box<dyn Fn() -> anyhow::Result<AdminPolicy> + Send + Sync>,
     pub host_uid_min: u32,
-    /// Where units go; its `pam` field is replaced by the policy's `units.pam_session`.
-    pub placement: Placement,
+    /// Whether `user.slice` splits CPU between accounts, for `units.ordinary_slice = "auto"`.
+    pub user_slice_splits_cpu: Box<dyn Fn() -> bool + Send + Sync>,
     pub rate: Mutex<RateLimiter>,
 }
 
@@ -190,8 +190,11 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
     let result = match request {
         Request::Start { .. } => {
             let placement = Placement {
+                ordinary_slice: policy
+                    .ordinary_slice
+                    .value
+                    .resolve((state.user_slice_splits_cpu)()),
                 pam: policy.pam_session.value,
-                ..state.placement
             };
             start_units(systemd, caller, &policy, placement)
         }
@@ -329,4 +332,85 @@ pub fn serve(listener: UnixListener, state: Arc<BrokerState>) -> anyhow::Result<
         }
     }
     anyhow::bail!("the broker's socket stopped accepting connections")
+}
+
+/// The broker's entry point, started by `cedegrid-broker.service` through its socket.
+#[cfg(target_os = "linux")]
+pub fn run() -> anyhow::Result<()> {
+    use super::admin_policy;
+    use super::peer::HostAccounts;
+    use super::systemd::SystemctlRunner;
+    use anyhow::{Context, ensure};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    ensure!(
+        unsafe { libc::geteuid() } == 0,
+        "the broker runs as root from cedegrid-broker.service only"
+    );
+    // Socket activation passes the listener as descriptor 3 (sd_listen_fds).
+    let pid_matches = std::env::var("LISTEN_PID")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        == Some(std::process::id());
+    let one_socket = std::env::var("LISTEN_FDS").ok().as_deref() == Some("1");
+    ensure!(
+        pid_matches && one_socket,
+        "no socket from cedegrid-broker.socket; start the broker through its socket unit"
+    );
+    let gid = cedegrid_gid()?;
+    let meta = std::fs::symlink_metadata(super::SOCKET_PATH)
+        .with_context(|| format!("cannot read {}", super::SOCKET_PATH))?;
+    ensure!(
+        meta.file_type().is_socket()
+            && meta.uid() == 0
+            && meta.gid() == gid
+            && meta.mode() & 0o7777 == 0o660,
+        "{} must be a socket owned by root, group {}, mode 0660",
+        super::SOCKET_PATH,
+        super::GROUP
+    );
+    // SAFETY: descriptor 3 is the listening socket systemd passed, owned from here on.
+    let listener = unsafe { UnixListener::from_raw_fd(3) };
+    // SAFETY: fcntl on the descriptor just taken; FD_CLOEXEC keeps it from systemd-run children.
+    ensure!(
+        unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
+        "cannot set close-on-exec on the broker socket"
+    );
+    let state = Arc::new(BrokerState {
+        systemd: Box::new(SystemctlRunner::default()),
+        accounts: Box::new(HostAccounts),
+        load_policy: Box::new(admin_policy::load),
+        host_uid_min: admin_policy::host_uid_min(),
+        user_slice_splits_cpu: Box::new(super::units::user_slice_splits_cpu),
+        rate: Mutex::new(RateLimiter::new(RATE_BURST, RATE_PER_SECOND)),
+    });
+    journal("started");
+    serve(listener, state)
+}
+
+#[cfg(target_os = "linux")]
+fn cedegrid_gid() -> anyhow::Result<u32> {
+    let name = std::ffi::CString::new(super::GROUP)?;
+    let mut buffer = vec![0 as libc::c_char; 64 * 1024];
+    // SAFETY: zeroed group is a valid out-parameter for getgrnam_r.
+    let mut entry: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: valid out-pointers and a buffer of the length passed.
+    let rc = unsafe {
+        libc::getgrnam_r(
+            name.as_ptr(),
+            &mut entry,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    anyhow::ensure!(
+        rc == 0 && !result.is_null(),
+        "group {} does not exist",
+        super::GROUP
+    );
+    Ok(entry.gr_gid)
 }
