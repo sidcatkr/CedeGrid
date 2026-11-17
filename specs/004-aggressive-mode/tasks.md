@@ -236,9 +236,16 @@ principal contends. Nothing else changes.
     places a granted request against it. Tests: `tests/policy.rs`
     `the_unprotected_budget_exists_only_under_an_aggressive_cap`, `tests/coordinator.rs`
     `a_granted_request_is_placed_against_the_unprotected_budget`.
-- [ ] T030 [US2] (after T622) In `src/explain.rs`, show the red `UNPROTECTED` marker in
+- [x] T030 [US2] (after T622) In `src/explain.rs`, show the red `UNPROTECTED` marker in
   `observe`, `doctor` and `status`. JSON gains `"unprotected": true` and the grant; the marker is
   plain under `NO_COLOR` and absent once the run ends (SC-006).
+  - *Done:* status marks an authorized allocation with a grant `"unprotected": true` with
+    `unprotected_grant`, until it is released; `observe` lists the node's started, unreleased
+    unprotected runs; `doctor` lists them under "Unprotected Aggressive" with a red `UNPROTECTED`
+    marker, plain without color, read without the store's locks. Tests: `tests/coordinator.rs`
+    `status_marks_a_started_granted_allocation_unprotected`, `tests/execution_state.rs`
+    `unprotected_runs_are_listed_from_authorization_until_release`, `tests/cli.rs` (observe), and
+    the container fixture.
 
 **Checkpoint**: an unprotected run starts only through the permitted path; every refusal path
 refuses (SC-005).
@@ -265,6 +272,10 @@ refuses (SC-005).
 - [ ] T035 (after T622) Run the native gates in quickstart §7 on the test host, at a time the
   coordinator schedules after 001's E9. Record the results in `docs/validation.md` under a
   feature 004 section, at least 3 runs each way.
+  - *Done in part (2026-11-17, `9647d21`):* fill and F2c on CPU, three runs of each arm, with a
+    cross-cgroup contender, and no step on running own work. Open: a same-cgroup contender (needs
+    root on this host) and the GPU compute runs. The first smoke run found the agent reserving
+    granted launches against the protected budget (fixed in `9647d21`).
 
 ---
 

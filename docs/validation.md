@@ -298,6 +298,29 @@ its own. Dates are UTC.
 | A member removed from the group while a job runs in its unit (decision N2, option A), after the broker was restarted on 0.2.0~sys005.6 | T060, FR-004 | `196394a` | 2026-11-17 | a request from a process that still held the group in its credentials was refused by the broker (`not_a_member`), and one from a new login was refused at the socket; both units and the job kept running through more than two of the broker's rest passes; 5 s after the job ended, the broker stopped both units and logged `stopped units: uid=<uid> is not in group cedegrid and no job runs` | pass |
 | The broker's journal over the host runs | T057 to T060 | `196394a` | 2026-11-17 | 257 lines: 244 requests answered `ok`, 2 refused `not_a_member` (T060), 130 `oom_score_adj` writes, none failed | recorded |
 
+## Native gate results (feature 004)
+
+Aggressive's host gates (`specs/004-aggressive-mode/tasks.md`, T035, quickstart section 7) ran on
+the same test host, with a build of `9647d21`: the agent started directly on a scope of four
+physical CPUs (the Tracked backend), the coordinator and the harness outside it. Own work ran as
+the first account; the second account ran its own load from its own login. The host enables the
+`cpu` controller down to each user slice, so the second account was a cross-cgroup contender.
+Each own task was a CPU-bound loop counting fixed units, and the second account's load was two
+saturating request loops tied to two of the scope's CPUs, its demand equal to its fair share.
+Every run began with an idle check (every CPU at 0%), and CedeGrid took no action on the second
+account's processes. The first smoke run of the unprotected arm, at `34c936a`, found a bug: the
+coordinator placed eight granted tasks and the agent reserved only one, because it reserved
+against the protected budget; `9647d21` fixes it. Dates are UTC.
+
+| Run | Requirement | Commit | Date | Result | Verdict |
+|---|---|---|---|---|---|
+| Fill on an idle scope: eight own tasks of 500 m, 30 s windows, Performance and Aggressive, three runs each | SC-003 | `9647d21` | 2026-11-17 | both modes admitted 7 of the 8 at the first placement after submission (1.40–1.73 s in Performance, 1.41 s in Aggressive) and the same count at every sample after it; the eighth fits neither once CedeGrid's own use is held out, so Aggressive's 0% margin admits no extra 500 m task on four CPUs. Own CPU 3689–3741 m (Performance), 3727–3753 m (Aggressive) | pass: Aggressive never below Performance, full in one placement |
+| F2c, protected: eight own tasks of 1000 m submitted while the second account's two loops run; Performance and protected Aggressive, 60 s windows, three runs each, with the second account alone as the reference | SC-001, SC-008 | `9647d21` | 2026-11-17 | own work admitted one task in both modes (983–988 m): the fair share of 2000 m less CedeGrid's own use leaves room for one, and what the second account leaves is the same. The second account kept 97.8–97.9% of its alone rate in Performance and 96.3–97.9% in Aggressive (alone: 6268–6270 requests a second), p99 0.33–0.35 ms against 0.32 ms alone | pass: its whole demand, which is its fair share, kept its CPUs |
+| F2c, unprotected: the same, with the host's allowance turned on through `setup --allow-unprotected-aggressive` on a terminal and both SDK fields set | SC-004, SC-008 | `9647d21` | 2026-11-17 | own work started three tasks at once beside the second account (2163–2201 m), each logging its `UNPROTECTED` warning, with no refusal; the second account fell to 85.5–87.7% of its alone rate, and its p99 rose to 3.33 ms | pass: own work starts where another principal contends |
+| Steps on running own work over all 18 runs above | SC-002 | `9647d21` | 2026-11-17 | the agent's decisions held no cap, pause or drain on own work in any run | pass |
+| A same-cgroup contender | SC-008 | — | — | not run: with the `cpu` controller enabled down to each user slice, the second account's processes are always in a cgroup of their own, and putting one into own work's cgroup needs root | open |
+| F2c on GPU compute | SC-001, SC-003 | — | — | not run in this host window | open |
+
 ## Rules for validation runs
 
 - Report these statuses separately:

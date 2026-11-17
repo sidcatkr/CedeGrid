@@ -49,7 +49,6 @@ candidate's commit, and this list is updated at that commit.
 
 ## Open before the review
 
-- T030: the red `UNPROTECTED` marker in `observe`, `doctor` and `status`, and `"unprotected": true`
-  in their JSON. Today the start is marked only by the agent's warning event.
 - T033: the full checks at the release candidate's commit.
-- T035: the native gates on the test host, when the coordinator schedules them.
+- T035, the rest: a same-cgroup contender and the GPU compute runs. The CPU gates passed on
+  2026-11-17 (`docs/validation.md`, feature 004).
