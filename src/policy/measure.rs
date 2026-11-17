@@ -1844,15 +1844,26 @@ impl<'a> Interval<'a> {
         }
         // One more own process is admitted only while (m + 1) × k ≤ E or no counted principal
         // would be slice-bound beside it, so a task is not admitted only to be held (FR-022,
-        // FR-089).
+        // FR-089). An own task placed on the device but not yet listed there counts as one
+        // context, so tasks placed a heartbeat apart do not both start.
+        let placed = self
+            .input
+            .allocations
+            .iter()
+            .filter(|a| {
+                matches!(a.phase, AllocationPhase::Pending | AllocationPhase::Running)
+                    && a.requested.gpu_memory_mib.contains_key(&gpu.uuid)
+            })
+            .count() as u32;
+        let own_admitting = own.max(placed);
         let next_holds = if counted {
-            own.saturating_add(1).saturating_mul(count) <= external
+            own_admitting.saturating_add(1).saturating_mul(count) <= external
         } else {
-            own == 0
+            own_admitting == 0
         };
         let next_held = holds && !next_holds && {
             let mut beside = TimeSliceRecord {
-                own: own.saturating_add(1),
+                own: own_admitting.saturating_add(1),
                 ..TimeSliceRecord::default()
             };
             self.slice_hold(&principals, read, &gpu.uuid, &mut beside);

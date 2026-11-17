@@ -46,6 +46,8 @@ pub struct Collector {
     gpu_samples: BTreeMap<String, GpuSampleState>,
     /// Each device's last readable per-process samples: when, and the busy contexts (FR-021).
     gpu_last_sampled: BTreeMap<String, LastSampled>,
+    /// Each device's last active external compute reading and when (FR-021).
+    gpu_last_activity: BTreeMap<String, (Instant, ComputeActivity)>,
     gpu_sample_max_age: Duration,
     gpu_config: crate::config::GpuConfig,
     platform_capabilities: BTreeMap<String, Capability>,
@@ -266,6 +268,7 @@ impl Collector {
             gpu_cursors: BTreeMap::new(),
             gpu_samples: BTreeMap::new(),
             gpu_last_sampled: BTreeMap::new(),
+            gpu_last_activity: BTreeMap::new(),
             gpu_sample_max_age: Duration::from_millis(
                 crate::config::Config::default().gpu_sample_max_age_ms(),
             ),
@@ -849,6 +852,17 @@ impl Collector {
             );
             let external_compute =
                 quiet_activity(external_compute, quiet_ticks, self.quiet_window_intervals);
+            let external_compute = carry_activity(
+                external_compute,
+                active_external.is_some(),
+                self.gpu_last_activity.get(&uuid),
+                Instant::now(),
+                self.gpu_sample_max_age,
+            );
+            if external_compute == ComputeActivity::Active {
+                self.gpu_last_activity
+                    .insert(uuid.clone(), (Instant::now(), external_compute));
+            }
             let (compute_amount, compute_by_pid) = match utilization_percent {
                 Some(device) if own_only => {
                     self.gpu_samples
@@ -2427,6 +2441,39 @@ mod tests {
     /// The listing the time-slice duty counts while the amounts are unknown: every listed PID
     /// that is neither own work's, the owner's nor background, with its UID where readable
     /// (FR-021, Q29).
+    /// External activity read as unknown only for want of a new sample stays active within the
+    /// sample age of an active reading, with the listing known; an unknown listing, an older
+    /// reading or a quiet one stays unknown (FR-021).
+    #[test]
+    fn unknown_activity_keeps_the_last_known_reading_for_the_sample_age() {
+        use crate::model::ComputeActivity::*;
+        let now = Instant::now();
+        let age = Duration::from_millis(2000);
+        let last = (now, Active);
+        let soon = now + Duration::from_millis(500);
+        assert_eq!(
+            carry_activity(Unknown, true, Some(&last), soon, age),
+            Active
+        );
+        assert_eq!(
+            carry_activity(Unknown, false, Some(&last), soon, age),
+            Unknown
+        );
+        let late = now + Duration::from_millis(2500);
+        assert_eq!(
+            carry_activity(Unknown, true, Some(&last), late, age),
+            Unknown
+        );
+        assert_eq!(carry_activity(Unknown, true, None, soon, age), Unknown);
+        assert_eq!(carry_activity(Quiet, true, Some(&last), soon, age), Quiet);
+        // Only an active reading carries over: unknown is never quiet.
+        let quiet = (now, Quiet);
+        assert_eq!(
+            carry_activity(Unknown, true, Some(&quiet), soon, age),
+            Unknown
+        );
+    }
+
     /// An interval without readable samples reads as the last readable one within the sample
     /// age, for the contexts still listed; past the age it stays unreadable (FR-021, T628).
     #[test]

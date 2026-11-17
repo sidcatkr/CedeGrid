@@ -38,7 +38,9 @@
   down to the share of the busy
   processes the time-slice rule allows beside a principal that reads at least
   `contention.gpu_compute.slice_bound_percent` (75) percent of its slices.
-  `contention.gpu_compute.slice_step_percent` still loads and has no effect.
+  `contention.gpu_compute.slice_step_percent` still loads and has no effect. An own GPU task placed
+  but not yet running on the device counts toward that rule, and one heartbeat places at most one
+  new GPU task on each device.
 - **First-come GPU floor.** Own GPU work that was on a device before every other user listed
   there keeps, in Yield First and Neutral, at least the share that leaves none of them more
   than half of the device. An unreadable user ID or an unknown process list withholds it.

@@ -3632,6 +3632,35 @@ fn placed(reply: &HeartbeatReply) -> Vec<String> {
     ids
 }
 
+/// A device's open GPU compute admission is room for one more own process, as the node's
+/// time-slice rule computes it, so one heartbeat places at most one new GPU task on each device;
+/// the next waits for a report that has counted the first (FR-022, FR-028, FR-089).
+#[test]
+fn a_heartbeat_places_one_new_gpu_task_per_device() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    submit_tasks(
+        &mut c,
+        "job",
+        0,
+        vec![
+            gpu_task("a1", "GPU-a", 100),
+            gpu_task("a2", "GPU-a", 100),
+            gpu_task("b1", "GPU-b", 100),
+        ],
+        100,
+    );
+    let mut r = negotiated(100, &["GPU-a", "GPU-b"]);
+    r.launch_slots = 4;
+    assert_eq!(placed(&report_reply(&mut c, &r, 100)), ["a1", "b1"]);
+    // The next report still reads open (no new own process counted yet in this fixture): a2
+    // is placed then, one heartbeat later.
+    let mut r = negotiated(200, &["GPU-a", "GPU-b"]);
+    r.launch_slots = 4;
+    assert!(placed(&report_reply(&mut c, &r, 200)).contains(&"a2".to_string()));
+}
+
 /// With `contention/1`, every requested resource must be open: CPU, RAM, and
 /// each requested GPU's memory and compute. A resource the report leaves out is
 /// not open (FR-028).

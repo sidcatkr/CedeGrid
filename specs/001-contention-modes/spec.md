@@ -1716,7 +1716,9 @@ node reports with the expected per-resource values at each step.
     the last readable one reads as that one, for the contexts still listed, in the observation
     itself, so the policy and the launch recheck read it alike, and the policy also keeps that
     interval's counts; NVML can have no new sample every other interval. Only past that age do the
-    listed processes count. An own process that holds a context without computing counts for at most one
+    listed processes count. In the same way, external activity read as unknown only for want of a
+    new sample stays active within the sample age of an active reading; a quiet reading does not
+    carry over, since unknown is never quiet. An own process that holds a context without computing counts for at most one
     counting window after its listing; for that time it counts toward t, so one fewer own task
     may be held beside a slice-bound principal, and no other workload pays beyond that window.
     When the listing itself is unknown on a device last read as time-sliced, nothing new is
@@ -2199,7 +2201,10 @@ node reports with the expected per-resource values at each step.
     worker's CPU hint is a request only.
   - On a time-sliced GPU, in every mode, one more own process is admitted only while
     (m + 1) × k ≤ E (FR-021's counts) or no counted principal is slice-bound; otherwise admission
-    is held with `gpu_time_slice_admission_held`.
+    is held with `gpu_time_slice_admission_held`. An own task placed on the device but not yet
+    listed there counts toward m as one context, and an open GPU compute admission is room for
+    one more own process: the coordinator places at most one new GPU task on each device per
+    heartbeat, and the next report counts it (FR-028).
   - `observe`, `status` and the decision say, per resource, that whole-task holds apply and which
     tasks are held.
 - **FR-090**: On GPU compute, in Yield First and Neutral, own work that arrived on a device before
