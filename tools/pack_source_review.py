@@ -120,6 +120,7 @@ ALLOWLIST = (
     'src/backup.rs',
     'src/broker.rs',
     'src/broker/admin_policy.rs',
+    'src/broker/process_handle.rs',
     'src/broker/request.rs',
     'src/broker/score.rs',
     'src/broker/units.rs',

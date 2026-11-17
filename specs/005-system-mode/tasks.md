@@ -44,7 +44,8 @@ the task list.
 
 - [ ] T001 Declare `pub mod broker;` and `pub mod system_mode;` in `src/lib.rs`, and create `src/broker.rs` declaring `pub mod request; pub mod admin_policy; pub mod units; pub mod score; pub mod oom;` (reached from `tests/`) and `mod peer; mod moves;`, with empty files under `src/broker/` (no `#[path]`)
 - [ ] T002 [P] Add every new shipped file (`src/broker.rs`, `src/broker/*.rs`, `src/system_mode.rs`, `packaging/deb/*`) to `ALLOWLIST` in `tools/pack_source_review.py` and to `include` in `Cargo.toml`
-- [ ] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid-idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
+  - *In progress:* every file added so far is listed; the list grows with each task.
+- [x] T003 [P] Create `packaging/deb/` with skeletons of `cedegrid-broker.socket`, `cedegrid-broker.service`, `cedegrid.slice`, `cedegrid-idle.slice`, `cedegrid-system.sysusers`, `postinst`, `prerm` and `postrm`, as listed in `contracts/units-and-slices.md`
 - [ ] T004 [P] Add a CI job on `ubuntu-22.04` in `.github/workflows/ci.yml` that builds both `.deb` files and starts a container with systemd as PID 1, running only `tests/system_mode.rs` with `CEDEGRID_TEST_SYSTEM_CONTAINER=1` (never `--ignored` across the suite)
 - [ ] T005 [P] Write the container harness in `tests/support/system_container.rs`: start and stop the container, run a command as a named test account, install and purge the packages, and take the inventory SC-009 compares (units, slices, groups, files under `/etc`, `/run`, `/usr`)
 
@@ -56,7 +57,7 @@ the task list.
 
 ### Tests first
 
-- [ ] T006 [P] Request parser tests in `tests/system_mode.rs`, for `contracts/broker-protocol.md`:
+- [x] T006 [P] Request parser tests in `tests/system_mode.rs`, for `contracts/broker-protocol.md`:
   - one JSON object per connection, "at most 65,536 bytes", so 65,537 bytes or no newline gives `request_too_large`;
   - `protocol` differing gives `protocol_mismatch`;
   - `kind` outside `start`, `stop`, `status`, `move` gives `unknown_kind`;
@@ -64,12 +65,12 @@ the task list.
   - each identity name (`uid`, `user`, `unit`, `path`, `cgroup`, `exec`, `mount`, `device`, `capability`) gives `identity_in_request`;
   - `job` must be "at most 128 bytes of `[A-Za-z0-9_-]`";
   - `mode` is accepted only on `start` and `move`.
-- [ ] T007 Administrator policy tests in `tests/system_mode.rs`, for `contracts/admin-policy.md`:
+- [x] T007 Administrator policy tests in `tests/system_mode.rs`, for `contracts/admin-policy.md`:
   - a file or directory not owned by root, or writable by group or others, is refused;
   - an unknown key is refused (`deny_unknown_fields`);
   - the defaults are `policy_version = 1`, `tasks_per_user = 64`, `tasks_max = 4096`, `uid_min` from `UID_MIN` (else 1000) and `principal_min_percent = 1`;
   - Aggressive is not allowed unless listed.
-- [ ] T008 Unit property builder tests in `tests/system_mode.rs`, for `contracts/units-and-slices.md`:
+- [x] T008 Unit property builder tests in `tests/system_mode.rs`, for `contracts/units-and-slices.md`:
   - the output depends only on the user ID, the primary group and the policy;
   - the names are `cedegrid-u<uid>.service` and `cedegrid-idle-u<uid>.service`, with `Delegate=yes`;
   - there is no `OOMScoreAdjust=`, `ManagedOOMSwap=` or `ManagedOOMMemoryPressure=`;
@@ -77,14 +78,17 @@ the task list.
   - the ordinary unit's slice is parameterized by N4 (`user-<uid>.slice` or `cedegrid.slice`);
   - `PAMName=` and the process limits are parameterized by N3.
 - [ ] T009 [P] Tests for the pidfd and `/proc` directory helpers in `tests/kernel.rs`: a write through a directory handle whose start time no longer matches reaches nothing; an exited PID fails closed.
+  - *Written, not yet run:* the tests are in `tests/system_mode.rs` (Linux only), not `tests/kernel.rs`, beside T014's new location.
 - [ ] T010 [P] CLI tests in `tests/cli.rs`: every command run with effective user ID 0 refuses in one line saying to run it as the user without `sudo` (003 FR-082, built here first); the broker's hidden subcommand is dispatched before argument parsing and is the one exception.
+  - *In part:* the refusal is a pure check, `system_mode::root_refusal`, tested in `tests/system_mode.rs`; `main.rs` does not call it yet (T015).
 
 ### Implementation
 
-- [ ] T011 Implement the request parser and its limits in `src/broker/request.rs` (passes T006)
-- [ ] T012 [P] Implement the policy loader in `src/broker/admin_policy.rs` (passes T007)
-- [ ] T013 [P] Implement the pure property builder in `src/broker/units.rs`, taking N3 and N4 as inputs, with `RuntimeDirectory=cedegrid/u<uid>` (0700) on the ordinary unit and `Restart=on-failure` on both (passes T008)
+- [x] T011 Implement the request parser and its limits in `src/broker/request.rs` (passes T006)
+- [x] T012 [P] Implement the policy loader in `src/broker/admin_policy.rs` (passes T007)
+- [x] T013 [P] Implement the pure property builder in `src/broker/units.rs`, taking N3 and N4 as inputs, with `RuntimeDirectory=cedegrid/u<uid>` (0700) on the ordinary unit and `Restart=on-failure` on both (passes T008)
 - [ ] T014 [P] Implement the pidfd and `/proc/<pid>` directory helpers with the start-time check in `src/kernel.rs` (passes T009)
+  - *Moved:* written as `src/broker/process_handle.rs`, because kernel code stays read-only (contributor notes) and this handle writes `oom_score_adj`. Its Linux tests have not run yet.
 - [ ] T015 Add the hidden dispatch for the broker and the idle executor subcommands, and the root refusal for every other command, in `src/main.rs`, before argument parsing, threads and terminal handoff (passes T010)
 
 **Checkpoint**: parsing, policy, properties and kernel helpers pass their tests; nothing runs as root yet.
@@ -129,6 +133,7 @@ the task list.
   - detect the socket and check the protocol;
   - start the units and wait;
   - fall back after 2 s (provisional) with one line, or refuse under `--require-system` (FR-013).
+  - *In part:* `src/system_mode.rs` has the request, the 2 s timeout and the fallback decision, tested against a stand-in socket; `cedegrid system` is not added to `main.rs` yet.
 - [ ] T025 [US1] Add System mode lines to `doctor` in `src/explain.rs` (FR-014):
   - the level and why;
   - the effective policy;
@@ -210,7 +215,7 @@ the task list.
 
 ### Tests first
 
-- [ ] T042 [P] [US4] Score function tests in `tests/system_mode.rs`, for `data-model.md`'s score record:
+- [x] T042 [P] [US4] Score function tests in `tests/system_mode.rs`, for `data-model.md`'s score record:
   - value `−round(1000 × in_share_pages ÷ total_pages)`, "clamped to −999", never −1000;
   - 1000 for a task wholly over the share in Yield First and Neutral, and in Performance only under D2 case B;
   - the in-share amount is handed out oldest task first;
@@ -230,7 +235,8 @@ the task list.
 
 ### Implementation
 
-- [ ] T046 [US4] Implement the pure score function in `src/broker/score.rs`, taking the mode's floor rule (D2) and N1's option as inputs (passes T042)
+- [x] T046 [US4] Implement the pure score function in `src/broker/score.rs`, taking the mode's floor rule (D2) and N1's option as inputs (passes T042)
+  - The share is handed out over the units' tasks only; the user's processes outside the units do not use it up. T047 may revisit this with the measured counters.
 - [ ] T047 [US4] Implement memory reading in `src/broker/oom.rs` (passes T043):
   - per-account cgroup counters where present, else per-process sums by user ID from `/proc`;
   - the measure 001 uses for RAM;
