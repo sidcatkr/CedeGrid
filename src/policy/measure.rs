@@ -906,6 +906,7 @@ impl<'a> Interval<'a> {
                 .unwrap_or_default(),
             probe: None,
             fair_share_limit: self.fair_share_limit(&ResourceKey::Cpu),
+            unprotected: false,
         };
         // In Performance and Aggressive own work above its Neutral share can saturate the CPU
         // itself, which is no evidence of hidden external demand: utilization is judged with
@@ -1054,6 +1055,7 @@ impl<'a> Interval<'a> {
             satisfied: vec![],
             probe: None,
             fair_share_limit: self.fair_share_limit(&ResourceKey::Ram),
+            unprotected: false,
         };
         let thresholds = config.contention.thresholds(ResourceKind::Ram);
         self.note_fair_share(&ResourceKey::Ram, &view, &thresholds);
@@ -2080,6 +2082,7 @@ impl<'a> Interval<'a> {
                     satisfied: satisfied.clone(),
                     probe: None,
                     fair_share_limit,
+                    unprotected: false,
                 };
                 let mut averaged_view = view(averaged_total, averaged_members, averaged_background);
                 self.note_fair_share(&compute_key, &averaged_view, &compute_thresholds);
@@ -2138,6 +2141,7 @@ impl<'a> Interval<'a> {
                     satisfied: vec![],
                     probe: None,
                     fair_share_limit: None,
+                    unprotected: false,
                 };
                 GpuComputeBudget {
                     share: own_allowance(&view, &compute_thresholds),
@@ -2224,6 +2228,7 @@ impl<'a> Interval<'a> {
                 satisfied: vec![],
                 probe: None,
                 fair_share_limit: self.fair_share_limit(&key),
+                unprotected: false,
             };
             let thresholds = config.contention.thresholds(ResourceKind::GpuMemory);
             self.note_fair_share(&key, &view, &thresholds);

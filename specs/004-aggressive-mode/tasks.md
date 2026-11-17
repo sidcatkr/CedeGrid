@@ -177,7 +177,7 @@ principal contends. Nothing else changes.
   "requested_unix_ms": <u64> }` is set only when both are true. Add the new contract cases:
   the grant without `confirmed` is rejected at submission, the grant on a node capped at
   Performance, the grant with the allowance off. Add the SDK parity test (FR-019).
-- [ ] T022 [P] [US2] (after T622) In `tests/contention.rs`, test the unprotected allowance: it is
+- [x] T022 [P] [US2] (after T622) In `tests/contention.rs`, test the unprotected allowance: it is
   `capacity` on compute without unknown activity (P8), Aggressive's under unknown activity (P5),
   and Performance's on memory.
 

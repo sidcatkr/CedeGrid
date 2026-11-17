@@ -688,6 +688,7 @@ mod modes {
             satisfied: vec![],
             probe: None,
             fair_share_limit: None,
+            unprotected: false,
         }
     }
 
@@ -2103,6 +2104,7 @@ mod scenarios {
                         satisfied: vec![],
                         probe: None,
                         fair_share_limit: None,
+                        unprotected: false,
                     },
                     &config.contention.thresholds(ResourceKind::GpuMemory),
                 );
@@ -7366,5 +7368,56 @@ mod aggressive {
             );
             assert_eq!(allowance(&aggressive), allowance(&performance));
         }
+    }
+}
+
+/// 004: the unprotected grant's allowance (contracts/policy-protection.md P5, P8).
+mod unprotected {
+    use super::modes::*;
+
+    fn granted(kind: ResourceKind, external: u64) -> ModeInput {
+        let mut input = input(kind, ContentionMode::Aggressive, 4000, external);
+        input.own = 1000;
+        input.saturated = true;
+        input.principals = Some(vec![principal(Some(1500), external)]);
+        input.unprotected = true;
+        input
+    }
+
+    #[test]
+    fn on_compute_it_may_take_the_whole_capacity() {
+        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
+            for external in [0, 2000, 3000] {
+                let input = granted(kind, external);
+                assert_eq!(allowance(&input), 4000, "{kind:?} {external}");
+                let mut protected = input.clone();
+                protected.unprotected = false;
+                assert!(allowance(&input) >= allowance(&protected));
+            }
+        }
+    }
+
+    #[test]
+    fn never_into_unknown_activity_nor_on_memory() {
+        let mut input = granted(ResourceKind::Cpu, 2000);
+        input.unknown_activity = true;
+        let mut protected = input.clone();
+        protected.unprotected = false;
+        assert_eq!(allowance(&input), allowance(&protected));
+        for kind in [ResourceKind::Ram, ResourceKind::GpuMemory] {
+            let input = granted(kind, 2000);
+            let mut protected = input.clone();
+            protected.unprotected = false;
+            assert_eq!(allowance(&input), allowance(&protected), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_aggressive_carries_it() {
+        let mut input = granted(ResourceKind::Cpu, 2000);
+        input.mode = ContentionMode::Performance;
+        let mut protected = input.clone();
+        protected.unprotected = false;
+        assert_eq!(allowance(&input), allowance(&protected));
     }
 }

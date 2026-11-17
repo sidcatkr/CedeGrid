@@ -1418,6 +1418,9 @@ pub struct ModeInput {
     /// While the principal list cannot be read, the last fair share a readable list gave,
     /// which the share never exceeds (FR-059).
     pub fair_share_limit: Option<u64>,
+    /// The allocation runs under an unprotected Aggressive grant (004 R5): on compute, with no
+    /// unknown activity, admission may take the whole capacity.
+    pub unprotected: bool,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -1465,6 +1468,15 @@ pub fn own_allowance(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
     let contended = contended(input, thresholds);
     let yield_first_margin = margin(thresholds.yield_first_margin_percent);
     let probe = input.probe.filter(|_| !input.unknown_activity);
+    // Unprotected Aggressive starts where others contend, never into activity of unknown amount
+    // or past the floors, which are already outside `capacity` (004 FR-010).
+    if input.unprotected
+        && input.mode == ContentionMode::Aggressive
+        && !input.kind.is_memory()
+        && !input.unknown_activity
+    {
+        return input.capacity;
+    }
     match input.mode {
         // While a small demand is probed, Yield First steps down with the probe.
         ContentionMode::YieldFirst if contended && probe.is_some() => available
