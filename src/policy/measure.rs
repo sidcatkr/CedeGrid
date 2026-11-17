@@ -864,15 +864,9 @@ impl<'a> Interval<'a> {
         let cedegrid = self.cedegrid_cpu;
         if self.cpu_unknown || self.cpu_held {
             self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_sub(cedegrid);
-            self.next.cpu_view = self.prev.cpu_view.clone();
             self.next.cpu_quiet_intervals = self.prev.cpu_quiet_intervals;
             self.next.cpu_unattributed_intervals = self.prev.cpu_unattributed_intervals;
             self.carry_principals(&ResourceKey::Cpu);
-            if self.cpu_unknown
-                && governing(config, ResourceKind::Cpu) >= ContentionMode::Performance
-            {
-                self.cpu_unknown_hold();
-            }
             return;
         }
         self.floor_available.insert(
@@ -936,14 +930,6 @@ impl<'a> Interval<'a> {
         self.note_fair_share(&ResourceKey::Cpu, &view, &thresholds);
         self.note_cpu_quiet(&view, &thresholds);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
-        self.next.cpu_view = Some(CpuView {
-            view: view.clone(),
-            room: self
-                .cpu_capacity
-                .saturating_sub(self.cpu_reserve)
-                .min(self.cpu_ceiling),
-            cedegrid,
-        });
         let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
         for target in targets.values_mut() {
             *target = target.saturating_sub(cedegrid);
@@ -975,41 +961,6 @@ impl<'a> Interval<'a> {
         if let Some(seen) = prev.principal_seen.get(key) {
             self.next.principal_seen.insert(key.clone(), seen.clone());
         }
-    }
-
-    /// While CPU telemetry is unknown, Performance and Aggressive hold own CPU at Neutral's
-    /// fair share of the last known view, with the unknown as one more principal of unbounded
-    /// demand. With no view yet, the ladder takes no new step (FR-022).
-    fn cpu_unknown_hold(&mut self) {
-        let Some(last) = self.prev.cpu_view.as_ref() else {
-            self.cpu_unviewed = true;
-            return;
-        };
-        let thresholds = self.config.contention.thresholds(ResourceKind::Cpu);
-        let mode = governing(self.config, ResourceKind::Cpu);
-        let view = ModeInput {
-            mode,
-            unknown_activity: true,
-            probe: None,
-            ..last.view.clone()
-        };
-        let mut targets = targets_of(&view, &thresholds, last.room);
-        for target in targets.values_mut() {
-            *target = target.saturating_sub(last.cedegrid);
-        }
-        let hold = targets[&mode];
-        self.budget.cpu_millicores = hold;
-        self.mode_targets.insert(ResourceKey::Cpu, targets);
-        self.reasons.push(ReasonCode::new(
-            "cpu_unknown_fair_share_hold",
-            "CPU telemetry unknown; own CPU holds at Neutral's fair share of the last known view",
-        ));
-        note(
-            &mut self.statuses,
-            ResourceKey::Cpu,
-            "cpu_unknown_fair_share_hold",
-            format!("own CPU holds at {hold}m, the unknown counted as one more principal"),
-        );
     }
 
     /// Counts the intervals in which every external CPU principal stayed below

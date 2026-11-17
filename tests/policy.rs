@@ -2862,6 +2862,48 @@ fn performance_cpu_contention_holds_the_cap_instead_of_pausing() {
     assert!(paused <= 1, "paused for {paused} intervals");
 }
 
+/// In Performance running own work takes no CPU step for another principal's demand, for own
+/// usage above the admission target, or while CPU telemetry is unknown, and admission holds
+/// instead; the same input in Neutral steps (FR-008, FR-011, FR-022, R87).
+#[test]
+fn performance_takes_no_cpu_step_for_others_or_unknown() {
+    use cedegrid::contention::{ContentionMode, ResourceKey};
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(4000, 0, 0),
+            Some(resources(6000, 0, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let cpu_actions = |mode| {
+        let mut cfg = config();
+        cfg.contention.default_mode = mode;
+        let mut engine = PolicyEngine::new();
+        let mut seen = Vec::new();
+        for now in (0..20_000).step_by(500) {
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = (now < 15_000).then_some(8000);
+            let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
+            if mode == ContentionMode::Performance {
+                assert_eq!(decision.admission_headroom.cpu_millicores, 0, "at {now}");
+            }
+            seen.extend(
+                decision
+                    .actions
+                    .into_iter()
+                    .filter(|a| a.resource == ResourceKey::Cpu)
+                    .map(|a| (now, a.step)),
+            );
+        }
+        seen
+    };
+    assert_eq!(cpu_actions(ContentionMode::Performance), []);
+    assert!(!cpu_actions(ContentionMode::Neutral).is_empty());
+}
+
 /// CPU/RAM admission waits its own cooldown, whose default follows the mode's
 /// scale-up interval; the GPU cooldown never gates it (audit M1).
 #[test]
@@ -3030,99 +3072,6 @@ fn lost_cpu_telemetry_holds_for_the_unknown_window_then_escalates() {
         (YieldStep::Cap, YieldCause::UnknownMeasurement)
     );
     assert!(after.would_drain.is_empty());
-}
-
-/// While CPU telemetry is unknown, Performance holds own CPU at Neutral's fair share of the
-/// last known view with the unknown as one more principal, and never steps below it; with no
-/// view yet it takes no new step. Yield First and Neutral keep a CPU budget of 0 (FR-008,
-/// FR-022).
-#[test]
-fn unknown_cpu_in_performance_holds_the_fair_share_of_the_last_view() {
-    use cedegrid::contention::{ContentionMode, YieldCause, YieldStep};
-    let input = PolicyInput {
-        allocations: vec![allocation(
-            "a",
-            AllocationPhase::Running,
-            resources(5000, 0, 0),
-            Some(resources(5000, 0, 0)),
-        )],
-        facts: rootless(&["a"]),
-        ..Default::default()
-    };
-    let mode = |mode: ContentionMode| {
-        let mut cfg = config();
-        cfg.cpu.reserve_physical_cores = 0;
-        cfg.contention.default_mode = mode;
-        cfg
-    };
-    let cfg = mode(ContentionMode::Performance);
-    let interval = cfg.monitor.interval_ms;
-    let window = u64::from(
-        cfg.contention
-            .thresholds(cedegrid::contention::ResourceKind::Cpu)
-            .unknown_window_intervals,
-    ) * interval;
-    // Own 5000m beside 2000m external, unsaturated: the view the hold comes from.
-    let mut known = snapshot();
-    known.cpu_busy_millicores = Some(7000);
-    let mut lost = known.clone();
-    lost.cpu_busy_millicores = None;
-    let held = |decision: &cedegrid::model::Decision| {
-        decision
-            .reason_codes
-            .iter()
-            .any(|r| r.code == "cpu_unknown_fair_share_hold")
-    };
-
-    let mut engine = PolicyEngine::new();
-    let first = engine.evaluate(&cfg, &known, &input, 0).unwrap();
-    assert!(first.actions.is_empty() && !held(&first));
-    // 8000m between own work, the 2000m external demand and the unknown: 3000m each beside it.
-    let mut now = interval;
-    while now <= window {
-        let decision = engine.evaluate(&cfg, &lost, &input, now).unwrap();
-        assert_eq!(decision.managed_budget.cpu_millicores, 3000, "t={now}");
-        assert!(held(&decision), "t={now}");
-        assert!(decision.actions.is_empty(), "t={now}: steps hold");
-        now += interval;
-    }
-    let mut capped = false;
-    for _ in 0..20 {
-        let decision = engine.evaluate(&cfg, &lost, &input, now).unwrap();
-        assert_eq!(decision.managed_budget.cpu_millicores, 3000, "t={now}");
-        for action in &decision.actions {
-            assert_eq!(
-                (action.step, action.cause),
-                (YieldStep::Cap, YieldCause::UnknownMeasurement),
-                "t={now}"
-            );
-            assert!(action.target >= Some(3000), "t={now}: {action:?}");
-            capped = true;
-        }
-        assert!(decision.would_drain.is_empty());
-        now += interval;
-    }
-    assert!(capped, "own work above the hold is capped to it");
-
-    // No view yet: no new step, however long CPU stays unknown.
-    let mut engine = PolicyEngine::new();
-    for step in 0..3 * window / interval {
-        let decision = engine
-            .evaluate(&cfg, &lost, &input, step * interval)
-            .unwrap();
-        assert_eq!(decision.managed_budget.cpu_millicores, 0);
-        assert!(decision.actions.is_empty(), "t={}", step * interval);
-    }
-
-    // Yield First and Neutral keep a budget of 0 while CPU is unknown.
-    for chosen in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
-        let cfg = mode(chosen);
-        let mut engine = PolicyEngine::new();
-        engine.evaluate(&cfg, &known, &input, 0).unwrap();
-        let decision = engine.evaluate(&cfg, &lost, &input, interval).unwrap();
-        assert_eq!(decision.managed_budget.cpu_millicores, 0, "{chosen:?}");
-        assert!(!held(&decision), "{chosen:?}");
-    }
 }
 
 /// One CPU principal for the snapshot.
@@ -4785,10 +4734,8 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
         step(Neutral, Active, opportunistic),
         Some((YieldStep::Cap, Some(500)))
     );
-    assert_eq!(
-        step(Performance, Active, opportunistic),
-        Some((YieldStep::Cap, Some(500)))
-    );
+    // Performance takes no GPU compute step for others (FR-022).
+    assert_eq!(step(Performance, Active, opportunistic), None);
     assert_eq!(
         step(YieldFirst, Active, opportunistic).map(|s| s.0),
         Some(YieldStep::Pause)
@@ -4844,7 +4791,8 @@ fn an_applied_gpu_cap_under_unknown_activity_is_credited_at_its_duty() {
     use ComputeActivity::*;
     use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
-    for mode in [Neutral, Performance] {
+    {
+        let mode = Neutral;
         let (cfg, mut snap) = us5_device(mode, Unknown, Some(vec![987]), Some(8000), false);
         let mut engine = PolicyEngine::new();
         let mut facts = rootless(&["job"]);
@@ -5043,13 +4991,14 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
         ContentionMode::*,
         YieldStep::{Cap, Pause},
     };
-    for (external, performance, yield_first, neutral) in [
+    // Performance reads the same path and takes no step (FR-022).
+    for (external, _performance, yield_first, neutral) in [
         (50, 930, (Some(Cap), Some(800)), 900),
         (400, 580, (Some(Pause), None), 500),
     ] {
         assert_eq!(
             gpu_compute_target(Performance, Some(external)),
-            (Some(Cap), Some(performance), Some(ComputePath::Measured)),
+            (None, None, Some(ComputePath::Measured)),
             "{external}"
         );
         assert_eq!(
@@ -5080,7 +5029,8 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
 fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
     use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
-    for mode in [Neutral, Performance] {
+    {
+        let mode = Neutral;
         let (cfg, mut snap) = us5_device(
             mode,
             ComputeActivity::Active,
@@ -6447,10 +6397,9 @@ mod gpu_cooldown_alone {
 
     #[test]
     fn gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu() {
-        for (mode, cooldown_ms) in [
-            (ContentionMode::Neutral, 10_000),
-            (ContentionMode::Performance, 2000),
-        ] {
+        // Neutral only: Performance caps no CPU for others (FR-022).
+        {
+            let (mode, cooldown_ms) = (ContentionMode::Neutral, 10_000);
             let cfg = cfg(mode);
             let (snap, input) = contended(true);
             let mut engine = PolicyEngine::new();
@@ -6691,10 +6640,14 @@ mod reclaim_admission {
         let capped = sim.run(120, 4000, &[("old", 1000, CPU)]);
         let last = capped.last().unwrap();
         let target = last.resources[&ResourceKey::Cpu].target_share;
+        // Performance caps no running work for others, so only the other modes hold a cap at
+        // the target share (FR-022).
         assert!(
-            last.actions
-                .iter()
-                .any(|a| a.resource == ResourceKey::Cpu && a.target == target),
+            mode >= ContentionMode::Performance
+                || last
+                    .actions
+                    .iter()
+                    .any(|a| a.resource == ResourceKey::Cpu && a.target == target),
             "{:?}",
             last.actions
         );
@@ -8082,7 +8035,7 @@ mod own_over_target {
 
     #[test]
     fn own_usage_over_its_target_holds_for_the_dwell_then_steps_with_its_own_cause() {
-        let config = config(ContentionMode::Performance);
+        let config = config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
         // Two tasks at 1960m beside 40m external: 3920m against a 3880m target.
         let mut first_step = None;
@@ -8113,7 +8066,7 @@ mod own_over_target {
 
     #[test]
     fn a_budget_that_falls_keeps_external_growth_and_its_bounds() {
-        let config = config(ContentionMode::Performance);
+        let config = config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
         let (snap, input) = reading(&[1450, 1450], 40, 0, 0);
         assert!(cpu_actions(&engine.evaluate(&config, &snap, &input, 0).unwrap()).is_empty());
@@ -8135,7 +8088,14 @@ mod own_over_target {
     /// each the whole increase (FR-011, FR-013).
     #[test]
     fn held_caps_yield_external_growth_once_between_them() {
-        let config = config(ContentionMode::Performance);
+        // Neutral at Performance's 2% margin, the numbers this shape was built with: own usage
+        // over its target is stepped in Yield First and Neutral only (FR-011).
+        let mut config = config(ContentionMode::Neutral);
+        config.contention.cpu.neutral_margin_percent = Some(2);
+        config
+            .contention
+            .acknowledge_caution
+            .insert("reduced_margin".into());
         let mut engine = PolicyEngine::new();
         // Four tasks at 980m beside 40m external, 40m over the target: after the dwell, all
         // four hold caps at one level.
@@ -8146,13 +8106,16 @@ mod own_over_target {
         }
         assert_eq!(held.len(), 4, "{held:?}");
         assert!(
-            held.iter().all(|(_, _, target, _)| *target == Some(970)),
+            held.iter().all(|(_, _, target, _)| *target == held[0].2),
             "{held:?}"
         );
-        // A 400m external user arrives and the host gives own work 3600m: 80m over the new
-        // 3520m target, which the caps give between them, 20m each.
+        // A 400m external user arrives and the host gives own work 3600m: what is over the new
+        // target, the caps give between them, a quarter each.
         let (snap, input) = reading(&[900; 4], 400, 0, 3500);
-        let lowered = cpu_actions(&engine.evaluate(&config, &snap, &input, 3500).unwrap());
+        let decision = engine.evaluate(&config, &snap, &input, 3500).unwrap();
+        let over =
+            3600u64.saturating_sub(decision.resources[&ResourceKey::Cpu].target_share.unwrap());
+        let lowered = cpu_actions(&decision);
         let after: Vec<u64> = lowered
             .iter()
             .map(|(_, _, target, _)| target.unwrap())
@@ -8161,7 +8124,7 @@ mod own_over_target {
             .iter()
             .map(|target| 900u64.saturating_sub(*target))
             .sum();
-        assert!((76..=84).contains(&freed), "{after:?}");
+        assert!(over > 0 && freed.abs_diff(over) <= 4, "{over} {after:?}");
         assert!(after.iter().all(|t| t.abs_diff(after[0]) <= 1), "{after:?}");
     }
 

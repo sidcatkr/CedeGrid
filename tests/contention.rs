@@ -2016,11 +2016,8 @@ mod scenarios {
     /// intervals: interval 1 observes the demand, interval 2 runs with the step.
     #[test]
     fn sc_002_contended_cpu_returns_within_two_intervals_in_every_mode() {
-        for mode in [
-            ContentionMode::YieldFirst,
-            ContentionMode::Neutral,
-            ContentionMode::Performance,
-        ] {
+        // Performance takes no CPU step for others (SC-002, FR-022).
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
             let mut world = World::new(mode, (64, 8000));
             let mut now = 0;
             while now < 5000 {
@@ -2028,7 +2025,7 @@ mod scenarios {
                 now += INTERVAL;
             }
             world.external = (5, 5000);
-            let (_, mut previous) = world.tick(now);
+            world.tick(now);
             // Until the pause bound, the CPU stays returned. Performance gives back
             // what external work takes, at least its margin per interval, and never
             // goes below the fair share.
@@ -2040,14 +2037,9 @@ mod scenarios {
                     ContentionMode::Neutral => {
                         own <= 4000 + CAPACITY / 100 && external + CAPACITY / 100 >= 4000
                     }
-                    ContentionMode::Performance => {
-                        own + CAPACITY / 100 >= 4000
-                            && (external >= previous + CAPACITY * 2 / 100
-                                || external + CAPACITY / 100 >= 4000)
-                    }
+                    ContentionMode::Performance => unreachable!("not in this loop"),
                 };
                 assert!(returned, "{mode:?} at {now}: own {own} external {external}");
-                previous = external;
             }
             assert!(!world.drained, "{mode:?}");
         }
@@ -2371,28 +2363,18 @@ mod scenarios {
         let reached = reached.expect("Performance never reached its ramp target");
         assert!(reached <= 30_000, "ramp target reached at {reached} ms");
 
-        // Reclaim: external work gets its demand within 5 s of starting.
+        // Running own work is not stepped for external work that starts later, and nothing
+        // is drained: what it gets is the kernel's split beside the same work (SC-004, FR-022).
         let mut world = World::new(ContentionMode::Performance, (8, 8000));
         let mut now = 0;
-        while now < 5000 {
-            world.tick(now);
-            now += INTERVAL;
-        }
+        let before = run_until(&mut world, &mut now, 5000);
         world.external = (4, 3000);
-        let started = now;
-        let mut served_at = None;
-        while now < started + 20_000 {
-            let (_, external) = world.tick(now);
-            if served_at.is_none() && external >= 3000 {
-                served_at = Some(now);
-            }
-            now += INTERVAL;
-        }
-        let served_at = served_at.expect("external work never got its demand");
+        let beside = run_until(&mut world, &mut now, 25_000);
         assert!(
-            served_at - started <= 5000,
-            "after {} ms",
-            served_at - started
+            beside
+                .iter()
+                .all(|own| *own >= *before.last().unwrap() * 8 / 12),
+            "own work was stepped: {beside:?}"
         );
         assert!(!world.drained);
     }
@@ -2953,34 +2935,17 @@ mod ramp {
         }
         let idle = reached_at(&own_per_interval[..20], target).expect("idle device never reached");
         assert!(idle <= 10_000, "idle ramp at {idle} ms");
-        // The external user gets its 300 throughout; own work keeps the margin back once its
-        // share's bootstrap window has run, at most 6 intervals after the first cap (Q24).
-        assert!(
-            own_per_interval[21..40].iter().all(|own| *own <= 700),
-            "own work took the external user's demand"
-        );
-        assert!(
-            own_per_interval[30..40].iter().all(|own| *own < 700),
-            "the external user never held own work back"
-        );
-        let after = reached_at(&own_per_interval[40..60], target).expect("never regained");
-        assert!(
-            after <= 10_000,
-            "regained at {after} ms after the external user left"
-        );
-        // After a fresh cap, the raise waits the minimum step dwell, now longer than
-        // the compute scale-up interval, and no more.
-        let timing = LadderTiming::new(
-            &config.contention.thresholds(ResourceKind::GpuCompute),
-            ContentionMode::Performance,
-            INTERVAL,
-        );
-        assert!(timing.scale_up_ms < timing.dwell_ms);
-        let burst = reached_at(&own_per_interval[61..], target).expect("burst never regained");
-        assert!(
-            burst <= timing.dwell_ms,
-            "regained {burst} ms after the burst's cap"
-        );
+        // Performance takes no GPU compute step for the external user, after it leaves, or
+        // after the burst: the driver splits the device as beside the same work started by
+        // hand (FR-022).
+        for (i, own) in own_per_interval.iter().enumerate().skip(20) {
+            let external = if (20..40).contains(&i) || (60..62).contains(&i) {
+                300
+            } else {
+                0
+            };
+            assert_eq!(*own, 1000 - external, "Performance stepped own work at {i}");
+        }
     }
 
     /// RAM keeps its Performance scale-up cooldown: a new floor breach still opens
@@ -4170,7 +4135,7 @@ mod t178_contender {
     fn own_over_target_caps_hold_while_one_task_dips() {
         let mut config = config();
         config.cpu.reserve_physical_cores = 0;
-        config.contention.default_mode = ContentionMode::Performance;
+        config.contention.default_mode = ContentionMode::Neutral;
         // The contention floor: principal_min_percent of capacity.
         let floor = CAPACITY
             * u64::from(
@@ -4301,13 +4266,6 @@ mod t178_contender {
     #[test]
     fn the_contender_reaches_its_demand_with_exact_own_measurement() {
         use ContentionMode::*;
-        // Performance (SC-002, SC-012): ⌈(own − fair share) ÷ margin⌉ intervals,
-        // ⌈(3755 − 2000) ÷ 80⌉ = 22 here. The account makes no difference.
-        assert_eq!(
-            served_from(Performance, true),
-            served_from(Performance, false)
-        );
-        assert!(served_from(Performance, false) <= 22);
         // Another user in Neutral and Yield First: within 2 intervals (SC-002).
         assert!(served_from(Neutral, false) <= 2);
         assert!(served_from(YieldFirst, false) <= 2);
@@ -4996,10 +4954,9 @@ mod contention_ended {
     /// count, in Performance within 3 s of the contender stopping (FR-034, Q18).
     #[test]
     fn run_7s_return_brings_own_usage_back_in_one_move_within_three_seconds() {
-        for (mode, tasks) in [
-            (ContentionMode::YieldFirst, 13),
-            (ContentionMode::Performance, 15),
-        ] {
+        // Performance takes no CPU step to return from (FR-034, FR-022).
+        {
+            let (mode, tasks) = (ContentionMode::YieldFirst, 13);
             let run = run_shaped(
                 mode,
                 140,
@@ -5547,7 +5504,7 @@ mod gpu_demand {
     fn a_light_user_turning_saturating_is_seen_at_the_next_window() {
         const RISE: u64 = 100;
         let (_, decisions) =
-            loop_decisions(ContentionMode::Performance, None, 260, &|i, capped| match (
+            loop_decisions(ContentionMode::Neutral, None, 260, &|i, capped| match (
                 i >= RISE,
                 capped,
             ) {
@@ -5678,7 +5635,7 @@ mod gpu_demand {
                 BESIDE_FULL_DUTY[(i % 60) as usize]
             }
         };
-        let (alone, own) = loop_decisions(ContentionMode::Performance, None, 200, &light);
+        let (alone, own) = loop_decisions(ContentionMode::Neutral, None, 200, &light);
         // A new device reads unknown until its amount is measured; those intervals feed nothing.
         let start = alone
             .iter()
@@ -5728,7 +5685,7 @@ mod gpu_demand {
         assert_eq!(fed, 5, "a window feeds its 5 uncapped intervals");
         let (_, yield_first) = loop_decisions(ContentionMode::YieldFirst, None, 40, &light);
         assert_eq!(record(&yield_first[39]).source, GpuDemandSource::Larger);
-        let config = mode_config(ContentionMode::Performance);
+        let config = mode_config(ContentionMode::Neutral);
         let report = cedegrid::agent::node_contention_report(&config, &own[window], 1);
         let report = serde_json::to_string(&report).unwrap();
         assert!(
@@ -5788,7 +5745,7 @@ mod gpu_demand {
     #[test]
     fn gpu_demand_edges() {
         use cedegrid::model::GpuDemandSource;
-        let config = mode_config(ContentionMode::Performance);
+        let config = mode_config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
         let (mut now, mut sample) = (0, 0);
         let idle = PolicyInput::default();
@@ -5915,10 +5872,12 @@ mod gpu_demand {
             (0, None, GpuDemandSource::Interval, true),
             "{read:?}"
         );
+        // Neutral holds the fair share while the other principal is not yet recorded as
+        // satisfied; Performance takes no GPU compute step here (FR-021, FR-022).
         assert_eq!(
             target_of(&restarted[1]),
-            680,
-            "the interval's 300 sets Performance's target"
+            500,
+            "the interval's 300 leaves Neutral at its fair share"
         );
         // The window's first uncapped interval feeds the restarted estimate.
         let read = record_of(&restarted[2]);
@@ -6517,7 +6476,7 @@ mod gpu_demand {
     fn a_window_that_changes_own_share_updates_the_duty() {
         const DROP: u64 = 120;
         let run = saturating_loop(
-            ContentionMode::Performance,
+            ContentionMode::Neutral,
             &|i| if i < DROP { 3 } else { 1 },
             300,
         );
@@ -6569,7 +6528,7 @@ mod gpu_demand {
                 BESIDE_FULL_DUTY[(i % 60) as usize]
             }
         };
-        let (_, performance) = loop_decisions(ContentionMode::Performance, None, 200, &light);
+        let (_, performance) = loop_decisions(ContentionMode::Neutral, None, 200, &light);
         let mut checked = 0;
         for decision in &performance[20..] {
             let read = record_of(decision);
@@ -6596,7 +6555,7 @@ mod gpu_demand {
         assert!(checked > 100, "{checked} capped decisions carried a duty");
         // Yield First's caps carry no duty.
         let (_, yield_first) = loop_decisions(
-            ContentionMode::Performance,
+            ContentionMode::Neutral,
             Some(ContentionMode::YieldFirst),
             120,
             &light,
@@ -6612,7 +6571,7 @@ mod gpu_demand {
         );
         // A restart while own work is capped leaves no share: a window opens at once (Q24), and no
         // cap goes out with a duty.
-        let config = mode_config(ContentionMode::Performance);
+        let config = mode_config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
         let busy = PolicyInput {
             allocations: vec![job(None)],
