@@ -10,6 +10,20 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
+/// Set once when this agent runs in a System mode unit, after `unit_jobs_root` checked it.
+static IN_UNIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Records that this process is the agent in a System mode unit.
+pub fn set_in_unit() {
+    let _ = IN_UNIT.set(true);
+}
+
+/// Whether this process is the agent in a System mode unit, where the broker is the only
+/// writer of OOM scores (005 FR-023, T049).
+pub fn in_unit() -> bool {
+    IN_UNIT.get().copied().unwrap_or(false)
+}
+
 /// How long the client waits for the broker before it falls back (*provisional*, FR-013).
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 

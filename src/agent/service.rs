@@ -1628,13 +1628,15 @@ impl AgentLoop<'_> {
             }
         }
         // OOM order by fault: a task's mark goes to its supervisor when it changes (FR-023).
+        // In a System mode unit the broker writes every score instead (005 T049).
+        let marks_here = !crate::system_mode::in_unit();
         let own_ram = decision
             .resources
             .get(&crate::contention::ResourceKey::Ram)
             .and_then(|status| status.own)
             .map(|(lower, _)| lower);
         for (id, slot) in self.slots.iter_mut() {
-            if slot.exited || slot.sequence == 0 {
+            if !marks_here || slot.exited || slot.sequence == 0 {
                 continue;
             }
             let preferred = decision.oom_preferred.contains(id.as_str());

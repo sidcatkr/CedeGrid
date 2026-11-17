@@ -258,6 +258,7 @@ the task list.
   - after a broker restart, the loop resumes and writes nothing for an unchanged value.
   - *In part:* the kernel rule (a value written as root is the user's floor) passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the loop's scoring under real memory pressure is for the host run (T058).
 - [ ] T045 [P] [US4] Test in `tests/agent.rs`: in System mode the agent writes no OOM score; outside it, 001's marks are unchanged.
+  - *In part:* when `main` has checked the unit, it marks the agent as in a unit (`system_mode::set_in_unit`); the agent then sends no OOM marks to its supervisors, and `ram.prefer_own_oom_victim` is turned off with a one-line warning, so no gate sets one either. The fixture that runs a configured agent inside a unit (T045) waits for the host runs.
 
 ### Implementation
 
@@ -275,6 +276,7 @@ the task list.
   - one journal line per write.
   - *Written, not yet run on Linux:* the pass driver is tested with fake process access; the loop thread in `broker::server::run` (marker recheck every 10 s, one journal line per write) compiles only on Linux and has not been built there yet.
 - [ ] T049 [US4] Switch off the agent's own OOM score writes in System mode in `src/agent/oom.rs` and the supervisor's mark path in `src/supervision/unix.rs` (passes T045)
+  - *In part:* when `main` has checked the unit, it marks the agent as in a unit (`system_mode::set_in_unit`); the agent then sends no OOM marks to its supervisors, and `ram.prefer_own_oom_victim` is turned off with a one-line warning, so no gate sets one either. The fixture that runs a configured agent inside a unit (T045) waits for the host runs.
 
 **Checkpoint**: US4 passes in the container; SC-006 and SC-007 wait on T072.
 

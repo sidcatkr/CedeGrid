@@ -633,6 +633,14 @@ async fn async_main(cli: Cli) -> Result<()> {
         && let Some(jobs) = cedegrid::system_mode::unit_jobs_root()?
     {
         config.cgroup.delegated_root = Some(jobs);
+        // The broker is the only writer of OOM scores in a unit (005 T049).
+        if config.ram.prefer_own_oom_victim {
+            eprintln!(
+                "cedegrid: warning: ram.prefer_own_oom_victim has no effect in System mode; the broker sets OOM scores"
+            );
+            config.ram.prefer_own_oom_victim = false;
+        }
+        cedegrid::system_mode::set_in_unit();
     }
     // Load-time warnings go to stderr, where they never mix with JSON output.
     for warning in &config_warnings {

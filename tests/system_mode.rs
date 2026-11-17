@@ -3733,3 +3733,9 @@ fn the_unit_agent_reads_its_configuration_from_the_users_config_dir() {
     assert_eq!(unit_config_dir(None, None), None);
     assert_eq!(unit_config_dir(Some(OsStr::new("relative")), None), None);
 }
+
+#[test]
+fn outside_a_unit_the_agent_keeps_its_own_oom_marks() {
+    // The flag is set only by the agent's start inside a checked System mode unit.
+    assert!(!cedegrid::system_mode::in_unit());
+}
