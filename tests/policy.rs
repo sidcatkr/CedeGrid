@@ -12,8 +12,8 @@ use cedegrid::{
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
-/// The node in Full, with `cpu.max` authorized, so the CPU caps these tests model apply; the
-/// `whole_tasks` tests run without it (FR-089).
+/// The node in Full, with `cpu.max` authorized as a launch setting: CPU takes no rate cap at
+/// either level, so running CPU work is held back by whole tasks (FR-089).
 fn config() -> Config {
     let mut result = whole_tasks::full(Config::default());
     result.cpu.reserve_physical_cores = 1;
@@ -1399,8 +1399,8 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
     let b = PolicyEngine::new()
         .evaluate(&config(), &snap, &second, 0)
         .unwrap();
-    // The pending reservation is cancelled by its charge; the equal running candidates share
-    // the excess at one level (FR-016).
+    // The pending reservation is cancelled by its charge; each running task is larger than the
+    // excess left, so whole-task holds leave both running (FR-016, FR-089).
     assert_eq!(a.would_drain, ["z"]);
     assert_eq!(a.actions, b.actions);
     let planned: std::collections::BTreeSet<_> = a
@@ -1409,15 +1409,7 @@ fn drain_choice_is_pending_first_then_id_independent_of_input_order() {
         .map(|action| (action.allocation_id.as_str(), action.step, action.target))
         .collect();
     use cedegrid::contention::YieldStep;
-    assert_eq!(
-        planned,
-        [
-            ("z", YieldStep::Drain, None),
-            ("a", YieldStep::Cap, Some(2500)),
-            ("b", YieldStep::Cap, Some(2500))
-        ]
-        .into()
-    );
+    assert_eq!(planned, [("z", YieldStep::Drain, None)].into());
     // CPU admits nothing more; RAM stays admissible on its own (T086a).
     assert_eq!(a.admission_headroom.cpu_millicores, 0);
     assert!(a.admission_headroom.ram_mib > 0);
@@ -2489,17 +2481,24 @@ fn d3_a_quiet_external_context_admits_gpu_work() {
 }
 
 #[test]
-fn d4_cpu_contention_caps_instead_of_draining() {
+fn d4_cpu_contention_pauses_a_whole_task_instead_of_draining() {
     // 8 logical CPUs on 4 physical cores; reserving 1 physical core holds 2000m.
-    // A rootless backend cannot lower the share at runtime, so cap comes first.
+    // A rootless backend cannot lower the share at runtime and CPU takes no rate cap, so a
+    // whole task is paused (FR-089).
+    let ids = ["a", "b", "c", "d"];
     let input = PolicyInput {
-        allocations: vec![allocation(
-            "mine",
-            AllocationPhase::Running,
-            resources(4000, 0, 0),
-            Some(resources(4000, 0, 0)),
-        )],
-        facts: rootless(&["mine"]),
+        allocations: ids
+            .iter()
+            .map(|id| {
+                allocation(
+                    id,
+                    AllocationPhase::Running,
+                    resources(1000, 0, 0),
+                    Some(resources(1000, 0, 0)),
+                )
+            })
+            .collect(),
+        facts: rootless(&ids),
         ..Default::default()
     };
     let mut engine = PolicyEngine::new();
@@ -2513,18 +2512,19 @@ fn d4_cpu_contention_caps_instead_of_draining() {
     let contended = engine.evaluate(&config(), &snap, &input, 1000).unwrap();
     assert_eq!(contended.managed_budget.cpu_millicores, 3000);
     assert!(contended.would_drain.is_empty());
+    let planned: Vec<_> = contended
+        .actions
+        .iter()
+        .map(|a| (a.resource.clone(), a.step, a.cause, a.code.as_str()))
+        .collect();
     assert_eq!(
-        contended.actions,
-        [YieldAction {
-            allocation_id: "mine".into(),
-            resource: cedegrid::contention::ResourceKey::Cpu,
-            step: cedegrid::contention::YieldStep::Cap,
-            target: Some(3000),
-            cause: cedegrid::contention::YieldCause::ExternalGrowth,
-            code: "yield_step_cap".into(),
-            deadline_ms: None,
-            duty: None,
-        }]
+        planned,
+        [(
+            cedegrid::contention::ResourceKey::Cpu,
+            cedegrid::contention::YieldStep::Pause,
+            cedegrid::contention::YieldCause::ExternalGrowth,
+            "yield_step_pause"
+        )]
     );
     assert_eq!(contended.admission_headroom.cpu_millicores, 0);
 }
@@ -2788,44 +2788,44 @@ fn resource_arithmetic_charges_adds_subtracts_and_fits_per_scope() {
     assert!(!total.fits(&cap, &observed), "GPU-b is over its budget");
 }
 
+/// CPU contention alone never drains running work: whole tasks are paused, and a pause that
+/// reaches its bound moves to another task, even when no step seems to free anything (FR-014,
+/// FR-089, SC-007).
 #[test]
-fn cpu_contention_climbs_to_pause_and_never_drains_running_work() {
+fn cpu_contention_pauses_whole_tasks_and_never_drains_running_work() {
     use cedegrid::contention::{ContentionMode, YieldStep};
     let mut cfg = config();
     cfg.contention.default_mode = ContentionMode::YieldFirst;
+    let ids = ["a", "b", "c", "d"];
     let input = PolicyInput {
-        allocations: vec![allocation(
-            "mine",
-            AllocationPhase::Running,
-            resources(4000, 0, 0),
-            Some(resources(4000, 0, 0)),
-        )],
-        facts: rootless(&["mine"]),
+        allocations: ids
+            .iter()
+            .map(|id| {
+                allocation(
+                    id,
+                    AllocationPhase::Running,
+                    resources(1000, 0, 0),
+                    Some(resources(1000, 0, 0)),
+                )
+            })
+            .collect(),
+        facts: rootless(&ids),
         ..Default::default()
     };
     let mut snap = snapshot();
     snap.cpu_busy_millicores = Some(7000);
     let mut engine = PolicyEngine::new();
-    let mut steps = vec![];
+    let mut paused = std::collections::BTreeSet::new();
     // Usage never falls in this recording, so every step looks ineffective.
     for now in (0..40_000).step_by(500) {
         let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
         assert!(decision.would_drain.is_empty(), "at {now}");
-        let step = decision.actions.first().map(|a| a.step);
-        if steps.last() != Some(&step) {
-            steps.push(step);
+        for action in &decision.actions {
+            assert_eq!(action.step, YieldStep::Pause, "at {now}: {action:?}");
+            paused.insert(action.allocation_id.clone());
         }
     }
-    // The pause ends at its bound as a cap at the minimum duty, which then holds
-    // (FR-014); running CPU work is never drained.
-    assert_eq!(
-        steps,
-        [
-            Some(YieldStep::Cap),
-            Some(YieldStep::Pause),
-            Some(YieldStep::Cap)
-        ]
-    );
+    assert!(paused.len() >= 2, "the pause moves on: {paused:?}");
 }
 
 /// Performance never pauses own CPU within its fair share: a cap that misses its target is
@@ -3106,7 +3106,7 @@ fn lost_cpu_telemetry_holds_for_the_unknown_window_then_escalates() {
     let action = after.actions.first().expect("escalates after the window");
     assert_eq!(
         (action.step, action.cause),
-        (YieldStep::Cap, YieldCause::UnknownMeasurement)
+        (YieldStep::Pause, YieldCause::UnknownMeasurement)
     );
     assert!(after.would_drain.is_empty());
 }
@@ -3793,7 +3793,7 @@ fn cpu_admission_charges_running_opportunistic_work_at_recent_usage() {
 
 /// While no other principal is active on CPU, running opportunistic work is charged at its
 /// window mean, and at its p95 from the interval one appears: an over-admission while alone can
-/// only cost own work, and a burst only caps own work, with no drain (FR-034).
+/// only cost own work, and a burst drains nothing (FR-034).
 #[test]
 fn cpu_admission_charges_the_mean_while_alone_and_the_p95_once_a_principal_appears() {
     const OWNER: u32 = 1000;
@@ -3856,7 +3856,8 @@ fn cpu_admission_charges_the_mean_while_alone_and_the_p95_once_a_principal_appea
         joined.would_drain
     );
     now += 500;
-    // Alone again, a burst past the budget caps own work on itself and drains nothing.
+    // Alone again, a burst past the budget drains nothing, and the one task, larger than the
+    // excess, is left running (FR-089).
     for _ in 0..4 {
         decide(1000, &[], now);
         now += 500;
@@ -3867,11 +3868,7 @@ fn cpu_admission_charges_the_mean_while_alone_and_the_p95_once_a_principal_appea
         "a burst drains nothing: {:?}",
         burst.would_drain
     );
-    assert!(
-        format!("{:?}", burst.actions).contains("OwnOverTarget"),
-        "the burst shows as own usage over its target: {:?}",
-        burst.actions
-    );
+    assert!(burst.actions.is_empty(), "{:?}", burst.actions);
 }
 
 /// While a running allocation has a held CPU step, CPU admission charges it at
@@ -6114,12 +6111,12 @@ mod per_job_modes {
         ]
     }
 
-    /// Two jobs in different modes on one resource: the Yield First job yields
-    /// first and is held to its own mode's target, the Performance job keeps the
-    /// rest, and the aggregate is the node mode's.
+    /// Two jobs in different modes on one resource: the Yield First job yields first and is
+    /// held back by whole tasks, the Performance job keeps the rest, and the aggregate is the
+    /// node mode's. Without contention, each job below its own target, neither is held.
     #[test]
     fn the_yield_first_job_yields_first_and_the_aggregate_is_the_node_modes() {
-        for external in [0, 1000] {
+        for external in [4000, 0] {
             let run = simulate(&pair(AllocationClass::Opportunistic, CPU), external, 240);
             for (i, interval) in run.iter().enumerate() {
                 assert_eq!(
@@ -6127,52 +6124,57 @@ mod per_job_modes {
                     "external {external}, interval {i}"
                 );
             }
-            let first = run.iter().find(|i| !i.actions.is_empty()).unwrap();
-            assert!(
-                first.actions.iter().all(|a| a.allocation_id == "gentle"),
-                "external {external}: {:?}",
-                first.actions
-            );
-            // Settled over the last minute: the Performance job is never held, so it keeps
-            // what the scheduler gives it, at least the aggregate less what the Yield First job
-            // keeps (FR-030, R88).
-            let settled = &run[120..];
-            let (gentle, eager) = (average(settled, 0), average(settled, 1));
-            let aggregate = settled.last().unwrap().aggregate;
-            assert!(
-                eager + gentle + CPU / 10 >= aggregate,
-                "external {external}: {gentle} + {eager} against {aggregate}"
-            );
             assert!(
                 run.iter()
                     .all(|i| i.actions.iter().all(|a| a.allocation_id != "eager")),
                 "external {external}: the Performance job is never held"
             );
-            assert!(eager > gentle, "external {external}: {gentle} {eager}");
-            if external > 0 {
-                // Contended, Yield First's target is zero: a pause, then at most
-                // the minimum duty once the pause bound passes (FR-014).
-                assert!(
-                    settled.iter().all(|i| i.usage[0] <= CPU * 5 / 100),
-                    "external {external}: gentle {:?}",
-                    settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
-                );
+            let settled = &run[120..];
+            let (gentle, eager) = (average(settled, 0), average(settled, 1));
+            if external == 0 {
+                assert!(run.iter().all(|i| i.actions.is_empty()), "nothing contends");
+                assert_eq!(gentle, eager);
+                continue;
             }
+            let first = run.iter().find(|i| !i.actions.is_empty()).unwrap();
+            assert!(
+                first.actions.iter().all(|a| a.allocation_id == "gentle"),
+                "{:?}",
+                first.actions
+            );
+            // Settled over the last minute: the Performance job is never held, so it keeps
+            // what the scheduler gives it, at least the aggregate less what the Yield First job
+            // keeps (FR-030, R88).
+            let aggregate = settled.last().unwrap().aggregate;
+            assert!(
+                eager + gentle + CPU / 10 >= aggregate,
+                "{gentle} + {eager} against {aggregate}"
+            );
+            assert!(eager > gentle, "{gentle} {eager}");
+            // Contended, Yield First's target leaves the job nothing: it is paused, and at the
+            // pause bound it runs until the next pause, since no other task can take its place
+            // (FR-014, FR-089).
+            let paused = settled.iter().filter(|i| i.usage[0] == 0).count();
+            assert!(
+                paused * 100 >= settled.len() * 85 && gentle <= CPU * 5 / 100,
+                "gentle {:?}",
+                settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
+            );
         }
     }
 
-    /// With room in the aggregate, a Yield First job is still held to its own
-    /// mode's target: capacity less Yield First's 15% idle margin.
+    /// With room in the aggregate, a Yield First job above its own mode's target (capacity less
+    /// Yield First's 15% idle margin) by less than its own usage runs on: pausing it would take
+    /// it below that target, so rounding favours own work (FR-089's known gap).
     #[test]
-    fn a_yield_first_job_is_held_to_its_own_target_below_the_aggregate() {
+    fn a_yield_first_job_over_its_target_by_less_than_itself_runs_on() {
         let run = simulate(&pair(AllocationClass::Opportunistic, 200), 0, 240);
         let settled = &run[120..];
-        let gentle = settled.iter().map(|i| i.usage[0]).max().unwrap();
-        assert!(gentle <= CPU * 85 / 100, "{gentle}");
+        assert!(run.iter().all(|i| i.actions.is_empty()));
         assert!(
-            average(settled, 0) + CPU / 10 >= CPU * 85 / 100,
-            "{}",
-            average(settled, 0)
+            settled.iter().all(|i| i.usage[0] > CPU * 85 / 100),
+            "{:?}",
+            settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
         );
         assert_eq!(
             settled.last().unwrap().aggregate,
@@ -6181,24 +6183,29 @@ mod per_job_modes {
     }
 
     /// A Performance job on a node whose mode is Neutral or Yield First is never held for
-    /// another principal: the node's other jobs give what the aggregate needs as far as they
-    /// can, and alone on the node it is not held at all (FR-016, FR-030, R88).
+    /// another principal: the node's other tasks give what the aggregate needs as far as they
+    /// can, by whole tasks, and alone on the node it is not held at all (FR-016, FR-030, R88).
     #[test]
     fn a_performance_job_is_never_held_whatever_the_node_mode() {
-        let job = |id, mode| Job {
+        let job = |id, mode, wants| Job {
             id,
             mode,
             class: AllocationClass::Opportunistic,
             request: 1000,
-            wants: CPU,
+            wants,
         };
         for node in [ContentionMode::Neutral, ContentionMode::YieldFirst] {
             let mut cfg = cfg();
             cfg.contention.default_mode = node;
-            let jobs = [
-                job("plain", None),
-                job("eager", Some(ContentionMode::Performance)),
-            ];
+            let eager = job("eager", Some(ContentionMode::Performance), CPU);
+            let mut jobs: Vec<Job> = [
+                "plain-0", "plain-1", "plain-2", "plain-3", "plain-4", "plain-5", "plain-6",
+                "plain-7",
+            ]
+            .into_iter()
+            .map(|id| job(id, None, CPU / 8))
+            .collect();
+            jobs.push(eager);
             for external in [1000, 4000] {
                 let run = simulate_in(&cfg, &jobs, external, 240);
                 for (i, interval) in run.iter().enumerate() {
@@ -6209,12 +6216,14 @@ mod per_job_modes {
                     );
                 }
                 assert!(
-                    run.iter()
-                        .any(|i| i.actions.iter().any(|a| a.allocation_id == "plain")),
+                    run.iter().any(|i| i
+                        .actions
+                        .iter()
+                        .any(|a| a.allocation_id.starts_with("plain"))),
                     "{node:?}, external {external}: the other job pays"
                 );
             }
-            let run = simulate_in(&cfg, &jobs[1..], 4000, 120);
+            let run = simulate_in(&cfg, &jobs[8..], 4000, 120);
             assert!(
                 run.iter().all(|i| i.actions.is_empty()),
                 "{node:?}: alone, nothing is held"
@@ -6222,7 +6231,8 @@ mod per_job_modes {
         }
     }
 
-    /// The operator envelope still steps a Performance job on a Neutral node (FR-030, FR-057).
+    /// The operator envelope still steps a Performance job on a Neutral node, also while the
+    /// host's CPU reading is unknown, since the envelope is judged on own usage (FR-030, FR-057).
     #[test]
     fn the_envelope_still_steps_a_performance_job_on_a_neutral_node() {
         let mut job = allocation(
@@ -6303,7 +6313,7 @@ mod per_job_modes {
     }
 }
 
-/// Whole-task holds where no CPU rate cap applies (FR-089, R89).
+/// Whole-task holds: CPU and GPU compute take no rate cap (FR-089, R89).
 mod whole_tasks {
     use super::*;
     use cedegrid::contention::{ResourceKey, YieldStep};
@@ -6311,7 +6321,8 @@ mod whole_tasks {
 
     const CPU: u64 = 8000;
 
-    /// The node in Full: a delegated cgroup with `cpu.max` authorized, so a CPU cap applies.
+    /// The node in Full: a delegated cgroup with `cpu.max` authorized, which is a launch setting
+    /// only, so CPU takes no rate cap here either (FR-089).
     pub(super) fn full(mut cfg: Config) -> Config {
         cfg.cgroup.enabled = true;
         cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
@@ -6326,6 +6337,8 @@ mod whole_tasks {
         usage: BTreeMap<String, u64>,
         steps: BTreeMap<String, YieldStep>,
         drains: Vec<String>,
+        /// CPU admission's refusal code, if any.
+        admission: Option<String>,
     }
 
     /// Runs `jobs` (id, what each would use) beside one external principal wanting
@@ -6399,6 +6412,11 @@ mod whole_tasks {
                     .map(|(id, (step, _))| (id.clone(), *step))
                     .collect(),
                 drains: decision.would_drain.clone(),
+                admission: decision.resources[&ResourceKey::Cpu]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string),
             });
         }
         out
@@ -6423,33 +6441,28 @@ mod whole_tasks {
 
     const FOUR: [(&str, u64); 4] = [("a", 1500), ("b", 1500), ("c", 1500), ("d", 1500)];
 
-    /// In Tracked, Neutral holds own work back by pausing whole tasks, only while the tasks left
-    /// running keep own usage at or above the fair share; no cap is planned. In Full the cap
-    /// still applies (FR-089).
+    /// Neutral holds own work back by pausing whole tasks, only while the tasks left running
+    /// keep own usage at or above the fair share; no cap is planned, in Tracked and in Full
+    /// (FR-089).
     #[test]
     fn without_a_cpu_cap_neutral_pauses_whole_tasks() {
         let facts = tracked_facts(&FOUR);
-        let held = run(&tracked(), &FOUR, &facts, |_| 4000, 9_500);
-        for seen in &held {
-            assert!(
-                seen.steps.values().all(|step| *step == YieldStep::Pause),
-                "at {}: {:?}",
-                seen.now,
-                seen.steps
-            );
+        for cfg in [tracked(), full(tracked())] {
+            let held = run(&cfg, &FOUR, &facts, |_| 4000, 9_500);
+            for seen in &held {
+                assert!(
+                    seen.steps.values().all(|step| *step == YieldStep::Pause),
+                    "at {}: {:?}",
+                    seen.now,
+                    seen.steps
+                );
+            }
+            for seen in &held[6..] {
+                assert_eq!(seen.steps.len(), 1, "at {}: {:?}", seen.now, seen.steps);
+                let own: u64 = seen.usage.values().sum();
+                assert!(own >= 4000, "at {}: own {own}", seen.now);
+            }
         }
-        for seen in &held[6..] {
-            assert_eq!(seen.steps.len(), 1, "at {}: {:?}", seen.now, seen.steps);
-            let own: u64 = seen.usage.values().sum();
-            assert!(own >= 4000, "at {}: own {own}", seen.now);
-        }
-        let capped = run(&full(tracked()), &FOUR, &facts, |_| 4000, 9_500);
-        assert!(
-            capped
-                .iter()
-                .any(|seen| seen.steps.values().any(|step| *step == YieldStep::Cap)),
-            "Full keeps its cap"
-        );
     }
 
     /// A task whose pause would take own work below its target is skipped for the next in the
@@ -6516,6 +6529,32 @@ mod whole_tasks {
         );
         assert!(gone.iter().all(|s| s.drains.is_empty()));
         assert!(gone.last().unwrap().steps.is_empty());
+    }
+
+    /// A pause that moves to another task at its bound is the hold staying: admission does not
+    /// read it as own work moving down (FR-028, FR-089).
+    #[test]
+    fn a_moving_pause_does_not_close_admission() {
+        // Six tasks of 1000m beside a user wanting 4000m: two paused hold own work exactly at
+        // its 4000m target, so nothing else closes admission.
+        const SIX: [(&str, u64); 6] = [
+            ("a", 1000),
+            ("b", 1000),
+            ("c", 1000),
+            ("d", 1000),
+            ("e", 1000),
+            ("f", 1000),
+        ];
+        let held = run(&tracked(), &SIX, &tracked_facts(&SIX), |_| 4000, 60_000);
+        let mut moved = 0;
+        for pair in held[20..].windows(2) {
+            assert_eq!(pair[1].steps.len(), 2, "at {}", pair[1].now);
+            assert_eq!(pair[1].admission, None, "at {}", pair[1].now);
+            if pair[0].steps.keys().ne(pair[1].steps.keys()) {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "the pause moved");
     }
 
     /// A draining task's usage does not make the others hold: own work below its target beside
@@ -6660,8 +6699,8 @@ mod gpu_cooldown_alone {
         gpu
     }
 
-    /// A saturated CPU: own work at 6000m beside an external user at 2000m, so the
-    /// job is over its CPU target and capped.
+    /// A saturated CPU: own work at 6000m beside an external user at 2000m, so own work is over
+    /// its CPU target and a whole CPU-only task is paused for it (FR-089).
     fn contended(cpu_known: bool) -> (Snapshot, PolicyInput) {
         let mut snap = snapshot();
         snap.gpu_inventory = CapabilityStatus::Available;
@@ -6675,13 +6714,19 @@ mod gpu_cooldown_alone {
             "job",
             AllocationPhase::Running,
             resources(1000, 100, 2000),
-            Some(resources(6000, 100, 2000)),
+            Some(resources(4000, 100, 2000)),
+        );
+        let cpu = allocation(
+            "cpu",
+            AllocationPhase::Running,
+            resources(1000, 100, 0),
+            Some(resources(2000, 100, 0)),
         );
         (
             snap,
             PolicyInput {
-                allocations: vec![job],
-                facts: rootless(&["job"]),
+                allocations: vec![job, cpu],
+                facts: rootless(&["job", "cpu"]),
                 ..PolicyInput::default()
             },
         )
@@ -6692,8 +6737,8 @@ mod gpu_cooldown_alone {
     }
 
     #[test]
-    fn gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu() {
-        // Neutral only: Performance caps no CPU for others (FR-022).
+    fn gpu_memory_opens_on_its_own_cooldown_beside_a_held_cpu() {
+        // Neutral only: Performance holds no CPU for others (FR-022).
         {
             let (mode, cooldown_ms) = (ContentionMode::Neutral, 10_000);
             let cfg = cfg(mode);
@@ -6774,8 +6819,8 @@ mod gpu_cooldown_alone {
     /// This module's runs in the decision snapshot.
     pub(super) const SNAPSHOT: &[(&str, fn())] = &[
         (
-            "gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu",
-            gpu_memory_opens_on_its_own_cooldown_beside_a_capped_cpu,
+            "gpu_memory_opens_on_its_own_cooldown_beside_a_held_cpu",
+            gpu_memory_opens_on_its_own_cooldown_beside_a_held_cpu,
         ),
         (
             "an_external_gpu_workload_resets_only_its_device",
@@ -6788,8 +6833,8 @@ mod gpu_cooldown_alone {
     ];
 }
 
-/// Admission is blocked for own work only while it is being reclaimed; a cap that
-/// holds at the target leaves admission to headroom and cooldown.
+/// Admission is blocked for own work only while it is being reclaimed; a hold that leaves own
+/// work at or below the target leaves admission to headroom and cooldown.
 mod reclaim_admission {
     use super::*;
     use crate::snapshot::PolicyEngine;
@@ -6797,7 +6842,10 @@ mod reclaim_admission {
 
     const CPU: u64 = 32_000;
 
-    /// In Full, where the cap these runs hold applies (FR-089).
+    /// The job `old` runs as this many equal tasks, so whole-task holds can give back part of
+    /// it (FR-089).
+    const OLD_TASKS: u64 = 32;
+
     fn cfg(mode: ContentionMode) -> Config {
         let mut cfg = super::whole_tasks::full(Config::default());
         cfg.contention.default_mode = mode;
@@ -6841,8 +6889,7 @@ mod reclaim_admission {
         given
     }
 
-    /// Jobs by ID with what each wants, beside one external user; every cap and
-    /// pause applies at once.
+    /// Jobs by ID with what each wants, beside one external user; every pause applies at once.
     struct Sim {
         engine: PolicyEngine,
         cfg: Config,
@@ -6861,6 +6908,20 @@ mod reclaim_admission {
         }
 
         fn step(&mut self, external: u64, jobs: &[(&str, u64, u64)]) -> Decision {
+            let tasks: Vec<(String, u64, u64)> = jobs
+                .iter()
+                .flat_map(|(id, request, wants)| {
+                    let count = if *id == "old" { OLD_TASKS } else { 1 };
+                    (0..count).map(move |i| {
+                        let name = if count == 1 {
+                            id.to_string()
+                        } else {
+                            format!("{id}-{i}")
+                        };
+                        (name, request / count, wants / count)
+                    })
+                })
+                .collect();
             let limit = |id: &str| {
                 self.actions
                     .iter()
@@ -6872,9 +6933,9 @@ mod reclaim_admission {
                     })
             };
             let mut demands = vec![external];
-            demands.extend(jobs.iter().map(|(id, _, wants)| (*wants).min(limit(id))));
+            demands.extend(tasks.iter().map(|(id, _, wants)| (*wants).min(limit(id))));
             let given = share(&demands);
-            let allocations: Vec<Allocation> = jobs
+            let allocations: Vec<Allocation> = tasks
                 .iter()
                 .zip(&given[1..])
                 .map(|((id, request, _), used)| {
@@ -6886,7 +6947,7 @@ mod reclaim_admission {
                     )
                 })
                 .collect();
-            let ids: Vec<&str> = jobs.iter().map(|(id, _, _)| *id).collect();
+            let ids: Vec<&str> = tasks.iter().map(|(id, _, _)| id.as_str()).collect();
             let decision = self
                 .engine
                 .evaluate(
@@ -6931,20 +6992,19 @@ mod reclaim_admission {
     }
 
     /// A steady 12.5% user recorded as satisfied and a job that wants the whole
-    /// CPU, capped and holding at the target share.
-    fn capped(mode: ContentionMode) -> Sim {
+    /// CPU, held back by whole tasks at or just above the target share.
+    fn held(mode: ContentionMode) -> Sim {
         let mut sim = Sim::new(mode);
-        let capped = sim.run(120, 4000, &[("old", 1000, CPU)]);
-        let last = capped.last().unwrap();
-        let target = last.resources[&ResourceKey::Cpu].target_share;
-        // Performance caps no running work for others, so only the other modes hold a cap at
-        // the target share (FR-022).
+        let held = sim.run(120, 4000, &[("old", 1000, CPU)]);
+        let last = held.last().unwrap();
+        // Performance holds no running work for others, so only the other modes pause tasks
+        // (FR-022).
         assert!(
             mode >= ContentionMode::Performance
                 || last
                     .actions
                     .iter()
-                    .any(|a| a.resource == ResourceKey::Cpu && a.target == target),
+                    .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Pause),
             "{:?}",
             last.actions
         );
@@ -6962,11 +7022,12 @@ mod reclaim_admission {
         sim
     }
 
-    /// The setup: `capped`, then the job's usage falls to 10 000 m for one full
-    /// p95 window.
+    /// The setup: `held`, then the job's usage falls to 10 000 m for one full p95 window and the
+    /// CPU cooldown: the hold ends at the pause bound, since own work is far below its target,
+    /// and the window no longer holds the usage the hold left just over the target (FR-089).
     fn settled(mode: ContentionMode) -> (Sim, Decision) {
-        let mut sim = capped(mode);
-        let fallen = sim.run(130, 4000, &[("old", 1000, 10_000)]);
+        let mut sim = held(mode);
+        let fallen = sim.run(160, 4000, &[("old", 1000, 10_000)]);
         (sim, fallen.last().unwrap().clone())
     }
 
@@ -7088,16 +7149,19 @@ mod reclaim_admission {
         assert!(coordinator_places(&sim, &reclaiming, 1000).is_empty());
     }
 
-    /// FR-028, end to end: a cap that holds at the target with room below it, so an
-    /// 8000 m job passes `request_admission` and the coordinator places it.
+    /// FR-028, end to end: once own work falls far below its target the hold ends, leaving room
+    /// below the target, so an 8000 m job passes `request_admission` and the coordinator places
+    /// it.
     #[test]
-    fn a_holding_cap_places_an_8000_m_job_end_to_end() {
+    fn after_the_hold_ends_an_8000_m_job_is_placed_end_to_end() {
         let (sim, decision) = settled(ContentionMode::Neutral);
         assert!(
             decision
                 .actions
                 .iter()
-                .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap)
+                .all(|a| a.resource != ResourceKey::Cpu),
+            "{:?}",
+            decision.actions
         );
         assert_eq!(
             cedegrid::policy::request_admission(&decision, &request(8000)),
@@ -7106,16 +7170,16 @@ mod reclaim_admission {
         assert_eq!(coordinator_places(&sim, &decision, 8000), ["new"]);
     }
 
-    /// External usage that jitters by 2% of capacity beside a holding cap toggles
-    /// neither admission nor placement: with room below the cap, and with the job
-    /// using all of it, so the cap follows the target share down and up.
+    /// External usage that jitters by 2% of capacity toggles neither admission nor placement:
+    /// with room below the target and nothing held, and with the job wanting all of the CPU
+    /// and held back by whole tasks just over the target.
     #[test]
     fn small_external_jitter_keeps_admission_and_placement_steady() {
         let cases = [
             (settled(ContentionMode::Neutral).0, 10_000),
             (
                 {
-                    let mut sim = capped(ContentionMode::Neutral);
+                    let mut sim = held(ContentionMode::Neutral);
                     sim.run(140, 4000, &[("old", 1000, CPU)]);
                     sim
                 },
@@ -7132,32 +7196,34 @@ mod reclaim_admission {
                     _ => 4000,
                 };
                 let decision = sim.step(external, &[("old", 1000, wants)]);
-                assert!(
-                    decision
-                        .actions
-                        .iter()
-                        .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Cap),
-                    "wants {wants}, interval {i}: the cap holds"
-                );
-                assert_eq!(
-                    cpu_admission(&decision),
-                    Admission::Open,
-                    "wants {wants}, interval {i}, external {external}"
-                );
+                let held = decision
+                    .actions
+                    .iter()
+                    .any(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Pause);
+                assert_eq!(held, wants == CPU, "wants {wants}, interval {i}");
+                if wants == 10_000 {
+                    assert_eq!(
+                        cpu_admission(&decision),
+                        Admission::Open,
+                        "interval {i}, external {external}"
+                    );
+                }
+                // Whether it admits, not which refusal: just over its target, the hold closes
+                // admission for the jitter's pause, then for the cooldown it restarted (FR-028).
                 answers.push((
-                    cedegrid::policy::request_admission(&decision, &request(8000)),
+                    cedegrid::policy::request_admission(&decision, &request(8000)).is_ok(),
                     coordinator_places(&sim, &decision, 8000),
                 ));
             }
             assert!(answers.windows(2).all(|w| w[0] == w[1]), "{answers:?}");
-            if wants == 10_000 {
-                assert_eq!(answers[0], (Ok(()), vec!["new".to_string()]));
-            }
+            let room = wants == 10_000;
+            let placed: Vec<String> = if room { vec!["new".into()] } else { vec![] };
+            assert_eq!(answers[0], (room, placed));
         }
     }
 
     #[test]
-    fn a_holding_cap_leaves_room_below_the_target_open() {
+    fn room_below_the_target_after_a_hold_is_open() {
         let (_, decision) = settled(ContentionMode::Neutral);
         assert_eq!(
             decision.resources[&ResourceKey::Cpu].target_share,
@@ -7333,16 +7399,16 @@ mod reclaim_admission {
             a_reclaiming_resource_places_nothing_end_to_end,
         ),
         (
-            "a_holding_cap_places_an_8000_m_job_end_to_end",
-            a_holding_cap_places_an_8000_m_job_end_to_end,
+            "after_the_hold_ends_an_8000_m_job_is_placed_end_to_end",
+            after_the_hold_ends_an_8000_m_job_is_placed_end_to_end,
         ),
         (
             "small_external_jitter_keeps_admission_and_placement_steady",
             small_external_jitter_keeps_admission_and_placement_steady,
         ),
         (
-            "a_holding_cap_leaves_room_below_the_target_open",
-            a_holding_cap_leaves_room_below_the_target_open,
+            "room_below_the_target_after_a_hold_is_open",
+            room_below_the_target_after_a_hold_is_open,
         ),
         (
             "a_request_over_own_target_is_held",
@@ -7400,6 +7466,8 @@ mod yield_first_cooldown {
         engine: PolicyEngine,
         config: Config,
         now: u64,
+        /// The job's equal tasks: whole-task holds give back only what covers one (FR-089).
+        tasks: u64,
     }
 
     impl Run {
@@ -7413,6 +7481,7 @@ mod yield_first_cooldown {
                 engine: PolicyEngine::new(),
                 config,
                 now: 0,
+                tasks: 1,
             }
         }
 
@@ -7433,14 +7502,24 @@ mod yield_first_cooldown {
             others: &[(u32, u64)],
             hidden: u64,
         ) -> Decision {
+            let ids: Vec<String> = (0..self.tasks).map(|i| format!("job-{i}")).collect();
+            let part = |total: u64, i: usize| {
+                total / self.tasks + if i == 0 { total % self.tasks } else { 0 }
+            };
             let input = PolicyInput {
-                allocations: vec![allocation(
-                    "job",
-                    AllocationPhase::Running,
-                    resources(JOB, 0, 0),
-                    Some(resources(usage, 0, 0)),
-                )],
-                facts: rootless(&["job"]),
+                allocations: ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| {
+                        allocation(
+                            id,
+                            AllocationPhase::Running,
+                            resources(part(JOB, i), 0, 0),
+                            Some(resources(part(usage, i), 0, 0)),
+                        )
+                    })
+                    .collect(),
+                facts: rootless(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
                 ..PolicyInput::default()
             };
             let mut snap = snapshot();
@@ -7715,6 +7794,7 @@ mod yield_first_cooldown {
     #[test]
     fn yield_first_still_steps_down_for_an_admitted_principal_within_sc_002s_bound() {
         let mut run = Run::new(ContentionMode::YieldFirst);
+        run.tasks = 8;
         while run.now <= 30_500 {
             run.step_with(USE, 500, &[(PEER, 200)], 0);
         }
@@ -7807,6 +7887,7 @@ mod yield_first_cooldown {
     #[test]
     fn yield_first_still_steps_down_within_sc_002s_bound() {
         let mut run = Run::new(ContentionMode::YieldFirst);
+        run.tasks = 8;
         run.until(30_500, 500, 0);
         let first = run.step_using(JOB, 500, 1500);
         let second = run.step_using(JOB, 500, 1500);
@@ -7823,7 +7904,7 @@ mod yield_first_cooldown {
 
 mod measurement_window {
     use super::*;
-    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+    use cedegrid::contention::{ContentionMode, ResourceKey};
 
     /// A scoped 4-CPU reading: host busy upper and lower, own lower, and optionally the
     /// window's host busy upper and lower and own lower.
@@ -7848,16 +7929,35 @@ mod measurement_window {
     }
 
     fn input(own: u64, upper: u64) -> PolicyInput {
-        let mut task = allocation(
-            "a",
-            AllocationPhase::Running,
-            resources(250, 0, 0),
-            Some(resources(own, 0, 0)),
-        );
-        task.observed_upper = Some(resources(upper, 0, 0));
+        tasks(own, upper, 1)
+    }
+
+    /// Own work as `count` equal tasks, `a` first, so whole-task holds can give back part of
+    /// it (FR-089).
+    fn tasks(own: u64, upper: u64, count: u64) -> PolicyInput {
+        let ids: Vec<String> = (0..count)
+            .map(|i| char::from(b'a' + i as u8).to_string())
+            .collect();
+        let allocations = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                // The first task takes the remainder, so the tasks sum to own work.
+                let part = |total: u64| total / count + if i == 0 { total % count } else { 0 };
+                let mut task = allocation(
+                    id,
+                    AllocationPhase::Running,
+                    resources(250, 0, 0),
+                    Some(resources(part(own), 0, 0)),
+                );
+                task.observed_upper = Some(resources(part(upper), 0, 0));
+                task
+            })
+            .collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         PolicyInput {
-            allocations: vec![task],
-            facts: rootless(&["a"]),
+            allocations,
+            facts: rootless(&ids),
             ..Default::default()
         }
     }
@@ -7962,28 +8062,8 @@ mod measurement_window {
                 target(&joined),
                 target(&quiet)
             );
-            // Yield First and Neutral step own work within SC-002's two intervals of the rise.
-            if mode != ContentionMode::Performance {
-                let next = engine
-                    .evaluate(
-                        &config,
-                        &listed(reading((3120, 3030), 2950, None), 40),
-                        &input(2950, 3050),
-                        1500,
-                    )
-                    .unwrap();
-                let stepped = |d: &Decision| {
-                    d.actions
-                        .iter()
-                        .any(|a| a.resource == ResourceKey::Cpu && a.step != YieldStep::None)
-                };
-                assert!(
-                    stepped(&joined) || stepped(&next),
-                    "{mode:?}: no CPU step within two intervals: {:?} then {:?}",
-                    joined.actions,
-                    next.actions
-                );
-            }
+            // A step follows only where the excess covers a whole task; this one, a few
+            // hundred millicores, does not, so rounding favours own work (FR-089).
         }
     }
 
@@ -8102,7 +8182,7 @@ mod measurement_window {
             let mut engine = PolicyEngine::new();
             let steady = reading((2980, 2960), 2950, Some(((2965, 2955), 2955)));
             let decision = engine
-                .evaluate(&config, &steady, &input(2950, 2960), 0)
+                .evaluate(&config, &steady, &tasks(2950, 2960, 8), 0)
                 .unwrap();
             assert!(
                 decision.actions.is_empty(),
@@ -8112,18 +8192,18 @@ mod measurement_window {
             // A one-core contender: per interval 1050 m external, the window only an eighth of it.
             let started = reading((4000, 3990), 2950, Some(((3090, 3080), 2955)));
             let first = engine
-                .evaluate(&config, &started, &input(2950, 2960), 500)
+                .evaluate(&config, &started, &tasks(2950, 2960, 8), 500)
                 .unwrap();
             assert_eq!(external(&first), Some(1050), "{mode:?}");
             let second = engine
-                .evaluate(&config, &started, &input(2950, 2960), 1000)
+                .evaluate(&config, &started, &tasks(2950, 2960, 8), 1000)
                 .unwrap();
             assert!(
                 first
                     .actions
                     .iter()
                     .chain(&second.actions)
-                    .any(|a| a.resource == ResourceKey::Cpu && a.allocation_id == "a"),
+                    .any(|a| a.resource == ResourceKey::Cpu),
                 "{mode:?}: no CPU step within 2 intervals"
             );
         }
@@ -8330,14 +8410,17 @@ mod own_over_target {
             .collect()
     }
 
+    /// Own usage over its target while the budget holds waits the dwell, then pauses a whole
+    /// task with its own cause; the tasks the excess does not cover keep running (FR-011,
+    /// FR-089).
     #[test]
     fn own_usage_over_its_target_holds_for_the_dwell_then_steps_with_its_own_cause() {
         let config = config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
-        // Two tasks at 1960m beside 40m external: 3920m against a 3880m target.
+        // Three tasks at 3920m beside 40m external, against a 3880m target.
         let mut first_step = None;
         for now in (0..=3000).step_by(500) {
-            let (snap, input) = reading(&[1960, 1960], 40, 0, now);
+            let (snap, input) = reading(&[1940, 1940, 40], 40, 0, now);
             let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
             let actions = cpu_actions(&decision);
             if !actions.is_empty() && first_step.is_none() {
@@ -8345,19 +8428,21 @@ mod own_over_target {
                 let report = cedegrid::agent::node_contention_report(&config, &decision, 2);
                 assert_eq!(
                     report.resources[&ResourceKey::Cpu].cause_summary,
-                    std::collections::BTreeMap::from([(YieldCause::OwnOverTarget, 2)])
+                    std::collections::BTreeMap::from([(YieldCause::OwnOverTarget, 1)])
                 );
                 first_step = Some((now, actions));
             }
         }
         let (at, actions) = first_step.expect("own work never stepped down");
         assert!(at >= 1500, "stepped at {at} ms, before the dwell");
-        assert!(
-            actions
-                .iter()
-                .all(|(_, step, _, cause)| *step == YieldStep::Cap
-                    && *cause == YieldCause::OwnOverTarget),
-            "{actions:?}"
+        assert_eq!(
+            actions,
+            [(
+                "t2".to_string(),
+                YieldStep::Pause,
+                None,
+                YieldCause::OwnOverTarget
+            )]
         );
     }
 
@@ -8365,10 +8450,11 @@ mod own_over_target {
     fn a_budget_that_falls_keeps_external_growth_and_its_bounds() {
         let config = config(ContentionMode::Neutral);
         let mut engine = PolicyEngine::new();
-        let (snap, input) = reading(&[1450, 1450], 40, 0, 0);
+        let (snap, input) = reading(&[725; 4], 40, 0, 0);
         assert!(cpu_actions(&engine.evaluate(&config, &snap, &input, 0).unwrap()).is_empty());
-        // A 1000m external user arrives: the budget falls to 2880m, and own work steps at once.
-        let (mut snap, input) = reading(&[1450, 1450], 1040, 0, 500);
+        // A 1000m external user arrives: the budget falls to 2880m, and a whole task is paused
+        // at once.
+        let (mut snap, input) = reading(&[725; 4], 1040, 0, 500);
         let cpu = &mut snap.kernel.as_mut().unwrap().cpu;
         cpu.busy_window_millicores = Some(2940 + 125);
         let actions = cpu_actions(&engine.evaluate(&config, &snap, &input, 500).unwrap());
@@ -8379,50 +8465,6 @@ mod own_over_target {
                 .all(|(_, _, _, cause)| *cause == YieldCause::ExternalGrowth),
             "{actions:?}"
         );
-    }
-
-    /// Caps already held yield an external increase once between them, at one level, and not
-    /// each the whole increase (FR-011, FR-013).
-    #[test]
-    fn held_caps_yield_external_growth_once_between_them() {
-        // Neutral at Performance's 2% margin, the numbers this shape was built with: own usage
-        // over its target is stepped in Yield First and Neutral only (FR-011).
-        let mut config = config(ContentionMode::Neutral);
-        config.contention.cpu.neutral_margin_percent = Some(2);
-        config
-            .contention
-            .acknowledge_caution
-            .insert("reduced_margin".into());
-        let mut engine = PolicyEngine::new();
-        // Four tasks at 980m beside 40m external, 40m over the target: after the dwell, all
-        // four hold caps at one level.
-        let mut held = Vec::new();
-        for now in (0..=3000).step_by(500) {
-            let (snap, input) = reading(&[980; 4], 40, 0, now);
-            held = cpu_actions(&engine.evaluate(&config, &snap, &input, now).unwrap());
-        }
-        assert_eq!(held.len(), 4, "{held:?}");
-        assert!(
-            held.iter().all(|(_, _, target, _)| *target == held[0].2),
-            "{held:?}"
-        );
-        // A 400m external user arrives and the host gives own work 3600m: what is over the new
-        // target, the caps give between them, a quarter each.
-        let (snap, input) = reading(&[900; 4], 400, 0, 3500);
-        let decision = engine.evaluate(&config, &snap, &input, 3500).unwrap();
-        let over =
-            3600u64.saturating_sub(decision.resources[&ResourceKey::Cpu].target_share.unwrap());
-        let lowered = cpu_actions(&decision);
-        let after: Vec<u64> = lowered
-            .iter()
-            .map(|(_, _, target, _)| target.unwrap())
-            .collect();
-        let freed: u64 = after
-            .iter()
-            .map(|target| 900u64.saturating_sub(*target))
-            .sum();
-        assert!(over > 0 && freed.abs_diff(over) <= 4, "{over} {after:?}");
-        assert!(after.iter().all(|t| t.abs_diff(after[0]) <= 1), "{after:?}");
     }
 
     /// One thread per claim, weighted max-min over the capacity.
@@ -8452,11 +8494,13 @@ mod own_over_target {
 
     /// A measured shape: 16 tasks of 250m that make up lost CPU, on 4 CPUs beside a
     /// steady 60m user, in Yield First for 5 minutes, read one interval late with
-    /// per-interval noise inside the bound. No pause or drain, caps that change only when
-    /// external usage changes, and own work averaging at least 90% of capacity minus the user
-    /// and the margin (SC-015, SC-007).
+    /// per-interval noise inside the bound. Whole tasks are paused, each no longer than the
+    /// pause bound, nothing is drained, and own work averages at least 90% of capacity minus
+    /// the user and the margin (SC-015, SC-007, FR-089). The tasks left running make up what
+    /// the paused ones lose, so own usage stays near the capacity less the user: the user is
+    /// served, and the margin is not kept (FR-089's known gap).
     #[test]
-    fn the_run_6_shape_converges_without_pauses_or_cap_cycling() {
+    fn the_run_6_shape_holds_whole_tasks_without_drains() {
         const TASKS: usize = 16;
         const INTERVAL: u64 = 500;
         let config = config(ContentionMode::YieldFirst);
@@ -8466,8 +8510,12 @@ mod own_over_target {
         let mut last = vec![250u64; TASKS];
         let mut seed: u64 = 9;
         let (mut own_sum, mut intervals) = (0u64, 0u64);
-        let mut changes_after_convergence = 0;
-        let mut previous_caps: Option<Vec<(YieldStep, Option<u64>)>> = None;
+        let bound = config
+            .contention
+            .thresholds(cedegrid::contention::ResourceKind::Cpu)
+            .pause_bound_s
+            * 1000;
+        let mut paused_since: Vec<Option<u64>> = vec![None; TASKS];
         for tick in 0..600u64 {
             let now = tick * INTERVAL;
             seed = seed
@@ -8498,11 +8546,9 @@ mod own_over_target {
             own_sum += last.iter().sum::<u64>();
             intervals += 1;
             let decision = engine.evaluate(&config, &snap, &input, now).unwrap();
+            assert!(decision.would_drain.is_empty(), "at {now} ms");
             for action in cpu_actions(&decision) {
-                assert!(
-                    action.1 != YieldStep::Pause && action.1 < YieldStep::Drain,
-                    "at {now} ms: {action:?}"
-                );
+                assert_eq!(action.1, YieldStep::Pause, "at {now} ms: {action:?}");
             }
             for (i, step) in steps.iter_mut().enumerate() {
                 *step = decision
@@ -8510,18 +8556,15 @@ mod own_over_target {
                     .iter()
                     .find(|a| a.allocation_id == format!("t{i}") && a.resource == ResourceKey::Cpu)
                     .map_or((YieldStep::None, None), |a| (a.step, a.target));
-            }
-            if now >= 20_000 {
-                if previous_caps.as_ref().is_some_and(|caps| caps != &steps) {
-                    changes_after_convergence += 1;
+                let since = &mut paused_since[i];
+                if step.0 == YieldStep::Pause {
+                    let start = *since.get_or_insert(now);
+                    assert!(now - start <= bound, "t{i} paused since {start} at {now}");
+                } else {
+                    *since = None;
                 }
-                previous_caps = Some(steps.clone());
             }
         }
-        assert_eq!(
-            changes_after_convergence, 0,
-            "caps changed with external usage steady"
-        );
         // Capacity less the 60m user and Yield First's 15% margin.
         let target = CAPACITY - 60 - 600;
         let average = own_sum / intervals;

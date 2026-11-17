@@ -37,7 +37,7 @@ impl<'a> Interval<'a> {
         let mut victims: Vec<VictimFacts> = running()
             .map(|a| {
                 let amount = judged(input, &self.charges, &key, a);
-                let facts = ladder_facts(input, &key, &a.id, cpu_rate_cap(config));
+                let facts = ladder_facts(input, &key, &a.id);
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -351,32 +351,16 @@ impl<'a> Interval<'a> {
         if usage_excess > 0 {
             note_excess(&mut self.over_target, &key, usage_excess);
         }
-        // Own usage over its target while the budget did not fall is enforced first: held
-        // caps keep their targets, which the actuator holds from the measured rate, and no
-        // step is entered until usage has stayed over the target for the dwell with every
-        // held cap applied; then it steps with its own cause (FR-011).
+        // Own usage over its target while the budget did not fall is enforced first: no step is
+        // entered until usage has stayed over the target for the dwell; then it steps with its
+        // own cause (FR-011).
         if kind == ResourceKind::Cpu
             && cause == YieldCause::ExternalGrowth
             && usage_excess > 0
             && !self.cpu_budget_fell()
         {
             cause = YieldCause::OwnOverTarget;
-            let caps_applied =
-                self.prev
-                    .ladder
-                    .iter()
-                    .filter(|((_, k), state)| k == &key && state.step == YieldStep::Cap)
-                    .all(|((id, _), state)| {
-                        now.saturating_sub(state.entered_at_ms) >= timing.dwell_ms
-                            || input.facts.get(id).is_some_and(|facts| {
-                                facts.applied.get(&key) == Some(&YieldStep::Cap)
-                            })
-                    });
-            let since = if caps_applied {
-                self.prev.cpu_over_since.unwrap_or(now)
-            } else {
-                now
-            };
+            let since = self.prev.cpu_over_since.unwrap_or(now);
             self.next.cpu_over_since = Some(since);
             self.cpu_own_hold = now.saturating_sub(since) < timing.dwell_ms;
         }
@@ -438,12 +422,6 @@ impl<'a> Interval<'a> {
         if kind.is_memory() && (floor_breach || usage_excess > 0) {
             self.next.reclaiming.insert(key.clone());
         }
-        // Only while own work holds no excess: a step raised then frees nothing, and the
-        // excess would fall on the next victim instead.
-        let return_level =
-            (kind == ResourceKind::Cpu && self.cpu_contention_returned && usage_excess == 0)
-                .then(|| self.return_level(&key, cpu_usage))
-                .flatten();
         Frame {
             external: self.external_of(&key),
             key,
@@ -463,36 +441,10 @@ impl<'a> Interval<'a> {
                 judged_total
             },
             contention_ended: kind == ResourceKind::Cpu && self.cpu_contention_ended,
-            return_level,
             save_progress,
             keeps_mode_memory,
             envelope_excess,
         }
-    }
-
-    /// The level every CPU step held for external growth rises to when contention has just
-    /// ended: filled from the lowest up, each counted at the smaller of its target and its
-    /// usage, since room a step does not use is spare, so those steps together hold the mode's
-    /// target beside the usage of other own work, and none is lowered (FR-034, R44).
-    fn return_level(&self, key: &ResourceKey, cpu_usage: u64) -> Option<u64> {
-        let mut targets: Vec<u64> = Vec::new();
-        let mut held_usage = 0u64;
-        for ((id, k), state) in &self.prev.ladder {
-            let Some(allocation) = self.input.allocations.iter().find(|a| &a.id == id) else {
-                continue;
-            };
-            let Some(target) = returning_target(state).filter(|_| k == key) else {
-                continue;
-            };
-            let usage = cpu_usage_of(allocation);
-            targets.push(target.min(usage));
-            held_usage = held_usage.saturating_add(usage);
-        }
-        let room = self
-            .budget
-            .cpu_millicores
-            .saturating_sub(cpu_usage.saturating_sub(held_usage));
-        water_level(&mut targets, room)
     }
 
     /// A floor breach or own work beyond the operator envelope on a resource,
@@ -615,7 +567,7 @@ impl<'a> Interval<'a> {
                     (ResourceKind::Cpu, false) => cpu_usage_of(a).saturating_sub(kept_cpu(kind, a)),
                     (_, false) => judged(input, &self.charges, key, a),
                 };
-                let facts = ladder_facts(input, key, &a.id, cpu_rate_cap(config));
+                let facts = ladder_facts(input, key, &a.id);
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -656,10 +608,15 @@ impl<'a> Interval<'a> {
         // Where no rate cap applies, running CPU work yields whole tasks: in victim order, each
         // only while the excess left is at least its usage, so the own work left running stays at
         // or above its target; a paused task frees nothing more and keeps its step (FR-089).
-        if !pending_pass && kind == ResourceKind::Cpu && !cpu_rate_cap(config) {
-            // The operator envelope is own work's hard limit, not a yield: it pauses a task even
-            // where that goes below it (FR-057).
-            let envelope = frame.cause == YieldCause::EnvelopeBreach;
+        if !pending_pass && kind == ResourceKind::Cpu {
+            // The operator envelope is own work's hard limit, not a yield: what own work holds
+            // beyond it pauses a task even where that goes below the target, whatever else the
+            // resource waits on (FR-057).
+            let mut hard = if frame.cause == YieldCause::EnvelopeBreach {
+                needed
+            } else {
+                frame.envelope_excess.min(needed)
+            };
             // A draining task is leaving: its usage makes no other task hold (FR-089).
             let draining: u64 = input
                 .allocations
@@ -667,21 +624,16 @@ impl<'a> Interval<'a> {
                 .filter(|a| a.phase == AllocationPhase::Draining)
                 .map(cpu_usage_of)
                 .fold(0, u64::saturating_add);
-            let mut remaining = if envelope {
-                needed
-            } else {
-                needed.min(
-                    frame
-                        .own_usage
-                        .saturating_sub(draining)
-                        .saturating_sub(self.budget.cpu_millicores),
-                )
-            };
             // A pause still answering its demand at its bound moves to another task: it resumes,
-            // and what it used is to be held back by the next tasks in the order, so the hold
-            // stays and no task is drained for CPU (FR-014, FR-089). The envelope's pauses drain.
+            // and the next tasks in the order cover what it used, as far as own work with it
+            // running would be over its target, so the hold stays without growing and no task is
+            // drained for CPU (FR-014, FR-089). Rounding favours own work, except where own work
+            // a task over its target would fill the host: there the cover is whole, a part of a
+            // task below the target, since a saturated host hides what the others want and the
+            // hold would swing. The envelope's pauses drain.
             let bound = frame.timing.pause_bound_ms;
             let mut rotated = BTreeSet::new();
+            let (mut resumed_usage, mut largest) = (0u64, 0u64);
             for victim in &victims {
                 if let Some(state) = self.prev.ladder.get(&(victim.id.clone(), key.clone()))
                     && state.step == YieldStep::Pause
@@ -689,11 +641,26 @@ impl<'a> Interval<'a> {
                     && now.saturating_sub(state.entered_at_ms) >= bound
                 {
                     rotated.insert(victim.id.clone());
-                    remaining = remaining.saturating_add(state.paused_usage.unwrap_or(0));
+                    let usage = state.paused_usage.unwrap_or(0);
+                    resumed_usage = resumed_usage.saturating_add(usage);
+                    largest = largest.max(usage);
                 }
             }
+            let over = |own: u64| {
+                own.saturating_sub(draining)
+                    .saturating_sub(self.budget.cpu_millicores)
+            };
+            let mut remaining = needed.min(over(frame.own_usage));
+            let mut cover = resumed_usage.min(over(frame.own_usage.saturating_add(resumed_usage)));
+            let whole = (frame.own_usage + resumed_usage - cover)
+                .saturating_sub(draining)
+                .saturating_add(largest)
+                .saturating_add(frame.external)
+                >= self.cpu_capacity;
+            let mut moved = Vec::new();
             for victim in victims {
                 if rotated.contains(&victim.id) {
+                    moved.push(victim.id.clone());
                     planned.insert(victim.id.clone());
                     let mut resumed = self.prev.ladder[&(victim.id.clone(), key.clone())].clone();
                     resumed.step = YieldStep::None;
@@ -704,61 +671,42 @@ impl<'a> Interval<'a> {
                         .insert((victim.id.clone(), key.clone()), resumed);
                     continue;
                 }
-                let fits = victim.amount <= remaining || envelope && remaining > 0;
-                let mut share = if victim.amount > 0 && fits {
+                let fits = victim.amount <= remaining
+                    || hard > 0
+                    || cover > 0 && (whole || victim.amount <= cover);
+                let asked = if victim.amount > 0 && fits {
                     victim.amount
                 } else {
                     0
                 };
-                remaining = remaining.saturating_sub(share);
+                let mut share = asked;
+                let id = (victim.id.clone(), key.clone());
                 planned.insert(victim.id.clone());
                 self.plan_victim(frame, victim, pending_pass, false, &mut share);
-            }
-            return;
-        }
-        // Running CPU yields tier by tier (FR-016). Within a tier, caps already held are lowered
-        // at one level, as they rise equally (FR-013), and own usage over its target is shared
-        // the same way (FR-011), so no single cap falls to the minimum duty and escalates; new
-        // victims then share what remains by usage, at one level, so none is capped to 0 for it.
-        if !pending_pass && kind == ResourceKind::Cpu {
-            let own_cause = frame.cause == YieldCause::OwnOverTarget;
-            let held = |v: &VictimFacts| {
-                self.prev
+                // Only a task that is paused counts: one whose pause waits, as for its dwell,
+                // leaves its part to the next in the order.
+                let paused = self
+                    .next
                     .ladder
-                    .get(&(v.id.clone(), key.clone()))
-                    .is_some_and(|state| state.step == YieldStep::Cap)
-            };
-            let tier = |v: &VictimFacts| (v.frees, v.pending, v.mode, v.guaranteed);
-            let mut remaining = needed;
-            let mut rest = victims.as_slice();
-            let mut tiers = Vec::new();
-            while let Some(first) = rest.first() {
-                let len = rest.iter().take_while(|v| tier(v) == tier(first)).count();
-                let (held, new): (Vec<VictimFacts>, Vec<VictimFacts>) = rest[..len]
-                    .iter()
-                    .cloned()
-                    .partition(|v| own_cause || held(v));
-                tiers.push((held, new));
-                rest = &rest[len..];
+                    .get(&id)
+                    .is_some_and(|state| state.step >= YieldStep::Pause);
+                let freed = if paused { asked } else { asked - share };
+                remaining = remaining.saturating_sub(freed);
+                hard = hard.saturating_sub(freed);
+                cover = cover.saturating_sub(freed);
             }
-            for group in tiers.into_iter().flat_map(|(held, new)| [held, new]) {
-                // Jobs in Performance and Aggressive pay only what the envelope still needs once
-                // the jobs before them have paid (FR-030).
-                if group
-                    .first()
-                    .is_some_and(|v| v.mode >= ContentionMode::Performance)
-                {
-                    let paid = needed.saturating_sub(remaining);
-                    remaining = remaining.min(frame.envelope_excess.saturating_sub(paid));
+            // Where no running task is left to take their place, as when Yield First pauses every
+            // task, the moved pauses take turns: the first resumes and the rest hold again from
+            // now, so own work keeps one task running instead of all at once (FR-014, FR-089).
+            for id in moved.iter().skip(1) {
+                let mut held = self.prev.ladder[&(id.clone(), key.clone())].clone();
+                let usage = held.paused_usage.unwrap_or(0);
+                if cover == 0 || !whole && usage > cover {
+                    break;
                 }
-                let total: u64 = group.iter().map(|v| v.amount).sum();
-                let level = fill_level(&group, remaining.min(total));
-                for victim in group {
-                    let mut share = victim.amount.saturating_sub(level);
-                    remaining = remaining.saturating_sub(share);
-                    planned.insert(victim.id.clone());
-                    self.plan_victim(frame, victim, pending_pass, false, &mut share);
-                }
+                held.entered_at_ms = now;
+                cover = cover.saturating_sub(usage);
+                self.next.ladder.insert((id.clone(), key.clone()), held);
             }
             return;
         }
@@ -1007,9 +955,10 @@ impl<'a> Interval<'a> {
         if own_excess > 0 {
             note_excess(&mut self.over_target, key, own_excess);
         }
-        // Whole tasks where no CPU rate cap applies (FR-089): a job above its own mode's target is
-        // paused for it only when that target leaves it nothing to run.
-        let whole = kind == ResourceKind::Cpu && !pending_pass && !cpu_rate_cap(config);
+        // CPU takes no rate cap, so running CPU work is held back by whole tasks (FR-089): a job
+        // above its own mode's target is paused for it only when that target leaves it nothing
+        // to run.
+        let whole = kind == ResourceKind::Cpu && !pending_pass;
         let own_excess = if whole && own_excess < victim.amount {
             0
         } else {
@@ -1031,7 +980,7 @@ impl<'a> Interval<'a> {
                 .guaranteed_hint_deadline_s
                 .saturating_mul(1000);
         }
-        let facts = ladder_facts(input, key, &victim.id, cpu_rate_cap(config));
+        let facts = ladder_facts(input, key, &victim.id);
         let mut unavailable = facts.unavailable.get(key).cloned().unwrap_or_default();
         if pending_pass {
             // Nothing runs yet: cancelling the reservation is the only step.
@@ -1043,16 +992,20 @@ impl<'a> Interval<'a> {
             ]);
         }
         let contended = excess > 0 && victim.frees;
-        // When contention has just ended, a binding step held for external growth rises to the
-        // return level in one move, without the dwell; others take their own paths (R44).
-        let returning = (!contended)
-            .then_some(frame.return_level)
-            .flatten()
-            .zip(state.and_then(returning_target))
-            .filter(|(_, held)| victim.amount.saturating_mul(100) >= held.saturating_mul(95))
-            .map(|(level, held)| level.max(held));
-        victim_timing.returning =
-            returning.is_some() || whole && frame.contention_ended && frame.usage_excess == 0;
+        // When contention has ended, a whole-task pause returns in one move, without the dwell
+        // (R44, FR-089).
+        victim_timing.returning = whole && frame.contention_ended && frame.usage_excess == 0;
+        // A pause held for own usage over its target is not ended because one task's usage fell
+        // while own work is not below its target by the contention floor (FR-013, FR-089).
+        if whole
+            && !contended
+            && let Some(held) = state.filter(|s| self.holds_own_pause(s, frame))
+        {
+            self.next
+                .ladder
+                .insert((victim.id.clone(), key.clone()), held.clone());
+            return;
+        }
         // Whole tasks take no CPU hint and drain only for the envelope, at the pause bound
         // (FR-014, FR-057, FR-089).
         let escalates = whole
@@ -1071,16 +1024,6 @@ impl<'a> Interval<'a> {
                     && s.cause == YieldCause::EnvelopeBreach
                     && now.saturating_sub(s.entered_at_ms) < victim_timing.pause_bound_ms
             })
-        {
-            self.next
-                .ladder
-                .insert((victim.id.clone(), key.clone()), held.clone());
-            return;
-        }
-        if kind == ResourceKind::Cpu
-            && !pending_pass
-            && !contended
-            && let Some(held) = state.filter(|s| self.holds_own_cap(s, frame))
         {
             self.next
                 .ladder
@@ -1114,17 +1057,16 @@ impl<'a> Interval<'a> {
                 memory_usage: kind.is_memory().then_some(victim.amount),
                 // What the allocation may use: while contended, a cap
                 // or hint target; while calm, its usage plus its share
-                // of the spare, toward which a held cap rises, and when
-                // contention has just ended, the return level; never
+                // of the spare, toward which a held cap rises; never
                 // above its own mode's target.
                 target: Some(
-                    match (contended, returning) {
-                        (true, _) => victim.amount.saturating_sub(excess).saturating_add(kept),
-                        (false, Some(level)) => level,
-                        _ => victim
+                    if contended {
+                        victim.amount.saturating_sub(excess).saturating_add(kept)
+                    } else {
+                        victim
                             .amount
                             .saturating_add(frame.spare_share)
-                            .saturating_add(kept),
+                            .saturating_add(kept)
                     }
                     .min(limit.unwrap_or(u64::MAX)),
                 ),
@@ -1222,12 +1164,10 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// Hysteresis for `own_over_target` caps (FR-013): while own work is not below its
-    /// target by the contention floor, a held cap within the budget is not relaxed because
-    /// one task's usage fell, so own work stays at its target and the contender's share
-    /// holds. A cap above the whole budget, as after external growth, no longer binds and
-    /// reverses as before.
-    fn holds_own_cap(&self, state: &StepState, frame: &Frame) -> bool {
+    /// Hysteresis for `own_over_target` pauses (FR-013, FR-089): while own work is not below its
+    /// target by the contention floor, a held pause holds, so own work stays at its target and
+    /// does not pause and resume a task by turns. At its bound the pause moves as any does.
+    fn holds_own_pause(&self, state: &StepState, frame: &Frame) -> bool {
         let floor = (self.cpu_capacity.saturating_mul(u64::from(
             self.config
                 .contention
@@ -1235,12 +1175,9 @@ impl<'a> Interval<'a> {
                 .principal_min_percent,
         )) / 100)
             .max(1);
-        state.step == YieldStep::Cap
+        state.step == YieldStep::Pause
             && state.cause == YieldCause::OwnOverTarget
             && frame.own_usage.saturating_add(floor) > self.budget.cpu_millicores
-            && state
-                .target
-                .is_some_and(|target| target <= self.budget.cpu_millicores)
     }
 
     /// Steps of allocations that are no longer candidates hold or reverse.
@@ -1262,12 +1199,6 @@ impl<'a> Interval<'a> {
             ) {
                 continue;
             }
-            if kind == ResourceKind::Cpu && self.holds_own_cap(state, frame) {
-                self.next
-                    .ladder
-                    .insert((id.clone(), step_key.clone()), state.clone());
-                continue;
-            }
             let decision = plan_step(
                 Some(state),
                 &LadderInput {
@@ -1280,7 +1211,7 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: is_guaranteed(allocation),
                     allow_drain: false,
-                    unavailable: ladder_facts(input, key, id, cpu_rate_cap(config))
+                    unavailable: ladder_facts(input, key, id)
                         .unavailable
                         .get(key)
                         .cloned()
@@ -1895,8 +1826,6 @@ struct Frame {
     own_usage: u64,
     /// CPU contention has fully ended: held steps rise without the mode's interval.
     contention_ended: bool,
-    /// The first interval it has: the level held CPU steps rise to in one move (R44).
-    return_level: Option<u64>,
     /// A memory floor is breached with a known fair share: in-share tasks not yet asked in the
     /// episode get the save-progress signal (FR-075).
     save_progress: bool,
@@ -1955,15 +1884,10 @@ fn unknown_window(config: &Config, kind: ResourceKind) -> u64 {
 /// acknowledged its target file takes a hint (FR-062); recordings without facts
 /// have no target channel. A RAM cap needs a backend that reports it can apply
 /// one.
-fn ladder_facts(
-    input: &PolicyInput,
-    key: &ResourceKey,
-    id: &str,
-    cpu_cap: bool,
-) -> AllocationFacts {
+fn ladder_facts(input: &PolicyInput, key: &ResourceKey, id: &str) -> AllocationFacts {
     let mut facts = input.facts.get(id).cloned().unwrap_or_default();
-    // Without a CPU rate cap, CPU work is held back by whole tasks (FR-089).
-    if *key == ResourceKey::Cpu && !cpu_cap {
+    // CPU work has no rate cap at either level: it is held back by whole tasks (FR-089).
+    if *key == ResourceKey::Cpu {
         facts
             .unavailable
             .entry(key.clone())
@@ -2086,27 +2010,6 @@ fn compute_unavailable(
     steps
 }
 
-/// The level at which capping every victim's amount frees `needed`: the sum of each amount
-/// above the level is at least `needed`, at the highest such level.
-fn fill_level(victims: &[VictimFacts], needed: u64) -> u64 {
-    let mut amounts: Vec<u64> = victims.iter().map(|v| v.amount).collect();
-    amounts.sort_unstable();
-    let total: u64 = amounts.iter().sum();
-    let keep = total.saturating_sub(needed);
-    // Water-fill from the smallest amounts up: those below the level keep all they use. Compared
-    // before dividing, so with nothing needed the level is the largest amount and no one gives.
-    let mut below = 0u64;
-    for (count, amount) in amounts.iter().enumerate() {
-        let open = (amounts.len() - count) as u64;
-        let left = keep.saturating_sub(below);
-        if amount.saturating_mul(open) >= left {
-            return left / open;
-        }
-        below += amount;
-    }
-    0
-}
-
 /// Whether a held step is a CPU drain the pending pass planned for opportunistic work that now
 /// runs: it no longer applies, and the allocation is planned as running work (FR-012).
 fn replanned_pending_drain(
@@ -2121,70 +2024,8 @@ fn replanned_pending_drain(
         && state.is_some_and(|state| state.pending && state.step >= YieldStep::Drain)
 }
 
-/// A step's target for the return level, when it was held for external growth: a cap's or
-/// hint's, nothing for a pause. Steps held for other causes keep their own paths.
-fn returning_target(state: &StepState) -> Option<u64> {
-    if state.cause != YieldCause::ExternalGrowth {
-        return None;
-    }
-    match state.step {
-        YieldStep::Cap | YieldStep::Hint => Some(state.target.unwrap_or(0)),
-        YieldStep::Pause => Some(0),
-        _ => None,
-    }
-}
-
-/// The level that lifts the lowest of `targets` so that together they hold `room`, none
-/// lowered; none when they already hold it.
-fn water_level(targets: &mut [u64], room: u64) -> Option<u64> {
-    targets.sort_unstable();
-    let mut above: u64 = targets.iter().sum();
-    if targets.is_empty() || room <= above {
-        return None;
-    }
-    for (i, target) in targets.iter().enumerate() {
-        above -= target;
-        let raised = i as u64 + 1;
-        let level = room.saturating_sub(above) / raised;
-        if targets.get(i + 1).is_none_or(|next| level <= *next) {
-            return Some(level.max(*target));
-        }
-    }
-    None
-}
-
 fn cpu_usage_of(allocation: &Allocation) -> u64 {
     allocation.observed.as_ref().map_or(0, |o| o.cpu_millicores)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::water_level;
-
-    /// The return level lifts the lowest steps until they hold the room, and never lowers one
-    /// (FR-034, R44).
-    #[test]
-    fn the_return_level_fills_the_lowest_first_and_lowers_none() {
-        let fill = |targets: &[u64], room| water_level(&mut targets.to_vec(), room);
-        assert_eq!(fill(&[1, 5, 24, 135, 184], 1000), Some(200));
-        // The highest stays where it is: 100 + 100 + 900 holds 1100.
-        assert_eq!(fill(&[100, 900, 10], 1100), Some(100));
-        assert_eq!(fill(&[300, 300], 600), None, "already holding the room");
-        assert_eq!(fill(&[300, 300], 500), None, "never lowered");
-        assert_eq!(fill(&[], 1000), None);
-        for (targets, room) in [
-            (vec![0, 7, 250, 3000], 4000u64),
-            (vec![13; 9], 200),
-            (vec![5], 6),
-        ] {
-            let level = fill(&targets, room).unwrap();
-            let held: u64 = targets.iter().map(|t| (*t).max(level)).sum();
-            assert!(
-                held <= room && room - held < targets.len() as u64,
-                "{targets:?} {room} {level}"
-            );
-        }
-    }
 }
 
 /// An over-share task's part of the excess in one memory pass (FR-016, FR-023): the excess left

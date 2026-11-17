@@ -1174,13 +1174,20 @@ pub fn plan_step(
     let mut held = state.clone();
     held.contended_since_ms = None;
     // Where no cap applies, a pause held for external growth ends in the interval contention has
-    // ended, as a cap would rise there (FR-034, FR-089).
+    // ended, as a cap would rise there (FR-034, FR-089). Ending it leaves no step to dwell on, so
+    // a contender that returns is answered at once, as a lowered cap would answer it (SC-002).
     if current == YieldStep::Pause
         && timing.returning
         && state.cause == YieldCause::ExternalGrowth
         && (!input.applies(YieldStep::Cap) || input.unavailable.contains(&YieldStep::Cap))
     {
         held.step = input.previous_step(current);
+        if held.step == YieldStep::None {
+            return LadderDecision {
+                state: None,
+                skipped: Vec::new(),
+            };
+        }
         held.entered_at_ms = now_ms;
         held.target = None;
         held.calm_since_ms = None;

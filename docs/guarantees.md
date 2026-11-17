@@ -186,7 +186,7 @@ supervisor reports applied counts as holding nothing. Unknown activity from a te
 or a missing observation first holds the steps and escalates after the unknown window. Each device's held-back breakdown says which
 path it took and why. An empty-device pass is not evidence of occupied-device sharing. See [GPU
 operation](coordinator-work.md#gpu-modes).
-In Full a restriction (a freeze, a lower `cpu.max` or `cpu.weight`, a `memory.high` cap) is
+In Full a restriction (a freeze, a lower `cpu.weight`, a `memory.high` cap) is
 written only while the leaf's members are exactly the verified family. A process that joins a
 frozen leaf, between the check and the write or while it holds, is thawed at once, within
 50 ms, and the step moves to the rootless mechanism, which reaches only the verified family; a
@@ -194,7 +194,7 @@ member list that cannot be read twice in a row counts as changed. Lifting what t
 wrote needs only its own leaf, whatever its members, and never tightens a control: a drain, the
 leader's exit, a supervisor error and a stop signal return every control it wrote to its launch
 value, and a restore that fails is reported and retried every 50 ms while the supervisor lives.
-A `cpu.max`, `cpu.weight` or `memory.high` cap stays on a leaf a foreign process joined while the
+A lower `cpu.weight` or a `memory.high` cap stays on a leaf a foreign process joined while the
 step holds, until the step changes or ends. The cap was written only to a leaf read as holding
 exactly the verified family; a process that enters afterwards comes under a limit already there,
 and CedeGrid writes nothing for it. A supervisor that is killed lifts nothing: its leaf keeps
@@ -312,16 +312,16 @@ recorded. On contended compute, Yield First pauses opportunistic
 work; while a small demand is probed it steps down with the probe instead. While own work
 holds more than capacity minus Yield First's margin, saturation may be its own doing, so
 Yield First first holds it to the margin within the fair share and pauses all of it only if
-the contention remains. Neutral holds the max-min fair share. Where a CPU rate cap applies,
-in Full with `cpu.max` authorized, own work is capped to its target, and after
-`pause_bound_s` (10 s) a pause becomes a cap at the 5% minimum duty while the contention
-lasts. In Tracked no rate cap applies: Yield First and Neutral pause whole tasks, in victim
-order, only while the own work left running stays at or above the target, so a task whose
-pause would go below it is skipped and rounding favours own work. A pause still answering its
-demand at `pause_bound_s` moves to another task: the paused task resumes and the next one in the
-order takes its place, so no task is drained for CPU and none stays stopped past the bound. A
-task that is draining makes no other task hold. A pause for the operator envelope drains at the
-bound. A job's own mode, within
+the contention remains. Neutral holds the max-min fair share. No CPU rate cap applies, in
+Tracked or in Full (where `cpu.max` is a launch setting only): Yield First and Neutral pause
+whole tasks, in victim order, only while the own work left running stays at or above the
+target, so a task whose pause would go below it is skipped and rounding favours own work; a
+task larger than the excess is therefore not held, and the other user then gets what plain
+Linux gives it. A pause still answering its demand at `pause_bound_s` (10 s) moves to another
+task: the paused task resumes and the next one in the order takes its place, as far as own work
+with it running would be over its target, so no task is drained for CPU. Where every task is
+paused, as in Yield First, the pauses take turns, one task running at a time. A task that is
+draining makes no other task hold. A pause for the operator envelope drains at the bound. A job's own mode, within
 the node cap, decides how that job gives back: a job in Performance or Aggressive is never held
 for another principal, for unknown activity or at a floor breach, whatever the node's mode, and
 only the operator's envelope steps it. The node's other jobs then give what its target needs as
@@ -397,7 +397,8 @@ so for that resource, and the coordinator still authorizes reservations it place
 while they fit the budget; it places nothing new there, and any other cause, a GPU resource or
 a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
 of the external growth a compute step answered (`hysteresis_percent` of that demand), is
-jitter: it blocks no admission, and a CPU cap that holds within it resets no cooldown. Admission then follows headroom, cooldown and reclaim backoff: own
+jitter: it blocks no admission, and a step that holds within it resets no cooldown. A pause
+that moves to another task at its bound is the hold staying, not a step down. Admission then follows headroom, cooldown and reclaim backoff: own
 charged usage plus a new request stays within own target, the aggregate from the node mode
 and cap, and a request beyond it waits (`admission_over_own_target`). After a reclaim the
 resource waits for its cooldown again, so admitting, growing and capping cannot cycle. GPU memory waits for
@@ -855,7 +856,8 @@ cannot run merely because spawning the gate succeeded.
 Cgroup v2 operates only within a configured delegated subtree using pinned directory
 handles. CPU/memory settings are explicit and read back before EXEC. `cpu.weight`
 is a relative hierarchical weight: it is neither a CPU percentage nor a guaranteed
-allocation. `cpu.max` is a separate opt-in bandwidth cap; there is no default quota.
+allocation. `cpu.max` is a separate opt-in launch bandwidth cap; there is no default quota,
+and no runtime step writes it.
 Memory controls do not enforce GPU VRAM. Ancestor limits and permitted CPU sets
 remain applicable. This increment removes only a confirmed-empty owned cgroup;
 nonempty cleanup and cgroup.kill are unavailable pending stronger ownership proof.
