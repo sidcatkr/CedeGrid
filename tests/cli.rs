@@ -206,12 +206,10 @@ fn observe_and_doctor_show_each_resource() {
         doctor["caution_options"][0]["settings"][0]["key"],
         "contention.cpu.neutral_margin_percent"
     );
-    assert!(
-        doctor["available_steps"]["cpu"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("cap"))
-    );
+    // Tracked takes no CPU rate cap; it pauses whole tasks (FR-089).
+    let cpu_steps = doctor["available_steps"]["cpu"].as_array().unwrap();
+    assert!(cpu_steps.contains(&json!("pause")), "{cpu_steps:?}");
+    assert!(!cpu_steps.contains(&json!("cap")), "{cpu_steps:?}");
     assert!(doctor["floors"]["ram"]["effective_mib"].is_u64());
     assert!(doctor["legacy_gpu"]["interpretation"].is_string());
     let text = run(&path, &["doctor", "--text"]);

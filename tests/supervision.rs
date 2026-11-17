@@ -1799,8 +1799,10 @@ mod actuation {
         );
     }
 
+    /// Tracked has no CPU rate cap: a cap is reported unavailable and the worker runs on at its
+    /// rate; a pause stops it and its end resumes it (FR-089).
     #[test]
-    fn a_cpu_cap_throttles_a_busy_worker_by_duty_cycle_and_reverses() {
+    fn a_tracked_cpu_cap_is_unavailable_and_a_pause_stops_the_worker() {
         let temp = TempDir::new().unwrap();
         let mut req = request(temp.path());
         req.class = AllocationClass::Opportunistic;
@@ -1815,12 +1817,15 @@ mod actuation {
                 after("free1", &counter, "free0", 1000),
                 send(adjust(1, YieldStep::Cap, Some(250))),
                 wait(|seen| seen.adjusted(1)),
-                // Two duty periods let the cap take hold.
-                wait(|seen| seen.since_adjusted(1) >= 200),
                 record(&[("capped0", &counter)]),
                 after("capped1", &counter, "capped0", 1000),
-                send(adjust(2, YieldStep::None, None)),
+                send(adjust(2, YieldStep::Pause, None)),
                 wait(|seen| seen.adjusted(2)),
+                wait(|seen| seen.since_adjusted(2) >= 200),
+                record(&[("paused0", &counter)]),
+                after("paused1", &counter, "paused0", 1000),
+                send(adjust(3, YieldStep::None, None)),
+                wait(|seen| seen.adjusted(3)),
                 record(&[("resumed0", &counter)]),
                 after("resumed1", &counter, "resumed0", 1000),
             ],
@@ -1835,19 +1840,22 @@ mod actuation {
         .unwrap();
         script.check();
         assert_eq!(outcome.exit_code, Some(0));
-        let (applied, _) = adjusted(&script.seen.reports, 1);
-        assert_eq!(applied[&ResourceKey::Cpu], YieldStep::Cap);
+        let (applied, unavailable) = adjusted(&script.seen.reports, 1);
+        assert_eq!(applied.get(&ResourceKey::Cpu), Some(&YieldStep::None));
+        assert_eq!(unavailable[&ResourceKey::Cpu], [YieldStep::Cap]);
         let free = script.seen.rate("free0", "free1");
         let capped = script.seen.rate("capped0", "capped1");
+        let paused = script.seen.rate("paused0", "paused1");
         let resumed = script.seen.rate("resumed0", "resumed1");
-        assert!(capped < 0.6 * free, "free {free} capped {capped}");
+        assert!(capped > 0.7 * free, "free {free} capped {capped}");
+        assert!(paused < 0.1 * free, "free {free} paused {paused}");
         assert!(resumed > 0.7 * free, "free {free} resumed {resumed}");
     }
 
-    /// A new CPU cap holds while its journal record waits for a locked journal: the record waits
-    /// only the bounded time, so the duty cycle keeps its phases (R84).
+    /// A new pause holds while its journal record waits for a locked journal: the record waits
+    /// only the bounded time (R84).
     #[test]
-    fn a_cpu_cap_keeps_its_phases_while_its_record_waits() {
+    fn a_pause_holds_while_its_record_waits() {
         let temp = TempDir::new().unwrap();
         let mut req = request(temp.path());
         req.class = AllocationClass::Opportunistic;
@@ -1860,9 +1868,12 @@ mod actuation {
                 running(&counter),
                 record(&[("free0", &counter)]),
                 after("free1", &counter, "free0", 1000),
-                record(&[("capped0", &counter)]),
-                send(adjust(1, YieldStep::Cap, Some(250))),
-                after("capped1", &counter, "capped0", 1500),
+                send(adjust(1, YieldStep::Pause, None)),
+                wait(|seen| seen.since_adjusted(1) >= 200),
+                record(&[("paused0", &counter)]),
+                after("paused1", &counter, "paused0", 1500),
+                send(adjust(2, YieldStep::None, None)),
+                wait(|seen| seen.adjusted(2)),
             ],
         );
         let journal = Journal {
@@ -1879,8 +1890,8 @@ mod actuation {
         .unwrap();
         script.check();
         let free = script.seen.rate("free0", "free1");
-        let capped = script.seen.rate("capped0", "capped1");
-        assert!(capped < 0.6 * free, "free {free} capped {capped}");
+        let paused = script.seen.rate("paused0", "paused1");
+        assert!(paused < 0.1 * free, "free {free} paused {paused}");
     }
 }
 
