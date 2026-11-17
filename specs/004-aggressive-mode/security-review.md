@@ -20,12 +20,12 @@ candidate's commit, and this list is updated at that commit.
 | `src/agent/service.rs` (the launch check) | a grant is refused before launch unless every condition holds; the warning event | end-to-end agent test (T019, open) |
 | `src/contention.rs` (`own_allowance`, `ModeInput.unprotected`) | the unprotected allowance: capacity on compute, never into unknown activity or on memory | `tests/contention.rs` `unprotected::*`, `aggressive::*` |
 | `src/policy/measure.rs`, `src/policy.rs`, `src/model.rs` (`unprotected_budget`) | the grant's budget, only under an Aggressive cap and never while CPU is unknown | `tests/policy.rs` `the_unprotected_budget_exists_only_under_an_aggressive_cap` |
-| `src/agent/report.rs` (`unprotected_permitted`) | the budget is reported only while the allowance reads on and, in a unit, the key permits | open: a report-level test |
+| `src/agent/report.rs` (`unprotected_permitted`) | the budget is reported only while the allowance reads on and, in a unit, the key permits | `tests/policy.rs` `the_report_carries_the_unprotected_budget_only_under_the_allowance` |
 | `src/coordinator.rs` (`placement`) | a granted request is placed against the unprotected budget; every other request as before | `tests/coordinator.rs` `a_granted_request_is_placed_against_the_unprotected_budget` |
 
 ## Open before the review
 
 - T019: the end-to-end agent test of the launch check, and keeping the grant across a retry.
-- A test of `unprotected_permitted` against a real state database, and inside a unit.
+- A test of `unprotected_permitted` inside a System mode unit (the container).
 - T020's container fixture for the administrator key.
 - The native gates (T035).

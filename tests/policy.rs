@@ -10035,3 +10035,47 @@ fn the_unprotected_budget_exists_only_under_an_aggressive_cap() {
             .is_none()
     );
 }
+
+/// 004 R12: the node reports the unprotected budget only while the host's allowance reads on.
+#[test]
+fn the_report_carries_the_unprotected_budget_only_under_the_allowance() {
+    use cedegrid::contention::ContentionMode;
+    use cedegrid::state::{StateStore, clear_allowance, set_allowance};
+    let state = tempfile::tempdir().unwrap();
+    drop(StateStore::open(state.path()).unwrap());
+    let mut cfg = config();
+    cfg.state_dir = state.path().to_path_buf();
+    cfg.contention.default_mode = ContentionMode::Aggressive;
+    cfg.contention.max_mode = Some(ContentionMode::Aggressive);
+    cfg.contention
+        .acknowledge_caution
+        .insert("aggressive_mode".into());
+    let mut snap = snapshot();
+    snap.cpu_busy_millicores = Some(7000);
+    let input = PolicyInput {
+        allocations: vec![allocation(
+            "mine",
+            AllocationPhase::Running,
+            resources(2000, 0, 0),
+            Some(resources(2000, 0, 0)),
+        )],
+        facts: rootless(&["mine"]),
+        ..Default::default()
+    };
+    let decision = PolicyEngine::new()
+        .evaluate(&cfg, &snap, &input, 0)
+        .unwrap();
+    assert!(decision.unprotected_budget.is_some());
+    let report = |cfg: &Config| cedegrid::agent::node_contention_report(cfg, &decision, 1);
+    assert!(report(&cfg).unprotected_budget.is_none(), "allowance off");
+    set_allowance(state.path(), 1).unwrap();
+    assert_eq!(report(&cfg).unprotected_budget, decision.unprotected_budget);
+    clear_allowance(state.path()).unwrap();
+    assert!(
+        report(&cfg).unprotected_budget.is_none(),
+        "allowance cleared"
+    );
+    // A state directory that cannot be read reads as off.
+    cfg.state_dir = state.path().join("missing");
+    assert!(report(&cfg).unprotected_budget.is_none());
+}
