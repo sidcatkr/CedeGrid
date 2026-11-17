@@ -86,11 +86,14 @@ the support boundary. In short:
 
 - CedeGrid acts only on processes it launched and verified. It never signals, renices,
   throttles, pauses, moves or adopts any other process, and never acts on a persisted PID.
-- Own work gives capacity back first. Own priority is never raised above the default.
+- Harm is measured against the same own work run without CedeGrid. Yield First and Neutral give
+  capacity back first; Performance and Aggressive hold back only at admission. Own priority is
+  never raised above the default.
 - Unknown or stale telemetry is never idle or free. Responses to it are graduated.
 - User code runs only after the launch barrier persists Authorized.
-- `policy.rs` stays pure; telemetry and kernel code are read-only; effects live in the agent
-  and supervisor.
+- `policy.rs` stays pure; telemetry and kernel code are read-only; effects live in the agent,
+  the supervisor and, in System mode, the root broker (`src/broker/`), whose limits Principle V
+  lists. Nothing else runs as root.
 - Never weaken ownership checks, launch barriers, retained reservations or unknown handling to
   make a test pass. macOS results are not Linux runtime evidence.
 
