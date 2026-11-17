@@ -1087,6 +1087,37 @@ bash runs-037.sh <commit> <second account uid> core058c
 #       --probe-env GLIBC_TUNABLES=glibc.malloc.tcache_count=0, twice each
 ```
 
+## Report 057 Part C: whole-task holds and the first-come floor (T621)
+
+Gates that read a GPU compute duty or a Tracked CPU cap (T456's d0 forms, items 041 to 053's
+duty rows, the aligned-phase and step-up checks) describe a mechanism that is gone (FR-089) and
+are not rerun. Their records stay in `docs/validation.md`. On the test host, at the last commit,
+at least 3 runs each way:
+
+- **E9** (SC-017, SC-020): two own GPU probes, one context each, started before the saturating
+  user, Neutral, Tracked. One probe is paused (then drained at the pause bound); own work ÷ alone
+  is at least 0.42 and the other user's rate at least 753.4 req/s. A miss is reported before
+  another target is chosen. Harness: `same_gpu_029.py --mode neutral --load saturating
+  --processes 2`.
+- **First-come floor** (FR-090): the same two probes in Yield First, started before the user: one
+  keeps running, own work ÷ alone about 0.5; with the user started first, both pause.
+- **E8** (SC-020): F2's shape (8 own tasks wanting 4 CPUs beside the other user wanting 2) in
+  Neutral, Tracked: own usage at or above its target in every interval, and the other user's rate
+  against plain Linux and against the former cap.
+- **F2 split** (SC-018, SC-019). F2 mixes admission with running work. A run on the System mode
+  branch (2026-11-17) found Performance at 2.12-2.15 CPU against plain Linux's
+  2.40-2.46 when the 8 tasks were submitted while the other user already held 2 of 4 CPUs: the
+  admission rule held the 4th task. The user kept that rule (2026-11-17, option A: Performance
+  holds new work where another principal contends; admitting into contention stays with
+  Aggressive). So F2 runs as two gates:
+  - **F2b**: all 8 own tasks admitted and running before the other user starts; SC-018 and
+    SC-019 compare with plain Linux (own ≥ without − spread).
+  - **F2c**: tasks submitted while the other user saturates; expected: own admitted up to
+    max(S, A − margin), the other user at or above min(its demand, its fair share); no
+    comparison with plain Linux.
+  Plain Linux in F2 lands in two places, so compare like placement with like, or medians of at
+  least 10 runs each way.
+
 ## C. Deferred gates that need later work
 
 | Task | Needs | Command once that code exists |

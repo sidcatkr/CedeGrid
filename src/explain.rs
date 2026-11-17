@@ -44,9 +44,9 @@ pub fn observation(snapshot: &Snapshot, decision: &Decision, id: Option<i64>) ->
 }
 
 /// The steps open to opportunistic work per resource with the configured
-/// backend. Hints need a worker that reads resource targets; a RAM cap needs a
-/// delegated leaf with `memory.high` authorized; memory is the only resource
-/// drained on its own.
+/// backend. Hints need a worker that reads resource targets; a CPU cap needs a
+/// delegated leaf with `cpu.max` authorized and a RAM cap one with `memory.high`;
+/// memory is the only resource drained on its own.
 pub fn available_steps(config: &Config) -> BTreeMap<&'static str, Vec<&'static str>> {
     let actuator = crate::actuation::RootlessActuator::new(&ActuatorSettings {
         class: AllocationClass::Opportunistic,
@@ -70,6 +70,10 @@ pub fn available_steps(config: &Config) -> BTreeMap<&'static str, Vec<&'static s
             let mut steps = Vec::new();
             if kind == ResourceKind::Cpu && authorized("cpu.weight") {
                 steps.push("lower_share");
+            }
+            // `cpu.max` is the only CPU rate cap; Tracked holds whole tasks instead (FR-089).
+            if kind == ResourceKind::Cpu && authorized("cpu.max") {
+                steps.push("cap");
             }
             for (step, name) in [(YieldStep::Cap, "cap"), (YieldStep::Pause, "pause")] {
                 if !unavailable.contains(&step) {

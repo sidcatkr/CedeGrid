@@ -37,7 +37,7 @@ impl<'a> Interval<'a> {
         let mut victims: Vec<VictimFacts> = running()
             .map(|a| {
                 let amount = judged(input, &self.charges, &key, a);
-                let facts = ladder_facts(input, &key, &a.id);
+                let facts = ladder_facts(input, &key, &a.id, cpu_rate_cap(config));
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -50,11 +50,9 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        // Performance and Aggressive mark none of their tasks, so the kernel chooses as it
-        // would without CedeGrid (FR-023).
-        if governing(config, ResourceKind::Ram) >= ContentionMode::Performance {
-            victims.retain(|v| v.mode < ContentionMode::Performance);
-        }
+        // Jobs in Performance and Aggressive are never marked, whatever the governing mode, so
+        // the kernel chooses among them as it would without CedeGrid (FR-023, FR-030).
+        victims.retain(|v| v.mode < ContentionMode::Performance);
         victim_order(&mut victims, excess);
         let mut covered = 0u64;
         for victim in victims {
@@ -86,20 +84,8 @@ impl<'a> Interval<'a> {
         }
         let budgets = std::mem::take(&mut self.gpu_compute_budget);
         for (uuid, budget) in &budgets {
-            if self.remeasuring(uuid, budget.own.is_some()) {
-                let key = ResourceKey::GpuCompute(uuid.clone());
-                if let Some(record) = self
-                    .statuses
-                    .get_mut(&key)
-                    .and_then(|s| s.gpu_demand.as_mut())
-                {
-                    record.window = true;
-                }
-                self.hold_remeasured(uuid);
-            } else {
-                self.plan_gpu_compute(uuid, budget);
-            }
-            self.hold_slice_duty(uuid, budget);
+            self.plan_gpu_compute(uuid, budget);
+            self.plan_slice_holds(uuid, budget);
         }
         self.hold_unbudgeted_gpu_compute(&budgets);
         self.gpu_compute_budget = budgets;
@@ -108,112 +94,14 @@ impl<'a> Interval<'a> {
         self.record_sent_caps();
     }
 
-    /// Whether this decision is part of a re-measure window on the device, opening one when the
-    /// last uncapped interval is `GPU_DEMAND_WINDOW_EVERY_MS` old and own work there is held back
-    /// by GPU compute caps alone, in a mode other than Yield First, beside a measured amount
-    /// (FR-021, Q19). An amount of unknown activity ends a window: only a measured interval
-    /// re-measures, and a cap for unknown activity is not the estimate's to lift.
-    fn remeasuring(&mut self, uuid: &str, measured: bool) -> bool {
-        let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
-        let compute = ResourceKey::GpuCompute(uuid.to_string());
-        let unknown_cause = prev.ladder.iter().any(|((_, key), state)| {
-            key == &compute && state.cause == YieldCause::UnknownMeasurement
-        });
-        let facts: Vec<RemeasureFacts> = input
-            .allocations
-            .iter()
-            .filter(|a| {
-                a.phase == AllocationPhase::Running
-                    && a.requested.gpu_memory_mib.contains_key(uuid)
-                    && !(self.time_slice_holds.contains(uuid)
-                        && self.time_slice_exempt(&a.id, uuid))
-            })
-            .map(|a| RemeasureFacts {
-                yield_first: self
-                    .allocation_modes
-                    .get(&a.id)
-                    .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
-                    .is_some_and(|mode| *mode == ContentionMode::YieldFirst),
-                gpu_step: prev
-                    .ladder
-                    .get(&(a.id.clone(), compute.clone()))
-                    .map_or(YieldStep::None, |s| s.step),
-                cpu_step: prev
-                    .ladder
-                    .get(&(a.id.clone(), ResourceKey::Cpu))
-                    .map_or(YieldStep::None, |s| s.step),
-            })
-            .collect();
-        let Some(demand) = self.next.gpu_demand.get_mut(uuid) else {
-            return false;
-        };
-        // Without a cap to lift, as under the time-slice rule, no window runs.
-        if !measured || unknown_cause || facts.is_empty() {
-            demand.window = None;
-            return false;
-        }
-        if let Some(window) = demand.window.as_mut() {
-            window.decisions_left = window.decisions_left.saturating_sub(1);
-            self.remeasured.insert(uuid.to_string());
-            return true;
-        }
-        // Until own work's share exists a window opens at once, and one ending short opens the
-        // next, since a window feeds only 4–5 uncapped intervals (FR-021, Q24). The time-slice
-        // duty needs no own share, so there a window opens at once only with none (Q28).
-        let bootstrap = if self.time_slice_duty.contains_key(uuid) {
-            demand.uncapped.is_empty()
-        } else {
-            demand.own_share().is_none()
-        };
-        let due = bootstrap
-            || demand
-                .last_uncapped_ms
-                .is_none_or(|last| now.saturating_sub(last) >= GPU_DEMAND_WINDOW_EVERY_MS);
-        if !due
-            || governing(config, ResourceKind::GpuCompute) == ContentionMode::YieldFirst
-            || !remeasure_window_allowed(&facts)
-        {
-            return false;
-        }
-        demand.window = Some(RemeasureWindow {
-            decisions_left: GPU_DEMAND_WINDOW_DECISIONS - 1,
-            before: demand.estimate().map(|(total, _)| total),
-            fed: Vec::new(),
-        });
-        self.remeasured.insert(uuid.to_string());
-        true
-    }
-
-    /// In a re-measure window each GPU compute step on the device holds as it was, so the cap
-    /// returns unchanged after the window, and none is sent meanwhile. Its dwell restarts, since
-    /// the window's uncapped intervals do not show whether the cap holds (FR-021, Q24).
-    fn hold_remeasured(&mut self, uuid: &str) {
-        let compute = ResourceKey::GpuCompute(uuid.to_string());
-        for ((id, key), state) in &self.prev.ladder {
-            if key == &compute
-                && self.input.allocations.iter().any(|a| &a.id == id)
-                && !self.time_slice_exempt(id, uuid)
-            {
-                let mut state = state.clone();
-                state.entered_at_ms = self.now;
-                self.next.ladder.insert((id.clone(), key.clone()), state);
-            }
-        }
-    }
-
-    /// Whether this decision sends own work on each device a cap or pause, on CPU or that
-    /// device's GPU compute, for the next intervals' demand estimate (FR-021, Q19).
+    /// Whether this decision holds own work back on each device, by a GPU compute pause or a CPU
+    /// step of cap or more, for the next intervals' demand estimate (FR-021, Q19).
     fn record_sent_caps(&mut self) {
         let input = self.input;
         for (uuid, demand) in self.next.gpu_demand.iter_mut() {
             let compute = ResourceKey::GpuCompute(uuid.clone());
-            // A GPU compute cap sent at full duty holds nothing back.
             let capped = self.actions.iter().any(|action| {
-                let full = action.resource == compute
-                    && action.step == YieldStep::Cap
-                    && action.duty.is_some_and(|duty| duty >= GPU_COMPUTE_CAPACITY);
                 matches!(action.step, YieldStep::Cap | YieldStep::Pause)
-                    && !full
                     && (action.resource == ResourceKey::Cpu || action.resource == compute)
                     && input.allocations.iter().any(|a| {
                         a.id == action.allocation_id
@@ -222,19 +110,6 @@ impl<'a> Interval<'a> {
                     })
             });
             demand.sent_capped = [capped, demand.sent_capped[0]];
-            let duty = self
-                .actions
-                .iter()
-                .filter(|action| action.resource == compute)
-                .filter_map(|action| action.duty)
-                .min();
-            if let Some(record) = self
-                .statuses
-                .get_mut(&compute)
-                .and_then(|status| status.gpu_demand.as_mut())
-            {
-                record.duty = duty;
-            }
         }
     }
 
@@ -437,11 +312,11 @@ impl<'a> Interval<'a> {
         } else {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
-        // Floors by mode (FR-023): in Performance and Aggressive a floor breach takes no memory
-        // of work in those modes, as without CedeGrid; the kernel decides at exhaustion. The
-        // envelope still applies in full.
+        // Floors by mode (FR-023, FR-030): a floor breach takes no memory of jobs in Performance
+        // and Aggressive, whatever the governing mode, as without CedeGrid; the kernel decides at
+        // exhaustion. The envelope still applies in full.
         let mut keeps_mode_memory = false;
-        if floor_breach && governing(config, kind) >= ContentionMode::Performance {
+        if floor_breach {
             let protected = input
                 .allocations
                 .iter()
@@ -459,13 +334,19 @@ impl<'a> Interval<'a> {
             usage_excess =
                 usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
         }
+        // What own work holds beyond the operator envelope, which steps jobs of every mode.
+        let envelope_excess = input.envelope.as_ref().map_or(0, |envelope| {
+            if kind == ResourceKind::Cpu {
+                cpu_usage.saturating_sub(envelope.cpu_millicores)
+            } else {
+                judged_total.saturating_sub(amount_of(&key, envelope))
+            }
+        });
         // Performance and Aggressive take no CPU step for others, for own usage over the
         // admission target or for unknown activity: the budget sets admission only, and only the
         // operator's envelope still steps running work (FR-022).
         if kind == ResourceKind::Cpu && governing(config, kind) >= ContentionMode::Performance {
-            usage_excess = input.envelope.as_ref().map_or(0, |envelope| {
-                cpu_usage.saturating_sub(envelope.cpu_millicores)
-            });
+            usage_excess = envelope_excess;
         }
         if usage_excess > 0 {
             note_excess(&mut self.over_target, &key, usage_excess);
@@ -585,6 +466,7 @@ impl<'a> Interval<'a> {
             return_level,
             save_progress,
             keeps_mode_memory,
+            envelope_excess,
         }
     }
 
@@ -733,7 +615,7 @@ impl<'a> Interval<'a> {
                     (ResourceKind::Cpu, false) => cpu_usage_of(a).saturating_sub(kept_cpu(kind, a)),
                     (_, false) => judged(input, &self.charges, key, a),
                 };
-                let facts = ladder_facts(input, key, &a.id);
+                let facts = ladder_facts(input, key, &a.id, cpu_rate_cap(config));
                 VictimFacts {
                     id: a.id.clone(),
                     controllable: !facts.uncontrollable,
@@ -746,7 +628,11 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        if frame.keeps_mode_memory {
+        // A job in Performance or Aggressive keeps its memory at a floor breach, and yields running
+        // CPU only for the operator envelope, whatever the governing mode (FR-023, FR-030).
+        if frame.keeps_mode_memory
+            || kind == ResourceKind::Cpu && !pending_pass && frame.envelope_excess == 0
+        {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);
@@ -764,6 +650,27 @@ impl<'a> Interval<'a> {
                     planned.insert(victim.id.clone());
                     self.plan_victim(frame, victim, pending_pass, false, &mut 0);
                 }
+            }
+            return;
+        }
+        // Where no rate cap applies, running CPU work yields whole tasks: in victim order, each
+        // only while the excess left is at least its usage, so the own work left running stays at
+        // or above its target; a paused task frees nothing more and keeps its step (FR-089).
+        if !pending_pass && kind == ResourceKind::Cpu && !cpu_rate_cap(config) {
+            // The operator envelope is own work's hard limit, not a yield: it pauses a task even
+            // where that goes below it (FR-057).
+            let envelope = frame.cause == YieldCause::EnvelopeBreach;
+            let mut remaining = needed;
+            for victim in victims {
+                let fits = victim.amount <= remaining || envelope && remaining > 0;
+                let mut share = if victim.amount > 0 && fits {
+                    victim.amount
+                } else {
+                    0
+                };
+                remaining = remaining.saturating_sub(share);
+                planned.insert(victim.id.clone());
+                self.plan_victim(frame, victim, pending_pass, false, &mut share);
             }
             return;
         }
@@ -793,6 +700,15 @@ impl<'a> Interval<'a> {
                 rest = &rest[len..];
             }
             for group in tiers.into_iter().flat_map(|(held, new)| [held, new]) {
+                // Jobs in Performance and Aggressive pay only what the envelope still needs once
+                // the jobs before them have paid (FR-030).
+                if group
+                    .first()
+                    .is_some_and(|v| v.mode >= ContentionMode::Performance)
+                {
+                    let paid = needed.saturating_sub(remaining);
+                    remaining = remaining.min(frame.envelope_excess.saturating_sub(paid));
+                }
                 let total: u64 = group.iter().map(|v| v.amount).sum();
                 let level = fill_level(&group, remaining.min(total));
                 for victim in group {
@@ -1006,49 +922,20 @@ impl<'a> Interval<'a> {
         over
     }
 
-    /// Performance and Aggressive CPU: the Neutral target, which under contention is own
-    /// work's fair share, below which a cap never pauses (FR-022).
-    fn compute_floor(
-        &self,
-        key: &ResourceKey,
-        mode: ContentionMode,
-        own_usage: u64,
-    ) -> Option<ComputeFloor> {
-        (governing(self.config, key.kind()) >= ContentionMode::Performance
-            && mode >= ContentionMode::Performance)
-            .then(|| {
-                self.mode_targets
-                    .get(key)?
-                    .get(&ContentionMode::Neutral)
-                    .copied()
-            })
-            .flatten()
-            .map(|fair_share| ComputeFloor {
-                fair_share,
-                own_usage,
-            })
-    }
-
     /// What a job's own mode allows it on a resource; Guaranteed keeps its CPU
     /// request, and memory in Performance and Aggressive its fair share (FR-023).
     fn ceiling(&self, key: &ResourceKey, allocation: &Allocation) -> Option<u64> {
         let kind = key.kind();
         let mode = self.allocation_modes[&allocation.id][&kind];
-        // A job in Performance or Aggressive under that governing mode is not capped back to its
-        // target on compute (FR-022).
-        if !kind.is_memory()
-            && mode >= ContentionMode::Performance
-            && governing(self.config, kind) >= ContentionMode::Performance
-        {
+        // A job in Performance or Aggressive is not capped back to its target on compute, whatever
+        // the governing mode (FR-022, FR-030).
+        if !kind.is_memory() && mode >= ContentionMode::Performance {
             return None;
         }
         let fair = self
             .memory_fair_share
             .get(key)
-            .filter(|_| {
-                mode >= ContentionMode::Performance
-                    && governing(self.config, kind) >= ContentionMode::Performance
-            })
+            .filter(|_| mode >= ContentionMode::Performance)
             .copied()
             .unwrap_or(0);
         self.mode_targets
@@ -1078,6 +965,14 @@ impl<'a> Interval<'a> {
         if own_excess > 0 {
             note_excess(&mut self.over_target, key, own_excess);
         }
+        // Whole tasks where no CPU rate cap applies (FR-089): a job above its own mode's target is
+        // paused for it only when that target leaves it nothing to run.
+        let whole = kind == ResourceKind::Cpu && !pending_pass && !cpu_rate_cap(config);
+        let own_excess = if whole && own_excess < victim.amount {
+            0
+        } else {
+            own_excess
+        };
         let excess = (*remaining).max(own_excess);
         let mut state = prev.ladder.get(&(victim.id.clone(), key.clone()));
         // A CPU drain planned while the allocation was pending cancelled its reservation; if
@@ -1094,7 +989,7 @@ impl<'a> Interval<'a> {
                 .guaranteed_hint_deadline_s
                 .saturating_mul(1000);
         }
-        let facts = ladder_facts(input, key, &victim.id);
+        let facts = ladder_facts(input, key, &victim.id, cpu_rate_cap(config));
         let mut unavailable = facts.unavailable.get(key).cloned().unwrap_or_default();
         if pending_pass {
             // Nothing runs yet: cancelling the reservation is the only step.
@@ -1114,7 +1009,41 @@ impl<'a> Interval<'a> {
             .zip(state.and_then(returning_target))
             .filter(|(_, held)| victim.amount.saturating_mul(100) >= held.saturating_mul(95))
             .map(|(level, held)| level.max(held));
-        victim_timing.returning = returning.is_some();
+        victim_timing.returning =
+            returning.is_some() || whole && frame.contention_ended && frame.usage_excess == 0;
+        // A whole-task pause goes on at its bound, to the hint and then a drain, only while the
+        // demand it answered is still there; a hint goes on to a drain at its deadline (FR-014).
+        let escalates = whole
+            && !victim.guaranteed
+            && state.is_some_and(|s| match s.step {
+                YieldStep::Pause => {
+                    s.cause == YieldCause::EnvelopeBreach
+                        || s.cause == YieldCause::ExternalGrowth
+                            && frame.external
+                                >= s.trigger_external
+                                    .saturating_mul(u64::from(victim_timing.hysteresis_percent))
+                                    / 100
+                }
+                YieldStep::Hint => true,
+                _ => false,
+            });
+        if whole && state.is_some_and(|s| s.step == YieldStep::Pause) && !escalates {
+            unavailable.insert(YieldStep::Hint);
+        }
+        // A whole-task pause for the envelope holds to its bound: that the breach cleared with the
+        // task paused does not show it would stay clear with the task running again.
+        if whole
+            && let Some(held) = state.filter(|s| {
+                s.step == YieldStep::Pause
+                    && s.cause == YieldCause::EnvelopeBreach
+                    && now.saturating_sub(s.entered_at_ms) < victim_timing.pause_bound_ms
+            })
+        {
+            self.next
+                .ladder
+                .insert((victim.id.clone(), key.clone()), held.clone());
+            return;
+        }
         if kind == ResourceKind::Cpu
             && !pending_pass
             && !contended
@@ -1140,7 +1069,7 @@ impl<'a> Interval<'a> {
                 allow_drain: if victim.guaranteed {
                     frame.guaranteed_drain
                 } else {
-                    pending_pass || kind != ResourceKind::Cpu
+                    pending_pass || kind != ResourceKind::Cpu || escalates
                 },
                 unavailable,
                 excess: if contended { excess } else { 0 },
@@ -1150,12 +1079,6 @@ impl<'a> Interval<'a> {
                 usage: (kind == ResourceKind::Cpu && !pending_pass)
                     .then(|| victim.amount.saturating_add(kept)),
                 memory_usage: kind.is_memory().then_some(victim.amount),
-                compute_floor: if kind == ResourceKind::Cpu && !pending_pass {
-                    self.compute_floor(key, victim.mode, frame.own_usage)
-                } else {
-                    None
-                },
-                at_minimum_duty: at_minimum_duty(input, key, &victim.id),
                 // What the allocation may use: while contended, a cap
                 // or hint target; while calm, its usage plus its share
                 // of the spare, toward which a held cap rises, and when
@@ -1317,7 +1240,7 @@ impl<'a> Interval<'a> {
                     kind,
                     guaranteed: is_guaranteed(allocation),
                     allow_drain: false,
-                    unavailable: ladder_facts(input, key, id)
+                    unavailable: ladder_facts(input, key, id, cpu_rate_cap(config))
                         .unavailable
                         .get(key)
                         .cloned()
@@ -1329,16 +1252,6 @@ impl<'a> Interval<'a> {
                     cause: frame.cause,
                     target: None,
                     usage: None,
-                    compute_floor: if kind == ResourceKind::Cpu {
-                        self.compute_floor(
-                            key,
-                            self.allocation_modes[&allocation.id][&kind],
-                            frame.own_usage,
-                        )
-                    } else {
-                        None
-                    },
-                    at_minimum_duty: at_minimum_duty(input, key, id),
                 },
                 &frame.timing_for(config, self.allocation_modes[&allocation.id][&kind]),
                 now,
@@ -1472,12 +1385,42 @@ impl<'a> Interval<'a> {
                 amount: frame.share,
             })
             .collect();
+        // Jobs in Performance and Aggressive take no GPU compute step for others, whatever the
+        // governing mode (FR-022, FR-030).
+        victims.retain(|v| v.mode < ContentionMode::Performance);
         victim_order(&mut victims, frame.excess);
+        // Whole tasks (FR-089): pausing one more running task frees own work's part on the device
+        // divided among the tasks still running.
+        let paused = |id: &str| {
+            prev.ladder
+                .get(&(id.to_string(), key.clone()))
+                .is_some_and(|s| s.step >= YieldStep::Pause)
+        };
+        let unpaused = frame
+            .running
+            .iter()
+            .filter(|a| !paused(&a.id))
+            .count()
+            .max(1) as u64;
+        let part = frame.share.saturating_mul(frame.running.len() as u64) / unpaused;
+        // On a time-sliced device whose counts are known, what own work keeps after one more
+        // pause is its running tasks' part of the busy contexts, each task one context; elsewhere
+        // its measured amount less one task's part (FR-021, FR-089).
+        let sliced_external = self
+            .statuses
+            .get(key)
+            .and_then(|status| status.time_slice.as_ref())
+            .and_then(|slice| slice.external)
+            .map(u64::from);
+        let mut running = unpaused;
+        let mut own_now = frame.share.saturating_mul(frame.running.len() as u64);
+        let target = own_now.saturating_sub(frame.excess);
         let mut remaining = frame.excess;
         let mut planned = BTreeSet::new();
         for victim in victims {
             planned.insert(victim.id.clone());
             let state = prev.ladder.get(&(victim.id.clone(), key.clone()));
+            let held = paused(&victim.id);
             // A job above its own mode's share yields the difference even
             // while the aggregate has room.
             let limit = (victim.mode < ContentionMode::Performance
@@ -1488,8 +1431,39 @@ impl<'a> Interval<'a> {
             if own_excess > 0 {
                 note_excess(&mut self.over_target, key, own_excess);
             }
-            let excess = remaining.max(own_excess);
+            // A running task is paused only while the others keep at least the target, and for
+            // its own mode's target only when that leaves it nothing; a paused one frees nothing
+            // more and keeps its step to its bound.
+            let own_excess = if own_excess >= frame.share {
+                own_excess
+            } else {
+                0
+            };
+            let left = match sliced_external {
+                Some(external) if running > 0 => {
+                    GPU_COMPUTE_CAPACITY * (running - 1) / (running - 1 + external).max(1)
+                }
+                _ => own_now.saturating_sub(part),
+            };
+            let excess = if held {
+                0
+            } else if remaining > 0 && left >= target {
+                remaining.max(own_excess)
+            } else {
+                own_excess
+            };
             let contended_victim = excess > 0;
+            // A pause still answering the demand it was entered for drains at its bound (FR-014).
+            let escalates = held
+                && !victim.guaranteed
+                && state.is_some_and(|s| {
+                    s.step == YieldStep::Pause
+                        && s.cause == YieldCause::ExternalGrowth
+                        && frame.external
+                            >= s.trigger_external.saturating_mul(u64::from(
+                                config.contention.thresholds(kind).hysteresis_percent,
+                            )) / 100
+                });
             let decision = plan_step(
                 state,
                 &LadderInput {
@@ -1497,7 +1471,7 @@ impl<'a> Interval<'a> {
                     room: None,
                     kind,
                     guaranteed: victim.guaranteed,
-                    allow_drain: false,
+                    allow_drain: escalates,
                     unavailable: compute_unavailable(
                         input,
                         key,
@@ -1512,15 +1486,6 @@ impl<'a> Interval<'a> {
                     // duties, as the frame holds it.
                     usage: (budget.own.is_some() || frame.cause == YieldCause::UnknownMeasurement)
                         .then_some(frame.share),
-                    compute_floor: (governing(config, kind) >= ContentionMode::Performance
-                        && victim.mode >= ContentionMode::Performance)
-                        .then(|| budget.targets.get(&ContentionMode::Neutral))
-                        .flatten()
-                        .map(|fair_share| ComputeFloor {
-                            fair_share: *fair_share,
-                            own_usage: frame.share.saturating_mul(frame.running.len() as u64),
-                        }),
-                    at_minimum_duty: at_minimum_duty(input, key, &victim.id),
                     target: Some(
                         if contended_victim {
                             frame.share.saturating_sub(excess)
@@ -1556,10 +1521,14 @@ impl<'a> Interval<'a> {
                         YieldStep::Cap => frame
                             .share
                             .saturating_sub(next.target.unwrap_or(frame.share)),
-                        YieldStep::Pause => frame.share,
+                        YieldStep::Pause => part,
                         _ => 0,
                     };
                     remaining = remaining.saturating_sub(freed);
+                    if next.step == YieldStep::Pause {
+                        running = running.saturating_sub(1);
+                        own_now = left;
+                    }
                 }
                 self.next
                     .ladder
@@ -1604,8 +1573,6 @@ impl<'a> Interval<'a> {
                     cause: frame.cause,
                     target: None,
                     usage: None,
-                    compute_floor: None,
-                    at_minimum_duty: at_minimum_duty(input, &frame.key, id),
                 },
                 &LadderTiming::new(
                     &config.contention.thresholds(kind),
@@ -1672,24 +1639,14 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// Every step above none becomes an action, a hint with its deadline; a device's GPU compute
-    /// steps in a re-measure window are held but not sent.
+    /// Every step above none becomes an action, a hint with its deadline.
     fn collect_actions(&mut self) {
         for ((id, key), state) in &self.next.ladder {
             if state.step == YieldStep::None {
                 continue;
             }
-            if let ResourceKey::GpuCompute(uuid) = key
-                && self.remeasured.contains(uuid)
-            {
-                continue;
-            }
-            let duty = match key {
-                ResourceKey::GpuCompute(uuid) if state.step == YieldStep::Cap => {
-                    self.gpu_duty(id, uuid, state)
-                }
-                _ => None,
-            };
+            // No duty cycle runs: GPU compute takes whole-task pauses only (FR-089).
+            let duty = None;
             self.actions.push(YieldAction {
                 allocation_id: id.clone(),
                 resource: key.clone(),
@@ -1703,49 +1660,90 @@ impl<'a> Interval<'a> {
         }
     }
 
-    /// On the time-slice duty each Neutral, Performance and Aggressive allocation on the device
-    /// holds a cap at the duty, which `gpu_duty` sends, and never a pause; a re-measure window
-    /// lifts it without a step change (FR-021, Q27, Q28).
-    fn hold_slice_duty(&mut self, uuid: &str, budget: &GpuComputeBudget) {
-        if !self.time_slice_duty.contains_key(uuid) {
+    /// The time-slice hold (FR-021, FR-089): on a device where the rule fails beside a slice-bound
+    /// principal, own tasks in Yield First and Neutral are paused in victim order while the own
+    /// tasks left running, each counted as one context, stay at or above the hold count. A held
+    /// pause stays while the hold lasts and drains at its bound; Guaranteed work is never paused.
+    fn plan_slice_holds(&mut self, uuid: &str, budget: &GpuComputeBudget) {
+        let Some(hold) = self.slice_hold.get(uuid).copied() else {
             return;
-        }
-        let input = self.input;
+        };
+        let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
+        let kind = ResourceKind::GpuCompute;
         let key = ResourceKey::GpuCompute(uuid.to_string());
-        let exempt: Vec<&Allocation> = input
+        let on_device: Vec<&Allocation> = input
             .allocations
             .iter()
             .filter(|a| {
-                a.phase == AllocationPhase::Running
-                    && a.requested.gpu_memory_mib.contains_key(uuid)
-                    && self.time_slice_exempt(&a.id, uuid)
+                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
             })
             .collect();
-        let target = budget.share / exempt.len().max(1) as u64;
-        for allocation in exempt {
-            let id = (allocation.id.clone(), key.clone());
-            let previous = self
-                .prev
-                .ladder
-                .get(&id)
-                .filter(|state| state.step == YieldStep::Cap);
-            self.next.ladder.insert(
-                id,
-                StepState {
-                    step: YieldStep::Cap,
-                    entered_at_ms: previous.map_or(self.now, |state| state.entered_at_ms),
-                    cause: YieldCause::ExternalGrowth,
-                    target: Some(target),
-                    trigger_external: previous.map_or(budget.external, |s| s.trigger_external),
-                    calm_since_ms: None,
-                    contended_since_ms: previous.and_then(|s| s.contended_since_ms),
-                    after_pause: false,
-                    to_free: None,
-                    pending: false,
-                    recomputed: false,
-                    asked_target: None,
-                },
-            );
+        let paused = |id: &str| {
+            prev.ladder
+                .get(&(id.to_string(), key.clone()))
+                .is_some_and(|state| state.step >= YieldStep::Pause)
+        };
+        let mut running = on_device.iter().filter(|a| !paused(&a.id)).count() as u32;
+        let mut victims: Vec<VictimFacts> = on_device
+            .iter()
+            .filter(|a| {
+                self.time_slice_exempt(&a.id, uuid)
+                    && self.allocation_modes[&a.id][&kind] < ContentionMode::Performance
+            })
+            .map(|a| VictimFacts {
+                id: a.id.clone(),
+                controllable: !input.facts.get(&a.id).is_some_and(|f| f.uncontrollable),
+                frees: true,
+                pending: false,
+                mode: self.allocation_modes[&a.id][&kind],
+                guaranteed: is_guaranteed(a),
+                progress_lost_ms: input.facts.get(&a.id).map_or(0, |f| f.progress_lost_ms),
+                amount: 1,
+            })
+            .collect();
+        victim_order(&mut victims, u64::from(running.saturating_sub(hold)));
+        let pause_bound_ms = config
+            .contention
+            .thresholds(kind)
+            .pause_bound_s
+            .saturating_mul(1000);
+        for victim in victims {
+            let id = (victim.id.clone(), key.clone());
+            if let Some(state) = prev.ladder.get(&id).filter(|s| s.step >= YieldStep::Pause) {
+                // A held pause stays while the hold lasts; at its bound it drains (FR-014).
+                let mut next = state.clone();
+                if state.step == YieldStep::Pause
+                    && now.saturating_sub(state.entered_at_ms) >= pause_bound_ms
+                {
+                    next.step = YieldStep::Drain;
+                    next.entered_at_ms = now;
+                }
+                self.next.ladder.insert(id, next);
+                continue;
+            }
+            let pausable = !victim.guaranteed
+                && victim.controllable
+                && !self.no_gpu_pause(&victim.id, &key)
+                && !compute_unavailable(input, &key, &victim.id, false).contains(&YieldStep::Pause);
+            if running > hold && pausable {
+                running -= 1;
+                self.next.ladder.insert(
+                    id,
+                    StepState {
+                        step: YieldStep::Pause,
+                        entered_at_ms: now,
+                        cause: YieldCause::ExternalGrowth,
+                        target: None,
+                        trigger_external: budget.external,
+                        calm_since_ms: None,
+                        contended_since_ms: Some(now),
+                        after_pause: false,
+                        to_free: None,
+                        pending: false,
+                        asked_target: None,
+                    },
+                );
+            }
         }
     }
 
@@ -1767,66 +1765,12 @@ impl<'a> Interval<'a> {
     /// rule holds there or the time-slice duty sets its cap, and the allocation runs in Neutral,
     /// Performance or Aggressive (FR-021, Q22, Q27).
     fn time_slice_exempt(&self, id: &str, uuid: &str) -> bool {
-        (self.time_slice_holds.contains(uuid) || self.time_slice_duty.contains_key(uuid))
+        (self.time_slice_holds.contains(uuid) || self.slice_hold.contains_key(uuid))
             && self
                 .allocation_modes
                 .get(id)
                 .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
                 .is_some_and(|mode| *mode != ContentionMode::YieldFirst)
-    }
-
-    /// A GPU compute cap's duty in thousandths, which the supervisor applies: in Neutral,
-    /// Performance and Aggressive, on a device measured this interval and for a cap not set for
-    /// unknown activity, the share target over the allocation's part of own work's uncapped share,
-    /// since own work at full duty beside another busy context holds only its slices (FR-021,
-    /// Q20, R49). On the time-slice duty it is that duty (Q27), and on a device last read as
-    /// time-sliced whose listing is unknown it is none (Q29). None leaves the duty at the share
-    /// target, target ÷ 1000.
-    fn gpu_duty(&self, id: &str, uuid: &str, state: &StepState) -> Option<u64> {
-        let yield_first = self
-            .allocation_modes
-            .get(id)
-            .and_then(|modes| modes.get(&ResourceKind::GpuCompute))
-            .is_none_or(|mode| *mode == ContentionMode::YieldFirst);
-        if let Some(duty) = self.time_slice_duty.get(uuid)
-            && !yield_first
-        {
-            return Some(*duty);
-        }
-        let measured = self
-            .gpu_compute_budget
-            .get(uuid)
-            .is_some_and(|budget| budget.own.is_some());
-        if yield_first
-            || !measured
-            || state.cause == YieldCause::UnknownMeasurement
-            || self.no_gpu_pause.contains(uuid)
-        {
-            return None;
-        }
-        let share = self
-            .next
-            .gpu_demand
-            .get(uuid)?
-            .own_share()
-            .filter(|share| *share > 0)?;
-        let running = self
-            .input
-            .allocations
-            .iter()
-            .filter(|a| {
-                a.phase == AllocationPhase::Running && a.requested.gpu_memory_mib.contains_key(uuid)
-            })
-            .count()
-            .max(1) as u64;
-        let target = state.target?;
-        Some(
-            (target
-                .saturating_mul(GPU_COMPUTE_CAPACITY)
-                .saturating_mul(running)
-                / share)
-                .min(GPU_COMPUTE_CAPACITY),
-        )
     }
 
     /// The allocations a step would drain, each once, and charges beyond the
@@ -1888,6 +1832,9 @@ struct Frame {
     /// A floor breach where work in Performance or Aggressive keeps its memory (FR-023): it is
     /// no victim, gets the save-progress signal and no OOM mark.
     keeps_mode_memory: bool,
+    /// Own work beyond the operator envelope, the only excess jobs in Performance and
+    /// Aggressive pay (FR-030, FR-057).
+    envelope_excess: u64,
 }
 
 impl Frame {
@@ -1937,8 +1884,21 @@ fn unknown_window(config: &Config, kind: ResourceKind) -> u64 {
 /// acknowledged its target file takes a hint (FR-062); recordings without facts
 /// have no target channel. A RAM cap needs a backend that reports it can apply
 /// one.
-fn ladder_facts(input: &PolicyInput, key: &ResourceKey, id: &str) -> AllocationFacts {
+fn ladder_facts(
+    input: &PolicyInput,
+    key: &ResourceKey,
+    id: &str,
+    cpu_cap: bool,
+) -> AllocationFacts {
     let mut facts = input.facts.get(id).cloned().unwrap_or_default();
+    // Without a CPU rate cap, CPU work is held back by whole tasks (FR-089).
+    if *key == ResourceKey::Cpu && !cpu_cap {
+        facts
+            .unavailable
+            .entry(key.clone())
+            .or_default()
+            .insert(YieldStep::Cap);
+    }
     if !facts.hint_ready {
         facts
             .unavailable
@@ -1954,16 +1914,6 @@ fn ladder_facts(input: &PolicyInput, key: &ResourceKey, id: &str) -> AllocationF
             .insert(YieldStep::Cap);
     }
     facts
-}
-
-/// The supervisor reported the allocation's cap on the resource at the minimum duty.
-fn at_minimum_duty(input: &PolicyInput, key: &ResourceKey, id: &str) -> bool {
-    input.facts.get(id).is_some_and(|facts| {
-        facts
-            .step_codes
-            .get(key)
-            .is_some_and(|code| code == "cap_at_minimum_duty")
-    })
 }
 
 /// What running memory work holds as yielding judges it: its usage. On GPU
@@ -2024,9 +1974,8 @@ fn note_excess(over_target: &mut BTreeMap<ResourceKey, u64>, key: &ResourceKey, 
     *largest = (*largest).max(excess);
 }
 
-/// The duty credited to own work on a device. Credit the larger of the target
-/// the supervisor applied and the current one, so a lowered target counts only
-/// once applied.
+/// What an allocation is credited with on a device: nothing while its pause is applied, else its
+/// assumed part (FR-021, FR-089).
 fn applied_duty(
     prev: &PolicyEngine,
     input: &PolicyInput,
@@ -2038,18 +1987,7 @@ fn applied_duty(
     let facts = input.facts.get(&allocation.id);
     let applied = facts.and_then(|facts| facts.applied.get(key));
     match (state, applied) {
-        (Some(state), Some(step)) if *step == state.step => match state.step {
-            YieldStep::Cap => {
-                let current = state.target.unwrap_or(assumed);
-                let ran = facts
-                    .and_then(|facts| facts.applied_targets.get(key))
-                    .copied()
-                    .unwrap_or(current);
-                assumed.min(ran.max(current))
-            }
-            YieldStep::Pause => 0,
-            _ => assumed,
-        },
+        (Some(state), Some(step)) if *step == state.step && state.step == YieldStep::Pause => 0,
         _ => assumed,
     }
 }
@@ -2069,7 +2007,8 @@ fn compute_unavailable(
         .and_then(|f| f.unavailable.get(key))
         .cloned()
         .unwrap_or_default();
-    steps.extend([YieldStep::LowerShare, YieldStep::Hint]);
+    // No rate cap: GPU compute is held back by whole tasks (FR-089).
+    steps.extend([YieldStep::LowerShare, YieldStep::Cap, YieldStep::Hint]);
     if no_pause {
         steps.insert(YieldStep::Pause);
     }

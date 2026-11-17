@@ -11,11 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
 use crate::contention::{
-    Admission, ComputeFloor, ContentionMode, GPU_DEMAND_WINDOW_DECISIONS,
-    GPU_DEMAND_WINDOW_EVERY_MS, GPU_MIN_DUTY_MILLI, LadderInput, LadderTiming, Measurement,
-    ModeInput, Principal, RemeasureFacts, ResourceKey, ResourceKind, ResourceThresholds, StepState,
-    VictimFacts, YieldCause, YieldStep, guaranteed_may_drain, hint_wait_over, own_allowance,
-    plan_step, remeasure_window_allowed, victim_order,
+    Admission, ContentionMode, LadderInput, LadderTiming, Measurement, ModeInput, Principal,
+    ResourceKey, ResourceKind, ResourceThresholds, StepState, VictimFacts, YieldCause, YieldStep,
+    guaranteed_may_drain, hint_wait_over, own_allowance, plan_step, victim_order,
 };
 use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
@@ -151,6 +149,26 @@ pub fn schedulable_budget(decision: &Decision) -> Resources {
     budget
 }
 
+/// When own work and each listed UID arrived on a device: first and last listed, in ms. One
+/// absent for more than `ARRIVAL_GAP_MS` arrives again when next listed (FR-090).
+#[derive(Debug, Clone, Default)]
+struct DeviceArrivals {
+    own: Option<(u64, u64)>,
+    uids: BTreeMap<u32, (u64, u64)>,
+}
+
+/// An absence longer than this makes a new arrival (FR-090).
+const ARRIVAL_GAP_MS: u64 = 30_000;
+
+impl DeviceArrivals {
+    fn note(arrival: Option<(u64, u64)>, now: u64) -> (u64, u64) {
+        match arrival {
+            Some((first, last)) if now.saturating_sub(last) <= ARRIVAL_GAP_MS => (first, now),
+            _ => (now, now),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PreviousGpu {
     pids: BTreeSet<u32>,
@@ -184,10 +202,6 @@ struct GpuDemand {
     pids: Option<Vec<u32>>,
     /// When the last uncapped interval was observed.
     last_uncapped_ms: Option<u64>,
-    /// An open re-measure window (FR-021, Q19).
-    window: Option<RemeasureWindow>,
-    /// The time-slice duty on the device and its steps (FR-021, Q27, Q28).
-    slice: Option<SliceDuty>,
     /// Whether the device was last read as time-sliced, for an interval whose listing is
     /// unknown (FR-021, Q29).
     last_time_sliced: bool,
@@ -212,16 +226,6 @@ impl SeenContext {
     }
 }
 
-/// The time-slice duty's state: the base duty it started from, the duty sent, when it last
-/// stepped, and the device's utilization since then (FR-021, Q28).
-#[derive(Debug, Clone, Default)]
-struct SliceDuty {
-    d0: u64,
-    duty: u64,
-    since_ms: u64,
-    utilization: std::collections::VecDeque<u32>,
-}
-
 /// One uncapped interval on a device: the external total, each principal UID's and own work's
 /// amount where it ran there (FR-021, Q19, Q20).
 #[derive(Debug, Clone, Default)]
@@ -229,15 +233,6 @@ struct UncappedInterval {
     external: u64,
     by_uid: BTreeMap<u32, u64>,
     own: Option<u64>,
-}
-
-/// A re-measure window: the decisions still to send own work no GPU compute cap on the device,
-/// the estimate before it, and the external totals its uncapped intervals fed.
-#[derive(Debug, Clone, Default)]
-struct RemeasureWindow {
-    decisions_left: u32,
-    before: Option<u64>,
-    fed: Vec<u64>,
 }
 
 impl GpuDemand {
@@ -278,6 +273,8 @@ pub struct PolicyEngine {
     previous_gpus: BTreeMap<String, PreviousGpu>,
     /// Each device's external GPU compute demand from uncapped intervals (FR-021).
     gpu_demand: BTreeMap<String, GpuDemand>,
+    /// Each device's arrivals, for the first-come floor (FR-090).
+    gpu_arrivals: BTreeMap<String, DeviceArrivals>,
     stable_since: Option<u64>,
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
@@ -413,7 +410,6 @@ impl PolicyEngine {
                 after_pause: false,
                 to_free: None,
                 pending: false,
-                recomputed: false,
                 asked_target: None,
             },
         );
@@ -557,16 +553,15 @@ struct Interval<'a> {
     gpu_memory_unknown: BTreeSet<String>,
     /// Why GPU admission is blocked on a device, for its admission state.
     gpu_block_reasons: BTreeMap<String, String>,
-    /// Devices in a re-measure window this decision: their GPU compute steps hold and none is
-    /// sent (FR-021, Q19).
-    remeasured: BTreeSet<String>,
     /// Devices where Neutral, Performance and Aggressive set no GPU compute step this decision:
     /// the time-slice rule holds, or no external principal is slice-bound (FR-021, Q22, Q27).
     time_slice_holds: BTreeSet<String>,
-    /// Devices on the time-slice duty, with the duty those modes' allocations run at (Q27).
-    time_slice_duty: BTreeMap<String, u64>,
+    /// Devices on the time-slice hold, with the own tasks that keep running there (FR-089).
+    slice_hold: BTreeMap<String, u32>,
     /// Devices last read as time-sliced whose listing is unknown: no GPU compute pause (Q29).
     no_gpu_pause: BTreeSet<String>,
+    /// Devices where own work arrived before every principal listed there (FR-090).
+    first_come: BTreeSet<String>,
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
@@ -663,10 +658,10 @@ impl<'a> Interval<'a> {
             gpu_activity_unknown: BTreeSet::new(),
             gpu_memory_unknown: BTreeSet::new(),
             gpu_block_reasons: BTreeMap::new(),
-            remeasured: BTreeSet::new(),
             time_slice_holds: BTreeSet::new(),
-            time_slice_duty: BTreeMap::new(),
+            slice_hold: BTreeMap::new(),
             no_gpu_pause: BTreeSet::new(),
+            first_come: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
             over_target: BTreeMap::new(),
@@ -743,6 +738,17 @@ impl<'a> Interval<'a> {
         );
         (decision, self.next)
     }
+}
+
+/// Whether a CPU rate cap applies: the node's cgroup backend is enabled with `cpu.max`
+/// authorized (Full). Elsewhere CPU work is held back by whole tasks (FR-089).
+fn cpu_rate_cap(config: &Config) -> bool {
+    config.cgroup.enabled
+        && config
+            .cgroup
+            .authorized_controls
+            .iter()
+            .any(|control| control == "cpu.max")
 }
 
 /// The mode that sets own work's aggregate on a resource: the node mode within

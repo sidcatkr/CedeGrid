@@ -18,8 +18,14 @@ mod snapshot {
 const CPU: u64 = 32_000;
 const GPU: &str = "GPU-a";
 
+/// Neutral in Full, with `cpu.max` authorized, so the CPU cap these runs show applies (FR-089).
 fn config() -> Config {
     let mut cfg = Config::default();
+    cfg.cgroup.enabled = true;
+    cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
+    cfg.cgroup.authorized_controls = ["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]
+        .map(String::from)
+        .to_vec();
     cfg.contention.default_mode = ContentionMode::Neutral;
     cfg
 }
@@ -399,26 +405,17 @@ fn a_scripted_gpu_compute_run_is_shown_at_every_step() {
     };
     assert_eq!(path(&steps[ends[1]]), Some(ComputePath::Measured));
     assert!(codes_of(&steps[ends[1]].decision, &key).contains(&"gpu_compute_measured".to_string()));
-    // Growth past the fair share: the target share drops to it, and own work,
-    // capped, runs within it.
+    // Growth past the fair share: the target share drops to it. A lone job is not paused for
+    // it, since that would leave own work below the share (FR-089), so no step is shown.
     let grown = &steps[ends[2]];
-    let cap = grown
-        .decision
-        .actions
-        .iter()
-        .find(|a| a.resource == key)
-        .expect("a GPU compute step for external growth");
-    assert_eq!(cap.code, "yield_step_cap");
     let target = grown.decision.resources[&key].target_share.unwrap();
     assert!(target <= 500, "{target}");
-    assert!(grown.snapshot.gpus[0].own_compute_milli.unwrap() <= target);
-    let after: Vec<String> = steps[ends[2] + 1..]
-        .iter()
-        .flat_map(|s| codes_of(&s.decision, &key))
-        .collect();
     assert!(
-        after.iter().any(|c| c == "step_reversed_contention_ended"),
-        "{after:?}"
+        steps[ends[1] + 1..=ends[2]].iter().all(|s| s
+            .decision
+            .actions
+            .iter()
+            .all(|a| a.resource != key))
     );
     assert!(
         steps[ends[3]]

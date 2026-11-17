@@ -62,19 +62,20 @@ cargo test --locked --test contention -- sc_002 yield_first_pauses_only a_pause_
 
 The agent test starts a coordinator and an agent with `[contention.cpu] mode = "yield_first"`,
 runs one CPU job, then starts a test-owned external load on every logical CPU. It checks that
-the job is capped or paused, that the supervisor journals the step, that the step reverses after
-the load stops, and that the job completes without a drain. The bounds, the margin case and the
-minimum duty come from the policy tests on the second line.
+the job is paused (in Tracked) or capped (in Full), that the supervisor journals the step, that
+the step reverses after the load stops, and that the job completes. The bounds, the margin case,
+the whole-task holds and the pause bound come from the policy tests on the second line.
 
 **Expected:**
 - A load that fits in the 15% margin leaves own work running, with any cap at most keeping the
   margin free.
 - A load that saturates the CPU (contended) pauses the opportunistic job within 2 monitor
-  intervals (SC-002); in Neutral, `observe` shows a `cap` at the fair share instead, and in
-  Performance a cap that follows what the load takes, never below the fair share.
-- No drain or termination occurs (SC-007). After the pause bound, the job resumes at the 5%
-  minimum duty, as a hint for an SDK worker or a cap for a plain command, and stays there while
-  the load lasts.
+  intervals (SC-002); in Neutral, `observe` shows a `cap` at the fair share in Full and, in
+  Tracked, whole tasks paused only while the rest stays at or above it; in Performance no step.
+- In Full no drain or termination occurs (SC-007): after the pause bound the job resumes at the
+  5% minimum duty, as a hint for an SDK worker or a cap for a plain command. In Tracked, a pause
+  still contended at the bound gives an SDK worker its hint and drains a plain command, which is
+  requeued without using an attempt.
 - After the load shrinks, a held cap rises again at the mode's rate; after it stops, the steps
   reverse.
 

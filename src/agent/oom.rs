@@ -8,7 +8,7 @@ pub(crate) struct RamView {
     pub fair_share_mib: u64,
     /// External principals above the fair share: UID, or none for unattributed usage, and MiB.
     pub above: Vec<(Option<u32>, u64)>,
-    /// Set where RAM's governing mode keeps own memory at a floor breach (Performance and
+    /// Set where the task's own RAM mode keeps its memory at a floor breach (Performance and
     /// Aggressive): what decides fault there instead of the fair share.
     pub keeps_memory: Option<Breach>,
 }
@@ -42,6 +42,23 @@ pub(crate) struct Ending<'a> {
     /// The host's `/proc/vmstat` `oom_kill` count at the agent's last samples, oldest first.
     pub host_oom_kills: &'a [Option<u64>],
     pub view: Option<&'a RamView>,
+}
+
+/// Whether a task's memory is kept at a floor breach: its RAM mode, its request within the node
+/// cap, is Performance or Aggressive, whatever the node's mode (FR-023, FR-030).
+pub(crate) fn keeps_memory(
+    config: &crate::config::Config,
+    modes: &std::collections::BTreeMap<
+        crate::contention::ResourceKind,
+        crate::contention::ContentionMode,
+    >,
+) -> bool {
+    use crate::contention::{ContentionMode, ResourceKind};
+    crate::contention::effective_mode(
+        config.contention.mode(ResourceKind::Ram),
+        modes.get(&ResourceKind::Ram).copied(),
+        config.contention.max_mode(),
+    ) >= ContentionMode::Performance
 }
 
 /// SIGKILL, which the kernel's OOM killer sends.
@@ -125,6 +142,29 @@ mod tests {
     /// In Performance own memory is not given up at a floor breach, so a kill there is not own
     /// fault when own memory grew by no more than the noise tolerance over the breach, whatever
     /// its fair share; a larger or unknown growth is (FR-076).
+    /// A task's own RAM mode, its request within the node cap, decides whether its memory is
+    /// kept at a floor breach, whatever the node's mode (FR-030, R88).
+    #[test]
+    fn the_jobs_own_mode_decides_whether_its_memory_is_kept() {
+        use crate::contention::{ContentionMode, ResourceKind};
+        let node = |mode, cap| {
+            let mut config = crate::config::Config::default();
+            config.contention.default_mode = mode;
+            config.contention.max_mode = cap;
+            config
+        };
+        let asks = |mode| std::collections::BTreeMap::from([(ResourceKind::Ram, mode)]);
+        let none = std::collections::BTreeMap::new();
+        let neutral = node(ContentionMode::Neutral, Some(ContentionMode::Performance));
+        assert!(keeps_memory(&neutral, &asks(ContentionMode::Performance)));
+        assert!(!keeps_memory(&neutral, &none));
+        let performance = node(ContentionMode::Performance, None);
+        assert!(keeps_memory(&performance, &none));
+        assert!(!keeps_memory(&performance, &asks(ContentionMode::Neutral)));
+        let capped = node(ContentionMode::Neutral, Some(ContentionMode::Neutral));
+        assert!(!keeps_memory(&capped, &asks(ContentionMode::Performance)));
+    }
+
     #[test]
     fn a_performance_kill_is_judged_by_growth_over_the_breach() {
         let host = [Some(5), Some(6)];

@@ -12,8 +12,10 @@ use cedegrid::{
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
+/// The node in Full, with `cpu.max` authorized, so the CPU caps these tests model apply; the
+/// `whole_tasks` tests run without it (FR-089).
 fn config() -> Config {
-    let mut result = Config::default();
+    let mut result = whole_tasks::full(Config::default());
     result.cpu.reserve_physical_cores = 1;
     result.ram.reserve_mib = 1000;
     result.ram.reserve_percent = 0;
@@ -933,12 +935,8 @@ fn low_total_utilization_does_not_override_external_compute_activity() {
     // work gets half of it. Without a memory breach nothing is drained.
     assert_eq!(decision.managed_budget.gpu_memory_mib["GPU-test"], 14_000);
     assert!(decision.would_drain.is_empty());
-    let share = decision
-        .actions
-        .iter()
-        .find(|a| a.resource == "gpu_compute:GPU-test".parse().unwrap())
-        .map(|a| a.target);
-    assert_eq!(share, Some(Some(500)));
+    let share = decision.resources[&"gpu_compute:GPU-test".parse().unwrap()].target_share;
+    assert_eq!(share, Some(500));
     // Yield First admits only on a quiet device.
     let held = PolicyEngine::new()
         .evaluate(&yield_first_gpu(), &snap, &input, 0)
@@ -4769,10 +4767,8 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
             .map(|a| (a.step, a.target))
     };
     let opportunistic = AllocationClass::Opportunistic;
-    assert_eq!(
-        step(Neutral, Active, opportunistic),
-        Some((YieldStep::Cap, Some(500)))
-    );
+    // A lone job is not paused for Neutral's share: that would leave own work below it (FR-089).
+    assert_eq!(step(Neutral, Active, opportunistic), None);
     // Performance takes no GPU compute step for others (FR-022).
     assert_eq!(step(Performance, Active, opportunistic), None);
     assert_eq!(
@@ -4783,6 +4779,59 @@ fn gpu_compute_shares_follow_the_mode_under_contention() {
     assert_eq!(step(Neutral, Active, AllocationClass::Guaranteed), None);
 }
 
+/// A Performance job on a Neutral node takes no GPU compute step for another principal; the
+/// node's Neutral job beside it does (FR-030, R88).
+#[test]
+fn a_performance_job_takes_no_gpu_compute_step_on_a_neutral_node() {
+    use ComputeActivity::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind};
+    let key = ResourceKey::GpuCompute("GPU-test".into());
+    let (mut cfg, mut snap) = us5_device(
+        ContentionMode::Neutral,
+        Active,
+        Some(vec![987]),
+        Some(8000),
+        false,
+    );
+    cfg.contention.max_mode = Some(ContentionMode::Performance);
+    snap.gpus[0].compute_sample_id = Some(1);
+    let job = |id: &str| {
+        allocation(
+            id,
+            AllocationPhase::Running,
+            resources(100, 100, 2000),
+            Some(resources(100, 100, 2000)),
+        )
+    };
+    let mut eager = job("eager");
+    eager.modes = BTreeMap::from([(ResourceKind::GpuCompute, ContentionMode::Performance)]);
+    let mut engine = PolicyEngine::new();
+    let mut stepped = std::collections::BTreeSet::new();
+    for now in (0..10_000).step_by(500) {
+        let decision = engine
+            .evaluate(
+                &cfg,
+                &snap,
+                &PolicyInput {
+                    allocations: vec![job("plain"), eager.clone()],
+                    facts: rootless(&["plain", "eager"]),
+                    ..PolicyInput::default()
+                },
+                now,
+            )
+            .unwrap();
+        stepped.extend(
+            decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == key && a.step > cedegrid::contention::YieldStep::None)
+                .map(|a| a.allocation_id.clone()),
+        );
+    }
+    assert!(!stepped.contains("eager"), "{stepped:?}");
+    assert!(stepped.contains("plain"), "{stepped:?}");
+}
+
 /// While device telemetry is unknown (here a missing process list), GPU compute caps and
 /// pauses hold rather than being lifted (FR-008, GPU-3).
 #[test]
@@ -4790,7 +4839,8 @@ fn gpu_compute_steps_hold_while_device_telemetry_is_unknown() {
     use ComputeActivity::*;
     use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
-    for (mode, expected) in [(Neutral, YieldStep::Cap), (YieldFirst, YieldStep::Pause)] {
+    // Neutral holds a lone job by no whole-task pause here (FR-089); Yield First pauses it.
+    for (mode, expected) in [(YieldFirst, YieldStep::Pause)] {
         let (cfg, mut known) = us5_device(mode, Active, Some(vec![987]), Some(8000), false);
         known.gpus[0].compute_sample_id = Some(1);
         let mut unknown = known.clone();
@@ -4819,72 +4869,6 @@ fn gpu_compute_steps_hold_while_device_telemetry_is_unknown() {
             let held = engine.evaluate(&cfg, &unknown, &input, i * 500).unwrap();
             assert_eq!(step(&held), first, "{mode:?} at {}", i * 500);
         }
-    }
-}
-
-/// Under GPU activity of unknown amount, a cap at the fair share that its supervisor reports
-/// applied is credited at its duty, so it holds and never escalates to a pause (FR-022,
-/// GPU-4).
-#[test]
-fn an_applied_gpu_cap_under_unknown_activity_is_credited_at_its_duty() {
-    use ComputeActivity::*;
-    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
-    let key = ResourceKey::GpuCompute("GPU-test".into());
-    {
-        let mode = Neutral;
-        let (cfg, mut snap) = us5_device(mode, Unknown, Some(vec![987]), Some(8000), false);
-        let mut engine = PolicyEngine::new();
-        let mut facts = rootless(&["job"]);
-        let mut steps = Vec::new();
-        for i in 0..60u64 {
-            snap.gpus[0].compute_sample_id = Some(i + 1);
-            let decision = engine
-                .evaluate(
-                    &cfg,
-                    &snap,
-                    &PolicyInput {
-                        allocations: vec![allocation(
-                            "job",
-                            AllocationPhase::Running,
-                            resources(100, 100, 2000),
-                            Some(resources(100, 100, 2000)),
-                        )],
-                        facts: facts.clone(),
-                        ..PolicyInput::default()
-                    },
-                    i * 500,
-                )
-                .unwrap();
-            let action = decision.actions.iter().find(|a| a.resource == key);
-            steps.push(action.map(|a| (a.step, a.target)));
-            // The supervisor applies each step at once and reports it.
-            let job = facts.get_mut("job").unwrap();
-            match action {
-                Some(action) => {
-                    job.applied.insert(key.clone(), action.step);
-                    if let Some(target) = action.target {
-                        job.applied_targets.insert(key.clone(), target);
-                    }
-                }
-                None => {
-                    job.applied.remove(&key);
-                    job.applied_targets.remove(&key);
-                }
-            }
-        }
-        // Steps hold through the unknown window, then the cap applies and stays.
-        let first = steps.iter().position(Option::is_some).expect("a step");
-        let capped = &steps[first..];
-        assert_eq!(capped[0], Some((YieldStep::Cap, Some(500))), "{mode:?}");
-        assert!(
-            capped.iter().all(|step| *step == capped[0]),
-            "{mode:?}: {:?}",
-            capped
-                .iter()
-                .filter(|step| **step != capped[0])
-                .take(3)
-                .collect::<Vec<_>>()
-        );
     }
 }
 
@@ -4955,8 +4939,8 @@ fn measured_at_once(cfg: &mut Config) {
 
 /// One evaluation of a lone running GPU job beside external GPU compute: a
 /// measured `external` amount (own work using the rest of the device at full
-/// utilization), or an unknown amount. Returns the job's GPU compute cap target and
-/// the path held_back reports.
+/// utilization), or an unknown amount. Returns the job's GPU compute step, the device's
+/// target share and the path held_back reports.
 fn gpu_compute_target(
     mode: cedegrid::contention::ContentionMode,
     external: Option<u64>,
@@ -5006,7 +4990,7 @@ fn gpu_compute_target(
     let action = decision.actions.iter().find(|a| a.resource == key);
     (
         action.map(|a| a.step),
-        action.and_then(|a| a.target),
+        decision.resources[&key].target_share,
         decision.resources[&key]
             .held_back
             .as_ref()
@@ -5026,18 +5010,17 @@ fn gpu_compute_target(
 /// unknown amount keeps the one-principal share, and held_back names the path.
 #[test]
 fn measured_external_gpu_compute_takes_the_cpu_paths() {
-    use cedegrid::contention::{
-        ContentionMode::*,
-        YieldStep::{Cap, Pause},
-    };
-    // Performance reads the same path and takes no step (FR-022).
-    for (external, _performance, yield_first, neutral) in [
-        (50, 930, (Some(Cap), Some(800)), 900),
-        (400, 580, (Some(Pause), None), 500),
+    use cedegrid::contention::{ContentionMode::*, YieldStep::Pause};
+    // Performance reads the same path and takes no step (FR-022). A lone job is held only by
+    // a whole-task pause, which Neutral never takes here, since it would leave own work below
+    // its target; Yield First pauses it where its target leaves it nothing (FR-089).
+    for (external, yield_first, neutral) in [
+        (50, (None, Some(800)), 900),
+        (400, (Some(Pause), Some(0)), 500),
     ] {
         assert_eq!(
-            gpu_compute_target(Performance, Some(external)),
-            (None, None, Some(ComputePath::Measured)),
+            gpu_compute_target(Performance, Some(external)).0,
+            None,
             "{external}"
         );
         assert_eq!(
@@ -5047,141 +5030,17 @@ fn measured_external_gpu_compute_takes_the_cpu_paths() {
         );
         assert_eq!(
             gpu_compute_target(Neutral, Some(external)),
-            (Some(Cap), Some(neutral), Some(ComputePath::Measured)),
+            (None, Some(neutral), Some(ComputePath::Measured)),
             "{external}"
         );
     }
     let (step, target, path) = gpu_compute_target(Neutral, None);
-    assert_eq!((step, target), (Some(Cap), Some(500)));
+    assert_eq!((step, target), (None, Some(500)));
     assert!(
         matches!(&path, Some(ComputePath::Unknown { code, reason }) if code == "gpu_compute_amount_unknown" && reason.contains("differs")),
         "{path:?}"
     );
     assert_eq!(gpu_compute_target(YieldFirst, None).0, Some(Pause));
-}
-
-/// Under GPU activity of unknown amount, Neutral and Performance hold the fair
-/// share: once the supervisor reports the duty cycle applied, own work holds at
-/// most that duty, so the cap at the share is met and never escalates; for 5
-/// minutes after the first step own work stays at 500 and is never paused.
-#[test]
-fn an_applied_duty_holds_the_fair_share_under_unknown_amounts() {
-    use cedegrid::contention::{ContentionMode::*, ResourceKey, YieldStep};
-    let key = ResourceKey::GpuCompute("GPU-test".into());
-    {
-        let mode = Neutral;
-        let (cfg, mut snap) = us5_device(
-            mode,
-            ComputeActivity::Active,
-            Some(vec![987]),
-            Some(8000),
-            false,
-        );
-        snap.gpus[0].compute_amount_unknown = Some("not measured".into());
-        let mut engine = PolicyEngine::new();
-        let mut applied: Option<YieldStep> = None;
-        let mut targets = vec![];
-        let mut now = 0;
-        while now < 300_000 {
-            snap.gpus[0].compute_sample_id = Some(now + 1);
-            let mut facts = rootless(&["job"]);
-            if let Some(step) = applied {
-                facts
-                    .get_mut("job")
-                    .unwrap()
-                    .applied
-                    .insert(key.clone(), step);
-            }
-            let decision = engine
-                .evaluate(
-                    &cfg,
-                    &snap,
-                    &PolicyInput {
-                        allocations: vec![allocation(
-                            "job",
-                            AllocationPhase::Running,
-                            resources(100, 100, 2000),
-                            Some(resources(100, 100, 2000)),
-                        )],
-                        facts,
-                        ..PolicyInput::default()
-                    },
-                    now,
-                )
-                .unwrap();
-            let action = decision.actions.iter().find(|a| a.resource == key);
-            // The supervisor applies each step it is sent.
-            applied = action.map(|a| a.step);
-            targets.push(action.map(|a| (a.step, a.target)));
-            now += 500;
-        }
-        assert_eq!(targets[0], Some((YieldStep::Cap, Some(500))), "{mode:?}");
-        assert!(
-            targets
-                .iter()
-                .all(|t| *t == Some((YieldStep::Cap, Some(500)))),
-            "{mode:?}: {:?}",
-            targets
-                .iter()
-                .find(|t| **t != Some((YieldStep::Cap, Some(500))))
-        );
-    }
-}
-
-/// The policy credits a GPU compute cap its supervisor reports applied at the cap's duty
-/// from the reported facts alone. Full and Tracked report the same facts for that cap
-/// (`tests/cgroup.rs`), so own work is credited alike in both.
-#[test]
-fn a_reported_gpu_compute_cap_is_credited_at_its_duty() {
-    use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
-    let key = ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
-        Neutral,
-        ComputeActivity::Active,
-        Some(vec![987]),
-        Some(8000),
-        false,
-    );
-    snap.gpus[0].compute_amount_unknown = Some("not measured".into());
-    let input = |applied: bool| {
-        let mut facts = rootless(&["job"]);
-        let job = facts.get_mut("job").unwrap();
-        // The GPU compute steps either actuator reports unavailable.
-        job.unavailable.insert(
-            key.clone(),
-            std::collections::BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
-        );
-        if applied {
-            job.applied.insert(key.clone(), YieldStep::Cap);
-        }
-        PolicyInput {
-            allocations: vec![allocation(
-                "job",
-                AllocationPhase::Running,
-                resources(100, 100, 2000),
-                Some(resources(100, 100, 2000)),
-            )],
-            facts,
-            ..PolicyInput::default()
-        }
-    };
-    let mut engine = PolicyEngine::new();
-    snap.gpus[0].compute_sample_id = Some(1);
-    let first = engine.evaluate(&cfg, &snap, &input(false), 0).unwrap();
-    let action = first.actions.iter().find(|a| a.resource == key).unwrap();
-    assert_eq!((action.step, action.target), (YieldStep::Cap, Some(500)));
-    snap.gpus[0].compute_sample_id = Some(2);
-    let second = engine.evaluate(&cfg, &snap, &input(true), 500).unwrap();
-    let status = &second.resources[&key];
-    assert_eq!(status.own, Some((500, 500)));
-    assert!(
-        status
-            .reasons
-            .iter()
-            .any(|reason| reason.code == "applied_duty_credit"),
-        "{:?}",
-        status.reasons
-    );
 }
 
 /// A task that launched at the Yield First nice and now runs in another CPU mode keeps
@@ -5277,10 +5136,11 @@ fn external_gpu_users_are_principals_by_uid() {
 
 /// Device time nobody accounts for is an unattributed external principal while an
 /// external PID is listed: with own samples at 85 on a saturated device, the 150
-/// contends; Neutral steps to the fair share, learns the user is satisfied and
-/// rises to capacity minus 150 minus its 5% margin (FR-021).
+/// contends and Neutral's target is the fair share. A lone job is not paused for it, so no
+/// capacity is freed to learn the user satisfied, and the target stays there (FR-021,
+/// FR-089).
 #[test]
-fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
+fn unattributed_gpu_time_contends_at_the_fair_share() {
     use cedegrid::contention::{ContentionMode::Neutral, ResourceKey, YieldStep};
     let key = ResourceKey::GpuCompute("GPU-test".into());
     let (mut cfg, mut snap) = us5_device(
@@ -5302,13 +5162,13 @@ fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
         ..PolicyInput::default()
     };
     let mut engine = PolicyEngine::new();
-    let (mut cap, mut lowest) = (None::<u64>, u64::MAX);
+    let (mut target, mut lowest) = (None::<u64>, u64::MAX);
     let mut now = 0;
     while now <= 90_000 {
-        // Own work wants 850; the listed external PID shows no samples, so the
-        // device time beside own work is the 150 nobody accounts for.
-        let own = cap.unwrap_or(850).min(850);
-        lowest = lowest.min(cap.unwrap_or(1000));
+        // Own work, a lone job, takes 850 and is never paused for it (FR-089); the listed
+        // external PID shows no samples, so the device time beside own work is the 150 nobody
+        // accounts for.
+        let own = 850;
         snap.gpus[0].compute_sample_id = Some(now + 1);
         snap.gpus[0].own_compute_milli = Some(own);
         snap.gpus[0].external_compute_milli = Some(150);
@@ -5316,11 +5176,12 @@ fn unattributed_gpu_time_contends_and_is_learned_satisfied() {
         let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
         let action = decision.actions.iter().find(|a| a.resource == key);
         assert_ne!(action.map(|a| a.step), Some(YieldStep::Pause), "at {now}");
-        cap = action.and_then(|a| a.target);
+        target = decision.resources[&key].target_share;
+        lowest = lowest.min(target.unwrap_or(1000));
         now += 500;
     }
-    assert_eq!(lowest, 500, "the fair share applied first");
-    assert_eq!(cap.unwrap_or(1000), 800);
+    assert_eq!(lowest, 500, "the fair share applies");
+    assert_eq!(target, Some(500));
 }
 
 /// A device whose samples alternate between consistent and inconsistent every
@@ -5380,11 +5241,15 @@ fn alternating_gpu_measurements_cause_at_most_one_step_change() {
             )
             .unwrap();
         let action = decision.actions.iter().find(|a| a.resource == key);
-        let next = action.map(|a| (a.step, a.target));
+        // A lone job is not paused for its target (FR-089); the target itself is what changes.
+        let next = Some((
+            action.map_or(YieldStep::None, |a| a.step),
+            decision.resources[&key].target_share,
+        ));
         if now == 59_500 {
             assert_eq!(
                 next,
-                Some((YieldStep::Cap, Some(900))),
+                Some((YieldStep::None, Some(900))),
                 "learned before alternating"
             );
         }
@@ -5478,67 +5343,6 @@ fn an_own_only_gpu_interval_is_measured_at_once() {
     );
 }
 
-/// Own work is credited at the larger of the duty its supervisor reports applied
-/// and the policy's current target: when the policy lowers a cap within the
-/// step (as when a new allocation halves each share) the allocation counts at
-/// its old duty until its supervisor reports the new one.
-#[test]
-fn own_gpu_work_counts_at_the_duty_the_supervisor_applied() {
-    use cedegrid::contention::{
-        ContentionMode::Neutral, ResourceKey, StepRequest, YieldCause, YieldStep,
-    };
-    let key = ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
-        Neutral,
-        ComputeActivity::Active,
-        Some(vec![987]),
-        Some(8000),
-        false,
-    );
-    snap.gpus[0].compute_amount_unknown = Some("not measured".into());
-    let own_counted = |applied_target: u64| {
-        let mut engine = PolicyEngine::new();
-        // The policy's current target for the cap is 250.
-        engine.seed(
-            "a",
-            key.clone(),
-            StepRequest {
-                step: YieldStep::Cap,
-                target: Some(250),
-                cause: YieldCause::ExternalGrowth,
-                deadline_ms: None,
-            },
-            0,
-        );
-        let mut facts = rootless(&["a"]);
-        let a = facts.get_mut("a").unwrap();
-        a.applied.insert(key.clone(), YieldStep::Cap);
-        a.applied_targets.insert(key.clone(), applied_target);
-        let decision = engine
-            .evaluate(
-                &cfg,
-                &snap,
-                &PolicyInput {
-                    allocations: vec![allocation(
-                        "a",
-                        AllocationPhase::Running,
-                        resources(100, 100, 1000),
-                        Some(resources(100, 100, 1000)),
-                    )],
-                    facts,
-                    ..PolicyInput::default()
-                },
-                500,
-            )
-            .unwrap();
-        decision.resources[&key].own.map(|own| own.0)
-    };
-    // Its supervisor still runs the old 500 duty: own work counts at 500.
-    assert_eq!(own_counted(500), Some(500));
-    // Once it reports 250 applied, own work counts at 250.
-    assert_eq!(own_counted(250), Some(250));
-}
-
 /// Neutral learns that a measured 5% external user is satisfied once own work
 /// holds the fair share and the device has capacity to spare, and own work then
 /// runs at capacity minus the user minus the 5% margin (FR-021).
@@ -5565,23 +5369,24 @@ fn neutral_learns_a_measured_gpu_user_is_satisfied() {
         ..PolicyInput::default()
     };
     let mut engine = PolicyEngine::new();
-    let mut cap: Option<u64> = None;
+    let mut target: Option<u64> = None;
     let mut now = 0;
     while now <= 60_000 {
-        // Own work wants 950 and runs at its cap; the user takes 50.
-        let own = cap.unwrap_or(950).min(950);
+        // Own work, a lone job, takes 950 and is never paused for it (FR-089); the user takes
+        // 50.
+        let own = 950;
         snap.gpus[0].own_compute_milli = Some(own);
         snap.gpus[0].external_compute_milli = Some(50);
         snap.gpus[0].utilization_percent = Some(((own + 50) / 10) as u32);
         let decision = engine.evaluate(&cfg, &snap, &input, now).unwrap();
-        cap = decision
-            .actions
-            .iter()
-            .find(|a| a.resource == key)
-            .and_then(|a| a.target);
+        assert!(
+            decision.actions.iter().all(|a| a.resource != key),
+            "at {now}"
+        );
+        target = decision.resources[&key].target_share;
         now += 500;
     }
-    assert_eq!(cap.unwrap_or(1000), 900);
+    assert_eq!(target, Some(900));
 }
 
 /// Running own work is not drained because a device becomes occupied, even with
@@ -6204,7 +6009,17 @@ mod per_job_modes {
     /// Runs the policy with the supervisor applying every cap and pause at once,
     /// beside a shadow engine that sees the same hosts without per-job modes.
     pub(super) fn simulate(jobs: &[Job], external: u64, intervals: u64) -> Vec<Interval> {
-        let cfg = cfg();
+        simulate_in(&cfg(), jobs, external, intervals)
+    }
+
+    /// `simulate` on a given node configuration.
+    pub(super) fn simulate_in(
+        cfg: &Config,
+        jobs: &[Job],
+        external: u64,
+        intervals: u64,
+    ) -> Vec<Interval> {
+        let cfg = cfg.clone();
         let (mut engine, mut shadow) = (PolicyEngine::new(), PolicyEngine::new());
         let mut actions: Vec<YieldAction> = vec![];
         let mut out = vec![];
@@ -6215,7 +6030,7 @@ mod per_job_modes {
                     .find(|a| a.allocation_id == id)
                     .map_or(CPU, |a| match a.step {
                         YieldStep::Cap => a.target.unwrap_or(CPU),
-                        YieldStep::Pause => 0,
+                        YieldStep::Pause | YieldStep::Drain | YieldStep::Terminate => 0,
                         _ => CPU,
                     })
             };
@@ -6318,18 +6133,20 @@ mod per_job_modes {
                 "external {external}: {:?}",
                 first.actions
             );
-            // Settled over the last minute: the Performance job holds the
-            // aggregate less what the Yield First job keeps.
+            // Settled over the last minute: the Performance job is never held, so it keeps
+            // what the scheduler gives it, at least the aggregate less what the Yield First job
+            // keeps (FR-030, R88).
             let settled = &run[120..];
             let (gentle, eager) = (average(settled, 0), average(settled, 1));
             let aggregate = settled.last().unwrap().aggregate;
             assert!(
-                gentle + eager <= aggregate + CPU / 100,
+                eager + gentle + CPU / 10 >= aggregate,
                 "external {external}: {gentle} + {eager} against {aggregate}"
             );
             assert!(
-                eager + gentle + CPU / 10 >= aggregate,
-                "external {external}: {gentle} + {eager} against {aggregate}"
+                run.iter()
+                    .all(|i| i.actions.iter().all(|a| a.allocation_id != "eager")),
+                "external {external}: the Performance job is never held"
             );
             assert!(eager > gentle, "external {external}: {gentle} {eager}");
             if external > 0 {
@@ -6363,6 +6180,116 @@ mod per_job_modes {
         );
     }
 
+    /// A Performance job on a node whose mode is Neutral or Yield First is never held for
+    /// another principal: the node's other jobs give what the aggregate needs as far as they
+    /// can, and alone on the node it is not held at all (FR-016, FR-030, R88).
+    #[test]
+    fn a_performance_job_is_never_held_whatever_the_node_mode() {
+        let job = |id, mode| Job {
+            id,
+            mode,
+            class: AllocationClass::Opportunistic,
+            request: 1000,
+            wants: CPU,
+        };
+        for node in [ContentionMode::Neutral, ContentionMode::YieldFirst] {
+            let mut cfg = cfg();
+            cfg.contention.default_mode = node;
+            let jobs = [
+                job("plain", None),
+                job("eager", Some(ContentionMode::Performance)),
+            ];
+            for external in [1000, 4000] {
+                let run = simulate_in(&cfg, &jobs, external, 240);
+                for (i, interval) in run.iter().enumerate() {
+                    assert!(
+                        interval.actions.iter().all(|a| a.allocation_id != "eager"),
+                        "{node:?}, external {external}, interval {i}: {:?}",
+                        interval.actions
+                    );
+                }
+                assert!(
+                    run.iter()
+                        .any(|i| i.actions.iter().any(|a| a.allocation_id == "plain")),
+                    "{node:?}, external {external}: the other job pays"
+                );
+            }
+            let run = simulate_in(&cfg, &jobs[1..], 4000, 120);
+            assert!(
+                run.iter().all(|i| i.actions.is_empty()),
+                "{node:?}: alone, nothing is held"
+            );
+        }
+    }
+
+    /// The operator envelope still steps a Performance job on a Neutral node (FR-030, FR-057).
+    #[test]
+    fn the_envelope_still_steps_a_performance_job_on_a_neutral_node() {
+        let mut job = allocation(
+            "eager",
+            AllocationPhase::Running,
+            resources(1000, 100, 0),
+            Some(resources(6000, 100, 0)),
+        );
+        job.modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::Performance)]);
+        let input = PolicyInput {
+            allocations: vec![job],
+            facts: rootless(&["eager"]),
+            envelope: Some(resources(3000, 16_000, 0)),
+            ..PolicyInput::default()
+        };
+        let mut engine = PolicyEngine::new();
+        let stepped = (0..20u64).any(|i| {
+            engine
+                .evaluate(&cfg(), &snapshot(), &input, i * 500)
+                .unwrap()
+                .actions
+                .iter()
+                .any(|a| a.allocation_id == "eager" && a.step > YieldStep::None)
+        });
+        assert!(stepped);
+    }
+
+    /// While CPU telemetry is unknown on a Neutral node, escalation past the unknown window
+    /// reaches the node's Neutral job and never its Performance job (FR-008, FR-030, R88).
+    #[test]
+    fn unknown_cpu_never_escalates_to_a_performance_job() {
+        let mut eager = allocation(
+            "eager",
+            AllocationPhase::Running,
+            resources(2000, 100, 0),
+            Some(resources(3000, 100, 0)),
+        );
+        eager.modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::Performance)]);
+        let plain = allocation(
+            "plain",
+            AllocationPhase::Running,
+            resources(2000, 100, 0),
+            Some(resources(3000, 100, 0)),
+        );
+        let input = PolicyInput {
+            allocations: vec![eager, plain],
+            facts: rootless(&["eager", "plain"]),
+            ..PolicyInput::default()
+        };
+        let mut engine = PolicyEngine::new();
+        let mut stepped = std::collections::BTreeSet::new();
+        for now in (0..30_000).step_by(500) {
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = (now < 5_000).then_some(8000);
+            let decision = engine.evaluate(&cfg(), &snap, &input, now).unwrap();
+            stepped.extend(
+                decision
+                    .actions
+                    .iter()
+                    .filter(|a| a.step > YieldStep::None)
+                    .map(|a| a.allocation_id.clone()),
+            );
+        }
+        assert!(!stepped.contains("eager"), "{stepped:?}");
+        assert!(stepped.contains("plain"), "{stepped:?}");
+    }
+
     /// A Guaranteed job keeps its CPU request in every tier (FR-024).
     #[test]
     fn a_guaranteed_yield_first_job_keeps_its_cpu_request() {
@@ -6373,6 +6300,289 @@ mod per_job_modes {
             "{:?}",
             settled.iter().map(|i| i.usage[0]).collect::<Vec<_>>()
         );
+    }
+}
+
+/// Whole-task holds where no CPU rate cap applies (FR-089, R89).
+mod whole_tasks {
+    use super::*;
+    use cedegrid::contention::{ResourceKey, YieldStep};
+    use std::collections::BTreeSet;
+
+    const CPU: u64 = 8000;
+
+    /// The node in Full: a delegated cgroup with `cpu.max` authorized, so a CPU cap applies.
+    pub(super) fn full(mut cfg: Config) -> Config {
+        cfg.cgroup.enabled = true;
+        cfg.cgroup.delegated_root = Some("/sys/fs/cgroup/cedegrid-test".into());
+        cfg.cgroup.authorized_controls = ["cgroup.procs", "cpu.weight", "cpu.max", "cgroup.freeze"]
+            .map(String::from)
+            .to_vec();
+        cfg
+    }
+
+    struct Seen {
+        now: u64,
+        usage: BTreeMap<String, u64>,
+        steps: BTreeMap<String, YieldStep>,
+        drains: Vec<String>,
+    }
+
+    /// Runs `jobs` (id, what each would use) beside one external principal wanting
+    /// `external(now)` on 8 000 millicores, each step applied at once; a drained task leaves.
+    fn run(
+        cfg: &Config,
+        jobs: &[(&str, u64)],
+        facts: &BTreeMap<String, AllocationFacts>,
+        external: impl Fn(u64) -> u64,
+        until: u64,
+    ) -> Vec<Seen> {
+        let mut engine = PolicyEngine::new();
+        let mut steps: BTreeMap<String, (YieldStep, Option<u64>)> = BTreeMap::new();
+        let mut gone: BTreeSet<String> = BTreeSet::new();
+        let mut out = vec![];
+        for now in (0..=until).step_by(500) {
+            let live: Vec<(&str, u64)> = jobs
+                .iter()
+                .filter(|(id, _)| !gone.contains(*id))
+                .copied()
+                .collect();
+            let limit = |id: &str, wants: u64| match steps.get(id) {
+                Some((YieldStep::Pause, _)) => 0,
+                Some((YieldStep::Cap, target)) => wants.min(target.unwrap_or(wants)),
+                _ => wants,
+            };
+            let mut demands = vec![external(now)];
+            demands.extend(live.iter().map(|(id, wants)| limit(id, *wants)));
+            let given = per_job_modes::schedule(&demands);
+            let allocations = live
+                .iter()
+                .zip(&given[1..])
+                .map(|((id, _), used)| {
+                    allocation(
+                        id,
+                        AllocationPhase::Running,
+                        resources(1000, 100, 0),
+                        Some(resources(*used, 100, 0)),
+                    )
+                })
+                .collect();
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = Some(given.iter().sum::<u64>().min(CPU));
+            let mut principals = vec![cpu_principal(1000, true, 0)];
+            if given[0] > 0 {
+                principals.push(cpu_principal(2001, false, given[0]));
+            }
+            snap.principals = Some(principals);
+            let input = PolicyInput {
+                allocations,
+                facts: facts.clone(),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(cfg, &snap, &input, now).unwrap();
+            steps = decision
+                .actions
+                .iter()
+                .filter(|a| a.resource == ResourceKey::Cpu)
+                .map(|a| (a.allocation_id.clone(), (a.step, a.target)))
+                .collect();
+            gone.extend(decision.would_drain.iter().cloned());
+            out.push(Seen {
+                now,
+                usage: live
+                    .iter()
+                    .zip(&given[1..])
+                    .map(|((id, _), used)| (id.to_string(), *used))
+                    .collect(),
+                steps: steps
+                    .iter()
+                    .map(|(id, (step, _))| (id.clone(), *step))
+                    .collect(),
+                drains: decision.would_drain.clone(),
+            });
+        }
+        out
+    }
+
+    /// `tracked()` in Tracked: no delegated cgroup, so no CPU rate cap.
+    fn tracked() -> Config {
+        let mut cfg = per_job_modes::cfg();
+        cfg.cgroup = Default::default();
+        cfg
+    }
+
+    fn names(jobs: &[(&str, u64)]) -> Vec<String> {
+        jobs.iter().map(|(id, _)| id.to_string()).collect()
+    }
+
+    fn tracked_facts(jobs: &[(&str, u64)]) -> BTreeMap<String, AllocationFacts> {
+        let ids = names(jobs);
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        rootless(&ids)
+    }
+
+    const FOUR: [(&str, u64); 4] = [("a", 1500), ("b", 1500), ("c", 1500), ("d", 1500)];
+
+    /// In Tracked, Neutral holds own work back by pausing whole tasks, only while the tasks left
+    /// running keep own usage at or above the fair share; no cap is planned. In Full the cap
+    /// still applies (FR-089).
+    #[test]
+    fn without_a_cpu_cap_neutral_pauses_whole_tasks() {
+        let facts = tracked_facts(&FOUR);
+        let held = run(&tracked(), &FOUR, &facts, |_| 4000, 9_500);
+        for seen in &held {
+            assert!(
+                seen.steps.values().all(|step| *step == YieldStep::Pause),
+                "at {}: {:?}",
+                seen.now,
+                seen.steps
+            );
+        }
+        for seen in &held[6..] {
+            assert_eq!(seen.steps.len(), 1, "at {}: {:?}", seen.now, seen.steps);
+            let own: u64 = seen.usage.values().sum();
+            assert!(own >= 4000, "at {}: own {own}", seen.now);
+        }
+        let capped = run(&full(tracked()), &FOUR, &facts, |_| 4000, 9_500);
+        assert!(
+            capped
+                .iter()
+                .any(|seen| seen.steps.values().any(|step| *step == YieldStep::Cap)),
+            "Full keeps its cap"
+        );
+    }
+
+    /// A task whose pause would take own work below its target is skipped for the next in the
+    /// order, so rounding favours own work (FR-089).
+    #[test]
+    fn a_task_that_would_overshoot_the_target_is_skipped() {
+        let jobs = [("big", 3000), ("b", 1000), ("c", 1000)];
+        let seen = run(&tracked(), &jobs, &tracked_facts(&jobs), |_| 4000, 9_500);
+        assert!(
+            seen.iter().all(|s| !s.steps.contains_key("big")),
+            "{:?}",
+            seen.iter().map(|s| &s.steps).collect::<Vec<_>>()
+        );
+        assert!(seen.iter().any(|s| s.steps.len() == 1));
+    }
+
+    /// A pause still contended at `pause_bound_s` drains the task, which leaves as a yield; one
+    /// whose demand has gone resumes instead and nothing drains (FR-014, FR-089).
+    #[test]
+    fn a_pause_drains_at_its_bound_only_while_contended() {
+        let facts = tracked_facts(&FOUR);
+        let cfg = tracked();
+        let held = run(&cfg, &FOUR, &facts, |_| 4000, 20_000);
+        let drains: Vec<(u64, String)> = held
+            .iter()
+            .flat_map(|s| s.drains.iter().map(|id| (s.now, id.clone())))
+            .collect();
+        assert_eq!(drains.len(), 1, "{drains:?}");
+        assert!(drains[0].0 >= 10_000, "{drains:?}");
+        let gone = run(
+            &cfg,
+            &FOUR,
+            &facts,
+            |now| if now < 6_000 { 4000 } else { 0 },
+            20_000,
+        );
+        assert!(gone.iter().all(|s| s.drains.is_empty()));
+        let last = gone.last().unwrap();
+        assert!(last.steps.is_empty(), "{:?}", last.steps);
+    }
+
+    /// A hint-ready task paused to its bound gets its hint, a request with no cap, and drains
+    /// once the hint's deadline has passed with the resource still contended (FR-014, FR-089).
+    #[test]
+    fn a_hint_ready_task_gets_its_hint_at_the_bound_then_drains() {
+        let facts: BTreeMap<String, AllocationFacts> = names(&FOUR)
+            .into_iter()
+            .map(|id| {
+                let facts = AllocationFacts {
+                    hint_ready: true,
+                    observes_drain: true,
+                    unavailable: BTreeMap::from([(
+                        ResourceKey::Cpu,
+                        BTreeSet::from([YieldStep::LowerShare]),
+                    )]),
+                    ..AllocationFacts::default()
+                };
+                (id, facts)
+            })
+            .collect();
+        let seen = run(&tracked(), &FOUR, &facts, |_| 4000, 40_000);
+        let hinted = seen
+            .iter()
+            .find(|s| s.steps.values().any(|step| *step == YieldStep::Hint))
+            .expect("a hint");
+        assert!(hinted.now >= 10_000, "at {}", hinted.now);
+        assert!(
+            seen.iter()
+                .all(|s| s.steps.values().all(|step| *step != YieldStep::Cap))
+        );
+        assert!(seen.iter().any(|s| !s.drains.is_empty()));
+    }
+
+    /// The operator envelope is own work's hard limit: in Tracked a task over it is paused even
+    /// where that goes below the envelope, the pause holds to its bound, and the task then
+    /// drains (FR-057, FR-089).
+    #[test]
+    fn a_task_over_the_envelope_is_paused_then_drained() {
+        let mut engine = PolicyEngine::new();
+        let mut steps = vec![];
+        for now in (0..=12_000).step_by(500) {
+            let paused = steps
+                .last()
+                .is_some_and(|(_, step)| *step == YieldStep::Pause);
+            let used = if paused { 0 } else { 2500 };
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "c",
+                    AllocationPhase::Running,
+                    resources(500, 100, 0),
+                    Some(resources(used, 100, 0)),
+                )],
+                facts: rootless(&["c"]),
+                envelope: Some(resources(2000, 16_000, 0)),
+                ..PolicyInput::default()
+            };
+            let mut snap = snapshot();
+            snap.cpu_busy_millicores = Some(used + 500);
+            snap.principals = Some(vec![cpu_principal(1000, true, used)]);
+            let decision = engine.evaluate(&tracked(), &snap, &input, now).unwrap();
+            let step = decision
+                .actions
+                .iter()
+                .find(|a| a.resource == ResourceKey::Cpu)
+                .map_or(YieldStep::None, |a| a.step);
+            steps.push((now, step));
+            if step >= YieldStep::Drain {
+                break;
+            }
+        }
+        assert_eq!(steps[0].1, YieldStep::Pause, "{steps:?}");
+        let drained = steps.iter().find(|(_, step)| *step >= YieldStep::Drain);
+        assert!(drained.is_some_and(|(now, _)| *now >= 10_000), "{steps:?}");
+        assert!(
+            steps
+                .iter()
+                .take_while(|(_, step)| *step < YieldStep::Drain)
+                .all(|(_, step)| *step == YieldStep::Pause),
+            "{steps:?}"
+        );
+    }
+
+    /// Yield First in Tracked pauses every own task while contended, with no cap (FR-020).
+    #[test]
+    fn yield_first_pauses_every_task_without_a_cap() {
+        let mut cfg = tracked();
+        cfg.contention.default_mode = cedegrid::contention::ContentionMode::YieldFirst;
+        let seen = run(&cfg, &FOUR, &tracked_facts(&FOUR), |_| 4000, 9_500);
+        assert!(
+            seen.iter()
+                .all(|s| s.steps.values().all(|step| *step == YieldStep::Pause))
+        );
+        assert!(seen.iter().any(|s| s.steps.len() == 4));
     }
 }
 
@@ -6540,8 +6750,9 @@ mod reclaim_admission {
 
     const CPU: u64 = 32_000;
 
+    /// In Full, where the cap these runs hold applies (FR-089).
     fn cfg(mode: ContentionMode) -> Config {
-        let mut cfg = Config::default();
+        let mut cfg = super::whole_tasks::full(Config::default());
         cfg.contention.default_mode = mode;
         cfg.contention
             .acknowledge_caution
@@ -8684,6 +8895,48 @@ mod floors_by_mode {
             );
             let signals: usize = run.iter().map(|i| i.saved.len()).sum();
             assert_eq!(signals, 4, "each task is signalled once");
+        }
+    }
+
+    /// On a node whose mode is Neutral or Yield First, a Performance job gives no memory back at
+    /// a floor breach others caused and is never marked for the OOM killer; the node's other
+    /// jobs give way as before (FR-023, FR-030, R88).
+    #[test]
+    fn a_performance_job_keeps_its_memory_at_a_breach_on_any_node() {
+        let class = AllocationClass::Opportunistic;
+        let mut eager = ram_job("z", class, 7_000);
+        eager.modes = BTreeMap::from([(
+            cedegrid::contention::ResourceKind::Ram,
+            ContentionMode::Performance,
+        )]);
+        let jobs = vec![
+            ram_job("a", class, 3_000),
+            ram_job("b", class, 3_000),
+            ram_job("c", class, 3_000),
+            eager,
+        ];
+        let facts = over_share_facts(&["a", "b", "c", "z"], &[], &[("z", 1_000)]);
+        for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+            let mut cfg = config_in(mode);
+            cfg.contention.max_mode = Some(ContentionMode::Performance);
+            cfg.contention
+                .acknowledge_caution
+                .insert("performance_mode".into());
+            let run = scripted(&cfg, &facts, 12_000, |_| (jobs.clone(), 700));
+            for interval in &run {
+                let label = format!("{mode:?} at {}", interval.now);
+                assert!(
+                    !interval.steps.contains_key("z"),
+                    "{label}: {:?}",
+                    interval.steps
+                );
+                assert!(!interval.drains.contains(&"z".to_string()), "{label}");
+                assert!(!interval.marked.contains(&"z".to_string()), "{label}");
+            }
+            assert!(
+                run.iter().any(|i| !i.steps.is_empty()),
+                "{mode:?}: the other jobs give way"
+            );
         }
     }
 

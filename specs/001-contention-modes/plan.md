@@ -2677,3 +2677,73 @@ tests that assert today's Performance steps are rewritten to the new expectation
 property test and the 500-sequence snapshot comparison by mode. Native: C4's shape in
 Performance (no own task hinted, drained or sent TERM; the kernel's victim as in the baseline)
 and the baseline-comparison gates SC-018 and SC-019 on the test host.
+
+## Report 057 Part C and point 7: per-job modes, whole-task holds and the first-come GPU floor (2026-11-17)
+
+**Input**: constitution 8.1.0 Principle II ("Modes are per job", "First-come GPU floor"); spec
+Session 2026-11-17's last five answers, FR-030, FR-089, FR-090 and SC-020; report 057 and its
+cap design note (drafts on the 057/059 design branch).
+
+**Technical Context**: Rust 1.88; no dependency, config key or wire change. The decision output's
+time-slice record gains the hold count and the floor; its duty fields stay for old recordings and
+are no longer set. The rootless actuator loses its CPU and GPU compute duty cycle; the cgroup
+actuator keeps `cpu.max` and loses the GPU compute freeze duty. Replays of recorded inputs give
+different Yield First and Neutral decisions, which the snapshot comparison lists.
+
+**Constitution Check**: Principles I to VI.
+- *Principle I.* No actuator is added. A pause still reaches only the verified family, through
+  pidfds in Tracked and a freeze of a leaf that holds exactly the family in Full.
+- *Principle II.* A job's own mode decides how it gives back. Yield First and Neutral give back by
+  whole tasks where no rate cap applies, with rounding toward own work; the first-come floor is
+  the one exception to "first to give back", on GPU compute only. Performance is unchanged.
+- *Principle III.* Unknown is never free: an unreadable UID or an unknown listing withholds the
+  floor; unknown activity keeps FR-008's hold-then-escalate.
+- *Principle IV.* Selection stays in the pure policy; the actuators only lose mechanisms; the
+  agent's OOM classification reads the job's mode.
+- *Principle V.* Nothing runs as root.
+- *Principle VI.* Each part is test first, seen failing.
+
+**Per-job modes (R88)**. In `src/policy/ladder.rs`: running work whose own mode is Performance or
+Aggressive is left out of the victims for external growth, own usage over the target and unknown
+activity on CPU and GPU compute, and of the floor-breach victims and the OOM marks, whatever the
+governing mode; the envelope still steps it. `keeps_mode_memory`, `oom_order`, `ceiling` and the
+compute victims drop their "governing mode is Performance" condition. The aggregate's excess and
+admission still come from the governing mode, so the other jobs pay it as far as they can. In
+`src/agent/service.rs` `note_ram_views` judges each slot by its allocation's effective RAM mode.
+
+**Whole-task holds on CPU (R89)**. A CPU rate cap applies only where the node's cgroup backend is
+enabled with `cpu.max` authorized (Full); elsewhere the policy treats the CPU cap as unavailable
+from configuration, so the first decision already plans no cap, and the rootless actuator reports
+it unavailable too. In `plan_pass`, victims without a cap are chosen whole: in FR-016's order,
+each paused only while the excess left is at least its usage, a held pause kept while the
+contention lasts. `plan_victim` allows a drain of such a victim only from a pause at its bound
+(through the hint for a hint-ready worker). In `src/contention.rs`, a pause held for external
+growth reverses in one move when contention has just ended and no cap is available (FR-034). The
+rootless actuator drops the CPU duty cycle (`cap`, `duty`, `measure_rate`); the supervisor's CPU
+hint is then a request only, which it already is when the actuator reports no cap.
+
+**Whole-task holds on GPU compute (R89)**. Both actuators report the GPU compute cap unavailable;
+the rootless duty (`gpu_duty`, the aligned clock) goes. In `src/policy/measure.rs` the time-slice
+path computes the hold count t = ⌊E_b ÷ k_b⌋ from the slice-bound principals instead of d0 and the
+duty, raised by the floor, and the time-slice admission hold applies in every mode. In
+`src/policy/ladder.rs` a new slice-hold pass pauses own tasks on the device in victim order while
+the running own tasks stay at or above t, keeps held pauses while the rule fails, and releases them
+when it holds; the measured path's `plan_compute_victims` pauses a whole task only while the excess
+left is at least its equal part. A pause ends at its bound with a drain. The re-measure window,
+the duty step-up and `gpu_duty` have no cap to act on and are removed with their state.
+
+**First-come GPU floor (R90)**. `PolicyEngine` keeps per device own work's arrival and each listed
+UID's arrival (first listed, last listed; a gap over 30 s restarts it), updated only from complete
+listings. The floor applies on a device when every listed external context has a readable UID
+whose arrival is later than own work's. It raises the slice-hold count to 2 × E_max − E, and on
+the measured path, beside exactly one contending principal, own work's target to 500. The GPU
+compute status records whether it applied and why not.
+
+**Docs**: `docs/guarantees.md` (modes per job, GPU sharing, Tracked CPU, the pause bound, reason
+table), the data model, `contracts/decision-output.md` for the time-slice record.
+
+**Tests and gates**: tests first in `tests/policy.rs`, `tests/contention.rs`,
+`tests/supervision.rs` and the actuator unit tests for each part; tests that assert a Tracked CPU
+cap or a GPU compute duty are moved to Full or rewritten to whole-task holds; the mode-order
+property test and the 500-sequence snapshot comparison by mode and level. Native: E9 on the test
+host before release (SC-020), then E8; C1 waits for E1 and E2.

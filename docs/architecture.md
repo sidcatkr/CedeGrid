@@ -26,8 +26,9 @@ unknown until an adapter supplies defensible evidence.
 GPU compute and GPU memory follow the per-resource contention modes. The collector
 records exact NVML status, driver cursor and sample timestamp in microseconds,
 observation age, and the resulting capability. Yield First admits new GPU work only on
-a quiet device; Neutral and Performance also admit on an active device and share compute
-by pause duty-cycling. Missing basic inventory or memory observation blocks that device.
+a quiet device; Neutral and Performance also admit on an active device. Yield First and
+Neutral share compute by pausing whole tasks, with no duty cycle; Performance holds back at
+admission only. Missing basic inventory or memory observation blocks that device.
 These are admission and reactive protection policies, not VRAM partitions or guarantees
 against every external allocation race.
 
