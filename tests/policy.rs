@@ -5343,67 +5343,6 @@ fn an_own_only_gpu_interval_is_measured_at_once() {
     );
 }
 
-/// Own work is credited at the larger of the duty its supervisor reports applied
-/// and the policy's current target: when the policy lowers a cap within the
-/// step (as when a new allocation halves each share) the allocation counts at
-/// its old duty until its supervisor reports the new one.
-#[test]
-fn own_gpu_work_counts_at_the_duty_the_supervisor_applied() {
-    use cedegrid::contention::{
-        ContentionMode::Neutral, ResourceKey, StepRequest, YieldCause, YieldStep,
-    };
-    let key = ResourceKey::GpuCompute("GPU-test".into());
-    let (cfg, mut snap) = us5_device(
-        Neutral,
-        ComputeActivity::Active,
-        Some(vec![987]),
-        Some(8000),
-        false,
-    );
-    snap.gpus[0].compute_amount_unknown = Some("not measured".into());
-    let own_counted = |applied_target: u64| {
-        let mut engine = PolicyEngine::new();
-        // The policy's current target for the cap is 250.
-        engine.seed(
-            "a",
-            key.clone(),
-            StepRequest {
-                step: YieldStep::Cap,
-                target: Some(250),
-                cause: YieldCause::ExternalGrowth,
-                deadline_ms: None,
-            },
-            0,
-        );
-        let mut facts = rootless(&["a"]);
-        let a = facts.get_mut("a").unwrap();
-        a.applied.insert(key.clone(), YieldStep::Cap);
-        a.applied_targets.insert(key.clone(), applied_target);
-        let decision = engine
-            .evaluate(
-                &cfg,
-                &snap,
-                &PolicyInput {
-                    allocations: vec![allocation(
-                        "a",
-                        AllocationPhase::Running,
-                        resources(100, 100, 1000),
-                        Some(resources(100, 100, 1000)),
-                    )],
-                    facts,
-                    ..PolicyInput::default()
-                },
-                500,
-            )
-            .unwrap();
-        decision.resources[&key].own.map(|own| own.0)
-    };
-    // Its supervisor still runs the old 500 duty: own work counts at 500.
-    assert_eq!(own_counted(500), Some(500));
-    // Once it reports 250 applied, own work counts at 250.
-    assert_eq!(own_counted(250), Some(250));
-}
-
 /// Neutral learns that a measured 5% external user is satisfied once own work
 /// holds the fair share and the device has capacity to spare, and own work then
 /// runs at capacity minus the user minus the 5% margin (FR-021).

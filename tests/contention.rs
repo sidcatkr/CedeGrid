@@ -113,8 +113,6 @@ mod ladder {
             target: None,
             usage: None,
             memory_usage: None,
-            compute_floor: None,
-            at_minimum_duty: false,
         }
     }
 
@@ -204,145 +202,6 @@ mod ladder {
             changes[..2],
             [(0, YieldStep::Cap), (5000, YieldStep::Pause)]
         );
-    }
-
-    /// Performance compute (FR-022): a cap that misses its target after the hold window is
-    /// recomputed and applied again, never escalated to a pause, while own usage is within
-    /// its fair share; Neutral escalates as before.
-    #[test]
-    fn performance_compute_recomputes_a_missing_cap_instead_of_pausing() {
-        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
-            let at = |floor: Option<ComputeFloor>| {
-                move |_: u64| LadderInput {
-                    unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
-                    target: Some(4000),
-                    usage: Some(6000),
-                    compute_floor: floor,
-                    ..input(kind, 2000, 4000)
-                }
-            };
-            let within = Some(ComputeFloor {
-                fair_share: 4000,
-                own_usage: 4000,
-            });
-            let performance = timing(kind, ContentionMode::Performance);
-            let (state, changes) = run(None, &performance, 0..80, at(within));
-            assert_eq!(changes, [(0, YieldStep::Cap)], "{kind:?}");
-            let state = state.unwrap();
-            assert!(state.recomputed, "{kind:?}");
-            assert!(
-                state.entered_at_ms > 0,
-                "the cap was applied again: {state:?}"
-            );
-            let neutral = timing(kind, ContentionMode::Neutral);
-            let (_, changes) = run(None, &neutral, 0..80, at(None));
-            assert!(
-                changes.iter().any(|(_, step)| *step == YieldStep::Pause),
-                "{kind:?}: {changes:?}"
-            );
-        }
-    }
-
-    /// A Performance cap that still misses after it was recomputed is at the minimum duty;
-    /// with own usage above its fair share it pauses for at most one monitor interval and
-    /// returns to the cap, which does not pause again (FR-022, FR-014).
-    #[test]
-    fn a_performance_cap_at_the_minimum_duty_pauses_one_interval_at_most() {
-        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
-            let performance = timing(kind, ContentionMode::Performance);
-            assert_eq!(performance.pause_bound_ms, INTERVAL, "{kind:?}");
-            let (_, changes) = run(None, &performance, 0..120, |_| LadderInput {
-                unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
-                target: Some(4000),
-                usage: Some(6000),
-                compute_floor: Some(ComputeFloor {
-                    fair_share: 4000,
-                    own_usage: 6000,
-                }),
-                at_minimum_duty: true,
-                ..input(kind, 2000, 4000)
-            });
-            let steps: Vec<_> = changes.iter().map(|(_, step)| *step).collect();
-            assert_eq!(
-                steps,
-                [YieldStep::Cap, YieldStep::Pause, YieldStep::Cap],
-                "{kind:?}"
-            );
-            assert_eq!(
-                changes[2].0 - changes[1].0,
-                INTERVAL,
-                "{kind:?}: {changes:?}"
-            );
-        }
-        // Memory and Neutral compute keep their pause bound.
-        assert_eq!(
-            timing(ResourceKind::Cpu, ContentionMode::Neutral).pause_bound_ms,
-            ResourceThresholds::defaults(ResourceKind::Cpu).pause_bound_s * 1000
-        );
-    }
-
-    /// A recomputed Performance cap that still misses, with own usage above the fair share,
-    /// pauses only once the supervisor reports it at the minimum duty (FR-022).
-    #[test]
-    fn a_performance_cap_pauses_only_at_the_reported_minimum_duty() {
-        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
-            let performance = timing(kind, ContentionMode::Performance);
-            let at = |at_minimum_duty: bool| {
-                move |_: u64| LadderInput {
-                    unavailable: BTreeSet::from([YieldStep::LowerShare, YieldStep::Hint]),
-                    target: Some(4000),
-                    usage: Some(6000),
-                    compute_floor: Some(ComputeFloor {
-                        fair_share: 4000,
-                        own_usage: 6000,
-                    }),
-                    at_minimum_duty,
-                    ..input(kind, 2000, 4000)
-                }
-            };
-            let (state, changes) = run(None, &performance, 0..120, at(false));
-            assert_eq!(changes, [(0, YieldStep::Cap)], "{kind:?}");
-            assert!(state.unwrap().recomputed, "{kind:?}");
-            let (_, changes) = run(None, &performance, 0..120, at(true));
-            assert!(
-                changes.iter().any(|(_, step)| *step == YieldStep::Pause),
-                "{kind:?}: {changes:?}"
-            );
-        }
-    }
-
-    /// A Performance compute pause returns to the cap at its one-interval bound even
-    /// where no fair share is known, and never moves on to the hint (FR-022, FR-014).
-    #[test]
-    fn a_performance_compute_pause_without_a_fair_share_returns_to_the_cap() {
-        for kind in [ResourceKind::Cpu, ResourceKind::GpuCompute] {
-            let performance = timing(kind, ContentionMode::Performance);
-            let paused = StepState {
-                to_free: None,
-                step: YieldStep::Pause,
-                entered_at_ms: 0,
-                cause: YieldCause::ExternalGrowth,
-                target: None,
-                trigger_external: 4000,
-                calm_since_ms: None,
-                contended_since_ms: Some(0),
-                after_pause: false,
-                pending: false,
-                recomputed: false,
-                asked_target: None,
-            };
-            for excess in [0, 500] {
-                let after = plan_step(
-                    Some(&paused),
-                    &input(kind, excess, 4000),
-                    &performance,
-                    performance.pause_bound_ms,
-                );
-                let capped = after.state.unwrap();
-                assert_eq!(capped.step, YieldStep::Cap, "{kind:?} {excess}");
-                assert!(capped.after_pause, "{kind:?} {excess}");
-            }
-        }
     }
 
     #[test]
@@ -489,7 +348,6 @@ mod ladder {
             contended_since_ms: Some(0),
             after_pause: false,
             pending: false,
-            recomputed: false,
             asked_target: None,
         };
         let before = plan_step(
@@ -524,7 +382,6 @@ mod ladder {
             contended_since_ms: Some(0),
             after_pause: false,
             pending: false,
-            recomputed: false,
             asked_target: None,
         };
         let plain = |excess| LadderInput {
@@ -568,7 +425,6 @@ mod ladder {
             contended_since_ms: None,
             after_pause: false,
             pending: false,
-            recomputed: false,
             asked_target: None,
         };
         // 60% of the trigger is inside the hysteresis band: hold.
@@ -602,7 +458,6 @@ mod ladder {
                 contended_since_ms: None,
                 after_pause: false,
                 pending: false,
-                recomputed: false,
                 asked_target: None,
             };
             let (after, changes) = run(Some(state), &cpu, 1..100, |_| {
@@ -684,12 +539,7 @@ mod ladder {
                 input(ResourceKind::Cpu, excess, external)
             });
             for pair in changes.windows(2) {
-                // Only a pause's return to the cap comes sooner, at its one-interval
-                // bound; nothing else follows a pause in Performance (FR-022, FR-014).
-                let returned = pair[0].1 == YieldStep::Pause && pair[1].1 == YieldStep::Cap;
-                prop_assert!(pair[0].1 != YieldStep::Pause || returned, "{changes:?}");
-                let least = if returned { cpu.pause_bound_ms } else { cpu.dwell_ms };
-                prop_assert!(pair[1].0 - pair[0].0 >= least, "{changes:?}");
+                prop_assert!(pair[1].0 - pair[0].0 >= cpu.dwell_ms, "{changes:?}");
             }
         }
 
@@ -5467,44 +5317,6 @@ mod gpu_demand {
     fn median(mut values: Vec<u64>) -> u64 {
         values.sort_unstable();
         values[values.len() / 2]
-    }
-
-    /// A window opens only while own work on the device is held back by GPU compute caps alone,
-    /// and never with a Yield First allocation there (FR-021, Q19).
-    #[test]
-    fn a_window_needs_gpu_compute_caps_only() {
-        use cedegrid::contention::{RemeasureFacts, remeasure_window_allowed};
-        let facts = |yield_first, gpu_step, cpu_step| RemeasureFacts {
-            yield_first,
-            gpu_step,
-            cpu_step,
-        };
-        assert!(remeasure_window_allowed(&[facts(
-            false,
-            YieldStep::Cap,
-            YieldStep::None
-        )]));
-        assert!(remeasure_window_allowed(&[
-            facts(false, YieldStep::Cap, YieldStep::None),
-            facts(false, YieldStep::None, YieldStep::LowerShare),
-        ]));
-        for blocked in [
-            vec![],
-            vec![facts(false, YieldStep::None, YieldStep::None)],
-            vec![facts(false, YieldStep::Cap, YieldStep::Cap)],
-            vec![facts(false, YieldStep::Pause, YieldStep::None)],
-            vec![
-                facts(false, YieldStep::Cap, YieldStep::None),
-                facts(false, YieldStep::None, YieldStep::Pause),
-            ],
-            vec![facts(true, YieldStep::Cap, YieldStep::None)],
-            vec![
-                facts(false, YieldStep::Cap, YieldStep::None),
-                facts(true, YieldStep::None, YieldStep::None),
-            ],
-        ] {
-            assert!(!remeasure_window_allowed(&blocked), "{blocked:?}");
-        }
     }
 
     /// Each decision records how the device's GPU demand was read (FR-021, Q19): whether the

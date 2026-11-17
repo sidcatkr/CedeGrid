@@ -684,7 +684,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `gpu_time_slice_hold` | Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals. |
 | `gpu_first_come_floor` | Own GPU work was on the device before every other principal listed there, so it keeps at least the share that leaves none of them more than half of the device. |
 | `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
-| `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
+| `applied_duty_credit` | Own GPU work is credited at what its supervisor applied: a paused task at nothing. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
 | `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |
 | `gpu_compute_amount_unknown` | Per-process GPU samples do not account for the device, so the external amount is unknown. |
@@ -716,7 +716,6 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `report_stale` | The coordinator renews no lease and offers no work while the node's last report is stale. |
 | `single_process_violated` | Processes outside the run's verified family were found; they are not measured as own work or stepped. |
 | `family_members` | The run has more processes than its leader; its verified family is measured and stepped as own work. |
-| `cap_at_minimum_duty` | The cap runs at the minimum duty. |
 | `cpu_unknown_fair_share_hold` | No longer emitted; kept for recorded decisions from before Performance stopped stepping for unknown CPU. |
 | `ram_usage_unknown` | Available RAM is unknown, so RAM admission is blocked. |
 | `kernel_cpu_stale` | The kernel CPU snapshot is stale, and repeated readings do not refresh it. |

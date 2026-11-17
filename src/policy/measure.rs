@@ -1691,21 +1691,6 @@ impl<'a> Interval<'a> {
                 demand.uncapped.pop_front();
             }
             demand.last_uncapped_ms = Some(self.now);
-            if let Some(window) = demand.window.as_mut() {
-                window.fed.push(external);
-            }
-        }
-        // A window ends with the interval its last decision set; one far from the estimate
-        // before it is a new demand, and the estimate restarts from the window (FR-021, R48).
-        if let Some(window) = demand.window.take_if(|window| window.decisions_left == 0) {
-            let fed = window.fed.len();
-            let mean = (fed > 0).then(|| window.fed.iter().sum::<u64>() / fed as u64);
-            if let (Some(before), Some(mean)) = (window.before, mean)
-                && mean.abs_diff(before) >= crate::contention::GPU_DEMAND_RESTART_MILLI
-            {
-                let keep = demand.uncapped.len().saturating_sub(fed);
-                demand.uncapped.drain(..keep);
-            }
         }
         let estimate = demand.estimate();
         let record = GpuDemandRecord {

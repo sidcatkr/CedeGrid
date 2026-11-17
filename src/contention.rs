@@ -380,7 +380,7 @@ pub const REASON_CODES: &[(&str, &str)] = &[
     ),
     (
         "applied_duty_credit",
-        "Own GPU work is credited at the duty its supervisor applied.",
+        "Own GPU work is credited at what its supervisor applied: a paused task at nothing.",
     ),
     (
         "gpu_compute_measured",
@@ -505,7 +505,6 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "family_members",
         "The run has more processes than its leader; its verified family is measured and stepped as own work.",
     ),
-    ("cap_at_minimum_duty", "The cap runs at the minimum duty."),
     (
         "cpu_unknown_fair_share_hold",
         "No longer emitted; kept for recorded decisions from before Performance stopped stepping for unknown CPU.",
@@ -867,20 +866,10 @@ pub struct StepState {
     /// is re-planned once the allocation runs (FR-012).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
-    /// A Performance compute cap applied again after it missed its target (FR-022).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub recomputed: bool,
     /// The target a memory hint was entered with; compliance at its deadline is judged against
     /// the larger of it and the current target (FR-037).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_target: Option<u64>,
-}
-
-/// Own work's fair share and usage on a compute resource in Performance (FR-022).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComputeFloor {
-    pub fair_share: u64,
-    pub own_usage: u64,
 }
 
 /// What the planner needs to know about one allocation and resource this interval.
@@ -907,11 +896,6 @@ pub struct LadderInput {
     pub memory_usage: Option<u64>,
     /// Free memory above the floor, for a memory resource, when known.
     pub room: Option<u64>,
-    /// Performance and Aggressive compute: no pause below the fair share (FR-022).
-    pub compute_floor: Option<ComputeFloor>,
-    /// The supervisor reported the cap on this resource at the minimum duty
-    /// (`cap_at_minimum_duty`).
-    pub at_minimum_duty: bool,
 }
 
 /// Mode-dependent ladder timing in milliseconds.
@@ -923,8 +907,6 @@ pub struct LadderTiming {
     /// The mode's scale-up rate: the least time between two reversals.
     pub scale_up_ms: u64,
     pub pause_bound_ms: u64,
-    /// Performance compute: a pause returns to the cap at its bound (FR-022).
-    pub pause_returns_to_cap: bool,
     /// How long a hint waits for compliance before the next step (FR-037).
     pub hint_deadline_ms: u64,
     pub hysteresis_percent: u8,
@@ -940,7 +922,6 @@ pub struct LadderTiming {
 impl LadderTiming {
     pub fn new(thresholds: &ResourceThresholds, mode: ContentionMode, interval_ms: u64) -> Self {
         let interval_ms = interval_ms.max(1);
-        let performance_compute = thresholds.compute && mode >= ContentionMode::Performance;
         let response_ms = match mode {
             ContentionMode::YieldFirst => {
                 u64::from(thresholds.yield_first_response_intervals).saturating_mul(interval_ms)
@@ -953,16 +934,7 @@ impl LadderTiming {
             response_ms,
             dwell_ms: u64::from(thresholds.min_step_dwell_intervals).saturating_mul(interval_ms),
             scale_up_ms: thresholds.scale_up_interval_ms(mode, interval_ms),
-            // Performance compute pauses for at most one interval (FR-022).
-            pause_bound_ms: if performance_compute {
-                thresholds
-                    .pause_bound_s
-                    .saturating_mul(1000)
-                    .min(interval_ms)
-            } else {
-                thresholds.pause_bound_s.saturating_mul(1000)
-            },
-            pause_returns_to_cap: performance_compute,
+            pause_bound_ms: thresholds.pause_bound_s.saturating_mul(1000),
             hint_deadline_ms: thresholds.hint_deadline_s.saturating_mul(1000),
             hysteresis_percent: thresholds.hysteresis_percent,
             reversal_room_min: thresholds.noise_tolerance_mib,
@@ -1017,7 +989,6 @@ impl LadderInput {
             if step == YieldStep::Cap
                 && self.cause == YieldCause::ExternalGrowth
                 && self.target == Some(0)
-                && self.compute_floor.is_none()
                 && self.applies(YieldStep::Pause)
                 && !self.unavailable.contains(&YieldStep::Pause)
             {
@@ -1084,7 +1055,6 @@ pub fn plan_step(
             after_pause: false,
             to_free: (input.excess > 0).then_some(input.excess),
             pending: false,
-            recomputed: false,
             asked_target: (step == YieldStep::Hint && input.kind.is_memory())
                 .then_some(input.target)
                 .flatten(),
@@ -1108,22 +1078,6 @@ pub fn plan_step(
         }
         Some(decision)
     };
-    // In Performance compute a pause lasts at most its bound, one interval, and then
-    // the cap returns; it never moves on to a later step, fair share known or not (FR-022).
-    if current == YieldStep::Pause
-        && (timing.pause_returns_to_cap || input.compute_floor.is_some())
-        && since_change >= timing.pause_bound_ms
-        && input.applies(YieldStep::Cap)
-        && !input.unavailable.contains(&YieldStep::Cap)
-    {
-        let mut decision = enter(YieldStep::Cap, Vec::new());
-        if let Some(capped) = decision.state.as_mut() {
-            capped.target = Some(input.target.unwrap_or(0));
-            capped.after_pause = true;
-            capped.recomputed = true;
-        }
-        return decision;
-    }
     if input.excess > 0 {
         let contended_since = state.and_then(|s| s.contended_since_ms).unwrap_or(now_ms);
         let anchor = state.map_or(now_ms, |s| s.entered_at_ms.max(contended_since));
@@ -1136,7 +1090,6 @@ pub fn plan_step(
         let cap_to_zero = current == YieldStep::Cap
             && input.cause == YieldCause::ExternalGrowth
             && input.target == Some(0)
-            && input.compute_floor.is_none()
             && input.applies(YieldStep::Pause)
             && !input.unavailable.contains(&YieldStep::Pause);
         let pause_bound = current == YieldStep::Pause && persisted >= timing.pause_bound_ms;
@@ -1161,25 +1114,6 @@ pub fn plan_step(
                     && state.is_some_and(|s| hint_wait_over(s, timing, now_ms)))
             || input.unavailable.contains(&current)
             || cap_to_zero;
-        // In Performance compute a cap that missed its target is recomputed and applied
-        // again; only one that still misses, that its supervisor reports at the minimum duty,
-        // with own usage above the fair share goes on to a pause (FR-022).
-        if due
-            && !after_pause
-            && current == YieldStep::Cap
-            && !input.unavailable.contains(&current)
-            && let Some(floor) = input.compute_floor
-            && !(state.is_some_and(|s| s.recomputed)
-                && input.at_minimum_duty
-                && floor.own_usage > floor.fair_share)
-        {
-            let mut decision = enter(YieldStep::Cap, Vec::new());
-            if let Some(capped) = decision.state.as_mut() {
-                capped.recomputed = true;
-                capped.contended_since_ms = Some(contended_since);
-            }
-            return decision;
-        }
         // A memory hint met at its deadline is entered again with the current target and a new
         // deadline; only a task above what it was asked goes on (FR-037).
         if due
@@ -1354,41 +1288,8 @@ pub fn plan_step(
     }
 }
 
-/// A re-measure window lifts own work's GPU compute caps on a device for this many decisions
-/// (FR-021, R48): 3 s at the default interval, its first interval still capped by the duty period.
-pub const GPU_DEMAND_WINDOW_DECISIONS: u32 = 6;
-/// A window opens when the device's last uncapped interval is this old (FR-021, R48).
-pub const GPU_DEMAND_WINDOW_EVERY_MS: u64 = 30_000;
-
-/// Uncapped intervals of own work from which its uncapped share sets a GPU compute duty
-/// (FR-021, Q24); with fewer, re-measure windows open at once.
+/// Uncapped intervals of own work from which its uncapped share is recorded (FR-021, Q24).
 pub const GPU_OWN_SHARE_INTERVALS: usize = 6;
-/// A window whose mean differs from the estimate before it by this much restarts the estimate
-/// from the window, in thousandths of device time (FR-021, R48).
-pub const GPU_DEMAND_RESTART_MILLI: u64 = 200;
-
-/// One running allocation on a device, as a re-measure window sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemeasureFacts {
-    /// The allocation runs GPU compute in Yield First.
-    pub yield_first: bool,
-    /// Its step on the device's GPU compute.
-    pub gpu_step: YieldStep,
-    /// Its step on CPU.
-    pub cpu_step: YieldStep,
-}
-
-/// Whether a re-measure window may lift own work's GPU compute caps on a device: own work there
-/// is held back by GPU compute caps alone, with no CPU step of cap or more and no GPU pause, and
-/// no allocation there runs in Yield First, which puts the other user first (FR-021, Q19).
-pub fn remeasure_window_allowed(running: &[RemeasureFacts]) -> bool {
-    running.iter().any(|facts| facts.gpu_step == YieldStep::Cap)
-        && running.iter().all(|facts| {
-            !facts.yield_first
-                && facts.gpu_step <= YieldStep::Cap
-                && facts.cpu_step < YieldStep::Cap
-        })
-}
 
 /// Facts about one candidate for victim selection (FR-016).
 #[derive(Debug, Clone, PartialEq, Eq)]
