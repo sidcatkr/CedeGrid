@@ -915,10 +915,13 @@ back more.
   account, control group and session layout. Harm to other workloads and loss to own work are
   measured against it (constitution Principle II).
 - **Fair share**: a work-conserving, equal split of a contended resource among active
-  principals. Capacity a principal does not use is available to the others.
+  principals. Capacity a principal does not use is available to the others. It is Neutral's
+  target under contention and Performance's admission bound; Performance does not cap running
+  work to it.
 - **Margin**: capacity own work leaves unused for external demand to grow into, justified only
   by how slowly the resource is reclaimed. Margins are set per mode and per resource: small on
-  CPU and GPU compute, and on memory the floors plus Yield First's 20%.
+  CPU and GPU compute, and on memory the floors plus Yield First's 20%. In Performance and
+  Aggressive the compute margin bounds admission only; running own work is not capped for it.
 - **Saturated**: busy at or above `saturation_percent` of capacity (default 98%). CPU is also
   saturated when external PSI `some` avg10 is above `contention.cpu.psi_some_percent` (default
   10%). External PSI is the CPU pressure of the cgroups outside own work's user slice; own and
@@ -928,7 +931,9 @@ back more.
   principal, or the unattributed principal, uses at least `principal_min_percent` of it (on GPU
   compute the unattributed principal needs `attribution_tolerance_percent`, FR-021) without
   its demand being known to be satisfied, or when it has external activity of unknown amount.
-  Saturation by PSI alone still needs such a principal.
+  Saturation by PSI alone still needs such a principal. A principal that makes a resource
+  contended contends for it. In Performance and Aggressive contention closes admission beyond
+  FR-022's admission target and steps nothing.
 - **Satisfied demand**: a principal's demand found by probing: the usage that did not grow into
   capacity own work freed, plus hysteresis equal to the contention floor. It holds while the
   principal's usage stays within it.
@@ -950,8 +955,9 @@ back more.
   On RAM it is the share RAM targets use (FR-021); on GPU memory, where principals are not
   formed, it is the equal split of the device among own work and the active external
   principals that GPU compute uses.
-- **Over-share task**: an own task among those that make up own memory above its fair share, in
-  the memory victim order (FR-023). The other own tasks on the resource are in-share.
+- **Over-share task**: in Yield First and Neutral, an own task among those that make up own memory
+  above its fair share, in the memory victim order (FR-023). The other own tasks on the resource
+  are in-share.
 - **Counting window**: the last 60 intervals whose per-process GPU samples were readable on a
   device, 30 s at the default interval. It has the external estimate's length but not its
   intervals, which are uncapped only (FR-021).
@@ -1500,6 +1506,8 @@ node reports with the expected per-resource values at each step.
   jobs carry their own modes (FR-030), the owner's aggregate share comes from the node mode and
   cap, and allocations yield in mode tiers
   inside it: Yield First, then Neutral, then Performance, with this cost order within a tier.
+  Where the governing mode is Performance, the aggregate takes no compute step for others, and only
+  jobs in Yield First and Neutral are held, each to its own mode's target (FR-022).
   Class rules still win across tiers: every opportunistic allocation is drained before any
   Guaranteed one, in Yield First and Neutral every one that holds any of the resource (FR-024),
   and a Guaranteed allocation keeps its CPU request in every tier.
@@ -2176,7 +2184,7 @@ node reports with the expected per-resource values at each step.
   | Option | Marker | Justification |
   |---|---|---|
   | Yield First, Neutral, default floors | none | Floors hold in every mode. Own work is released before others are affected. |
-  | Performance mode (the default) | none | Own work keeps all idle capacity minus a small margin and grows quickly. Other workloads still get their fair share within the reclaim bounds; own memory above its fair share gives way at the floors, and in-share own memory is kept at a breach others caused (FR-023). |
+  | Performance mode (the default) | none | Own work keeps all idle capacity minus a small admission margin and grows quickly. Running own work gives others nothing beyond what the kernel and the GPU driver give them beside it; new own work does not start where another principal is short of its fair share; the floors limit admission, and at a floor breach the kernel decides, as without CedeGrid (FR-022, FR-023). |
   | A floor near its minimum | *caution* (yellow) | Less headroom is kept for other workloads' bursts. The enforced minimum and out-of-memory order by fault still protect them. |
   | A margin below its default (`reduced_margin`) | *caution* (yellow) | Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold. |
   | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
