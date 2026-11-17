@@ -123,3 +123,24 @@ which protected waiting principals with running steps.
   (labelled an estimate). It shows a yes/no question with no default, then asks for the fixed
   phrase.
 - **Rationale**: FR-013. 001's setup already has a terminal interface and the agent's state.
+
+## R12. How the grant reaches placement
+
+- **Decision**: the coordinator places work against the node's reported aggregate budget
+  (`managed_budget`) and per-resource admission states, and 001's per-job modes only bound jobs
+  inside that aggregate. So the grant needs its own budget.
+  - The policy computes `unprotected_budget`: the managed budget with CPU raised to the
+    unprotected allowance (capacity less reserves, the envelope and CedeGrid's own use, unless
+    unknown activity holds it). It does so only while the node cap is Aggressive.
+  - The agent reports it in the `contention/1` report only while the allowance reads on and, in a
+    System mode unit, the administrator key permits it.
+  - The coordinator places a granted request against that budget. A GPU compute hold whose cause
+    is another principal's contention counts as open for it; unknown, floor, cooldown and backoff
+    holds still apply. Every other request is placed exactly as before.
+- **Rationale**: the protected path stays unchanged. Without the allowance or the key, nothing
+  is reported, so a granted job is placed protected and refused at launch with every missing
+  condition named (R7).
+- **Compatibility**: `NodeContentionReport` denies unknown fields. A coordinator older than the
+  agent rejects a report that carries the new field, and the field appears only when the
+  allowance is on. The release notes say to upgrade coordinators before agents, as for every
+  `contention/1` field.
