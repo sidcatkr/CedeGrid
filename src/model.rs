@@ -614,6 +614,10 @@ pub struct GpuDemandRecord {
     /// The smallest duty, in thousandths, sent with the device's GPU compute caps this decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<u64>,
+    /// The first-come floor (FR-090): `applies`, or why not: `own_later`, `uid_unreadable` or
+    /// `order_unknown`; absent while no other principal is listed on the device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_come: Option<String>,
 }
 
 /// The external GPU compute amount a target was set from (FR-021, Q19).

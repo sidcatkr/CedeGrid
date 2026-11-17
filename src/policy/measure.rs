@@ -1238,6 +1238,7 @@ impl<'a> Interval<'a> {
         if telemetry_unknown {
             self.gpu_memory_unknown.insert(gpu.uuid.clone());
         }
+        demand_record.first_come = self.note_arrivals(gpu).map(str::to_string);
         let mut time_slice = None;
         let mut slice_admission_held = false;
         if !telemetry_unknown {
@@ -1283,6 +1284,19 @@ impl<'a> Interval<'a> {
                     "gpu_time_slice_unbound"
                 };
                 note_reason(&mut self.statuses, &gpu.uuid, code);
+            }
+            // Own work that came first keeps at least the floor in Yield First and Neutral
+            // (FR-090).
+            if let Some(floor) = self.first_come_share(gpu) {
+                for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+                    if let Some(target) = budget.targets.get_mut(&mode) {
+                        *target = (*target).max(floor);
+                    }
+                }
+                if governing(self.config, ResourceKind::GpuCompute) < ContentionMode::Performance {
+                    budget.share = budget.share.max(floor);
+                }
+                note_reason(&mut self.statuses, &gpu.uuid, "gpu_first_come_floor");
             }
             self.gpu_compute_budget.insert(gpu.uuid.clone(), budget);
         }
@@ -1706,6 +1720,7 @@ impl<'a> Interval<'a> {
             source: GpuDemandSource::Interval,
             own_uncapped: demand.own_share(),
             duty: None,
+            first_come: None,
         };
         self.next.gpu_demand.insert(gpu.uuid.clone(), demand);
         (estimate, record)
@@ -1829,6 +1844,95 @@ impl<'a> Interval<'a> {
         Some(record)
     }
 
+    /// Own work's and each listed UID's arrival on the device, and the first-come floor's state
+    /// there (FR-090): `None` while no other principal is listed. An unknown listing restarts
+    /// nothing and withholds the floor; so does a listed context whose UID cannot be read.
+    fn note_arrivals(&mut self, gpu: &GpuSnapshot) -> Option<&'static str> {
+        let now = self.now;
+        let mut arrivals = self
+            .prev
+            .gpu_arrivals
+            .get(&gpu.uuid)
+            .cloned()
+            .unwrap_or_default();
+        let Some(contexts) = &gpu.compute_contexts else {
+            let listed = gpu
+                .external_process_ids
+                .as_ref()
+                .is_none_or(|pids| !pids.is_empty());
+            self.next.gpu_arrivals.insert(gpu.uuid.clone(), arrivals);
+            return listed.then_some("order_unknown");
+        };
+        if !contexts.own.is_empty() {
+            arrivals.own = Some(DeviceArrivals::note(arrivals.own, now));
+        }
+        let uid_min = self.config.contention.uid_min;
+        let mut unreadable = false;
+        let mut listed = BTreeSet::new();
+        for (_, uid) in &contexts.listed {
+            match uid {
+                Some(uid) if *uid >= uid_min => {
+                    listed.insert(*uid);
+                }
+                Some(_) => {}
+                None => unreadable = true,
+            }
+        }
+        for uid in &listed {
+            let seen = arrivals.uids.get(uid).copied();
+            arrivals.uids.insert(*uid, DeviceArrivals::note(seen, now));
+        }
+        arrivals
+            .uids
+            .retain(|_, (_, last)| now.saturating_sub(*last) <= ARRIVAL_GAP_MS);
+        let state = if unreadable {
+            Some("uid_unreadable")
+        } else if listed.is_empty() {
+            None
+        } else {
+            match arrivals.own.filter(|_| !contexts.own.is_empty()) {
+                None => Some("order_unknown"),
+                Some((own_first, _)) => {
+                    let later = listed.iter().all(|uid| {
+                        arrivals
+                            .uids
+                            .get(uid)
+                            .is_some_and(|(first, _)| *first > own_first)
+                    });
+                    Some(if later { "applies" } else { "own_later" })
+                }
+            }
+        };
+        if state == Some("applies") {
+            self.first_come.insert(gpu.uuid.clone());
+        }
+        self.next.gpu_arrivals.insert(gpu.uuid.clone(), arrivals);
+        state
+    }
+
+    /// The share the first-come floor keeps for own work on the device, in thousandths, where it
+    /// applies (FR-090): on a time-sliced device, the share 2 × E_max − E running own contexts
+    /// get beside E external ones, E_max the most of one principal; elsewhere half the device
+    /// beside exactly one listed principal, and none beside more.
+    fn first_come_share(&self, gpu: &GpuSnapshot) -> Option<u64> {
+        if !self.first_come.contains(&gpu.uuid) {
+            return None;
+        }
+        let contexts = gpu.compute_contexts.as_ref()?;
+        let mut by_uid: BTreeMap<u32, u64> = BTreeMap::new();
+        for (_, uid) in &contexts.listed {
+            *by_uid.entry((*uid)?).or_default() += 1;
+        }
+        let most = by_uid.values().copied().max()?;
+        let all: u64 = by_uid.values().sum();
+        if gpu.time_sliced == Some(true) {
+            let own = (2 * most).saturating_sub(all);
+            Some(GPU_COMPUTE_CAPACITY * own / (own + all).max(1))
+        } else {
+            (by_uid.len() == 1).then_some(GPU_COMPUTE_CAPACITY / 2)
+        }
+    }
+
     /// The time-slice hold at m × k > E (FR-021, FR-089): the slice-bound principals, from the
     /// external estimate's readings when `read`, else every counted principal, and the own tasks
     /// that keep running, ⌊E_b ÷ k_b⌋, at least one.
@@ -1875,7 +1979,15 @@ impl<'a> Interval<'a> {
             return;
         }
         let contexts: u32 = record.bound.iter().map(|b| b.contexts).sum();
-        record.hold = Some((contexts / record.bound.len() as u32).max(1));
+        let mut hold = (contexts / record.bound.len() as u32).max(1);
+        // Own work that came first keeps enough contexts running that no later principal gets
+        // more than half of the device: 2 × E_max − E (FR-090).
+        if self.first_come.contains(uuid) {
+            let most = principals.values().copied().max().unwrap_or(0);
+            let all: u32 = principals.values().sum();
+            hold = hold.max((2 * most).saturating_sub(all));
+        }
+        record.hold = Some(hold);
     }
 
     /// A device's GPU compute budget. A measured external amount takes the CPU

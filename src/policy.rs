@@ -151,6 +151,26 @@ pub fn schedulable_budget(decision: &Decision) -> Resources {
     budget
 }
 
+/// When own work and each listed UID arrived on a device: first and last listed, in ms. One
+/// absent for more than `ARRIVAL_GAP_MS` arrives again when next listed (FR-090).
+#[derive(Debug, Clone, Default)]
+struct DeviceArrivals {
+    own: Option<(u64, u64)>,
+    uids: BTreeMap<u32, (u64, u64)>,
+}
+
+/// An absence longer than this makes a new arrival (FR-090).
+const ARRIVAL_GAP_MS: u64 = 30_000;
+
+impl DeviceArrivals {
+    fn note(arrival: Option<(u64, u64)>, now: u64) -> (u64, u64) {
+        match arrival {
+            Some((first, last)) if now.saturating_sub(last) <= ARRIVAL_GAP_MS => (first, now),
+            _ => (now, now),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PreviousGpu {
     pids: BTreeSet<u32>,
@@ -266,6 +286,8 @@ pub struct PolicyEngine {
     previous_gpus: BTreeMap<String, PreviousGpu>,
     /// Each device's external GPU compute demand from uncapped intervals (FR-021).
     gpu_demand: BTreeMap<String, GpuDemand>,
+    /// Each device's arrivals, for the first-come floor (FR-090).
+    gpu_arrivals: BTreeMap<String, DeviceArrivals>,
     stable_since: Option<u64>,
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
@@ -555,6 +577,8 @@ struct Interval<'a> {
     slice_hold: BTreeMap<String, u32>,
     /// Devices last read as time-sliced whose listing is unknown: no GPU compute pause (Q29).
     no_gpu_pause: BTreeSet<String>,
+    /// Devices where own work arrived before every principal listed there (FR-090).
+    first_come: BTreeSet<String>,
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
@@ -655,6 +679,7 @@ impl<'a> Interval<'a> {
             time_slice_holds: BTreeSet::new(),
             slice_hold: BTreeMap::new(),
             no_gpu_pause: BTreeSet::new(),
+            first_come: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
             over_target: BTreeMap::new(),

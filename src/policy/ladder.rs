@@ -1565,6 +1565,18 @@ impl<'a> Interval<'a> {
             .count()
             .max(1) as u64;
         let part = frame.share.saturating_mul(frame.running.len() as u64) / unpaused;
+        // On a time-sliced device whose counts are known, what own work keeps after one more
+        // pause is its running tasks' part of the busy contexts, each task one context; elsewhere
+        // its measured amount less one task's part (FR-021, FR-089).
+        let sliced_external = self
+            .statuses
+            .get(key)
+            .and_then(|status| status.time_slice.as_ref())
+            .and_then(|slice| slice.external)
+            .map(u64::from);
+        let mut running = unpaused;
+        let mut own_now = frame.share.saturating_mul(frame.running.len() as u64);
+        let target = own_now.saturating_sub(frame.excess);
         let mut remaining = frame.excess;
         let mut planned = BTreeSet::new();
         for victim in victims {
@@ -1589,9 +1601,15 @@ impl<'a> Interval<'a> {
             } else {
                 0
             };
+            let left = match sliced_external {
+                Some(external) if running > 0 => {
+                    GPU_COMPUTE_CAPACITY * (running - 1) / (running - 1 + external).max(1)
+                }
+                _ => own_now.saturating_sub(part),
+            };
             let excess = if held {
                 0
-            } else if part <= remaining {
+            } else if remaining > 0 && left >= target {
                 remaining.max(own_excess)
             } else {
                 own_excess
@@ -1678,6 +1696,10 @@ impl<'a> Interval<'a> {
                         _ => 0,
                     };
                     remaining = remaining.saturating_sub(freed);
+                    if next.step == YieldStep::Pause {
+                        running = running.saturating_sub(1);
+                        own_now = left;
+                    }
                 }
                 self.next
                     .ladder

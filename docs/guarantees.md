@@ -92,22 +92,16 @@ report the contexts. Own work
 already running on a device that becomes occupied is not drained for that alone. The
 launch recheck also refuses a request that would leave less than the device's floor
 free. Missing GPU observation holds the current steps as an unknown measurement instead
-of yielding fully, so Guaranteed GPU work needs no special contract. Under external
-compute activity, own GPU work gets a compute share by pausing it for part of each
-period: the period is one monitor interval (500 ms by default) and the minimum duty 5%,
-and kernels already submitted keep running, so the effective granularity is the period
-plus the longest kernel. While a GPU compute cap is part of an allocation's cycle, the cycle
-follows the node's monotonic clock: own work runs while the clock's position in the period is
-below the duty, so every own allocation on the node stops and resumes together, whenever its cap
-began. A stop holds until the period ends, so a duty change mid-period never resumes own work
-inside an off phase; a cycle for a CPU cap alone keeps its own phase. A changed CPU cap starts
-at its target over the family's last measured natural rate, so it holds from its first
-period. On a delegated cgroup with `cgroup.freeze` authorized, the off phase freezes the
-workload's leaf, confirmed through `cgroup.events` within the off phase, and never thaws a
-freeze a pause holds; otherwise, or
-after a refused freeze, it stops the verified processes, as without a delegated cgroup. Where
-the CPU cap is also a duty cycle, the process runs one cycle at the smaller duty; a CPU cap
-through `cpu.max` runs beside the GPU share. Guaranteed work takes no GPU compute step. On a
+of yielding fully, so Guaranteed GPU work needs no special contract. No GPU compute
+rate cap or duty cycle runs, at either level: no unprivileged per-process quota exists on a
+time-sliced GPU, and stopping and resuming own work by period misses its target. Yield First and
+Neutral hold own GPU work back by whole tasks instead. A task is paused, in victim order, only
+while the own work left running stays at or above own work's target, so rounding favours own
+work; a lone job, and one whose pause would go below the target, is left alone. A pause reaches
+only the verified family: through pidfds without a delegated cgroup, and through a freeze of the
+workload's leaf, confirmed through `cgroup.events`, where `cgroup.freeze` is authorized. A pause
+still answering its demand at `pause_bound_s` (10 s) drains the task, which is requeued without
+using an attempt. Guaranteed work takes no GPU compute step. On a
 time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
 time-slicing: in Neutral own work is not capped while it holds no
 more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the
@@ -120,45 +114,40 @@ measured path, and Yield First is unchanged; each decision records the counts (`
 When own work holds more than its share there, m × k > E, an external principal with E_j busy
 processes is slice-bound when its uncapped reading, averaged as below, is at least
 `contention.gpu_compute.slice_bound_percent` (75) percent of their equal slices, 1000 × E_j ÷
-(m + E). With none, own work is not capped, since the driver already gives every other
-principal what it asks for. Otherwise, in Neutral, each own process
-runs at a duty of d0 = (m + E_b) ÷ m × (1 ÷ (k_b + 1) − the mode's margin), at least 50
-thousandths, with E_b and k_b the slice-bound principals' processes and number, which leaves own
-work 1 ÷ (k_b + 1) of what they want less Neutral's 5% margin, while the others keep their
-slices: 675 at m = 2 beside one saturating process. Performance and Aggressive set no duty and
-open no re-measure window: own work keeps the driver's slices, as beside the same work started
-by hand, and one more own process is admitted on the device only while no counted principal
-is slice-bound (`gpu_time_slice_admission_held`). Own work pays for CedeGrid's re-measure windows, which hold it at
-full duty for 6 decisions in each cycle of about 33 s: the duty starts at d0' = (d0 − w) ÷ (1 −
-w), with w the windows' share of the time, so own work's duty averages d0 with the windows and
-the others keep their share over time. That is 643 in Neutral at the default interval; where no window can open, d0' = d0. The duty rises
-`contention.gpu_compute.slice_step_percent` (5) points once per scale-up interval or step
-dwell, whichever is longer, while the device's utilization averaged over the dwell, in per
-mille, shows more spare time than the mode's margin or one reading's quantum of 1%, whichever is
-larger. It falls a step toward d0' once per dwell while the spare time is less than half of that,
-and at 1000 stays a cap at full duty. Utilization comes in whole percent, and a dip of one
-reading as own work's phases switch is no idle time, so with a zero margin CedeGrid takes device
-time only beyond 1% averaged spare. This path reads no per-process amount for the duty and never
-pauses. The counts are the
+(m + E). With none, nothing is held, since the driver already gives every other principal what
+it asks for. Otherwise, in Neutral, own tasks on the device are paused while the own tasks left
+running stay at or above ⌊E_b ÷ k_b⌋ (`gpu_time_slice_hold`), with E_b and k_b the slice-bound
+principals' processes and number and each own task counted as one context: beside one saturating
+process, two own tasks become one, so each side gets half. Principals that are not slice-bound
+keep their slices. A held task resumes once no counted principal is slice-bound or the rule holds
+with it running. In every mode one more own process is admitted on the device only while
+(m + 1) × k ≤ E or no counted principal is slice-bound (`gpu_time_slice_admission_held`).
+Performance and Aggressive hold no task: own work keeps the driver's slices, as beside the same
+work started by hand. The counts are the
 processes sampled busy within the counting window, and own work's processes also from the
 interval the device first lists them, before their first sample. An own process stops counting
 once 60 intervals with readable samples (30 s at the default interval) pass without a sample for
 it, from its listing or its last sample. So an own task that holds a GPU context without computing
-can hold the other own tasks on that device at d0' beside a slice-bound user for at most that long
-after its listing or an agent restart; no other workload pays. The owner's unmanaged processes and
+counts toward the tasks left running beside a slice-bound user for at most that long after its
+listing or an agent restart; no other workload pays. The owner's unmanaged processes and
 other users' processes count only while sampled busy in that window, so an idle one never counts.
 The estimate's readings decide which principals are slice-bound even in an interval whose amounts
 are inconsistent. Only while the per-process samples are unreadable do the listed processes
-count. Without an uncapped interval in the estimate every counted principal is slice-bound, and the duty rises only with a utilization reading; on a device last read as
-time-sliced whose listing is unknown, the cap is the target over the whole device, without a
-pause. Each decision records where its counts came from, for each own process counted whether
-by its listing or by a sample, the slice-bound principals with their readings and thresholds,
-d0, the duty and its step. On other devices own work at full duty
-beside another busy context holds only its slices, so when it holds more than its share a GPU
-compute cap's duty is its target over own work's uncapped share, its amount averaged over at
-least 6 uncapped intervals in which it ran on the device, with windows to measure it opening at
-once while it has fewer; until then, while the amount is unknown, and in Yield First the duty is
-the target over the whole device. External compute is measured when fresh per-process samples,
+count. Without an uncapped interval in the estimate every counted principal is slice-bound; on a
+device last read as time-sliced whose listing is unknown, nothing new is paused and held pauses
+hold. Each decision records where its counts came from, for each own process counted whether by
+its listing or by a sample, the slice-bound principals with their readings and thresholds, and
+the hold. On other devices a task is paused only while own work's measured amount less that
+task's equal part stays at or above the target, and a lone job is never paused for it. Own GPU
+work that was listed on a device before every other principal listed there keeps, in Yield First
+and Neutral, at least the share that leaves none of them more than half of the device
+(`gpu_first_come_floor`): on the time-slice path 2 × E_max − E running own tasks, E_max being the
+most processes of one principal, and elsewhere, beside exactly one listed principal, half the
+device. Arrival is kept per UID and, for own work, per device; one absent for more than 30 s
+arrives again when next listed, and an agent restart starts the record again, which only withholds
+the floor. A listed process whose UID cannot be read, or an unknown listing, withholds it, and
+each decision records whether it applied and why not (`gpu_demand.first_come`). External compute
+is measured when fresh per-process samples,
 summed over every process on the device, are within
 `contention.gpu_compute.attribution_tolerance_percent` (15) points of device utilization. A
 sample counts its whole span since its process's previous sample, at most one interval, in the
@@ -168,14 +157,12 @@ without a sample counting as idle, and each observation records the samples
 late, the shares and the device summed over it and the 3 intervals before it decide, and the
 amounts are then those 4 intervals' averages. On a time-sliced device another user's reading
 rises when own work leaves gaps, at the same demand, so in Neutral the external amount that sets own work's target, the owner's unmanaged usage left out, is the
-average over the last 60 intervals in which own work ran uncapped on the device (no cap or pause
-sent by the decision that set the interval or the one before it), or had no allocation there.
-While own work is held back by GPU compute caps alone, a 6-decision window lifts them every 30 s
-to measure again, at most 10% of the capped time, and a window 200 thousandths or more from the
-average restarts it, as does a change in the device's external processes, the background ones
-and the owner's unmanaged ones left out; Yield First takes the larger of the interval's amount
-and the average and
-takes no window, and each decision records how the demand was read (`gpu_demand`). A measured
+average over the last 60 intervals in which own work ran unheld on the device (no pause on GPU
+compute and no CPU step of cap or more sent by the decision that set the interval or the one
+before it), or had no allocation there. No re-measure window is taken: with no cap there is none
+to lift. A change in the device's external processes, the background ones and the owner's
+unmanaged ones left out, restarts the average; Yield First takes the larger of the interval's
+amount and the average, and each decision records how the demand was read (`gpu_demand`). A measured
 amount takes the CPU paths, with external processes grouped into principals by UID as on CPU and
 device time nobody accounts for counted as external usage while an external process is listed,
 and as one more external principal from the attribution tolerance's 15 points, below which it is
@@ -194,16 +181,14 @@ unknown activity, its share of device time is nobody's, and its memory still cou
 usage, as `never_share_occupied_gpus` still counts the context. Where per-process utilization is
 not readable it stays unknown activity. Unsupported queries, stale samples, an incomplete
 process list or MPS leave it activity of unknown amount, one principal, under which Neutral
-holds the fair share and Performance admits nothing new and holds: once the supervisor reports a duty cycle applied, own work
-counts as holding at most that duty, at the larger of the target the supervisor reports applied
-and the current one, so the cap at the share is met and does not escalate. Unknown activity from
-a telemetry failure or a missing observation, and a duty cycle not reported applied, first hold
-the steps and escalate after the unknown window. Each device's held-back breakdown says which
+holds the fair share and Performance admits nothing new and holds: a task whose pause the
+supervisor reports applied counts as holding nothing. Unknown activity from a telemetry failure
+or a missing observation first holds the steps and escalates after the unknown window. Each device's held-back breakdown says which
 path it took and why. An empty-device pass is not evidence of occupied-device sharing. See [GPU
 operation](coordinator-work.md#gpu-modes).
 In Full a restriction (a freeze, a lower `cpu.max` or `cpu.weight`, a `memory.high` cap) is
 written only while the leaf's members are exactly the verified family. A process that joins a
-frozen leaf, between the check and the write or during the off phase, is thawed at once, within
+frozen leaf, between the check and the write or while it holds, is thawed at once, within
 50 ms, and the step moves to the rootless mechanism, which reaches only the verified family; a
 member list that cannot be read twice in a row counts as changed. Lifting what the supervisor
 wrote needs only its own leaf, whatever its members, and never tightens a control: a drain, the
@@ -324,11 +309,23 @@ normal rate and stays up; a recorded user that returns rejoins at once, and whil
 resource is saturated a recorded user using clearly less than its recorded demand counts
 at that demand, so it gets it back within 2 intervals. Activity of unknown amount is never
 recorded. On contended compute, Yield First pauses opportunistic
-work, and after `pause_bound_s` (10 s) keeps it at the 5% minimum duty while the
-contention lasts; while a small demand is probed it steps down with the probe instead.
-While own work holds more than capacity minus Yield First's margin, saturation may be
-its own doing, so Yield First first caps it to the margin within the fair share and
-pauses only if the contention remains. Neutral holds the max-min fair share. Performance
+work; while a small demand is probed it steps down with the probe instead. While own work
+holds more than capacity minus Yield First's margin, saturation may be its own doing, so
+Yield First first holds it to the margin within the fair share and pauses all of it only if
+the contention remains. Neutral holds the max-min fair share. Where a CPU rate cap applies,
+in Full with `cpu.max` authorized, own work is capped to its target, and after
+`pause_bound_s` (10 s) a pause becomes a cap at the 5% minimum duty while the contention
+lasts. In Tracked no rate cap applies: Yield First and Neutral pause whole tasks, in victim
+order, only while the own work left running stays at or above the target, so a task whose
+pause would go below it is skipped and rounding favours own work. A pause still answering its
+demand at `pause_bound_s` gives a hint-ready task its hint, as a request with no cap, and drains
+a task still contended at the hint's deadline or without the hint; the task is requeued without
+using an attempt. So in Tracked, CPU contention alone can drain a task. A job's own mode, within
+the node cap, decides how that job gives back: a job in Performance or Aggressive is never held
+for another principal, for unknown activity or at a floor breach, whatever the node's mode, and
+only the operator's envelope steps it. The node's other jobs then give what its target needs as
+far as they can, so another workload can get less than the node's mode promises; this is a known
+limitation of per-job modes. Performance
 takes no step on running work for another principal, for own usage above its admission target
 or for activity of unknown amount, and only the operator's envelope still steps it: what
 another principal gets is the kernel's and the driver's split beside the same work. It holds
@@ -685,6 +682,7 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `gpu_time_slice_fair` | Own work holds no more than its fair share of the time-sliced device's busy contexts, so the driver's slices keep it fair without a GPU compute cap. |
 | `gpu_time_slice_unbound` | Own work holds more than its share of the time-sliced device's busy contexts, but no other principal reads slice-bound, so the driver's slices already give each what it asks for without a GPU compute cap. |
 | `gpu_time_slice_hold` | Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals. |
+| `gpu_first_come_floor` | Own GPU work was on the device before every other principal listed there, so it keeps at least the share that leaves none of them more than half of the device. |
 | `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
 | `applied_duty_credit` | Own GPU work is credited at the duty its supervisor applied. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
@@ -785,7 +783,7 @@ itself, and one given up drains Opportunistic work as the leader's does. A recor
 when the run is released is not written: Released supersedes it.
 
 A running supervisor waits for a control line, its leader's exit through the pidfd or a
-new SDK connection until its next deadline: a duty cycle's phase switch, the lease, drain,
+new SDK connection until its next deadline: the lease, drain,
 TERM and KILL deadlines, the readiness check and the release confirmation, and passes at
 least once a second. Without a pidfd, while SDK connections or mediated children are
 active, or while a control or drain-file write fails, it passes every 5 ms. While a journal

@@ -6212,44 +6212,77 @@ mod gpu_demand {
             peer: usize,
             intervals: u64,
         ) -> Vec<TaskTick> {
+            let run = tasks_run(
+                config,
+                job_mode,
+                &|i| i >= 60,
+                &|_| peer,
+                Some(PEER),
+                60 + intervals,
+            );
+            run.into_iter().skip(60).collect()
+        }
+
+        /// A two-task run: `own_at(i)` says whether own tasks "a" and "b" are on the device in
+        /// interval i, and `peer_at(i)` how many saturating contexts the other user, of
+        /// `peer_uid`, has there. Every busy context gets an equal slice of 990; a paused task's
+        /// context stays listed, unsampled, and a drained task leaves for good.
+        pub(super) fn tasks_run(
+            config: &Config,
+            job_mode: Option<ContentionMode>,
+            own_at: &dyn Fn(u64) -> bool,
+            peer_at: &dyn Fn(u64) -> usize,
+            peer_uid: Option<u32>,
+            intervals: u64,
+        ) -> Vec<TaskTick> {
             let mut engine = PolicyEngine::new();
-            let mut now = 0;
-            for i in 0..60u64 {
-                engine
-                    .evaluate(
-                        config,
-                        &sliced(None, 990, i + 1, 0, peer),
-                        &PolicyInput::default(),
-                        now,
-                    )
-                    .unwrap();
-                now += INTERVAL;
-            }
             let tasks = [("a", OWN_PIDS[0]), ("b", OWN_PIDS[1])];
             let key = ResourceKey::GpuCompute(GPU.into());
             let (mut steps, mut gone): (BTreeMap<String, YieldStep>, BTreeSet<String>) =
                 Default::default();
             let mut out = vec![];
             for i in 0..intervals {
-                let live: Vec<(&str, u32)> = tasks
-                    .iter()
-                    .copied()
-                    .filter(|(id, _)| !gone.contains(*id))
-                    .collect();
+                let peer = peer_at(i);
+                let live: Vec<(&str, u32)> = if own_at(i) {
+                    tasks
+                        .iter()
+                        .copied()
+                        .filter(|(id, _)| !gone.contains(*id))
+                        .collect()
+                } else {
+                    vec![]
+                };
                 let running: Vec<u32> = live
                     .iter()
                     .filter(|(id, _)| steps.get(*id).is_none_or(|s| *s < YieldStep::Pause))
                     .map(|(_, pid)| *pid)
                     .collect();
                 let r = running.len() as u64;
-                let own = 990 * r / (r + peer as u64);
-                let mut snap = sliced(Some(own), 990 - own, 61 + i, live.len(), peer);
+                let own = 990 * r / (r + peer as u64).max(1);
+                let reading = (!live.is_empty()).then_some(own);
+                let external = if peer == 0 { 0 } else { 990 - own };
+                let mut snap = sliced(reading, external, i + 1, live.len(), peer);
+                if peer == 0 {
+                    snap.gpus[0].external_compute = ComputeActivity::Idle;
+                    if let Some(principals) = snap.principals.as_mut() {
+                        principals.retain(|p| p.is_owner);
+                    }
+                }
                 let contexts = snap.gpus[0].compute_contexts.as_mut().unwrap();
                 contexts.own = live.iter().map(|(_, pid)| *pid).collect();
                 contexts.sampled.retain(|(pid, _)| !OWN_PIDS.contains(pid));
                 contexts
                     .sampled
                     .extend(running.iter().map(|pid| (*pid, Some(1000))));
+                for (_, uid) in contexts
+                    .listed
+                    .iter_mut()
+                    .chain(contexts.sampled.iter_mut())
+                {
+                    if *uid == Some(PEER) {
+                        *uid = peer_uid;
+                    }
+                }
                 let input = PolicyInput {
                     allocations: live
                         .iter()
@@ -6261,7 +6294,9 @@ mod gpu_demand {
                         .collect(),
                     ..PolicyInput::default()
                 };
-                let decision = engine.evaluate(config, &snap, &input, now).unwrap();
+                let decision = engine
+                    .evaluate(config, &snap, &input, i * INTERVAL)
+                    .unwrap();
                 steps = decision
                     .actions
                     .iter()
@@ -6275,7 +6310,6 @@ mod gpu_demand {
                     decision,
                     own,
                 });
-                now += INTERVAL;
             }
             out
         }
@@ -6340,6 +6374,78 @@ mod gpu_demand {
         fn performance_holds_no_own_task_on_the_time_sliced_device() {
             let run = two_tasks(&mode_config(ContentionMode::Performance), None, 1, 30);
             assert!(run.iter().all(|t| t.steps.is_empty()));
+        }
+
+        /// The first-come record of the device (FR-090).
+        pub(super) fn first_come(decision: &Decision) -> Option<String> {
+            decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+                .gpu_demand
+                .as_ref()
+                .and_then(|record| record.first_come.clone())
+        }
+
+        /// Own tasks alone on the device for 20 intervals, then the other user arrives, in Yield
+        /// First: own work was there first, so it keeps half the device, one of its two tasks
+        /// running; the record says the floor applies (FR-090).
+        #[test]
+        fn yield_first_keeps_half_beside_a_user_that_arrived_later() {
+            let config = mode_config(ContentionMode::YieldFirst);
+            let run = tasks_run(
+                &config,
+                None,
+                &|_| true,
+                &|i| usize::from(i >= 20),
+                Some(PEER),
+                40,
+            );
+            for (i, t) in run.iter().enumerate().skip(24) {
+                let paused = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
+                assert_eq!(paused, 1, "interval {i}: {:?}", t.steps);
+                assert!(t.own >= 495, "interval {i}: own {}", t.own);
+                assert_eq!(
+                    first_come(&t.decision).as_deref(),
+                    Some("applies"),
+                    "interval {i}"
+                );
+            }
+        }
+
+        /// The floor is withheld where the order cannot be known or own work came later: an
+        /// unreadable UID, or a user that arrived while own work was away for more than 30 s.
+        /// Yield First then pauses both tasks (FR-090).
+        #[test]
+        fn no_floor_where_the_order_is_unknown_or_own_work_came_later() {
+            let config = mode_config(ContentionMode::YieldFirst);
+            let unreadable = tasks_run(
+                &config,
+                None,
+                &|_| true,
+                &|i| usize::from(i >= 20),
+                None,
+                40,
+            );
+            let back = tasks_run(
+                &config,
+                None,
+                &|i| !(10..80).contains(&i),
+                &|i| usize::from(i >= 30),
+                Some(PEER),
+                100,
+            );
+            for (run, from, why) in [
+                (&unreadable, 24, "uid_unreadable"),
+                (&back, 84, "own_later"),
+            ] {
+                for (i, t) in run.iter().enumerate().skip(from).take(14) {
+                    let paused = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
+                    assert_eq!(paused, 2, "{why} interval {i}: {:?}", t.steps);
+                    assert_eq!(
+                        first_come(&t.decision).as_deref(),
+                        Some(why),
+                        "interval {i}"
+                    );
+                }
+            }
         }
 
         pub(super) fn gpu_steps(decision: &Decision) -> Vec<&YieldAction> {

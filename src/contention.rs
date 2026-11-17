@@ -371,6 +371,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals.",
     ),
     (
+        "gpu_first_come_floor",
+        "Own GPU work was on the device before every other principal listed there, so it keeps at least the share that leaves none of them more than half of the device.",
+    ),
+    (
         "gpu_time_slice_admission_held",
         "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
     ),
