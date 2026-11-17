@@ -2590,3 +2590,47 @@ grant still needs time left. A drain that cannot be handed on is reported once p
 **Open points for the reviewer**: the leader's Running record is bounded too (it follows EXEC);
 an SDK child's launch records keep their 5 s, the one exception to "no write holds the loop";
 only the lock wait is bounded, not the commit's sync.
+
+## Report 056 Decision 1 C: a task that met its memory target is not drained (2026-11-17)
+
+**Input**: spec Session 2026-11-17, FR-023, FR-037, SC-012 and User Story 4's scenario 7; report
+056 Decision 1 C as the user chose it, with the design note the user approved on 2026-11-17.
+
+**Technical Context**: Rust 1.88; no dependency, config key or wire change. `StepState` gains one
+optional field, absent in older state and skipped when absent; `LadderInput` gains the
+allocation's memory usage for memory resources only. The policy stays pure.
+
+**Constitution Check**: Principles II, III, IV and VI.
+- *Principle II.* Floors, shares and the over-share order are unchanged. A task that complied is
+  hinted again instead of drained, so the floor can stay breached one hint deadline longer for
+  each growth of another own task; SC-012 counts that excess from the interval that first shows
+  it, and a task above its target at the deadline is drained as before.
+- *Principle III.* Unknown memory readings hold the step as today; compliance is judged only on a
+  known reading.
+- *Principle IV.* The rule lives in `plan_step` and `plan_victim`, from the state and the
+  interval's input.
+- *Principle VI.* Each test is seen failing first.
+
+**Compliance at the deadline (R86)**. In `src/contention.rs`, `StepState.asked_target` holds the
+target a memory hint was entered with. `LadderInput.memory_usage` carries the allocation's
+reading for RAM and GPU memory, filled in `plan_victim` from `victim.amount`, `None` for CPU and
+GPU compute. In `plan_step`, when a memory hint is due on its deadline while the resource is
+contended and the reading is at or below the larger of `asked_target` (or `target` where older
+state has none) and the current target, the hint is entered again with the current target as its
+new `asked_target`, its entry time now, so its deadline starts again; otherwise the next step
+applies as before. `plan_victim`'s counting is unchanged: a hint within its deadline counts what
+was asked, so the excess is not passed to in-share tasks while the new hint waits, and a
+Guaranteed task passes its excess on (FR-024) only once that wait is over.
+
+Tests first: in `src/contention.rs`, a due memory hint at or below its asked target re-enters
+Hint with a new deadline, one above it goes to Drain, and a target of 0 with usage above 0 goes
+to Drain; in `tests/policy.rs`, `random::193`'s shape (a hinted over-share task meets its target
+while another own task grows) keeps the hinted task running and hints it again. The hint-deaf
+tests stay unchanged. Then the 500 decision-snapshot sequences are compared before and after,
+by mode: own tasks stopped for memory, tasks stopped at their target, and breach intervals.
+
+**Docs**: `docs/guarantees.md`'s over-share paragraph and the data model's escalation rule say
+that a task that complied is hinted again, not drained.
+
+**Native**: C3's floor breach in Neutral and C4 run 2 (`runs-037.sh <commit> <uid> c3n c4b`) on
+the test host at the last commit, as in item 056.

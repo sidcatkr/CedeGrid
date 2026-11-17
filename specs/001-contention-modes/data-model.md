@@ -172,7 +172,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
   - On the critical floor path, the hint deadline is `critical_hint_deadline_s`, and an
     allocation that does not observe the drain file goes to `terminate` instead of `drain`
     (FR-063). A Guaranteed hint waits `guaranteed_hint_deadline_s` off that path.
-  - A hint waits for its deadline, never only the response time.
+  - A hint waits for its deadline, never only the response time. At a memory hint's deadline, a
+    task whose reading is at or below the larger of `asked_target` and the current target has
+    complied: it gets a new hint with the current target and a new deadline instead of the next
+    step (FR-037).
   - Memory victims: while own memory is above its fair share, the over-share tasks (the
     victim-order prefix that covers the excess, as the OOM mark picks them) lead the order. An
     over-share task keeps counting toward the excess while it is handled: a decided drain in
@@ -381,6 +384,12 @@ configuration types and fails for one without a class (FR-068).
 
 True for a step planned on the pending pass. The running pass re-plans a pending-pass CPU drain
 of opportunistic work instead of holding it (FR-012).
+
+## StepState.asked_target (`src/contention.rs`)
+
+The target a memory hint was entered with, in MiB. Compliance at the deadline is judged against
+the larger of it and the current target (FR-037). Optional, absent in older state and skipped
+when absent; older state judges against the current target alone.
 
 ## GpuSnapshot.background_process_ids (`src/model.rs`)
 

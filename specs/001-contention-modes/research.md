@@ -1469,3 +1469,15 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
   left could be dropped with no event.
 - **Alternatives**: drop only the time test for a lease that says drain, on both sides (leaves an
   older supervisor's gap).
+
+## R86. A memory hint that was complied with is renewed, not escalated (report 056 Decision 1 C)
+
+- **Decision**: at a memory hint's deadline, a task whose reading is at or below the larger of the
+  target the hint began with and the current target gets a new hint with the current target and a
+  new deadline; any other task escalates as before.
+- **Rationale**: the deadline counted time only, so a task that shrank to its target was drained
+  when another own task grew during the wait. Over the 500 benchmark sequences 20 of 87 memory
+  stops were such tasks. Plain Linux would stop none of them.
+- **Alternatives**: keep the order as built (the user declined); return to the order before item
+  051 (in-share tasks pay for another task's excess again, ruled out on 2026-11-03); ask the task
+  that grew (needs a per-task baseline and redefines the victim order and the OOM mark).
