@@ -230,12 +230,13 @@ refuses (SC-005).
 
 ## Phase 5: Polish & Cross-Cutting Concerns
 
-- [ ] T031 [P] (now) In `docs/guarantees.md`, replace "which is not implemented" with the mode,
+- [x] T031 [P] (now) In `docs/guarantees.md`, replace "which is not implemented" with the mode,
   admission-only protection and the unprotected exception, generically. In `docs/system-mode.md`,
   add the administrator key.
-- [ ] T032 [P] (now) For any new file that ships (none is planned), add it to `ALLOWLIST` in
+- [x] T032 [P] (now) For any new file that ships (none is planned), add it to `ALLOWLIST` in
   `tools/pack_source_review.py` and to `include` in `Cargo.toml`. Run
   `python3 tools/pack_source_review.py` and confirm it passes.
+  - *Done:* 004 added no file that ships.
 - [ ] T033 (after T622) Run the full checks from `CLAUDE.md`: `cargo fmt`, `cargo clippy
   --all-targets -D warnings`, the serial Rust suite, `cargo +1.88.0 check`, both Python suites,
   `npm test`, the Windows client paths, and the system-mode container suite.

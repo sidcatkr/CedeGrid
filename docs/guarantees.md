@@ -561,9 +561,35 @@ kill is a normal failure.
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
 failed GPU allocation beyond what the same work started without CedeGrid would cause; the
 floor rule of Performance and Aggressive above belongs to those modes themselves. The constitution allows one risk to other workloads' compute, slower compute, and
-only under an unprotected Aggressive mode, which is not implemented: the modes are Yield
-First, Neutral and Performance, and no configuration key or job field can name Aggressive.
-In Performance no compute step is taken for others. The former floor policies `b` and `c` and Neutral memory policy
+only under unprotected Aggressive.
+
+Aggressive is the fourth mode, after Performance. It is Performance with no admission margin:
+it admits up to all idle CPU and GPU compute at once, where Performance keeps 2% free. Like
+Performance, it takes no compute step for others, and its memory is Performance's. A
+configuration names it only with `contention.acknowledge_caution = ["aggressive_mode"]`, and it
+runs only where `contention.max_mode = "aggressive"` is set explicitly. Without that setting,
+the node cap stops at Performance, and an Aggressive setting runs as Performance with a
+`mode_capped` warning.
+
+Protected Aggressive, the default form, keeps the admission rule. New own work starts only
+where every other principal keeps the lesser of its demand and its fair share, and never into
+activity of unknown amount.
+
+Unprotected Aggressive is the one exception to that rule. A job may start new compute work
+where another principal contends, only when all of these hold:
+- the submission sets both `unprotected_aggressive` and `confirm_unprotected_aggressive`;
+- the node cap is Aggressive;
+- a person turned on the host's allowance in interactive `cedegrid setup`, after the host's
+  numbers and a fixed phrase;
+- on a System mode host, the administrator policy sets `modes.unprotected_aggressive = true`.
+
+The allowance lives in the agent's state database. It counts as off whenever that database
+cannot be read, and a restore resets it. No configuration file, environment variable,
+migration or saved setting can turn it on, and a file that tries fails to load. Unprotected
+Aggressive never starts work into activity of unknown amount or past the floors, raises no
+priority, and changes nothing about memory. A refusal names every missing condition. A run that
+starts logs one warning line.
+In Performance and Aggressive no compute step is taken for others. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded
 or caution. Three options are marked *caution* because they let own work hold more
@@ -589,8 +615,8 @@ interval: unset, it is max(2000 ms, twice the interval), which `doctor` and `val
 derived; set at or below the interval, the configuration is refused on every host, with an
 error that names both keys and the smallest value that loads. Decisions and node reports show, per
 resource, how much is held back and why. Without `contention.max_mode`, a job may
-request at most the node's most aggressive configured mode, so no job runs in a mode beyond
-what the node's configuration allows. A file that sets no mode runs Performance and gets one
+request at most the node's most aggressive configured mode, up to Performance, so no job runs
+in a mode beyond what the node's configuration allows. A file that sets no mode runs Performance and gets one
 `default_mode_changed` notice; `default_mode = "neutral"` keeps the earlier default. Policy recordings without an allocation class
 retain the legacy opportunistic default; live observation copies the required class from
 the durable execution record.
