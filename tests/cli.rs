@@ -1393,13 +1393,14 @@ mod setup_terminal {
     }
 
     #[test]
-    fn arrows_space_and_enter_choose_and_write() {
+    fn arrows_and_enter_choose_and_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
         open(&mut pty, DEFAULT_MODE);
         pty.wait_for("Holds the fair share");
-        // Options: Yield First, Neutral, Performance (current, the default).
+        // Options: Yield First, Neutral, Performance, Aggressive; the highlight starts on
+        // Performance, the current value. Space does nothing; Enter chooses.
         pty.keys(UP, 2);
         pty.key(b" ");
         pty.key(b"\r");
@@ -1420,7 +1421,6 @@ mod setup_terminal {
         // Ascending options; 768 MiB, near the minimum, is four above the current 8192.
         open(&mut pty, RAM_FLOOR);
         pty.keys(UP, 4);
-        pty.key(b" ");
         pty.key(b"\r");
         pty.wait_for("Confirm a caution option");
         pty.wait_for("Less headroom is kept");
@@ -1436,11 +1436,9 @@ mod setup_terminal {
         assert!(!row.contains("[caution]"), "{row}");
         pty.key(b"\r");
         pty.keys(UP, 4);
-        pty.key(b" ");
         pty.key(b"\r");
         pty.wait_for("Confirm a caution option");
         pty.key(DOWN);
-        pty.key(b" ");
         pty.key(b"\r");
         write_from(&mut pty, RAM_FLOOR);
         let (status, text, _) = pty.finish();
@@ -1466,7 +1464,6 @@ mod setup_terminal {
             // A change made before cancelling is not written either.
             open(&mut pty, DEFAULT_MODE);
             pty.key(UP);
-            pty.key(b" ");
             pty.key(b"\r");
             pty.key(key);
             let (status, text, after) = pty.finish();
@@ -1536,13 +1533,11 @@ mod setup_terminal {
         let mut pty = interface(&path, &[]);
         open(&mut pty, MAX_MODE);
         pty.keys(DOWN, 2);
-        pty.key(b" ");
         pty.key(b"\r");
         pty.wait_for("Confirm a caution option");
         pty.wait_for("record aggressive_mode");
         // No is preselected; choose Yes.
         pty.key(DOWN);
-        pty.key(b" ");
         pty.key(b"\r");
         write_from(&mut pty, MAX_MODE);
         let (status, text, _) = pty.finish();
@@ -1575,7 +1570,6 @@ mod setup_terminal {
                     // needs no confirmation.
                     open(pty, MAX_MODE);
                     pty.key(DOWN);
-                    pty.key(b" ");
                     pty.key(b"\r");
                     write_from(pty, MAX_MODE);
                 },
@@ -1588,7 +1582,6 @@ mod setup_terminal {
                     // Ascending options; 16 384 follows the current 8192.
                     open(pty, RAM_FLOOR);
                     pty.key(DOWN);
-                    pty.key(b" ");
                     pty.key(b"\r");
                     write_from(pty, RAM_FLOOR);
                 },
@@ -1601,7 +1594,6 @@ mod setup_terminal {
                     // Descending options; 7 precedes the default 5.
                     open(pty, CPU_NEUTRAL_MARGIN);
                     pty.key(UP);
-                    pty.key(b" ");
                     pty.key(b"\r");
                     write_from(pty, CPU_NEUTRAL_MARGIN);
                 },
@@ -1694,38 +1686,19 @@ mod setup_terminal {
         }
     }
 
-    /// Terminals without cursor control get line prompts with the same choices,
-    /// markers and confirmation (FR-055).
+    /// A terminal that cannot move the cursor gets no second, typed interface: setup stops,
+    /// names the flags and writes nothing (FR-055).
     #[test]
-    fn line_prompts_serve_terminals_without_cursor_control() {
+    fn a_terminal_without_cursor_control_is_pointed_to_the_flags() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
-        let mut pty = Pty::spawn(&path, &["setup", "--role", "node"], &[("TERM", "dumb")]);
-        pty.wait_for("Default mode: Performance");
-        // Keep the modes and the cap, then choose 2) 768 MiB, a floor near its minimum.
-        for _ in 0..6 {
-            pty.key(b"\r");
-        }
-        pty.wait_for("RAM floor");
-        pty.key(b"2\r");
-        pty.wait_for("Type yes to record small_floor");
-        pty.key(b"yes\r");
-        // Keep every other value.
-        for _ in 0..12 {
-            pty.key(b"\r");
-        }
-        pty.wait_for("Write this configuration? [y/N]");
-        pty.key(b"y\r");
+        let pty = Pty::spawn(&path, &["setup", "--role", "node"], &[("TERM", "dumb")]);
         let (status, text, _) = pty.finish();
-        assert!(status.success(), "{text}");
+        assert_eq!(status.code(), Some(2), "{text}");
         assert!(!text.contains('\x1b'), "{text:?}");
-        assert!(text.contains("[caution]"));
-        let config = Config::load(&path).unwrap();
-        assert_eq!(
-            config.contention.default_mode,
-            cedegrid::contention::ContentionMode::Performance
-        );
-        assert_eq!(config.ram.reserve_mib, 768);
+        assert!(text.contains("ERR_CEDEGRID_SETUP_TERMINAL"), "{text}");
+        assert!(text.contains("--non-interactive"), "{text}");
+        assert!(!path.exists());
     }
 
     #[test]

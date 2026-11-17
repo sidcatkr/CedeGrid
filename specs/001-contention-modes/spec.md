@@ -2279,8 +2279,9 @@ node reports with the expected per-resource values at each step.
   - the thresholds an operator is likely to tune (tolerances)
 
   The remaining thresholds keep their defaults unless changed by flags or in the file.
-- **FR-048**: The interface MUST be usable with the keyboard alone: arrow keys move, Space toggles
-  or selects, Enter confirms. It MUST NOT require a mouse.
+- **FR-048**: The interface MUST be usable with the keyboard alone: arrow keys move and Enter
+  chooses; where several options may be chosen at once, Space toggles each. It MUST NOT require a
+  mouse, and MUST NOT mix typed numbers with arrow keys (user, 2026-11-17).
 - **FR-049**: Each mode, floor, margin, threshold and hint-deadline option MUST show a one-line
   consequence.
   - Default options MUST be uncolored and unmarked.
@@ -2312,7 +2313,9 @@ node reports with the expected per-resource values at each step.
   minimum without the `small_floor` entry MUST load, so that 0.2 files keep loading (FR-031), and
   MUST apply as twice the minimum, with a warning naming the entry (FR-023).
 - **FR-055**: Cancelling setup MUST write nothing and MUST restore the terminal. If the interface
-  cannot drive the terminal, setup MUST fall back to line-based prompts.
+  cannot drive the terminal, setup MUST stop, write nothing and name the flags for non-interactive
+  use; it offers no second, typed interface (user, 2026-11-17). A list taller than the terminal
+  scrolls.
 
 **Documentation**
 

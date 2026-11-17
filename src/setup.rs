@@ -2091,6 +2091,9 @@ fn fix_for(code: &str) -> Option<&'static str> {
         "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY" => Some(
             "Run cedegrid setup --allow-unprotected-aggressive in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
         ),
+        "ERR_CEDEGRID_SETUP_TERMINAL" => Some(
+            "Use a terminal that moves the cursor, or pass the choices as flags with --non-interactive; cedegrid setup --help lists them.",
+        ),
         "ERR_CEDEGRID_CAUTION_UNACKNOWLEDGED" => Some(
             "Confirm the option in interactive setup, or pass --acknowledge-caution with its name.",
         ),
@@ -2272,6 +2275,17 @@ mod tests {
                 assert!(!node_fields().contains(&Field::Margin(kind, mode)));
             }
         }
+    }
+
+    /// A list longer than the terminal scrolls so the highlight stays in view, near the middle.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_list_keeps_the_highlight_in_view() {
+        use super::interface::window_start;
+        assert_eq!(window_start(5, 10, 3), 0);
+        assert_eq!(window_start(20, 6, 0), 0);
+        assert_eq!(window_start(20, 6, 10), 7);
+        assert_eq!(window_start(20, 6, 19), 14);
     }
 
     /// Option lists keep labels in one column and descriptions beside them, or under them on a

@@ -1,17 +1,6 @@
 use super::*;
 
-/// The terminal's width in columns, where it can be read.
-fn width() -> Option<usize> {
-    #[cfg(unix)]
-    {
-        terminal::size().map(|(_, columns)| usize::from(columns))
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
-}
-
+#[cfg(unix)]
 /// The value a pick writes, as the confirmation's Setting row shows it.
 fn written(pick: Pick) -> String {
     match pick {
@@ -22,6 +11,7 @@ fn written(pick: Pick) -> String {
     }
 }
 
+#[cfg(unix)]
 /// The confirmation's rows for a caution pick: the setting, its effect, why it is a caution
 /// option and where the acknowledgement goes, with the reason wrapped to `width`.
 fn confirmation_rows(
@@ -58,6 +48,63 @@ fn cursor_control() -> bool {
     std::env::var("TERM").map_or(true, |term| term != "dumb" && !term.is_empty())
 }
 
+#[cfg(unix)]
+/// Whether the locale says UTF-8, so list glyphs may leave ASCII.
+fn unicode() -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("utf-8") || value.contains("utf8")
+        })
+}
+
+#[cfg(unix)]
+/// List glyphs: Unicode where the locale allows it, ASCII otherwise.
+#[derive(Clone, Copy, Debug)]
+pub struct Glyphs {
+    /// Points at the highlighted row of the main list.
+    pub pointer: &'static str,
+    /// Marks the highlighted option in a list that picks one value.
+    pub chosen: &'static str,
+    /// Marks every other option there.
+    pub other: &'static str,
+    /// The keys that move the highlight.
+    pub arrows: &'static str,
+}
+
+#[cfg(unix)]
+impl Glyphs {
+    pub fn detect() -> Self {
+        if unicode() {
+            Self {
+                pointer: "❯",
+                chosen: "●",
+                other: "○",
+                arrows: "↑/↓",
+            }
+        } else {
+            Self {
+                pointer: ">",
+                chosen: ">",
+                other: " ",
+                arrows: "Up/Down",
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+/// The first row a list of `total` rows shows in `visible` rows so that `cursor` stays in view,
+/// keeping it near the middle once the list scrolls.
+pub fn window_start(total: usize, visible: usize, cursor: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    cursor.saturating_sub(visible / 2).min(total - visible)
+}
+
 pub fn run(target: &Target, flags: Choices, host: Option<&Host>) -> Result<Option<Choices>> {
     let role = match (target.role, flags.role) {
         (Some(role), _) | (None, Some(role)) => role,
@@ -73,20 +120,24 @@ pub fn run(target: &Target, flags: Choices, host: Option<&Host>) -> Result<Optio
         return prompts::connection(target, role, flags);
     }
     let (_, base) = node_base(target)?;
-    let mut state = State::new(target.clone(), base, flags, host.cloned());
+    // The interface takes arrow keys and Enter only; a terminal that cannot move the cursor gets
+    // the flags instead of a second, typed interface (FR-055).
     #[cfg(unix)]
-    if cursor_control()
-        && let Some(size) = terminal::size()
-        && size.0 as usize >= state.rows().len() + 8
-        && size.1 >= 72
-    {
-        return match screen::run(&mut state, Style::detect().color)? {
+    if cursor_control() {
+        let mut state = State::new(target.clone(), base, flags, host.cloned());
+        return match screen::run(&mut state, Style::detect().color, Glyphs::detect())? {
             screen::Outcome::Done(choices) => Ok(Some(choices)),
             screen::Outcome::Cancelled => Ok(None),
             screen::Outcome::Role(role) => prompts::connection(target, role, Choices::default()),
         };
     }
-    prompts::node(&mut state)
+    #[cfg(not(unix))]
+    let _ = (base, flags, host);
+    Err(fail(
+        2,
+        "ERR_CEDEGRID_SETUP_TERMINAL",
+        "this terminal cannot run setup's interface, which needs cursor movement",
+    ))
 }
 
 /// The interface's choices so far, on top of the current configuration.
@@ -164,7 +215,7 @@ impl State {
     }
 }
 
-/// Line-based prompts, for terminals the interface cannot drive (FR-055).
+/// Typed prompts for a coordinator's or client's addresses and file paths, which are text.
 mod prompts {
     use super::*;
 
@@ -176,118 +227,6 @@ mod prompts {
             return Ok(None);
         }
         Ok(Some(line.trim().to_string()))
-    }
-
-    pub fn node(state: &mut State) -> Result<Option<Choices>> {
-        let style = Style::detect();
-        println!(
-            "{}",
-            style.bold(&format!(
-                "CedeGrid setup · node · {}",
-                state.target.path.display()
-            ))
-        );
-        println!(
-            "{}",
-            style.dim("Enter keeps the current value. Ctrl-D cancels.")
-        );
-        for field in state.rows() {
-            if field == Field::Role {
-                continue;
-            }
-            let config = state.preview();
-            let options = field.options(&config, state.fresh);
-            let current = state.values[&field];
-            println!();
-            println!(
-                "{}",
-                style.bold(&format!(
-                    "{}: {}",
-                    field.label(),
-                    field.show(current, &config)
-                ))
-            );
-            if let Some(note) = field.note() {
-                println!("{}", style.dim(note));
-            }
-            let rows: Vec<OptionRow> = options
-                .iter()
-                .enumerate()
-                .map(|(index, option)| OptionRow {
-                    prefix: format!("{:>4}  ", index + 1),
-                    label: field.show(*option, &config),
-                    description: consequence(field, *option, &config, state.host.as_ref()),
-                    caution: state.risk(field, *option).is_some(),
-                    selected: false,
-                })
-                .collect();
-            for line in option_lines(&rows, style, width()) {
-                println!("{line}");
-            }
-            loop {
-                let Some(answer) = ask(&format!("Choose 1-{}, or Enter to keep: ", options.len()))?
-                else {
-                    return Ok(None);
-                };
-                if answer.is_empty() {
-                    break;
-                }
-                let Some(pick) = answer
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|n| n.checked_sub(1))
-                    .and_then(|n| options.get(n))
-                    .copied()
-                else {
-                    println!("Enter a number from 1 to {}.", options.len());
-                    continue;
-                };
-                if let Some(option) = state.risk(field, pick)
-                    && state.needs_confirmation(option)
-                {
-                    println!();
-                    println!(
-                        "  {} {}: {}",
-                        style.caution(CAUTION),
-                        field.label(),
-                        field.show(pick, &config)
-                    );
-                    for line in confirmation_rows(
-                        state,
-                        &config,
-                        field,
-                        pick,
-                        option,
-                        width().unwrap_or(80),
-                    ) {
-                        println!("{line}");
-                    }
-                    let Some(answer) =
-                        ask(&format!("Type yes to record {option} and use this value: "))?
-                    else {
-                        return Ok(None);
-                    };
-                    if answer != "yes" {
-                        println!("Kept {}.", field.show(current, &config));
-                        break;
-                    }
-                    state.acknowledged.insert(option.to_string());
-                }
-                state.values.insert(field, pick);
-                break;
-            }
-        }
-        let plan = state.plan()?;
-        println!();
-        println!("{}", style.bold("Review before writing"));
-        for line in summary_lines(&plan, state.host.as_ref()) {
-            println!("{}", line.replace(CAUTION, &style.caution(CAUTION)));
-        }
-        println!();
-        let Some(answer) = ask("Write this configuration? [y/N] ")? else {
-            return Ok(None);
-        };
-        Ok(matches!(answer.as_str(), "y" | "Y" | "yes").then(|| state.choices()))
     }
 
     pub fn connection(target: &Target, role: Role, flags: Choices) -> Result<Option<Choices>> {
@@ -343,7 +282,7 @@ mod prompts {
     }
 }
 
-/// The keyboard interface (FR-046 to FR-051).
+/// The keyboard interface (FR-046 to FR-051): arrow keys move, Enter chooses, Esc or q cancels.
 #[cfg(unix)]
 mod screen {
     use super::*;
@@ -361,20 +300,19 @@ mod screen {
             field: Field,
             options: Vec<Pick>,
             cursor: usize,
-            marked: usize,
         },
         Confirm {
             field: Field,
             pick: Pick,
             option: &'static str,
             cursor: usize,
-            marked: usize,
         },
         Summary(Box<Result<Plan, String>>),
     }
 
     struct Painter {
         color: bool,
+        glyphs: Glyphs,
         out: std::io::Stdout,
     }
 
@@ -402,11 +340,12 @@ mod screen {
         }
     }
 
-    pub fn run(state: &mut State, color: bool) -> Result<Outcome> {
+    pub fn run(state: &mut State, color: bool, glyphs: Glyphs) -> Result<Outcome> {
         let _raw = terminal::Raw::enter().context("cannot drive the terminal")?;
         let mut keys = terminal::Keys::default();
         let mut painter = Painter {
             color,
+            glyphs,
             out: std::io::stdout(),
         };
         let rows = state.rows();
@@ -431,26 +370,23 @@ mod screen {
                         row = (row + 1) % total;
                         View::Main
                     }
-                    Key::Space | Key::Enter if row == rows.len() => {
+                    Key::Enter if row == rows.len() => {
                         notice = None;
                         View::Summary(Box::new(state.plan().map_err(|error| error.to_string())))
                     }
-                    Key::Space | Key::Enter if row == rows.len() + 1 => {
-                        return Ok(Outcome::Cancelled);
-                    }
-                    Key::Space | Key::Enter => {
+                    Key::Enter if row == rows.len() + 1 => return Ok(Outcome::Cancelled),
+                    Key::Enter => {
                         let field = rows[row];
                         let config = state.preview();
                         let options = field.options(&config, state.fresh);
-                        let current = options
+                        let cursor = options
                             .iter()
                             .position(|pick| *pick == state.values[&field])
                             .unwrap_or(0);
                         View::Options {
                             field,
                             options,
-                            cursor: current,
-                            marked: current,
+                            cursor,
                         }
                     }
                     _ => View::Main,
@@ -458,105 +394,59 @@ mod screen {
                 View::Options {
                     field,
                     options,
-                    mut cursor,
-                    mut marked,
+                    cursor,
                 } => match key {
-                    Key::Up => {
-                        cursor = cursor.saturating_sub(1);
-                        View::Options {
-                            field,
-                            options,
-                            cursor,
-                            marked,
-                        }
-                    }
-                    Key::Down => {
-                        cursor = (cursor + 1).min(options.len() - 1);
-                        View::Options {
-                            field,
-                            options,
-                            cursor,
-                            marked,
-                        }
-                    }
-                    Key::Space => {
-                        marked = cursor;
-                        View::Options {
-                            field,
-                            options,
-                            cursor,
-                            marked,
-                        }
-                    }
+                    Key::Up => View::Options {
+                        field,
+                        cursor: cursor.saturating_sub(1),
+                        options,
+                    },
+                    Key::Down => View::Options {
+                        field,
+                        cursor: (cursor + 1).min(options.len() - 1),
+                        options,
+                    },
                     Key::Enter => {
-                        let pick = options[marked];
-                        if let Pick::Role(role) = pick {
-                            if role != Role::Node {
+                        let pick = options[cursor];
+                        match pick {
+                            Pick::Role(role) if role != Role::Node => {
                                 return Ok(Outcome::Role(role));
                             }
-                            View::Main
-                        } else {
-                            match state.risk(field, pick) {
+                            Pick::Role(_) => View::Main,
+                            _ => match state.risk(field, pick) {
                                 Some(option) if state.needs_confirmation(option) => View::Confirm {
                                     field,
                                     pick,
                                     option,
                                     cursor: 0,
-                                    marked: 0,
                                 },
                                 _ => {
                                     state.values.insert(field, pick);
                                     View::Main
                                 }
-                            }
+                            },
                         }
                     }
                     _ => View::Options {
                         field,
                         options,
                         cursor,
-                        marked,
                     },
                 },
                 View::Confirm {
                     field,
                     pick,
                     option,
-                    mut cursor,
-                    mut marked,
+                    cursor,
                 } => match key {
-                    Key::Up => {
-                        cursor = 0;
-                        View::Confirm {
-                            field,
-                            pick,
-                            option,
-                            cursor,
-                            marked,
-                        }
-                    }
-                    Key::Down => {
-                        cursor = 1;
-                        View::Confirm {
-                            field,
-                            pick,
-                            option,
-                            cursor,
-                            marked,
-                        }
-                    }
-                    Key::Space => {
-                        marked = cursor;
-                        View::Confirm {
-                            field,
-                            pick,
-                            option,
-                            cursor,
-                            marked,
-                        }
-                    }
+                    Key::Up | Key::Down => View::Confirm {
+                        field,
+                        pick,
+                        option,
+                        cursor: 1 - cursor,
+                    },
                     Key::Enter => {
-                        if marked == 1 {
+                        if cursor == 1 {
                             state.acknowledged.insert(option.to_string());
                             state.values.insert(field, pick);
                         }
@@ -567,12 +457,11 @@ mod screen {
                         pick,
                         option,
                         cursor,
-                        marked,
                     },
                 },
                 View::Summary(plan) => match (key, *plan) {
                     (Key::Enter, Ok(_)) => return Ok(Outcome::Done(state.choices())),
-                    (Key::Enter | Key::Space, Err(error)) => {
+                    (Key::Enter, Err(error)) => {
                         notice = Some(error);
                         View::Main
                     }
@@ -581,8 +470,6 @@ mod screen {
             };
         }
     }
-
-    const MOVE: &str = "Up/Down move · Space select · Enter confirm · Esc cancel";
 
     fn render(
         state: &State,
@@ -594,8 +481,17 @@ mod screen {
     ) -> Vec<String> {
         let config = state.preview();
         let style = painter.style();
-        let width = width().unwrap_or(80);
-        let pointer = |selected: bool| if selected { "> " } else { "  " };
+        let glyphs = painter.glyphs;
+        let (height, width) = terminal::size().map_or((40, 80), |(rows, columns)| {
+            (usize::from(rows), usize::from(columns))
+        });
+        let pointer = |selected: bool| {
+            if selected {
+                format!("{} ", glyphs.pointer)
+            } else {
+                "  ".to_owned()
+            }
+        };
         let marker = |risky: bool| {
             if risky {
                 format!("  {}", style.caution(CAUTION))
@@ -604,6 +500,12 @@ mod screen {
             }
         };
         let title = |text: &str| style.bold(&format!("CedeGrid setup · {text}"));
+        let hint = |action: &str| {
+            style.dim(&format!(
+                "{} move · Enter {action} · Esc cancel",
+                glyphs.arrows
+            ))
+        };
         let mut lines = Vec::new();
         match view {
             View::Main => {
@@ -615,7 +517,21 @@ mod screen {
                     .max()
                     .unwrap_or(0)
                     + 3;
-                for (index, field) in rows.iter().enumerate() {
+                // A short terminal shows the rows around the highlight, with what is hidden
+                // counted above and below.
+                let fixed = 7 + if notice.is_some() { 2 } else { 0 };
+                let visible = height.saturating_sub(fixed).max(3);
+                let (start, end) = if rows.len() <= visible {
+                    (0, rows.len())
+                } else {
+                    let inner = visible - 2;
+                    let start = window_start(rows.len(), inner, row.min(rows.len() - 1));
+                    (start, start + inner)
+                };
+                if start > 0 {
+                    lines.push(style.dim(&format!("  {start} more above")));
+                }
+                for (index, field) in rows.iter().enumerate().take(end).skip(start) {
                     let pick = state.values[field];
                     // Floors also show what applies on this host.
                     let host = match (field, state.host.as_ref()) {
@@ -646,6 +562,9 @@ mod screen {
                         marker(state.risk(*field, pick).is_some())
                     ));
                 }
+                if end < rows.len() {
+                    lines.push(style.dim(&format!("  {} more below", rows.len() - end)));
+                }
                 lines.push(String::new());
                 lines.push(format!("{}Review and write", pointer(row == rows.len())));
                 lines.push(format!("{}Cancel", pointer(row == rows.len() + 1)));
@@ -654,44 +573,50 @@ mod screen {
                     lines.push(format!("{} {notice}", style.refusal("Cannot write:")));
                 }
                 lines.push(String::new());
-                lines.push(style.dim("Up/Down move · Enter open · Esc cancel"));
+                lines.push(hint("open"));
             }
             View::Options {
                 field,
                 options,
                 cursor,
-                marked,
             } => {
                 lines.push(title(&field.label()));
                 if let Some(note) = field.note() {
                     lines.push(style.dim(note));
                 }
                 lines.push(String::new());
+                let current = state.values[field];
                 let rows: Vec<OptionRow> = options
                     .iter()
                     .enumerate()
                     .map(|(index, option)| OptionRow {
                         prefix: format!(
-                            "{}({}) ",
-                            pointer(index == *cursor),
-                            if index == *marked { '*' } else { ' ' }
+                            "  {} ",
+                            if index == *cursor {
+                                glyphs.chosen
+                            } else {
+                                glyphs.other
+                            }
                         ),
                         label: field.show(*option, &config),
-                        description: consequence(*field, *option, &config, state.host.as_ref()),
+                        description: format!(
+                            "{}{}",
+                            consequence(*field, *option, &config, state.host.as_ref()),
+                            if *option == current { " (current)" } else { "" }
+                        ),
                         caution: state.risk(*field, *option).is_some(),
                         selected: index == *cursor,
                     })
                     .collect();
                 lines.extend(option_lines(&rows, style, Some(width)));
                 lines.push(String::new());
-                lines.push(style.dim(MOVE));
+                lines.push(hint("choose"));
             }
             View::Confirm {
                 field,
                 pick,
                 option,
                 cursor,
-                marked,
             } => {
                 let kept = state.values[field];
                 lines.push(title("Confirm a caution option"));
@@ -717,19 +642,14 @@ mod screen {
                 .into_iter()
                 .enumerate()
                 {
-                    lines.push(format!(
-                        "{}({}) {}",
-                        pointer(*cursor == index),
-                        if *marked == index { '*' } else { ' ' },
-                        if *cursor == index {
-                            style.bold(&text)
-                        } else {
-                            text
-                        }
-                    ));
+                    lines.push(if *cursor == index {
+                        format!("  {} {}", glyphs.chosen, style.bold(&text))
+                    } else {
+                        format!("  {} {text}", glyphs.other)
+                    });
                 }
                 lines.push(String::new());
-                lines.push(style.dim(MOVE));
+                lines.push(hint("choose"));
             }
             View::Summary(plan) => {
                 lines.push(title("Review before writing"));
