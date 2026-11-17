@@ -273,6 +273,26 @@ Performance tasks launch at nice 0, and the `own-efficiency` profile keeps every
 the coordinator and the harness outside the probe's scope and the placement in the report. The
 own-throughput rows above use that profile.
 
+## Native gate results (feature 005)
+
+System mode's host runs (`specs/005-system-mode/tasks.md`, T057 to T060) ran on the same test
+host as feature 001, with the packages installed by the user: 0.2.0~sys005.2 (built at `3169bb3`)
+for the N4 A placement and the first logout check, and 0.2.0~sys005.6 (built at `196394a`) after
+that. The coordinator and the harness ran from a build of `51a0caf`. Own work ran as the first
+account; the second account ran its own load and, where named, its own units. CedeGrid took no
+action on the second account's processes. Each own task was a CPU-bound loop counting fixed
+units. "Plain Linux" is the same own work started without CedeGrid, each process in a session of
+its own. Dates are UTC.
+
+| Run | Requirement | Commit | Date | Result | Verdict |
+|---|---|---|---|---|---|
+| F1: one own process against the second account's saturating thread on the same core; plain Linux, System mode under N4 A (unit in the account's user slice) and N4 B (unit in `cedegrid.slice`), 60 s windows, Performance | SC-011 | `3169bb3`, `196394a` | 2026-11-17 | own work 495–497 m plain (6 runs), 492–493 m N4 A (3), 498 m N4 B (3); the second account 1574.5–1583.5 req/s plain, 1588.8–1589.9 N4 A, 1572.2–1572.7 N4 B, p99 3.32 ms in every run | pass: own work no more than plain and the second account no less, within the spread |
+| F2: eight own tasks wanting four CPUs against the second account's two saturating threads tied to two of them; the same arms, plus Tracked (CedeGrid without System mode) as the control | SC-011 | `3169bb3`, `196394a`, `51a0caf` | 2026-11-17 | plain: own 2396–2490 m, the second account 4635.1–4918.3 req/s; System mode N4 A: own 2122–2154 m, 5583.0–5655.2 req/s; N4 B: own 2131–2229 m, 5347.6–5638.2 req/s; Tracked: own 2191–2248 m, 5266.5–5474.9 req/s; p99 at or below 3.33 ms in every arm | pass. In the CedeGrid arms, own work was submitted while the second account saturated, so Performance's admission held part of it (four tasks admitted, three running in the window, as in Tracked): 001's F2c shape, not a placement cost |
+| The last logout with the second account's ordinary unit in its user slice (N4 A) and a job holding a POSIX shared memory segment; logind's `RemoveIPC=yes` and `KillUserProcesses=no` left at the host's defaults | T057, R18 | `196394a` | 2026-11-17 | after the account's last session closed, `user@<uid>.service` stopped and `/run/user/<uid>` was removed; both units kept their main process and start time, and the job kept running and kept its mapping; about 10 s after the logout, logind removed the segment's name, and the job could no longer open it by name | recorded: units survive the last logout; a job that reopens POSIX shared memory by name loses it under `RemoveIPC=yes` |
+| The idle executor after the last logout | T057, R18 | — | 2026-11-17 | not applicable in this version: the idle unit runs a holder until follow-up SYS-3 | deferred |
+| Idle cost, 300 s: the broker and both accounts' units, each agent connected to a coordinator, no work, monitor interval 500 ms | SC-012, T059 | `196394a` | 2026-11-17 | broker 0.03% of one CPU, 7.7 MiB resident; each ordinary unit (agent) 2.77–2.80% of one CPU, 37–39 MiB; each idle unit (holder) 0.00%, 5 MiB | broker: pass. The agents' idle CPU is T067's question against 001's SC-014 (1% bound) |
+| Busy cost, the F1 and F2 windows above | T059 | `196394a` | 2026-11-17 | broker 0.00–0.03% of one CPU, 7.1–7.2 MiB; own agent cgroup 2.2–2.7% of one CPU, 38–40 MiB | broker: pass |
+
 ## Rules for validation runs
 
 - Report these statuses separately:
