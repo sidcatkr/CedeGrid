@@ -1074,20 +1074,27 @@ impl<'a> Interval<'a> {
         let exit_recent = self.next.own_exit_ms.is_some_and(|at| {
             self.now.saturating_sub(at) <= self.config.monitor.interval_ms.saturating_mul(2)
         });
-        let plain_contends = (!exit_recent && self.cpu_unattributed >= floor)
-            || self.snapshot.principals.iter().flatten().any(|p| {
-                !p.is_owner
-                    && in_scope(p.cpu_millicores) >= floor
-                    && match p.uid {
-                        None => true,
-                        Some(uid) => {
-                            uid >= uid_min
-                                && standings
-                                    .as_ref()
-                                    .is_some_and(|s| s.get(&uid).is_none_or(|s| s.work.is_none()))
+        // A plain principal contends only on a saturated CPU, and usage no account accounts
+        // for stands for one only after the principal window, as 001 counts it (FR-034).
+        let unattributed = !exit_recent
+            && self.next.cpu_unattributed_intervals
+                >= self.config.contention.principal_window_intervals
+            && self.cpu_unattributed >= floor.max(self.cpu_bound);
+        let plain_contends = view.saturated
+            && (unattributed
+                || self.snapshot.principals.iter().flatten().any(|p| {
+                    !p.is_owner
+                        && in_scope(p.cpu_millicores) >= floor
+                        && match p.uid {
+                            None => true,
+                            Some(uid) => {
+                                uid >= uid_min
+                                    && standings.as_ref().is_some_and(|s| {
+                                        s.get(&uid).is_none_or(|s| s.work.is_none())
+                                    })
+                            }
                         }
-                    }
-            });
+                }));
         // The flag needs a plain principal's contention for a few intervals in a row and holds
         // a while after it ends, so one reading does not swing admission either way.
         let open = view.mode >= ContentionMode::Performance && held.is_none();

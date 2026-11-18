@@ -81,8 +81,12 @@ impl Interval<'_> {
                 moving_down.insert(key.clone());
             }
         }
-        // A CPU cap that holds may sit within the tolerance above a jittering budget.
-        let cpu_fits = self.charged.cpu_millicores <= self.budget.cpu_millicores
+        // A CPU cap that holds may sit within the tolerance above a jittering budget. In
+        // Performance and Aggressive own charges over the CPU budget hold admission through the
+        // headroom alone: the agent may start tasks past it beside a plain user, and nothing
+        // steps own work back, so they restart no cooldown (006 FR-007a, FR-009).
+        let cpu_fits = governing(config, ResourceKind::Cpu) >= ContentionMode::Performance
+            || self.charged.cpu_millicores <= self.budget.cpu_millicores
             || (!moving_down.contains(&ResourceKey::Cpu)
                 && self.charged.cpu_millicores
                     <= self.budget.cpu_millicores.saturating_add(jitter_tolerance(
