@@ -226,9 +226,25 @@ pub(super) fn lease_turn(sent: usize, elapsed: Duration, budget: Duration) -> bo
     sent == 0 || elapsed < budget
 }
 
-/// Whether a heartbeat is due: once per heartbeat interval, stopping or not.
-pub(super) fn heartbeat_due(since_last: Duration, interval: Duration) -> bool {
-    since_last >= interval
+/// The shortest gap between heartbeats brought forward because room opened.
+pub(super) const PROMPT_HEARTBEAT_GAP: Duration = Duration::from_millis(250);
+
+/// Whether a heartbeat is due: once per heartbeat interval, stopping or not, and as soon as
+/// `PROMPT_HEARTBEAT_GAP` after the last when room opened (`prompt`), so the coordinator places
+/// work in it without waiting out the interval (006 SC-001, SC-004).
+pub(super) fn heartbeat_due(since_last: Duration, interval: Duration, prompt: bool) -> bool {
+    since_last >= interval || (prompt && since_last >= PROMPT_HEARTBEAT_GAP)
+}
+
+/// Whether this interval opened room for new work: a plain user started to compete for the
+/// CPU, so Performance starts more (FR-007a), or the CPU headroom grew by half a core or more.
+pub(super) fn room_opened(
+    was_beside_plain: bool,
+    beside_plain: bool,
+    last_headroom_cpu: u64,
+    headroom_cpu: u64,
+) -> bool {
+    (beside_plain && !was_beside_plain) || headroom_cpu >= last_headroom_cpu.saturating_add(500)
 }
 
 /// Whether lease renewals are asked for: only while the newest sample the loop acted on is no
@@ -473,6 +489,11 @@ struct AgentLoop<'a> {
     policy_refused: BTreeSet<String>,
     /// The unprotected raise as last asked of the broker (006 FR-016, FR-018).
     raise: RaiseSteer,
+    /// Room opened since the last heartbeat: a task ended, the CPU room grew, or the last reply
+    /// placed work and more may wait; the next heartbeat comes early.
+    heartbeat_prompt: bool,
+    /// Last interval's CPU headroom and whether a plain user competed, for `room_opened`.
+    last_room: (u64, bool),
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -606,6 +627,8 @@ impl AgentLoop<'_> {
             let supervisor_exited = slot.child.exited()?.is_some();
             // A slot with no new event and an unchanged journal needs no new read.
             let mut fresh = slot.exited != supervisor_exited;
+            // A task that ended frees room for the next.
+            self.heartbeat_prompt |= supervisor_exited && !slot.exited;
             slot.exited = supervisor_exited;
             while let Ok(event) = slot.events.try_recv() {
                 fresh = true;
@@ -1849,9 +1872,19 @@ impl AgentLoop<'_> {
         let agent = self.agent;
         let executable = self.executable;
         // A stopping agent keeps the heartbeat interval too (FR-080).
+        let room = (
+            decision.admission_headroom.cpu_millicores,
+            decision.cpu_beside_plain,
+        );
+        if room_opened(self.last_room.1, room.1, self.last_room.0, room.0) {
+            self.heartbeat_prompt = true;
+        }
+        self.last_room = room;
+        let prompt = self.heartbeat_prompt && self.stopping.is_none();
         if !heartbeat_due(
             self.last_heartbeat.elapsed(),
             Duration::from_millis(self.config.lifecycle.heartbeat_interval_ms),
+            prompt,
         ) {
             return Ok(());
         }
@@ -2015,7 +2048,14 @@ impl AgentLoop<'_> {
         });
         // Report preparation can cross a scheduled slot. Advance at actual
         // enqueue so the next due time agrees with recorded lateness.
-        let due = next_control_due(&mut self.last_heartbeat, interval);
+        let due = if prompt && self.last_heartbeat.elapsed() < interval {
+            // Brought forward: the regular cadence restarts from here.
+            self.last_heartbeat = Instant::now();
+            self.last_heartbeat
+        } else {
+            next_control_due(&mut self.last_heartbeat, interval)
+        };
+        self.heartbeat_prompt = false;
         match bounded(
             self.rpc_budget,
             self.client
@@ -2101,6 +2141,8 @@ impl AgentLoop<'_> {
                 for id in acknowledged {
                     self.refusals.remove(&id);
                 }
+                // A reply that placed work may leave more queued: ask again soon.
+                self.heartbeat_prompt |= !reply.assignments.is_empty();
                 for assignment in reply.assignments {
                     let id = assignment.request.assignment_id.clone();
                     let journaled = self.store.execution_record(&id)?.is_some();
@@ -2679,6 +2721,8 @@ pub async fn run(
         descriptor_refused: BTreeSet::new(),
         policy_refused: BTreeSet::new(),
         raise: RaiseSteer::default(),
+        heartbeat_prompt: false,
+        last_room: (0, false),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,

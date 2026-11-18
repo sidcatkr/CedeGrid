@@ -3146,8 +3146,26 @@ mod pacing_tests {
     fn a_stopping_agent_keeps_the_heartbeat_interval() {
         use super::service::heartbeat_due;
         let interval = Duration::from_secs(2);
-        assert!(!heartbeat_due(Duration::from_millis(100), interval));
-        assert!(heartbeat_due(interval, interval));
+        assert!(!heartbeat_due(Duration::from_millis(100), interval, false));
+        assert!(heartbeat_due(interval, interval, false));
+    }
+
+    /// When room opens, the next heartbeat comes as soon as 250 ms after the last, so the
+    /// coordinator places work without waiting out the interval (006 SC-001, SC-004).
+    #[test]
+    fn opened_room_brings_the_heartbeat_forward() {
+        use super::service::{heartbeat_due, room_opened};
+        let interval = Duration::from_secs(2);
+        assert!(!heartbeat_due(Duration::from_millis(100), interval, true));
+        assert!(heartbeat_due(Duration::from_millis(250), interval, true));
+        assert!(!heartbeat_due(Duration::from_millis(250), interval, false));
+        // A plain user starting to compete, or CPU room growing by half a core, opens room;
+        // readings that move by less do not, so a steady host heartbeats at its interval.
+        assert!(room_opened(false, true, 1000, 1000));
+        assert!(room_opened(false, false, 1000, 1500));
+        assert!(!room_opened(false, false, 1000, 1499));
+        assert!(!room_opened(true, true, 1000, 1200));
+        assert!(!room_opened(false, false, 1500, 1000));
     }
 
     /// A released run's failure report checks its turn before the attempt pin: a failure with
