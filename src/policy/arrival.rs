@@ -95,6 +95,35 @@ impl Interval<'_> {
 }
 
 impl Interval<'_> {
+    /// An account's CPU, which the principal list reads host-wide, counted at the part of the
+    /// scope's external usage it can be: an agent scoped to fewer CPUs measures only what runs
+    /// in its scope, so work on other CPUs does not count there (006 FR-008).
+    pub(super) fn cpu_in_scope(&self, view: &ModeInput) -> impl Fn(u64) -> u64 + use<> {
+        let owner: u64 = view
+            .principals
+            .iter()
+            .flatten()
+            .filter(|(p, _)| p.is_owner)
+            .map(|(_, usage)| *usage)
+            .sum();
+        let listed = self
+            .snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_owner)
+            .fold(owner, |sum, p| sum.saturating_add(p.cpu_millicores));
+        let external = view.external;
+        move |usage| {
+            if listed > external {
+                let part = u128::from(usage) * u128::from(external) / u128::from(listed);
+                u64::try_from(part).unwrap_or(usage)
+            } else {
+                usage
+            }
+        }
+    }
+
     /// The CPU budget in Performance and Aggressive beside the accounts `holds_for` names
     /// (006 FR-007, FR-008), with the UIDs it holds for: 001's hold counting only them, or,
     /// where none of them contends, what plain Linux would start, the capacity less the reserve
@@ -115,10 +144,11 @@ impl Interval<'_> {
         let mut pending = Vec::new();
         let held_view = match &view.principals {
             Some(list) => {
+                let in_scope = self.cpu_in_scope(view);
                 let kept: Vec<(Principal, u64)> = list
                     .iter()
                     .filter(|(p, _)| p.is_owner || p.uid.is_some_and(holds_for))
-                    .copied()
+                    .map(|(p, usage)| (*p, in_scope(*usage)))
                     .collect();
                 // An account not yet admitted as a principal stays in the unattributed usage,
                 // as 001 counts it, while it is one this budget holds for.
@@ -132,7 +162,7 @@ impl Interval<'_> {
                     .filter_map(|p| {
                         p.uid
                             .filter(|uid| holds_for(*uid) && !members.contains(uid))
-                            .map(|uid| (uid, p.cpu_millicores))
+                            .map(|uid| (uid, in_scope(p.cpu_millicores)))
                     })
                     .collect();
                 let external = kept

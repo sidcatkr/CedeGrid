@@ -356,6 +356,9 @@ admission hold; VRAM headroom and the memory floors still apply (`admitted_as_pl
 a first-comer, admission holds as below, counting only first-comers: new own work starts only
 within the larger of the fair share and capacity minus their observed usage minus the margin,
 and nothing new starts while their activity is of unknown amount (`held_for_first_comer`).
+Accounts' CPU is read host-wide, so an agent scoped to fewer CPUs counts each account's CPU at
+the part of the scope's measured external usage it can be: work on the host's other CPUs does
+not hold the scope.
 While the principal list cannot be read, no account is known to be plain, and the hold counts
 every principal. Every decision in Performance and Aggressive also carries an admit immediately
 budget, which holds only for protected first-comers (on a device held for one, it carries no
