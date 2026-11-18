@@ -790,13 +790,44 @@ fn collect_files(
     output: &mut Vec<(PathBuf, u64)>,
     exempt_root_database: bool,
 ) -> Result<()> {
-    for entry in fs::read_dir(root)? {
+    collect_tree(root, output, exempt_root_database, true)
+}
+
+/// An entry's metadata, or `None` when it was removed since it was listed: a released attempt's
+/// cleanup or a temporary file can remove it while another launch walks the tree, and it then
+/// holds no bytes.
+fn entry_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// `collect_files` below `root`. A subdirectory removed while it is walked is skipped;
+/// the walk's own root (`required`) must exist.
+fn collect_tree(
+    root: &Path,
+    output: &mut Vec<(PathBuf, u64)>,
+    exempt_root_database: bool,
+    required: bool,
+) -> Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot list {}", root.display()));
+        }
+    };
+    for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
+        let Some(metadata) = entry_metadata(&path)? else {
+            continue;
+        };
         ensure!(!metadata.file_type().is_symlink(), "spool symlink refused");
         if metadata.is_dir() {
-            collect_files(&path, output, false)?;
+            collect_tree(&path, output, false, false)?;
         } else if metadata.is_file()
             && !(exempt_root_database
                 && [
@@ -953,6 +984,22 @@ mod tests {
         value["assignment_id"] = json!(p.settings.assignment_id);
         value["generation"] = json!(1);
         p.request(&value)
+    }
+    /// A file or directory removed while the spool tree is walked holds no bytes, so the walk
+    /// skips it instead of refusing a launch; the walk's own root must still exist.
+    #[test]
+    fn the_spool_walk_skips_what_was_removed_under_it() {
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let root = temp.path().join("tree");
+        fs::create_dir_all(root.join("kept")).unwrap();
+        fs::write(root.join("kept/file"), [0u8; 10]).unwrap();
+        let mut files = Vec::new();
+        assert!(collect_tree(&root.join("gone"), &mut files, false, true).is_err());
+        collect_tree(&root.join("gone"), &mut files, false, false).unwrap();
+        assert!(files.is_empty());
+        assert!(entry_metadata(&root.join("gone/file")).unwrap().is_none());
+        collect_files(&root, &mut files, false).unwrap();
+        assert_eq!(files, vec![(root.join("kept/file"), 10)]);
     }
     #[test]
     fn first_input_reservation_counts_retained_quarantine_without_a_publisher() {
