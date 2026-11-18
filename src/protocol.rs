@@ -14,13 +14,19 @@ pub const FEATURE_CONTENTION: &str = "contention/1";
 pub const FEATURE_LEASE_BATCH: &str = "lease_batch/1";
 /// `NodeReport.sample_age_ms`: freshness from the agent's own monotonic clock (FR-079).
 pub const FEATURE_REPORT_AGE: &str = "report_age/1";
+/// `Request::AwaitWork` and `Response::Work`: a node with room waits for new work instead of
+/// its next heartbeat (006 SC-001).
+pub const FEATURE_AWAIT_WORK: &str = "await_work/1";
 /// Features this coordinator advertises in every heartbeat reply.
-pub const COORDINATOR_FEATURES: [&str; 4] = [
+pub const COORDINATOR_FEATURES: [&str; 5] = [
     FEATURE_API,
     FEATURE_CONTENTION,
     FEATURE_LEASE_BATCH,
     FEATURE_REPORT_AGE,
+    FEATURE_AWAIT_WORK,
 ];
+/// The longest one `Request::AwaitWork` is held, within the node client's 15 s deadline.
+pub const MAX_AWAIT_WORK_MS: u64 = 10_000;
 /// The most items, and serialized bytes of items, one lease batch carries (FR-074).
 pub const MAX_LEASE_BATCH_ITEMS: usize = 128;
 pub const MAX_LEASE_BATCH_BYTES: usize = 1024 * 1024;
@@ -388,6 +394,12 @@ pub enum Request {
     Heartbeat {
         report: NodeReport,
     },
+    /// Held until the work generation differs from `seen` or `wait_ms` passes, at most
+    /// `MAX_AWAIT_WORK_MS`, behind `await_work/1`. Answered with `Response::Work`.
+    AwaitWork {
+        seen: u64,
+        wait_ms: u64,
+    },
     Prepared {
         assignment_id: String,
         generation: u64,
@@ -459,6 +471,10 @@ pub enum Response {
     Ok,
     Heartbeat {
         reply: HeartbeatReply,
+    },
+    /// The coordinator's work generation: it moves whenever a task becomes queued.
+    Work {
+        generation: u64,
     },
     Lease {
         lease: Lease,

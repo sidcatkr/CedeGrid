@@ -8,6 +8,21 @@
 | `contention/1` | Everything below; frozen when released, so a later field needs `contention/2` |
 | `lease_batch/1` | `Request::Leases` and `Response::Leases` (FR-074) |
 | `report_age/1` | `NodeReport.sample_age_ms`, the agent's monotonic age of its sample; a stale report gets no renewals or offers and causes no drain (FR-079, item 030) |
+| `await_work/1` | `Request::AwaitWork` and `Response::Work`: a node with room waits for the next queued task instead of its next heartbeat (006 SC-001) |
+
+## Waiting for work (`await_work/1`)
+
+- **Request**: `{"op": "await_work", "seen": <generation>, "wait_ms": <ms>}`, node certificates
+  only, inside the replay session wrapper where one is registered. The coordinator answers
+  `{"kind": "work", "generation": <n>}` at once when its work generation differs from `seen`,
+  else when it moves or `wait_ms` (at most 10000) passes.
+- **Generation**: it moves whenever a task becomes queued: a submission, a retry, or a requeue
+  after a release, a lease expiry or a failure. Each coordinator start begins a new range.
+- **Bounds**: at most 32 nodes wait at once; past that a node is answered at once and the agent
+  waits 2 s before it asks again, so the heartbeat finds the work.
+- **Agent**: it waits only while the coordinator advertises the feature and the node has room
+  for a task, and only marks the arrival: the next interval's heartbeat comes early and takes
+  the work, under the usual checks. A wait changes no state.
 
 ## Lease batches (`lease_batch/1`)
 

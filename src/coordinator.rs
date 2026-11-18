@@ -24,6 +24,8 @@ pub struct Coordinator {
     config: CoordinatorConfig,
     epoch: u64,
     last_clock_ms: u64,
+    /// Moves whenever a task becomes queued; nodes waiting for work watch it (006 SC-001).
+    work: tokio::sync::watch::Sender<u64>,
     _lock: crate::backup::StateLock,
 }
 struct PreparedArtifacts {
@@ -184,8 +186,25 @@ impl Coordinator {
             config,
             epoch: epoch as u64,
             last_clock_ms,
+            // Each coordinator start begins its own range, so no node's last generation repeats.
+            work: tokio::sync::watch::Sender::new((epoch as u64).wrapping_shl(32)),
             _lock: lock,
         })
+    }
+    /// The current work generation (006 SC-001).
+    pub fn work_generation(&self) -> u64 {
+        *self.work.borrow()
+    }
+    /// A receiver that wakes when the work generation moves.
+    pub fn subscribe_work(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.work.subscribe()
+    }
+    fn queued_tasks(&self) -> Result<u64> {
+        Ok(self.store.connection.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status='queued'",
+            [],
+            |r| row_u64(r, 0),
+        )?)
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -516,6 +535,23 @@ impl Coordinator {
         request: Request,
         now: u64,
     ) -> Result<Response> {
+        // A submission or retry queues work; any other request may requeue some, through a
+        // release, a lease expiry or a failure. Either wakes the nodes waiting for work.
+        let queues = matches!(request, Request::Submit { .. } | Request::Retry { .. });
+        let before = self.queued_tasks()?;
+        let response = self.handle_request(principal, request, now)?;
+        if queues || self.queued_tasks()? > before {
+            self.work
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+        Ok(response)
+    }
+    fn handle_request(
+        &mut self,
+        principal: &Principal,
+        request: Request,
+        now: u64,
+    ) -> Result<Response> {
         // Check the durable session before any clock update, expiration, upload,
         // or receipt operation. An old agent cannot regain authority by omitting
         // the wrapper, and a new session never conveys operator privileges.
@@ -676,6 +712,16 @@ impl Coordinator {
             Request::Heartbeat { report } => {
                 node(principal, &report.node_id)?;
                 self.heartbeat(report, now)
+            }
+            // The server holds the request; here it is answered at once (006 SC-001).
+            Request::AwaitWork { .. } => {
+                ensure!(
+                    matches!(principal, Principal::Node { .. }),
+                    "waiting for work requires a node certificate"
+                );
+                Ok(Response::Work {
+                    generation: self.work_generation(),
+                })
             }
             Request::Prepared {
                 assignment_id,
@@ -2486,6 +2532,7 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let allow = Arc::new(config.clients.clone());
     let state = Arc::new(Mutex::new(Coordinator::open(config)?));
+    let waiters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
     let concurrency = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
@@ -2497,6 +2544,7 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
         let acceptor = acceptor.clone();
         let allow = allow.clone();
         let state = state.clone();
+        let waiters = waiters.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let Ok(Ok(tls)) =
@@ -2518,12 +2566,40 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
                     post(
                         |Extension(state): Extension<Arc<Mutex<Coordinator>>>,
                          Extension(principal): Extension<Principal>,
+                         Extension(waiters): Extension<Arc<std::sync::atomic::AtomicUsize>>,
                          body: Bytes| async move {
                             let response = tokio::task::spawn_blocking(move || {
                                 let request = crate::numeric::from_slice::<Request>(&body)?;
+                                // Subscribed before the answer, so no move between is missed.
+                                let wait = await_work_of(&request)
+                                    .map(|(seen, wait_ms)| -> Result<_> {
+                                        let work = state
+                                            .lock()
+                                            .map_err(|_| {
+                                                anyhow::anyhow!("coordinator state lock poisoned")
+                                            })?
+                                            .subscribe_work();
+                                        Ok((work, seen, wait_ms))
+                                    })
+                                    .transpose()?;
                                 Coordinator::dispatch(&state, &principal, request)
+                                    .map(|response| (response, wait))
                             })
                             .await;
+                            let response = match response {
+                                Ok(Ok((
+                                    Response::Work { generation },
+                                    Some((work, seen, wait_ms)),
+                                ))) if generation == seen => {
+                                    let wait = std::time::Duration::from_millis(
+                                        wait_ms.min(crate::protocol::MAX_AWAIT_WORK_MS),
+                                    );
+                                    Ok(Ok(Response::Work {
+                                        generation: wait_for_work(work, seen, wait, &waiters).await,
+                                    }))
+                                }
+                                other => other.map(|r| r.map(|(response, _)| response)),
+                            };
                             Json(match response {
                                 Ok(Ok(response)) => response,
                                 Ok(Err(e)) => Response::Error {
@@ -2538,6 +2614,7 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
                 )
                 .layer(Extension(state))
                 .layer(Extension(principal))
+                .layer(Extension(waiters))
                 .layer(DefaultBodyLimit::max(3 * 1024 * 1024));
             let io = TokioIo::new(tls);
             let mut builder = Builder::new(TokioExecutor::new());
@@ -2556,6 +2633,42 @@ pub async fn serve(config: CoordinatorConfig) -> Result<()> {
             }
         });
     }
+}
+
+/// A node's wait for work, unwrapped from its replay session: what it saw and how long it waits.
+fn await_work_of(request: &Request) -> Option<(u64, u64)> {
+    match request {
+        Request::AwaitWork { seen, wait_ms } => Some((*seen, *wait_ms)),
+        Request::NodeSession { request, .. } => await_work_of(request),
+        _ => None,
+    }
+}
+
+/// Nodes holding a wait at once. Past this a node is answered at once and polls on its
+/// heartbeat interval, so waits never use up the server's connections.
+pub const MAX_WORK_WAITERS: usize = 32;
+
+/// Holds a node's wait for work (006 SC-001). Answers at once when the generation already
+/// differs from `seen` or `MAX_WORK_WAITERS` nodes already wait, else when it moves or `wait`
+/// passes.
+pub async fn wait_for_work(
+    mut work: tokio::sync::watch::Receiver<u64>,
+    seen: u64,
+    wait: std::time::Duration,
+    waiting: &std::sync::atomic::AtomicUsize,
+) -> u64 {
+    use std::sync::atomic::Ordering;
+    if *work.borrow_and_update() != seen {
+        return *work.borrow();
+    }
+    if waiting.fetch_add(1, Ordering::SeqCst) >= MAX_WORK_WAITERS {
+        waiting.fetch_sub(1, Ordering::SeqCst);
+        return seen;
+    }
+    // A closed channel means the coordinator is going away: answer with what was seen.
+    let _ = tokio::time::timeout(wait, work.changed()).await;
+    waiting.fetch_sub(1, Ordering::SeqCst);
+    *work.borrow()
 }
 
 const ACCEPT_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(10);

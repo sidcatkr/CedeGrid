@@ -33,6 +33,8 @@ pub(super) struct NegotiatedFeatures {
     pub(super) lease_batch: bool,
     /// Reports carry their sample's monotonic age (FR-079).
     pub(super) report_age: bool,
+    /// The coordinator holds waits for work (006 SC-001).
+    pub(super) await_work: bool,
 }
 
 impl NegotiatedFeatures {
@@ -40,6 +42,7 @@ impl NegotiatedFeatures {
         self.contention = reply.features.iter().any(|f| f == FEATURE_CONTENTION);
         self.lease_batch = reply.features.iter().any(|f| f == FEATURE_LEASE_BATCH);
         self.report_age = reply.features.iter().any(|f| f == FEATURE_REPORT_AGE);
+        self.await_work = reply.features.iter().any(|f| f == FEATURE_AWAIT_WORK);
     }
 
     /// A rejected or failed heartbeat may come from a restarted older coordinator.
@@ -47,6 +50,7 @@ impl NegotiatedFeatures {
         self.contention = false;
         self.lease_batch = false;
         self.report_age = false;
+        self.await_work = false;
     }
 
     /// A refused batch may come from a restarted older coordinator: single requests until the

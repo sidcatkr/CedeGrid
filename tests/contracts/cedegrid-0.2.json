@@ -1430,5 +1430,20 @@
         ]
       }
     }
+  ],
+  "await_work_cases": [
+    {
+      "id": "AW-01",
+      "description": "A node with room waits for work behind await_work/1; the reply carries the coordinator's work generation, which moves whenever a task becomes queued (006 SC-001).",
+      "request": {
+        "op": "await_work",
+        "seen": 4294967296,
+        "wait_ms": 10000
+      },
+      "response": {
+        "kind": "work",
+        "generation": 4294967297
+      }
+    }
   ]
 }

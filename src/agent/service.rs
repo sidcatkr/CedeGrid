@@ -494,6 +494,8 @@ struct AgentLoop<'a> {
     heartbeat_prompt: bool,
     /// Last interval's CPU headroom and whether a plain user competed, for `room_opened`.
     last_room: (u64, bool),
+    /// Shared with the wait for work, which brings the next heartbeat forward (006 SC-001).
+    work: std::sync::Arc<WorkWatch>,
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -1880,6 +1882,18 @@ impl AgentLoop<'_> {
             self.heartbeat_prompt = true;
         }
         self.last_room = room;
+        // Work queued at the coordinator while the node had room: take it now.
+        let ordering = std::sync::atomic::Ordering::SeqCst;
+        if self.work.arrived.swap(false, ordering) {
+            self.heartbeat_prompt = true;
+        }
+        let active = self.slots.values().filter(|s| !s.reported).count() + self.preparations.len();
+        self.work.wanted.store(
+            self.stopping.is_none()
+                && active < agent.max_workers
+                && decision.admission_headroom.cpu_millicores > 0,
+            ordering,
+        );
         let prompt = self.heartbeat_prompt && self.stopping.is_none();
         if !heartbeat_due(
             self.last_heartbeat.elapsed(),
@@ -2065,6 +2079,10 @@ impl AgentLoop<'_> {
         {
             Ok(Response::Heartbeat { reply }) => {
                 self.negotiated.learn(&reply);
+                self.work.enabled.store(
+                    self.negotiated.await_work,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 for slot in self.slots.values_mut() {
                     slot.assignment.coordinator_epoch = reply.coordinator_epoch;
                 }
@@ -2358,6 +2376,9 @@ impl AgentLoop<'_> {
             }
             result => {
                 self.negotiated.forget();
+                self.work
+                    .enabled
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 emit(
                     &serde_json::json!({"event":"coordinator_disconnected","detail":format!("{result:?}")}),
                 )?;
@@ -2661,6 +2682,15 @@ pub async fn run(
         .as_ref()
         .map(|(_, _, snapshot)| snapshot.session_id.clone());
     let client = std::sync::Arc::new(client);
+    // A node with room waits for new work at the coordinator between heartbeats (006 SC-001).
+    let work = std::sync::Arc::new(WorkWatch::default());
+    let waiter = tokio::spawn(await_work(std::sync::Arc::clone(&work), {
+        let client = std::sync::Arc::clone(&client);
+        move |request| {
+            let client = std::sync::Arc::clone(&client);
+            async move { client.request(&request).await }
+        }
+    }));
     let collector = ManagedCollector::new(config)?;
     let policy = PolicyEngine::new();
     let mut refusals: BTreeMap<String, (Assignment, String)> = BTreeMap::new();
@@ -2723,6 +2753,7 @@ pub async fn run(
         raise: RaiseSteer::default(),
         heartbeat_prompt: false,
         last_room: (0, false),
+        work: std::sync::Arc::clone(&work),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
@@ -2866,6 +2897,7 @@ pub async fn run(
         }
         tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now()); state.leave_supervisors=true;}, _=reload_signal(&mut hangup)=>{state.reload_config()?;}}
     }
+    waiter.abort();
     state.shutdown().await?;
     drop(lock);
     Ok(())

@@ -909,3 +909,14 @@ explicit drain, and loss of GPU admission evidence between offer and preparation
 Evidence is retained privately.
 A single consolidated native source004 pass remains
 required; these focused results do not replace it.
+
+## Waiting for work (006)
+
+A node learned of new work only from its next heartbeat, every 2 s by default, so a submission
+waited 1 s on average and up to 2 s before it was placed. Behind `await_work/1` an agent with
+room for a task keeps one request open at the coordinator, which answers when a task becomes
+queued: a submission, a retry, or a requeue after a release, a lease expiry or a failure. The
+agent's next interval then sends its heartbeat early, and placement goes on as before. The wait
+changes no state. At most 32 nodes wait at once; beyond that a node is answered at once and
+finds the work at its heartbeat. The contract is in
+`specs/001-contention-modes/contracts/wire-negotiation.md`.

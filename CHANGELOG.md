@@ -77,6 +77,10 @@
   account (`modes.unprotected_cpu_weight`, 400 by default). The raise never replaces a weight
   the broker did not set, and ends within 5 s of the key turning off or the member leaving the
   group, and when the broker stops or restarts.
+- **Waiting for work.** A node with room waits at the coordinator for the next queued task
+  (`await_work/1`), so new work starts within one monitor interval of its submission instead of
+  at the next 2 s heartbeat.
+
 ### Changed
 
 - **Validation layout.** The application validation manifest generator is

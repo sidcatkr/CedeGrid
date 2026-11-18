@@ -2003,6 +2003,113 @@ mod negotiation_tests {
         negotiated.apply(&mut recovered, NodeContentionReport::default);
         assert!(!plain(&recovered) && recovered.contention.is_some());
     }
+
+    /// 006 SC-001: the agent waits for work only at a coordinator that holds waits, and stops
+    /// after a rejected heartbeat until the next reply advertises them again.
+    #[test]
+    fn waits_for_work_follow_the_coordinators_features() {
+        let mut negotiated = NegotiatedFeatures::default();
+        assert!(!negotiated.await_work);
+        negotiated.learn(&reply(&[FEATURE_API, FEATURE_CONTENTION]));
+        assert!(!negotiated.await_work);
+        negotiated.learn(&reply(&COORDINATOR_FEATURES));
+        assert!(negotiated.await_work);
+        negotiated.forget();
+        assert!(!negotiated.await_work);
+    }
+}
+
+#[cfg(test)]
+mod await_work_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
+    type Script = Arc<Mutex<VecDeque<Result<Response>>>>;
+
+    /// Runs the wait loop against scripted answers for `run`, and returns the requests it sent.
+    /// An empty script holds the request, as a coordinator does while nothing moves.
+    fn waits(
+        watch: &Arc<WorkWatch>,
+        script: Vec<Result<Response>>,
+        run: Duration,
+    ) -> Vec<(u64, u64)> {
+        let script: Script = Arc::new(Mutex::new(script.into()));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let (watch, answers, log) = (Arc::clone(watch), Arc::clone(&script), Arc::clone(&sent));
+        runtime.block_on(async move {
+            let ask = move |request: Request| {
+                let (answers, log) = (Arc::clone(&answers), Arc::clone(&log));
+                async move {
+                    if let Request::AwaitWork { seen, wait_ms } = request {
+                        log.lock().unwrap().push((seen, wait_ms));
+                    }
+                    let next = answers.lock().unwrap().pop_front();
+                    match next {
+                        Some(answer) => answer,
+                        None => std::future::pending().await,
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(run, await_work(watch, ask)).await;
+        });
+        sent.lock().unwrap().clone()
+    }
+
+    fn generation(generation: u64) -> Result<Response> {
+        Ok(Response::Work { generation })
+    }
+
+    #[test]
+    fn nothing_is_asked_until_the_coordinator_holds_waits_and_the_node_has_room() {
+        let watch = Arc::new(WorkWatch::default());
+        assert!(waits(&watch, vec![generation(1)], Duration::from_millis(300)).is_empty());
+        watch.enabled.store(true, Ordering::SeqCst);
+        assert!(waits(&watch, vec![generation(1)], Duration::from_millis(300)).is_empty());
+        watch.wanted.store(true, Ordering::SeqCst);
+        assert_eq!(waits(&watch, vec![], Duration::from_millis(300)).len(), 1);
+    }
+
+    /// The first answer only sets what the node has seen; a later move marks new work for the
+    /// next heartbeat.
+    #[test]
+    fn a_moved_generation_marks_new_work() {
+        let watch = Arc::new(WorkWatch::default());
+        watch.enabled.store(true, Ordering::SeqCst);
+        watch.wanted.store(true, Ordering::SeqCst);
+        let sent = waits(&watch, vec![generation(5)], Duration::from_millis(300));
+        assert_eq!(sent, vec![(u64::MAX, AWAIT_WORK_MS), (5, AWAIT_WORK_MS)]);
+        assert!(!watch.arrived.load(Ordering::SeqCst));
+        let watch = Arc::new(WorkWatch::default());
+        watch.enabled.store(true, Ordering::SeqCst);
+        watch.wanted.store(true, Ordering::SeqCst);
+        let sent = waits(
+            &watch,
+            vec![generation(5), generation(6)],
+            Duration::from_millis(300),
+        );
+        assert_eq!(sent.last(), Some(&(6, AWAIT_WORK_MS)));
+        assert!(watch.arrived.load(Ordering::SeqCst));
+    }
+
+    /// Failures back off, and an unchanged answer that came at once (a coordinator at its
+    /// waiter cap) is not asked again at once either.
+    #[test]
+    fn failures_and_unheld_answers_do_not_spin() {
+        let watch = Arc::new(WorkWatch::default());
+        watch.enabled.store(true, Ordering::SeqCst);
+        watch.wanted.store(true, Ordering::SeqCst);
+        let errors = (0..50).map(|_| Err(anyhow::anyhow!("refused"))).collect();
+        assert!(waits(&watch, errors, Duration::from_millis(1200)).len() <= 3);
+        let unheld = (0..50).map(|_| generation(3)).collect();
+        assert!(waits(&watch, unheld, Duration::from_millis(1200)).len() <= 3);
+        assert!(!watch.arrived.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(all(test, unix))]

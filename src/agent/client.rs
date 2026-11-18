@@ -306,3 +306,68 @@ impl RateLimiter {
             .saturating_duration_since(now)
     }
 }
+
+/// How long one wait for work is held: within the client's 15 s deadline (006 SC-001).
+pub(super) const AWAIT_WORK_MS: u64 = 10_000;
+/// How often the wait loop looks again while it may not wait.
+const AWAIT_IDLE: Duration = Duration::from_millis(250);
+/// The first retry after a failed wait, doubled up to `AWAIT_RETRY_MAX`.
+const AWAIT_RETRY_MIN: Duration = Duration::from_millis(500);
+const AWAIT_RETRY_MAX: Duration = Duration::from_secs(30);
+/// After an unchanged answer that was not held (the coordinator's waiter cap), the next wait:
+/// the default heartbeat interval, which then finds the work anyway.
+const AWAIT_UNHELD: Duration = Duration::from_secs(2);
+
+/// What the agent loop and its wait for work share (006 SC-001).
+#[derive(Debug, Default)]
+pub(super) struct WorkWatch {
+    /// The coordinator holds waits (`await_work/1`).
+    pub(super) enabled: std::sync::atomic::AtomicBool,
+    /// The node has room for more work and is not stopping.
+    pub(super) wanted: std::sync::atomic::AtomicBool,
+    /// New work was queued since the loop last looked: its next heartbeat comes early.
+    pub(super) arrived: std::sync::atomic::AtomicBool,
+}
+
+/// Waits for new work at the coordinator while the loop wants it, so a node with room hears
+/// of a submission at once instead of at its next heartbeat (006 SC-001). It only marks the
+/// arrival; the loop's heartbeat takes the work, under the usual checks.
+pub(super) async fn await_work<F, Fut>(watch: std::sync::Arc<WorkWatch>, mut ask: F)
+where
+    F: FnMut(Request) -> Fut,
+    Fut: std::future::Future<Output = Result<Response>>,
+{
+    use std::sync::atomic::Ordering;
+    let mut seen: Option<u64> = None;
+    let mut retry = AWAIT_RETRY_MIN;
+    loop {
+        if !(watch.enabled.load(Ordering::SeqCst) && watch.wanted.load(Ordering::SeqCst)) {
+            tokio::time::sleep(AWAIT_IDLE).await;
+            continue;
+        }
+        let asked = Instant::now();
+        let request = Request::AwaitWork {
+            // Nothing seen yet: answered at once, which sets the baseline.
+            seen: seen.unwrap_or(u64::MAX),
+            wait_ms: AWAIT_WORK_MS,
+        };
+        match ask(request).await {
+            Ok(Response::Work { generation }) => {
+                retry = AWAIT_RETRY_MIN;
+                let unchanged = seen == Some(generation);
+                if seen.is_some() && !unchanged {
+                    watch.arrived.store(true, Ordering::SeqCst);
+                }
+                seen = Some(generation);
+                // An unchanged answer that came at once was not held: ask again later.
+                if unchanged && asked.elapsed() < AWAIT_RETRY_MIN {
+                    tokio::time::sleep(AWAIT_UNHELD).await;
+                }
+            }
+            _ => {
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(AWAIT_RETRY_MAX);
+            }
+        }
+    }
+}

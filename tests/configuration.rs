@@ -1661,6 +1661,25 @@ fn lease_batch_cases_round_trip() {
     }
 }
 
+/// A wait for work and its reply parse and round-trip exactly (006 SC-001).
+#[test]
+fn await_work_cases_round_trip() {
+    use cedegrid::protocol::{Request, Response};
+    for case in contract()["await_work_cases"].as_array().unwrap() {
+        let request: Request = serde_json::from_value(case["request"].clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        assert!(
+            matches!(request, Request::AwaitWork { .. }),
+            "{}",
+            case["id"]
+        );
+        assert_eq!(serde_json::to_value(&request).unwrap(), case["request"]);
+        let response: Response = serde_json::from_value(case["response"].clone())
+            .unwrap_or_else(|e| panic!("{}: {e}", case["id"]));
+        assert_eq!(serde_json::to_value(&response).unwrap(), case["response"]);
+    }
+}
+
 /// A negotiated heartbeat with per-resource admission, held-back amounts,
 /// allocation readiness and the worker limit parses and round-trips; the 0.2
 /// report fixture still parses (FR-032).

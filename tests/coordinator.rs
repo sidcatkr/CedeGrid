@@ -3253,7 +3253,13 @@ fn heartbeat_reply_advertises_contention_features() {
     setup(&mut c, &["task"], 100);
     assert_eq!(
         offers(&mut c, 100).features,
-        ["api/1", "contention/1", "lease_batch/1", "report_age/1"]
+        [
+            "api/1",
+            "contention/1",
+            "lease_batch/1",
+            "report_age/1",
+            "await_work/1"
+        ]
     );
 }
 
@@ -5023,4 +5029,110 @@ fn status_marks_a_started_granted_allocation_unprotected() {
             "{allocation}"
         );
     }
+}
+
+fn work(c: &mut Coordinator, seen: u64, now: u64) -> u64 {
+    let Response::Work { generation } = c
+        .handle_at(
+            &node(),
+            Request::AwaitWork {
+                seen,
+                wait_ms: 5000,
+            },
+            now,
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    generation
+}
+
+/// 006 SC-001: the work generation moves when a task becomes queued, by a submission or a
+/// requeue, and stays put otherwise; only nodes may ask for it, and heartbeats advertise it.
+#[test]
+fn the_work_generation_moves_when_a_task_is_queued() {
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    let start = work(&mut c, 0, 100);
+    assert_eq!(start, c.work_generation());
+    assert!(
+        c.handle_at(
+            &Principal::Operator,
+            Request::AwaitWork {
+                seen: 0,
+                wait_ms: 0
+            },
+            100
+        )
+        .is_err()
+    );
+    let mut watched = c.subscribe_work();
+    watched.borrow_and_update();
+    setup(&mut c, &["task"], 100);
+    let submitted = work(&mut c, start, 100);
+    assert_ne!(submitted, start);
+    assert!(watched.has_changed().unwrap());
+    // Placing it queues nothing, and the reply says the coordinator holds waits.
+    let reply = offers(&mut c, 101);
+    assert!(reply.features.iter().any(|f| f == FEATURE_AWAIT_WORK));
+    let a = reply.assignments[0].clone();
+    assert_eq!(work(&mut c, submitted, 101), submitted);
+    // A yielded attempt goes back to the queue, and the generation moves again.
+    authorize(&mut c, &a, 102);
+    released_failure(&mut c, &a, 103, FailureKind::Yielded);
+    assert_ne!(work(&mut c, submitted, 103), submitted);
+}
+
+/// 006 SC-001: a wait is answered at once when the generation already moved or too many nodes
+/// wait, else when it moves or the wait ends.
+#[test]
+fn a_wait_for_work_ends_on_a_move_or_its_deadline() {
+    use cedegrid::coordinator::{MAX_WORK_WAITERS, wait_for_work};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (sender, receiver) = tokio::sync::watch::channel(7u64);
+        let waiting = AtomicUsize::new(0);
+        // Already moved past what the node saw.
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_work(receiver.clone(), 6, Duration::from_secs(5), &waiting).await,
+            7
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Nothing moves: the wait ends at its deadline with what was seen.
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_work(receiver.clone(), 7, Duration::from_millis(200), &waiting).await,
+            7
+        );
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(waiting.load(Ordering::SeqCst), 0);
+        // A move ends it at once.
+        let mover = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sender.send_modify(|g| *g += 1);
+        };
+        let started = Instant::now();
+        let (moved, ()) = tokio::join!(
+            wait_for_work(receiver.clone(), 7, Duration::from_secs(5), &waiting),
+            mover
+        );
+        assert_eq!(moved, 8);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // At the waiter cap the node is answered at once and polls instead.
+        waiting.store(MAX_WORK_WAITERS, Ordering::SeqCst);
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_work(receiver.clone(), 8, Duration::from_secs(5), &waiting).await,
+            8
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(waiting.load(Ordering::SeqCst), MAX_WORK_WAITERS);
+    });
 }

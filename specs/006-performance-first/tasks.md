@@ -50,6 +50,12 @@ this thread's.
   envelope's CPU times its task limit (`max_workers`), caps neither the budget nor the headroom
   at the envelope's CPU, and `envelope_exceeded` ignores CPU; once the flag clears, new CPU work
   waits until requests fit again. Tests first in `src/agent/service.rs`.
+- [x] T026 SC-001, SC-004, start latency: the agent's heartbeat comes early (at most every
+  250 ms) when room opens, a slot ends or a reply placed work (`src/agent/service.rs`); and a
+  node with room waits at the coordinator for the next queued task behind `await_work/1`
+  (`src/protocol.rs`, `src/coordinator.rs`, `src/agent/client.rs`), so new work starts within
+  one monitor interval of its submission. Tests first in `tests/coordinator.rs` and
+  `src/agent.rs`.
 - [x] T021 **(001)** GPU compute: the time-slice admission hold counts only first-comers in
   Performance and Aggressive (`src/policy/measure.rs`, `src/policy.rs`), with tests for both
   orders and both options.
@@ -91,9 +97,11 @@ this thread's.
   processes, and report none when not permitted.
 - [x] T042 [US3] The agent asks for and withdraws the raise per FR-016 and FR-018
   (`src/agent/service.rs`, `src/system_mode.rs`).
-- [ ] T043 [US3] Container fixtures for the broker request in `tests/system_mode.rs`, and the
+- [x] T043 [US3] Container fixtures for the broker request in `tests/system_mode.rs`, and the
   security review package in `specs/005-system-mode/security-review.md` and
-  `specs/004-aggressive-mode/security-review.md`.
+  `specs/004-aggressive-mode/security-review.md`. The raise also ends at the broker's start and
+  stop (`ExecStopPost`), within 5 s of the key turning off or the member leaving, and is never
+  set over a weight the broker did not set.
 
 ## Phase 6: Gates (this thread)
 
