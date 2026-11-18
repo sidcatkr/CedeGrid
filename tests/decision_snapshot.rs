@@ -323,6 +323,7 @@ fn sequence(seed: u64) -> usize {
                         .into_iter()
                         .filter(|(_, v)| measured_compute && *v > 0)
                         .collect(),
+                    ..PrincipalUsage::default()
                 }
             }));
             snap.principals = Some(principals);

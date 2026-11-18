@@ -1430,6 +1430,7 @@ impl AgentLoop<'_> {
             facts: BTreeMap::new(),
             envelope: Some(agent.capacity.clone()),
             spool_full: self.spool_full,
+            arrivals: BTreeMap::new(),
         };
         input.facts = self.allocation_facts(records, &input.allocations);
         let estimated = self.collector.ram_estimated().clone();

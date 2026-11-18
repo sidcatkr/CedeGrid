@@ -1323,6 +1323,7 @@ mod tests {
                     ram_mib: 3,
                     gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 256)]),
                     gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 100)]),
+                    ..PrincipalUsage::default()
                 },
                 PrincipalUsage {
                     uid: Some(1000),
@@ -1331,6 +1332,7 @@ mod tests {
                     ram_mib: 10,
                     gpu_memory_mib: BTreeMap::new(),
                     gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 50)]),
+                    ..PrincipalUsage::default()
                 },
                 PrincipalUsage {
                     uid: Some(1001),
@@ -1339,6 +1341,7 @@ mod tests {
                     ram_mib: 50,
                     gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 512)]),
                     gpu_compute_milli: BTreeMap::from([("GPU-a".into(), 400)]),
+                    ..PrincipalUsage::default()
                 },
             ]
         );

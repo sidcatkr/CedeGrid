@@ -8,7 +8,8 @@ Its core purpose is that own work runs at the highest possible performance, effi
 nothing left idle on the server. The modes set how much own work gives back to others:
 Performance, the default, carries this purpose, and Yield First is one option among them.
 What CedeGrid costs anyone, own work or another workload, is measured against the same own work
-run without CedeGrid.
+run without CedeGrid. Performance never does worse for own work than that baseline, and is built
+to do better.
 
 ## Core Principles
 
@@ -68,6 +69,16 @@ never let CedeGrid act on a process it does not own.
   workloads, is against the same own work started plainly without CedeGrid in the same place:
   the same account, control group and session layout. What another workload gets beside that
   baseline is the kernel's and the GPU driver's split, not CedeGrid's doing.
+- **Principals.** Another account is a *CedeGrid principal* on a resource while CedeGrid can
+  identify, read-only, that its work running there runs under CedeGrid: by its task supervisors'
+  command lines, and on a host with System mode only by work inside the units the broker made.
+  Every other principal is a *plain* principal, including usage CedeGrid cannot attribute or
+  identify: it starts work as plain Linux does.
+- **Arrival order.** Among CedeGrid principals, order on a resource follows the arrival time each
+  one's running work there carries from its launch, which every agent reads the same way. Own
+  work is *first* beside a CedeGrid principal when its earliest running work there arrived before
+  that principal's. Where the order cannot be known, or the times are equal, own work counts as
+  arriving later.
 - In Yield First and Neutral, own work MUST be the first to give capacity back when external
   demand needs it.
 - **First-come GPU floor.** As the one exception to the rule above, on GPU compute own work that
@@ -77,10 +88,16 @@ never let CedeGrid act on a process it does not own.
 - In Performance and Aggressive, CedeGrid MUST NOT cap, pause or drain running own work to give
   another workload more CPU or GPU compute time than the kernel and the GPU driver would give it
   beside the same own work.
-- **Admission.** In every mode except unprotected Aggressive, CedeGrid MUST NOT start new own
-  work on a compute resource where it would take another principal below the lesser of that
-  principal's demand and its fair share, nor into activity of unknown amount. In every mode it
-  MUST NOT start new own work into the memory floors.
+- **Admission.** In every mode CedeGrid MUST NOT start new own work into the memory floors. On
+  CPU and GPU compute:
+  - in Yield First and Neutral, CedeGrid MUST NOT start new own work where it would take another
+    principal below the lesser of that principal's demand and its fair share, nor into activity
+    of unknown amount;
+  - in Performance and Aggressive, CedeGrid starts new own work as plain Linux would beside plain
+    principals and beside CedeGrid principals that own work arrived before. Beside a CedeGrid
+    principal that arrived first, it MUST NOT start new own work that would take that principal
+    below the lesser of its demand and its fair share, nor into that principal's activity of
+    unknown amount, except as admit immediately allows (below).
 - CedeGrid MUST NOT drive another workload into OOM kills, swap thrash, failed GPU allocations
   or loss of capacity that workload is already using, beyond what the baseline does. Every mode
   keeps explicit floors, such as minimum available host RAM and per-device VRAM headroom, each
@@ -105,43 +122,53 @@ never let CedeGrid act on a process it does not own.
   that CedeGrid MUST NOT drive another workload into OOM kills beyond what the baseline does. It
   applies only to the part of own memory within its fair share, and only while the lowering is
   in force; when it is in force is the feature's rule (005 FR-024, decision N1).
-- Own priority MUST NOT be raised above the default: no negative nice values and no real-time
-  scheduling classes. No exception relaxes this rule.
+- Own priority MUST NOT be raised above the default: no negative nice values, no CPU weight above
+  other users' and no real-time scheduling classes. The unprotected option, below, is the one
+  exception, and it never uses real-time scheduling classes.
 - **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive.
   Performance is the default mode. Aggressive is a *caution* option with a red label: Performance
-  with no admission margin, filling idle capacity at once. Its default form, protected
-  Aggressive, keeps every rule of this principle, and never holds less than Performance would in
-  the same observation.
+  with no admission margin. It keeps every rule of this principle, and never holds less than
+  Performance would in the same observation.
 - **Modes are per job.** A job's mode, within the node's cap, decides how that job gives back; the
   node's mode is the default for jobs that set none. A Performance job therefore gives back
   nothing beyond the baseline on a node whose default is Neutral, and other workloads there can
   then get less than Neutral's fair share: a known limitation.
 - **Loss by mode.** Yield First and Neutral MAY cost own work compared with the baseline.
-  Performance and Aggressive MUST NOT cost running own work anything compared with the baseline
-  beyond CedeGrid's measured own overhead. What they hold back is held at admission only: the
-  documented admission margin (Performance 2%, Aggressive 0%) and, except under unprotected
-  Aggressive, new work where another principal contends. The work-conserving rule below holds in
-  every mode.
-- **Unprotected Aggressive, the one admission exception.** It MAY start new own work on a
-  compute resource another principal contends for, as an exception to the admission rule
-  above. It covers starting compute work only:
-  - the floors (as above), Principle I, the OOM order and the no-priority-raise rule hold in
-    full, and it never starts own work into activity of unknown amount or into the floors;
-  - CedeGrid only starts work. It MUST NOT raise priority, inflate thread counts or do
-    anything else to win share; the split is whatever the kernel and the GPU driver decide;
+  Performance and Aggressive MUST NOT cost own work anything compared with the baseline beyond
+  CedeGrid's measured own overhead, at admission or while running, except the hold beside a
+  CedeGrid principal that arrived first; that hold keeps the documented admission margin
+  (Performance 2%, Aggressive 0%). The work-conserving rule below holds in every mode.
+- **Admit immediately, an admission option.** A per-run option for Performance and Aggressive
+  work. It lifts the admission hold beside a CedeGrid principal that arrived first and runs only
+  Yield First or Neutral work on the resource; beside one that runs Performance or Aggressive
+  work there, the hold stays and the option is ignored for that principal. It covers starting
+  compute work only: the floors, Principle I, the OOM order and the priority rule hold in full.
+  It is a *caution* option.
+- **Unprotected, the one priority exception.** A per-run option for Performance and Aggressive
+  work, at the highest warning level. Beyond admit immediately, it MAY raise own work's CPU share
+  above other users' where the host provides a way: the System mode broker raising the CPU
+  weight of the caller's ordinary unit (Principle V), or a negative nice value on own verified
+  processes within a nice limit the administrator granted the account. Otherwise:
+  - the floors, Principle I and the OOM order hold in full; it never uses real-time scheduling
+    classes and never acts on another process;
+  - it applies no raise while a CedeGrid principal that arrived first runs Performance or
+    Aggressive work on the resource, and GPU compute, which the driver splits, gets no raise;
   - it is never a default. Configuration files, saved per-job setup, profiles, environment
     variables, upgrades, migrations and the node cap MUST NOT enable it. Only an explicit
     per-run flag, or the same explicit per-submission SDK field, turns it on, and only after
-    the two-step confirmation the feature specification defines;
+    the two-step confirmation the feature specification defines and the host's allowance, which
+    fails closed; on a System mode host the administrator policy MUST also permit it;
   - while active it MUST be reported in `ps`, `top`, logs and JSON output.
 - **Who carries the risk.** An option whose risk falls only on own work, such as a shorter hint
   deadline or draining Guaranteed work sooner, MAY be offered. Apart from System mode's OOM
   exception, above, an option whose risk is OOM kills, swap thrash, failed GPU allocations or any
   other failure of external workloads beyond the baseline MUST NOT exist, not even as an opt-in.
-  The only other risk beyond the baseline to other workloads that any option may carry is slower
-  compute from new own work started where they contend, and only under unprotected Aggressive.
+  Starting own work where plain principals contend is what the baseline does. The only other
+  risks beyond the baseline to other workloads that any option may carry are slower compute for
+  a CedeGrid principal that arrived first and runs only Yield First or Neutral work, under admit
+  immediately, and slower compute from own work's raised CPU share, under unprotected.
 - Options that let own work hold more capacity within the floors and the reclaim bounds, such as
-  protected Aggressive or a floor near its minimum, are marked *caution*. Each
+  Aggressive, admit immediately or a floor near its minimum, are marked *caution*. Each
   such option MUST:
   - be off by default and never enabled implicitly, including by upgrades, migrations or
     non-interactive defaults;
@@ -151,18 +178,21 @@ never let CedeGrid act on a process it does not own.
 - **Work-conserving.** Within these limits, capacity no workload wants MUST NOT sit idle. A
   reserve held back from own work is justified only by how slowly its resource can be
   reclaimed: by default, CPU and GPU compute, reclaimed within a monitor interval, keep only
-  small idle margins at admission, and RAM and GPU memory keep the floors. A more yielding mode
-  the operator chooses MAY keep more idle, since that cost falls only on own work.
+  small idle margins at admission, and only where admission holds for others: in Yield First and
+  Neutral, and in Performance and Aggressive beside a CedeGrid principal that arrived first. RAM
+  and GPU memory keep the floors. A more yielding mode the operator chooses MAY keep more idle,
+  since that cost falls only on own work.
 
 Rationale: running CedeGrid must never make another workload worse off than the same own work
-run without CedeGrid would. Performance, the default, therefore gives back nothing the kernel
-and the driver would not, and protects own work as much as anyone's: dying first because of
-someone else's growth is a design error. CedeGrid still never adds own work where another
-principal is short of its fair share, never fills the floors, and never touches another
-process. An operator may trade away their own work's progress in a more yielding mode: Neutral
-gives back down to own work's fair share, and Yield First gives others first. Capacity held back
-without a reclaim reason protects no workload. Some operators accept starting work where others
-contend to meet a deadline; that choice stays explicit, rare and visible, and it never
+run without CedeGrid would, and Performance, the default, must never make own work worse off
+than plain Linux. Performance therefore starts work as plain Linux would, gives back nothing the
+kernel and the driver would not, and protects own work as much as anyone's: dying first because
+of someone else's growth is a design error. Between CedeGrid users the one who arrived first
+keeps its fair share, so two of them never fight over admission. CedeGrid never fills the
+floors and never touches another process. An operator may trade away their own work's progress
+in a more yielding mode: Neutral gives back down to own work's fair share, and Yield First gives
+others first. Capacity held back without a reclaim reason protects no workload. Raising own
+priority above other users' is the operator's explicit, rare and visible choice, and it never
 threatens another workload's safety.
 
 ### III. Unknown Is Never Silently Idle
@@ -210,12 +240,17 @@ from effects keeps every action auditable.
     never runs user input;
   - moves only the caller's own verified work between the caller's own units, held still from
     the check to the move;
+  - under the unprotected option, and only where the administrator policy permits it, raises the
+    CPU weight of the caller's ordinary unit while the caller asks, and returns it to the default
+    when the caller stops asking, stops or is removed; it raises no other unit's or process's
+    priority;
   - writes OOM score adjustments only for processes in its verified set (Principle I), and
     lowers one only for the part of its user's memory within that user's fair share, which it
     reads from kernel counters itself; it never writes −1000;
-  - writes no other file than those scores, the cgroup files of those moves and, where systemd
-    cannot set it, the idle slice's `cpu.idle`; it changes no PAM, login, sysctl or kernel module
-    setting, and purging the package leaves the host as before the install;
+  - writes no other file than those scores, the cgroup files of those moves, that unit weight
+    and, where systemd cannot set it, the idle slice's `cpu.idle`; it changes no PAM, login,
+    sysctl or kernel module setting, and purging the package leaves the host as before the
+    install;
   - is confined as far as the host's systemd allows, and its code gets a security review before
     each release.
 
@@ -329,4 +364,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 8.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-17
+**Version**: 9.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-18

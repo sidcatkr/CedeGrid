@@ -409,6 +409,25 @@ pub struct PrincipalUsage {
     /// Measured GPU compute per device, in thousandths of device time.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub gpu_compute_milli: BTreeMap<String, u64>,
+    /// Its CedeGrid work busy on the CPU; None means it is a plain principal there (006 FR-002).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cedegrid_cpu: Option<CedeGridWork>,
+    /// Its CedeGrid work listed on each GPU device; a missing device means plain there.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub cedegrid_gpu: BTreeMap<String, CedeGridWork>,
+}
+
+/// Another account's CedeGrid work on one compute resource, identified read-only (006 FR-002,
+/// FR-005).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CedeGridWork {
+    /// The earliest arrival among that work, in milliseconds since the epoch; None is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arrival_unix_ms: Option<u64>,
+    /// Some of that work runs Performance or Aggressive there.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -427,6 +446,10 @@ pub struct PolicyInput {
     /// The node spool budget is exhausted: admission is blocked and nothing drains (FR-058).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub spool_full: bool,
+    /// Each own allocation's run arrival on this node, in milliseconds since the epoch, by
+    /// allocation ID; a missing entry is unknown (006 FR-005).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub arrivals: BTreeMap<String, u64>,
 }
 
 /// What the agent knows about an allocation that observation does not show.
@@ -955,4 +978,47 @@ pub struct ExceptionNotice {
 #[serde(rename_all = "snake_case")]
 pub enum RiskMarker {
     Caution,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Snapshots and inputs recorded before 006 read the same, and the new fields round-trip
+    /// (006 FR-002, FR-005).
+    #[test]
+    fn cedegrid_work_and_arrivals_are_optional_and_round_trip() {
+        let old: PrincipalUsage =
+            serde_json::from_str(r#"{"uid":1001,"is_owner":false,"cpu_millicores":5,"ram_mib":1}"#)
+                .unwrap();
+        assert_eq!(old.cedegrid_cpu, None);
+        assert!(old.cedegrid_gpu.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("cedegrid"));
+        let usage = PrincipalUsage {
+            uid: Some(1001),
+            cedegrid_cpu: Some(CedeGridWork {
+                arrival_unix_ms: Some(1_763_000_000_000),
+                protected: true,
+            }),
+            cedegrid_gpu: BTreeMap::from([("GPU-a".into(), CedeGridWork::default())]),
+            ..PrincipalUsage::default()
+        };
+        let text = serde_json::to_string(&usage).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PrincipalUsage>(&text).unwrap(),
+            usage
+        );
+        let input = PolicyInput {
+            arrivals: BTreeMap::from([("job-1".into(), 1_763_000_000_000)]),
+            ..PolicyInput::default()
+        };
+        let text = serde_json::to_string(&input).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PolicyInput>(&text).unwrap().arrivals,
+            input.arrivals
+        );
+        assert!(
+            serde_json::from_str::<PrincipalUsage>(r#"{"cedegrid_cpu":{"arrival":1}}"#).is_err()
+        );
+    }
 }
