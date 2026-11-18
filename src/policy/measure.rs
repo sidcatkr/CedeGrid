@@ -1000,13 +1000,18 @@ impl<'a> Interval<'a> {
             .min(self.budget.cpu_millicores)
             .saturating_sub(cedegrid)
             .max(kept);
-        self.first_comer_cpu(&view, &thresholds);
+        self.first_comer_cpu(&view, &thresholds, saturated);
     }
 
     /// Performance and Aggressive hold CPU admission only for the accounts that arrived first,
     /// and admit immediately only for the protected ones among them (006 FR-007, FR-008,
     /// FR-013); each decision says which it did (FR-020).
-    fn first_comer_cpu(&mut self, view: &ModeInput, thresholds: &ResourceThresholds) {
+    fn first_comer_cpu(
+        &mut self,
+        view: &ModeInput,
+        thresholds: &ResourceThresholds,
+        saturated_now: bool,
+    ) {
         let own = self.own_arrival(&|_| true);
         let standings = self.standings(own, &|p| p.cedegrid_cpu);
         let known = standings.as_ref();
@@ -1074,15 +1079,19 @@ impl<'a> Interval<'a> {
         let exit_recent = self.next.own_exit_ms.is_some_and(|at| {
             self.now.saturating_sub(at) <= self.config.monitor.interval_ms.saturating_mul(2)
         });
-        // A plain principal contends only on a saturated CPU, and usage no account accounts
-        // for stands for one only after the principal window, as 001 counts it (FR-034).
-        let unattributed = !exit_recent
+        // A plain principal contends only on a saturated CPU. A named account counts on a CPU
+        // full this interval: own work above its half share does not hide it, as the judged
+        // saturation of Performance would until pressure builds. Usage no account accounts for
+        // needs the longer evidence: the judged saturation and the principal window, as 001
+        // counts it (FR-034).
+        let unattributed = view.saturated
+            && !exit_recent
             && self.next.cpu_unattributed_intervals
                 >= self.config.contention.principal_window_intervals
             && self.cpu_unattributed >= floor.max(self.cpu_bound);
-        let plain_contends = view.saturated
-            && (unattributed
-                || self.snapshot.principals.iter().flatten().any(|p| {
+        let plain_contends = unattributed
+            || saturated_now
+                && self.snapshot.principals.iter().flatten().any(|p| {
                     !p.is_owner
                         && in_scope(p.cpu_millicores) >= floor
                         && match p.uid {
@@ -1094,7 +1103,7 @@ impl<'a> Interval<'a> {
                                     })
                             }
                         }
-                }));
+                });
         // The flag needs a plain principal's contention for a few intervals in a row and holds
         // a while after it ends, so one reading does not swing admission either way.
         let open = view.mode >= ContentionMode::Performance && held.is_none();

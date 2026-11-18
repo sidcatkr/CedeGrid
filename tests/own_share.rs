@@ -886,3 +886,51 @@ fn own_work_over_the_cpu_budget_holds_no_cooldown_in_performance() {
         );
     }
 }
+
+/// F2c: a plain user at 2000 m from before submission, own work filling the rest of a saturated
+/// CPU. The flag sets within the three-interval streak, so own work fills to its task limit as
+/// plain Linux would start it (006 FR-007a).
+#[test]
+fn a_named_plain_user_on_a_saturated_cpu_sets_the_flag_promptly() {
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let mut engine = PolicyEngine::new();
+        let mut run = Vec::new();
+        for i in 0..20u64 {
+            // Before interval 4 own work is not running; then four 1000 m tasks take 2400 m of
+            // the full CPU, more than half, and the plain user gets the rest, as on the host.
+            let started = if i >= 4 { 4 } else { 0 };
+            let other = if started > 0 { 1550 } else { 2000 };
+            let (mut snapshot, mut input) = reading_beside(other, 50, 0, Some(true), None);
+            let job = input.allocations[0].clone();
+            input.allocations = (0..started)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    observed: Some(Resources {
+                        cpu_millicores: 600,
+                        ram_mib: 256,
+                        gpu_memory_mib: BTreeMap::new(),
+                    }),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..started)
+                .map(|k| (format!("job-{k}"), OWN_ARRIVAL))
+                .collect();
+            let own = 600 * started as u64;
+            let busy = (own + 50 + other).min(4000);
+            snapshot.managed_cpu_lower_millicores = Some(own);
+            snapshot.cpu_busy_millicores = Some(busy);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            run.push(
+                engine
+                    .evaluate(&config(mode), &snapshot, &input, i * 500)
+                    .unwrap()
+                    .cpu_beside_plain,
+            );
+        }
+        // Saturated from interval 4: set by interval 6, and on from there.
+        assert!(run[6..].iter().all(|on| *on), "{mode:?}: {run:?}");
+    }
+}
