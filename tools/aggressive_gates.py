@@ -14,6 +14,9 @@ started directly and the coordinator and this harness outside the scope.
         each task's completion (006 SC-004).
   vram  six own GPU tasks of 2048 MiB each on one device, more than its memory, for --window
         seconds each; records which ones could allocate (006 SC-005).
+  ram   twelve own tasks of 4096 MiB each, more than the host's RAM and swap, holding their memory
+        for --window seconds; records which ones finished and which the kernel killed. Its plain
+        arm drives the host into OOM: run it only with the host's owner's approval (006 SC-005).
   cg-later-gpu, cg-first-gpu
         two own GPU tasks beside the second account's one GPU task run through its own CedeGrid
         (--peer-arm cedegrid, in --peer-mode) or by hand (--peer-arm plain), the second account
@@ -93,7 +96,24 @@ json.dump({'units': units, 'cpu_seconds': time.process_time(), 'seconds': time.t
 '''
 SHAPES = {'fill': (8, 500), 'f2c': (8, 1000), 'gpu': (2, 500), 'first': (8, 1000), 'first-gpu': (2, 500),
           'batch': (16, 1000), 'vram': (6, 500)}
-SHAPES.update({'cg-later-gpu': (2, 500), 'cg-first-gpu': (2, 500)})
+SHAPES.update({'cg-later-gpu': (2, 500), 'cg-first-gpu': (2, 500), 'ram': (12, 500)})
+RAM_LOOP = r'''
+import json, os, sys, time
+seconds, mib, path = float(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+t0 = time.time()
+open(path + '.pid', 'w').write(json.dumps({'pid': os.getpid(), 'started': t0}))
+held = bytearray(mib * 2**20)
+for i in range(0, len(held), 4096):
+    held[i] = 1
+end = time.time() + seconds
+while time.time() < end:
+    time.sleep(.5)
+json.dump({'units': 1, 'cpu_seconds': time.process_time(), 'seconds': time.time() - t0, 'started': t0,
+           'finished': time.time(), 'allocated': True}, open(path, 'w'))
+'''
+RAM_TASK_MIB = 4096
+# Fixed-work shapes run until every task finished or was killed.
+FIXED_SHAPES = {'batch', 'vram', 'ram'}
 GPU_SHAPES = {'gpu', 'first-gpu', 'vram', 'cg-later-gpu', 'cg-first-gpu'}
 # Shapes with the second account's load, started by the operator from schedule.json.
 PEER_SHAPES = {'f2c', 'gpu', 'first', 'first-gpu', 'cg-later-gpu', 'cg-first-gpu'}
@@ -151,7 +171,7 @@ class Cluster:
     """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
-                 gpu_reserve_mib=None):
+                 gpu_reserve_mib=None, ram_mib=None):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -173,12 +193,15 @@ class Cluster:
         node['contention'] = {'default_mode': mode}
         if gpu_reserve_mib is not None:
             node['gpu']['reserve_vram_mib'] = gpu_reserve_mib
+        if ram_mib is not None:
+            # The host's floors decide; the agent's own reserve stays small.
+            node['ram'] = {**node.get('ram', {}), 'reserve_mib': 2048}
         if mode == 'aggressive':
             node['contention'].update(max_mode='aggressive', acknowledge_caution=['aggressive_mode'])
         atomic_runtime_config(self.out / 'node.toml', node, 'node')
         agent = read_runtime_config(self.out / 'agent.toml')
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
-                     'ram_mib': max(4096, workers * 1024 * 2),
+                     'ram_mib': ram_mib or max(4096, workers * 1024 * 2),
                      'gpu_memory_mib': {gpu_uuid: gpu_mib} if gpu_uuid else {}})
         atomic_runtime_config(self.out / 'agent.toml', agent, 'agent')
         self.services = {'coordinator': OwnedProcess(
@@ -237,6 +260,16 @@ class Cluster:
             except Exception as error:
                 result[name] = repr(error)
         return result
+
+
+def ended(path):
+    """Whether a fixed-work task finished, or started and is gone without a result."""
+    if path.exists():
+        return True
+    pid_file = Path(f'{path}.pid')
+    if not pid_file.exists():
+        return False
+    return not Path(f'/proc/{json.loads(pid_file.read_text())["pid"]}').exists()
 
 
 def completion(own, submitted):
@@ -337,7 +370,7 @@ def main():
         p.error('admit runs the cg shapes')
     if a.shape == 'fill' and a.arm in ('alone', 'plain', 'unprotected'):
         p.error('fill runs performance or aggressive')
-    if a.shape in ('batch', 'vram') and a.arm not in ('plain', 'performance'):
+    if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
@@ -369,9 +402,11 @@ def main():
     try:
         if a.arm not in ('alone', 'plain'):
             mode = 'performance' if a.arm in ('performance', 'admit') else 'aggressive'
-            lifetime = a.lead + a.window + 240 + (300 if a.shape in ('batch', 'vram') else 0)
+            lifetime = a.lead + a.window + 240 + (300 if a.shape in FIXED_SHAPES else 0)
+            total_ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 2**20
             cluster = Cluster(repo, out, cpus, mode, tasks, lifetime, gpu, gpu_mib,
-                              1024 if a.shape == 'vram' else None)
+                              1024 if a.shape == 'vram' else None,
+                              total_ram if a.shape == 'ram' else None)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)
@@ -404,6 +439,8 @@ def main():
                 return [a.python, '-c', CPU_WORK, str(BATCH_UNITS), str(path)]
             if a.shape == 'vram':
                 return [a.python, '-c', VRAM_LOOP, str(a.window), str(VRAM_TASK_MIB), str(path)]
+            if a.shape == 'ram':
+                return [a.python, '-c', RAM_LOOP, str(a.window), str(RAM_TASK_MIB), str(path)]
             return [a.python, '-c', GPU_LOOP if gpu else CPU_LOOP, str(end), str(path)]
         while time.time() < start:
             if cluster:
@@ -422,8 +459,9 @@ def main():
             vram = VRAM_TASK_MIB if a.shape == 'vram' else 512
             for i, path in enumerate(paths):
                 task_id = f'{cluster.run_id}.{i}'
+                ram = RAM_TASK_MIB + 256 if a.shape == 'ram' else 1024 if gpu else 256
                 task = command_task(task_id, argv(path), str(repo), env=cluster.worker_env, cpu_millicores=millicores,
-                                    ram_mib=1024 if gpu else 256, gpu_vram_mib={gpu: vram} if gpu else {},
+                                    ram_mib=ram, gpu_vram_mib={gpu: vram} if gpu else {},
                                     allocation_class='opportunistic', single_process=True, no_escape=True,
                                     replay_safe=True, max_attempts=1, **extra)
                 cluster.client.submit(task_id, cluster.run_id, [task])
@@ -437,7 +475,7 @@ def main():
                 plain.append(child)
         samples = []
         # Fixed work runs until every task has finished, within a bound.
-        until = submitted + 600 if a.shape in ('batch', 'vram') else end + 3
+        until = submitted + 600 if a.shape in FIXED_SHAPES else end + 3
         while time.time() < until:
             running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
             if cluster:
@@ -447,15 +485,15 @@ def main():
                                 states.count('assigned') + states.count('completed'), running])
             elif plain:
                 samples.append([round(time.time() - submitted, 2), len(plain), running])
-            if a.shape in ('batch', 'vram') and all(p.exists() for p in paths):
+            if a.shape in FIXED_SHAPES and all(ended(p) for p in paths):
                 break
             time.sleep(.25)
         deadline = time.time() + 60
         started = [p for p in paths if Path(f'{p}.pid').exists()]
-        while not all(p.exists() for p in started) and time.time() < deadline:
+        while not all(ended(p) for p in started) and time.time() < deadline:
             time.sleep(.5)
         own = [json.loads(p.read_text()) for p in paths if p.exists()]
-        span = (max(o['finished'] for o in own) - submitted) if a.shape in ('batch', 'vram') and own else a.window
+        span = (max(o['finished'] for o in own) - submitted) if a.shape in FIXED_SHAPES and own else a.window
         report['own'] = {'started': len(started), 'units': sum(o['units'] for o in own),
                          'cpu_millicores': round(1000 * sum(o['cpu_seconds'] for o in own) / max(span, 1))}
         if a.shape == 'batch':
@@ -463,6 +501,10 @@ def main():
         if a.shape == 'vram':
             report['own'].update(allocated=sum(1 for o in own if o.get('allocated')),
                                  failed=sum(1 for o in own if o.get('allocated') is False),
+                                 **completion(own, submitted))
+        if a.shape == 'ram':
+            # A task that started and left no result was killed, by the kernel at exhaustion.
+            report['own'].update(finished=len(own), killed=len(started) - len(own),
                                  **completion(own, submitted))
         report['samples'] = samples
         report['admitted_at'] = admitted_at(samples, (0.5, 1, 2, 4, 8))

@@ -35,6 +35,19 @@ class CompletionTest(unittest.TestCase):
                          {'completion_s': [], 'mean_s': None, 'makespan_s': None})
 
 
+class EndedTest(unittest.TestCase):
+    def test_a_task_ends_with_a_result_or_when_its_process_is_gone(self):
+        import json, os, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'own-0.json'
+            self.assertFalse(gates.ended(path))
+            Path(f'{path}.pid').write_text(json.dumps({'pid': os.getpid(), 'started': 0}))
+            if Path('/proc').exists():
+                self.assertFalse(gates.ended(path))
+            path.write_text('{}')
+            self.assertTrue(gates.ended(path))
+
+
 class ArgumentsTest(unittest.TestCase):
     def test_fill_runs_only_the_two_modes(self):
         for arm in ('alone', 'plain', 'unprotected'):
@@ -46,7 +59,7 @@ class ArgumentsTest(unittest.TestCase):
             self.assertIn('fill runs performance or aggressive', result.stderr)
 
     def test_fixed_work_shapes_run_plain_or_performance(self):
-        for shape in ('batch', 'vram'):
+        for shape in ('batch', 'vram', 'ram'):
             result = subprocess.run(
                 [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
                  '--python', sys.executable, '--shape', shape, '--arm', 'aggressive'],
