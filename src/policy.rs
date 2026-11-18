@@ -536,6 +536,9 @@ struct Interval<'a> {
     /// Devices where a protected first-comer holds GPU admission, which carry no VRAM in the
     /// admit immediately budget (006 FR-013).
     admit_immediately_closed: BTreeSet<String>,
+    /// Own CPU work in Performance or Aggressive beside a plain principal, with no first-comer
+    /// holding it (006 FR-007a).
+    cpu_beside_plain: bool,
     /// Own work's arrival on the CPU and each other account's standing there; None while the
     /// principal list cannot be read (006 FR-006).
     unsafe_now: bool,
@@ -668,6 +671,7 @@ impl<'a> Interval<'a> {
             budget: Resources::default(),
             admit_immediately_cpu: None,
             admit_immediately_closed: BTreeSet::new(),
+            cpu_beside_plain: false,
             unsafe_now: false,
             cpu_unknown: false,
             ram_unknown: false,
@@ -757,6 +761,7 @@ impl<'a> Interval<'a> {
                         .collect(),
                     ..self.budget.clone()
                 }),
+            cpu_beside_plain: self.cpu_beside_plain,
             managed_budget: self.budget,
             admission_headroom: self.headroom,
             expansion_allowed: self.expansion_allowed,

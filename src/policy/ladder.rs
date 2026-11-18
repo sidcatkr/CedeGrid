@@ -336,10 +336,15 @@ impl<'a> Interval<'a> {
             usage_excess =
                 usage_excess.min(judged_total.saturating_sub(protected).max(envelope_excess));
         }
-        // What own work holds beyond the operator envelope, which steps jobs of every mode.
+        // What own work holds beyond the operator envelope, which steps jobs of every mode except
+        // on CPU in Performance and Aggressive (006 FR-007a).
         let envelope_excess = input.envelope.as_ref().map_or(0, |envelope| {
             if kind == ResourceKind::Cpu {
-                cpu_usage.saturating_sub(envelope.cpu_millicores)
+                if governing(config, kind) >= ContentionMode::Performance {
+                    0
+                } else {
+                    cpu_usage.saturating_sub(envelope.cpu_millicores)
+                }
             } else {
                 judged_total.saturating_sub(amount_of(&key, envelope))
             }
@@ -468,20 +473,24 @@ impl<'a> Interval<'a> {
             );
         }
         let floor_breach = floor_breach.is_some();
-        // Own work beyond the operator envelope, judged like a floor breach.
-        let envelope_breach = input.envelope.as_ref().is_some_and(|envelope| {
-            let held = if key.kind() == ResourceKind::Cpu {
-                input
-                    .allocations
-                    .iter()
-                    .filter(|a| a.phase != AllocationPhase::Pending)
-                    .map(cpu_usage_of)
-                    .fold(self.unknown_charge.cpu_millicores, u64::saturating_add)
-            } else {
-                judged_total
-            };
-            held > amount_of(key, envelope)
-        });
+        // Own work beyond the operator envelope, judged like a floor breach. Performance and
+        // Aggressive leave own CPU over it alone, as plain Linux would run it (006 FR-007a).
+        let cpu_exempt = key.kind() == ResourceKind::Cpu
+            && governing(self.config, ResourceKind::Cpu) >= ContentionMode::Performance;
+        let envelope_breach = !cpu_exempt
+            && input.envelope.as_ref().is_some_and(|envelope| {
+                let held = if key.kind() == ResourceKind::Cpu {
+                    input
+                        .allocations
+                        .iter()
+                        .filter(|a| a.phase != AllocationPhase::Pending)
+                        .map(cpu_usage_of)
+                        .fold(self.unknown_charge.cpu_millicores, u64::saturating_add)
+                } else {
+                    judged_total
+                };
+                held > amount_of(key, envelope)
+            });
         if envelope_breach {
             note(
                 &mut self.statuses,
@@ -582,11 +591,10 @@ impl<'a> Interval<'a> {
                 }
             })
             .collect();
-        // A job in Performance or Aggressive keeps its memory at a floor breach, and yields running
-        // CPU only for the operator envelope, whatever the governing mode (FR-023, FR-030).
-        if frame.keeps_mode_memory
-            || kind == ResourceKind::Cpu && !pending_pass && frame.envelope_excess == 0
-        {
+        // A job in Performance or Aggressive keeps its memory at a floor breach and yields no
+        // running CPU, not even for the operator envelope, whatever the governing mode (FR-023,
+        // FR-030, 006 FR-007a).
+        if frame.keeps_mode_memory || kind == ResourceKind::Cpu && !pending_pass {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);

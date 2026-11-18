@@ -333,12 +333,14 @@ paused, as in Yield First, the pauses take turns, one task running at a time. A 
 draining makes no other task hold. A pause for the operator envelope drains at the bound. A job's own mode, within
 the node cap, decides how that job gives back: a job in Performance or Aggressive is never held
 for another principal, for unknown activity or at a floor breach, whatever the node's mode, and
-only the operator's envelope steps it. The node's other jobs then give what its target needs as
+only the operator's envelope steps it, on memory and GPU memory only. The node's other jobs then give what its target needs as
 far as they can, so another workload can get less than the node's mode promises; this is a known
 limitation of per-job modes. Performance
 takes no step on running work for another principal, for own usage above its admission target
-or for activity of unknown amount, and only the operator's envelope still steps it: what
-another principal gets is the kernel's and the driver's split beside the same work. It holds
+or for activity of unknown amount, and only the operator's envelope still steps it, on memory
+and GPU memory only: own CPU above the envelope's CPU takes no yield, cap or drain, as plain
+Linux would run it (006 FR-007a). What another principal gets is the kernel's and the driver's
+split beside the same work. It holds
 back at admission only, and only for another account whose CedeGrid work arrived first on the
 resource (feature 006). Another account is a CedeGrid principal on a resource while the agent
 identifies, read-only, that its work running there runs under CedeGrid; every other account,
@@ -509,7 +511,11 @@ lowered in share or capped, are never paused, and their memory is drained only a
 last step of floor policy A. Explicit node drain retains its all-allocation stop semantics.
 
 When own work exceeds the operator's node envelope, the policy restores the envelope per
-resource through the yield ladder, releasing opportunistic work first. Guaranteed work is
+resource through the yield ladder, releasing opportunistic work first; on CPU, only for work in
+Yield First and Neutral, and not at all where the node's CPU mode is Performance or Aggressive.
+Where such a node's CPU work contends with a plain principal and no first-comer holds it, the
+decision says so (`cpu_beside_plain`), and the agent may start tasks past the envelope's CPU as
+plain Linux would, up to its worker limit and memory. Guaranteed work is
 drained for it only as floor policy A allows, and a breach never stops every allocation at
 once. An exhausted node spool budget blocks admission and is reported; nothing is drained
 because of it.

@@ -2432,13 +2432,21 @@ mod operator_limits {
             decision.actions
         );
         assert_eq!(step(&decision, "g", ResourceKey::Ram), None);
+        // Performance, the default, leaves own CPU over the envelope alone (006 FR-007a).
+        assert_eq!(step(&decision, "c", ResourceKey::Cpu), None);
+        assert_eq!(decision.would_drain, ["o"]);
+        // Neutral restores the CPU envelope by a step short of a drain.
+        let mut neutral = config();
+        neutral.contention.default_mode = cedegrid::contention::ContentionMode::Neutral;
+        let decision = PolicyEngine::new()
+            .evaluate(&neutral, &snapshot(), &input, 0)
+            .unwrap();
         let cpu = step(&decision, "c", ResourceKey::Cpu).unwrap();
         assert!(
             cpu.0 < YieldStep::Drain && cpu.0 > YieldStep::None,
             "{cpu:?}"
         );
         assert_eq!(cpu.1, YieldCause::EnvelopeBreach);
-        assert_eq!(decision.would_drain, ["o"]);
     }
 
     #[test]

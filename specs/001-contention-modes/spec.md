@@ -1827,8 +1827,9 @@ node reports with the expected per-resource values at each step.
     records `gpu_time_slice_admission_held` otherwise;
   - while CPU telemetry is unknown, or a compute resource has a first-comer's activity of
     unknown amount, admit no new own work there and hold every step (FR-008);
-  - keep the operator envelope (FR-057), the Guaranteed rules (FR-024) and explicit operator
-    drain, as every mode does.
+  - keep the operator envelope (FR-057) on memory and GPU memory, the Guaranteed rules (FR-024)
+    and explicit operator drain, as every mode does; own CPU above the envelope takes no step
+    (006 FR-007a).
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
   Yield First ≤ Neutral ≤ Performance. Configuration enforces it by construction: the margins
   are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance.
@@ -2403,7 +2404,11 @@ node reports with the expected per-resource values at each step.
 **Operator limits**
 
 - **FR-057**: When own work exceeds the operator's configured resource envelope, CedeGrid MUST
-  restore the envelope per resource through the yield ladder.
+  restore the envelope per resource through the yield ladder. On CPU it steps only work in Yield
+  First and Neutral, and nothing where the node's CPU mode is Performance or Aggressive: own CPU
+  above the envelope is left alone there, as plain Linux would run it, and a decision whose CPU
+  work contends with a plain principal with no first-comer holding it sets `cpu_beside_plain`
+  ([006](../006-performance-first/spec.md) FR-007a).
   - Opportunistic work is released first, by least cost.
   - Guaranteed work MUST NOT be drained except as floor policy A allows (FR-024).
   - An envelope breach MUST NOT stop every allocation at once.

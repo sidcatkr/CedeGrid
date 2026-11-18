@@ -99,13 +99,14 @@ impl Interval<'_> {
     /// (006 FR-007, FR-008), with the UIDs it holds for: 001's hold counting only them, or,
     /// where none of them contends, what plain Linux would start, the capacity less the reserve
     /// within the ancestor quota, with no margin, no deduction and CedeGrid's own CPU left in.
-    /// An unreadable principal list shows no account to be plain, so every one counts.
+    /// An unreadable principal list shows no account to be plain, so every one counts. The
+    /// UIDs held for are None where nothing holds.
     pub(super) fn cpu_budget_for(
         &self,
         view: &ModeInput,
         thresholds: &ResourceThresholds,
         holds_for: &dyn Fn(u32) -> bool,
-    ) -> (u64, Vec<u32>) {
+    ) -> (u64, Option<Vec<u32>>) {
         let cedegrid = self.cedegrid_cpu;
         let schedulable = self
             .cpu_capacity
@@ -150,7 +151,7 @@ impl Interval<'_> {
         };
         let contending = crate::contention::contending_principals(&held_view, thresholds);
         if contending.is_empty() {
-            return (schedulable, Vec::new());
+            return (schedulable, None);
         }
         let mut held: Vec<u32> = contending.iter().filter_map(|(uid, _)| *uid).collect();
         if contending.iter().any(|(uid, _)| uid.is_none()) {
@@ -207,7 +208,7 @@ impl Interval<'_> {
             .min(room)
             .saturating_sub(cedegrid)
             .max(kept);
-        (budget, held)
+        (budget, Some(held))
     }
 }
 
