@@ -45,7 +45,7 @@ this thread's.
 - [x] T021 **(001)** GPU compute: the time-slice admission hold counts only first-comers in
   Performance and Aggressive (`src/policy/measure.rs`, `src/policy.rs`), with tests for both
   orders and both options.
-- [ ] T022 **(001)** Reason codes `admitted_as_plain`, `held_for_first_comer` and
+- [x] T022 **(001)** Reason codes `admitted_as_plain`, `held_for_first_comer` and
   `admit_immediately_ignored_for_protected_first_comer` in `src/contention.rs`; `explain.rs`
   rows for principals; decision snapshots re-recorded and reviewed.
 - [x] T023 **(001)** 001's spec and `docs/guarantees.md` text for admission in Performance and
