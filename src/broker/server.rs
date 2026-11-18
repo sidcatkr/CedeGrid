@@ -86,6 +86,40 @@ pub struct BrokerState {
     pub rate: Mutex<RateLimiter>,
     /// One lock per caller, so a caller's requests run one at a time.
     pub callers: Mutex<HashMap<u32, Arc<Mutex<()>>>>,
+    /// When each raised account slice's lease ends, by caller (006 FR-018).
+    pub raises: Mutex<HashMap<u32, Instant>>,
+}
+
+/// How long a raise lasts without the caller renewing it (006 FR-018).
+pub const RAISE_LEASE: Duration = Duration::from_secs(30);
+
+/// Resets every account slice whose raise lease ended before `now` (006 FR-018).
+pub fn expire_raises(state: &BrokerState, now: Instant) {
+    let ended: Vec<u32> = state
+        .raises
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|(_, until)| **until <= now)
+        .map(|(uid, _)| *uid)
+        .collect();
+    for uid in ended {
+        let slice = super::systemd::account_slice(uid);
+        match state.systemd.set_slice_weight(&slice, None) {
+            Ok(()) => {
+                state
+                    .raises
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&uid);
+                journal(&format!("raise ended: uid={uid} lease expired"));
+            }
+            Err(refusal) => journal(&format!(
+                "raise of uid={uid} not reset: {}",
+                refusal.message
+            )),
+        }
+    }
 }
 
 /// One journal line (FR-011). Losing a log line never stops the broker.
@@ -228,7 +262,31 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
                 Ok(units)
             })
         }
-        Request::Stop => stop_units(systemd, caller),
+        Request::Stop => stop_units(systemd, caller).and_then(|units| {
+            // A stopped unit's raise ends with it (006 FR-018).
+            if state
+                .raises
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&caller.uid)
+                .is_some()
+            {
+                super::systemd::raise_account_slice(systemd, caller, &policy, false)?;
+            }
+            Ok(units)
+        }),
+        Request::Raise { on } => super::systemd::raise_account_slice(systemd, caller, &policy, on)
+            .inspect(|_| {
+                let mut raises = state
+                    .raises
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if on {
+                    raises.insert(caller.uid, Instant::now() + RAISE_LEASE);
+                } else {
+                    raises.remove(&caller.uid);
+                }
+            }),
         Request::Status => status_units(systemd, caller),
         Request::Move { job, mode } => caller_units(systemd, caller).and_then(|units| {
             let moved = move_job(
@@ -457,7 +515,17 @@ pub fn run() -> anyhow::Result<()> {
         processes: Box::new(super::oom::PidfdAccess),
         rate: Mutex::new(RateLimiter::new(RATE_BURST, RATE_PER_SECOND)),
         callers: Mutex::new(HashMap::new()),
+        raises: Mutex::new(HashMap::new()),
     });
+    let expiring = Arc::clone(&state);
+    std::thread::Builder::new()
+        .name("broker-raise".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                expire_raises(&expiring, Instant::now());
+            }
+        })?;
     std::thread::Builder::new()
         .name("broker-oom".to_owned())
         .spawn(oom_loop)?;

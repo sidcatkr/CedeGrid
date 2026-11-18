@@ -58,6 +58,7 @@ policy_version = 1
 [modes]
 allowed = ["yield_first", "neutral", "performance"]
 unprotected = false
+unprotected_cpu_weight = 400
 
 [limits]
 tasks_per_user = 64
@@ -79,6 +80,7 @@ ordinary_slice = "auto"
 |---|---|---|
 | `modes.allowed` | all modes except `aggressive` | modes a member may run; checked by the broker and by the agent |
 | `modes.unprotected` | `false` | whether a member may request unprotected for a run; checked by the agent in the unit, separately from `modes.allowed` |
+| `modes.unprotected_cpu_weight` | 400 | the `CPUWeight=` (101 to 10000) the broker gives an unprotected member's account slice while the run is active, where the host splits CPU by account and the member's ordinary unit sits in that slice; reset when the run ends, after 30 s without renewal, or when the units stop |
 | `limits.tasks_per_user` | 64 | CedeGrid tasks one user may run at once |
 | `limits.tasks_max` | 4096 | `TasksMax=` on each unit |
 | `limits.open_files`, `processes`, `locked_memory_mib` | systemd defaults | `LimitNOFILE=`, `LimitNPROC=`, `LimitMEMLOCK=` when `pam_session = "none"` |

@@ -58,6 +58,35 @@ fn closed_request_set_parses() {
             mode: ModeName::YieldFirst
         })
     );
+    // 006 FR-016: the unprotected raise takes only its switch.
+    for on in [true, false] {
+        assert_eq!(
+            parse_frame(&frame(&format!(
+                r#"{{"protocol":1,"kind":"raise","on":{on}}}"#
+            ))),
+            Ok(Request::Raise { on })
+        );
+        assert_eq!(
+            Request::Raise { on }.to_line(),
+            format!("{{\"kind\":\"raise\",\"on\":{on},\"protocol\":1}}\n")
+        );
+    }
+    assert_eq!(
+        refused(r#"{"protocol":1,"kind":"raise"}"#),
+        RefusalCode::Malformed
+    );
+    assert_eq!(
+        refused(r#"{"protocol":1,"kind":"raise","on":"yes"}"#),
+        RefusalCode::Malformed
+    );
+    assert_eq!(
+        refused(r#"{"protocol":1,"kind":"raise","on":true,"mode":"neutral"}"#),
+        RefusalCode::UnknownField
+    );
+    assert_eq!(
+        refused(r#"{"protocol":1,"kind":"raise","on":true,"weight":10000}"#),
+        RefusalCode::UnknownField
+    );
 }
 
 #[test]
@@ -322,6 +351,31 @@ fn policy_defaults() {
     assert_eq!(AdminPolicy::parse("", 1000).unwrap(), policy);
 }
 
+/// 006 FR-016: the raise's weight is the administrator's, 400 by default, between 101 and 10000.
+#[test]
+fn the_raise_weight_is_the_administrators_and_bounded() {
+    let policy = AdminPolicy::parse("", 1000).unwrap();
+    assert_eq!(policy.unprotected_cpu_weight.value, 400);
+    let policy = AdminPolicy::parse("[modes]\nunprotected_cpu_weight = 2000\n", 1000).unwrap();
+    assert_eq!(policy.unprotected_cpu_weight.value, 2000);
+    assert!(
+        policy
+            .entries()
+            .iter()
+            .any(|(key, value, _)| *key == "modes.unprotected_cpu_weight" && value == "2000")
+    );
+    for weight in [0, 100, 10_001] {
+        assert!(
+            AdminPolicy::parse(
+                &format!("[modes]\nunprotected_cpu_weight = {weight}\n"),
+                1000
+            )
+            .is_err(),
+            "{weight}"
+        );
+    }
+}
+
 #[test]
 fn policy_file_values_and_sources() {
     let policy = AdminPolicy::parse(
@@ -331,6 +385,7 @@ policy_version = 1
 [modes]
 allowed = ["yield_first", "neutral", "aggressive"]
 unprotected = true
+unprotected_cpu_weight = 800
 
 [limits]
 tasks_per_user = 8
@@ -1369,6 +1424,8 @@ mod broker_service {
     #[derive(Default)]
     struct FakeSystemd {
         units: Mutex<BTreeMap<String, UnitShow>>,
+        /// Slices' CPU weights; a missing slice is at the default.
+        weights: Mutex<BTreeMap<String, u64>>,
         calls: Mutex<Vec<String>>,
         fail_start: bool,
         /// A stopped unit is left failed, as an agent that exits non-zero on TERM leaves it.
@@ -1444,6 +1501,23 @@ mod broker_service {
             self.units.lock().unwrap().remove(unit);
             Ok(())
         }
+
+        fn slice_weight(&self, slice: &str) -> Result<Option<u64>, Refusal> {
+            Ok(self.weights.lock().unwrap().get(slice).copied())
+        }
+
+        fn set_slice_weight(&self, slice: &str, weight: Option<u64>) -> Result<(), Refusal> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("weight {slice} {weight:?}"));
+            let mut weights = self.weights.lock().unwrap();
+            match weight {
+                Some(weight) => weights.insert(slice.to_owned(), weight),
+                None => weights.remove(slice),
+            };
+            Ok(())
+        }
     }
 
     /// Lets a test keep a handle on the fake after the broker state takes it.
@@ -1464,6 +1538,14 @@ mod broker_service {
 
         fn reset_failed(&self, unit: &str) -> Result<(), Refusal> {
             self.0.reset_failed(unit)
+        }
+
+        fn slice_weight(&self, slice: &str) -> Result<Option<u64>, Refusal> {
+            self.0.slice_weight(slice)
+        }
+
+        fn set_slice_weight(&self, slice: &str, weight: Option<u64>) -> Result<(), Refusal> {
+            self.0.set_slice_weight(slice, weight)
         }
     }
 
@@ -1698,11 +1780,102 @@ mod broker_service {
             processes: Box::new(NoProcesses),
             rate: Mutex::new(RateLimiter::new(8, 2)),
             callers: Mutex::new(Default::default()),
+            raises: Mutex::new(Default::default()),
         }
     }
 
     fn line(json: &str) -> Vec<u8> {
         format!("{json}\n").into_bytes()
+    }
+
+    /// 006 FR-016, FR-018: the raise reaches only the caller's account slice, only while the
+    /// administrator permits unprotected and the caller's ordinary unit sits in that slice; it is
+    /// read back, kept for a lease the caller renews, and reset on withdrawal, on the lease's
+    /// expiry and on stop.
+    #[test]
+    fn the_raise_weights_only_the_callers_account_slice_while_permitted() {
+        use cedegrid::broker::server::expire_raises;
+        let in_slice = |systemd: &FakeSystemd| {
+            for kind in [UnitKind::Ordinary, UnitKind::Idle] {
+                let mut show = ours(kind, 1234, "active");
+                show.control_group = format!(
+                    "/user.slice/user-1234.slice/{}",
+                    cedegrid::broker::units::unit_name(kind, 1234)
+                );
+                systemd.put(&cedegrid::broker::units::unit_name(kind, 1234), show);
+            }
+        };
+        let raise = |on: bool| line(&format!(r#"{{"protocol":1,"kind":"raise","on":{on}}}"#));
+        // Not permitted by the policy: refused, nothing written.
+        let systemd = Arc::new(FakeSystemd::default());
+        in_slice(&systemd);
+        let mut denied = state(FakeSystemd::default(), &[1234], None);
+        denied.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        let handled = handle(&denied, peer(1234), &raise(true));
+        assert_eq!(handled.reply.code, Some(RefusalCode::RaiseRefused));
+        assert!(systemd.weights.lock().unwrap().is_empty());
+        // Permitted, but the ordinary unit sits in cedegrid.slice: no raise reaches others there.
+        let permitted = "[modes]\nunprotected = true\nunprotected_cpu_weight = 500\n";
+        let elsewhere = Arc::new(FakeSystemd::default());
+        elsewhere.put(
+            "cedegrid-u1234.service",
+            ours(UnitKind::Ordinary, 1234, "active"),
+        );
+        elsewhere.put(
+            "cedegrid-idle-u1234.service",
+            ours(UnitKind::Idle, 1234, "active"),
+        );
+        let mut state_elsewhere = state(FakeSystemd::default(), &[1234], Some(permitted));
+        state_elsewhere.systemd = Box::new(Shared(Arc::clone(&elsewhere)));
+        let handled = handle(&state_elsewhere, peer(1234), &raise(true));
+        assert_eq!(handled.reply.code, Some(RefusalCode::RaiseRefused));
+        assert!(elsewhere.weights.lock().unwrap().is_empty());
+        // Permitted and in the account slice: that slice, and only it, at the policy's weight.
+        let mut granted = state(FakeSystemd::default(), &[1234, 1235], Some(permitted));
+        granted.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        let handled = handle(&granted, peer(1234), &raise(true));
+        assert!(handled.reply.ok, "{:?}", handled.reply);
+        assert_eq!(
+            *systemd.weights.lock().unwrap(),
+            BTreeMap::from([("user-1234.slice".to_owned(), 500)])
+        );
+        // A lease not renewed in time ends, and the slice is back at its default.
+        let now = std::time::Instant::now();
+        expire_raises(&granted, now);
+        assert_eq!(systemd.weights.lock().unwrap().len(), 1);
+        expire_raises(&granted, now + std::time::Duration::from_secs(31));
+        assert!(systemd.weights.lock().unwrap().is_empty());
+        // Withdrawal resets at once, permitted or not.
+        assert!(handle(&granted, peer(1234), &raise(true)).reply.ok);
+        assert!(
+            handle(&denied_after(&systemd), peer(1234), &raise(false))
+                .reply
+                .ok
+        );
+        assert!(systemd.weights.lock().unwrap().is_empty());
+        // Stopping the units resets it too.
+        assert!(handle(&granted, peer(1234), &raise(true)).reply.ok);
+        assert!(
+            handle(
+                &granted,
+                peer(1234),
+                &line(r#"{"protocol":1,"kind":"stop"}"#)
+            )
+            .reply
+            .ok
+        );
+        assert!(systemd.weights.lock().unwrap().is_empty());
+        // Another member's request never reaches this slice.
+        in_slice(&systemd);
+        let handled = handle(&granted, peer(1235), &raise(true));
+        assert_eq!(handled.reply.code, Some(RefusalCode::RaiseRefused));
+        assert!(systemd.weights.lock().unwrap().is_empty());
+    }
+
+    fn denied_after(systemd: &Arc<FakeSystemd>) -> BrokerState {
+        let mut denied = state(FakeSystemd::default(), &[1234], None);
+        denied.systemd = Box::new(Shared(Arc::clone(systemd)));
+        denied
     }
 
     #[test]
@@ -4549,6 +4722,38 @@ fn a_stop_waits_for_both_units_and_nothing_else_waits_longer_than_two_seconds() 
         assert_eq!(reply_timeout(&request), CLIENT_TIMEOUT);
     }
     assert_eq!(CLIENT_TIMEOUT, Duration::from_secs(2));
+}
+
+/// 006 FR-016, FR-018: the raise is wanted while an unprotected run is unreleased and no other
+/// account's Performance or Aggressive CedeGrid work arrived on the CPU before own work.
+#[test]
+fn the_raise_is_wanted_only_without_a_protected_first_comer() {
+    use cedegrid::model::{CedeGridWork, PrincipalUsage};
+    use cedegrid::system_mode::raise_wanted;
+    let other = |arrival: Option<u64>, protected: Option<u64>| PrincipalUsage {
+        uid: Some(1002),
+        cedegrid_cpu: Some(CedeGridWork {
+            arrival_unix_ms: arrival,
+            protected_arrival_unix_ms: protected,
+        }),
+        ..PrincipalUsage::default()
+    };
+    let plain = PrincipalUsage {
+        uid: Some(1003),
+        cpu_millicores: 2000,
+        ..PrincipalUsage::default()
+    };
+    assert!(!raise_wanted(0, Some(100), &[]));
+    assert!(raise_wanted(1, Some(100), std::slice::from_ref(&plain)));
+    // A protected first-comer, or a tie, holds the raise; a later one or one that only yields
+    // does not.
+    assert!(!raise_wanted(1, Some(100), &[other(Some(50), Some(50))]));
+    assert!(!raise_wanted(1, Some(100), &[other(Some(100), Some(100))]));
+    assert!(raise_wanted(1, Some(100), &[other(Some(50), None)]));
+    assert!(raise_wanted(1, Some(100), &[other(Some(50), Some(150))]));
+    // Without own arrival, any protected CedeGrid work holds it.
+    assert!(!raise_wanted(1, None, &[other(Some(500), Some(500))]));
+    assert!(raise_wanted(1, None, &[plain]));
 }
 
 #[test]

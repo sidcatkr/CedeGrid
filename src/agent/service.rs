@@ -411,6 +411,24 @@ type Publication = (
 
 type Preparation = (Assignment, tokio::task::JoinHandle<Result<ChildSlot>>, bool);
 
+/// How often the agent renews a raise; the broker's lease is three times as long.
+const RAISE_RENEWAL: Duration = Duration::from_secs(10);
+
+/// How often the agent checks whether a raise is wanted while none is in force.
+const RAISE_CHECK: Duration = Duration::from_secs(5);
+
+/// The unprotected raise as this agent last asked the System mode broker for it (006 FR-016).
+#[derive(Default)]
+struct RaiseSteer {
+    /// Whether the broker last confirmed it on.
+    on: bool,
+    last_check: Option<Instant>,
+    last_ask: Option<Instant>,
+    /// The last refusal or silence reported, so it is reported once.
+    last_problem: Option<String>,
+    pending: Option<(bool, tokio::task::JoinHandle<crate::system_mode::Outcome>)>,
+}
+
 /// State of one agent service loop. Each stage of an interval is a method.
 struct AgentLoop<'a> {
     /// The running configuration; a SIGHUP reload replaces its `[contention]` (FR-080).
@@ -453,6 +471,8 @@ struct AgentLoop<'a> {
     descriptor_refused: BTreeSet<String>,
     /// Offers refused once under System mode's administrator policy (005 FR-010).
     policy_refused: BTreeSet<String>,
+    /// The unprotected raise as last asked of the broker (006 FR-016, FR-018).
+    raise: RaiseSteer,
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -1459,6 +1479,90 @@ impl AgentLoop<'_> {
         self.cost.charge("decision", mark);
         self.note_ram_views(&snapshot, &allocations, &decision);
         Ok((snapshot, allocations, decision))
+    }
+
+    /// Asks the System mode broker to raise, renew or end the raise of this account's slice
+    /// for unprotected runs, off the loop's thread (006 FR-016, FR-018). Outside a unit, or where
+    /// no raise reaches other accounts, nothing is asked.
+    async fn steer_raise(&mut self, snapshot: &crate::model::Snapshot) -> Result<()> {
+        if let Some((on, handle)) = self.raise.pending.take() {
+            if !handle.is_finished() {
+                self.raise.pending = Some((on, handle));
+                return Ok(());
+            }
+            // A finished task's result is ready; a panicked one is no answer.
+            let outcome = handle.await.unwrap_or_else(|_| {
+                crate::system_mode::Outcome::NoAnswer("request failed".to_owned())
+            });
+            let problem = match outcome {
+                crate::system_mode::Outcome::Units(_) => {
+                    if self.raise.on != on {
+                        emit(&serde_json::json!({
+                            "event": if on { "raise_on" } else { "raise_off" },
+                            "detail": if on {
+                                "warning: this account's CPU weight is raised for an UNPROTECTED run"
+                            } else {
+                                "this account's CPU weight is back at the default"
+                            },
+                        }))?;
+                    }
+                    self.raise.on = on;
+                    None
+                }
+                crate::system_mode::Outcome::Refused(refusal) => Some(refusal.message),
+                crate::system_mode::Outcome::NoAnswer(reason) => Some(format!("broker {reason}")),
+                crate::system_mode::Outcome::NotInstalled => {
+                    Some("System mode is not installed".to_owned())
+                }
+            };
+            if let Some(problem) = problem
+                && self.raise.last_problem.as_deref() != Some(problem.as_str())
+            {
+                emit(&serde_json::json!({
+                    "event": "raise_refused",
+                    "detail": problem,
+                }))?;
+                self.raise.last_problem = Some(problem);
+            }
+        }
+        let now = Instant::now();
+        let due = |at: Option<Instant>, every: Duration| at.is_none_or(|at| now >= at + every);
+        if !self.raise.on && !due(self.raise.last_check, RAISE_CHECK) {
+            return Ok(());
+        }
+        self.raise.last_check = Some(now);
+        let wanted = crate::system_mode::in_unit()
+            && crate::actuation::Raise::current() == crate::actuation::Raise::AccountSlice
+            && crate::system_mode::raise_wanted(
+                self.store
+                    .unprotected_runs()
+                    .map(|runs| runs.len())
+                    .unwrap_or(0),
+                self.store
+                    .arrivals()
+                    .ok()
+                    .and_then(|arrivals| arrivals.into_values().min()),
+                snapshot.principals.as_deref().unwrap_or_default(),
+            );
+        let ask = if wanted {
+            (!self.raise.on || due(self.raise.last_ask, RAISE_RENEWAL)).then_some(true)
+        } else {
+            self.raise.on.then_some(false)
+        };
+        if let Some(on) = ask {
+            self.raise.last_ask = Some(now);
+            self.raise.pending = Some((
+                on,
+                tokio::task::spawn_blocking(move || {
+                    crate::system_mode::ask(
+                        Path::new(crate::broker::SOCKET_PATH),
+                        &crate::broker::request::Request::Raise { on },
+                        crate::system_mode::CLIENT_TIMEOUT,
+                    )
+                }),
+            ));
+        }
+        Ok(())
     }
 
     /// Each running task's view of RAM, kept for judging an OOM kill after it (FR-076).
@@ -2567,6 +2671,7 @@ pub async fn run(
         counted_drains: BTreeSet::new(),
         descriptor_refused: BTreeSet::new(),
         policy_refused: BTreeSet::new(),
+        raise: RaiseSteer::default(),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
@@ -2627,6 +2732,7 @@ pub async fn run(
             state.cost.charge("records", mark);
             // Observation charges its own stages.
             let (snapshot, allocations, mut decision) = state.observe(&records).await?;
+            state.steer_raise(&snapshot).await?;
             mark = LoopCost::thread_ns();
             state.share_observation(&snapshot);
             state.actuate(&mut decision, &allocations)?;

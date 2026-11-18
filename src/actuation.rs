@@ -336,37 +336,43 @@ impl TargetChannel {
 /// The lowest nice value the unprotected raise sets, whatever the granted limit (006 FR-016).
 pub const LOWEST_RAISE_NICE: i32 = -10;
 
-/// How unprotected can raise own CPU share on this host (006 FR-016).
+/// How unprotected can raise own CPU share on this host, at the level where other users' work
+/// competes with it (006 FR-016).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Raise {
-    /// The System mode broker raises the CPU weight of the caller's ordinary unit, where the
-    /// administrator policy permits it.
-    UnitWeight,
-    /// A negative nice value on the run's verified processes, down to this one, within the
-    /// account's granted limit.
+    /// The System mode broker raises the CPU weight of the caller's account slice, where the host
+    /// splits CPU by account, if the administrator policy permits it.
+    AccountSlice,
+    /// A negative nice value on the run's verified processes, down to this one, where own work
+    /// shares a CPU cgroup with other users' work.
     Nice(i32),
-    /// No way here: unprotected admits immediately only.
+    /// No way here that reaches other users' work: unprotected admits immediately only.
     #[default]
     Unavailable,
 }
 
 impl Raise {
-    /// From whether System mode is installed and the account's `RLIMIT_NICE` soft limit, which
-    /// allows nice values down to 20 minus the limit.
-    pub fn on_host(system_mode: bool, nice_limit: Option<u64>) -> Self {
-        if system_mode {
-            return Self::UnitWeight;
+    /// From whether System mode is installed, whether the host splits CPU by account, and the
+    /// account's `RLIMIT_NICE` soft limit, which allows nice values down to 20 minus the limit.
+    /// A nice value does not cross CPU cgroups, so it helps only where accounts share one.
+    pub fn on_host(system_mode: bool, account_split: bool, nice_limit: Option<u64>) -> Self {
+        if account_split {
+            return if system_mode {
+                Self::AccountSlice
+            } else {
+                Self::Unavailable
+            };
         }
         match nice_limit.map(|limit| 20 - i64::try_from(limit.min(40)).unwrap_or(40)) {
-            Some(lowest) if lowest < 0 => {
+            Some(lowest) if lowest < 0 && !system_mode => {
                 Self::Nice(i32::try_from(lowest).unwrap_or(0).max(LOWEST_RAISE_NICE))
             }
             _ => Self::Unavailable,
         }
     }
 
-    /// This host's raise: System mode when the broker's socket exists, else the account's
-    /// granted nice limit (Linux only).
+    /// This host's raise: System mode when the broker's socket exists, the split read from
+    /// cgroup v2, and the account's granted nice limit (Linux only).
     pub fn current() -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -378,6 +384,7 @@ impl Raise {
             let read = unsafe { libc::getrlimit(libc::RLIMIT_NICE, &mut limit) } == 0;
             Self::on_host(
                 std::path::Path::new(crate::broker::SOCKET_PATH).exists(),
+                crate::broker::units::user_slice_splits_cpu(),
                 read.then_some(limit.rlim_cur),
             )
         }
@@ -389,10 +396,15 @@ impl Raise {
 
     pub fn describe(self) -> String {
         match self {
-            Self::UnitWeight => {
-                "System mode unit CPU weight, where the administrator policy permits".into()
+            Self::AccountSlice => {
+                "your account slice's CPU weight, where the administrator policy permits".into()
             }
-            Self::Nice(nice) => format!("nice down to {nice}, within this account's limit"),
+            // The supervisor's per-thread nice step is not built yet (006 T041).
+            Self::Nice(nice) => {
+                format!(
+                    "nice down to {nice} would reach other users; this version does not apply it yet"
+                )
+            }
             Self::Unavailable => "none on this host: it only starts work sooner".into(),
         }
     }
@@ -403,17 +415,23 @@ mod tests {
     use super::*;
     use crate::execution_model::ProcessIdentity;
 
-    /// System mode raises the unit weight; elsewhere a granted nice limit allows a nice value
-    /// down to 20 minus the limit, never below -10; without one there is no raise (006 FR-016).
+    /// Where the host splits CPU by account, only System mode's account slice weight reaches
+    /// other users; where accounts share a CPU cgroup, a granted nice limit allows a nice value
+    /// down to 20 minus the limit, never below -10; otherwise there is no raise (006 FR-016).
     #[test]
-    fn the_raise_follows_system_mode_and_the_granted_nice_limit() {
-        assert_eq!(Raise::on_host(true, None), Raise::UnitWeight);
-        assert_eq!(Raise::on_host(false, None), Raise::Unavailable);
-        assert_eq!(Raise::on_host(false, Some(0)), Raise::Unavailable);
-        assert_eq!(Raise::on_host(false, Some(20)), Raise::Unavailable);
-        assert_eq!(Raise::on_host(false, Some(25)), Raise::Nice(-5));
-        assert_eq!(Raise::on_host(false, Some(40)), Raise::Nice(-10));
-        assert_eq!(Raise::on_host(false, Some(u64::MAX)), Raise::Nice(-10));
+    fn the_raise_reaches_other_users_only_at_their_level() {
+        assert_eq!(Raise::on_host(true, true, None), Raise::AccountSlice);
+        assert_eq!(Raise::on_host(false, true, Some(40)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(true, false, Some(40)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, false, None), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, false, Some(0)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, false, Some(20)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, false, Some(25)), Raise::Nice(-5));
+        assert_eq!(Raise::on_host(false, false, Some(40)), Raise::Nice(-10));
+        assert_eq!(
+            Raise::on_host(false, false, Some(u64::MAX)),
+            Raise::Nice(-10)
+        );
     }
     use crate::model::Resources;
 

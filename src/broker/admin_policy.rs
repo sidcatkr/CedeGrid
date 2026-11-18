@@ -42,6 +42,7 @@ struct PolicyFile {
 struct ModesSection {
     allowed: Option<Vec<ModeName>>,
     unprotected: Option<bool>,
+    unprotected_cpu_weight: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -106,13 +107,19 @@ impl<T> Setting<T> {
     }
 }
 
+/// The account slice's CPU weight under unprotected when the policy names none: four times the
+/// default of 100 (006 FR-016).
+pub const DEFAULT_UNPROTECTED_CPU_WEIGHT: u64 = 400;
+
 /// The effective administrator policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminPolicy {
     pub policy_version: u32,
     pub allowed_modes: Setting<Vec<ModeName>>,
-    /// Whether members may request unprotected (004 FR-015a); off by default.
+    /// Whether members may request unprotected (006 FR-015); off by default.
     pub unprotected: Setting<bool>,
+    /// The CPU weight the broker gives an unprotected caller's account slice (006 FR-016).
+    pub unprotected_cpu_weight: Setting<u64>,
     pub tasks_per_user: Setting<u32>,
     pub tasks_max: Setting<u32>,
     /// `LimitNOFILE=`; `None` keeps systemd's default.
@@ -197,10 +204,19 @@ impl AdminPolicy {
         );
         let pam_session = Setting::pick(file.units.pam_session, PamSession::None);
         let unprotected = Setting::pick(file.modes.unprotected, false);
+        let unprotected_cpu_weight = Setting::pick(
+            file.modes.unprotected_cpu_weight,
+            DEFAULT_UNPROTECTED_CPU_WEIGHT,
+        );
+        ensure!(
+            (101..=10_000).contains(&unprotected_cpu_weight.value),
+            "modes.unprotected_cpu_weight must be between 101 and 10000"
+        );
         Ok(Self {
             policy_version,
             allowed_modes,
             unprotected,
+            unprotected_cpu_weight,
             tasks_per_user,
             tasks_max,
             open_files,
@@ -238,6 +254,11 @@ impl AdminPolicy {
                 "modes.unprotected",
                 self.unprotected.value.to_string(),
                 self.unprotected.source,
+            ),
+            (
+                "modes.unprotected_cpu_weight",
+                self.unprotected_cpu_weight.value.to_string(),
+                self.unprotected_cpu_weight.source,
             ),
             (
                 "limits.tasks_per_user",

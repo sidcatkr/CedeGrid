@@ -26,6 +26,15 @@ class AdmittedAtTest(unittest.TestCase):
         self.assertEqual(gates.admitted_at(samples, (0.5, 1, 2, 4)), [1, 2, 2, None])
 
 
+class CompletionTest(unittest.TestCase):
+    def test_reads_each_finished_tasks_completion_after_submission(self):
+        own = [{'finished': 115.0}, {'finished': 130.5}, {'units': 0}, {'finished': 160.0}]
+        self.assertEqual(gates.completion(own, 100.0),
+                         {'completion_s': [15.0, 30.5, 60.0], 'mean_s': 35.17, 'makespan_s': 60.0})
+        self.assertEqual(gates.completion([], 100.0),
+                         {'completion_s': [], 'mean_s': None, 'makespan_s': None})
+
+
 class ArgumentsTest(unittest.TestCase):
     def test_fill_runs_only_the_two_modes(self):
         for arm in ('alone', 'plain', 'unprotected'):
@@ -35,6 +44,25 @@ class ArgumentsTest(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('fill runs performance or aggressive', result.stderr)
+
+    def test_fixed_work_shapes_run_plain_or_performance(self):
+        for shape in ('batch', 'vram'):
+            result = subprocess.run(
+                [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
+                 '--python', sys.executable, '--shape', shape, '--arm', 'aggressive'],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(f'{shape} runs plain or performance', result.stderr)
+
+    def test_the_peer_role_needs_its_times_and_admit_needs_a_cg_shape(self):
+        for args, message in ((['--role', 'peer'], 'the peer role takes'),
+                              (['--shape', 'gpu', '--arm', 'admit'], 'admit runs the cg shapes'),
+                              (['--shape', 'gpu'], '--shape and --arm are required')):
+            result = subprocess.run(
+                [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
+                 '--python', sys.executable, *args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(message, result.stderr)
 
     def test_plain_tasks_go_only_with_the_plain_arm(self):
         for arm, count in (('performance', '1'), ('plain', '0')):

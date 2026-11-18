@@ -729,10 +729,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                         })
                         .flatten()
                         .map(|(_, gap)| gap);
-                    cedegrid::explain::unprotected_text(
-                        &cedegrid::system_mode::host_gaps(allowance, policy),
-                        &runs,
-                        unreadable.as_deref(),
+                    // The raise this host offers unprotected runs (006 FR-016, FR-019).
+                    format!(
+                        "{}  raise on this host: {}\n",
+                        cedegrid::explain::unprotected_text(
+                            &cedegrid::system_mode::host_gaps(allowance, policy),
+                            &runs,
+                            unreadable.as_deref(),
+                        ),
+                        cedegrid::actuation::Raise::current().describe()
                     )
                 } else {
                     String::new()

@@ -113,6 +113,25 @@ pub fn job_modes(
         .collect()
 }
 
+/// Whether an unprotected raise may be in force now: a run started unprotected is unreleased,
+/// and no protected first-comer is on the CPU (006 FR-016, FR-018). `own_arrival` is own work's
+/// earliest arrival there; without one, every other account with Performance or Aggressive
+/// CedeGrid work on the CPU counts as a protected first-comer.
+pub fn raise_wanted(
+    unprotected_runs: usize,
+    own_arrival: Option<u64>,
+    principals: &[crate::model::PrincipalUsage],
+) -> bool {
+    unprotected_runs > 0
+        && !principals.iter().any(|principal| {
+            !principal.is_owner
+                && principal
+                    .cedegrid_cpu
+                    .and_then(|work| work.protected_arrival_unix_ms)
+                    .is_some_and(|at| own_arrival.is_none_or(|own| at <= own))
+        })
+}
+
 /// One condition an unprotected grant lacks: its code, what is missing and how to
 /// fix it. `doctor` lists them as bullets; a refusal joins them into one line.
 #[derive(Clone, Debug, PartialEq, Eq)]

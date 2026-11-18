@@ -11,6 +11,7 @@ policy_version = 1
 [modes]
 allowed = ["yield_first", "neutral", "performance"]   # default: all of 001's modes except Aggressive
 unprotected = false                        # default; true lets members request 006's unprotected option
+unprotected_cpu_weight = 400               # default; the account slice's CPUWeight under unprotected, 101 to 10000
 
 [limits]
 tasks_per_user = 64          # CedeGrid tasks one user may run at once; default 64

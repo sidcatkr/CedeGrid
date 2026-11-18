@@ -9,8 +9,9 @@ CedeGrid account that arrived first, where 001's hold stays. Other accounts' Ced
 identified read-only from a marker in its supervisors' command lines, which also carries each
 run's arrival on the node. Admit immediately lifts the hold beside first-comers that only yield.
 Unprotected, which replaces 004's unprotected Aggressive and keeps its consent path, also raises
-own CPU share where the host gives a way: the System mode broker's unit weight, or a nice limit
-the administrator granted.
+own CPU share where the host gives a way that reaches other users' work: the account slice's
+weight through the System mode broker, or a granted nice limit where accounts share a CPU
+cgroup.
 
 ## Technical Context
 
@@ -36,7 +37,7 @@ arms through `tools/aggressive_gates.py`.
   Pass.
 - **IV. Pure policy**: principal kinds and arrivals enter through the snapshot and the policy
   input; the policy decides from them alone. Pass.
-- **V. Broker**: one new request, the caller's ordinary unit weight under unprotected, limited
+- **V. Broker**: one new request, the caller's account slice weight under unprotected, limited
   as the amended Principle V states; it needs the security review before release. Pass with
   review.
 - **VI. Tests first**: each FR gets a failing test first; decision snapshots are re-recorded and
@@ -101,15 +102,22 @@ arms through `tools/aggressive_gates.py`.
   grant record and System mode administrator key (`modes.unprotected`, renamed).
 - The coordinator places a run that takes either option against the node's admit immediately
   budget. The agent's launch check does the same.
-- Raise, System mode: a new broker request `raise_cpu_weight { on: bool }`. The broker sets the
-  caller's ordinary unit's `CPUWeight` to the administrator policy's `unprotected_cpu_weight`
-  (default 400, range 101 to 10000) or back to the default, through `systemctl set-property
-  --runtime`, and reads it back. It returns the weight to the default when the caller's agent
-  connection is gone for a grace period, when the caller's ordinary unit stops, or when the
-  caller is removed from the group.
-- Raise, elsewhere: the supervisor of an unprotected run reads `RLIMIT_NICE`. If it permits a
-  value below 0, it sets the run's verified processes to the lowest permitted nice value, no
-  lower than −10. Otherwise it reports that no raise is available.
+- A raise must act where other users' work competes with own work. Where `user.slice` splits
+  CPU by account, that is the account slice: a nice value inside it reaches nobody else, and only
+  root can weight it, so only System mode can raise there. Where accounts share a CPU cgroup, a
+  nice value reaches them, and the account's granted nice limit bounds it. `actuation::Raise`
+  decides which applies on the host.
+- Raise, System mode: a new broker request `raise { on: bool }`, served only while the
+  administrator policy's `modes.unprotected` is true and the caller's ordinary unit sits in its
+  account slice. The broker sets `user-<uid>.slice`'s `CPUWeight` to the policy's
+  `unprotected_cpu_weight` (default 400, range 101 to 10000) through `systemctl set-property
+  --runtime`, reads it back, and records the expiry of the caller's lease (30 s; the agent
+  renews it each monitor interval). It resets the weight when the caller withdraws, when the
+  lease expires, when the caller's ordinary unit stops, or when the caller leaves the group; on
+  start it resets any weight it set before (its own drop-in, recognized by content).
+- Raise, shared CPU cgroup: the supervisor of an unprotected run reads `RLIMIT_NICE`. If it
+  permits a value below 0, it sets the run's verified processes to the lowest permitted nice
+  value, no lower than −10, and back to 0 when told. Otherwise no raise is available.
 - The agent asks for the raise only while an unprotected run is active and no protected
   first-comer is on the CPU, and withdraws it within two monitor intervals of either changing.
 
@@ -137,13 +145,18 @@ both sides build against them.
 ## Gates
 
 `tools/aggressive_gates.py` gains:
-- a `first` shape, in which own work starts on an idle scope and the second account arrives
-  20 s later;
-- a `batch` shape (sixteen 500 m tasks on four CPUs, completion times);
-- a `ram` shape (more 1 GiB tasks than RAM less the floor);
-- a `vram` shape (more GPU tasks than device memory);
-- a `peer-cedegrid` arm, which runs a second agent as the second account;
-- plain arms for every shape.
+- `first` and `first-gpu`: own work starts on an idle scope and the second account arrives 20 s
+  later;
+- `batch`: sixteen 1000 m tasks of fixed work on four CPUs, with completion times;
+- `vram`: six 2048 MiB GPU tasks on one 8 GiB device, with which ones could allocate;
+- `cg-later-gpu` and `cg-first-gpu`: the second account runs one GPU task through its own
+  CedeGrid (`--role peer`, from a copy in `/tmp` it can read) or by hand, before or after own
+  work. On CPU, where the host splits by account, the kernel gives each account its share
+  whatever the other starts, so the CedeGrid-against-CedeGrid gate runs on GPU compute;
+- an `admit` arm (Performance with admit immediately), and plain arms for every shape.
+
+A `ram` shape (more tasks than RAM) waits for the user's approval: its plain arm drives the host
+into OOM.
 
 The System mode raise gate runs from the installed packages, with the administrator key set by
 the user.

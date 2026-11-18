@@ -41,7 +41,7 @@ const IDENTITY_WORDS: &[&str] = &[
     "caps",
 ];
 
-const FIELDS: &[&str] = &["protocol", "kind", "mode", "job"];
+const FIELDS: &[&str] = &["protocol", "kind", "mode", "job", "on"];
 
 /// One request about the caller's own units (FR-005).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +54,9 @@ pub enum Request {
     Status,
     /// Move one of the caller's jobs to the unit for `mode` (FR-018).
     Move { job: JobId, mode: ModeName },
+    /// Raise, or stop raising, the CPU weight of the caller's account slice under unprotected
+    /// (006 FR-016).
+    Raise { on: bool },
 }
 
 impl Request {
@@ -68,6 +71,9 @@ impl Request {
         if let Request::Move { job, .. } = self {
             fields.insert("job".to_owned(), Value::from(job.as_str()));
         }
+        if let Request::Raise { on } = self {
+            fields.insert("on".to_owned(), Value::from(*on));
+        }
         let mut line = Value::Object(fields).to_string();
         line.push('\n');
         line
@@ -79,6 +85,7 @@ impl Request {
             Request::Stop => "stop",
             Request::Status => "status",
             Request::Move { .. } => "move",
+            Request::Raise { .. } => "raise",
         }
     }
 
@@ -86,7 +93,7 @@ impl Request {
         match self {
             Request::Start { mode } => *mode,
             Request::Move { mode, .. } => Some(*mode),
-            Request::Stop | Request::Status => None,
+            Request::Stop | Request::Status | Request::Raise { .. } => None,
         }
     }
 }
@@ -131,6 +138,8 @@ pub enum RefusalCode {
     UnitNotOurs,
     JobNotFound,
     MoveRefused,
+    /// The unprotected raise is not permitted, or reaches no other account from here (006).
+    RaiseRefused,
     SystemdTimeout,
     SystemdFailed,
 }
@@ -260,7 +269,7 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
         _ => {
             return Err(Refusal::new(
                 RefusalCode::Malformed,
-                "missing or invalid field kind (expected start, stop, status or move)",
+                "missing or invalid field kind (expected start, stop, status, move or raise)",
             ));
         }
     };
@@ -304,9 +313,19 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
             };
             Ok(Request::Move { job, mode })
         }
+        "raise" => {
+            only_fields(&fields, &["protocol", "kind", "on"])?;
+            match fields.get("on") {
+                Some(Value::Bool(on)) => Ok(Request::Raise { on: *on }),
+                _ => Err(Refusal::new(
+                    RefusalCode::Malformed,
+                    "raise request without a true or false field on",
+                )),
+            }
+        }
         _ => Err(Refusal::new(
             RefusalCode::UnknownKind,
-            "unknown request kind (expected start, stop, status or move)",
+            "unknown request kind (expected start, stop, status, move or raise)",
         )),
     }
 }
@@ -366,7 +385,7 @@ fn unknown_field(name: &str) -> Refusal {
         format!(
             "unknown field {} (this request accepts {})",
             shown(name),
-            "protocol, kind, and mode or job where the kind takes them"
+            "protocol, kind, and mode, job or on where the kind takes them"
         ),
     )
 }

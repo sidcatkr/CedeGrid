@@ -70,16 +70,18 @@ this thread's.
 
 ## Phase 5: Raise (this thread)
 
-- [ ] T040 [US3] Test first, then the broker request `raise_cpu_weight { on }` in
-  `src/broker/request.rs`, `src/broker/server.rs` and `src/broker/systemd.rs`: the caller's
-  ordinary unit only, read back, and returned to the default on withdrawal, on the agent's
-  absence past the grace period, on the unit's stop and on removal from the group. The
-  administrator policy's `unprotected_cpu_weight` (default 400, 101 to 10000) goes in
-  `src/broker/admin_policy.rs`.
-- [ ] T041 [US3] Test first, then the supervisor's nice raise in `src/supervision/unix.rs`:
+- [x] T040 [US3] Test first, then the broker request `raise { on }` in `src/broker/request.rs`,
+  `src/broker/server.rs` and `src/broker/systemd.rs`: only while `modes.unprotected` is true and
+  the caller's ordinary unit sits in its account slice; `user-<uid>.slice` `CPUWeight` set and
+  read back; a 30 s lease the agent renews; reset on withdrawal, expiry, the unit's stop, removal
+  from the group and broker start (its own drop-in only). The administrator policy's
+  `unprotected_cpu_weight` (default 400, 101 to 10000) goes in `src/broker/admin_policy.rs`.
+- [ ] T041 [US3] (open: per-thread nice with Principle I's thread checks, and its withdrawal
+  when a protected first-comer arrives) Test first, then the supervisor's nice raise in
+  `src/supervision/unix.rs`:
   read `RLIMIT_NICE`, set the lowest permitted value no lower than −10 on the run's verified
   processes, and report none when not permitted.
-- [ ] T042 [US3] The agent asks for and withdraws the raise per FR-016 and FR-018
+- [x] T042 [US3] The agent asks for and withdraws the raise per FR-016 and FR-018
   (`src/agent/service.rs`, `src/system_mode.rs`).
 - [ ] T043 [US3] Container fixtures for the broker request in `tests/system_mode.rs`, and the
   security review package in `specs/005-system-mode/security-review.md` and
@@ -87,8 +89,12 @@ this thread's.
 
 ## Phase 6: Gates (this thread)
 
-- [ ] T050 Add the `first`, `batch`, `ram` and `vram` shapes, the `peer-cedegrid` arm and plain
-  arms to `tools/aggressive_gates.py`, with tests in `tests/test_aggressive_gates.py`.
+- [x] T050 Add the `first`, `first-gpu`, `batch`, `vram`, `cg-later-gpu` and `cg-first-gpu`
+  shapes, the `admit` arm, the second account's `--role peer` and plain arms for every shape to
+  `tools/aggressive_gates.py`, with tests in `tests/test_aggressive_gates.py`. CedeGrid against
+  CedeGrid runs on GPU compute: where the host splits CPU by account, the kernel gives each
+  account its share whatever the other starts, so a CPU shape would show nothing. The `ram`
+  shape waits for the user's approval, since its plain arm drives the host into OOM.
 - [ ] T051 Run FR-023's gates on the test host and record them in `docs/validation.md` under
   feature 006.
 

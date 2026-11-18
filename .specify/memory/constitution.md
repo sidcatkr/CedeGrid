@@ -146,9 +146,12 @@ never let CedeGrid act on a process it does not own.
   It is a *caution* option.
 - **Unprotected, the one priority exception.** A per-run option for Performance and Aggressive
   work, at the highest warning level. Beyond admit immediately, it MAY raise own work's CPU share
-  above other users' where the host provides a way: the System mode broker raising the CPU
-  weight of the caller's ordinary unit (Principle V), or a negative nice value on own verified
-  processes within a nice limit the administrator granted the account. Otherwise:
+  above other users' where the host provides a way that reaches the level at which other
+  users' work competes with it: the System mode broker raising the CPU weight of the caller's
+  account slice, where the host splits CPU by account and the caller's ordinary unit sits in that
+  slice (Principle V); or, where own work shares a CPU cgroup with other users' work, a negative
+  nice value on own verified processes within a nice limit the administrator granted the account.
+  Otherwise:
   - the floors, Principle I and the OOM order hold in full; it never uses real-time scheduling
     classes and never acts on another process;
   - it applies no raise while a CedeGrid principal that arrived first runs Performance or
@@ -241,13 +244,13 @@ from effects keeps every action auditable.
   - moves only the caller's own verified work between the caller's own units, held still from
     the check to the move;
   - under the unprotected option, and only where the administrator policy permits it, raises the
-    CPU weight of the caller's ordinary unit while the caller asks, and returns it to the default
-    when the caller stops asking, stops or is removed; it raises no other unit's or process's
-    priority;
+    CPU weight of the caller's account slice, where the caller's ordinary unit sits in it, while
+    the caller asks, and returns it to the default when the caller stops asking, stops or is
+    removed; it raises no other unit's or process's priority;
   - writes OOM score adjustments only for processes in its verified set (Principle I), and
     lowers one only for the part of its user's memory within that user's fair share, which it
     reads from kernel counters itself; it never writes −1000;
-  - writes no other file than those scores, the cgroup files of those moves, that unit weight
+  - writes no other file than those scores, the cgroup files of those moves, that slice weight
     and, where systemd cannot set it, the idle slice's `cpu.idle`; it changes no PAM, login,
     sysctl or kernel module setting, and purging the package leaves the host as before the
     install;

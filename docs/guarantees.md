@@ -595,8 +595,9 @@ work they have no effect.
   work. Beside one that arrived first in Performance or Aggressive it is ignored.
 - Unprotected (`unprotected` with `confirm_unprotected`, at the highest warning level) implies
   admit immediately and raises own work's CPU share above other users' where this host gives a
-  way: the System mode broker's unit weight, or a nice limit the administrator granted the
-  account. It never raises while a CedeGrid user that arrived first runs Performance or
+  way that reaches their work: the account slice's CPU weight through the System mode broker,
+  where the host splits CPU by account, or a nice limit the administrator granted the account,
+  where own work shares a CPU cgroup with theirs. It never raises while a CedeGrid user that arrived first runs Performance or
   Aggressive on the CPU, and GPU compute gets no raise.
 
 Unprotected starts only when all of these hold:

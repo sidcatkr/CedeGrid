@@ -19,7 +19,7 @@ Performance and Aggressive (FR-020 to FR-022, FR-065, FR-089, and the kept equal
 2026-11-17), and replaces [004-aggressive-mode](../004-aggressive-mode/spec.md)'s unprotected
 Aggressive with the two options below. It uses [005-system-mode](../005-system-mode/spec.md)'s
 broker and units. The constitution (9.0.0) applies, in particular Principle II's Principals,
-Arrival order, Admission, Admit immediately and Unprotected rules, and Principle V's unit weight.
+Arrival order, Admission, Admit immediately and Unprotected rules, and Principle V's slice weight.
 
 ## Clarifications
 
@@ -62,8 +62,10 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
   not protected.
 - **Unprotected**: a per-run option at the highest warning level that implies admit immediately
   and raises own work's CPU share where the host provides a way.
-- **Raise**: CPU share above the kernel's even split: a higher CPU weight on the caller's System
-  mode unit, or a negative nice value within a limit the administrator granted the account.
+- **Raise**: CPU share above the kernel's even split, set where other users' work competes with
+  own work: a higher CPU weight on the caller's account slice in System mode, where the host
+  splits CPU by account, or a negative nice value within a limit the administrator granted the
+  account, where own work shares a CPU cgroup with other users' work.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -132,9 +134,10 @@ protected first-comer present.
 
 **Acceptance Scenarios**:
 
-1. **Given** System mode, the allowance, the administrator key and a granted run, **When**
-   another account saturates the CPU, **Then** the caller's ordinary unit runs at the raised CPU
-   weight while the run is active, and own work's CPU share is above the even split.
+1. **Given** System mode with the ordinary unit in the account slice, the allowance, the
+   administrator key and a granted run, **When** another account saturates the CPU, **Then** the
+   caller's account slice runs at the raised CPU weight while the run is active, and own work's
+   CPU share is above the even split.
 2. **Given** the same with a protected first-comer on the CPU, **Then** no raise applies.
 3. **Given** a Tracked node without a granted nice limit, **Then** the run is admitted
    immediately, no raise applies, and every output says no raise is available on this host.
@@ -248,17 +251,20 @@ and for own work, its arrival and the options in force.
   immediately.
 - **FR-016**: Under unprotected, while no protected first-comer is on the CPU, own work's CPU
   share MUST be raised where the host provides a way:
-  - in System mode, the broker raises the caller's ordinary unit's CPU weight to the
-    administrator policy's value while the agent asks, and returns it to the default when the
-    agent stops asking, stops or is removed from the group;
-  - elsewhere, the supervisor sets a negative nice value on the run's verified processes, no
-    lower than the account's granted nice limit allows; without a granted limit, no raise.
+  - in System mode, where the caller's ordinary unit sits in its account slice, the broker
+    raises that slice's CPU weight to the administrator policy's value while the agent asks, and
+    returns it to the default when the agent stops asking, stops or is removed from the group;
+  - where own work shares a CPU cgroup with other users' work, the supervisor sets a negative
+    nice value on the run's verified processes, no lower than the account's granted nice limit
+    allows;
+  - anywhere else no raise reaches other users' work, and none is applied: a nice value does not
+    cross CPU cgroups, and only an administrator can weight one account's slice over another.
 - **FR-017**: No raise MUST use real-time scheduling classes, act on another process, or apply
   to GPU compute.
 - **FR-018**: A raise MUST end within two monitor intervals after the run ends or is drained,
   the allowance turns off, the administrator key turns off, or a protected first-comer arrives.
 - **FR-019**: An unprotected run MUST be marked `UNPROTECTED` in red in `observe`, `doctor`, the
-  coordinator status and the log, with the raise in force (unit weight, nice value, or none
+  coordinator status and the log, with the raise in force (slice weight, nice value, or none
   available).
 
 **Visibility and decisions**
@@ -291,7 +297,7 @@ and for own work, its arrival and the options in force.
   command line.
 - **Principal kind**: plain or CedeGrid, per resource, with arrival and first-comer status.
 - **Admit immediately grant** and **unprotected grant**: per-run records, as 004's grant.
-- **Raise**: the unit weight or nice value in force, or none, per unprotected run.
+- **Raise**: the account slice weight or nice value in force, or none, per unprotected run.
 
 ## Success Criteria *(mandatory)*
 

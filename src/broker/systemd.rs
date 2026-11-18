@@ -69,6 +69,10 @@ pub trait Systemd {
     fn start(&self, spec: &UnitSpec) -> Result<(), Refusal>;
     fn stop(&self, unit: &str) -> Result<(), Refusal>;
     fn reset_failed(&self, unit: &str) -> Result<(), Refusal>;
+    /// A slice's `CPUWeight`; `None` when it is at the default.
+    fn slice_weight(&self, slice: &str) -> Result<Option<u64>, Refusal>;
+    /// Sets a slice's `CPUWeight` for this boot only, or back to the default with `None`.
+    fn set_slice_weight(&self, slice: &str, weight: Option<u64>) -> Result<(), Refusal>;
 }
 
 /// The real systemd, through its fixed command paths.
@@ -174,6 +178,90 @@ impl Systemd for SystemctlRunner {
         )
         .map(|_| ())
     }
+
+    fn slice_weight(&self, slice: &str) -> Result<Option<u64>, Refusal> {
+        let output = self.run(
+            SYSTEMCTL,
+            vec![
+                "show".into(),
+                "--property=CPUWeight".into(),
+                "--".into(),
+                slice.into(),
+            ],
+        )?;
+        Ok(parse_weight(&output))
+    }
+
+    fn set_slice_weight(&self, slice: &str, weight: Option<u64>) -> Result<(), Refusal> {
+        let value = weight.map(|weight| weight.to_string()).unwrap_or_default();
+        self.run(
+            SYSTEMCTL,
+            vec![
+                "set-property".into(),
+                "--runtime".into(),
+                "--".into(),
+                slice.into(),
+                format!("CPUWeight={value}").into(),
+            ],
+        )
+        .map(|_| ())
+    }
+}
+
+/// A `CPUWeight=` line of `systemctl show`; anything but a number is the default.
+pub fn parse_weight(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("CPUWeight="))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The caller's account slice, which only an unprotected raise weights (006 FR-016).
+pub fn account_slice(uid: u32) -> String {
+    format!("user-{uid}.slice")
+}
+
+/// Raises, or resets, the CPU weight of the caller's account slice under unprotected (006
+/// FR-016). A raise needs the administrator's `modes.unprotected` and the caller's ordinary unit
+/// in that slice, where the host splits CPU by account; a reset needs neither. Either is read
+/// back.
+pub fn raise_account_slice(
+    systemd: &dyn Systemd,
+    caller: Caller,
+    policy: &AdminPolicy,
+    on: bool,
+) -> Result<Vec<UnitStatus>, Refusal> {
+    let slice = account_slice(caller.uid);
+    let units = status_units(systemd, caller);
+    let weight = if on {
+        if !policy.unprotected.value {
+            return Err(Refusal::new(
+                RefusalCode::RaiseRefused,
+                "policy modes.unprotected is false; ask an administrator to permit unprotected",
+            ));
+        }
+        let prefix = format!("/user.slice/{slice}/");
+        let placed = units.as_ref().is_ok_and(|units| {
+            units.iter().any(|unit| {
+                unit.kind == UnitKind::Ordinary
+                    && unit.state == "active"
+                    && unit.cgroup.starts_with(&prefix)
+            })
+        });
+        if !placed {
+            return Err(Refusal::new(
+                RefusalCode::RaiseRefused,
+                "your ordinary unit is not running in your account slice, so no raise reaches other accounts",
+            ));
+        }
+        Some(policy.unprotected_cpu_weight.value)
+    } else {
+        None
+    };
+    systemd.set_slice_weight(&slice, weight)?;
+    if systemd.slice_weight(&slice)? != weight {
+        return Err(failed());
+    }
+    Ok(units.unwrap_or_default())
 }
 
 const KINDS: [UnitKind; 2] = [UnitKind::Ordinary, UnitKind::Idle];
