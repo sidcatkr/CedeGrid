@@ -5989,6 +5989,62 @@ mod gpu_demand {
             }
         }
 
+        /// An own GPU task placed on the device but not yet listed there counts toward the rule as
+        /// one context: beside one saturating context, one placed task leaves no room for another,
+        /// so two tasks placed a heartbeat apart do not both start (FR-022, FR-089).
+        #[test]
+        fn a_placed_task_not_yet_listed_counts_toward_the_admission_rule() {
+            let code = |decision: &Decision| {
+                decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string)
+            };
+            for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+                let config = mode_config(mode);
+                let mut engine = PolicyEngine::new();
+                for i in 0..60u64 {
+                    let snap = sliced(None, 990, i + 1, 0, 1);
+                    engine
+                        .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                        .unwrap();
+                }
+                let alone = engine
+                    .evaluate(
+                        &config,
+                        &sliced(None, 990, 61, 0, 1),
+                        &PolicyInput::default(),
+                        60 * INTERVAL,
+                    )
+                    .unwrap();
+                assert_ne!(
+                    code(&alone).as_deref(),
+                    Some("gpu_time_slice_admission_held"),
+                    "{mode:?}: room for one"
+                );
+                for phase in [AllocationPhase::Pending, AllocationPhase::Running] {
+                    let mut placed = job(None);
+                    placed.phase = phase;
+                    if phase == AllocationPhase::Pending {
+                        placed.observed = None;
+                    }
+                    let input = PolicyInput {
+                        allocations: vec![placed],
+                        ..PolicyInput::default()
+                    };
+                    let decision = engine
+                        .evaluate(&config, &sliced(None, 990, 62, 0, 1), &input, 61 * INTERVAL)
+                        .unwrap();
+                    assert_eq!(
+                        code(&decision).as_deref(),
+                        Some("gpu_time_slice_admission_held"),
+                        "{mode:?} {phase:?}"
+                    );
+                }
+            }
+        }
+
         /// The first-come record of the device (FR-090).
         pub(super) fn first_come(decision: &Decision) -> Option<String> {
             decision.resources[&ResourceKey::GpuCompute(GPU.into())]

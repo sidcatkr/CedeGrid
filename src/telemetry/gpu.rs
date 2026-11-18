@@ -256,6 +256,30 @@ pub(super) fn advance_quiet(
 }
 
 /// Quiet only replaces Unknown; Idle and Active evidence always wins.
+/// External compute activity read as unknown only because no new per-process sample came this
+/// interval, with the listing known, stays active within the sample age of an active reading:
+/// NVML can have no new sample every other interval, and a saturating user would read active and
+/// unknown by turns (FR-021). Only the active reading carries over, since unknown is never quiet;
+/// an unknown listing, or a reading older than the age, stays unknown.
+pub(super) fn carry_activity(
+    activity: ComputeActivity,
+    listed: bool,
+    last: Option<&(std::time::Instant, ComputeActivity)>,
+    now: std::time::Instant,
+    max_age: std::time::Duration,
+) -> ComputeActivity {
+    match last {
+        Some((at, ComputeActivity::Active))
+            if activity == ComputeActivity::Unknown
+                && listed
+                && now.saturating_duration_since(*at) <= max_age =>
+        {
+            ComputeActivity::Active
+        }
+        _ => activity,
+    }
+}
+
 pub(super) fn quiet_activity(
     activity: ComputeActivity,
     ticks: u32,
