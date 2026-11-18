@@ -650,7 +650,7 @@ fn a_heartbeat_reports_active_work_and_the_last_256_released_runs() {
 fn unprotected_runs_are_listed_from_authorization_until_release() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     let (dir, store) = store();
-    let grant = UnprotectedGrant {
+    let grant = RunGrant {
         confirmed: true,
         requested_unix_ms: 7,
     };
@@ -660,7 +660,8 @@ fn unprotected_runs_are_listed_from_authorization_until_release() {
             (ResourceKind::Cpu, ContentionMode::Aggressive),
             (ResourceKind::GpuCompute, ContentionMode::Aggressive),
         ]),
-        unprotected_aggressive: Some(grant),
+        admit_immediately: None,
+        unprotected: Some(grant),
     });
     let room = Resources {
         cpu_millicores: 4000,
@@ -709,4 +710,50 @@ fn unprotected_runs_are_listed_from_authorization_until_release() {
     candidate.phase = ExecutionPhase::Released;
     store.transition(&candidate).unwrap();
     assert!(store.unprotected_runs().unwrap().is_empty());
+}
+
+/// A run's arrival stays with its unreleased work across a reopen. A launch beside unreleased
+/// work takes the earliest arrival there, a GPU launch counting only work on its devices, and a
+/// launch beside none takes its own time (006 FR-005).
+#[test]
+fn arrivals_follow_unreleased_work_and_survive_reopen() {
+    use std::collections::BTreeSet;
+    let (dir, store) = store();
+    let none = BTreeSet::new();
+    let gpu = BTreeSet::from(["GPU-a".to_string()]);
+    assert_eq!(store.launch_arrival(&none, 5_000).unwrap(), 5_000);
+    let first = store
+        .reserve(&request("a", "a1"), &resources(1000))
+        .unwrap();
+    store.record_arrival("a1", 5_000).unwrap();
+    assert_eq!(store.launch_arrival(&none, 9_000).unwrap(), 5_000);
+    // Nothing of own work holds that device yet.
+    assert_eq!(store.launch_arrival(&gpu, 9_000).unwrap(), 9_000);
+    let mut on_gpu = request("g", "g1");
+    on_gpu.resources.gpu_memory_mib = BTreeMap::from([("GPU-a".into(), 512)]);
+    let room = Resources {
+        cpu_millicores: 4000,
+        ram_mib: 1024,
+        gpu_memory_mib: BTreeMap::from([("GPU-a".into(), 8192)]),
+    };
+    store.reserve(&on_gpu, &room).unwrap();
+    store.record_arrival("g1", 9_000).unwrap();
+    assert_eq!(store.launch_arrival(&gpu, 12_000).unwrap(), 9_000);
+    assert_eq!(store.launch_arrival(&none, 12_000).unwrap(), 5_000);
+    drop(store);
+    let store = StateStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.arrivals().unwrap(),
+        BTreeMap::from([("a1".into(), 5_000), ("g1".into(), 9_000)])
+    );
+    let mut released = first;
+    released.phase = ExecutionPhase::Released;
+    store.transition(&released).unwrap();
+    assert_eq!(
+        store.arrivals().unwrap(),
+        BTreeMap::from([("g1".into(), 9_000)])
+    );
+    // CPU work beside the GPU run takes its arrival; once it is released too, a new run
+    // arrives anew.
+    assert_eq!(store.launch_arrival(&none, 15_000).unwrap(), 9_000);
 }

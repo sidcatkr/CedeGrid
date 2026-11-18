@@ -195,7 +195,7 @@ pub struct NodeContentionReport {
     /// from one that paces its growth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_workers: Option<u32>,
-    /// The budget an unprotected Aggressive grant is placed against (004 R12): sent only while
+    /// The budget an unprotected grant is placed against (004 R12): sent only while
     /// the node cap is Aggressive, the host's allowance is on and, in a System mode unit, the
     /// administrator policy permits it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -699,25 +699,25 @@ pub fn validate_launch_request(request: &LaunchRequest) -> anyhow::Result<()> {
         "ERR_CEDEGRID_ARGUMENT: invalid managed-child contract"
     );
     anyhow::ensure!(
-        request
-            .contention
-            .as_ref()
-            .is_none_or(|contention| !contention.modes.is_empty()),
-        "ERR_CEDEGRID_ARGUMENT: a per-job contention override needs at least one mode"
+        request.contention.as_ref().is_none_or(|contention| {
+            !contention.modes.is_empty()
+                || contention.admit_immediately.is_some()
+                || contention.unprotected.is_some()
+        }),
+        "ERR_CEDEGRID_ARGUMENT: a per-job contention override needs a mode or an option"
     );
-    if let Some(contention) = &request.contention
-        && let Some(grant) = contention.unprotected_aggressive
-    {
-        use crate::contention::{ContentionMode::Aggressive, ResourceKind};
+    // Each option needs its own confirmation; on Yield First or Neutral work it has no effect,
+    // which the run's decisions say (006 FR-012, FR-015).
+    if let Some(contention) = &request.contention {
         anyhow::ensure!(
-            grant.confirmed,
-            "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing"
+            contention
+                .admit_immediately
+                .is_none_or(|grant| grant.confirmed),
+            "ERR_CEDEGRID_ADMIT_CONFIRMATION: confirm_admit_immediately is missing"
         );
         anyhow::ensure!(
-            [ResourceKind::Cpu, ResourceKind::GpuCompute]
-                .iter()
-                .all(|kind| contention.modes.get(kind) == Some(&Aggressive)),
-            "ERR_CEDEGRID_ARGUMENT: unprotected Aggressive needs mode aggressive on cpu and gpu_compute"
+            contention.unprotected.is_none_or(|grant| grant.confirmed),
+            "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected is missing"
         );
     }
     Ok(())

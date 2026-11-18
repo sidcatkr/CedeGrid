@@ -10,6 +10,11 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 /// Released runs a heartbeat reports beside the unreleased ones (FR-081).
 pub const REPORTED_RELEASED: usize = 256;
 
+const ARRIVALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS run_arrivals (
+    assignment_id TEXT PRIMARY KEY,
+    arrival_unix_ms INTEGER NOT NULL
+);";
+
 impl StateStore {
     /// A key that moves whenever the journal may have changed: another connection's commit,
     /// as a supervisor's, moves `data_version`, and this connection's writes move
@@ -94,6 +99,74 @@ impl StateStore {
     /// Runs that started under an unprotected grant and have not been released (004 FR-016).
     pub fn unprotected_runs(&self) -> Result<Vec<UnprotectedRun>> {
         unprotected_runs_on(&self.connection)
+    }
+
+    /// Keeps the run arrival a launch's marker carries (006 FR-001, FR-005). Rows of released
+    /// work are dropped on the way.
+    pub fn record_arrival(&self, assignment_id: &str, arrival_unix_ms: u64) -> Result<()> {
+        self.connection.execute_batch(ARRIVALS_TABLE)?;
+        self.connection.execute(
+            "DELETE FROM run_arrivals WHERE assignment_id IN (SELECT assignment_id FROM executions
+             WHERE json_extract(record_json,'$.phase')='released')",
+            [],
+        )?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO run_arrivals VALUES (?1, ?2)",
+            params![
+                assignment_id,
+                i64::try_from(arrival_unix_ms).context("arrival out of range")?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Each unreleased run's arrival, by assignment ID (006 FR-005).
+    pub fn arrivals(&self) -> Result<std::collections::BTreeMap<String, u64>> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='run_arrivals')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(Default::default());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT a.assignment_id, a.arrival_unix_ms FROM run_arrivals a JOIN executions e
+             USING(assignment_id) WHERE json_extract(e.record_json,'$.phase')!='released'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.map(|row| {
+            let (id, arrival) = row?;
+            Ok((id, u64::try_from(arrival).context("arrival out of range")?))
+        })
+        .collect()
+    }
+
+    /// The arrival a new launch carries: the earliest among unreleased own work on the same
+    /// resource, which for a launch on GPU devices is work holding one of them, else
+    /// `now_unix_ms`, so a run keeps its place across its tasks (006 FR-005).
+    pub fn launch_arrival(
+        &self,
+        devices: &std::collections::BTreeSet<String>,
+        now_unix_ms: u64,
+    ) -> Result<u64> {
+        let arrivals = self.arrivals()?;
+        Ok(self
+            .active_executions()?
+            .into_iter()
+            .filter(|record| {
+                devices.is_empty()
+                    || record
+                        .resources
+                        .gpu_memory_mib
+                        .keys()
+                        .any(|uuid| devices.contains(uuid))
+            })
+            .filter_map(|record| arrivals.get(&record.assignment_id).copied())
+            .min()
+            .unwrap_or(now_unix_ms))
     }
 
     /// Unknown surviving usage cannot be treated as zero. Original reservations persist.
@@ -788,7 +861,7 @@ pub(crate) fn unprotected_runs_on(
         let request: LaunchRequest = serde_json::from_str(&request)?;
         let Some(grant) = request
             .contention
-            .and_then(|contention| contention.unprotected_aggressive)
+            .and_then(|contention| contention.unprotected)
         else {
             continue;
         };

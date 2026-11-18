@@ -195,6 +195,7 @@ pub(super) async fn start_assignment(
     capacity: &Resources,
     executable: &Path,
     client: &NodeClient,
+    arrival_unix_ms: u64,
 ) -> Result<ChildSlot> {
     validate_replay_launch(config, &assignment.request)?;
     ensure!(
@@ -350,10 +351,14 @@ pub(super) async fn start_assignment(
     };
     let path = output.join("supervisor-spec.json");
     client.write_json_new(&path, &spec)?;
+    // Other accounts' agents read the task's modes and its run's arrival from this argument,
+    // read-only (006 FR-001); the hidden dispatch reads only the spec path before it.
+    let marker = work_marker(config, &assignment.request, arrival_unix_ms);
     let mut command = Command::new(executable);
     command
         .arg("__assignment-supervisor")
         .arg(path)
+        .arg(marker.to_arg())
         .env("TMPDIR", workspace.join("tmp"))
         .env("CEDEGRID_SUPERVISOR_STATE_ROOT", &config.state_dir)
         .env(
@@ -459,4 +464,65 @@ pub(super) async fn start_assignment(
         outside_reason: None,
         family: None,
     })
+}
+
+/// The marker for a task: its modes on CPU and GPU compute under the node cap, and its run's
+/// arrival (006 FR-001).
+fn work_marker(
+    config: &Config,
+    request: &crate::execution_model::LaunchRequest,
+    arrival_unix_ms: u64,
+) -> crate::execution_model::WorkMarker {
+    let modes = crate::system_mode::job_modes(&config.contention, request.contention.as_ref());
+    crate::execution_model::WorkMarker {
+        cpu: modes[0],
+        gpu: modes[2],
+        arrival_unix_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contention::{ContentionMode, ResourceKind};
+    use crate::execution_model::{JobContention, LaunchRequest};
+
+    fn request(modes: &[(ResourceKind, ContentionMode)]) -> LaunchRequest {
+        let mut request: LaunchRequest = serde_json::from_value(serde_json::json!({
+            "task_id": "t", "assignment_id": "a", "argv": ["unused"], "cwd": "/",
+            "resources": {"cpu_millicores": 1000, "ram_mib": 64},
+            "class": "opportunistic",
+        }))
+        .unwrap();
+        request.contention = (!modes.is_empty()).then(|| JobContention {
+            modes: modes.iter().copied().collect(),
+            ..JobContention::default()
+        });
+        request
+    }
+
+    /// The marker carries the modes the task runs at, within the node cap, and the arrival.
+    #[test]
+    fn the_marker_carries_the_tasks_modes_under_the_cap() {
+        let mut config = Config::default();
+        assert_eq!(
+            work_marker(&config, &request(&[]), 7).to_arg(),
+            "cedegrid-work=v1;cpu=performance;gpu=performance;arrival=7"
+        );
+        let yielding = request(&[
+            (ResourceKind::Cpu, ContentionMode::Neutral),
+            (ResourceKind::GpuCompute, ContentionMode::YieldFirst),
+        ]);
+        assert_eq!(
+            work_marker(&config, &yielding, 7).to_arg(),
+            "cedegrid-work=v1;cpu=neutral;gpu=yield_first;arrival=7"
+        );
+        // A request beyond the node cap runs, and is marked, at the cap.
+        config.contention.max_mode = Some(ContentionMode::Performance);
+        let aggressive = request(&[(ResourceKind::Cpu, ContentionMode::Aggressive)]);
+        assert_eq!(
+            work_marker(&config, &aggressive, 7).cpu,
+            ContentionMode::Performance
+        );
+    }
 }

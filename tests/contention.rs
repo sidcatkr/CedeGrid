@@ -4895,7 +4895,7 @@ mod launch_nice {
                 "required_controls": if required { vec!["cpu.nice"] } else { vec![] },
                 "contention": mode.map(|mode| JobContention {
                     modes: BTreeMap::from([(ResourceKind::Cpu, mode)]),
-                    unprotected_aggressive: None,
+                    ..JobContention::default()
                 }),
             }))
             .unwrap();

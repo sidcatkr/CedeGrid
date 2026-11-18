@@ -106,14 +106,14 @@ pub fn table(rows: &[Vec<String>], indent: usize) -> Vec<String> {
         .collect()
 }
 
-/// Whether unprotected Aggressive may start on this host, for `doctor`: what is missing and
+/// Whether unprotected may start on this host, for `doctor`: what is missing and
 /// how to fix each (004 FR-014, FR-015, FR-015a).
 pub fn unprotected_text(
     gaps: &[crate::system_mode::Gap],
     runs: &[crate::execution_model::UnprotectedRun],
     unreadable: Option<&str>,
 ) -> String {
-    let mut out = String::from("\nUnprotected Aggressive\n");
+    let mut out = String::from("\nUnprotected\n");
     if gaps.is_empty() {
         out.push_str("  available: a run that sends both SDK fields may start unprotected\n");
     } else {

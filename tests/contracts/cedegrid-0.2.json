@@ -1313,31 +1313,56 @@
       "accepted": true
     }
   ],
-  "unprotected_grant_cases": [
+  "run_option_cases": [
     {
-      "id": "UG-01",
-      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": true},
-      "wire": {"modes": {"cpu": "aggressive", "gpu_compute": "aggressive"}, "unprotected_aggressive": {"confirmed": true, "requested_unix_ms": 1}},
+      "id": "RO-01",
+      "sdk": {"unprotected": true, "confirm_unprotected": true},
+      "wire": {"modes": {}, "unprotected": {"confirmed": true, "requested_unix_ms": 1}},
       "accepted": true
     },
     {
-      "id": "UG-02",
-      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": false},
-      "wire": {"modes": {"cpu": "aggressive", "gpu_compute": "aggressive"}, "unprotected_aggressive": {"confirmed": false, "requested_unix_ms": 1}},
+      "id": "RO-02",
+      "sdk": {"unprotected": true, "confirm_unprotected": false},
+      "wire": {"modes": {}, "unprotected": {"confirmed": false, "requested_unix_ms": 1}},
       "accepted": false,
       "code": "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION"
     },
     {
-      "id": "UG-03",
-      "sdk": {"unprotected_aggressive": true, "confirm_unprotected_aggressive": true, "contention_modes": {"cpu": "performance"}},
-      "wire": {"modes": {"cpu": "performance"}, "unprotected_aggressive": {"confirmed": true, "requested_unix_ms": 1}},
-      "accepted": false
+      "id": "RO-03",
+      "sdk": {"unprotected": true, "confirm_unprotected": true, "contention_modes": {"cpu": "performance"}},
+      "wire": {"modes": {"cpu": "performance"}, "unprotected": {"confirmed": true, "requested_unix_ms": 1}},
+      "accepted": true
     },
     {
-      "id": "UG-04",
-      "sdk": {"unprotected_aggressive": false, "confirm_unprotected_aggressive": true},
+      "id": "RO-04",
+      "sdk": {"unprotected": false, "confirm_unprotected": true},
       "wire": null,
       "accepted": true
+    },
+    {
+      "id": "RO-05",
+      "sdk": {"admit_immediately": true, "confirm_admit_immediately": true},
+      "wire": {"modes": {}, "admit_immediately": {"confirmed": true, "requested_unix_ms": 1}},
+      "accepted": true
+    },
+    {
+      "id": "RO-06",
+      "sdk": {"admit_immediately": true, "confirm_admit_immediately": false},
+      "wire": {"modes": {}, "admit_immediately": {"confirmed": false, "requested_unix_ms": 1}},
+      "accepted": false,
+      "code": "ERR_CEDEGRID_ADMIT_CONFIRMATION"
+    },
+    {
+      "id": "RO-07",
+      "sdk": {"admit_immediately": true, "confirm_admit_immediately": true, "contention_modes": {"cpu": "neutral"}},
+      "wire": {"modes": {"cpu": "neutral"}, "admit_immediately": {"confirmed": true, "requested_unix_ms": 1}},
+      "accepted": true
+    },
+    {
+      "id": "RO-08",
+      "wire": {"modes": {}},
+      "accepted": false,
+      "code": "ERR_CEDEGRID_ARGUMENT"
     }
   ],
   "lease_batch_cases": [

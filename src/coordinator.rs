@@ -2355,13 +2355,15 @@ fn placement(
     {
         return Placement::Closed;
     }
-    // An unprotected Aggressive grant (004 R12) is placed against the node's unprotected budget,
-    // and a GPU hold for another principal's slice counts as open for it; every other hold,
-    // and every request without a grant, is placed as before.
+    // A run that takes admit immediately, alone or through unprotected (006 FR-012, FR-015),
+    // is placed against the node's admit immediately budget, and a GPU hold for another
+    // principal's slice counts as open for it: that budget already leaves out a device held
+    // for a protected first-comer. Every other hold, and every other request, is placed as
+    // before.
     let granted = request
         .contention
         .as_ref()
-        .is_some_and(|contention| contention.unprotected_aggressive.is_some());
+        .is_some_and(crate::execution_model::JobContention::admits_immediately);
     let unprotected = report
         .contention
         .as_ref()

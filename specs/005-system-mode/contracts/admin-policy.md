@@ -10,7 +10,7 @@ policy_version = 1
 
 [modes]
 allowed = ["yield_first", "neutral", "performance"]   # default: all of 001's modes except Aggressive
-unprotected_aggressive = false                        # default; true lets members request 004's unprotected Aggressive
+unprotected = false                        # default; true lets members request 006's unprotected option
 
 [limits]
 tasks_per_user = 64          # CedeGrid tasks one user may run at once; default 64
@@ -42,10 +42,10 @@ ordinary_slice = "auto"      # N4: "auto" (default), "user" or "cedegrid"
   counter is unknown. The Yield First unit is always in `cedegrid_idle.slice`.
 - A user's setting above a limit is refused in one line naming the policy key (FR-010).
 - `doctor` shows the effective values and whether each comes from the file or the default.
-- Aggressive is allowed only when the administrator lists it, and unprotected Aggressive's
+- Aggressive is allowed only when the administrator lists it, and unprotected's
   per-run confirmation (004) still applies on top.
-- `modes.unprotected_aggressive` (004 FR-015a, user choice of 2026-11-17): the agent in the unit
-  refuses an unprotected Aggressive grant while it is false, with
+- `modes.unprotected` (004 FR-015a, user choice of 2026-11-17): the agent in the unit
+  refuses an unprotected grant while it is false, with
   `ERR_CEDEGRID_UNPROTECTED_POLICY`, whatever `modes.allowed` lists.
 - Who applies what: the broker applies `modes.allowed` to its `start` and `move` requests. The
   agent in the unit, which runs the root-installed binary, applies `modes.allowed` and

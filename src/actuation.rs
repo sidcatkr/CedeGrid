@@ -333,10 +333,88 @@ impl TargetChannel {
     }
 }
 
+/// The lowest nice value the unprotected raise sets, whatever the granted limit (006 FR-016).
+pub const LOWEST_RAISE_NICE: i32 = -10;
+
+/// How unprotected can raise own CPU share on this host (006 FR-016).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Raise {
+    /// The System mode broker raises the CPU weight of the caller's ordinary unit, where the
+    /// administrator policy permits it.
+    UnitWeight,
+    /// A negative nice value on the run's verified processes, down to this one, within the
+    /// account's granted limit.
+    Nice(i32),
+    /// No way here: unprotected admits immediately only.
+    #[default]
+    Unavailable,
+}
+
+impl Raise {
+    /// From whether System mode is installed and the account's `RLIMIT_NICE` soft limit, which
+    /// allows nice values down to 20 minus the limit.
+    pub fn on_host(system_mode: bool, nice_limit: Option<u64>) -> Self {
+        if system_mode {
+            return Self::UnitWeight;
+        }
+        match nice_limit.map(|limit| 20 - i64::try_from(limit.min(40)).unwrap_or(40)) {
+            Some(lowest) if lowest < 0 => {
+                Self::Nice(i32::try_from(lowest).unwrap_or(0).max(LOWEST_RAISE_NICE))
+            }
+            _ => Self::Unavailable,
+        }
+    }
+
+    /// This host's raise: System mode when the broker's socket exists, else the account's
+    /// granted nice limit (Linux only).
+    pub fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: getrlimit writes into the struct passed.
+            let read = unsafe { libc::getrlimit(libc::RLIMIT_NICE, &mut limit) } == 0;
+            Self::on_host(
+                std::path::Path::new(crate::broker::SOCKET_PATH).exists(),
+                read.then_some(limit.rlim_cur),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::Unavailable
+        }
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            Self::UnitWeight => {
+                "System mode unit CPU weight, where the administrator policy permits".into()
+            }
+            Self::Nice(nice) => format!("nice down to {nice}, within this account's limit"),
+            Self::Unavailable => "none on this host: it only starts work sooner".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution_model::ProcessIdentity;
+
+    /// System mode raises the unit weight; elsewhere a granted nice limit allows a nice value
+    /// down to 20 minus the limit, never below -10; without one there is no raise (006 FR-016).
+    #[test]
+    fn the_raise_follows_system_mode_and_the_granted_nice_limit() {
+        assert_eq!(Raise::on_host(true, None), Raise::UnitWeight);
+        assert_eq!(Raise::on_host(false, None), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, Some(0)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, Some(20)), Raise::Unavailable);
+        assert_eq!(Raise::on_host(false, Some(25)), Raise::Nice(-5));
+        assert_eq!(Raise::on_host(false, Some(40)), Raise::Nice(-10));
+        assert_eq!(Raise::on_host(false, Some(u64::MAX)), Raise::Nice(-10));
+    }
     use crate::model::Resources;
 
     #[derive(Default)]

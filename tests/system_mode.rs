@@ -330,7 +330,7 @@ policy_version = 1
 
 [modes]
 allowed = ["yield_first", "neutral", "aggressive"]
-unprotected_aggressive = true
+unprotected = true
 
 [limits]
 tasks_per_user = 8
@@ -352,7 +352,7 @@ ordinary_slice = "cedegrid"
     .unwrap();
     assert!(policy.allows(ModeName::Aggressive));
     assert!(!policy.allows(ModeName::Performance));
-    assert!(policy.unprotected_aggressive.value);
+    assert!(policy.unprotected.value);
     assert_eq!(policy.tasks_per_user.value, 8);
     assert_eq!(policy.tasks_max.value, 512);
     assert_eq!(policy.open_files.value, Some(65536));
@@ -3176,7 +3176,7 @@ mod container {
                 "/etc/cedegrid/policy.toml",
                 format!(
                     "policy_version = 1\n[modes]\nallowed = [\"yield_first\", \"neutral\", \"performance\", \"aggressive\"]\n{}",
-                    if unprotected { "unprotected_aggressive = true\n" } else { "" }
+                    if unprotected { "unprotected = true\n" } else { "" }
                 ),
             )
             .unwrap();
@@ -3221,7 +3221,7 @@ while True:
 c.put_pool('pool', ['node-a'], max_workers=1, min_workers=0, allocation_class='opportunistic')
 t = command_task('{job}', ['/bin/sleep', '{seconds}'], '/tmp', cpu_millicores=100, ram_mib=64,
     allocation_class='opportunistic', single_process=True, no_escape=True, replay_safe=True,
-    max_attempts={attempts}, unprotected_aggressive=True, confirm_unprotected_aggressive=True)
+    max_attempts={attempts}, unprotected=True, confirm_unprotected=True)
 c.submit('{job}', 'pool', [t])
 "#
                 ),
@@ -4201,7 +4201,8 @@ mod agent_in_unit {
             allow_fallback: false,
             contention: ram.map(|mode| JobContention {
                 modes: [(ResourceKind::Ram, mode)].into(),
-                unprotected_aggressive: None,
+                admit_immediately: None,
+                unprotected: None,
             }),
         }
     }
@@ -4341,20 +4342,20 @@ mod policy_in_unit {
     }
 
     #[test]
-    fn unprotected_aggressive_needs_its_own_policy_key() {
+    fn unprotected_needs_its_own_policy_key() {
         use cedegrid::system_mode::unprotected_refusal_with;
         // Absent or false: refused, naming the key; true: permitted.
-        for text in ["", "[modes]\nunprotected_aggressive = false\n"] {
+        for text in ["", "[modes]\nunprotected = false\n"] {
             let (code, line) = unprotected_refusal_with(policy(text)).unwrap();
             assert_eq!(code, "unprotected_policy");
             assert!(
                 line.starts_with("ERR_CEDEGRID_UNPROTECTED_POLICY:"),
                 "{line}"
             );
-            assert!(line.contains("modes.unprotected_aggressive"), "{line}");
+            assert!(line.contains("modes.unprotected"), "{line}");
         }
         assert_eq!(
-            unprotected_refusal_with(policy("[modes]\nunprotected_aggressive = true\n")),
+            unprotected_refusal_with(policy("[modes]\nunprotected = true\n")),
             None
         );
         // The allowed modes do not grant it, and an unreadable policy refuses.
@@ -4364,14 +4365,13 @@ mod policy_in_unit {
         let (code, _) = unprotected_refusal_with(policy("unknown = 1\n")).unwrap();
         assert_eq!(code, "policy_refused");
         let (code, _) =
-            unprotected_refusal_with(policy("[modes]\nunprotected_aggressive = \"yes\"\n"))
-                .unwrap();
+            unprotected_refusal_with(policy("[modes]\nunprotected = \"yes\"\n")).unwrap();
         assert_eq!(code, "policy_refused");
         let entries = policy("").unwrap().entries();
         assert!(
             entries
                 .iter()
-                .any(|(key, value, _)| *key == "modes.unprotected_aggressive" && value == "false")
+                .any(|(key, value, _)| *key == "modes.unprotected" && value == "false")
         );
     }
 
@@ -4428,7 +4428,8 @@ fn a_jobs_modes_are_its_requests_capped_by_the_node() {
             (ResourceKind::Cpu, ContentionMode::YieldFirst),
         ]
         .into(),
-        unprotected_aggressive: None,
+        admit_immediately: None,
+        unprotected: None,
     };
     let modes = job_modes(&node, Some(&request));
     assert_eq!(modes[0], ContentionMode::YieldFirst);
@@ -4553,16 +4554,14 @@ fn a_stop_waits_for_both_units_and_nothing_else_waits_longer_than_two_seconds() 
 #[test]
 fn an_unprotected_grant_starts_only_with_every_condition_met() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
-    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    use cedegrid::execution_model::{JobContention, RunGrant};
     use cedegrid::state::Allowance;
     use cedegrid::system_mode::grant_refusal;
+    // Unprotected applies to Performance as well as Aggressive work: no mode is a condition.
     let grant = |confirmed| JobContention {
-        modes: [
-            (ResourceKind::Cpu, ContentionMode::Aggressive),
-            (ResourceKind::GpuCompute, ContentionMode::Aggressive),
-        ]
-        .into(),
-        unprotected_aggressive: Some(UnprotectedGrant {
+        modes: [(ResourceKind::Cpu, ContentionMode::Performance)].into(),
+        admit_immediately: None,
+        unprotected: Some(RunGrant {
             confirmed,
             requested_unix_ms: 1,
         }),
@@ -4573,41 +4572,29 @@ fn an_unprotected_grant_starts_only_with_every_condition_met() {
         reason: Some("the allowance record cannot be read: corrupt".into()),
     };
     let permitted = || None;
-    let aggressive = ContentionMode::Aggressive;
     // Every condition met: it starts.
-    assert_eq!(
-        grant_refusal(Some(&grant(true)), aggressive, on, permitted),
-        None
-    );
+    assert_eq!(grant_refusal(Some(&grant(true)), on, permitted), None);
     // No grant: nothing to check.
-    assert_eq!(
-        grant_refusal(None, ContentionMode::Neutral, off, permitted),
-        None
-    );
+    assert_eq!(grant_refusal(None, off, permitted), None);
     // Each missing condition is named, all of them in one line.
-    let (code, line) = grant_refusal(
-        Some(&grant(false)),
-        ContentionMode::Performance,
-        off,
-        || {
-            Some((
-                "unprotected_policy",
-                "ERR_CEDEGRID_UNPROTECTED_POLICY: no".to_owned(),
-            ))
-        },
-    )
+    let (code, line) = grant_refusal(Some(&grant(false)), off, || {
+        Some((
+            "unprotected_policy",
+            "ERR_CEDEGRID_UNPROTECTED_POLICY: no".to_owned(),
+        ))
+    })
     .unwrap();
     assert_eq!(code, "unprotected_refused");
     for needle in [
         "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION",
-        "ERR_CEDEGRID_UNPROTECTED_CAPPED",
         "ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED",
         "ERR_CEDEGRID_UNPROTECTED_POLICY",
     ] {
         assert!(line.contains(needle), "{line}");
     }
     assert_eq!(line.lines().count(), 1);
-    let (_, line) = grant_refusal(Some(&grant(true)), aggressive, unreadable, permitted).unwrap();
+    let (_, line) = grant_refusal(Some(&grant(true)), unreadable, permitted).unwrap();
+    assert!(!line.contains("CAPPED"), "{line}");
     assert!(
         line.contains("ERR_CEDEGRID_UNPROTECTED_ALLOWANCE_UNREADABLE"),
         "{line}"

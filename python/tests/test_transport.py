@@ -76,7 +76,9 @@ class TransportTests(unittest.TestCase):
                 command_task('t',['worker'],'/home/user',contention_modes=case['modes'])
         with self.assertRaises(ValidationError):
             command_task('t',['worker'],'/home/user',contention_modes=['cpu'])
-        for case in fixture['unprotected_grant_cases']:
+        for case in fixture['run_option_cases']:
+            if 'sdk' not in case:
+                continue
             args=dict(case['sdk'])
             if not case['accepted']:
                 with self.assertRaises(ValidationError,msg=case['id']):
@@ -85,10 +87,12 @@ class TransportTests(unittest.TestCase):
             sent=command_task('t',['worker'],'/home/user',**args)
             if case['wire'] is None:
                 self.assertNotIn('contention',sent,case['id']);continue
-            grant=sent['contention'].pop('unprotected_aggressive')
-            self.assertEqual(set(grant),{'confirmed','requested_unix_ms'},case['id'])
-            self.assertTrue(grant['confirmed'],case['id'])
-            wire=dict(case['wire']);wire.pop('unprotected_aggressive')
+            wire=dict(case['wire'])
+            for name in ('admit_immediately','unprotected'):
+                if name in wire:
+                    grant=sent['contention'].pop(name);wire.pop(name)
+                    self.assertEqual(set(grant),{'confirmed','requested_unix_ms'},case['id'])
+                    self.assertTrue(grant['confirmed'],case['id'])
             self.assertEqual(sent['contention'],wire,case['id'])
     def test_wrong_ca_wrong_hostname_and_unauthorized_leaf(self):
         with self.assertRaises(RemoteError):self.client(ca=self.root/'wrong.pem').request('echo')

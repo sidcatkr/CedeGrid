@@ -13,17 +13,21 @@ pub(super) struct StatFields {
     pub(super) start_ticks: u64,
     /// Resident pages, as `statm` counts them.
     pub(super) rss_pages: u64,
+    /// The parent PID.
+    pub(super) parent: u32,
 }
 
 /// Splits after the last `)`, so a command holding spaces or parentheses cannot shift fields.
 pub(super) fn parse_stat(line: &str) -> Option<StatFields> {
     let fields: Vec<&str> = line.rsplit_once(')')?.1.split_whitespace().collect();
-    // The first field after ')' is field 3 (state): utime 14, stime 15, starttime 22, rss 24.
+    // The first field after ')' is field 3 (state): ppid 4, utime 14, stime 15, starttime 22,
+    // rss 24.
     let field = |n: usize| fields.get(n - 3)?.parse::<u64>().ok();
     Some(StatFields {
         cpu_ticks: field(14)?.saturating_add(field(15)?),
         start_ticks: field(22)?,
         rss_pages: field(24)?,
+        parent: u32::try_from(field(4)?).ok()?,
     })
 }
 
@@ -82,6 +86,8 @@ pub(super) struct ProcessTable {
     previous: BTreeMap<u32, (u64, u64)>,
     /// Real user IDs, read once per PID and start time.
     uids: BTreeMap<(u32, u64), Option<u32>>,
+    /// CedeGrid supervisors' markers, read once per PID and start time (006 FR-001).
+    markers: BTreeMap<(u32, u64), Option<crate::execution_model::WorkMarker>>,
     last_total: Option<u64>,
     /// Whether the last sample listed an MPS control daemon or server, by command name, as
     /// sysinfo's process names gave it.
@@ -103,6 +109,7 @@ impl ProcessTable {
         Some(Self {
             previous: BTreeMap::new(),
             uids: BTreeMap::new(),
+            markers: BTreeMap::new(),
             last_total: None,
             mps: false,
             clock_hz: u64::try_from(hz).ok().filter(|hz| *hz > 0)?,
@@ -122,6 +129,8 @@ impl ProcessTable {
         let mut next = BTreeMap::new();
         let mut samples = Vec::new();
         let mut mps = false;
+        // On a System mode host only work inside the broker's units counts (006 FR-003).
+        let system_mode = std::path::Path::new(crate::broker::SOCKET_PATH).exists();
         for entry in entries {
             let entry = entry.ok()?;
             let Some(pid) = entry
@@ -143,10 +152,11 @@ impl ProcessTable {
             let Some(fields) = parse_stat(&line) else {
                 continue;
             };
-            mps |= line
+            let command = line
                 .split_once('(')
                 .and_then(|(_, rest)| rest.rsplit_once(')'))
-                .is_some_and(|(command, _)| is_mps_process(command));
+                .map(|(command, _)| command);
+            mps |= command.is_some_and(is_mps_process);
             let cpu = match (self.previous.get(&pid), delta_total) {
                 (Some((start, ticks)), Some(delta)) if *start == fields.start_ticks => {
                     cpu_millicores(fields.cpu_ticks.saturating_sub(*ticks), delta, cpus)
@@ -164,15 +174,35 @@ impl ProcessTable {
                     uid
                 }
             };
+            // Only a CedeGrid binary's command line is read, once per process; what cannot be
+            // read is no marker, so that account stays plain (006 FR-004).
+            let marker = match (command, uid) {
+                (Some(command), Some(uid)) if command.starts_with("cedegrid") => {
+                    *self.markers.entry(key).or_insert_with(|| {
+                        let marker = supervisor_marker(
+                            &std::fs::read(format!("/proc/{pid}/cmdline")).ok()?,
+                        )?;
+                        (!system_mode
+                            || std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+                                .is_ok_and(|cgroup| in_broker_unit(&cgroup, uid)))
+                        .then_some(marker)
+                    })
+                }
+                _ => None,
+            };
             samples.push(ProcessSample {
                 pid,
                 uid,
                 cpu_millicores: cpu,
                 ram_mib: fields.rss_pages.saturating_mul(self.page_bytes) / MIB,
                 start_time: boot.saturating_add(fields.start_ticks / self.clock_hz),
+                parent: Some(fields.parent),
+                marker,
             });
         }
         self.uids
+            .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _)| s == start));
+        self.markers
             .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _)| s == start));
         self.previous = next;
         self.last_total = Some(total);

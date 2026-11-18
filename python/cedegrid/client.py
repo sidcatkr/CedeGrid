@@ -60,8 +60,8 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
                  single_process: bool = False, no_escape: bool = False, managed_child_limit: int = 0,
                  input_artifacts: list[dict] | None = None, max_attempts: int | None = None,
                  contention_modes: dict[str, str] | None = None,
-                 unprotected_aggressive: bool = False,
-                 confirm_unprotected_aggressive: bool = False) -> dict:
+                 admit_immediately: bool = False, confirm_admit_immediately: bool = False,
+                 unprotected: bool = False, confirm_unprotected: bool = False) -> dict:
     """Build a task; callers must explicitly acknowledge the workload contract."""
     _validate_text_field("task_id", task_id)
     _validate_text_field("cwd", cwd)
@@ -117,18 +117,19 @@ def command_task(task_id: str, argv: list[str], cwd: str, *, cpu_millicores: int
                 for key, value in contention_modes.items()):
             raise ValidationError("contention_modes must map resources to modes")
         task["contention"] = {"modes": dict(contention_modes)}
-    if type(unprotected_aggressive) is not bool or type(confirm_unprotected_aggressive) is not bool:
-        raise ValidationError("unprotected_aggressive and confirm_unprotected_aggressive must be booleans")
-    if unprotected_aggressive:
-        # 004: both fields, sent as one grant; the launching agent still checks the host.
-        if not confirm_unprotected_aggressive:
-            raise ValidationError("ERR_CEDEGRID_UNPROTECTED_CONFIRMATION: confirm_unprotected_aggressive is missing")
-        modes = dict(contention_modes or {})
-        for resource in ("cpu", "gpu_compute"):
-            if modes.setdefault(resource, "aggressive") != "aggressive":
-                raise ValidationError("unprotected Aggressive needs mode aggressive on cpu and gpu_compute")
-        task["contention"] = {"modes": modes, "unprotected_aggressive": {
-            "confirmed": True, "requested_unix_ms": int(time.time() * 1000)}}
+    # 006: each option is sent only with its confirmation; the launching agent still checks the
+    # host's allowance for unprotected. On Yield First or Neutral work an option has no effect.
+    for name, value, confirm in (("admit_immediately", admit_immediately, confirm_admit_immediately),
+                                 ("unprotected", unprotected, confirm_unprotected)):
+        if type(value) is not bool or type(confirm) is not bool:
+            raise ValidationError(f"{name} and confirm_{name} must be booleans")
+        if not value:
+            continue
+        if not confirm:
+            code = "ERR_CEDEGRID_ADMIT_CONFIRMATION" if name == "admit_immediately" else "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION"
+            raise ValidationError(f"{code}: confirm_{name} is missing")
+        task.setdefault("contention", {"modes": {}})[name] = {
+            "confirmed": True, "requested_unix_ms": int(time.time() * 1000)}
     return task
 
 

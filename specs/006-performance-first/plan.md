@@ -72,9 +72,9 @@ arms through `tools/aggressive_gates.py`.
   only when its `/proc/<pid>/cgroup` path lies inside one of that account's broker units
   (its ordinary or idle unit, wherever N4 placed them).
 - `PrincipalUsage` gains `cedegrid_cpu: Option<CedeGridWork>` and
-  `cedegrid_gpu: BTreeMap<String, CedeGridWork>`, where `CedeGridWork { arrival_unix_ms:
-  Option<u64>, protected: bool }`: the earliest arrival among the account's CedeGrid work busy
-  on that resource, and whether any of it runs Performance or Aggressive there.
+  `cedegrid_gpu: BTreeMap<String, CedeGridWork>`, where `CedeGridWork { arrival_unix_ms,
+  protected_arrival_unix_ms }`: the earliest arrival among the account's CedeGrid work on that
+  resource, and the earliest among its Performance or Aggressive work there (None if none).
 
 ### Admission (FR-007 to FR-011), in the policy
 

@@ -113,7 +113,7 @@ pub fn job_modes(
         .collect()
 }
 
-/// One condition an unprotected Aggressive grant lacks: its code, what is missing and how to
+/// One condition an unprotected grant lacks: its code, what is missing and how to
 /// fix it. `doctor` lists them as bullets; a refusal joins them into one line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gap {
@@ -140,28 +140,17 @@ impl Gap {
     }
 }
 
-/// What this host lacks for any unprotected Aggressive grant (004 FR-014, FR-015, FR-015a): the
-/// node cap, the allowance and, where it applies, the administrator policy. Empty when a
-/// confirmed grant may start.
-pub fn host_gaps(
-    cap: crate::contention::ContentionMode,
-    allowance: crate::state::Allowance,
-    policy: Option<Gap>,
-) -> Vec<Gap> {
+/// What this host lacks for any unprotected grant (006 FR-015): the allowance and, where it
+/// applies, the administrator policy. Empty when a confirmed grant may start. Unprotected
+/// applies to Performance and Aggressive work, so the node cap is no condition.
+pub fn host_gaps(allowance: crate::state::Allowance, policy: Option<Gap>) -> Vec<Gap> {
     let mut gaps = Vec::new();
-    if cap < crate::contention::ContentionMode::Aggressive {
-        gaps.push(Gap::new(
-            "ERR_CEDEGRID_UNPROTECTED_CAPPED",
-            "the node cap does not include Aggressive",
-            "set contention.max_mode = \"aggressive\" with the aggressive_mode acknowledgement",
-        ));
-    }
     match allowance {
         crate::state::Allowance::On { .. } => {}
         crate::state::Allowance::Off { reason: None } => gaps.push(Gap::new(
             "ERR_CEDEGRID_UNPROTECTED_NOT_ALLOWED",
-            "the host's \"allow unprotected Aggressive\" setting is off",
-            "run cedegrid setup --allow-unprotected-aggressive on a terminal",
+            "the host's \"allow unprotected\" setting is off",
+            "run cedegrid setup --allow-unprotected on a terminal",
         )),
         crate::state::Allowance::Off {
             reason: Some(reason),
@@ -175,22 +164,21 @@ pub fn host_gaps(
     gaps
 }
 
-/// Why an unprotected Aggressive grant may not start (004 FR-014, FR-015, FR-015a), naming every
+/// Why an unprotected grant may not start (004 FR-014, FR-015, FR-015a), naming every
 /// missing condition in one line, or `None` when it may (or carries no grant). The allowance and,
 /// in a System mode unit, the administrator policy are read only when a grant is present.
 pub fn grant_refusal(
     contention: Option<&crate::execution_model::JobContention>,
-    cap: crate::contention::ContentionMode,
     allowance: impl FnOnce() -> crate::state::Allowance,
     unit_policy: impl FnOnce() -> Option<(&'static str, String)>,
 ) -> Option<(&'static str, String)> {
-    let grant = contention.and_then(|contention| contention.unprotected_aggressive)?;
+    let grant = contention.and_then(|contention| contention.unprotected)?;
     let mut gaps = Vec::new();
     if !grant.confirmed {
         gaps.push(Gap::new(
             "ERR_CEDEGRID_UNPROTECTED_CONFIRMATION",
-            "confirm_unprotected_aggressive is missing",
-            "send confirm_unprotected_aggressive with the submission",
+            "confirm_unprotected is missing",
+            "send confirm_unprotected with the submission",
         ));
     }
     let policy = unit_policy().map(|(_, line)| Gap {
@@ -198,25 +186,25 @@ pub fn grant_refusal(
         what: line,
         fix: String::new(),
     });
-    gaps.extend(host_gaps(cap, allowance(), policy));
+    gaps.extend(host_gaps(allowance(), policy));
     let lines: Vec<String> = gaps.iter().map(Gap::line).collect();
     (!lines.is_empty()).then(|| ("unprotected_refused", lines.join("; ")))
 }
 
-/// The administrator policy's gap for unprotected Aggressive in a System mode unit (004
+/// The administrator policy's gap for unprotected in a System mode unit (004
 /// FR-015a), with its event code, or `None` when it permits one. A policy that cannot be read
 /// refuses.
 pub fn unprotected_policy_gap(
     policy: anyhow::Result<crate::broker::admin_policy::AdminPolicy>,
 ) -> Option<(&'static str, Gap)> {
     match policy {
-        Ok(policy) if policy.unprotected_aggressive.value => None,
+        Ok(policy) if policy.unprotected.value => None,
         Ok(_) => Some((
             "unprotected_policy",
             Gap::new(
                 "ERR_CEDEGRID_UNPROTECTED_POLICY",
-                "this host's System mode policy does not permit unprotected Aggressive (modes.unprotected_aggressive)",
-                "an administrator sets modes.unprotected_aggressive = true in /etc/cedegrid/policy.toml",
+                "this host's System mode policy does not permit unprotected (modes.unprotected)",
+                "an administrator sets modes.unprotected = true in /etc/cedegrid/policy.toml",
             ),
         )),
         Err(error) => Some((
@@ -230,7 +218,7 @@ pub fn unprotected_policy_gap(
     }
 }
 
-/// Why the administrator policy refuses an unprotected Aggressive grant in a System mode unit
+/// Why the administrator policy refuses an unprotected grant in a System mode unit
 /// (004 FR-015a), or `None` when it permits one. A policy that cannot be read refuses.
 pub fn unprotected_refusal_with(
     policy: anyhow::Result<crate::broker::admin_policy::AdminPolicy>,

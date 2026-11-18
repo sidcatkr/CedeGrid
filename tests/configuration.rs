@@ -1853,19 +1853,19 @@ fn a_reload_applies_contention_changes_and_refuses_the_rest() {
 include!("support/state_dir.rs");
 
 #[test]
-fn a_file_can_never_store_unprotected_aggressive() {
+fn a_file_can_never_store_unprotected() {
     // 004 FR-012: the request is per submission only; any file that holds it fails to load.
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let cases = [
-        ("unprotected_aggressive = true\n", "unprotected_aggressive"),
+        ("unprotected = true\n", "unprotected"),
         (
-            "[contention]\nallow_unprotected_aggressive = true\n",
-            "contention.allow_unprotected_aggressive",
+            "[contention]\nallow_unprotected = true\n",
+            "contention.allow_unprotected",
         ),
         (
-            "[contention.cpu]\nunprotected_aggressive = false\n",
-            "contention.cpu.unprotected_aggressive",
+            "[contention.cpu]\nunprotected = false\n",
+            "contention.cpu.unprotected",
         ),
     ];
     for (body, path) in cases {
@@ -1878,14 +1878,14 @@ fn a_file_can_never_store_unprotected_aggressive() {
         .to_string();
         assert!(
             error.contains(&format!(
-                "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {path} cannot be stored; unprotected Aggressive is requested per submission only"
+                "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {path} cannot be stored; unprotected is requested per submission only"
             )),
             "{error}"
         );
     }
     let client = config::example(RuntimeConfigKind::Client).unwrap();
     let error = config::parse_runtime::<RuntimeClientConfig>(
-        &format!("{client}\nunprotected_aggressive = true\n"),
+        &format!("{client}\nunprotected = true\n"),
         &root.join("client.toml"),
         RuntimeConfigKind::Client,
     )
@@ -1898,7 +1898,7 @@ fn a_file_can_never_store_unprotected_aggressive() {
 }
 
 #[test]
-fn a_migrated_file_that_holds_unprotected_aggressive_is_refused() {
+fn a_migrated_file_that_holds_unprotected_is_refused() {
     let fixtures = contract();
     let case = fixtures["config_cases"]
         .as_array()
@@ -1912,7 +1912,7 @@ fn a_migrated_file_that_holds_unprotected_aggressive_is_refused() {
     options.input = root.join(case["legacy_path"].as_str().unwrap());
     options.output = root.join(case["output_path"].as_str().unwrap());
     let source = format!(
-        "{}unprotected_aggressive: true\n",
+        "{}unprotected: true\n",
         case["legacy_text"].as_str().unwrap()
     );
     stage(&options, &source);
@@ -1995,13 +1995,13 @@ fn an_aggressive_job_launches_at_the_default_priority() {
 }
 
 #[test]
-fn unprotected_grant_cases_parse_and_validate_alike() {
-    // 004 FR-011, FR-014: the grant is on the wire only when both SDK fields were set.
+fn run_option_cases_parse_and_validate_alike() {
+    // 006 FR-012, FR-015: an option is on the wire only when both of its SDK fields were set.
     use cedegrid::execution_model::LaunchRequest;
     let reply: Value =
         serde_json::from_str(include_str!("fixtures/0.2/heartbeat_reply.json")).unwrap();
     let base = reply["assignments"][0]["request"].clone();
-    for case in contract()["unprotected_grant_cases"].as_array().unwrap() {
+    for case in contract()["run_option_cases"].as_array().unwrap() {
         if case["wire"].is_null() {
             continue;
         }
