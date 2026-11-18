@@ -121,7 +121,10 @@ principals' processes and number and each own task counted as one context: besid
 process, two own tasks become one, so each side gets half. Principals that are not slice-bound
 keep their slices. A held task resumes once no counted principal is slice-bound or the rule holds
 with it running. In every mode one more own process is admitted on the device only while
-(m + 1) × k ≤ E or no counted principal is slice-bound (`gpu_time_slice_admission_held`).
+(m + 1) × k ≤ E or no counted principal is slice-bound (`gpu_time_slice_admission_held`), a
+principal reading the larger of its average and its most within the sample age: beside one
+saturating process, one own process is the fair share, and no second one is admitted. While the
+amounts go unmeasured for the sample age, every counted principal is slice-bound.
 Performance and Aggressive hold no task: own work keeps the driver's slices, as beside the same
 work started by hand. The counts are the
 processes sampled busy within the counting window, and own work's processes also from the

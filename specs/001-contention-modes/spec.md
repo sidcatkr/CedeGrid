@@ -1709,7 +1709,11 @@ node reports with the expected per-resource values at each step.
   - While the per-process samples are readable the counts are those of the counting window, from
     every interval whose samples are readable, whether own work is held or not; the amounts,
     which decide slice-bound, come only from uncapped intervals. While the estimate holds intervals its readings decide which principals
-    are slice-bound, even in an interval whose amounts are unknown or inconsistent. When the
+    are slice-bound, even in an interval whose amounts are unknown or inconsistent, until uncapped
+    intervals have gone without a measured amount for `gpu.process_sample_max_age_ms` since the
+    last one that fed it: the estimate then holds only the past, and every counted external
+    principal is slice-bound until an uncapped interval is measured again. Intervals in which own
+    work there is held do not feed the estimate and leave its readings standing. When the
     estimate has no uncapped interval since it restarted, or when the samples themselves are
     unreadable and the counts are the listed processes, every counted external principal is
     slice-bound. An interval without readable samples within `gpu.process_sample_max_age_ms` of
@@ -1798,7 +1802,8 @@ node reports with the expected per-resource values at each step.
     fair share counting each contending principal at the lesser of its demand and its share, so
     that new own work never takes a contending principal below that. On a time-sliced GPU it
     admits one more own process only while (m + 1) × k ≤ E (FR-021's counts) or no counted
-    principal is slice-bound, and records `gpu_time_slice_admission_held` otherwise;
+    principal is slice-bound by its latest readings as well as the estimate's (FR-089), and
+    records `gpu_time_slice_admission_held` otherwise;
   - while CPU telemetry is unknown, or a compute resource has activity of unknown amount, admit
     no new own work there and hold every step (FR-008);
   - keep the operator envelope (FR-057), the Guaranteed rules (FR-024) and explicit operator
@@ -2201,7 +2206,11 @@ node reports with the expected per-resource values at each step.
     worker's CPU hint is a request only.
   - On a time-sliced GPU, in every mode, one more own process is admitted only while
     (m + 1) × k ≤ E (FR-021's counts) or no counted principal is slice-bound; otherwise admission
-    is held with `gpu_time_slice_admission_held`. An own task placed on the device but not yet
+    is held with `gpu_time_slice_admission_held`. For this a principal reads the larger of the
+    estimate's average and its most in the uncapped intervals within
+    `gpu.process_sample_max_age_ms`, so one that has just become busy is not read by its quiet
+    past; beside one saturating process one own process is the fair share, and admission is held
+    there whether or not the amounts can be read. An own task placed on the device but not yet
     listed there counts toward m as one context, and an open GPU compute admission is room for
     one more own process: the coordinator places at most one new GPU task on each device per
     heartbeat, and the next report counts it (FR-028).

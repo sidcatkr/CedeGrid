@@ -6029,6 +6029,123 @@ mod gpu_demand {
             }
         }
 
+        /// A principal that has just become busy is read by its latest measured intervals as well
+        /// as by the estimate's window, so a window still full of its quiet past does not read it
+        /// unbound: beside it, one own process at 1:1 leaves no room for another, even with the
+        /// amounts unknown every other interval (FR-021, FR-022, FR-089).
+        #[test]
+        fn a_principal_that_just_became_busy_holds_admission_at_one_to_one() {
+            let code = |decision: &Decision| {
+                decision.resources[&ResourceKey::GpuCompute(GPU.into())]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string)
+            };
+            for mode in [ContentionMode::Neutral, ContentionMode::Performance] {
+                let config = mode_config(mode);
+                let mut engine = PolicyEngine::new();
+                let mut i = 0u64;
+                let mut step = |engine: &mut PolicyEngine,
+                                build: &dyn Fn(u64) -> Snapshot,
+                                input: &PolicyInput| {
+                    let decision = engine
+                        .evaluate(&config, &build(i + 1), input, i * INTERVAL)
+                        .unwrap();
+                    i += 1;
+                    decision
+                };
+                // The other user's process is listed but quiet for a whole window.
+                for _ in 0..60 {
+                    step(
+                        &mut engine,
+                        &|s| sliced(None, 0, s, 0, 1),
+                        &PolicyInput::default(),
+                    );
+                }
+                // It saturates the device alone for a few intervals.
+                for _ in 0..4 {
+                    step(
+                        &mut engine,
+                        &|s| sliced(None, 990, s, 0, 1),
+                        &PolicyInput::default(),
+                    );
+                }
+                // One own task runs beside it at 1:1; every other interval's amounts are unknown.
+                let input = PolicyInput {
+                    allocations: vec![job(None)],
+                    ..PolicyInput::default()
+                };
+                for n in 0..8 {
+                    let build = |s: u64| {
+                        let mut snap = sliced(Some(495), 495, s, 1, 1);
+                        if n % 2 == 1 {
+                            let gpu = &mut snap.gpus[0];
+                            gpu.own_compute_milli = None;
+                            gpu.external_compute_milli = None;
+                            gpu.compute_amount_unknown =
+                                Some("summed per-process use differs".into());
+                        }
+                        snap
+                    };
+                    let decision = step(&mut engine, &build, &input);
+                    if n >= 1 {
+                        assert_eq!(
+                            code(&decision).as_deref(),
+                            Some("gpu_time_slice_admission_held"),
+                            "{mode:?} interval {n}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A window that uncapped intervals have not fed for the sample age holds only the past:
+        /// every counted principal is then slice-bound, as without a window, so two own contexts
+        /// beside a principal that became busy are held to one though the window's average still
+        /// reads its quiet past (FR-021, FR-089).
+        #[test]
+        fn a_window_not_fed_for_the_sample_age_reads_every_principal_bound() {
+            let config = mode_config(ContentionMode::Neutral);
+            let mut engine = PolicyEngine::new();
+            let mut i = 0u64;
+            let mut step = |engine: &mut PolicyEngine, snap: &dyn Fn(u64) -> Snapshot| {
+                let decision = engine
+                    .evaluate(&config, &snap(i + 1), &PolicyInput::default(), i * INTERVAL)
+                    .unwrap();
+                i += 1;
+                decision
+            };
+            for _ in 0..60 {
+                step(&mut engine, &|s| sliced(None, 0, s, 0, 1));
+            }
+            for _ in 0..4 {
+                step(&mut engine, &|s| sliced(None, 990, s, 0, 1));
+            }
+            let age = config.gpu_sample_max_age_ms() / INTERVAL;
+            for n in 0..12u64 {
+                let build = |s: u64| {
+                    let mut snap = sliced(Some(660), 330, s, 2, 1);
+                    if n % 2 == 1 {
+                        let gpu = &mut snap.gpus[0];
+                        gpu.own_compute_milli = None;
+                        gpu.external_compute_milli = None;
+                        gpu.compute_amount_unknown = Some("summed per-process use differs".into());
+                    }
+                    snap
+                };
+                let slice = slice_of(&step(&mut engine, &build));
+                assert_eq!((slice.own, slice.holds), (2, false), "interval {n}");
+                if n > age {
+                    assert_eq!(
+                        (slice.bound.len(), slice.hold),
+                        (1, Some(1)),
+                        "interval {n}: {slice:?}"
+                    );
+                }
+            }
+        }
+
         /// The first-come record of the device (FR-090).
         pub(super) fn first_come(decision: &Decision) -> Option<String> {
             decision.resources[&ResourceKey::GpuCompute(GPU.into())]

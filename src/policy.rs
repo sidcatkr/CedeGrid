@@ -202,6 +202,9 @@ struct GpuDemand {
     pids: Option<Vec<u32>>,
     /// When the last uncapped interval was observed.
     last_uncapped_ms: Option<u64>,
+    /// Whether an uncapped interval went without a measured amount since the last one fed: the
+    /// window then stands for no current reading once the sample age passes (FR-021).
+    unfed: bool,
     /// Whether the device was last read as time-sliced, for an interval whose listing is
     /// unknown (FR-021, Q29).
     last_time_sliced: bool,
@@ -233,6 +236,7 @@ impl SeenContext {
 /// amount where it ran there (FR-021, Q19, Q20).
 #[derive(Debug, Clone, Default)]
 struct UncappedInterval {
+    at_ms: u64,
     external: u64,
     by_uid: BTreeMap<u32, u64>,
     own: Option<u64>,
@@ -259,6 +263,33 @@ impl GpuDemand {
                 .map(|(uid, sum)| (uid, mean(sum)))
                 .collect(),
         ))
+    }
+
+    /// Whether the window is a current reading: fed within `max_age_ms`, or not fed since only
+    /// because own work there was capped or paused, which keeps it on purpose (FR-021, Q19).
+    fn current(&self, now: u64, max_age_ms: u64) -> bool {
+        !self.unfed
+            || self
+                .last_uncapped_ms
+                .is_some_and(|at| now.saturating_sub(at) <= max_age_ms)
+    }
+
+    /// The most of the external total and of each principal's over the uncapped intervals within
+    /// `max_age_ms`, so a principal that has just become busy is not read by its quiet past.
+    fn recent(&self, now: u64, max_age_ms: u64) -> DemandEstimate {
+        let mut most: DemandEstimate = (0, BTreeMap::new());
+        for entry in self
+            .uncapped
+            .iter()
+            .filter(|entry| now.saturating_sub(entry.at_ms) <= max_age_ms)
+        {
+            most.0 = most.0.max(entry.external);
+            for (uid, amount) in &entry.by_uid {
+                let held = most.1.entry(*uid).or_default();
+                *held = (*held).max(*amount);
+            }
+        }
+        most
     }
 
     /// Own work's uncapped share: its amount averaged over the uncapped intervals in which it ran

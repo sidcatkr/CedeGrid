@@ -1692,6 +1692,7 @@ impl<'a> Interval<'a> {
                 })
                 .collect();
             demand.uncapped.push_back(UncappedInterval {
+                at_ms: self.now,
                 external,
                 by_uid: amounts,
                 own: own_ran.then_some(own),
@@ -1700,6 +1701,9 @@ impl<'a> Interval<'a> {
                 demand.uncapped.pop_front();
             }
             demand.last_uncapped_ms = Some(self.now);
+            demand.unfed = false;
+        } else if uncapped {
+            demand.unfed = true;
         }
         let estimate = demand.estimate();
         let record = GpuDemandRecord {
@@ -1817,8 +1821,11 @@ impl<'a> Interval<'a> {
         };
         own_counted.sort_by_key(|counted| counted.pid);
         // The window's readings decide which principals are slice-bound, even in an interval
-        // whose amounts are inconsistent; without a window every counted principal is (Q29).
-        let read = source == SliceSource::Window;
+        // whose amounts are inconsistent; without a window every counted principal is (Q29), and
+        // so is every one once uncapped intervals have gone unmeasured for the sample age, since
+        // the window then holds only the past.
+        let read = source == SliceSource::Window
+            && demand.current(self.now, self.config.gpu_sample_max_age_ms());
         if read && measured && unattributed {
             principals.entry(None).or_insert(1);
         }
@@ -1840,12 +1847,13 @@ impl<'a> Interval<'a> {
             ..TimeSliceRecord::default()
         };
         if !holds {
-            self.slice_hold(&principals, read, &gpu.uuid, &mut record);
+            self.slice_hold(&principals, read, false, &gpu.uuid, &mut record);
         }
         // One more own process is admitted only while (m + 1) × k ≤ E or no counted principal
         // would be slice-bound beside it, so a task is not admitted only to be held (FR-022,
-        // FR-089). An own task placed on the device but not yet listed there counts as one
-        // context, so tasks placed a heartbeat apart do not both start.
+        // FR-089); a principal's latest readings count as well as the window's. An own task
+        // placed on the device but not yet listed there counts as one context, so tasks placed a
+        // heartbeat apart do not both start.
         let placed = self
             .input
             .allocations
@@ -1866,7 +1874,7 @@ impl<'a> Interval<'a> {
                 own: own_admitting.saturating_add(1),
                 ..TimeSliceRecord::default()
             };
-            self.slice_hold(&principals, read, &gpu.uuid, &mut beside);
+            self.slice_hold(&principals, read, true, &gpu.uuid, &mut beside);
             !beside.bound.is_empty()
         };
         Some((record, next_held))
@@ -1963,11 +1971,13 @@ impl<'a> Interval<'a> {
 
     /// The time-slice hold at m × k > E (FR-021, FR-089): the slice-bound principals, from the
     /// external estimate's readings when `read`, else every counted principal, and the own tasks
-    /// that keep running, ⌊E_b ÷ k_b⌋, at least one.
+    /// that keep running, ⌊E_b ÷ k_b⌋, at least one. For `admitting` a principal reads the larger
+    /// of the window's average and its most within the sample age.
     fn slice_hold(
         &mut self,
         principals: &BTreeMap<Option<u32>, u32>,
         read: bool,
+        admitting: bool,
         uuid: &str,
         record: &mut TimeSliceRecord,
     ) {
@@ -1978,8 +1988,13 @@ impl<'a> Interval<'a> {
             return;
         };
         let estimate = demand.estimate();
+        let recent =
+            admitting.then(|| demand.recent(self.now, self.config.gpu_sample_max_age_ms()));
         // A lone principal reads the total: usage below the tolerance is its sampling error.
-        let reading = |uid: &Option<u32>| match (&estimate, principals.len()) {
+        let read_of = |estimate: Option<&DemandEstimate>, uid: &Option<u32>| match (
+            estimate,
+            principals.len(),
+        ) {
             (Some((total, _)), 1) => *total,
             (Some((total, by_uid)), _) => match uid {
                 Some(uid) => by_uid.get(uid).copied().unwrap_or(0),
@@ -1987,6 +2002,8 @@ impl<'a> Interval<'a> {
             },
             (None, _) => 0,
         };
+        let reading =
+            |uid: &Option<u32>| read_of(estimate.as_ref(), uid).max(read_of(recent.as_ref(), uid));
         let threshold = |contexts: u32| {
             GPU_COMPUTE_CAPACITY
                 .saturating_mul(u64::from(contexts))
