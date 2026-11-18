@@ -195,11 +195,11 @@ pub struct NodeContentionReport {
     /// from one that paces its growth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_workers: Option<u32>,
-    /// The budget an unprotected grant is placed against (004 R12): sent only while
-    /// the node cap is Aggressive, the host's allowance is on and, in a System mode unit, the
-    /// administrator policy permits it.
+    /// The budget a run with admit immediately is placed against (006 FR-013): sent wherever
+    /// the node cap reaches Performance. Admit immediately needs no allowance; unprotected,
+    /// which implies it, is checked against the allowance at launch.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unprotected_budget: Option<crate::model::Resources>,
+    pub admit_immediately_budget: Option<crate::model::Resources>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

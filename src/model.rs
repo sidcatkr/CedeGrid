@@ -518,10 +518,11 @@ pub struct Decision {
     pub observe_only: bool,
     /// Budget for all managed allocations; includes currently occupied capacity.
     pub managed_budget: Resources,
-    /// The budget an unprotected grant is placed against: the managed budget with CPU
-    /// raised to the grant's allowance. Only where the node cap reaches Aggressive (004 R12).
+    /// The budget a run with admit immediately, alone or through unprotected, is placed
+    /// against: admission holds only for protected first-comers, and a device held for one
+    /// carries no VRAM. Wherever the node cap reaches Performance (006 FR-013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unprotected_budget: Option<Resources>,
+    pub admit_immediately_budget: Option<Resources>,
     /// Remaining admission capacity after one charge per existing/pending allocation.
     pub admission_headroom: Resources,
     pub expansion_allowed: bool,
@@ -705,6 +706,32 @@ pub struct ResourceStatus {
     /// (FR-021, Q22).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_slice: Option<TimeSliceRecord>,
+    /// Own work's arrival on a compute resource, while it is known (006 FR-021).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_arrival_unix_ms: Option<u64>,
+    /// The other accounts on a compute resource, as admission in Performance and Aggressive
+    /// reads them (006 FR-020, FR-021): those that contend or run CedeGrid work there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principals: Vec<PrincipalStanding>,
+}
+
+/// Another account on a compute resource (006 FR-021): plain or CedeGrid, its arrival when
+/// CedeGrid, whether it arrived first and runs Performance or Aggressive work there, and whether
+/// admission holds for it in Performance and Aggressive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrincipalStanding {
+    pub uid: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cedegrid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arrival_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub first_comer: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub protected: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held_for: bool,
 }
 
 /// The time-slice rule on one device in one interval (FR-021, Q22): own work's busy contexts

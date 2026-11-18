@@ -2364,17 +2364,17 @@ fn placement(
         .contention
         .as_ref()
         .is_some_and(crate::execution_model::JobContention::admits_immediately);
-    let unprotected = report
+    let immediate = report
         .contention
         .as_ref()
-        .and_then(|contention| contention.unprotected_budget.as_ref())
+        .and_then(|contention| contention.admit_immediately_budget.as_ref())
         .filter(|_| granted);
     let admitted = match &report.contention {
         Some(contention) => {
             let open = |key: ResourceKey| {
                 contention.resources.get(&key).is_some_and(|state| {
                     state.admission == Admission::Open
-                        || (unprotected.is_some()
+                        || (immediate.is_some()
                             && matches!(key, ResourceKey::GpuCompute(_))
                             && state.admission.code() == Some("gpu_time_slice_admission_held"))
                 })
@@ -2403,7 +2403,7 @@ fn placement(
     };
     if !admitted {
         Placement::Closed
-    } else if total.fits(unprotected.unwrap_or(&report.managed_budget), resources) {
+    } else if total.fits(immediate.unwrap_or(&report.managed_budget), resources) {
         Placement::Fits
     } else {
         Placement::Exhausted

@@ -392,6 +392,18 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
     ),
     (
+        "admitted_as_plain",
+        "No account that arrived first with CedeGrid work contends, so Performance starts new work as plain Linux would.",
+    ),
+    (
+        "held_for_first_comer",
+        "Another account's CedeGrid work arrived first and contends, so admission holds at the fair share for it.",
+    ),
+    (
+        "admit_immediately_ignored_for_protected_first_comer",
+        "An account that arrived first runs Performance or Aggressive work, so admit immediately does not lift the hold for it.",
+    ),
+    (
         "applied_duty_credit",
         "Own GPU work is credited at what its supervisor applied: a paused task at nothing.",
     ),

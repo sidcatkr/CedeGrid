@@ -1,6 +1,11 @@
 //! Own work keeps its fair share for admission while another principal keeps its own, and holds
 //! it steady (user, 2026-11-17, option A). 004's host gate F2c found own work admitted to half
 //! its share: CedeGrid's own CPU was charged to the share and a 1000 m task no longer fit.
+//!
+//! Since 006, Performance and Aggressive keep that share only beside another account's CedeGrid
+//! work that arrived first; beside a plain principal, or CedeGrid work that arrived later, they
+//! start new work as plain Linux would (006 FR-006 to FR-008, FR-013). The other user here is a
+//! first-comer unless a test says otherwise.
 use cedegrid::{
     config::Config,
     contention::{ContentionMode, ResourceKey},
@@ -63,6 +68,24 @@ fn reading_with(
     cedegrid: u64,
     owner: u64,
     per_user: Option<bool>,
+) -> (Snapshot, PolicyInput) {
+    reading_beside(other, cedegrid, owner, per_user, FIRST)
+}
+
+/// Own work's run arrived on the node at this time.
+const OWN_ARRIVAL: u64 = 1_000;
+/// The other user's CedeGrid work arrived before own work's, with Yield First or Neutral work.
+const FIRST: Option<CedeGridWork> = Some(CedeGridWork {
+    arrival_unix_ms: Some(500),
+    protected_arrival_unix_ms: None,
+});
+
+fn reading_beside(
+    other: u64,
+    cedegrid: u64,
+    owner: u64,
+    per_user: Option<bool>,
+    work: Option<CedeGridWork>,
 ) -> (Snapshot, PolicyInput) {
     let busy = 1000 + cedegrid + owner + other;
     let hierarchy = per_user.map(|cpu| {
@@ -153,6 +176,7 @@ fn reading_with(
                 uid: Some(OTHER),
                 is_owner: false,
                 cpu_millicores: other,
+                cedegrid_cpu: work,
                 ..PrincipalUsage::default()
             },
         ]),
@@ -178,6 +202,7 @@ fn reading_with(
             usage_unknown: None,
             modes: Default::default(),
         }],
+        arrivals: BTreeMap::from([("job-1".into(), OWN_ARRIVAL)]),
         ..PolicyInput::default()
     };
     (snapshot, input)
@@ -283,5 +308,185 @@ fn the_owners_other_processes_share_its_slice_where_it_has_one() {
     assert_eq!(
         budget_with(ContentionMode::Performance, 2000, 30, 200, None),
         1770
+    );
+}
+
+fn decide(mode: ContentionMode, other: u64, work: Option<CedeGridWork>) -> Decision {
+    let (snapshot, input) = reading_beside(other, 50, 0, Some(true), work);
+    PolicyEngine::new()
+        .evaluate(&config(mode), &snapshot, &input, 0)
+        .unwrap()
+}
+
+fn codes(decision: &Decision) -> Vec<String> {
+    decision.resources[&ResourceKey::Cpu]
+        .reasons
+        .iter()
+        .map(|reason| reason.code.clone())
+        .collect()
+}
+
+/// Beside an account that does not run CedeGrid, Performance and Aggressive start new work as
+/// plain Linux would: up to the scope's capacity less the reserve, with no margin, no deduction
+/// of the other's usage and CedeGrid's own CPU left in (006 FR-007, SC-002).
+#[test]
+fn beside_a_plain_principal_performance_admits_up_to_capacity() {
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        for other in [500, 2000, 2900] {
+            let decision = decide(mode, other, None);
+            assert_eq!(
+                decision.managed_budget.cpu_millicores, 4000,
+                "{mode:?} beside {other} m"
+            );
+            assert!(
+                codes(&decision).contains(&"admitted_as_plain".to_string()),
+                "{mode:?}: {:?}",
+                codes(&decision)
+            );
+            let rows = &decision.resources[&ResourceKey::Cpu].principals;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert!(!rows[0].cedegrid && !rows[0].held_for, "{rows:?}");
+        }
+    }
+}
+
+/// CedeGrid work that arrived after own work's is not held for either (006 FR-006, FR-007).
+#[test]
+fn beside_cedegrid_work_that_arrived_later_performance_admits_as_plain() {
+    let later = Some(CedeGridWork {
+        arrival_unix_ms: Some(OWN_ARRIVAL + 1),
+        protected_arrival_unix_ms: Some(OWN_ARRIVAL + 1),
+    });
+    let decision = decide(ContentionMode::Performance, 2000, later);
+    assert_eq!(decision.managed_budget.cpu_millicores, 4000);
+    let row = &decision.resources[&ResourceKey::Cpu].principals[0];
+    assert!(row.cedegrid && !row.first_comer && !row.held_for, "{row:?}");
+    assert_eq!(
+        decision.resources[&ResourceKey::Cpu].own_arrival_unix_ms,
+        Some(OWN_ARRIVAL)
+    );
+}
+
+/// Beside CedeGrid work that arrived first, at the same time, or at a time either side cannot
+/// read, Performance holds at the kept equal share, and the decision names the first-comer
+/// (006 FR-006, FR-008, FR-020).
+#[test]
+fn beside_a_first_comer_performance_holds_at_the_fair_share() {
+    for arrival in [Some(500), Some(OWN_ARRIVAL), None] {
+        let work = Some(CedeGridWork {
+            arrival_unix_ms: arrival,
+            protected_arrival_unix_ms: None,
+        });
+        let decision = decide(ContentionMode::Performance, 2000, work);
+        assert_eq!(
+            decision.managed_budget.cpu_millicores, 2000,
+            "arrival {arrival:?}"
+        );
+        assert!(codes(&decision).contains(&"held_for_first_comer".to_string()));
+        let row = &decision.resources[&ResourceKey::Cpu].principals[0];
+        assert!(row.first_comer && row.held_for, "{row:?}");
+    }
+}
+
+/// Own work with no arrival on record, or with nothing running, comes after every CedeGrid
+/// principal (006 FR-006).
+#[test]
+fn own_work_without_a_known_arrival_holds_for_cedegrid_work() {
+    let later = Some(CedeGridWork {
+        arrival_unix_ms: Some(OWN_ARRIVAL + 1),
+        protected_arrival_unix_ms: None,
+    });
+    let (snapshot, mut input) = reading_beside(2000, 50, 0, Some(true), later);
+    input.arrivals.clear();
+    let decision = PolicyEngine::new()
+        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
+        .unwrap();
+    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
+}
+
+/// Yield First and Neutral keep 001's admission beside every principal, plain or not
+/// (006 FR-010).
+#[test]
+fn neutral_holds_beside_a_plain_principal_as_before() {
+    assert_eq!(
+        decide(ContentionMode::Neutral, 2000, None)
+            .managed_budget
+            .cpu_millicores,
+        2000
+    );
+    assert!(
+        !codes(&decide(ContentionMode::Neutral, 2000, None))
+            .iter()
+            .any(|code| code == "admitted_as_plain")
+    );
+}
+
+/// The admit immediately budget lifts the hold beside a first-comer that runs only Yield First
+/// or Neutral work, and keeps it beside one that runs Performance or Aggressive work there,
+/// saying so (006 FR-013).
+#[test]
+fn admit_immediately_lifts_the_hold_only_for_an_unprotected_first_comer() {
+    let decision = decide(ContentionMode::Performance, 2000, FIRST);
+    assert_eq!(decision.managed_budget.cpu_millicores, 2000);
+    assert_eq!(
+        decision
+            .admit_immediately_budget
+            .as_ref()
+            .map(|budget| budget.cpu_millicores),
+        Some(4000)
+    );
+    let protected = Some(CedeGridWork {
+        arrival_unix_ms: Some(500),
+        protected_arrival_unix_ms: Some(500),
+    });
+    let decision = decide(ContentionMode::Performance, 2000, protected);
+    assert_eq!(
+        decision
+            .admit_immediately_budget
+            .as_ref()
+            .map(|budget| budget.cpu_millicores),
+        Some(2000)
+    );
+    assert!(
+        codes(&decision)
+            .contains(&"admit_immediately_ignored_for_protected_first_comer".to_string())
+    );
+}
+
+/// While the principal list cannot be read, no account is known to be plain: Performance holds
+/// as 001 does (Principle III).
+#[test]
+fn an_unreadable_principal_list_holds_as_before() {
+    let (mut snapshot, input) = reading_beside(2000, 50, 0, Some(true), None);
+    snapshot.principals = None;
+    let decision = PolicyEngine::new()
+        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
+        .unwrap();
+    assert!(decision.managed_budget.cpu_millicores < 4000);
+}
+
+/// `doctor` lists each other account on the CPU with its kind, arrival and whether admission
+/// holds for it, and own work's arrival (006 FR-021).
+#[test]
+fn doctor_lists_the_other_accounts_and_whom_admission_holds_for() {
+    let (snapshot, input) = reading_beside(2000, 50, 0, Some(true), FIRST);
+    let mut config = config(ContentionMode::Performance);
+    config.node_id = snapshot.node_id.clone();
+    let decision = PolicyEngine::new()
+        .evaluate(&config, &snapshot, &input, 0)
+        .unwrap();
+    let text = cedegrid::explain::doctor_text(&config, &snapshot, &decision, &[]);
+    assert!(
+        text.contains("own arrival: 1000 ms since the epoch"),
+        "{text}"
+    );
+    let row = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(&OTHER.to_string()))
+        .unwrap_or_else(|| panic!("no row for the other account: {text}"));
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(
+        cells,
+        [&OTHER.to_string(), "cedegrid", "500", "yes", "no", "yes"]
     );
 }

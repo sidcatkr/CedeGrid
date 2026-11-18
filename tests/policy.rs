@@ -1184,10 +1184,11 @@ fn cpu_idle_reserve_is_the_larger_of_the_reserve_and_the_margin() {
             .managed_budget
             .cpu_millicores
     };
-    // Margins of 15%, 5% and 2% of 32 000 m are 4800, 1600 and 640 m; one and four
-    // reserved physical cores of 16 are 2000 and 8000 m.
+    // Margins of 15% and 5% of 32 000 m are 4800 and 1600 m; Performance keeps no margin where
+    // no account that arrived first contends (006 FR-007). One and four reserved physical cores
+    // of 16 are 2000 and 8000 m.
     for (reserve, expected) in [
-        (0, [27_200, 30_400, 31_360]),
+        (0, [27_200, 30_400, 32_000]),
         (1, [27_200, 30_000, 30_000]),
         (4, [24_000, 24_000, 24_000]),
     ] {
@@ -8033,10 +8034,14 @@ mod measurement_window {
             let mut config = config();
             config.contention.default_mode = mode;
             let mut engine = PolicyEngine::new();
+            // The other user's CedeGrid work came first, so Performance holds for it (006).
             let listed = |mut snap: Snapshot, other: u64| {
                 snap.principals = Some(vec![
                     super::cpu_principal(1000, true, 0),
-                    super::cpu_principal(2000, false, other),
+                    PrincipalUsage {
+                        cedegrid_cpu: Some(CedeGridWork::default()),
+                        ..super::cpu_principal(2000, false, other)
+                    },
                 ]);
                 snap
             };
@@ -10076,10 +10081,10 @@ mod save_progress {
 
 include!("support/state_dir.rs");
 
-/// 004 R12: the unprotected budget exists only under an Aggressive cap, raises CPU alone, and
-/// is gone while CPU is unknown.
+/// 006 FR-013: the admit immediately budget exists wherever the cap reaches Performance, holds
+/// only for protected first-comers, and has no CPU while CPU is unknown.
 #[test]
-fn the_unprotected_budget_exists_only_under_an_aggressive_cap() {
+fn the_admit_immediately_budget_exists_wherever_the_cap_reaches_performance() {
     use cedegrid::contention::ContentionMode;
     let input = PolicyInput {
         allocations: vec![allocation(
@@ -10109,45 +10114,52 @@ fn the_unprotected_budget_exists_only_under_an_aggressive_cap() {
         }
         last.unwrap()
     };
-    let performance = decide(ContentionMode::Performance, Some(7000));
-    assert!(performance.unprotected_budget.is_none());
-    let aggressive = decide(ContentionMode::Aggressive, Some(7000));
-    let unprotected = aggressive
-        .unprotected_budget
-        .clone()
-        .expect("an Aggressive cap");
-    assert!(
-        unprotected.cpu_millicores > aggressive.managed_budget.cpu_millicores,
-        "{unprotected:?} against {:?}",
-        aggressive.managed_budget
-    );
-    assert_eq!(unprotected.ram_mib, aggressive.managed_budget.ram_mib);
-    assert_eq!(
-        unprotected.gpu_memory_mib,
-        aggressive.managed_budget.gpu_memory_mib
-    );
-    // Unknown CPU leaves no budget, protected or not.
-    assert!(
-        decide(ContentionMode::Aggressive, None)
-            .unprotected_budget
-            .is_none()
-    );
+    let mut neutral_cap = config();
+    neutral_cap.contention.default_mode = ContentionMode::Neutral;
+    neutral_cap.contention.max_mode = Some(ContentionMode::Neutral);
+    let neutral = PolicyEngine::new()
+        .evaluate(&neutral_cap, &snapshot(), &input, 0)
+        .unwrap();
+    assert!(neutral.admit_immediately_budget.is_none());
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let decision = decide(mode, Some(7000));
+        let budget = decision
+            .admit_immediately_budget
+            .clone()
+            .expect("a cap that reaches Performance");
+        // No protected first-comer is known here, so it is the default budget or more.
+        assert!(
+            budget.cpu_millicores >= decision.managed_budget.cpu_millicores,
+            "{mode:?}"
+        );
+        assert_eq!(budget.ram_mib, decision.managed_budget.ram_mib);
+        assert_eq!(
+            budget.gpu_memory_mib,
+            decision.managed_budget.gpu_memory_mib
+        );
+        // Unknown CPU leaves no CPU budget, default or not.
+        let unknown = decide(mode, None);
+        assert_eq!(
+            unknown
+                .admit_immediately_budget
+                .map(|budget| budget.cpu_millicores),
+            Some(0),
+            "{mode:?}"
+        );
+    }
 }
 
-/// 004 R12: the node reports the unprotected budget only while the host's allowance reads on.
+/// 006 FR-013: the node always reports the admit immediately budget it decided; admit
+/// immediately needs no allowance, and unprotected is checked against it at launch.
 #[test]
-fn the_report_carries_the_unprotected_budget_only_under_the_allowance() {
+fn the_report_always_carries_the_admit_immediately_budget() {
     use cedegrid::contention::ContentionMode;
-    use cedegrid::state::{StateStore, clear_allowance, set_allowance};
+    use cedegrid::state::StateStore;
     let state = tempfile::tempdir().unwrap();
     drop(StateStore::open(state.path()).unwrap());
     let mut cfg = config();
     cfg.state_dir = state.path().to_path_buf();
-    cfg.contention.default_mode = ContentionMode::Aggressive;
-    cfg.contention.max_mode = Some(ContentionMode::Aggressive);
-    cfg.contention
-        .acknowledge_caution
-        .insert("aggressive_mode".into());
+    cfg.contention.default_mode = ContentionMode::Performance;
     let mut snap = snapshot();
     snap.cpu_busy_millicores = Some(7000);
     let input = PolicyInput {
@@ -10163,17 +10175,17 @@ fn the_report_carries_the_unprotected_budget_only_under_the_allowance() {
     let decision = PolicyEngine::new()
         .evaluate(&cfg, &snap, &input, 0)
         .unwrap();
-    assert!(decision.unprotected_budget.is_some());
+    assert!(decision.admit_immediately_budget.is_some());
     let report = |cfg: &Config| cedegrid::agent::node_contention_report(cfg, &decision, 1);
-    assert!(report(&cfg).unprotected_budget.is_none(), "allowance off");
-    set_allowance(state.path(), 1).unwrap();
-    assert_eq!(report(&cfg).unprotected_budget, decision.unprotected_budget);
-    clear_allowance(state.path()).unwrap();
-    assert!(
-        report(&cfg).unprotected_budget.is_none(),
-        "allowance cleared"
+    assert_eq!(
+        report(&cfg).admit_immediately_budget,
+        decision.admit_immediately_budget,
+        "no allowance"
     );
-    // A state directory that cannot be read reads as off.
     cfg.state_dir = state.path().join("missing");
-    assert!(report(&cfg).unprotected_budget.is_none());
+    assert_eq!(
+        report(&cfg).admit_immediately_budget,
+        decision.admit_immediately_budget,
+        "an unreadable state directory"
+    );
 }

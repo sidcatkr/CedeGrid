@@ -150,6 +150,7 @@ ALLOWLIST = (
     'src/pagination.rs',
     'src/policy.rs',
     'src/policy/admission.rs',
+    'src/policy/arrival.rs',
     'src/policy/ladder.rs',
     'src/policy/measure.rs',
     'src/protocol.rs',
