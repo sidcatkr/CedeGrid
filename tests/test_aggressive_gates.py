@@ -28,13 +28,22 @@ class AdmittedAtTest(unittest.TestCase):
 
 class ArgumentsTest(unittest.TestCase):
     def test_fill_runs_only_the_two_modes(self):
-        for arm in ('alone', 'unprotected'):
+        for arm in ('alone', 'plain', 'unprotected'):
             result = subprocess.run(
                 [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
                  '--python', sys.executable, '--shape', 'fill', '--arm', arm],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('fill runs performance or aggressive', result.stderr)
+
+    def test_plain_tasks_go_only_with_the_plain_arm(self):
+        for arm, count in (('performance', '1'), ('plain', '0')):
+            result = subprocess.run(
+                [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
+                 '--python', sys.executable, '--shape', 'gpu', '--arm', arm, '--plain-tasks', count],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('--plain-tasks takes a positive count', result.stderr)
 
 
 if __name__ == '__main__':

@@ -8,9 +8,10 @@ started directly and the coordinator and this harness outside the scope.
   gpu   two own GPU tasks (1024x1024 multiplies) while a second account saturates the same GPU
         from a CPU outside the scope.
 
-Arms: alone (the second account's load with no own work), performance, aggressive (protected)
-and unprotected (Aggressive with the host's allowance turned on through setup on a terminal,
-and both SDK fields set). For f2c and gpu the harness writes schedule.json, from which the
+Arms: alone (the second account's load with no own work), plain (own tasks started by hand on the
+scope without CedeGrid, the harm baseline; --plain-tasks sets how many), performance, aggressive
+(protected) and unprotected (Aggressive with the host's allowance turned on through setup on a
+terminal, and both SDK fields set). For f2c and gpu the harness writes schedule.json, from which the
 operator starts the second account's load at its epoch, then report.json. It acts only on
 processes it starts, and prints one summary line."""
 import argparse
@@ -186,12 +187,15 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--python', required=True, help='the Python own tasks run with (torch for gpu)')
     p.add_argument('--shape', choices=sorted(SHAPES), required=True)
-    p.add_argument('--arm', choices=['alone', 'performance', 'aggressive', 'unprotected'], required=True)
+    p.add_argument('--arm', choices=['alone', 'plain', 'performance', 'aggressive', 'unprotected'], required=True)
+    p.add_argument('--plain-tasks', type=int, help="own tasks the plain arm starts (default: the shape's)")
     p.add_argument('--window', type=int, default=60)
     p.add_argument('--lead', type=int, default=40)
     a = p.parse_args()
-    if a.shape == 'fill' and a.arm in ('alone', 'unprotected'):
+    if a.shape == 'fill' and a.arm in ('alone', 'plain', 'unprotected'):
         p.error('fill runs performance or aggressive')
+    if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
+        p.error('--plain-tasks takes a positive count, with --arm plain')
     repo = Path(a.repo).resolve()
     out = Path(a.output).resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -202,6 +206,8 @@ def main():
     from cedegrid import command_task
     cpus = physical_cpus(4)
     tasks, millicores = SHAPES[a.shape]
+    if a.arm == 'plain' and a.plain_tasks:
+        tasks = a.plain_tasks
     peer_cpus, gpu = cpus[:2], None
     if a.shape == 'gpu':
         gpu = subprocess.run(['nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader'], capture_output=True,
@@ -210,8 +216,9 @@ def main():
     report = {'shape': a.shape, 'arm': a.arm, 'cpus': cpus, 'tasks': tasks, 'task_millicores': millicores,
               'window_seconds': a.window, 'status': 'running'}
     cluster = None
+    plain = []
     try:
-        if a.arm != 'alone':
+        if a.arm not in ('alone', 'plain'):
             mode = 'performance' if a.arm == 'performance' else 'aggressive'
             cluster = Cluster(repo, out, cpus, mode, tasks, a.lead + a.window + 240, gpu)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
@@ -248,6 +255,14 @@ def main():
                                     replay_safe=True, max_attempts=1, **extra)
                 cluster.client.submit(task_id, cluster.run_id, [task])
                 cluster.jobs.append(task_id)
+        elif a.arm == 'plain':
+            # The baseline: the same loops started by hand where CedeGrid would run them.
+            for path in paths:
+                child = subprocess.Popen([a.python, '-c', GPU_LOOP if gpu else CPU_LOOP, str(end), str(path)],
+                                         cwd=str(repo), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                os.sched_setaffinity(child.pid, cpus)
+                plain.append(child)
         samples = []
         while time.time() < end + 3:
             if cluster:
@@ -256,6 +271,9 @@ def main():
                 running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
                 samples.append([round(time.time() - submitted, 2),
                                 states.count('assigned') + states.count('completed'), running])
+            elif plain:
+                running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
+                samples.append([round(time.time() - submitted, 2), len(plain), running])
             time.sleep(.25)
         deadline = time.time() + 60
         started = [p for p in paths if Path(f'{p}.pid').exists()]
@@ -282,6 +300,10 @@ def main():
     finally:
         if cluster is not None:
             report['cluster_cleanup'] = cluster.stop()
+        for child in plain:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
         atomic_json(out / 'report.json', report)
         print(json.dumps({k: report.get(k) for k in ('shape', 'arm', 'status', 'own', 'admitted_at', 'error')}))
 
