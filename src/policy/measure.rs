@@ -1,5 +1,6 @@
 //! The interval's measurement phases: charges and modes, the CPU, RAM and GPU
 //! readings, the mode targets and budgets, and whether the node is safe.
+use super::arrival::{OwnArrival, Standing};
 use super::*;
 
 impl<'a> Interval<'a> {
@@ -640,7 +641,7 @@ impl<'a> Interval<'a> {
     pub(super) fn unknown_budgets(&mut self) {
         if self.cpu_unknown {
             self.budget.cpu_millicores = 0;
-            self.unprotected_cpu = None;
+            self.admit_immediately_cpu = None;
             self.unsafe_now = true;
         }
         if self.ram_unknown {
@@ -987,27 +988,97 @@ impl<'a> Interval<'a> {
             .min(self.budget.cpu_millicores)
             .saturating_sub(cedegrid)
             .max(kept);
-        // An unprotected grant's budget, only where the cap reaches Aggressive (004 R12).
-        self.unprotected_cpu =
-            (config.contention.max_mode() == ContentionMode::Aggressive).then(|| {
-                own_allowance(
-                    &ModeInput {
-                        mode: ContentionMode::Aggressive,
-                        unprotected: true,
-                        ..view.clone()
-                    },
-                    &thresholds,
-                )
-                // Capacity minus the reserve within the ancestor quota: the grant starts beside
-                // others' usage, which the protected budget leaves out.
-                .min(
-                    self.cpu_capacity
-                        .saturating_sub(self.cpu_reserve)
-                        .min(self.cpu_ceiling),
-                )
-                .saturating_sub(cedegrid)
-                .max(self.budget.cpu_millicores)
-            });
+        self.first_comer_cpu(&view, &thresholds);
+    }
+
+    /// Performance and Aggressive hold CPU admission only for the accounts that arrived first,
+    /// and admit immediately only for the protected ones among them (006 FR-007, FR-008,
+    /// FR-013); each decision says which it did (FR-020).
+    fn first_comer_cpu(&mut self, view: &ModeInput, thresholds: &ResourceThresholds) {
+        let own = self.own_arrival(&|_| true);
+        let standings = self.standings(own, &|p| p.cedegrid_cpu);
+        let known = standings.as_ref();
+        let first = |protected: bool| {
+            move |uid: u32| {
+                known.is_none_or(|standings| {
+                    standings
+                        .get(&uid)
+                        .is_some_and(|s| s.first_comer && (s.protected || !protected))
+                })
+            }
+        };
+        let others = crate::contention::contending_principals(view, thresholds);
+        let mut held = Vec::new();
+        if view.mode >= ContentionMode::Performance {
+            let (budget, uids) = self.cpu_budget_for(view, thresholds, &first(false));
+            self.budget.cpu_millicores = budget;
+            held = uids;
+        }
+        self.admit_immediately_cpu = None;
+        if self.config.contention.max_mode() >= ContentionMode::Performance {
+            let (budget, protected) = self.cpu_budget_for(
+                &ModeInput {
+                    mode: view.mode.max(ContentionMode::Performance),
+                    ..view.clone()
+                },
+                thresholds,
+                &first(true),
+            );
+            if !protected.is_empty() {
+                note(
+                    &mut self.statuses,
+                    ResourceKey::Cpu,
+                    "admit_immediately_ignored_for_protected_first_comer",
+                    format!(
+                        "admit immediately does not lift the CPU hold for {}, which arrived first with Performance or Aggressive work",
+                        uid_list(&protected)
+                    ),
+                );
+            }
+            self.admit_immediately_cpu = Some(budget.max(self.budget.cpu_millicores));
+        }
+        // The rows show every account at the contention floor this interval, admitted as a
+        // principal or not yet.
+        let floor = (view
+            .capacity
+            .saturating_mul(u64::from(thresholds.principal_min_percent))
+            / 100)
+            .max(1);
+        let contending: BTreeSet<u32> = self
+            .snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_owner && p.cpu_millicores >= floor)
+            .filter_map(|p| p.uid)
+            .collect();
+        let held_set: BTreeSet<u32> = held.iter().copied().collect();
+        let status = self.statuses.entry(ResourceKey::Cpu).or_default();
+        if let OwnArrival::At(at) = own {
+            status.own_arrival_unix_ms = Some(at);
+        }
+        status.principals = standing_rows(standings.as_ref(), &contending, &held_set);
+        if view.mode < ContentionMode::Performance || others.is_empty() {
+            return;
+        }
+        if held.is_empty() {
+            note(
+                &mut self.statuses,
+                ResourceKey::Cpu,
+                "admitted_as_plain",
+                "CPU admission starts new work as plain Linux would: no account that arrived first with CedeGrid work contends".into(),
+            );
+        } else {
+            note(
+                &mut self.statuses,
+                ResourceKey::Cpu,
+                "held_for_first_comer",
+                format!(
+                    "CPU admission holds at the fair share for {}, which arrived first with CedeGrid work",
+                    uid_list(&held)
+                ),
+            );
+        }
     }
 
     /// While a resource is unknown or held, its principals, satisfied records and probes
@@ -1214,8 +1285,8 @@ impl<'a> Interval<'a> {
     pub(super) fn envelope_and_floors(&mut self) {
         if let Some(envelope) = &self.input.envelope {
             self.budget.cpu_millicores = self.budget.cpu_millicores.min(envelope.cpu_millicores);
-            self.unprotected_cpu = self
-                .unprotected_cpu
+            self.admit_immediately_cpu = self
+                .admit_immediately_cpu
                 .map(|cpu| cpu.min(envelope.cpu_millicores));
             self.budget.ram_mib = self.budget.ram_mib.min(envelope.ram_mib);
             for (key, limit) in [
@@ -1312,9 +1383,73 @@ impl<'a> Interval<'a> {
         let mut slice_admission_held = false;
         if !telemetry_unknown {
             let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
-            let (slice, next_held) = self
-                .time_slice(gpu, measured.is_some(), budget.unattributed)
+            // Performance and Aggressive hold GPU admission only for the accounts that arrived
+            // first, and admit immediately only for the protected ones (006 FR-008, FR-013).
+            let own = self.own_arrival(&|a| a.requested.gpu_memory_mib.contains_key(&gpu.uuid));
+            let standings = self.standings(own, &|p| p.cedegrid_gpu.get(&gpu.uuid).copied());
+            let known = standings.as_ref();
+            let first = |protected: bool| {
+                move |uid: Option<u32>| {
+                    known.is_none_or(|standings| {
+                        uid.and_then(|uid| standings.get(&uid))
+                            .is_some_and(|s| s.first_comer && (s.protected || !protected))
+                    })
+                }
+            };
+            let mode = governing(self.config, ResourceKind::GpuCompute);
+            // The record and the hold of running tasks count every principal: a Yield First or
+            // Neutral job keeps its give-back on any node (FR-010).
+            let (slice, mut next_held) = self
+                .time_slice(gpu, measured.is_some(), budget.unattributed, None)
                 .unzip();
+            let mut bound = slice.as_ref().is_some_and(|slice| !slice.bound.is_empty());
+            if mode >= ContentionMode::Performance {
+                let first_comers = first(false);
+                let held = self.time_slice(
+                    gpu,
+                    measured.is_some(),
+                    budget.unattributed,
+                    Some(&first_comers),
+                );
+                bound = held
+                    .as_ref()
+                    .is_some_and(|(slice, _)| !slice.bound.is_empty());
+                next_held = held.map(|(_, next)| next);
+            }
+            if self.config.contention.max_mode() >= ContentionMode::Performance {
+                let protected = first(true);
+                if let Some((slice, next)) = self.time_slice(
+                    gpu,
+                    measured.is_some(),
+                    budget.unattributed,
+                    Some(&protected),
+                ) && (!slice.bound.is_empty() || next)
+                {
+                    self.admit_immediately_closed.insert(gpu.uuid.clone());
+                    let uids: Vec<u32> = slice.bound.iter().filter_map(|b| b.uid).collect();
+                    note(
+                        &mut self.statuses,
+                        ResourceKey::GpuCompute(gpu.uuid.clone()),
+                        "admit_immediately_ignored_for_protected_first_comer",
+                        format!(
+                            "admit immediately does not lift the GPU hold for {}, which arrived first with Performance or Aggressive work",
+                            if uids.is_empty() {
+                                "the accounts listed there".to_string()
+                            } else {
+                                uid_list(&uids)
+                            }
+                        ),
+                    );
+                }
+            }
+            self.gpu_standings(
+                gpu,
+                own,
+                known,
+                mode,
+                slice.as_ref(),
+                bound || next_held == Some(true),
+            );
             time_slice = slice;
             if let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) {
                 match gpu.time_sliced {
@@ -1328,10 +1463,7 @@ impl<'a> Interval<'a> {
             }
             // No mode sets a duty: a slice-bound principal holds GPU admission in every mode, and
             // in Yield First and Neutral own tasks there are held by whole tasks (FR-021, FR-089).
-            slice_admission_held = time_slice
-                .as_ref()
-                .is_some_and(|slice| !slice.bound.is_empty())
-                || next_held == Some(true);
+            slice_admission_held = bound || next_held == Some(true);
             if let Some(hold) = time_slice.as_ref().and_then(|slice| slice.hold) {
                 self.slice_hold.insert(gpu.uuid.clone(), hold);
                 note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_hold");
@@ -1806,6 +1938,7 @@ impl<'a> Interval<'a> {
         gpu: &GpuSnapshot,
         measured: bool,
         unattributed: bool,
+        holds_for: Option<&dyn Fn(Option<u32>) -> bool>,
     ) -> Option<(TimeSliceRecord, bool)> {
         if gpu.time_sliced != Some(true) {
             return None;
@@ -1899,6 +2032,10 @@ impl<'a> Interval<'a> {
             && demand.current(self.now, self.config.gpu_sample_max_age_ms());
         if read && measured && unattributed {
             principals.entry(None).or_insert(1);
+        }
+        // Performance and Aggressive count only the accounts they hold for (006 FR-008).
+        if let Some(holds_for) = holds_for {
+            principals.retain(|uid, _| holds_for(*uid));
         }
         let external: u32 = principals.values().sum();
         let count = principals.len() as u32;
@@ -2479,6 +2616,103 @@ fn owner_unmanaged(snapshot: &Snapshot, uuid: &str) -> u64 {
 }
 
 /// A catalog reason on a device's GPU compute status.
+impl Interval<'_> {
+    /// A device's standing rows and the decision's sentence on whom GPU admission holds for in
+    /// Performance and Aggressive (006 FR-020, FR-021).
+    fn gpu_standings(
+        &mut self,
+        gpu: &GpuSnapshot,
+        own: OwnArrival,
+        standings: Option<&BTreeMap<u32, Standing>>,
+        mode: ContentionMode,
+        slice: Option<&TimeSliceRecord>,
+        held: bool,
+    ) {
+        let listed: BTreeSet<u32> = gpu
+            .compute_contexts
+            .iter()
+            .flat_map(|contexts| contexts.listed.iter().filter_map(|(_, uid)| *uid))
+            .collect();
+        let held_for: BTreeSet<u32> = if !held {
+            BTreeSet::new()
+        } else if mode >= ContentionMode::Performance {
+            standings
+                .into_iter()
+                .flatten()
+                .filter(|(uid, s)| s.first_comer && listed.contains(uid))
+                .map(|(uid, _)| *uid)
+                .collect()
+        } else {
+            slice
+                .into_iter()
+                .flat_map(|slice| slice.bound.iter().filter_map(|b| b.uid))
+                .collect()
+        };
+        let key = ResourceKey::GpuCompute(gpu.uuid.clone());
+        let status = self.statuses.entry(key.clone()).or_default();
+        if let OwnArrival::At(at) = own {
+            status.own_arrival_unix_ms = Some(at);
+        }
+        status.principals = standing_rows(standings, &listed, &held_for);
+        if mode < ContentionMode::Performance || listed.is_empty() {
+            return;
+        }
+        if held {
+            let first: Vec<u32> = held_for.iter().copied().collect();
+            note(
+                &mut self.statuses,
+                key,
+                "held_for_first_comer",
+                format!(
+                    "GPU admission holds at the time-slice rule for {}, which arrived first with CedeGrid work",
+                    if first.is_empty() {
+                        "the accounts listed there".to_string()
+                    } else {
+                        uid_list(&first)
+                    }
+                ),
+            );
+        } else {
+            note(
+                &mut self.statuses,
+                key,
+                "admitted_as_plain",
+                "GPU admission starts new work as plain Linux would: no account that arrived first with CedeGrid work holds a slice there".into(),
+            );
+        }
+    }
+}
+
+/// The rows for the accounts on a compute resource that contend or run CedeGrid work there.
+fn standing_rows(
+    standings: Option<&BTreeMap<u32, Standing>>,
+    contending: &BTreeSet<u32>,
+    held: &BTreeSet<u32>,
+) -> Vec<PrincipalStanding> {
+    standings
+        .into_iter()
+        .flatten()
+        .filter(|(uid, standing)| standing.work.is_some() || contending.contains(uid))
+        .map(|(uid, standing)| PrincipalStanding {
+            uid: *uid,
+            cedegrid: standing.work.is_some(),
+            arrival_unix_ms: standing.work.and_then(|work| work.arrival_unix_ms),
+            first_comer: standing.first_comer,
+            protected: standing.protected,
+            held_for: held.contains(uid),
+        })
+        .collect()
+}
+
+/// UIDs for a reason sentence: "UID 1001" or "UIDs 1001, 1002".
+fn uid_list(uids: &[u32]) -> String {
+    let list: Vec<String> = uids.iter().map(u32::to_string).collect();
+    match list.len() {
+        1 => format!("UID {}", list[0]),
+        _ => format!("UIDs {}", list.join(", ")),
+    }
+}
+
 fn note_reason(
     statuses: &mut BTreeMap<ResourceKey, ResourceStatus>,
     uuid: &str,
@@ -2497,7 +2731,7 @@ fn note_reason(
 /// Whether the agent runs in a CPU cgroup of the owner's own, so the kernel charges CedeGrid's
 /// CPU to the owner rather than to other users: an ancestor that is the owner's user slice or
 /// System mode unit and has the `cpu` controller.
-fn owner_cpu_cgroup(snapshot: &Snapshot) -> bool {
+pub(super) fn owner_cpu_cgroup(snapshot: &Snapshot) -> bool {
     let own = |name: &str| {
         let user = name
             .strip_prefix("user-")

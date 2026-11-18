@@ -79,6 +79,47 @@ fn overview(decision: &Decision) -> Vec<String> {
     table(&rows, 2)
 }
 
+/// Own work's arrival on a compute resource and a row for each other account there: plain or
+/// CedeGrid, its arrival, whether it came first, and whether admission holds for it in
+/// Performance and Aggressive (006 FR-021). Empty where there is neither.
+pub fn principals_text(status: &crate::model::ResourceStatus) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(at) = status.own_arrival_unix_ms {
+        lines.push(format!("  own arrival: {at} ms since the epoch"));
+    }
+    if status.principals.is_empty() {
+        return lines;
+    }
+    let yes = |on: bool| if on { "yes" } else { "no" }.to_owned();
+    let mut rows = vec![
+        ["UID", "KIND", "ARRIVAL", "FIRST", "PROTECTED", "HELD FOR"]
+            .map(str::to_owned)
+            .to_vec(),
+    ];
+    for principal in &status.principals {
+        rows.push(vec![
+            principal.uid.to_string(),
+            if principal.cedegrid {
+                "cedegrid"
+            } else {
+                "plain"
+            }
+            .to_owned(),
+            match (principal.cedegrid, principal.arrival_unix_ms) {
+                (false, _) => "-".to_owned(),
+                (true, Some(at)) => at.to_string(),
+                (true, None) => "unknown".to_owned(),
+            },
+            yes(principal.first_comer),
+            yes(principal.protected),
+            yes(principal.held_for),
+        ]);
+    }
+    lines.push("  other accounts:".to_owned());
+    lines.extend(table(&rows, 4));
+    lines
+}
+
 /// Rows in aligned columns, indented; trailing blank cells add no spaces.
 pub fn table(rows: &[Vec<String>], indent: usize) -> Vec<String> {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -399,6 +440,9 @@ pub fn doctor_text(
         }
         for reason in &status.reasons {
             let _ = writeln!(out, "  reason {}: {}", reason.code, reason.text);
+        }
+        for line in principals_text(status) {
+            let _ = writeln!(out, "{line}");
         }
         if let Some(held) = &status.held_back {
             let share = |cause: &str| {

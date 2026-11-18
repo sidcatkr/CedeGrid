@@ -3651,8 +3651,9 @@ mod psi_saturation {
             .iter()
             .map(|d| d.resources[&ResourceKey::Cpu].target_share)
             .collect();
-        // 8000 − 500 external − each mode's margin (15%, 5%, 2%).
-        assert_eq!(targets, [Some(6300), Some(7100), Some(7340)]);
+        // 8000 − 500 external − each mode's margin (15%, 5%); the other user runs no CedeGrid
+        // work, so Performance's is the whole 8000 (006 FR-007).
+        assert_eq!(targets, [Some(6300), Some(7100), Some(8000)]);
         assert_eq!(hosts.map(|host| host.own()), [6300, 7100, 7200]);
     }
 
@@ -5671,6 +5672,9 @@ mod gpu_demand {
                 samples_readable: true,
                 others_quiet: false,
             });
+            // The other user's work runs under CedeGrid and came first, so Performance and
+            // Aggressive hold GPU admission for it as Neutral does (006 FR-008).
+            peer_runs_cedegrid(&mut snap, 0, false);
             snap
         }
 
@@ -6160,6 +6164,125 @@ mod gpu_demand {
                     );
                 }
             }
+        }
+
+        /// The other user's CedeGrid work on the device, which arrived at `arrival` (006 FR-002).
+        pub(super) fn peer_runs_cedegrid(snap: &mut Snapshot, arrival: u64, protected: bool) {
+            for principal in snap.principals.iter_mut().flatten() {
+                if principal.uid == Some(PEER) {
+                    principal.cedegrid_gpu.insert(
+                        GPU.into(),
+                        CedeGridWork {
+                            arrival_unix_ms: Some(arrival),
+                            protected,
+                        },
+                    );
+                }
+            }
+        }
+
+        /// One own task beside one saturating process of another account, in Performance:
+        /// GPU admission holds for that account only when its CedeGrid work arrived first, and
+        /// admit immediately lifts that hold only when it runs no Performance or Aggressive work
+        /// there (006 FR-007, FR-008, FR-013).
+        #[test]
+        fn performance_holds_gpu_admission_only_for_a_first_comer() {
+            const OWN: u64 = 1_000;
+            let key = ResourceKey::GpuCompute(GPU.into());
+            let run = |peer: Option<(u64, bool)>, mode: ContentionMode| {
+                let mut config = mode_config(mode);
+                if mode == ContentionMode::Aggressive {
+                    config.contention.max_mode = Some(ContentionMode::Aggressive);
+                    config
+                        .contention
+                        .acknowledge_caution
+                        .insert("aggressive_mode".into());
+                }
+                let mut engine = PolicyEngine::new();
+                let input = PolicyInput {
+                    allocations: vec![job(None)],
+                    arrivals: BTreeMap::from([("job".into(), OWN)]),
+                    ..PolicyInput::default()
+                };
+                let mut last = None;
+                for i in 0..80u64 {
+                    let mut snap = sliced(Some(495), 495, i + 1, 1, 1);
+                    match peer {
+                        Some((arrival, protected)) => {
+                            peer_runs_cedegrid(&mut snap, arrival, protected)
+                        }
+                        None => {
+                            for principal in snap.principals.iter_mut().flatten() {
+                                principal.cedegrid_gpu.clear();
+                            }
+                        }
+                    }
+                    last = Some(
+                        engine
+                            .evaluate(&config, &snap, &input, i * INTERVAL)
+                            .unwrap(),
+                    );
+                }
+                last.unwrap()
+            };
+            let code = |decision: &Decision| {
+                decision.resources[&key]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string)
+            };
+            let reasons = |decision: &Decision| -> Vec<String> {
+                decision.resources[&key]
+                    .reasons
+                    .iter()
+                    .map(|r| r.code.clone())
+                    .collect()
+            };
+            let vram = |decision: &Decision| {
+                decision
+                    .unprotected_budget
+                    .as_ref()
+                    .and_then(|budget| budget.gpu_memory_mib.get(GPU).copied())
+            };
+            for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+                // A plain process: admitted as plain Linux would.
+                let plain = run(None, mode);
+                assert_eq!(code(&plain), None, "{mode:?}");
+                assert!(
+                    reasons(&plain).contains(&"admitted_as_plain".into()),
+                    "{mode:?}"
+                );
+                assert!(!plain.resources[&key].principals[0].cedegrid);
+                // CedeGrid work that arrived later: the same.
+                assert_eq!(code(&run(Some((OWN + 1, true)), mode)), None, "{mode:?}");
+                // A first-comer running only Neutral work: held; admit immediately lifts it.
+                let first = run(Some((OWN - 1, false)), mode);
+                assert_eq!(
+                    code(&first).as_deref(),
+                    Some("gpu_time_slice_admission_held"),
+                    "{mode:?}"
+                );
+                assert!(reasons(&first).contains(&"held_for_first_comer".into()));
+                assert!(first.resources[&key].principals[0].held_for);
+                assert_eq!(
+                    vram(&first),
+                    first.managed_budget.gpu_memory_mib.get(GPU).copied()
+                );
+                assert!(vram(&first).unwrap_or(0) > 0, "{mode:?}");
+                // A protected first-comer: admit immediately keeps the device off.
+                let protected = run(Some((OWN - 1, true)), mode);
+                assert_eq!(vram(&protected), Some(0), "{mode:?}");
+                assert!(
+                    reasons(&protected)
+                        .contains(&"admit_immediately_ignored_for_protected_first_comer".into())
+                );
+            }
+            // Neutral holds beside every principal, as before (006 FR-010).
+            assert_eq!(
+                code(&run(None, ContentionMode::Neutral)).as_deref(),
+                Some("gpu_time_slice_admission_held")
+            );
         }
 
         /// The first-come record of the device (FR-090).
@@ -6923,11 +7046,18 @@ mod gpu_demand {
 
         /// In Performance two own contexts beside a saturating one set no duty and open no
         /// re-measure window, so own work keeps the driver's slices, as beside the same work
-        /// started by hand; GPU admission holds instead (FR-021, FR-022, R87).
+        /// started by hand; GPU admission holds instead, here for CedeGrid work that came first
+        /// (FR-021, FR-022, R87, 006 FR-008).
         #[test]
         fn performance_sets_no_time_slice_duty_and_holds_gpu_admission() {
             let config = mode_config(ContentionMode::Performance);
-            let run = tick_loop_with(&config, &|_| 2, &|_| vec![(PEER, 1, 1000)], 120, &|_, _| {});
+            let run = tick_loop_with(
+                &config,
+                &|_| 2,
+                &|_| vec![(PEER, 1, 1000)],
+                120,
+                &|_, snap| peer_runs_cedegrid(snap, 0, false),
+            );
             let (unmanaged, _, _) = tick(2, 1000, &[(PEER, 1, 1000)]);
             for (i, t) in run.iter().enumerate().skip(10) {
                 let steps = gpu_steps(&t.decision);

@@ -969,6 +969,14 @@ back more.
   5977-6114 req/s (former cap 5884-6018), own more than 2% below its target in at most 4 of 100
   intervals, the error's p95 64-112 m (user, 2026-11-17).
 
+### Session 2026-11-18
+
+- Q: Whom do Performance and Aggressive hold admission for? → A: Only for another account whose
+  CedeGrid work arrived first on the resource; beside plain principals and CedeGrid work that
+  arrived later they admit as plain Linux would, and admit immediately lifts the hold except for
+  a first-comer running Performance or Aggressive work (constitution 9.0.0;
+  [006](../006-performance-first/spec.md) FR-006 to FR-013; FR-022, FR-065).
+
 ## Terms
 
 - **Own work**: allocations that CedeGrid launched and verified, including SDK-managed children.
@@ -1790,9 +1798,22 @@ node reports with the expected per-resource values at each step.
   interval count and the time since the last uncapped interval. The node report's held-back breakdown
   states, per device, whether the amount was measured or why it is unknown.
 - **FR-022**: Performance MUST:
-  - let own work use all capacity external demand is not using, minus a small admission margin
-    (default 2%) on CPU and GPU compute; running own work is not capped for the margin. Memory
-    keeps the floors as FR-023 states for this mode;
+  - beside plain principals and CedeGrid principals that arrived after own work
+    ([006](../006-performance-first/spec.md) FR-006, FR-007), admit new own work on CPU and GPU
+    compute as plain Linux would start it: up to the capacity less the operator reserve, within
+    the envelope and the ancestor quota, with no admission margin, no deduction of their usage,
+    CedeGrid's own CPU left in, and without the time-slice admission hold, recording
+    `admitted_as_plain`. The bullets on admission below apply only beside a CedeGrid principal
+    that arrived first, counting only such first-comers, and record `held_for_first_comer`;
+    while the principal list cannot be read, they count every principal. The decision also
+    carries an admit immediately budget that counts only protected first-comers, those running
+    Performance or Aggressive work there, and on a device held for one carries no VRAM
+    (`admit_immediately_ignored_for_protected_first_comer`). Each compute resource's status lists
+    own work's arrival and each other account that contends or runs CedeGrid work there, with
+    its kind, arrival, first-comer and protected flags and whether admission holds for it;
+  - beside a first-comer, let own work use all capacity its demand is not using, minus a small
+    admission margin (default 2%) on CPU and GPU compute; running own work is not capped for the
+    margin. Memory keeps the floors as FR-023 states for this mode;
   - scale up quickly;
   - not cap, pause or drain running own work on CPU or GPU compute for another principal's
     demand, for own usage above its admission target, or for activity of unknown amount, in
@@ -1804,16 +1825,16 @@ node reports with the expected per-resource values at each step.
     admits one more own process only while (m + 1) × k ≤ E (FR-021's counts) or no counted
     principal is slice-bound by its latest readings as well as the estimate's (FR-089), and
     records `gpu_time_slice_admission_held` otherwise;
-  - while CPU telemetry is unknown, or a compute resource has activity of unknown amount, admit
-    no new own work there and hold every step (FR-008);
+  - while CPU telemetry is unknown, or a compute resource has a first-comer's activity of
+    unknown amount, admit no new own work there and hold every step (FR-008);
   - keep the operator envelope (FR-057), the Guaranteed rules (FR-024) and explicit operator
     drain, as every mode does.
 - **FR-065**: For every resource and every observation, own work's target MUST satisfy
   Yield First ≤ Neutral ≤ Performance. Configuration enforces it by construction: the margins
   are validated as Yield First ≥ Neutral ≥ Performance, with Yield First above Performance.
   Under contention Neutral holds the fair share and Performance takes no compute step, so its
-  running target is the whole capacity and its admission target, max(S, A − m_P·C), is at least
-  Neutral's S. On memory, Yield First and Neutral give way at the floors and Performance does not
+  running target is the whole capacity and its admission target, max(S, A − m_P·C) beside a
+  first-comer and the capacity less the reserve otherwise (006 FR-007), is at least Neutral's S. On memory, Yield First and Neutral give way at the floors and Performance does not
   (FR-023), so Yield First ≤ Neutral ≤ Performance still holds.
 - **FR-023**: No-harm floors MUST apply in every mode:
   - a minimum available host RAM;

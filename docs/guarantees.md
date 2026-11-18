@@ -120,11 +120,13 @@ running stay at or above ⌊E_b ÷ k_b⌋ (`gpu_time_slice_hold`), with E_b and 
 principals' processes and number and each own task counted as one context: beside one saturating
 process, two own tasks become one, so each side gets half. Principals that are not slice-bound
 keep their slices. A held task resumes once no counted principal is slice-bound or the rule holds
-with it running. In every mode one more own process is admitted on the device only while
-(m + 1) × k ≤ E or no counted principal is slice-bound (`gpu_time_slice_admission_held`), a
-principal reading the larger of its average and its most within the sample age: beside one
-saturating process, one own process is the fair share, and no second one is admitted. While the
-amounts go unmeasured for the sample age, every counted principal is slice-bound.
+with it running. One more own process is admitted on the device only while (m + 1) × k ≤ E or
+no counted principal is slice-bound (`gpu_time_slice_admission_held`), a principal reading the
+larger of its average and its most within the sample age: beside one saturating process, one
+own process is the fair share, and no second one is admitted. While the amounts go unmeasured
+for the sample age, every counted principal is slice-bound. Yield First and Neutral count every
+principal; Performance and Aggressive count only accounts whose CedeGrid work on the device
+arrived first, as below, and beside the others admit as plain Linux would.
 Performance and Aggressive hold no task: own work keeps the driver's slices, as beside the same
 work started by hand. The counts are the
 processes sampled busy within the counting window, and own work's processes also from the
@@ -337,14 +339,35 @@ limitation of per-job modes. Performance
 takes no step on running work for another principal, for own usage above its admission target
 or for activity of unknown amount, and only the operator's envelope still steps it: what
 another principal gets is the kernel's and the driver's split beside the same work. It holds
-back at admission only: new own work starts only within the larger of the fair share and
-capacity minus observed external usage minus its margin, and nothing new starts while
-activity is of unknown amount. In Neutral, Performance and Aggressive, while another principal
-contends and the others leave own work its equal share of the capacity less the operator
-reserve, within a principal's floor (1% of capacity), own work keeps that equal share for
-admission: the margin is room for others' growth past an equal share, which no mode owes, and
-readings that close to the share do not move it. Otherwise Yield First keeps 15%
-of capacity free, Neutral 5% and Performance 2%; the margins are validated as Yield
+back at admission only, and only for another account whose CedeGrid work arrived first on the
+resource (feature 006). Another account is a CedeGrid principal on a resource while the agent
+identifies, read-only, that its work running there runs under CedeGrid; every other account,
+and usage CedeGrid cannot attribute or identify, is a plain principal. Own work's arrival on a
+resource is the earliest among its running allocations there. A CedeGrid principal is a
+first-comer when its work there arrived before own work's, at the same time, or when either
+time is unknown or own work runs nothing there; it is a protected first-comer when it runs
+Performance or Aggressive work there. Beside plain principals and CedeGrid work that arrived
+later, Performance and Aggressive start new work as plain Linux would: up to the capacity less
+the operator reserve, within the envelope and the ancestor quota, with no margin, no deduction
+of others' usage and CedeGrid's own CPU left in, and on GPU compute without the time-slice
+admission hold; VRAM headroom and the memory floors still apply (`admitted_as_plain`). Beside
+a first-comer, admission holds as below, counting only first-comers: new own work starts only
+within the larger of the fair share and capacity minus their observed usage minus the margin,
+and nothing new starts while their activity is of unknown amount (`held_for_first_comer`).
+While the principal list cannot be read, no account is known to be plain, and the hold counts
+every principal. Every decision in Performance and Aggressive also carries an admit immediately
+budget, which holds only for protected first-comers (on a device held for one, it carries no
+VRAM); a run with admit immediately is placed against it, and the decision says when a
+protected first-comer kept the hold (`admit_immediately_ignored_for_protected_first_comer`).
+Each compute resource's status lists own work's arrival and, for each other account that
+contends or runs CedeGrid work there, its kind, arrival, whether it came first, whether it is
+protected and whether admission holds for it. In Neutral, and in Performance and Aggressive
+beside a first-comer, while another principal contends and the others leave own work its
+equal share of the capacity less the operator reserve, within a principal's floor (1% of
+capacity), own work keeps that equal share for admission: the margin is room for others'
+growth past an equal share, which no mode owes, and readings that close to the share do not
+move it. Otherwise Yield First keeps 15% of capacity free, Neutral 5%, and Performance 2%
+where it holds for a first-comer and nothing elsewhere; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
 scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU and GPU
 compute and 2 s on memory. A held step still moves no faster than the minimum step dwell.
@@ -584,9 +607,10 @@ runs only where `contention.max_mode = "aggressive"` is set explicitly. Without 
 the node cap stops at Performance, and an Aggressive setting runs as Performance with a
 `mode_capped` warning.
 
-Protected Aggressive, the default form, keeps the admission rule. New own work starts only
-where every other principal keeps the lesser of its demand and its fair share, and never into
-activity of unknown amount.
+Protected Aggressive, the default form, keeps Performance's admission rule. Beside an account
+whose CedeGrid work arrived first, new own work starts only where that account keeps the lesser
+of its demand and its fair share, and never into its activity of unknown amount; beside every
+other account it starts as plain Linux would.
 
 Unprotected Aggressive is the one exception to that rule. A job may start new compute work
 where another principal contends, only when all of these hold:
@@ -723,6 +747,9 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `gpu_time_slice_hold` | Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals. |
 | `gpu_first_come_floor` | Own GPU work was on the device before every other principal listed there, so it keeps at least the share that leaves none of them more than half of the device. |
 | `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
+| `admitted_as_plain` | No account that arrived first with CedeGrid work contends, so Performance starts new work as plain Linux would. |
+| `held_for_first_comer` | Another account's CedeGrid work arrived first and contends, so admission holds at the fair share for it. |
+| `admit_immediately_ignored_for_protected_first_comer` | An account that arrived first runs Performance or Aggressive work, so admit immediately does not lift the hold for it. |
 | `applied_duty_credit` | Own GPU work is credited at what its supervisor applied: a paused task at nothing. |
 | `gpu_compute_measured` | External GPU compute is measured from per-process samples. |
 | `gpu_compute_unknown_activity` | External GPU activity without per-process amounts counts as one principal of unknown amount. |

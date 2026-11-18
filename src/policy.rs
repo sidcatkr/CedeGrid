@@ -19,6 +19,7 @@ use crate::kernel::{CpuTopology, CpuUsageStatus, KernelSnapshot};
 use crate::model::*;
 
 mod admission;
+mod arrival;
 mod ladder;
 mod measure;
 
@@ -529,8 +530,14 @@ struct Interval<'a> {
     allocation_modes: BTreeMap<String, BTreeMap<ResourceKind, ContentionMode>>,
     // Measurement and budgets.
     budget: Resources,
-    /// The CPU an unprotected grant may be placed against, where the cap reaches Aggressive.
-    unprotected_cpu: Option<u64>,
+    /// The CPU a run with admit immediately may be placed against, where the cap reaches
+    /// Performance: the hold counts only protected first-comers (006 FR-013).
+    admit_immediately_cpu: Option<u64>,
+    /// Devices where a protected first-comer holds GPU admission, which carry no VRAM in the
+    /// admit immediately budget (006 FR-013).
+    admit_immediately_closed: BTreeSet<String>,
+    /// Own work's arrival on the CPU and each other account's standing there; None while the
+    /// principal list cannot be read (006 FR-006).
     unsafe_now: bool,
     cpu_unknown: bool,
     ram_unknown: bool,
@@ -659,7 +666,8 @@ impl<'a> Interval<'a> {
             held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
-            unprotected_cpu: None,
+            admit_immediately_cpu: None,
+            admit_immediately_closed: BTreeSet::new(),
             unsafe_now: false,
             cpu_unknown: false,
             ram_unknown: false,
@@ -732,10 +740,24 @@ impl<'a> Interval<'a> {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
             observe_only: true,
-            unprotected_budget: self.unprotected_cpu.map(|cpu| Resources {
-                cpu_millicores: cpu.max(self.budget.cpu_millicores),
-                ..self.budget.clone()
-            }),
+            unprotected_budget: (config.contention.max_mode() >= ContentionMode::Performance).then(
+                || Resources {
+                    cpu_millicores: self
+                        .admit_immediately_cpu
+                        .unwrap_or(0)
+                        .max(self.budget.cpu_millicores),
+                    gpu_memory_mib: self
+                        .budget
+                        .gpu_memory_mib
+                        .iter()
+                        .map(|(uuid, mib)| {
+                            let closed = self.admit_immediately_closed.contains(uuid);
+                            (uuid.clone(), if closed { 0 } else { *mib })
+                        })
+                        .collect(),
+                    ..self.budget.clone()
+                },
+            ),
             managed_budget: self.budget,
             admission_headroom: self.headroom,
             expansion_allowed: self.expansion_allowed,
