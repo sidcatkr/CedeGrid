@@ -2408,10 +2408,11 @@ node reports with the expected per-resource values at each step.
   First and Neutral, and nothing where the node's CPU mode is Performance or Aggressive: own CPU
   above the envelope is left alone there, as plain Linux would run it, and a decision whose CPU
   work contends with a plain principal with no first-comer holding it sets `cpu_beside_plain`
-  ([006](../006-performance-first/spec.md) FR-007a): after three intervals in a row of that
-  contention, held 10 s after it ends, and never from CPU read unattributed within two monitor
-  intervals after an own task stops. There, own charges over the CPU budget hold admission and
-  release no admitted reservation.
+  ([006](../006-performance-first/spec.md) FR-007a): on a saturated CPU, after three intervals
+  in a row of that contention, held 10 s after it ends; unattributed CPU stands for a plain
+  principal only after the principal window and never within two monitor intervals after an own
+  task stops. There, own charges over the CPU budget restart no cooldown and release no admitted
+  reservation: new work waits through the headroom.
   - Opportunistic work is released first, by least cost.
   - Guaranteed work MUST NOT be drained except as floor policy A allows (FR-024).
   - An envelope breach MUST NOT stop every allocation at once.

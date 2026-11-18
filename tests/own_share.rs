@@ -514,23 +514,28 @@ fn the_decision_flags_cpu_beside_a_plain_principal() {
         arrival_unix_ms: Some(OWN_ARRIVAL + 1),
         protected_arrival_unix_ms: None,
     });
+    // At 2900 m the other user and own work keep the CPU saturated: they contend.
     for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
         assert!(
-            flag(mode, 2000, None),
+            flag(mode, 2900, None),
             "{mode:?}: a plain principal contends"
         );
         assert!(
-            !flag(mode, 2000, FIRST),
+            !flag(mode, 2900, FIRST),
             "{mode:?}: a first-comer holds own work"
         );
         assert!(
-            !flag(mode, 2000, later),
+            !flag(mode, 2900, later),
             "{mode:?}: later CedeGrid work is not plain"
         );
         assert!(!flag(mode, 0, None), "{mode:?}: nobody contends");
+        assert!(
+            !flag(mode, 1000, None),
+            "{mode:?}: a plain principal on a CPU with room to spare does not contend"
+        );
     }
     for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
-        assert!(!flag(mode, 2000, None), "{mode:?}");
+        assert!(!flag(mode, 2900, None), "{mode:?}");
     }
 }
 
@@ -538,7 +543,7 @@ fn the_decision_flags_cpu_beside_a_plain_principal() {
 /// principal list holds for everyone, so the flag stays off (006 FR-004, FR-007a).
 #[test]
 fn unattributed_usage_counts_as_plain_and_an_unreadable_list_does_not() {
-    let (mut snapshot, input) = reading_beside(2000, 50, 0, Some(true), None);
+    let (mut snapshot, input) = reading_beside(2900, 50, 0, Some(true), None);
     for principal in snapshot.principals.iter_mut().flatten() {
         if principal.uid == Some(OTHER) {
             principal.uid = None;
@@ -700,11 +705,11 @@ fn flags(
 /// 10 s after it ends, so one reading does not swing admission (006 FR-007a).
 #[test]
 fn the_beside_plain_flag_is_debounced_and_held() {
-    // The other user contends from interval 10 to 29.
+    // The other user contends from interval 10 to 29, the CPU saturated beside two own tasks.
     let run = flags(
         ContentionMode::Performance,
         80,
-        &|i| if (10..30).contains(&i) { 1500 } else { 0 },
+        &|i| if (10..30).contains(&i) { 1950 } else { 0 },
         &|_| 0,
         &|_| 2,
     );
@@ -717,7 +722,7 @@ fn the_beside_plain_flag_is_debounced_and_held() {
     let blip = flags(
         ContentionMode::Performance,
         40,
-        &|i| if i == 10 || i == 20 { 1500 } else { 0 },
+        &|i| if i == 10 || i == 20 { 1950 } else { 0 },
         &|_| 0,
         &|_| 2,
     );
@@ -750,7 +755,7 @@ fn own_task_exits_never_make_a_plain_principal() {
 }
 
 /// Performance and Aggressive drain no CPU reservation that is admitted but not started when
-/// own charges come to exceed the budget: admission holds instead (006 FR-007a, FR-009).
+/// own charges come to exceed the budget: new work waits instead (006 FR-007a, FR-009).
 #[test]
 fn performance_drains_no_pending_cpu_reservation() {
     let run = |mode: ContentionMode| {
@@ -792,7 +797,10 @@ fn performance_drains_no_pending_cpu_reservation() {
             actions.iter().all(|a| a.resource != ResourceKey::Cpu),
             "{mode:?}: {actions:?}"
         );
-        assert_ne!(
+        // New work waits through the headroom; the admission state stays open, so the tasks
+        // already placed are still authorized.
+        assert_eq!(last.admission_headroom.cpu_millicores, 0, "{mode:?}");
+        assert_eq!(
             last.resources[&ResourceKey::Cpu].admission,
             Some(cedegrid::contention::Admission::Open),
             "{mode:?}"
@@ -806,4 +814,75 @@ fn performance_drains_no_pending_cpu_reservation() {
                 && a.step >= cedegrid::contention::YieldStep::Drain),
         "Neutral still releases reservations that no longer fit"
     );
+}
+
+/// On a CPU with room to spare, the system's own small, unattributed use, such as the agent
+/// starting up or its supervisors, is no plain principal contending (006 FR-007a).
+#[test]
+fn unattributed_noise_on_an_idle_cpu_sets_no_flag() {
+    let run = flags(
+        ContentionMode::Performance,
+        60,
+        &|_| 0,
+        &|i| [200, 42, 129, 92, 53, 81, 93][(i % 7) as usize],
+        &|i| usize::from(i >= 30),
+    );
+    assert!(!run.iter().any(|on| *on), "{run:?}");
+}
+
+/// Own work running past the CPU budget, as the agent starts it beside a plain user, is no reason
+/// for a cooldown: CPU admission stays open for the tasks already placed (006 FR-007a, FR-009).
+#[test]
+fn own_work_over_the_cpu_budget_holds_no_cooldown_in_performance() {
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let mut engine = PolicyEngine::new();
+        let mut codes = Vec::new();
+        for i in 0..20u64 {
+            // Eight 1000 m tasks admitted beside a plain user; four have started, all by 3 s.
+            let (mut snapshot, mut input) = reading_beside(2900, 50, 0, Some(true), None);
+            let job = input.allocations[0].clone();
+            // The running tasks share the 1000 m the other user leaves.
+            let started = if i >= 6 { 8 } else { 4 };
+            input.allocations = (0..8)
+                .map(|k| {
+                    let running = k < started;
+                    Allocation {
+                        id: format!("job-{k}"),
+                        phase: if running {
+                            AllocationPhase::Running
+                        } else {
+                            AllocationPhase::Pending
+                        },
+                        observed: running.then(|| Resources {
+                            cpu_millicores: 1000 / started as u64,
+                            ram_mib: 256,
+                            gpu_memory_mib: BTreeMap::new(),
+                        }),
+                        ..job.clone()
+                    }
+                })
+                .collect();
+            input.arrivals = (0..8).map(|k| (format!("job-{k}"), OWN_ARRIVAL)).collect();
+            snapshot.managed_cpu_lower_millicores = Some(1000);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            let decision = engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap();
+            codes.push(
+                decision.resources[&ResourceKey::Cpu]
+                    .admission
+                    .as_ref()
+                    .and_then(|a| a.code())
+                    .map(str::to_string),
+            );
+        }
+        assert!(
+            !codes
+                .iter()
+                .skip(1)
+                .any(|code| code.as_deref() == Some("admission_cooling_down")),
+            "{mode:?}: {codes:?}"
+        );
+    }
 }
