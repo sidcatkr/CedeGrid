@@ -861,6 +861,18 @@ impl<'a> Interval<'a> {
     /// which bounds the budget.
     pub(super) fn cpu_target(&mut self) {
         let config = self.config;
+        // Own tasks that stopped running since the last interval (006 FR-007a).
+        let running: BTreeSet<String> = self
+            .input
+            .allocations
+            .iter()
+            .filter(|a| a.phase == AllocationPhase::Running)
+            .map(|a| a.id.clone())
+            .collect();
+        if self.prev.own_running.iter().any(|id| !running.contains(id)) {
+            self.next.own_exit_ms = Some(self.now);
+        }
+        self.next.own_running = running;
         let saturated = self.cpu_saturation();
         // CedeGrid's own CPU comes out of own tasks' budget and targets (FR-069).
         let cedegrid = self.cedegrid_cpu;
@@ -1057,7 +1069,12 @@ impl<'a> Interval<'a> {
         // A plain principal contends: an account with no CedeGrid work on the CPU, or usage
         // that no readable account accounts for. Accounts below uid_min are background.
         let uid_min = self.config.contention.uid_min;
-        let plain_contends = self.cpu_unattributed >= floor
+        // CPU no account accounts for right after own tasks stop is their last interval's
+        // usage, read in the host's busy time after the own reading dropped: no principal.
+        let exit_recent = self.next.own_exit_ms.is_some_and(|at| {
+            self.now.saturating_sub(at) <= self.config.monitor.interval_ms.saturating_mul(2)
+        });
+        let plain_contends = (!exit_recent && self.cpu_unattributed >= floor)
             || self.snapshot.principals.iter().flatten().any(|p| {
                 !p.is_owner
                     && in_scope(p.cpu_millicores) >= floor
@@ -1071,8 +1088,22 @@ impl<'a> Interval<'a> {
                         }
                     }
             });
-        self.cpu_beside_plain =
-            view.mode >= ContentionMode::Performance && held.is_none() && plain_contends;
+        // The flag needs a plain principal's contention for a few intervals in a row and holds
+        // a while after it ends, so one reading does not swing admission either way.
+        let open = view.mode >= ContentionMode::Performance && held.is_none();
+        let streak = if open && plain_contends {
+            self.prev.beside_plain_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.next.beside_plain_streak = streak;
+        if streak >= crate::policy::BESIDE_PLAIN_INTERVALS {
+            self.next.beside_plain_ms = Some(self.now);
+        }
+        self.cpu_beside_plain = open
+            && self.next.beside_plain_ms.is_some_and(|at| {
+                self.now.saturating_sub(at) <= crate::policy::BESIDE_PLAIN_HOLD_MS
+            });
         let status = self.statuses.entry(ResourceKey::Cpu).or_default();
         if let OwnArrival::At(at) = own {
             status.own_arrival_unix_ms = Some(at);

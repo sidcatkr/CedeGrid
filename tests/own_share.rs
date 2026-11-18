@@ -495,8 +495,20 @@ fn doctor_lists_the_other_accounts_and_whom_admission_holds_for() {
 /// principal with no first-comer holding it, so the agent may start tasks as plain Linux would.
 #[test]
 fn the_decision_flags_cpu_beside_a_plain_principal() {
+    // The flag sets after three intervals of contention (the debounce test below).
     let flag = |mode: ContentionMode, other: u64, work: Option<CedeGridWork>| {
-        decide(mode, other, work).cpu_beside_plain
+        let (mut snapshot, input) = reading_beside(other, 50, 0, Some(true), work);
+        let mut engine = PolicyEngine::new();
+        let mut on = false;
+        for i in 0..4u64 {
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            on = engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap()
+                .cpu_beside_plain;
+        }
+        on
     };
     let later = Some(CedeGridWork {
         arrival_unix_ms: Some(OWN_ARRIVAL + 1),
@@ -532,15 +544,27 @@ fn unattributed_usage_counts_as_plain_and_an_unreadable_list_does_not() {
             principal.uid = None;
         }
     }
-    let decision = PolicyEngine::new()
-        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
-        .unwrap();
-    assert!(decision.cpu_beside_plain);
+    let after = |snapshot: &mut Snapshot| {
+        let mut engine = PolicyEngine::new();
+        let mut on = false;
+        for i in 0..4u64 {
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            on = engine
+                .evaluate(
+                    &config(ContentionMode::Performance),
+                    snapshot,
+                    &input,
+                    i * 500,
+                )
+                .unwrap()
+                .cpu_beside_plain;
+        }
+        on
+    };
+    assert!(after(&mut snapshot));
     snapshot.principals = None;
-    let decision = PolicyEngine::new()
-        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
-        .unwrap();
-    assert!(!decision.cpu_beside_plain);
+    assert!(!after(&mut snapshot));
 }
 
 /// Performance and Aggressive leave own CPU above the operator envelope alone: no yield, cap or
@@ -632,5 +656,154 @@ fn a_first_comer_busy_outside_the_scope_does_not_hold_it() {
         inside.managed_budget.cpu_millicores < 1000,
         "{:?}",
         inside.resources[&ResourceKey::Cpu]
+    );
+}
+
+/// A run of `intervals` decisions 500 ms apart, with the other user at `other(i)` m and the
+/// own tasks listed by `running(i)`, each at 1000 m.
+fn flags(
+    mode: ContentionMode,
+    intervals: u64,
+    other: &dyn Fn(u64) -> u64,
+    unattributed: &dyn Fn(u64) -> u64,
+    running: &dyn Fn(u64) -> usize,
+) -> Vec<bool> {
+    let mut engine = PolicyEngine::new();
+    (0..intervals)
+        .map(|i| {
+            let (mut snapshot, mut input) = reading_beside(other(i), 50, 0, Some(true), None);
+            let n = running(i);
+            let job = input.allocations[0].clone();
+            input.allocations = (0..n)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..n).map(|k| (format!("job-{k}"), OWN_ARRIVAL)).collect();
+            let own = 1000 * n as u64;
+            snapshot.managed_cpu_lower_millicores = Some(own);
+            let busy = (own + 50 + other(i) + unattributed(i)).min(4000);
+            snapshot.cpu_busy_millicores = Some(busy);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap()
+                .cpu_beside_plain
+        })
+        .collect()
+}
+
+/// The flag needs a plain principal's contention for three intervals in a row and holds for
+/// 10 s after it ends, so one reading does not swing admission (006 FR-007a).
+#[test]
+fn the_beside_plain_flag_is_debounced_and_held() {
+    // The other user contends from interval 10 to 29.
+    let run = flags(
+        ContentionMode::Performance,
+        80,
+        &|i| if (10..30).contains(&i) { 1500 } else { 0 },
+        &|_| 0,
+        &|_| 2,
+    );
+    assert!(!run[..12].iter().any(|on| *on), "{run:?}");
+    assert!(run[12..30].iter().all(|on| *on), "{run:?}");
+    // Held for 10 s, 20 intervals, after the last contended interval.
+    assert!(run[30..50].iter().all(|on| *on), "{run:?}");
+    assert!(!run[51..].iter().any(|on| *on), "{run:?}");
+    // A one-interval reading never sets it.
+    let blip = flags(
+        ContentionMode::Performance,
+        40,
+        &|i| if i == 10 || i == 20 { 1500 } else { 0 },
+        &|_| 0,
+        &|_| 2,
+    );
+    assert!(!blip.iter().any(|on| *on), "{blip:?}");
+}
+
+/// Own tasks that exit leave their last interval's CPU in the host's busy reading after the own
+/// reading has dropped; that unattributed CPU is not a plain principal (006 FR-004, FR-007a).
+#[test]
+fn own_task_exits_never_make_a_plain_principal() {
+    // Three tasks exit at interval 10, two at 11 and two more at 12, each leaving its CPU
+    // unattributed for that interval and the next.
+    let running = |i: u64| match i {
+        0..10 => 3 + 2 + 2,
+        10 => 4,
+        11 => 2,
+        _ => 0,
+    };
+    let left = |i: u64| match i {
+        10 => 3000,
+        11 => 2000 + 1500,
+        12 => 2000 + 1000,
+        13 => 1000,
+        _ => 0,
+    };
+    let run = flags(ContentionMode::Performance, 40, &|_| 0, &left, &|i| {
+        running(i).min(4)
+    });
+    assert!(!run.iter().any(|on| *on), "{run:?}");
+}
+
+/// Performance and Aggressive drain no CPU reservation that is admitted but not started when
+/// own charges come to exceed the budget: admission holds instead (006 FR-007a, FR-009).
+#[test]
+fn performance_drains_no_pending_cpu_reservation() {
+    let run = |mode: ContentionMode| {
+        // Four tasks run and twelve more were admitted; the budget is back at 4000 m.
+        let (mut snapshot, mut input) = reading_beside(0, 50, 0, Some(true), None);
+        snapshot.managed_cpu_lower_millicores = Some(4000);
+        snapshot.cpu_busy_millicores = Some(4000);
+        snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(4000);
+        let job = input.allocations[0].clone();
+        input.allocations = (0..16)
+            .map(|k| Allocation {
+                id: format!("job-{k}"),
+                phase: if k < 4 {
+                    AllocationPhase::Running
+                } else {
+                    AllocationPhase::Pending
+                },
+                observed: (k < 4).then(|| job.observed.clone()).flatten(),
+                ..job.clone()
+            })
+            .collect();
+        let mut engine = PolicyEngine::new();
+        let mut actions = Vec::new();
+        let mut last = None;
+        for i in 0..10u64 {
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            let decision = engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap();
+            actions.extend(decision.actions.clone());
+            last = Some(decision);
+        }
+        (actions, last.unwrap())
+    };
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let (actions, last) = run(mode);
+        assert!(
+            actions.iter().all(|a| a.resource != ResourceKey::Cpu),
+            "{mode:?}: {actions:?}"
+        );
+        assert_ne!(
+            last.resources[&ResourceKey::Cpu].admission,
+            Some(cedegrid::contention::Admission::Open),
+            "{mode:?}"
+        );
+    }
+    let (actions, _) = run(ContentionMode::Neutral);
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.resource == ResourceKey::Cpu
+                && a.step >= cedegrid::contention::YieldStep::Drain),
+        "Neutral still releases reservations that no longer fit"
     );
 }

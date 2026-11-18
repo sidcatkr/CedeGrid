@@ -300,7 +300,16 @@ impl<'a> Interval<'a> {
         // Pending reservations are cancelled by their charge. CPU in use is
         // measured by usage against the mode's allowance, since a cap lowers
         // usage but never the request.
-        let admission_excess = held_charge.saturating_sub(amount_of(&key, &self.budget));
+        // Performance and Aggressive release no CPU reservation that was admitted: charges over
+        // the budget hold admission instead, as plain Linux would start what it was given
+        // (006 FR-007a, FR-009).
+        let admission_excess = if kind == ResourceKind::Cpu
+            && governing(self.config, kind) >= ContentionMode::Performance
+        {
+            0
+        } else {
+            held_charge.saturating_sub(amount_of(&key, &self.budget))
+        };
         let cpu_usage = input
             .allocations
             .iter()
@@ -592,9 +601,9 @@ impl<'a> Interval<'a> {
             })
             .collect();
         // A job in Performance or Aggressive keeps its memory at a floor breach and yields no
-        // running CPU, not even for the operator envelope, whatever the governing mode (FR-023,
-        // FR-030, 006 FR-007a).
-        if frame.keeps_mode_memory || kind == ResourceKind::Cpu && !pending_pass {
+        // CPU, running or reserved, not even for the operator envelope, whatever the governing
+        // mode (FR-023, FR-030, 006 FR-007a).
+        if frame.keeps_mode_memory || kind == ResourceKind::Cpu {
             victims.retain(|v| v.mode < ContentionMode::Performance);
         }
         victim_order(&mut victims, needed);
