@@ -589,3 +589,48 @@ fn performance_takes_no_cpu_step_for_the_envelope() {
         "memory over the envelope still steps: {actions:?}"
     );
 }
+
+/// An agent scoped to one CPU beside a first-comer whose work runs on the host's other CPUs:
+/// the principal list reads that work host-wide, but the scope sees none of it, so the hold
+/// counts only what the scope measures and the scope's CPU stays open (006 FR-008).
+#[test]
+fn a_first_comer_busy_outside_the_scope_does_not_hold_it() {
+    let scoped = |other_in_scope: u64| {
+        // Own work at 500 m and CedeGrid at 50 m run on CPU 0; the first-comer runs 2000 m
+        // host-wide, `other_in_scope` of it on CPU 0.
+        let (mut snapshot, mut input) = reading_beside(2000, 50, 0, Some(true), FIRST);
+        input.allocations[0].requested.cpu_millicores = 500;
+        input.allocations[0]
+            .observed
+            .as_mut()
+            .unwrap()
+            .cpu_millicores = 500;
+        snapshot.managed_cpu_lower_millicores = Some(500);
+        snapshot.cpu_busy_millicores = Some(500 + 50 + 2000);
+        let kernel = snapshot.kernel.as_mut().unwrap();
+        kernel.cpu.allowed_cpu_ids = Some(vec![0]);
+        kernel.cpu.effective_cgroup_cpu_ids = Some(vec![0]);
+        kernel.cpu.effective_cpu_ids = Some(vec![0]);
+        kernel.cpu.cores.truncate(1);
+        kernel.cpu.effective_cpu_capacity_millicores = Some(1000);
+        kernel.cpu.visible_cpu_ceiling_millicores = Some(1000);
+        kernel.cpu.busy_millicores = Some(500 + 50 + other_in_scope);
+        PolicyEngine::new()
+            .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
+            .unwrap()
+    };
+    let outside = scoped(0);
+    assert_eq!(
+        outside.managed_budget.cpu_millicores,
+        1000,
+        "{:?}",
+        outside.resources[&ResourceKey::Cpu]
+    );
+    // Where the first-comer's work does run in the scope, the hold applies to that part.
+    let inside = scoped(450);
+    assert!(
+        inside.managed_budget.cpu_millicores < 1000,
+        "{:?}",
+        inside.resources[&ResourceKey::Cpu]
+    );
+}

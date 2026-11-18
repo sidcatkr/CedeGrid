@@ -1044,12 +1044,13 @@ impl<'a> Interval<'a> {
             .saturating_mul(u64::from(thresholds.principal_min_percent))
             / 100)
             .max(1);
+        let in_scope = self.cpu_in_scope(view);
         let contending: BTreeSet<u32> = self
             .snapshot
             .principals
             .iter()
             .flatten()
-            .filter(|p| !p.is_owner && p.cpu_millicores >= floor)
+            .filter(|p| !p.is_owner && in_scope(p.cpu_millicores) >= floor)
             .filter_map(|p| p.uid)
             .collect();
         let held_set: BTreeSet<u32> = held.iter().flatten().copied().collect();
@@ -1059,7 +1060,7 @@ impl<'a> Interval<'a> {
         let plain_contends = self.cpu_unattributed >= floor
             || self.snapshot.principals.iter().flatten().any(|p| {
                 !p.is_owner
-                    && p.cpu_millicores >= floor
+                    && in_scope(p.cpu_millicores) >= floor
                     && match p.uid {
                         None => true,
                         Some(uid) => {
