@@ -91,6 +91,11 @@ pub struct ProcessSample {
     pub ram_mib: u64,
     /// Seconds since the epoch; with the PID it identifies the process.
     pub start_time: u64,
+    /// The parent PID, where the platform's table reads it.
+    pub parent: Option<u32>,
+    /// The CedeGrid marker of a task supervisor that counts as CedeGrid work (006 FR-001,
+    /// FR-003).
+    pub marker: Option<crate::execution_model::WorkMarker>,
 }
 
 /// External processes whose memory the policy tracks for admission peaks
@@ -201,6 +206,35 @@ pub fn aggregate_principals(
             *usage = usage.saturating_add(*mib);
         }
     }
+    // Other accounts' CedeGrid work, by marker (006 FR-002 to FR-005).
+    let by_pid: BTreeMap<u32, &ProcessSample> = processes.iter().map(|p| (p.pid, p)).collect();
+    let work_of = |pid: u32| cedegrid_work_of(&by_pid, pid);
+    for process in processes {
+        if managed.contains(&process.pid) || process.uid.is_none() || process.uid == owner_uid {
+            continue;
+        }
+        if let Some(marker) = work_of(process.pid) {
+            let work = entry(&mut principals, process.uid, owner_uid)
+                .cedegrid_cpu
+                .get_or_insert_with(Default::default);
+            note_cedegrid_work(work, marker.arrival_unix_ms, marker.cpu);
+        }
+    }
+    for (uuid, contexts) in gpu_memory.iter().chain(gpu_compute) {
+        for pid in contexts.keys() {
+            let uid = owners.get(pid).copied().flatten();
+            if managed.contains(pid) || uid.is_none() || uid == owner_uid {
+                continue;
+            }
+            if let Some(marker) = work_of(*pid) {
+                let work = entry(&mut principals, uid, owner_uid)
+                    .cedegrid_gpu
+                    .entry(uuid.clone())
+                    .or_default();
+                note_cedegrid_work(work, marker.arrival_unix_ms, marker.gpu);
+            }
+        }
+    }
     // A PID whose owner cannot be read stays with the unattributed principal.
     for (uuid, processes) in gpu_compute {
         for (pid, milli) in processes {
@@ -219,6 +253,72 @@ pub fn aggregate_principals(
         }
     }
     principals.into_values().collect()
+}
+
+/// The marker in a task supervisor's `/proc/<pid>/cmdline`: a CedeGrid binary started as
+/// `__assignment-supervisor <spec> <marker>` (006 FR-001). Anything else has none.
+// Only Linux's process table reads markers; the tests run everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn supervisor_marker(cmdline: &[u8]) -> Option<crate::execution_model::WorkMarker> {
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let program = std::str::from_utf8(args.first()?).ok()?;
+    let name = program.rsplit('/').next()?;
+    if !name.starts_with("cedegrid") || args.get(1).copied() != Some(b"__assignment-supervisor") {
+        return None;
+    }
+    crate::execution_model::WorkMarker::parse(std::str::from_utf8(args.get(3)?).ok()?)
+}
+
+/// Whether a `/proc/<pid>/cgroup` text places the process inside one of `uid`'s units the
+/// System mode broker made (006 FR-003).
+// Only Linux's process table reads markers; the tests run everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn in_broker_unit(cgroup: &str, uid: u32) -> bool {
+    let units = [
+        format!("cedegrid-u{uid}.service"),
+        format!("cedegrid-idle-u{uid}.service"),
+    ];
+    cgroup
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"))
+        .any(|path| {
+            path.split('/')
+                .any(|part| units.iter().any(|unit| part == unit))
+        })
+}
+
+/// The marker that makes `pid` CedeGrid work: its own, or its nearest marked ancestor's within
+/// 32 levels, through processes of the same account only (006 FR-002).
+fn cedegrid_work_of(
+    by_pid: &BTreeMap<u32, &ProcessSample>,
+    pid: u32,
+) -> Option<crate::execution_model::WorkMarker> {
+    let mut current = *by_pid.get(&pid)?;
+    let uid = current.uid?;
+    for _ in 0..32 {
+        if current.uid != Some(uid) {
+            return None;
+        }
+        if let Some(marker) = current.marker {
+            return Some(marker);
+        }
+        current = by_pid.get(&current.parent?)?;
+    }
+    None
+}
+
+/// Keeps the earliest arrival, and the earliest among Performance or Aggressive work.
+fn note_cedegrid_work(
+    work: &mut crate::model::CedeGridWork,
+    arrival_unix_ms: u64,
+    mode: crate::contention::ContentionMode,
+) {
+    let earliest =
+        |known: Option<u64>| Some(known.map_or(arrival_unix_ms, |k| k.min(arrival_unix_ms)));
+    work.arrival_unix_ms = earliest(work.arrival_unix_ms);
+    if crate::execution_model::WorkMarker::protected(mode) {
+        work.protected_arrival_unix_ms = earliest(work.protected_arrival_unix_ms);
+    }
 }
 
 /// The owner UID of a process, when the platform exposes it as a number.
@@ -345,6 +445,9 @@ impl Collector {
                 cpu_millicores: (f64::from(process.cpu_usage()) * 10.0).round() as u64,
                 ram_mib: process.memory() / MIB,
                 start_time: process.start_time(),
+                // Other platforms identify no CedeGrid work: every account is plain there.
+                parent: None,
+                marker: None,
             })
             .collect();
         Some(self.principals_from(&samples))
@@ -1226,6 +1329,8 @@ mod tests {
             cpu_millicores,
             ram_mib,
             start_time: u64::from(pid) * 10,
+            parent: None,
+            marker: None,
         }
     }
 
@@ -1289,6 +1394,98 @@ mod tests {
         );
         assert_eq!(listed.len(), 64);
         assert!(listed.iter().all(|p| p.pid > 6), "{listed:?}");
+    }
+
+    /// Another account's CedeGrid work, a marked supervisor of that account and what descends
+    /// from it, makes it a CedeGrid principal with its earliest arrivals; GPU contexts count per
+    /// device. Unmarked work, work under another account's supervisor and the owner stay plain
+    /// (006 FR-002 to FR-005).
+    #[test]
+    fn other_accounts_cedegrid_work_is_identified_by_its_marker() {
+        use crate::contention::ContentionMode::{Neutral, Performance};
+        use crate::execution_model::WorkMarker;
+        use crate::model::CedeGridWork;
+        let marked = |cpu, gpu, arrival_unix_ms| {
+            Some(WorkMarker {
+                cpu,
+                gpu,
+                arrival_unix_ms,
+            })
+        };
+        let processes = [
+            // 1001: a Neutral run that arrived at 500 and a Performance run at 900, with a task
+            // and the task's own child.
+            ProcessSample {
+                marker: marked(Neutral, Neutral, 500),
+                ..process(10, Some(1001), 5, 1)
+            },
+            ProcessSample {
+                parent: Some(10),
+                ..process(11, Some(1001), 900, 100)
+            },
+            ProcessSample {
+                marker: marked(Performance, Performance, 900),
+                ..process(20, Some(1001), 5, 1)
+            },
+            ProcessSample {
+                parent: Some(20),
+                ..process(21, Some(1001), 1000, 100)
+            },
+            ProcessSample {
+                parent: Some(21),
+                ..process(22, Some(1001), 0, 1)
+            },
+            // 1002 starts its work by hand.
+            process(30, Some(1002), 2000, 50),
+            // A 1003 process under 1001's supervisor is not 1003's CedeGrid work.
+            ProcessSample {
+                parent: Some(20),
+                ..process(40, Some(1003), 100, 1)
+            },
+            // The owner's own markers make no principal of it.
+            ProcessSample {
+                marker: marked(Performance, Performance, 100),
+                ..process(50, Some(1000), 1, 1)
+            },
+        ];
+        let gpu = BTreeMap::from([
+            ("GPU-a".to_string(), BTreeMap::from([(22, 512)])),
+            ("GPU-b".to_string(), BTreeMap::from([(30, 256), (11, 64)])),
+        ]);
+        let compute = BTreeMap::from([("GPU-a".to_string(), BTreeMap::from([(22, 900)]))]);
+        let principals =
+            aggregate_principals(&processes, &gpu, &compute, Some(1000), &BTreeSet::new());
+        let by = |uid| principals.iter().find(|p| p.uid == Some(uid)).unwrap();
+        assert_eq!(
+            by(1001).cedegrid_cpu,
+            Some(CedeGridWork {
+                arrival_unix_ms: Some(500),
+                protected_arrival_unix_ms: Some(900),
+            })
+        );
+        assert_eq!(
+            by(1001).cedegrid_gpu,
+            BTreeMap::from([
+                (
+                    "GPU-a".into(),
+                    CedeGridWork {
+                        arrival_unix_ms: Some(900),
+                        protected_arrival_unix_ms: Some(900),
+                    }
+                ),
+                (
+                    "GPU-b".into(),
+                    CedeGridWork {
+                        arrival_unix_ms: Some(500),
+                        protected_arrival_unix_ms: None,
+                    }
+                ),
+            ])
+        );
+        for plain in [1002, 1003, 1000] {
+            assert_eq!(by(plain).cedegrid_cpu, None, "{plain}");
+            assert!(by(plain).cedegrid_gpu.is_empty(), "{plain}");
+        }
     }
 
     #[test]
@@ -4279,7 +4476,57 @@ mod tests {
         assert_eq!(fields.cpu_ticks, 200);
         assert_eq!(fields.start_ticks, 98765);
         assert_eq!(fields.rss_pages, 512);
+        assert_eq!(fields.parent, 1);
         assert!(processes::parse_stat("4242 (truncated").is_none());
+    }
+
+    /// A supervisor's marker comes only from its own command line, in its place after the spec
+    /// path; on a System mode host it counts only inside one of that account's broker units
+    /// (006 FR-001, FR-003).
+    #[test]
+    fn a_supervisor_marker_is_read_from_its_command_line_and_unit() {
+        use crate::contention::ContentionMode;
+        let marker = "cedegrid-work=v1;cpu=performance;gpu=neutral;arrival=42";
+        let cmdline = |args: &[&str]| args.join("\0").into_bytes();
+        let read = supervisor_marker(&cmdline(&[
+            "/usr/bin/cedegrid",
+            "__assignment-supervisor",
+            "/home/user/.local/state/cedegrid/attempts/a/supervisor-spec.json",
+            marker,
+        ]));
+        assert_eq!(
+            read,
+            Some(crate::execution_model::WorkMarker {
+                cpu: ContentionMode::Performance,
+                gpu: ContentionMode::Neutral,
+                arrival_unix_ms: 42,
+            })
+        );
+        for other in [
+            cmdline(&["/usr/bin/cedegrid", "agent", "run", marker]),
+            cmdline(&["/usr/bin/cedegrid", "__assignment-supervisor", marker]),
+            cmdline(&["python3", "__assignment-supervisor", "spec", marker]),
+            cmdline(&["/usr/bin/cedegrid", "__assignment-supervisor", "spec"]),
+            Vec::new(),
+        ] {
+            assert_eq!(supervisor_marker(&other), None);
+        }
+        let unit = "0::/cedegrid.slice/cedegrid-u1001.service/jobs/a1\n";
+        assert!(in_broker_unit(unit, 1001));
+        assert!(in_broker_unit(
+            "0::/user.slice/user-1001.slice/cedegrid-idle-u1001.service/jobs\n",
+            1001
+        ));
+        assert!(!in_broker_unit(unit, 1002));
+        assert!(!in_broker_unit(
+            "0::/user.slice/user-1001.slice/session-3.scope\n",
+            1001
+        ));
+        assert!(!in_broker_unit(
+            "0::/user.slice/user-1001.slice/x-cedegrid-u1001.service\n",
+            1001
+        ));
+        assert!(!in_broker_unit("", 1001));
     }
 
     /// The total takes the first eight fields of the `cpu` line: user and nice already hold

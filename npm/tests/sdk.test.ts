@@ -107,11 +107,15 @@ test('job specs carry contention only when it is set', () => {
             assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: c.modes }), CedeGridError, c.id);
     }
     assert.throws(() => commandTask('t', ['worker'], '/work', { contentionModes: ['cpu'] } as any));
-    const grants = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).unprotected_grant_cases;
-    for (const c of grants) {
+    const runOptions = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'tests', 'contracts', 'cedegrid-0.2.json'), 'utf8')).run_option_cases;
+    for (const c of runOptions) {
+        if (!c.sdk)
+            continue;
         const options = {
-            unprotectedAggressive: c.sdk.unprotected_aggressive,
-            confirmUnprotectedAggressive: c.sdk.confirm_unprotected_aggressive,
+            admitImmediately: c.sdk.admit_immediately,
+            confirmAdmitImmediately: c.sdk.confirm_admit_immediately,
+            unprotected: c.sdk.unprotected,
+            confirmUnprotected: c.sdk.confirm_unprotected,
             ...(c.sdk.contention_modes ? { contentionModes: c.sdk.contention_modes } : {}),
         };
         if (!c.accepted) {
@@ -124,7 +128,8 @@ test('job specs carry contention only when it is set', () => {
             continue;
         }
         const contention = sent.contention as Record<string, any>;
-        assert.equal(contention.unprotected_aggressive.confirmed, true, c.id);
+        for (const name of ['admit_immediately', 'unprotected'])
+            assert.equal(contention[name]?.confirmed, c.wire[name] ? true : undefined, `${c.id} ${name}`);
         assert.deepEqual(contention.modes, c.wire.modes, c.id);
     }
 });

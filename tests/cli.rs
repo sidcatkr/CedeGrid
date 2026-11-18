@@ -1632,8 +1632,8 @@ mod setup_terminal {
         }
     }
 
-    /// 004 FR-013: the allowance turns on only on a terminal, after the numbers, a yes and the
-    /// exact phrase.
+    /// 004 FR-013, 006 FR-015: the allowance turns on only on a terminal, after the numbers, the
+    /// raise this host offers, a yes and the exact phrase, under the highest warning label.
     #[test]
     fn the_allowance_needs_a_yes_and_the_exact_phrase_on_a_terminal() {
         use cedegrid::state::{Allowance, StateStore, read_allowance};
@@ -1647,8 +1647,8 @@ mod setup_terminal {
             let path = setup(dir.path());
             let state = dir.path().join("state");
             drop(StateStore::open(&state).unwrap());
-            let mut pty = Pty::spawn(&path, &["setup", "--allow-unprotected-aggressive"], &[]);
-            pty.wait_for("Allow unprotected Aggressive on this host? [y/n]");
+            let mut pty = Pty::spawn(&path, &["setup", "--allow-unprotected"], &[]);
+            pty.wait_for("Allow unprotected on this host? [y/n]");
             pty.key(format!("{answer}\r").as_bytes());
             if answer == "y" {
                 pty.wait_for("to confirm:");
@@ -1657,6 +1657,8 @@ mod setup_terminal {
             let (status, text, _) = pty.finish();
             assert!(status.success(), "{text}");
             assert!(text.contains("Other users active now"), "{text}");
+            assert!(text.contains("[highest warning]"), "{text}");
+            assert!(text.contains("Raise on this host"), "{text}");
             // No slowdown figure: setup cannot know how the kernel will split CPU time.
             assert!(!text.contains("slower"), "{text}");
             let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1722,7 +1724,7 @@ fn the_allowance_never_turns_on_without_a_terminal_and_turns_off_anywhere() {
     let state = dir.path().join("state");
     drop(StateStore::open(&state).unwrap());
     for extra in [&["--non-interactive"][..], &["--json"][..], &[][..]] {
-        let mut args = vec!["setup", "--allow-unprotected-aggressive"];
+        let mut args = vec!["setup", "--allow-unprotected"];
         args.extend_from_slice(extra);
         let output = run(&path, &args);
         assert!(!output.status.success());
@@ -1740,11 +1742,7 @@ fn the_allowance_never_turns_on_without_a_terminal_and_turns_off_anywhere() {
     set_allowance(&state, 1).unwrap();
     let output = run(
         &path,
-        &[
-            "setup",
-            "--non-interactive",
-            "--disallow-unprotected-aggressive",
-        ],
+        &["setup", "--non-interactive", "--disallow-unprotected"],
     );
     assert!(
         output.status.success(),
@@ -1794,13 +1792,13 @@ fn doctor_marks_aggressive_and_its_caution() {
         "{text}"
     );
     assert!(row("ram ").starts_with("ram Performance"), "{text}");
-    // Unprotected Aggressive lists what is missing here, each with its fix.
+    // Unprotected lists what is missing here, each with its fix.
     assert!(
-        text.contains("Unprotected Aggressive\n  not available on this host\n"),
+        text.contains("Unprotected\n  not available on this host\n"),
         "{text}"
     );
     assert!(
-        text.contains("    fix: run cedegrid setup --allow-unprotected-aggressive on a terminal"),
+        text.contains("    fix: run cedegrid setup --allow-unprotected on a terminal"),
         "{text}"
     );
     assert!(

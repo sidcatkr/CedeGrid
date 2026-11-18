@@ -597,7 +597,7 @@ kill is a normal failure.
 No option puts another workload at risk of an out-of-memory kill, swap thrash or a
 failed GPU allocation beyond what the same work started without CedeGrid would cause; the
 floor rule of Performance and Aggressive above belongs to those modes themselves. The constitution allows one risk to other workloads' compute, slower compute, and
-only under unprotected Aggressive.
+only under unprotected.
 
 Aggressive is the fourth mode, after Performance. It is Performance with no admission margin:
 it admits up to all idle CPU and GPU compute at once, where Performance keeps 2% free. Like
@@ -612,20 +612,29 @@ whose CedeGrid work arrived first, new own work starts only where that account k
 of its demand and its fair share, and never into its activity of unknown amount; beside every
 other account it starts as plain Linux would.
 
-Unprotected Aggressive is the one exception to that rule. A job may start new compute work
-where another principal contends, only when all of these hold:
-- the submission sets both `unprotected_aggressive` and `confirm_unprotected_aggressive`;
-- the node cap is Aggressive;
+Two per-run options change this for Performance and Aggressive work; on Yield First or Neutral
+work they have no effect.
+- Admit immediately (`admit_immediately` with `confirm_admit_immediately`, a caution option)
+  starts new work beside a CedeGrid user that arrived first and runs only Yield First or Neutral
+  work. Beside one that arrived first in Performance or Aggressive it is ignored.
+- Unprotected (`unprotected` with `confirm_unprotected`, at the highest warning level) implies
+  admit immediately and raises own work's CPU share above other users' where this host gives a
+  way: the System mode broker's unit weight, or a nice limit the administrator granted the
+  account. It never raises while a CedeGrid user that arrived first runs Performance or
+  Aggressive on the CPU, and GPU compute gets no raise.
+
+Unprotected starts only when all of these hold:
+- the submission sets both `unprotected` and `confirm_unprotected`;
 - a person turned on the host's allowance in interactive `cedegrid setup`, after the host's
   numbers and a fixed phrase;
-- on a System mode host, the administrator policy sets `modes.unprotected_aggressive = true`.
+- on a System mode host, the administrator policy sets `modes.unprotected = true`.
 
 The allowance lives in the agent's state database. It counts as off whenever that database
 cannot be read, and a restore resets it. No configuration file, environment variable,
-migration or saved setting can turn it on, and a file that tries fails to load. Unprotected
-Aggressive never starts work into activity of unknown amount or past the floors, raises no
-priority, and changes nothing about memory. A refusal names every missing condition. A run that
-starts logs one warning line.
+migration or saved setting can turn it on, and a file that tries fails to load. Neither option
+starts work past the floors or uses real-time scheduling classes, and neither changes anything
+about memory. A refusal names every missing condition. A run that starts logs one line: a
+caution for admit immediately, a warning for unprotected.
 In Performance and Aggressive no compute step is taken for others. The former floor policies `b` and `c` and Neutral memory policy
 `b` were removed, and a configuration that sets them fails to load with a message that
 names the replacement settings. Every configuration key is classified as safe, bounded

@@ -439,7 +439,7 @@ pub fn restore(
     checkpoint(&restored.connection)?;
     integrity(&restored.connection)?;
     drop(restored);
-    // A restored state never carries the unprotected Aggressive allowance or a started grant
+    // A restored state never carries the unprotected allowance or a started grant
     // (004 FR-015).
     crate::state::clear_allowance(&destination)?;
     crate::state::clear_grants(&destination)?;

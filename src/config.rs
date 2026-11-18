@@ -90,9 +90,9 @@ pub fn parse_runtime<T: DeserializeOwned>(
     result.map_err(|error: anyhow::Error| config_error(format!("{error:#}")))
 }
 
-/// Keys that would turn on unprotected Aggressive (004 FR-012): it is requested per submission
+/// Keys that would turn on unprotected (004 FR-012): it is requested per submission
 /// only, so a file holding one, at any depth, fails to load naming it.
-const UNPROTECTED_KEYS: &[&str] = &["unprotected_aggressive", "allow_unprotected_aggressive"];
+const UNPROTECTED_KEYS: &[&str] = &["unprotected", "allow_unprotected"];
 
 fn refuse_unprotected_keys(value: &Value, path: &str) -> Result<()> {
     match value {
@@ -105,7 +105,7 @@ fn refuse_unprotected_keys(value: &Value, path: &str) -> Result<()> {
                 };
                 if UNPROTECTED_KEYS.contains(&key.as_str()) {
                     anyhow::bail!(
-                        "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {here} cannot be stored; unprotected Aggressive is requested per submission only"
+                        "ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE: {here} cannot be stored; unprotected is requested per submission only"
                     );
                 }
                 refuse_unprotected_keys(inner, &here)?;

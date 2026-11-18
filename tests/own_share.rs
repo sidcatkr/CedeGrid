@@ -77,7 +77,7 @@ const OWN_ARRIVAL: u64 = 1_000;
 /// The other user's CedeGrid work arrived before own work's, with Yield First or Neutral work.
 const FIRST: Option<CedeGridWork> = Some(CedeGridWork {
     arrival_unix_ms: Some(500),
-    protected: false,
+    protected_arrival_unix_ms: None,
 });
 
 fn reading_beside(
@@ -355,7 +355,7 @@ fn beside_a_plain_principal_performance_admits_up_to_capacity() {
 fn beside_cedegrid_work_that_arrived_later_performance_admits_as_plain() {
     let later = Some(CedeGridWork {
         arrival_unix_ms: Some(OWN_ARRIVAL + 1),
-        protected: true,
+        protected_arrival_unix_ms: Some(OWN_ARRIVAL + 1),
     });
     let decision = decide(ContentionMode::Performance, 2000, later);
     assert_eq!(decision.managed_budget.cpu_millicores, 4000);
@@ -375,7 +375,7 @@ fn beside_a_first_comer_performance_holds_at_the_fair_share() {
     for arrival in [Some(500), Some(OWN_ARRIVAL), None] {
         let work = Some(CedeGridWork {
             arrival_unix_ms: arrival,
-            protected: false,
+            protected_arrival_unix_ms: None,
         });
         let decision = decide(ContentionMode::Performance, 2000, work);
         assert_eq!(
@@ -394,7 +394,7 @@ fn beside_a_first_comer_performance_holds_at_the_fair_share() {
 fn own_work_without_a_known_arrival_holds_for_cedegrid_work() {
     let later = Some(CedeGridWork {
         arrival_unix_ms: Some(OWN_ARRIVAL + 1),
-        protected: false,
+        protected_arrival_unix_ms: None,
     });
     let (snapshot, mut input) = reading_beside(2000, 50, 0, Some(true), later);
     input.arrivals.clear();
@@ -437,7 +437,7 @@ fn admit_immediately_lifts_the_hold_only_for_an_unprotected_first_comer() {
     );
     let protected = Some(CedeGridWork {
         arrival_unix_ms: Some(500),
-        protected: true,
+        protected_arrival_unix_ms: Some(500),
     });
     let decision = decide(ContentionMode::Performance, 2000, protected);
     assert_eq!(

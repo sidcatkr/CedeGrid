@@ -1825,7 +1825,7 @@ fn observations_are_pruned_by_age_and_row_count() {
 }
 
 mod unprotected_allowance {
-    //! 004 FR-015: the host's allowance for unprotected Aggressive fails closed.
+    //! 004 FR-015: the host's allowance for unprotected fails closed.
     use super::storage_dir;
     use cedegrid::state::{
         ActiveGrant, Allowance, DATABASE_FILENAME, StateStore, active_grant, allowance_for_run,

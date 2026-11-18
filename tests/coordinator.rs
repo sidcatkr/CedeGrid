@@ -4129,7 +4129,8 @@ fn with_mode(mut request: LaunchRequest) -> LaunchRequest {
     use cedegrid::contention::{ContentionMode, ResourceKind};
     request.contention = Some(cedegrid::execution_model::JobContention {
         modes: BTreeMap::from([(ResourceKind::Cpu, ContentionMode::YieldFirst)]),
-        unprotected_aggressive: None,
+        admit_immediately: None,
+        unprotected: None,
     });
     request
 }
@@ -4892,7 +4893,7 @@ include!("support/state_dir.rs");
 #[test]
 fn a_granted_request_is_placed_against_the_unprotected_budget() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
-    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    use cedegrid::execution_model::{JobContention, RunGrant};
     let granted = |id: &str| {
         let mut t = task(id);
         t.contention = Some(JobContention {
@@ -4900,7 +4901,8 @@ fn a_granted_request_is_placed_against_the_unprotected_budget() {
                 (ResourceKind::Cpu, ContentionMode::Aggressive),
                 (ResourceKind::GpuCompute, ContentionMode::Aggressive),
             ]),
-            unprotected_aggressive: Some(UnprotectedGrant {
+            admit_immediately: None,
+            unprotected: Some(RunGrant {
                 confirmed: true,
                 requested_unix_ms: 1,
             }),
@@ -4938,7 +4940,7 @@ fn a_granted_request_is_placed_against_the_unprotected_budget() {
 #[test]
 fn status_marks_a_started_granted_allocation_unprotected() {
     use cedegrid::contention::{ContentionMode, ResourceKind};
-    use cedegrid::execution_model::{JobContention, UnprotectedGrant};
+    use cedegrid::execution_model::{JobContention, RunGrant};
     let d = dir();
     let mut c = Coordinator::open(config(d.path())).unwrap();
     wide_pool(&mut c, 100);
@@ -4948,7 +4950,8 @@ fn status_marks_a_started_granted_allocation_unprotected() {
             (ResourceKind::Cpu, ContentionMode::Aggressive),
             (ResourceKind::GpuCompute, ContentionMode::Aggressive),
         ]),
-        unprotected_aggressive: Some(UnprotectedGrant {
+        admit_immediately: None,
+        unprotected: Some(RunGrant {
             confirmed: true,
             requested_unix_ms: 7,
         }),

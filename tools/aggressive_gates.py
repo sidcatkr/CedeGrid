@@ -70,7 +70,7 @@ def admitted_at(samples, times):
 def allow(binary, config):
     """Turns the allowance on the way a person does: setup on a terminal, yes, then the phrase."""
     master, slave = pty.openpty()
-    proc = subprocess.Popen([str(binary), '--config', str(config), 'setup', '--allow-unprotected-aggressive'],
+    proc = subprocess.Popen([str(binary), '--config', str(config), 'setup', '--allow-unprotected'],
                             stdin=slave, stdout=slave, stderr=slave, close_fds=True,
                             env={**os.environ, 'TERM': 'xterm', 'NO_COLOR': '1'})
     os.close(slave)
@@ -245,7 +245,7 @@ def main():
             extra = {}
             if a.arm == 'unprotected':
                 extra = dict(contention_modes={'cpu': 'aggressive', 'gpu_compute': 'aggressive'},
-                             unprotected_aggressive=True, confirm_unprotected_aggressive=True)
+                             unprotected=True, confirm_unprotected=True)
             for i, path in enumerate(paths):
                 task_id = f'{cluster.run_id}.{i}'
                 task = command_task(task_id, [a.python, '-c', GPU_LOOP if gpu else CPU_LOOP, str(end), str(path)],

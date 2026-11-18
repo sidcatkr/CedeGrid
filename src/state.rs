@@ -1150,7 +1150,7 @@ impl StateStore {
     }
 }
 
-/// The host's allowance for unprotected Aggressive (004 FR-015): one row in its own table of the
+/// The host's allowance for unprotected (004 FR-015): one row in its own table of the
 /// state database, set only by interactive setup. Every read fails closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Allowance {

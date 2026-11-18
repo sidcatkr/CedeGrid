@@ -425,9 +425,10 @@ pub struct CedeGridWork {
     /// The earliest arrival among that work, in milliseconds since the epoch; None is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arrival_unix_ms: Option<u64>,
-    /// Some of that work runs Performance or Aggressive there.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub protected: bool,
+    /// The earliest arrival among that work running Performance or Aggressive there; None when
+    /// none of it does. A first-comer is protected when this arrival is the earlier one (FR-006).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protected_arrival_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -517,7 +518,7 @@ pub struct Decision {
     pub observe_only: bool,
     /// Budget for all managed allocations; includes currently occupied capacity.
     pub managed_budget: Resources,
-    /// The budget an unprotected Aggressive grant is placed against: the managed budget with CPU
+    /// The budget an unprotected grant is placed against: the managed budget with CPU
     /// raised to the grant's allowance. Only where the node cap reaches Aggressive (004 R12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unprotected_budget: Option<Resources>,
@@ -1024,7 +1025,7 @@ mod tests {
             uid: Some(1001),
             cedegrid_cpu: Some(CedeGridWork {
                 arrival_unix_ms: Some(1_763_000_000_000),
-                protected: true,
+                protected_arrival_unix_ms: Some(1_763_000_000_500),
             }),
             cedegrid_gpu: BTreeMap::from([("GPU-a".into(), CedeGridWork::default())]),
             ..PrincipalUsage::default()

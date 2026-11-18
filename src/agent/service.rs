@@ -1430,7 +1430,8 @@ impl AgentLoop<'_> {
             facts: BTreeMap::new(),
             envelope: Some(agent.capacity.clone()),
             spool_full: self.spool_full,
-            arrivals: BTreeMap::new(),
+            // Unreadable arrivals leave own work's arrival unknown: later than any first-comer.
+            arrivals: self.store.arrivals().unwrap_or_default(),
         };
         input.facts = self.allocation_facts(records, &input.allocations);
         let estimated = self.collector.ram_estimated().clone();
@@ -2037,15 +2038,14 @@ impl AgentLoop<'_> {
                         }
                         continue;
                     }
-                    // An unprotected Aggressive grant starts only under the host's allowance, a
-                    // node cap at Aggressive and, in a unit, the administrator key (004 FR-014).
-                    // A later attempt of a run that started unprotected here keeps the allowance
-                    // it began under.
+                    // An unprotected grant starts only under the host's allowance and, in a
+                    // unit, the administrator key (006 FR-015). A later attempt of a run that
+                    // started unprotected here keeps the allowance it began under.
                     let grant = assignment
                         .request
                         .contention
                         .as_ref()
-                        .and_then(|contention| contention.unprotected_aggressive);
+                        .and_then(|contention| contention.unprotected);
                     let allowance = grant.map(|grant| {
                         crate::state::allowance_for_run(
                             &config.state_dir,
@@ -2055,7 +2055,6 @@ impl AgentLoop<'_> {
                     });
                     if let Some((code, detail)) = crate::system_mode::grant_refusal(
                         assignment.request.contention.as_ref(),
-                        config.contention.max_mode(),
                         || {
                             allowance
                                 .clone()
@@ -2113,19 +2112,60 @@ impl AgentLoop<'_> {
                             }))?;
                         }
                         emit(&serde_json::json!({
-                            "event": "unprotected_aggressive",
+                            "event": "unprotected",
                             "assignment_id": id,
                             "detail": "warning: this run is UNPROTECTED: other users' compute may slow down until it ends",
                         }))?;
+                    } else if assignment
+                        .request
+                        .contention
+                        .as_ref()
+                        .is_some_and(|contention| contention.admit_immediately.is_some())
+                    {
+                        emit(&serde_json::json!({
+                            "event": "admit_immediately",
+                            "assignment_id": id,
+                            "detail": "caution: this run starts beside CedeGrid users that arrived first and yield",
+                        }))?;
                     }
+                    // The run's arrival goes on the supervisor's marker and into the journal, so
+                    // other accounts' agents and this one read the same order (006 FR-005). An
+                    // unrecorded arrival leaves own work later than any first-comer: the safe side.
+                    let now = super::reconcile::now_unix_ms();
+                    let devices = assignment
+                        .request
+                        .resources
+                        .gpu_memory_mib
+                        .keys()
+                        .cloned()
+                        .collect();
+                    let arrival = match self.store.launch_arrival(&devices, now).and_then(
+                        |arrival| self.store.record_arrival(&id, arrival).map(|()| arrival),
+                    ) {
+                        Ok(arrival) => arrival,
+                        Err(error) => {
+                            emit(&serde_json::json!({
+                                "event": "arrival_unrecorded",
+                                "assignment_id": id,
+                                "detail": format!("own work counts as arriving later: {error:#}"),
+                            }))?;
+                            now
+                        }
+                    };
                     let task_config = config.clone();
                     let task_agent = agent.clone();
                     let task_assignment = assignment.clone();
+                    // Admit immediately needs no allowance; unprotected, which implies it, has
+                    // passed the allowance check above (006 FR-012, FR-015).
+                    let admits = assignment.request.contention.as_ref().is_some_and(|c| {
+                        c.admit_immediately.is_some()
+                            || (c.unprotected.is_some()
+                                && matches!(allowance, Some(crate::state::Allowance::On { .. })))
+                    });
                     let task_capacity = launch_capacity(
                         schedulable_budget(decision),
                         decision.unprotected_budget.as_ref(),
-                        grant.is_some()
-                            && matches!(allowance, Some(crate::state::Allowance::On { .. })),
+                        admits,
                     );
                     let task_snapshot = snapshot.clone();
                     let task_executable = executable.to_path_buf();
@@ -2151,6 +2191,7 @@ impl AgentLoop<'_> {
                                 &task_capacity,
                                 &task_executable,
                                 &task_client,
+                                arrival,
                             )
                             .await
                         })

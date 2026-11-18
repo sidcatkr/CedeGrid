@@ -151,13 +151,13 @@ pub struct SetupArgs {
     pub certificate: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub private_key: Option<String>,
-    /// Allow unprotected Aggressive on this host: on a terminal only, after the host's numbers
+    /// Allow unprotected on this host: on a terminal only, after the host's numbers
     /// and the fixed phrase (004 FR-013).
-    #[arg(long, conflicts_with = "disallow_unprotected_aggressive")]
-    pub allow_unprotected_aggressive: bool,
+    #[arg(long, conflicts_with = "disallow_unprotected")]
+    pub allow_unprotected: bool,
     /// Turn that allowance off; no confirmation.
     #[arg(long)]
-    pub disallow_unprotected_aggressive: bool,
+    pub disallow_unprotected: bool,
 }
 
 /// What an operator chose. Unset fields keep the current configuration.
@@ -1019,14 +1019,14 @@ pub struct Report {
 
 /// Run setup and print its result; returns the exit status.
 pub fn main(config: &Path, args: &SetupArgs) -> i32 {
-    if args.allow_unprotected_aggressive || args.disallow_unprotected_aggressive {
+    if args.allow_unprotected || args.disallow_unprotected {
         return match allowance(config, args) {
             Ok(change) => {
                 if args.json {
                     println!(
                         "{}",
                         serde_json::json!({
-                            "unprotected_aggressive": if change.on() { "on" } else { "off" },
+                            "unprotected": if change.on() { "on" } else { "off" },
                             "changed": change.changed(),
                         })
                     );
@@ -1132,6 +1132,8 @@ pub struct AllowanceNumbers {
     pub other_principals: Option<usize>,
     pub other_cpu_millicores: u64,
     pub capacity_millicores: u64,
+    /// How unprotected can raise own CPU share here (006 FR-016).
+    pub raise: crate::actuation::Raise,
 }
 
 impl AllowanceNumbers {
@@ -1148,11 +1150,12 @@ impl AllowanceNumbers {
             other_principals: snapshot.principals.as_ref().map(|_| others.len()),
             other_cpu_millicores: others.iter().sum(),
             capacity_millicores: snapshot.cpu_capacity_millicores,
+            raise: crate::actuation::Raise::current(),
         }
     }
 }
 
-/// What `--allow-unprotected-aggressive` or `--disallow-unprotected-aggressive` did.
+/// What `--allow-unprotected` or `--disallow-unprotected` did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllowanceChange {
     Allowed,
@@ -1176,27 +1179,27 @@ impl AllowanceChange {
 
     /// The result line and an optional dim note; nothing after a cancel, which printed its own.
     fn text(self) -> Option<(String, Option<String>)> {
-        let off = "Turn it off with: cedegrid setup --disallow-unprotected-aggressive";
+        let off = "Turn it off with: cedegrid setup --disallow-unprotected";
         Some(match self {
             Self::Allowed => (
-                "Unprotected Aggressive is now allowed on this host.".into(),
+                "Unprotected is now allowed on this host.".into(),
                 Some(format!(
                     "  A run still needs both SDK fields to use it. {off}"
                 )),
             ),
             Self::AlreadyAllowed { since_unix_ms } => (
                 format!(
-                    "Unprotected Aggressive is already allowed on this host (since {}).",
+                    "Unprotected is already allowed on this host (since {}).",
                     utc_minute(since_unix_ms)
                 ),
                 Some(format!("  {off}")),
             ),
             Self::Disallowed => (
-                "Unprotected Aggressive is no longer allowed on this host.".into(),
+                "Unprotected is no longer allowed on this host.".into(),
                 Some("  Runs already started keep their grant until they end.".into()),
             ),
             Self::AlreadyOff => (
-                "Unprotected Aggressive is not allowed on this host; nothing changed.".into(),
+                "Unprotected is not allowed on this host; nothing changed.".into(),
                 None,
             ),
             Self::Cancelled => return None,
@@ -1236,22 +1239,24 @@ pub fn allowance_dialog(
     writeln!(
         output,
         "{}  {}",
-        style.bold("Unprotected Aggressive"),
-        style.caution(CAUTION)
+        style.bold("Unprotected"),
+        style.refusal(HIGHEST_WARNING)
     )?;
     writeln!(output)?;
     // No slowdown figure: the kernel's split depends on the run's threads and this host's cgroup
     // layout, which setup cannot know (004 FR-013).
     for line in wrap(
-        "A run that asks for it may start compute work where other users already run. Where \
-         they contend, the kernel splits CPU time between their work and the run, so theirs can \
-         slow down until the run ends. Memory floors and OOM handling do not change.",
+        "A run that asks for it starts compute work beside every other user, including CedeGrid \
+         users that arrived first and yield, and raises its CPU share above other users' where \
+         this host gives a way. Other users' compute can slow down until the run ends. It never \
+         does either beside a CedeGrid user that arrived first in Performance. Memory floors and \
+         OOM handling do not change.",
         76,
     ) {
         writeln!(output, "  {line}")?;
     }
     writeln!(output)?;
-    let rows = match numbers.other_principals {
+    let mut rows = match numbers.other_principals {
         Some(count) => vec![
             ("Other users active now", count.to_string()),
             (
@@ -1268,11 +1273,12 @@ pub fn allowance_dialog(
             "unknown: no per-user telemetry on this host".to_string(),
         )],
     };
+    rows.push(("Raise on this host", numbers.raise.describe()));
     for line in key_values(&rows, 2) {
         writeln!(output, "{line}")?;
     }
     writeln!(output)?;
-    write!(output, "Allow unprotected Aggressive on this host? [y/n] ")?;
+    write!(output, "Allow unprotected on this host? [y/n] ")?;
     output.flush()?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
@@ -1294,13 +1300,13 @@ pub fn allowance_dialog(
     Ok(true)
 }
 
-/// `setup --allow-unprotected-aggressive` or `--disallow-unprotected-aggressive`. Turning it on
+/// `setup --allow-unprotected` or `--disallow-unprotected`. Turning it on
 /// needs a terminal; turning it off needs nothing.
 fn allowance(config: &Path, args: &SetupArgs) -> Result<AllowanceChange> {
     let target = locate(config)?;
     let (_, node) = node_base(&target)?;
     let before = crate::state::read_allowance(&node.state_dir);
-    if args.disallow_unprotected_aggressive {
+    if args.disallow_unprotected {
         crate::state::clear_allowance(&node.state_dir)?;
         return Ok(match before {
             crate::state::Allowance::On { .. } => AllowanceChange::Disallowed,
@@ -1315,7 +1321,7 @@ fn allowance(config: &Path, args: &SetupArgs) -> Result<AllowanceChange> {
         return Err(SetupError {
             exit: 2,
             code: "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
-            message: "unprotected Aggressive can be allowed only from a terminal".into(),
+            message: "unprotected can be allowed only from a terminal".into(),
         }
         .into());
     }
@@ -1918,6 +1924,8 @@ pub fn summary_lines(plan: &Plan, host: Option<&Host>) -> Vec<String> {
 
 /// The marker text; yellow (SGR 33) is added where color is allowed.
 pub const CAUTION: &str = "[caution]";
+/// The label for unprotected, the one option above caution (006 FR-015).
+pub const HIGHEST_WARNING: &str = "[highest warning]";
 
 /// Color for setup's human output (FR-050): yellow for caution, red for a refusal and dim for
 /// descriptions, only on a terminal that allows color; plain text otherwise.
@@ -2089,7 +2097,7 @@ pub fn error_lines(code: &str, message: &str, style: Style) -> Vec<String> {
 fn fix_for(code: &str) -> Option<&'static str> {
     match code {
         "ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY" => Some(
-            "Run cedegrid setup --allow-unprotected-aggressive in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
+            "Run cedegrid setup --allow-unprotected in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
         ),
         "ERR_CEDEGRID_SETUP_TERMINAL" => Some(
             "Use a terminal that moves the cursor, or pass the choices as flags with --non-interactive; cedegrid setup --help lists them.",
@@ -2331,7 +2339,7 @@ mod tests {
             ),
             [
                 "error: no terminal",
-                "  - Run cedegrid setup --allow-unprotected-aggressive in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
+                "  - Run cedegrid setup --allow-unprotected in an interactive shell: it shows this host's numbers, then asks for a fixed phrase.",
                 "  code: ERR_CEDEGRID_ALLOWANCE_INTERACTIVE_ONLY",
             ]
         );

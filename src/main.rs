@@ -703,7 +703,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             let decision =
                 PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
             if text {
-                // Unprotected Aggressive is shown where the configuration names Aggressive or the
+                // Unprotected is shown where the configuration names Aggressive or the
                 // allowance is on; on a System mode host the administrator key applies too.
                 let allowance = cedegrid::state::read_allowance(&config.state_dir);
                 let (runs, unreadable) =
@@ -730,11 +730,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                         .flatten()
                         .map(|(_, gap)| gap);
                     cedegrid::explain::unprotected_text(
-                        &cedegrid::system_mode::host_gaps(
-                            config.contention.max_mode(),
-                            allowance,
-                            policy,
-                        ),
+                        &cedegrid::system_mode::host_gaps(allowance, policy),
                         &runs,
                         unreadable.as_deref(),
                     )

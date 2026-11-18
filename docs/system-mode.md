@@ -57,7 +57,7 @@ policy_version = 1
 
 [modes]
 allowed = ["yield_first", "neutral", "performance"]
-unprotected_aggressive = false
+unprotected = false
 
 [limits]
 tasks_per_user = 64
@@ -78,7 +78,7 @@ ordinary_slice = "auto"
 | Key | Default | Meaning |
 |---|---|---|
 | `modes.allowed` | all modes except `aggressive` | modes a member may run; checked by the broker and by the agent |
-| `modes.unprotected_aggressive` | `false` | whether a member may request unprotected Aggressive for a run; checked by the agent in the unit, separately from `modes.allowed` |
+| `modes.unprotected` | `false` | whether a member may request unprotected for a run; checked by the agent in the unit, separately from `modes.allowed` |
 | `limits.tasks_per_user` | 64 | CedeGrid tasks one user may run at once |
 | `limits.tasks_max` | 4096 | `TasksMax=` on each unit |
 | `limits.open_files`, `processes`, `locked_memory_mib` | systemd defaults | `LimitNOFILE=`, `LimitNPROC=`, `LimitMEMLOCK=` when `pam_session = "none"` |

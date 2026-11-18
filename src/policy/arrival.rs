@@ -37,13 +37,6 @@ pub(super) struct Standing {
     pub(super) protected: bool,
 }
 
-/// The earliest arrival among the account's Performance or Aggressive work on the resource, or
-/// None when it runs none there.
-fn protected_arrival(work: &CedeGridWork) -> Option<u64> {
-    // An unknown arrival counts as the earliest, so the account stays protected.
-    work.protected.then(|| work.arrival_unix_ms.unwrap_or(0))
-}
-
 /// The standing of an account whose CedeGrid work on a resource is `work`, beside own work's
 /// arrival there.
 pub(super) fn standing(own: OwnArrival, work: Option<CedeGridWork>) -> Standing {
@@ -54,8 +47,12 @@ pub(super) fn standing(own: OwnArrival, work: Option<CedeGridWork>) -> Standing 
     Standing {
         work: Some(work),
         first_comer,
+        // Its Performance or Aggressive work must itself have come first: Neutral work that
+        // arrived first and Performance work that arrived later make no protected first-comer.
         protected: first_comer
-            && protected_arrival(&work).is_some_and(|arrival| own.yields_to(Some(arrival))),
+            && work
+                .protected_arrival_unix_ms
+                .is_some_and(|arrival| own.yields_to(Some(arrival))),
     }
 }
 
@@ -218,46 +215,38 @@ impl Interval<'_> {
 mod tests {
     use super::*;
 
-    fn work(arrival: Option<u64>, protected: bool) -> Option<CedeGridWork> {
+    fn work(arrival: Option<u64>, protected: Option<u64>) -> Option<CedeGridWork> {
         Some(CedeGridWork {
             arrival_unix_ms: arrival,
-            protected,
+            protected_arrival_unix_ms: protected,
         })
     }
 
     #[test]
     fn the_other_account_comes_first_unless_own_work_is_known_earlier() {
         let first = |own, work| standing(own, work).first_comer;
+        assert!(!first(OwnArrival::At(10), None), "a plain principal");
+        assert!(first(OwnArrival::At(10), work(Some(5), None)));
+        assert!(first(OwnArrival::At(10), work(Some(10), None)), "equal");
+        assert!(!first(OwnArrival::At(10), work(Some(11), None)));
+        assert!(first(OwnArrival::At(10), work(None, None)), "its unknown");
         assert!(
-            !first(OwnArrival::At(10), None),
-            "a plain principal is never a first-comer"
+            first(OwnArrival::Unknown, work(Some(11), None)),
+            "own unknown"
         );
-        assert!(first(OwnArrival::At(10), work(Some(5), false)));
-        assert!(
-            first(OwnArrival::At(10), work(Some(10), false)),
-            "equal times"
-        );
-        assert!(!first(OwnArrival::At(10), work(Some(11), false)));
-        assert!(
-            first(OwnArrival::At(10), work(None, false)),
-            "its arrival unknown"
-        );
-        assert!(
-            first(OwnArrival::Unknown, work(Some(11), false)),
-            "own arrival unknown"
-        );
-        assert!(
-            first(OwnArrival::Nothing, work(Some(11), false)),
-            "nothing own running"
-        );
+        assert!(first(OwnArrival::Nothing, work(Some(11), None)), "none own");
     }
 
     #[test]
-    fn a_first_comer_is_protected_only_with_performance_work_there() {
+    fn a_first_comer_is_protected_only_by_performance_work_that_came_first() {
         let protected = |own, work| standing(own, work).protected;
-        assert!(protected(OwnArrival::At(10), work(Some(5), true)));
-        assert!(!protected(OwnArrival::At(10), work(Some(5), false)));
-        assert!(!protected(OwnArrival::At(10), work(Some(11), true)));
-        assert!(protected(OwnArrival::Unknown, work(None, true)));
+        assert!(protected(OwnArrival::At(10), work(Some(5), Some(5))));
+        assert!(protected(OwnArrival::At(10), work(Some(5), Some(10))));
+        assert!(!protected(OwnArrival::At(10), work(Some(5), None)));
+        // Neutral work first, Performance work after own work: not protected.
+        assert!(!protected(OwnArrival::At(10), work(Some(5), Some(11))));
+        assert!(!protected(OwnArrival::At(10), work(Some(11), Some(11))));
+        assert!(protected(OwnArrival::Unknown, work(None, Some(11))));
+        assert!(protected(OwnArrival::Nothing, work(Some(11), Some(11))));
     }
 }

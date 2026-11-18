@@ -54,8 +54,8 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
 - **First-comer**: a CedeGrid principal whose arrival on a resource is earlier than own work's.
   Where either arrival is unknown, or both are equal, the other principal counts as the
   first-comer.
-- **Protected first-comer**: a first-comer with Performance or Aggressive work running on the
-  resource.
+- **Protected first-comer**: a first-comer whose Performance or Aggressive work on the resource
+  itself arrived first, by the same comparison.
 - **Hold**: 001's admission protection in Performance (the kept equal share and the margin on
   CPU, the time-slice rule on GPU compute), applied only for first-comers.
 - **Admit immediately**: a per-run caution option that lifts the hold for first-comers that are
@@ -195,8 +195,9 @@ and for own work, its arrival and the options in force.
 - **FR-001**: Each own task supervisor's command line MUST carry a CedeGrid marker with the
   task's mode on each compute resource and its run's arrival on the node, in milliseconds since
   the epoch. The marker carries nothing that names the account, the run or the task's arguments.
-- **FR-002**: Another account MUST count as a CedeGrid principal on a resource while one of its
-  processes busy there is a marked supervisor or descends from one. The agent reads command
+- **FR-002**: Another account MUST count as a CedeGrid principal on a resource while it has
+  CedeGrid work there: on the CPU, a live process that is a marked supervisor of that account or
+  descends from one; on a GPU device, such a process listed on the device. The agent reads command
   lines, parent chains and cgroups from `/proc`, and GPU process lists, read-only, and acts on
   none of them (Principle I).
 - **FR-003**: On a host with System mode installed, only processes inside units the broker
@@ -208,8 +209,8 @@ and for own work, its arrival and the options in force.
   arrival is computed the same way from own running work.
 - **FR-006**: A CedeGrid principal MUST be a first-comer when its arrival is earlier than own
   work's, when either is unknown, when they are equal, or when own work has nothing running on
-  the resource. It is a protected first-comer when it has Performance or Aggressive work running
-  there.
+  the resource. It is a protected first-comer when the same holds for the earliest arrival among
+  its Performance or Aggressive work there.
 
 **Admission in Performance and Aggressive**
 

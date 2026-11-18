@@ -61,17 +61,28 @@ pub struct LaunchRequest {
 #[serde(deny_unknown_fields)]
 pub struct JobContention {
     pub modes: BTreeMap<crate::contention::ResourceKind, crate::contention::ContentionMode>,
-    /// A submission's request for unprotected Aggressive (004 FR-011, FR-014). An agent without
-    /// it rejects the job, since this type denies unknown fields.
+    /// A submission's request for admit immediately (006 FR-012). An agent without it rejects
+    /// the job, since this type denies unknown fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unprotected_aggressive: Option<UnprotectedGrant>,
+    pub admit_immediately: Option<RunGrant>,
+    /// A submission's request for unprotected (006 FR-015, formerly 004's unprotected
+    /// Aggressive), which implies admit immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unprotected: Option<RunGrant>,
 }
 
-/// The per-submission grant the two SDK fields produce; the launching agent checks it against
-/// the host's allowance before Authorized (004 R7).
+impl JobContention {
+    /// Whether the run takes admit immediately, alone or through unprotected (006 FR-015).
+    pub fn admits_immediately(&self) -> bool {
+        self.admit_immediately.is_some() || self.unprotected.is_some()
+    }
+}
+
+/// The per-submission grant an option's two SDK fields produce. The launching agent checks
+/// unprotected's against the host's allowance before Authorized (004 R7).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct UnprotectedGrant {
+pub struct RunGrant {
     /// Set only when the second confirmation field was set too.
     pub confirmed: bool,
     pub requested_unix_ms: u64,
@@ -83,7 +94,7 @@ pub struct UnprotectedGrant {
 pub struct UnprotectedRun {
     pub assignment_id: String,
     pub task_id: String,
-    pub grant: UnprotectedGrant,
+    pub grant: RunGrant,
     /// The allowance and start of the run's first unprotected start here, where recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowance_set_at_unix_ms: Option<u64>,
@@ -336,5 +347,100 @@ pub trait LaunchBackend {
     /// (FR-076). Read-only.
     fn oom_kills(&self) -> Option<u64> {
         None
+    }
+}
+
+/// The argument prefix of the marker on each task supervisor's command line (006 FR-001).
+pub const WORK_MARKER_PREFIX: &str = "cedegrid-work=";
+
+/// What a task supervisor's command line tells other accounts' agents, read-only: the task's
+/// modes on CPU and GPU compute and its run's arrival on the node (006 FR-001, FR-005). It
+/// carries nothing that names the account, the run or the task's arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkMarker {
+    pub cpu: crate::contention::ContentionMode,
+    pub gpu: crate::contention::ContentionMode,
+    pub arrival_unix_ms: u64,
+}
+
+impl WorkMarker {
+    pub fn to_arg(&self) -> String {
+        format!(
+            "{WORK_MARKER_PREFIX}v1;cpu={};gpu={};arrival={}",
+            self.cpu.name(),
+            self.gpu.name(),
+            self.arrival_unix_ms
+        )
+    }
+
+    /// The marker in `arg`, or None for anything else, including another version.
+    pub fn parse(arg: &str) -> Option<Self> {
+        let mode = |text: &str| {
+            serde_json::from_value::<crate::contention::ContentionMode>(serde_json::Value::from(
+                text,
+            ))
+            .ok()
+        };
+        let mut fields = arg.strip_prefix(WORK_MARKER_PREFIX)?.split(';');
+        if fields.next()? != "v1" {
+            return None;
+        }
+        let cpu = mode(fields.next()?.strip_prefix("cpu=")?)?;
+        let gpu = mode(fields.next()?.strip_prefix("gpu=")?)?;
+        let arrival = fields.next()?.strip_prefix("arrival=")?;
+        if fields.next().is_some()
+            || arrival.is_empty()
+            || !arrival.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        Some(Self {
+            cpu,
+            gpu,
+            arrival_unix_ms: arrival.parse().ok()?,
+        })
+    }
+
+    /// Work in Performance or Aggressive on a resource is a protected first-comer's (FR-006).
+    pub fn protected(mode: crate::contention::ContentionMode) -> bool {
+        mode >= crate::contention::ContentionMode::Performance
+    }
+}
+
+#[cfg(test)]
+mod work_marker_tests {
+    use super::*;
+    use crate::contention::ContentionMode;
+
+    #[test]
+    fn the_marker_round_trips_and_refuses_anything_else() {
+        let marker = WorkMarker {
+            cpu: ContentionMode::Performance,
+            gpu: ContentionMode::Neutral,
+            arrival_unix_ms: 1_763_000_000_123,
+        };
+        let arg = marker.to_arg();
+        assert_eq!(
+            arg,
+            "cedegrid-work=v1;cpu=performance;gpu=neutral;arrival=1763000000123"
+        );
+        assert_eq!(WorkMarker::parse(&arg), Some(marker));
+        for other in [
+            "",
+            "cedegrid-work=",
+            "cedegrid-work=v2;cpu=performance;gpu=neutral;arrival=1",
+            "cedegrid-work=v1;cpu=fast;gpu=neutral;arrival=1",
+            "cedegrid-work=v1;gpu=neutral;cpu=performance;arrival=1",
+            "cedegrid-work=v1;cpu=performance;gpu=neutral;arrival=",
+            "cedegrid-work=v1;cpu=performance;gpu=neutral;arrival=-1",
+            "cedegrid-work=v1;cpu=performance;gpu=neutral;arrival=1;user=1000",
+            "/home/user/.local/state/cedegrid/attempts/a/supervisor-spec.json",
+        ] {
+            assert_eq!(WorkMarker::parse(other), None, "{other}");
+        }
+        assert!(WorkMarker::protected(ContentionMode::Aggressive));
+        assert!(WorkMarker::protected(ContentionMode::Performance));
+        assert!(!WorkMarker::protected(ContentionMode::Neutral));
+        assert!(!WorkMarker::protected(ContentionMode::YieldFirst));
     }
 }
