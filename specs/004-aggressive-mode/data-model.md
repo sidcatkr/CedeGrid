@@ -59,7 +59,7 @@ run needs new fields.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `modes.unprotected_aggressive` | `false` | whether members may request the grant; the agent in the unit refuses it while false |
+| `modes.unprotected` (named `unprotected_aggressive` before 006) | `false` | whether members may request the grant; the agent in the unit refuses it while false |
 
 ## Decision output (extended)
 

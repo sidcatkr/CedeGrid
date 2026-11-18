@@ -57,7 +57,7 @@ and the SDK parity test passes (FR-019).
 tools/docker-validation/system-mode/run.sh container::unprotected
 ```
 
-**Expected:** with `modes.unprotected_aggressive` absent or false, a member's grant is refused in
+**Expected:** with `modes.unprotected` absent or false, a member's grant is refused in
 one line naming the policy; with it true and the allowance on, the run starts unprotected.
 
 ## 6. Labels and markers (a terminal; `NO_COLOR` too)
