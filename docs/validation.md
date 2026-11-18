@@ -336,6 +336,44 @@ against the protected budget; `9647d21` fixes it. Dates are UTC.
 | F2c on GPU compute: two own GPU tasks (1024×1024 multiplies) submitted together while the second account saturates the same GPU from a CPU outside the scope; the second account alone, Performance, protected Aggressive and unprotected Aggressive, three runs each, with `tools/aggressive_gates.py` | SC-001, SC-004, SC-008 | `7d220ed` | 2026-11-17 | in every protected run both own tasks were placed in the same heartbeat while GPU compute admission read open, and own work held two of the device's three contexts: the second account fell to 25.7–26.0% of its alone rate (3019–3113 multiplies a second) and its p99 rose from 0.33–0.35 ms to 1.29–1.34 ms. Unprotected Aggressive came out the same (25.7–25.8%). No cap, pause or drain fell on own work | fail: protected admission let a batch past the one-more-process time-slice rule; passed to 001's GPU admission, fixed in `5504189` (next row) |
 | F2c on GPU compute, rerun after 001's fix (`5504189`, T631): the same shape and arms, three runs each | SC-001, SC-004, SC-008 | `b4dda15` | 2026-11-18 | in every Performance and protected Aggressive run, admission held own work to one GPU process beside the second account's saturating one within the window: it was placed 0.04–2.2 s after submission, and admission read `gpu_time_slice_admission_held` in 116–119 of the window's 120 intervals. The second account ran at 38.1–39.0% of its alone rate (1180–1190 against 3024–3114 multiplies a second), p99 0.86–0.89 ms against 0.33–0.35 ms: the driver's time slicing between its process and one own process. Unprotected Aggressive started both own tasks within 4.1 s, each logging its `UNPROTECTED` warning, with no refusal, and the second account fell to 25.4–26.0%. No cap, pause or drain fell on own work | pass: one own process beside one saturating process, the 1:1 share; one own process started by hand beside it was not run |
 
+## Native gate results (feature 006)
+
+Performance First's host gates (`specs/006-performance-first/tasks.md`, T051) ran on the same test
+host with `tools/aggressive_gates.py`. Each shape ran with a plain arm, the same own work started
+by hand in the same place, and the Performance arm through CedeGrid, three runs each,
+interleaved. The setup was otherwise as in feature 004's section: own work as the first account
+on a scope of four physical CPUs, and the second account from its own login. On GPU compute the
+second account's process ran on a CPU outside the scope; in the CedeGrid-against-CedeGrid shapes
+it ran its own CedeGrid on the scope's CPUs. Units are each shape's fixed work: hashes on CPU,
+1024×1024 multiplies on GPU. Dates are UTC.
+
+In the CedeGrid-against-CedeGrid shapes a first run gave the second account's CedeGrid a CPU of
+its own outside the scope; it then charged own work's CPU on the other four CPUs to that one CPU
+and held its task for 66 s. Those rows are from a rerun with both accounts on the scope's CPUs,
+and `ca0c8c5` now counts a principal's CPU only within the agent's CPU scope.
+
+The first series, at `f13b429`, found Performance 8% to 13% below plain on CPU beside a competing
+plain user, because plain Linux starts all eight tasks and the kernel gives more threads more
+CPU. With the maintainer's rule that CedeGrid wins against non-CedeGrid users, `05d5c04` starts
+every task the node's task limit allows in that case (FR-007a). The CPU and own-first rows below
+are from `05d5c04`. The own-first GPU runs at `f13b429` were held 30 s by the validation
+deployment's GPU scale-up cooldown, which the harness now leaves at CedeGrid's default
+(`34c2892`), so they too are from `05d5c04`.
+
+| Run | Requirement | Commit | Date | Result | Verdict |
+|---|---|---|---|---|---|
+| F2c on CPU: eight own tasks of 1000 m submitted while the second account's two loops run, plain and Performance | SC-001 | `05d5c04` | 2026-11-18 | Performance started all eight within 0.6 s; own work 887,869–894,033 units against 898,871–941,233 by hand (−1% to −6%). The second account kept 72.6–72.7% of its alone rate against 71.8–76.2% beside the same work by hand, p99 3.33 ms in both | pass: within the start latency of plain |
+| Own work first on CPU: the same eight tasks on an idle scope, the second account arriving 20 s later | SC-001 | `05d5c04` | 2026-11-18 | Performance started four on the idle scope at 2–3 s and the other four within 2–4 s of the second account's arrival; own work 1,336,380–1,376,192 units against 1,435,504–1,499,780 by hand (−4% to −11%), the second account at 70.4–71.0% against 62.5–69.5% | fail: short of plain by the seconds of the start and of the reaction to the second account |
+| F2c on GPU compute: two own GPU tasks while the second account saturates the device | SC-001 | `f13b429` | 2026-11-18 | Performance started both, the second at 2–4 s; own work 89,985–91,156 multiplies against 93,210–93,749 by hand (−3%), the second account at 25.4–25.5% of its alone rate either way | pass: within the start latency of plain |
+| Own work first on GPU compute, the second account arriving 20 s later | SC-001 | `05d5c04` | 2026-11-18 | own work 144,911–145,569 multiplies against 148,862–149,343 by hand (−2.5%) | pass: within the start latency of plain |
+| Fill: eight own tasks of 500 m on an idle scope | SC-002 | `f13b429` | 2026-11-18 | all eight admitted at 1.1 s, as by hand | pass |
+| Batch: sixteen own tasks of 1000 m, each a fixed 90,000 hashes, on an idle scope | SC-004 | `f13b429` | 2026-11-18 | mean completion 40.4–42.3 s against 56.9–58.1 s by hand (28% lower); the whole batch took 64.6–68.9 s against 58.8–59.3 s (10–16% longer), each next task starting 1–2 s after a CPU frees up | mean: pass; total time: fail, short by the handoff between tasks |
+| More GPU tasks than VRAM: six own tasks of 2048 MiB on an 8 GiB device for 30 s each | SC-005 | `05d5c04` | 2026-11-18 | CedeGrid ran all six, three at a time, in 80.8–81.1 s; by hand three of six failed to allocate in every run | pass |
+| More tasks than RAM: twelve own tasks of 4096 MiB on 31 GiB of RAM and 8 GiB of swap for 30 s each | SC-005 | `05d5c04` | 2026-11-18 | CedeGrid ran all twelve, six at a time, in 67.7 s with no kill; by hand the kernel killed three of them, and before them the account's whole desktop session, whose processes carry a higher OOM score adjustment; nine finished by 77.3 s. One run each: the other two plain runs were stopped | pass |
+| CedeGrid against CedeGrid, the second account first: its one GPU task through its own CedeGrid in Performance, then two own GPU tasks 20 s later, both accounts on the scope's CPUs | SC-003 | `05d5c04` | 2026-11-18 | Performance held own work to one process beside the first-comer; the second account ran 140,684–141,381 multiplies against 115,302–115,559 beside the same two tasks by hand (22% more), and own work 67,300–68,181 against 92,573–92,872. Admit immediately was ignored for it, with its caution logged: 141,154–141,467 and 67,542–67,974. With the second account in Neutral, admit immediately started both own tasks: own work 87,343–88,567 | pass: the first-comer kept more than beside plain Linux, and admit immediately lifted the hold only beside one that yields |
+| CedeGrid against CedeGrid, own work first: two own GPU tasks, then the second account's one task 20 s later through its own CedeGrid or by hand | SC-003 | `05d5c04` | 2026-11-18 | own work 142,739–146,355 multiplies beside the second account's CedeGrid against 141,421–142,298 beside its task by hand; its one task fit its fair share and started, 61,697–62,246 against 63,669–63,781 | pass, by a small margin: one later task is within the hold |
+| Steps on running own work over all runs above | SC-002 | `f13b429`, `05d5c04` | 2026-11-18 | no cap, pause or drain fell on own work in any run | pass |
+
 ## Rules for validation runs
 
 - Report these statuses separately:

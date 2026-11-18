@@ -105,6 +105,11 @@ this thread's.
   shape waits for the user's approval, since its plain arm drives the host into OOM.
 - [ ] T051 Run FR-023's gates on the test host and record them in `docs/validation.md` under
   feature 006.
+  - *Done in part (2026-11-18, `f13b429`, `05d5c04`):* F2c and own-first on CPU and GPU, fill,
+    batch, VRAM, RAM (one plain run: its OOM also killed the account's desktop session, so the
+    other two were stopped) and CedeGrid against CedeGrid, with plain arms. Open: the
+    same-cgroup layout and the System mode raise (both need the user's sudo steps); the own-first
+    CPU gap (start and reaction latency) and the batch's total time (handoff between tasks).
 
 ## Phase 7: Docs and checks
 
