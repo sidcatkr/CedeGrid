@@ -43,6 +43,20 @@ pub fn launch_slots(pacing: LaunchPacing) -> usize {
     }
 }
 
+/// Workers holding a place: preparations, and slots whose supervisor still runs and whose
+/// release is not yet reported. A slot whose supervisor exited runs nothing, so its place is
+/// free at once; the coordinator still counts its reservation until the release is reported.
+pub(super) fn active_worker_count(
+    slots: impl IntoIterator<Item = (bool, bool)>,
+    preparations: usize,
+) -> usize {
+    slots
+        .into_iter()
+        .filter(|(reported, exited)| !reported && !exited)
+        .count()
+        + preparations
+}
+
 /// Waiting lease requests, longest waiting first.
 pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
     waiting.sort();
@@ -1887,7 +1901,10 @@ impl AgentLoop<'_> {
         if self.work.arrived.swap(false, ordering) {
             self.heartbeat_prompt = true;
         }
-        let active = self.slots.values().filter(|s| !s.reported).count() + self.preparations.len();
+        let active = active_worker_count(
+            self.slots.values().map(|s| (s.reported, s.exited)),
+            self.preparations.len(),
+        );
         self.work.wanted.store(
             self.stopping.is_none()
                 && active < agent.max_workers
@@ -1957,8 +1974,10 @@ impl AgentLoop<'_> {
                 }),
         );
         let available_controls = advertised_controls(config, agent.cpu_affinity.is_some());
-        let active_workers =
-            self.slots.values().filter(|s| !s.reported).count() + self.preparations.len();
+        let active_workers = active_worker_count(
+            self.slots.values().map(|s| (s.reported, s.exited)),
+            self.preparations.len(),
+        );
         // Every drain sent since the last heartbeat backs off once, whether local
         // policy or the coordinator asked for it (audit M8).
         let draining_workers = self
@@ -2188,8 +2207,10 @@ impl AgentLoop<'_> {
                     {
                         continue;
                     }
-                    let active = self.slots.values().filter(|s| !s.reported).count()
-                        + self.preparations.len();
+                    let active = active_worker_count(
+                        self.slots.values().map(|s| (s.reported, s.exited)),
+                        self.preparations.len(),
+                    );
                     if active >= agent.max_workers || self.stopping.is_some() {
                         continue;
                     }

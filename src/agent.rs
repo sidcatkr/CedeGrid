@@ -3275,6 +3275,36 @@ mod pacing_tests {
         assert!(!room_opened(false, false, 1500, 1000));
     }
 
+    /// A slot whose supervisor exited runs nothing, so it frees its worker place at once, before
+    /// its release is reported. A Performance node that just filled to its admitted
+    /// parallelism then takes the replacement at the next heartbeat, not after its growth
+    /// cooldown (006 SC-004).
+    #[test]
+    fn an_exited_slot_frees_its_place_before_its_release_is_reported() {
+        use super::service::{LaunchPacing, active_worker_count, launch_slots};
+        // Three slots running, one exited and not yet reported, one reported, no preparation.
+        let slots = [
+            (false, false),
+            (false, false),
+            (false, false),
+            (false, true),
+            (true, true),
+        ];
+        assert_eq!(active_worker_count(slots, 0), 3);
+        assert_eq!(active_worker_count(slots, 2), 5);
+        let pacing = |active| {
+            launch_slots(LaunchPacing {
+                max_workers: 16,
+                active,
+                admitted: 4,
+                may_grow: false,
+                fill: true,
+            })
+        };
+        assert_eq!(pacing(active_worker_count(slots, 0)), 1);
+        assert_eq!(pacing(4), 0);
+    }
+
     /// A released run's failure report checks its turn before the attempt pin: a failure with
     /// no result descriptor and no turn takes no pin. A success, a descriptor, a head or an
     /// outcome that could not be read, or a turn, does, and every read is made again under it.
