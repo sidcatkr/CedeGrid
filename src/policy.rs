@@ -185,6 +185,11 @@ struct PreviousGpu {
 /// Uncapped intervals averaged into a device's external GPU compute demand (FR-021, R48).
 const GPU_DEMAND_INTERVALS: usize = 60;
 
+/// Consecutive intervals of a plain principal's CPU contention before the beside-plain flag
+/// sets, and how long it holds after the contention ends (006 FR-007a).
+const BESIDE_PLAIN_INTERVALS: u32 = 3;
+const BESIDE_PLAIN_HOLD_MS: u64 = 10_000;
+
 /// A device's external GPU compute demand: the average total and each principal UID's.
 type DemandEstimate = (u64, BTreeMap<u32, u64>);
 
@@ -310,6 +315,14 @@ pub struct PolicyEngine {
     gpu_demand: BTreeMap<String, GpuDemand>,
     /// Each device's arrivals, for the first-come floor (FR-090).
     gpu_arrivals: BTreeMap<String, DeviceArrivals>,
+    /// Own allocations running at the last interval, and when one last stopped: CPU no account
+    /// accounts for right after is that task's last usage, never a plain principal (006 FR-007a).
+    own_running: BTreeSet<String>,
+    own_exit_ms: Option<u64>,
+    /// Consecutive intervals in which a plain principal contended for CPU, and the last one in
+    /// which that had lasted long enough to set the beside-plain flag (006 FR-007a).
+    beside_plain_streak: u32,
+    beside_plain_ms: Option<u64>,
     stable_since: Option<u64>,
     /// Since when CPU and RAM have each been safe, for their own cooldowns (FR-034).
     cpu_stable_since: Option<u64>,
@@ -654,6 +667,8 @@ impl<'a> Interval<'a> {
                 gpu_demand: prev.gpu_demand.clone(),
                 last_kernel_cpu_sample: prev.last_kernel_cpu_sample,
                 fair_share_readable: prev.fair_share_readable.clone(),
+                own_exit_ms: prev.own_exit_ms,
+                beside_plain_ms: prev.beside_plain_ms,
                 ..PolicyEngine::default()
             },
             reasons: Vec::new(),

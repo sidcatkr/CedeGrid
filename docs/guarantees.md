@@ -518,7 +518,11 @@ resource through the yield ladder, releasing opportunistic work first; on CPU, o
 Yield First and Neutral, and not at all where the node's CPU mode is Performance or Aggressive.
 Where such a node's CPU work contends with a plain principal and no first-comer holds it, the
 decision says so (`cpu_beside_plain`), and the agent may start tasks past the envelope's CPU as
-plain Linux would, up to its worker limit and memory. Guaranteed work is
+plain Linux would, up to its worker limit and memory. The flag sets after three intervals in a
+row of such contention and holds 10 s after it ends; CPU no account accounts for within two
+monitor intervals after an own task stops is that task's last usage, never a plain principal.
+Performance and Aggressive release no CPU reservation that was admitted: when own charges come
+to exceed the CPU budget, admission holds until they fit. Guaranteed work is
 drained for it only as floor policy A allows, and a breach never stops every allocation at
 once. An exhausted node spool budget blocks admission and is reported; nothing is drained
 because of it.
