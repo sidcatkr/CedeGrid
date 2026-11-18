@@ -20,6 +20,11 @@ caution options (FR-043, FR-051) and the mode ordering (FR-065). It uses
 per-user run-queue wait (FR-050). The constitution (8.1.0) applies, in particular Principle II's
 Aggressive mode and its one named exception, unprotected Aggressive.
 
+**Superseded in part (2026-11-18, constitution 9.0.0)**: [006-performance-first](../006-performance-first/spec.md)
+replaces unprotected Aggressive with two per-run options for Performance and Aggressive work,
+admit immediately and unprotected, and changes admission in both modes. Where this spec and
+006 differ, 006 applies.
+
 **Rework (2026-11-17, constitution 8.1.0)**: under 001 item 057, Performance takes no running
 steps on compute, and Aggressive follows it. In both forms, running own work is never capped,
 paused or drained to give another workload more CPU or GPU compute time. Protected Aggressive

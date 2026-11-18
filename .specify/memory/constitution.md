@@ -106,7 +106,10 @@ never let CedeGrid act on a process it does not own.
   above its fair share first, then the rest. In Performance and Aggressive, own memory is not
   hinted, drained or sent TERM for a floor breach, and the kernel decides at exhaustion, as it
   would beside the same own work without CedeGrid; the floors still bound what own work is
-  admitted to, and the operator's envelope applies in every mode.
+  admitted to, and the operator's envelope applies in every mode, except that in Performance
+  and Aggressive its CPU part does not bound admission while a plain principal contends for the
+  CPU: there own work starts every task the node's task limit and the floors allow, as plain
+  Linux would, and nothing it started that way is stepped back when that principal leaves.
 - **OOM order.** Own work MUST stay at the OOM score adjustment it launched with, the same
   baseline as every other process, and MUST NOT be set below it, except by the System mode
   broker as Principle V allows. In Yield First and Neutral, the own tasks that make up own memory

@@ -39,6 +39,9 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
 - Q: How is a user CedeGrid cannot identify treated? → A: as a user who does not run CedeGrid.
 - Q: May own priority be raised above other users'? → A: yes, as an opt-in at the highest
   warning level, never by default, and only where the host provides a way.
+- Q: Beside a competing plain user, may Performance start more CPU tasks than the CPUs hold? →
+  A: yes. Plain Linux starts every task and the kernel gives more threads more CPU, and CedeGrid
+  wins against non-CedeGrid users (gate F2c showed own work 13% below plain at the CPU limit).
 - Q: Is 004's unprotected Aggressive kept? → A: its consent path is kept for the priority
   option, renamed unprotected; its admission effect is now Performance's default beside plain
   users and admit immediately's beside CedeGrid users.
@@ -222,6 +225,13 @@ and for own work, its arrival and the options in force.
   capacity less the operator reserve and envelope, without deducting their usage, without an
   admission margin, without holding out CedeGrid's own CPU, and on GPU compute without the
   time-slice hold, within VRAM headroom.
+- **FR-007a**: While a plain principal contends for the CPU and no first-comer holds own work,
+  Performance and Aggressive MUST NOT bound new own CPU work by the scope's capacity or the CPU
+  part of the operator's envelope: they start every task the node's task limit, the memory
+  floors and the RAM and GPU envelope allow, as plain Linux starts every task, since the kernel
+  gives more threads more CPU (maintainer, 2026-11-18). Own work started this way MUST NOT be
+  stepped when that principal leaves; new CPU work then waits until own CPU requests fit the
+  capacity again. On an idle scope and beside first-comers the CPU-sized limit stays.
 - **FR-008**: Beside a first-comer, new own work MUST be held as 001 holds it today, counting only
   first-comers: the kept equal share with the mode's margin on CPU, and the time-slice rule on
   GPU compute. New own work MUST NOT start into a first-comer's activity of unknown amount.

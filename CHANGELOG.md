@@ -61,6 +61,20 @@
   replies. Agents send the new report fields only after that, and coordinators send requests
   without `contention` to agents that did not negotiate it.
 
+- **Performance first.** Performance, the default, starts new compute work as plain Linux would
+  beside users who do not run CedeGrid, and beside CedeGrid users that arrived after own work.
+  Beside a CedeGrid user whose work arrived first it holds new work at the fair share. Other
+  users' CedeGrid work is recognized read-only from a marker on each task supervisor's command
+  line, which also carries the run's arrival; a user CedeGrid cannot identify counts as plain.
+  While a plain user competes for the CPU, Performance starts every task the node's task limit
+  and memory allow, beyond the CPU count, as plain Linux does.
+- **Admit immediately and unprotected.** Two per-run SDK options for Performance and Aggressive
+  work (`admit_immediately`, `unprotected`, each with its confirmation field). Admit immediately
+  also starts beside a CedeGrid user that arrived first and yields; it is ignored beside one that
+  arrived first in Performance. Unprotected, at the highest warning level and behind the host's
+  allowance (`cedegrid setup --allow-unprotected`) and, in System mode, `modes.unprotected`,
+  also raises the account slice's CPU weight through the broker where the host splits CPU by
+  account (`modes.unprotected_cpu_weight`, 400 by default).
 ### Changed
 
 - **Validation layout.** The application validation manifest generator is
