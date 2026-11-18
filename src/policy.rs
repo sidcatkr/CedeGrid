@@ -740,8 +740,8 @@ impl<'a> Interval<'a> {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
             observe_only: true,
-            unprotected_budget: (config.contention.max_mode() >= ContentionMode::Performance).then(
-                || Resources {
+            admit_immediately_budget: (config.contention.max_mode() >= ContentionMode::Performance)
+                .then(|| Resources {
                     cpu_millicores: self
                         .admit_immediately_cpu
                         .unwrap_or(0)
@@ -756,8 +756,7 @@ impl<'a> Interval<'a> {
                         })
                         .collect(),
                     ..self.budget.clone()
-                },
-            ),
+                }),
             managed_budget: self.budget,
             admission_headroom: self.headroom,
             expansion_allowed: self.expansion_allowed,

@@ -430,7 +430,7 @@ fn admit_immediately_lifts_the_hold_only_for_an_unprotected_first_comer() {
     assert_eq!(decision.managed_budget.cpu_millicores, 2000);
     assert_eq!(
         decision
-            .unprotected_budget
+            .admit_immediately_budget
             .as_ref()
             .map(|budget| budget.cpu_millicores),
         Some(4000)
@@ -442,7 +442,7 @@ fn admit_immediately_lifts_the_hold_only_for_an_unprotected_first_comer() {
     let decision = decide(ContentionMode::Performance, 2000, protected);
     assert_eq!(
         decision
-            .unprotected_budget
+            .admit_immediately_budget
             .as_ref()
             .map(|budget| budget.cpu_millicores),
         Some(2000)

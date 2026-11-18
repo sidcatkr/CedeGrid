@@ -2164,7 +2164,7 @@ impl AgentLoop<'_> {
                     });
                     let task_capacity = launch_capacity(
                         schedulable_budget(decision),
-                        decision.unprotected_budget.as_ref(),
+                        decision.admit_immediately_budget.as_ref(),
                         admits,
                     );
                     let task_snapshot = snapshot.clone();
@@ -2977,7 +2977,7 @@ mod launch_capacity_tests {
     use crate::model::Resources;
 
     #[test]
-    fn a_granted_launch_reserves_against_the_unprotected_budget_only() {
+    fn a_granted_launch_reserves_against_the_admit_immediately_budget_only() {
         let cpu = |millicores| Resources {
             cpu_millicores: millicores,
             ram_mib: 4096,

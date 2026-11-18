@@ -518,10 +518,11 @@ pub struct Decision {
     pub observe_only: bool,
     /// Budget for all managed allocations; includes currently occupied capacity.
     pub managed_budget: Resources,
-    /// The budget an unprotected grant is placed against: the managed budget with CPU
-    /// raised to the grant's allowance. Only where the node cap reaches Aggressive (004 R12).
+    /// The budget a run with admit immediately, alone or through unprotected, is placed
+    /// against: admission holds only for protected first-comers, and a device held for one
+    /// carries no VRAM. Wherever the node cap reaches Performance (006 FR-013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unprotected_budget: Option<Resources>,
+    pub admit_immediately_budget: Option<Resources>,
     /// Remaining admission capacity after one charge per existing/pending allocation.
     pub admission_headroom: Resources,
     pub expansion_allowed: bool,

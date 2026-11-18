@@ -6241,7 +6241,7 @@ mod gpu_demand {
             };
             let vram = |decision: &Decision| {
                 decision
-                    .unprotected_budget
+                    .admit_immediately_budget
                     .as_ref()
                     .and_then(|budget| budget.gpu_memory_mib.get(GPU).copied())
             };

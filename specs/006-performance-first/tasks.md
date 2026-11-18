@@ -14,7 +14,7 @@ this thread's.
   `PrincipalUsage.cedegrid_gpu` and `PolicyInput.arrivals` (allocation ID to arrival) to
   `src/model.rs`, optional and serde-defaulted, with a round-trip test there. Arrivals sit on
   the input, not on `Allocation`, so no allocation literal changes.
-- [ ] T003 **(001)** Rename `Decision.unprotected_budget` to `admit_immediately_budget` in
+- [x] T003 **(001)** Rename `Decision.unprotected_budget` to `admit_immediately_budget` in
   `src/model.rs`, `src/policy.rs` and its consumers (`src/protocol.rs`, `src/agent/report.rs`,
   `src/agent/service.rs`, `src/coordinator.rs`) and their tests, with T020.
 
@@ -36,19 +36,19 @@ this thread's.
 
 ## Phase 3: Admission (001 thread)
 
-- [ ] T020 **(001)** Tests first in `tests/policy.rs` and `tests/contention.rs`, then in
+- [x] T020 **(001)** Tests first in `tests/policy.rs` and `tests/contention.rs`, then in
   `src/policy/measure.rs` and `src/contention.rs`: Performance and Aggressive admit as plain
   Linux (capacity less reserve, within the envelope, no margin, no deduction, CedeGrid's own
   CPU not subtracted) when no first-comer contends; hold as today counting only first-comers;
   unknown activity holds only for a first-comer. Produce `admit_immediately_budget`, counting
   only protected first-comers.
-- [ ] T021 **(001)** GPU compute: the time-slice admission hold counts only first-comers in
+- [x] T021 **(001)** GPU compute: the time-slice admission hold counts only first-comers in
   Performance and Aggressive (`src/policy/measure.rs`, `src/policy.rs`), with tests for both
   orders and both options.
 - [ ] T022 **(001)** Reason codes `admitted_as_plain`, `held_for_first_comer` and
   `admit_immediately_ignored_for_protected_first_comer` in `src/contention.rs`; `explain.rs`
   rows for principals; decision snapshots re-recorded and reviewed.
-- [ ] T023 **(001)** 001's spec and `docs/guarantees.md` text for admission in Performance and
+- [x] T023 **(001)** 001's spec and `docs/guarantees.md` text for admission in Performance and
   Aggressive.
 
 ## Phase 4: Options (this thread)

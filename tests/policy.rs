@@ -10120,11 +10120,11 @@ fn the_admit_immediately_budget_exists_wherever_the_cap_reaches_performance() {
     let neutral = PolicyEngine::new()
         .evaluate(&neutral_cap, &snapshot(), &input, 0)
         .unwrap();
-    assert!(neutral.unprotected_budget.is_none());
+    assert!(neutral.admit_immediately_budget.is_none());
     for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
         let decision = decide(mode, Some(7000));
         let budget = decision
-            .unprotected_budget
+            .admit_immediately_budget
             .clone()
             .expect("a cap that reaches Performance");
         // No protected first-comer is known here, so it is the default budget or more.
@@ -10141,7 +10141,7 @@ fn the_admit_immediately_budget_exists_wherever_the_cap_reaches_performance() {
         let unknown = decide(mode, None);
         assert_eq!(
             unknown
-                .unprotected_budget
+                .admit_immediately_budget
                 .map(|budget| budget.cpu_millicores),
             Some(0),
             "{mode:?}"
@@ -10149,20 +10149,17 @@ fn the_admit_immediately_budget_exists_wherever_the_cap_reaches_performance() {
     }
 }
 
-/// 004 R12: the node reports the unprotected budget only while the host's allowance reads on.
+/// 006 FR-013: the node always reports the admit immediately budget it decided; admit
+/// immediately needs no allowance, and unprotected is checked against it at launch.
 #[test]
-fn the_report_carries_the_unprotected_budget_only_under_the_allowance() {
+fn the_report_always_carries_the_admit_immediately_budget() {
     use cedegrid::contention::ContentionMode;
-    use cedegrid::state::{StateStore, clear_allowance, set_allowance};
+    use cedegrid::state::StateStore;
     let state = tempfile::tempdir().unwrap();
     drop(StateStore::open(state.path()).unwrap());
     let mut cfg = config();
     cfg.state_dir = state.path().to_path_buf();
-    cfg.contention.default_mode = ContentionMode::Aggressive;
-    cfg.contention.max_mode = Some(ContentionMode::Aggressive);
-    cfg.contention
-        .acknowledge_caution
-        .insert("aggressive_mode".into());
+    cfg.contention.default_mode = ContentionMode::Performance;
     let mut snap = snapshot();
     snap.cpu_busy_millicores = Some(7000);
     let input = PolicyInput {
@@ -10178,17 +10175,17 @@ fn the_report_carries_the_unprotected_budget_only_under_the_allowance() {
     let decision = PolicyEngine::new()
         .evaluate(&cfg, &snap, &input, 0)
         .unwrap();
-    assert!(decision.unprotected_budget.is_some());
+    assert!(decision.admit_immediately_budget.is_some());
     let report = |cfg: &Config| cedegrid::agent::node_contention_report(cfg, &decision, 1);
-    assert!(report(&cfg).unprotected_budget.is_none(), "allowance off");
-    set_allowance(state.path(), 1).unwrap();
-    assert_eq!(report(&cfg).unprotected_budget, decision.unprotected_budget);
-    clear_allowance(state.path()).unwrap();
-    assert!(
-        report(&cfg).unprotected_budget.is_none(),
-        "allowance cleared"
+    assert_eq!(
+        report(&cfg).admit_immediately_budget,
+        decision.admit_immediately_budget,
+        "no allowance"
     );
-    // A state directory that cannot be read reads as off.
     cfg.state_dir = state.path().join("missing");
-    assert!(report(&cfg).unprotected_budget.is_none());
+    assert_eq!(
+        report(&cfg).admit_immediately_budget,
+        decision.admit_immediately_budget,
+        "an unreadable state directory"
+    );
 }
