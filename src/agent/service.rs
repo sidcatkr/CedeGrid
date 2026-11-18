@@ -1467,14 +1467,12 @@ impl AgentLoop<'_> {
         )?;
         let allocations = input.allocations;
         let mark = self.cost.charge("policy", mark);
-        decision.managed_budget = minimum(&decision.managed_budget, &agent.capacity);
         decision.observe_only = false;
-        decision.admission_headroom = minimum(
-            &decision.admission_headroom,
-            &remaining_capacity(
-                &schedulable_budget(&decision),
-                &allocation_charge(&allocations),
-            ),
+        bound_by_envelope(
+            &mut decision,
+            &agent.capacity,
+            agent.max_workers,
+            &allocation_charge(&allocations),
         );
         self.cost.charge("decision", mark);
         self.note_ram_views(&snapshot, &allocations, &decision);
@@ -1661,7 +1659,16 @@ impl AgentLoop<'_> {
         allocations: &[crate::model::Allocation],
     ) -> Result<()> {
         let agent = self.agent;
-        block_admission_beyond_envelope(decision, allocations, &agent.capacity)?;
+        block_admission_beyond_envelope(
+            decision,
+            allocations,
+            &envelope_for_check(
+                &agent.capacity,
+                self.config
+                    .contention
+                    .mode(crate::contention::ResourceKind::Cpu),
+            ),
+        )?;
         let draining_stop = self.stopping.is_some() && !self.leave_supervisors;
         self.drain_quota = stop_drain_quota(self.store_write);
         dispatch_drains(
@@ -3020,6 +3027,49 @@ pub(super) fn block_admission_beyond_envelope(
     Ok(())
 }
 
+/// Bounds the decision's budget and headroom by the operator's envelope. While a plain user
+/// competes for the CPU in Performance or Aggressive (`cpu_beside_plain`), the CPU part is the
+/// envelope's CPU times the task limit instead, as plain Linux starts every task and the kernel
+/// gives more threads more CPU (006 FR-007a).
+pub(super) fn bound_by_envelope(
+    decision: &mut crate::model::Decision,
+    capacity: &Resources,
+    max_workers: usize,
+    charge: &Resources,
+) {
+    let mut envelope = capacity.clone();
+    if decision.cpu_beside_plain {
+        envelope.cpu_millicores = capacity
+            .cpu_millicores
+            .saturating_mul(u64::try_from(max_workers.max(1)).unwrap_or(u64::MAX));
+    }
+    decision.managed_budget = minimum(&decision.managed_budget, &envelope);
+    if decision.cpu_beside_plain {
+        decision.managed_budget.cpu_millicores = envelope.cpu_millicores;
+        decision.admission_headroom.cpu_millicores = envelope
+            .cpu_millicores
+            .saturating_sub(charge.cpu_millicores);
+    }
+    decision.admission_headroom = minimum(
+        &decision.admission_headroom,
+        &remaining_capacity(&schedulable_budget(decision), charge),
+    );
+}
+
+/// The envelope the admission block checks running work against. In Performance and
+/// Aggressive, CPU started beside a plain user may exceed the envelope's CPU after that user
+/// leaves: the CPU budget then waits for it, and it blocks no other resource (006 FR-007a).
+pub(super) fn envelope_for_check(
+    capacity: &Resources,
+    cpu_mode: crate::contention::ContentionMode,
+) -> Resources {
+    let mut envelope = capacity.clone();
+    if cpu_mode >= crate::contention::ContentionMode::Performance {
+        envelope.cpu_millicores = u64::MAX;
+    }
+    envelope
+}
+
 /// CPU counts as admission charges it: `cpu_credit` is what running opportunistic
 /// work is charged above its recent usage.
 pub fn envelope_exceeded(
@@ -3100,5 +3150,63 @@ mod launch_capacity_tests {
         );
         // The unprotected budget never lowers what a launch may reserve.
         assert_eq!(launch_capacity(cpu(1000), Some(&cpu(500)), true), cpu(1000));
+    }
+}
+
+#[cfg(test)]
+mod beside_plain_tests {
+    use super::{bound_by_envelope, envelope_for_check};
+    use crate::contention::ContentionMode;
+    use crate::model::{Decision, Resources};
+
+    fn resources(cpu: u64) -> Resources {
+        Resources {
+            cpu_millicores: cpu,
+            ram_mib: 8192,
+            gpu_memory_mib: Default::default(),
+        }
+    }
+
+    /// 006 FR-007a: beside a competing plain user, the CPU budget and headroom reach the
+    /// envelope's CPU times the task limit, as plain Linux starts every task; RAM keeps the
+    /// envelope. Otherwise both stay within the envelope's CPU.
+    #[test]
+    fn beside_a_plain_user_cpu_admission_reaches_the_task_limit() {
+        let capacity = resources(4000);
+        let charge = resources(4000);
+        let mut decision: Decision = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "node_id": "n", "observe_only": false,
+            "managed_budget": resources(4000), "admission_headroom": resources(0),
+            "cpu_beside_plain": true, "expansion_allowed": true, "would_drain": [], "reasons": [],
+        }))
+        .unwrap();
+        bound_by_envelope(&mut decision, &capacity, 8, &charge);
+        assert_eq!(decision.managed_budget.cpu_millicores, 32_000);
+        assert_eq!(decision.admission_headroom.cpu_millicores, 28_000);
+        assert_eq!(decision.managed_budget.ram_mib, 8192);
+        decision.cpu_beside_plain = false;
+        decision.managed_budget = resources(4000);
+        decision.admission_headroom = resources(0);
+        let over = resources(8000);
+        bound_by_envelope(&mut decision, &capacity, 8, &over);
+        assert_eq!(decision.managed_budget.cpu_millicores, 4000);
+        assert_eq!(decision.admission_headroom.cpu_millicores, 0);
+    }
+
+    /// In Performance and Aggressive, CPU started beside a plain user that later left blocks no
+    /// other resource's admission; Neutral and Yield First keep the whole envelope.
+    #[test]
+    fn cpu_overage_blocks_nothing_else_in_performance() {
+        let capacity = resources(4000);
+        for (mode, cpu) in [
+            (ContentionMode::Performance, u64::MAX),
+            (ContentionMode::Aggressive, u64::MAX),
+            (ContentionMode::Neutral, 4000),
+            (ContentionMode::YieldFirst, 4000),
+        ] {
+            let envelope = envelope_for_check(&capacity, mode);
+            assert_eq!(envelope.cpu_millicores, cpu, "{mode:?}");
+            assert_eq!(envelope.ram_mib, 8192);
+        }
     }
 }

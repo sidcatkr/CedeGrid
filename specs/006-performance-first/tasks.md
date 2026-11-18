@@ -42,11 +42,11 @@ this thread's.
   CPU not subtracted) when no first-comer contends; hold as today counting only first-comers;
   unknown activity holds only for a first-comer. Produce `admit_immediately_budget`, counting
   only protected first-comers.
-- [ ] T024 **(001)** FR-007a, policy: add `Decision.cpu_beside_plain`, true in Performance and
+- [x] T024 **(001)** FR-007a, policy: add `Decision.cpu_beside_plain`, true in Performance and
   Aggressive while a plain principal contends for the CPU and no first-comer holds own work;
   in those modes the envelope step leaves CPU overage alone (memory and GPU envelope as before).
   Tests first.
-- [ ] T025 FR-007a, agent: under `cpu_beside_plain` the agent sets the CPU budget to the
+- [x] T025 FR-007a, agent: under `cpu_beside_plain` the agent sets the CPU budget to the
   envelope's CPU times its task limit (`max_workers`), caps neither the budget nor the headroom
   at the envelope's CPU, and `envelope_exceeded` ignores CPU; once the flag clears, new CPU work
   waits until requests fit again. Tests first in `src/agent/service.rs`.
