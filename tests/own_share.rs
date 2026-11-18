@@ -490,3 +490,102 @@ fn doctor_lists_the_other_accounts_and_whom_admission_holds_for() {
         [&OTHER.to_string(), "cedegrid", "500", "yes", "no", "yes"]
     );
 }
+
+/// 006 FR-007a: the decision says when Performance or Aggressive starts work beside a plain
+/// principal with no first-comer holding it, so the agent may start tasks as plain Linux would.
+#[test]
+fn the_decision_flags_cpu_beside_a_plain_principal() {
+    let flag = |mode: ContentionMode, other: u64, work: Option<CedeGridWork>| {
+        decide(mode, other, work).cpu_beside_plain
+    };
+    let later = Some(CedeGridWork {
+        arrival_unix_ms: Some(OWN_ARRIVAL + 1),
+        protected_arrival_unix_ms: None,
+    });
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        assert!(
+            flag(mode, 2000, None),
+            "{mode:?}: a plain principal contends"
+        );
+        assert!(
+            !flag(mode, 2000, FIRST),
+            "{mode:?}: a first-comer holds own work"
+        );
+        assert!(
+            !flag(mode, 2000, later),
+            "{mode:?}: later CedeGrid work is not plain"
+        );
+        assert!(!flag(mode, 0, None), "{mode:?}: nobody contends");
+    }
+    for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
+        assert!(!flag(mode, 2000, None), "{mode:?}");
+    }
+}
+
+/// Usage no principal accounts for is unidentifiable, so it counts as plain; an unreadable
+/// principal list holds for everyone, so the flag stays off (006 FR-004, FR-007a).
+#[test]
+fn unattributed_usage_counts_as_plain_and_an_unreadable_list_does_not() {
+    let (mut snapshot, input) = reading_beside(2000, 50, 0, Some(true), None);
+    for principal in snapshot.principals.iter_mut().flatten() {
+        if principal.uid == Some(OTHER) {
+            principal.uid = None;
+        }
+    }
+    let decision = PolicyEngine::new()
+        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
+        .unwrap();
+    assert!(decision.cpu_beside_plain);
+    snapshot.principals = None;
+    let decision = PolicyEngine::new()
+        .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
+        .unwrap();
+    assert!(!decision.cpu_beside_plain);
+}
+
+/// Performance and Aggressive leave own CPU above the operator envelope alone: no yield, cap or
+/// drain, as plain Linux would run it. Neutral still steps it, and memory over the envelope
+/// still steps in every mode (006 FR-007a, FR-057).
+#[test]
+fn performance_takes_no_cpu_step_for_the_envelope() {
+    let run = |mode: ContentionMode, envelope: Resources| {
+        let (snapshot, mut input) = reading_beside(500, 50, 0, Some(true), None);
+        input.envelope = Some(envelope);
+        let mut engine = PolicyEngine::new();
+        let mut actions = Vec::new();
+        for i in 0..40u64 {
+            let decision = engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap();
+            actions.extend(decision.actions);
+        }
+        actions
+    };
+    let cpu_over = Resources {
+        cpu_millicores: 500,
+        ram_mib: 32_000,
+        gpu_memory_mib: BTreeMap::new(),
+    };
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let actions = run(mode, cpu_over.clone());
+        assert!(
+            actions.iter().all(|a| a.resource != ResourceKey::Cpu),
+            "{mode:?}: {actions:?}"
+        );
+    }
+    let neutral = run(ContentionMode::Neutral, cpu_over);
+    assert!(
+        neutral.iter().any(|a| a.resource == ResourceKey::Cpu),
+        "Neutral steps own CPU over the envelope"
+    );
+    let ram_over = Resources {
+        cpu_millicores: 4000,
+        ram_mib: 100,
+        gpu_memory_mib: BTreeMap::new(),
+    };
+    let actions = run(ContentionMode::Performance, ram_over);
+    assert!(
+        actions.iter().any(|a| a.resource == ResourceKey::Ram),
+        "memory over the envelope still steps: {actions:?}"
+    );
+}

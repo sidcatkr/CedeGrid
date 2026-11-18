@@ -5959,7 +5959,7 @@ mod allowance {
 /// it, Yield First first, and each job is also held to its own mode's target.
 mod per_job_modes {
     use super::*;
-    use cedegrid::contention::{ContentionMode, ResourceKind, YieldStep};
+    use cedegrid::contention::{ContentionMode, ResourceKey, ResourceKind, YieldStep};
 
     const CPU: u64 = 8000;
 
@@ -6241,33 +6241,54 @@ mod per_job_modes {
         }
     }
 
-    /// The operator envelope still steps a Performance job on a Neutral node, also while the
-    /// host's CPU reading is unknown, since the envelope is judged on own usage (FR-030, FR-057).
+    /// The operator envelope steps no running CPU of a Performance job, even on a Neutral node,
+    /// as plain Linux would run it; its memory over the envelope still steps (FR-030, FR-057,
+    /// 006 FR-007a).
     #[test]
-    fn the_envelope_still_steps_a_performance_job_on_a_neutral_node() {
-        let mut job = allocation(
-            "eager",
-            AllocationPhase::Running,
-            resources(1000, 100, 0),
-            Some(resources(6000, 100, 0)),
-        );
-        job.modes = BTreeMap::from([(ResourceKind::Cpu, ContentionMode::Performance)]);
-        let input = PolicyInput {
-            allocations: vec![job],
-            facts: rootless(&["eager"]),
-            envelope: Some(resources(3000, 16_000, 0)),
-            ..PolicyInput::default()
+    fn the_envelope_steps_a_performance_job_on_memory_only() {
+        let run = |used: Resources, envelope: Resources, kind: ResourceKind| {
+            let mut job = allocation(
+                "eager",
+                AllocationPhase::Running,
+                resources(1000, 100, 0),
+                Some(used),
+            );
+            job.modes = BTreeMap::from([
+                (ResourceKind::Cpu, ContentionMode::Performance),
+                (ResourceKind::Ram, ContentionMode::Performance),
+            ]);
+            let input = PolicyInput {
+                allocations: vec![job],
+                facts: rootless(&["eager"]),
+                envelope: Some(envelope),
+                ..PolicyInput::default()
+            };
+            let mut engine = PolicyEngine::new();
+            let key = match kind {
+                ResourceKind::Cpu => ResourceKey::Cpu,
+                _ => ResourceKey::Ram,
+            };
+            (0..20u64).any(|i| {
+                engine
+                    .evaluate(&cfg(), &snapshot(), &input, i * 500)
+                    .unwrap()
+                    .actions
+                    .iter()
+                    .any(|a| {
+                        a.allocation_id == "eager" && a.resource == key && a.step > YieldStep::None
+                    })
+            })
         };
-        let mut engine = PolicyEngine::new();
-        let stepped = (0..20u64).any(|i| {
-            engine
-                .evaluate(&cfg(), &snapshot(), &input, i * 500)
-                .unwrap()
-                .actions
-                .iter()
-                .any(|a| a.allocation_id == "eager" && a.step > YieldStep::None)
-        });
-        assert!(stepped);
+        assert!(!run(
+            resources(6000, 100, 0),
+            resources(3000, 16_000, 0),
+            ResourceKind::Cpu
+        ));
+        assert!(run(
+            resources(1000, 2000, 0),
+            resources(8000, 1000, 0),
+            ResourceKind::Ram
+        ));
     }
 
     /// While CPU telemetry is unknown on a Neutral node, escalation past the unknown window

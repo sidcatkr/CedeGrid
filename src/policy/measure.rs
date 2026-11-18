@@ -1008,7 +1008,7 @@ impl<'a> Interval<'a> {
             }
         };
         let others = crate::contention::contending_principals(view, thresholds);
-        let mut held = Vec::new();
+        let mut held = None;
         if view.mode >= ContentionMode::Performance {
             let (budget, uids) = self.cpu_budget_for(view, thresholds, &first(false));
             self.budget.cpu_millicores = budget;
@@ -1024,7 +1024,7 @@ impl<'a> Interval<'a> {
                 thresholds,
                 &first(true),
             );
-            if !protected.is_empty() {
+            if let Some(protected) = protected.filter(|uids| !uids.is_empty()) {
                 note(
                     &mut self.statuses,
                     ResourceKey::Cpu,
@@ -1052,7 +1052,26 @@ impl<'a> Interval<'a> {
             .filter(|p| !p.is_owner && p.cpu_millicores >= floor)
             .filter_map(|p| p.uid)
             .collect();
-        let held_set: BTreeSet<u32> = held.iter().copied().collect();
+        let held_set: BTreeSet<u32> = held.iter().flatten().copied().collect();
+        // A plain principal contends: an account with no CedeGrid work on the CPU, or usage
+        // that no readable account accounts for. Accounts below uid_min are background.
+        let uid_min = self.config.contention.uid_min;
+        let plain_contends = self.cpu_unattributed >= floor
+            || self.snapshot.principals.iter().flatten().any(|p| {
+                !p.is_owner
+                    && p.cpu_millicores >= floor
+                    && match p.uid {
+                        None => true,
+                        Some(uid) => {
+                            uid >= uid_min
+                                && standings
+                                    .as_ref()
+                                    .is_some_and(|s| s.get(&uid).is_none_or(|s| s.work.is_none()))
+                        }
+                    }
+            });
+        self.cpu_beside_plain =
+            view.mode >= ContentionMode::Performance && held.is_none() && plain_contends;
         let status = self.statuses.entry(ResourceKey::Cpu).or_default();
         if let OwnArrival::At(at) = own {
             status.own_arrival_unix_ms = Some(at);
@@ -1061,23 +1080,26 @@ impl<'a> Interval<'a> {
         if view.mode < ContentionMode::Performance || others.is_empty() {
             return;
         }
-        if held.is_empty() {
-            note(
+        match held {
+            None => note(
                 &mut self.statuses,
                 ResourceKey::Cpu,
                 "admitted_as_plain",
                 "CPU admission starts new work as plain Linux would: no account that arrived first with CedeGrid work contends".into(),
-            );
-        } else {
-            note(
+            ),
+            Some(held) => note(
                 &mut self.statuses,
                 ResourceKey::Cpu,
                 "held_for_first_comer",
                 format!(
                     "CPU admission holds at the fair share for {}, which arrived first with CedeGrid work",
-                    uid_list(&held)
+                    if held.is_empty() {
+                        "every account, since the account list cannot be read".to_string()
+                    } else {
+                        uid_list(&held)
+                    }
                 ),
-            );
+            ),
         }
     }
 

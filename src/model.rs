@@ -523,6 +523,10 @@ pub struct Decision {
     /// carries no VRAM. Wherever the node cap reaches Performance (006 FR-013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admit_immediately_budget: Option<Resources>,
+    /// Own CPU work in Performance or Aggressive contends with a plain principal and no
+    /// first-comer holds it, so the agent may start tasks as plain Linux would (006 FR-007a).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cpu_beside_plain: bool,
     /// Remaining admission capacity after one charge per existing/pending allocation.
     pub admission_headroom: Resources,
     pub expansion_allowed: bool,
