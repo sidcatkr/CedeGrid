@@ -269,18 +269,24 @@ refuses (SC-005).
   check in `src/agent/launch.rs`, the allowance in `src/state.rs` and `src/backup.rs`, the
   refusals in `src/config.rs`, `src/config_migration.rs` and `src/coordinator.rs`, the setup step,
   and the administrator key. Add the tests that pin each one.
-- [ ] T035 (after T622) Run the native gates in quickstart §7 on the test host, at a time the
+- [x] T035 (after T622) Run the native gates in quickstart §7 on the test host, at a time the
   coordinator schedules after 001's E9. Record the results in `docs/validation.md` under a
   feature 004 section, at least 3 runs each way.
   - *Done in part (2026-11-17, `9647d21`):* fill and F2c on CPU, three runs of each arm, with a
-    cross-cgroup contender, and no step on running own work. Open: a same-cgroup contender (needs
-    root on this host) and the GPU compute runs. The first smoke run found the agent reserving
+    cross-cgroup contender, and no step on running own work. Open then: a same-cgroup contender
+    and the GPU compute runs. The first smoke run found the agent reserving
     granted launches against the protected budget (fixed in `9647d21`).
   - *GPU compute (2026-11-17, `7d220ed`):* run with `tools/aggressive_gates.py`, three runs of each
     arm. Protected admission placed two own GPU tasks together beside a saturating second
     account, which fell to 26% of its alone rate: the one-more-process time-slice rule counts
-    only running processes. Passed to 001's GPU admission; rerun after its fix. The same-cgroup
-    run waits for the user's sudo step.
+    only running processes. Passed to 001's GPU admission; rerun after its fix.
+  - *GPU compute after 001's fix (2026-11-18, `b4dda15`, with `5504189`):* three runs of each arm.
+    Protected admission held own work to one process beside the saturating second account, which
+    ran at 38–39% of its alone rate; unprotected Aggressive started both tasks, and it fell to 26%.
+  - *Same-cgroup contender (2026-11-18, `7ee0a23`):* F2c with the `cpu` controller turned off
+    below `user.slice` at run time, three runs of each protected arm. The second account kept
+    97.7–98.0% of its alone rate; own work held one task steadily, CedeGrid's own use leaving the
+    share short of a second 1000 m task.
 
 ---
 

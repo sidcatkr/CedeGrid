@@ -50,6 +50,11 @@ candidate's commit, and this list is updated at that commit.
 ## Open before the review
 
 - T033: the full checks at the release candidate's commit.
-- T035, the rest: a same-cgroup contender, and the GPU compute runs again after 001's fix for
-  two own GPU tasks placed together past the time-slice rule. The CPU gates passed on 2026-11-17
-  (`docs/validation.md`, feature 004).
+
+## Host gates
+
+T035 is done (`docs/validation.md`, feature 004): fill and F2c on CPU with a cross-cgroup
+contender (2026-11-17), F2c with a same-cgroup contender (2026-11-18, `7ee0a23`), and GPU compute
+after 001's fix (2026-11-18, `b4dda15`). Every protected run admitted own work only within its
+share beside the second account; every unprotected run started beside it with its warning; no
+run stepped own work.
