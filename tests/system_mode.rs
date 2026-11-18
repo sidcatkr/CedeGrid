@@ -1872,6 +1872,173 @@ mod broker_service {
         assert!(systemd.weights.lock().unwrap().is_empty());
     }
 
+    /// 006 FR-016: a raise never replaces a weight someone else gave the account slice. The
+    /// policy's own weight, as a broker that stopped leaves it, is taken over and renewed.
+    #[test]
+    fn a_raise_never_replaces_another_weight_on_the_account_slice() {
+        let permitted = "[modes]\nunprotected = true\nunprotected_cpu_weight = 500\n";
+        let systemd = Arc::new(FakeSystemd::default());
+        for kind in [UnitKind::Ordinary, UnitKind::Idle] {
+            let mut show = ours(kind, 1234, "active");
+            show.control_group = format!(
+                "/user.slice/user-1234.slice/{}",
+                cedegrid::broker::units::unit_name(kind, 1234)
+            );
+            systemd.put(&cedegrid::broker::units::unit_name(kind, 1234), show);
+        }
+        let mut granted = state(FakeSystemd::default(), &[1234], Some(permitted));
+        granted.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        let raise = line(r#"{"protocol":1,"kind":"raise","on":true}"#);
+        systemd
+            .weights
+            .lock()
+            .unwrap()
+            .insert("user-1234.slice".into(), 250);
+        let handled = handle(&granted, peer(1234), &raise);
+        assert_eq!(handled.reply.code, Some(RefusalCode::RaiseRefused));
+        assert!(
+            handled
+                .reply
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("250"),
+            "{:?}",
+            handled.reply
+        );
+        assert_eq!(systemd.weights.lock().unwrap()["user-1234.slice"], 250);
+        assert!(granted.raises.lock().unwrap().is_empty());
+        systemd
+            .weights
+            .lock()
+            .unwrap()
+            .insert("user-1234.slice".into(), 500);
+        assert!(handle(&granted, peer(1234), &raise).reply.ok);
+        assert_eq!(systemd.weights.lock().unwrap()["user-1234.slice"], 500);
+        assert!(granted.raises.lock().unwrap().contains_key(&1234));
+    }
+
+    /// 006 FR-016, FR-018: a raise ends at the next check, without waiting for its lease, once
+    /// the administrator turns unprotected off or the member leaves the group.
+    #[test]
+    fn a_raise_ends_once_the_key_is_off_or_the_member_left() {
+        use cedegrid::broker::server::expire_raises;
+        let systemd = Arc::new(FakeSystemd::default());
+        for uid in [1234, 1235] {
+            for kind in [UnitKind::Ordinary, UnitKind::Idle] {
+                let mut show = ours(kind, uid, "active");
+                show.control_group = format!(
+                    "/user.slice/user-{uid}.slice/{}",
+                    cedegrid::broker::units::unit_name(kind, uid)
+                );
+                systemd.put(&cedegrid::broker::units::unit_name(kind, uid), show);
+            }
+        }
+        let permitted = Arc::new(Mutex::new(true));
+        let members = Arc::new(Mutex::new(BTreeSet::from([1234u32, 1235])));
+        struct Members(Arc<Mutex<BTreeSet<u32>>>);
+        impl Accounts for Members {
+            fn primary_gid(&self, uid: u32) -> anyhow::Result<u32> {
+                Ok(uid + 100)
+            }
+            fn is_member(&self, uid: u32) -> anyhow::Result<bool> {
+                Ok(self.0.lock().unwrap().contains(&uid))
+            }
+        }
+        let mut broker = state(FakeSystemd::default(), &[], None);
+        broker.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        broker.accounts = Box::new(Members(Arc::clone(&members)));
+        let key = Arc::clone(&permitted);
+        broker.load_policy = Box::new(move || {
+            AdminPolicy::parse(
+                &format!("[modes]\nunprotected = {}\n", key.lock().unwrap()),
+                1000,
+            )
+        });
+        let raise = line(r#"{"protocol":1,"kind":"raise","on":true}"#);
+        let now = Instant::now();
+        assert!(handle(&broker, peer(1234), &raise).reply.ok);
+        assert!(handle(&broker, peer(1235), &raise).reply.ok);
+        expire_raises(&broker, now);
+        assert_eq!(systemd.weights.lock().unwrap().len(), 2);
+        // The member who left loses its raise; the other keeps its own.
+        members.lock().unwrap().remove(&1235);
+        expire_raises(&broker, now);
+        assert_eq!(
+            *systemd.weights.lock().unwrap(),
+            BTreeMap::from([("user-1234.slice".to_owned(), 400)])
+        );
+        assert!(!broker.raises.lock().unwrap().contains_key(&1235));
+        // The key off ends every raise.
+        *permitted.lock().unwrap() = false;
+        expire_raises(&broker, now);
+        assert!(systemd.weights.lock().unwrap().is_empty());
+        assert!(broker.raises.lock().unwrap().is_empty());
+    }
+
+    /// 006 FR-018: a raise ends with the broker that set it, however that broker stopped. The
+    /// next broker, and the stop of this one, reset each account slice whose runtime drop-in
+    /// carries the policy's weight, and nothing else.
+    #[test]
+    fn raises_a_stopped_broker_left_are_reset_and_nothing_else() {
+        use cedegrid::broker::server::end_left_raises;
+        use cedegrid::broker::systemd::raised_slices;
+        let base = std::env::var_os("TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!(".system-mode-control-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let drop_in = |name: &str, file: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join(file),
+                format!(
+                    "# This is a drop-in unit file extension, created via \"systemctl set-property\"\n# or an equivalent operation. Do not edit.\n[Slice]\n{body}\n"
+                ),
+            )
+            .unwrap();
+        };
+        drop_in("user-1234.slice.d", "50-CPUWeight.conf", "CPUWeight=400");
+        // An administrator's weight, one already reset, another file, a name that is not the
+        // slice's, another slice, and the last line deciding either way.
+        drop_in("user-1235.slice.d", "50-CPUWeight.conf", "CPUWeight=200");
+        drop_in("user-1236.slice.d", "50-CPUWeight.conf", "CPUWeight=");
+        drop_in(
+            "user-1237.slice.d",
+            "50-CPUAccounting.conf",
+            "CPUWeight=400",
+        );
+        drop_in("user-01238.slice.d", "50-CPUWeight.conf", "CPUWeight=400");
+        drop_in("system.slice.d", "50-CPUWeight.conf", "CPUWeight=400");
+        drop_in(
+            "user-1239.slice.d",
+            "50-CPUWeight.conf",
+            "CPUWeight=400\nCPUWeight=",
+        );
+        drop_in(
+            "user-1240.slice.d",
+            "50-CPUWeight.conf",
+            "CPUWeight=100\nCPUWeight=400",
+        );
+        assert_eq!(raised_slices(&dir, 400), vec![1234, 1240]);
+        assert!(raised_slices(&dir.join("missing"), 400).is_empty());
+        let systemd = FakeSystemd::default();
+        for (slice, weight) in [
+            ("user-1234.slice", 400),
+            ("user-1235.slice", 200),
+            ("user-1240.slice", 400),
+        ] {
+            systemd.weights.lock().unwrap().insert(slice.into(), weight);
+        }
+        assert_eq!(end_left_raises(&systemd, 400, &dir), vec![1234, 1240]);
+        assert_eq!(
+            *systemd.weights.lock().unwrap(),
+            BTreeMap::from([("user-1235.slice".to_owned(), 200)])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn denied_after(systemd: &Arc<FakeSystemd>) -> BrokerState {
         let mut denied = state(FakeSystemd::default(), &[1234], None);
         denied.systemd = Box::new(Shared(Arc::clone(systemd)));
@@ -3632,6 +3799,154 @@ c.submit('{job}', 'pool', [t])
         );
         let output = cedegrid_as(OUTSIDER, &["system", "start", "--require-system"]);
         assert!(!output.status.success());
+    }
+
+    /// 006 T043, FR-016, FR-018: under `modes.unprotected` a member's raise weights its own
+    /// account slice and nothing else. It is refused without the key, where the ordinary unit
+    /// is not in the account slice, and over a weight the broker did not set. Withdrawal, the
+    /// units' stop, the broker's stop, the next broker's start and an unrenewed lease each end it.
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn an_unprotected_raise_weights_only_the_account_slice_and_every_end_resets_it() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        let slice = format!("user-{MEMBER_UID}.slice");
+        let holder = "raise-fixture-split.service";
+        let cleanup = || {
+            let _ = run("systemctl", &["stop", holder]);
+            stop_units(MEMBER);
+            let _ = std::fs::remove_file("/etc/cedegrid/policy.toml");
+            let _ = run("systemctl", &["revert", "--", &slice]);
+        };
+        cleanup();
+        let outcome = std::panic::catch_unwind(|| {
+            let weight = || show(&slice, "CPUWeight")["CPUWeight"].clone();
+            let raise = |on: bool| {
+                reply_code(&raw_request(
+                    Some(MEMBER),
+                    format!("{{\"protocol\":1,\"kind\":\"raise\",\"on\":{on}}}\n").as_bytes(),
+                    false,
+                ))
+            };
+            let policy = |unprotected: bool| {
+                ok("install", &["-d", "-m", "0755", "/etc/cedegrid"]);
+                std::fs::write(
+                    "/etc/cedegrid/policy.toml",
+                    format!("policy_version = 1\n[modes]\nunprotected = {unprotected}\n"),
+                )
+                .unwrap();
+                ok("chmod", &["0644", "/etc/cedegrid/policy.toml"]);
+            };
+            let start = || {
+                let output = cedegrid_as(MEMBER, &["system", "start"]);
+                assert!(output.status.success(), "{}", stderr(&output));
+                assert!(wait_until(Duration::from_secs(10), || {
+                    show(&ordinary(MEMBER_UID), "ActiveState")["ActiveState"] == "active"
+                }));
+                show(&ordinary(MEMBER_UID), "Slice")["Slice"].clone()
+            };
+            let unset = "[not set]";
+            // Without a split by account the ordinary unit sits in cedegrid.slice, where a raise
+            // would reach no other account.
+            policy(true);
+            assert_eq!(start(), "cedegrid.slice");
+            assert_eq!(raise(true), "raise_refused");
+            stop_units(MEMBER);
+            // Another account's work with a CPU weight splits user.slice by account, as on a
+            // desktop host; the ordinary unit then sits in the account slice.
+            ok(
+                "systemd-run",
+                &[
+                    "--quiet",
+                    "--unit",
+                    holder,
+                    "--slice",
+                    &format!("user-{SECOND_UID}.slice"),
+                    "-p",
+                    "CPUWeight=100",
+                    "sleep",
+                    "600",
+                ],
+            );
+            assert!(wait_until(Duration::from_secs(5), || {
+                std::fs::read_to_string("/sys/fs/cgroup/user.slice/cgroup.subtree_control")
+                    .is_ok_and(|text| text.split_whitespace().any(|c| c == "cpu"))
+            }));
+            policy(false);
+            assert_eq!(start(), slice);
+            assert_eq!(raise(true), "raise_refused");
+            assert_eq!(weight(), unset);
+            // Permitted: the account slice, and no other, at the default weight, read back.
+            policy(true);
+            assert_eq!(raise(true), "ok");
+            assert_eq!(weight(), "400");
+            assert_eq!(
+                show(&format!("user-{SECOND_UID}.slice"), "CPUWeight")["CPUWeight"],
+                unset
+            );
+            assert_eq!(raise(false), "ok");
+            assert_eq!(weight(), unset);
+            // The administrator's key off ends it at the broker's next check, within 5 s.
+            assert_eq!(raise(true), "ok");
+            policy(false);
+            assert!(
+                wait_until(Duration::from_secs(8), || weight() == unset),
+                "{}",
+                weight()
+            );
+            policy(true);
+            // The units' stop ends it.
+            assert_eq!(raise(true), "ok");
+            stop_units(MEMBER);
+            assert_eq!(weight(), unset);
+            // So does the broker's stop, through its unit's stop hook.
+            assert_eq!(start(), slice);
+            assert_eq!(raise(true), "ok");
+            ok("systemctl", &["stop", "cedegrid-broker.service"]);
+            assert!(
+                wait_until(Duration::from_secs(10), || weight() == unset),
+                "{}",
+                weight()
+            );
+            // A raise left without the hook ends at the next broker's start.
+            ok(
+                "systemctl",
+                &["set-property", "--runtime", "--", &slice, "CPUWeight=400"],
+            );
+            assert_eq!(
+                reply_code(&raw_request(
+                    Some(MEMBER),
+                    b"{\"protocol\":1,\"kind\":\"status\"}\n",
+                    false
+                )),
+                "ok"
+            );
+            assert_eq!(weight(), unset);
+            // An administrator's weight is never replaced, and outlives the broker's stop.
+            ok(
+                "systemctl",
+                &["set-property", "--runtime", "--", &slice, "CPUWeight=250"],
+            );
+            assert_eq!(raise(true), "raise_refused");
+            assert_eq!(weight(), "250");
+            ok("systemctl", &["stop", "cedegrid-broker.service"]);
+            assert_eq!(weight(), "250");
+            ok(
+                "systemctl",
+                &["set-property", "--runtime", "--", &slice, "CPUWeight="],
+            );
+            // A lease nobody renews ends within its 30 s and the 5 s check.
+            assert_eq!(raise(true), "ok");
+            assert_eq!(weight(), "400");
+            assert!(
+                wait_until(Duration::from_secs(45), || weight() == unset),
+                "{}",
+                weight()
+            );
+        });
+        cleanup();
+        outcome.unwrap();
     }
 
     #[test]

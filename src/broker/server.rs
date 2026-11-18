@@ -93,17 +93,31 @@ pub struct BrokerState {
 /// How long a raise lasts without the caller renewing it (006 FR-018).
 pub const RAISE_LEASE: Duration = Duration::from_secs(30);
 
-/// Resets every account slice whose raise lease ended before `now` (006 FR-018).
+/// Resets every account slice whose raise lease ended before `now`, and every one at once while
+/// the policy does not permit unprotected or its caller is no longer a member (006 FR-018).
 pub fn expire_raises(state: &BrokerState, now: Instant) {
-    let ended: Vec<u32> = state
+    let leases: Vec<(u32, Instant)> = state
         .raises
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
-        .filter(|(_, until)| **until <= now)
-        .map(|(uid, _)| *uid)
+        .map(|(uid, until)| (*uid, *until))
         .collect();
-    for uid in ended {
+    if leases.is_empty() {
+        return;
+    }
+    // An unreadable policy or group database ends the raise: it fails closed.
+    let permitted = (state.load_policy)().is_ok_and(|policy| policy.unprotected.value);
+    for (uid, until) in leases {
+        let reason = if !permitted {
+            "unprotected not permitted"
+        } else if !state.accounts.is_member(uid).unwrap_or(false) {
+            "not a member"
+        } else if until <= now {
+            "lease expired"
+        } else {
+            continue;
+        };
         let slice = super::systemd::account_slice(uid);
         match state.systemd.set_slice_weight(&slice, None) {
             Ok(()) => {
@@ -112,7 +126,7 @@ pub fn expire_raises(state: &BrokerState, now: Instant) {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&uid);
-                journal(&format!("raise ended: uid={uid} lease expired"));
+                journal(&format!("raise ended: uid={uid} {reason}"));
             }
             Err(refusal) => journal(&format!(
                 "raise of uid={uid} not reset: {}",
@@ -120,6 +134,37 @@ pub fn expire_raises(state: &BrokerState, now: Instant) {
             )),
         }
     }
+}
+
+/// Resets the account slices a stopped broker left raised: those `raised_slices` finds in `dir`
+/// at `weight` (006 FR-018). Returns the user IDs reset.
+pub fn end_left_raises(systemd: &dyn Systemd, weight: u64, dir: &std::path::Path) -> Vec<u32> {
+    let mut ended = Vec::new();
+    for uid in super::systemd::raised_slices(dir, weight) {
+        match systemd.set_slice_weight(&super::systemd::account_slice(uid), None) {
+            Ok(()) => {
+                journal(&format!("raise ended: uid={uid} left by a stopped broker"));
+                ended.push(uid);
+            }
+            Err(refusal) => journal(&format!(
+                "raise of uid={uid} not reset: {}",
+                refusal.message
+            )),
+        }
+    }
+    ended
+}
+
+/// The second argument with which the broker's unit runs it after it stops (`ExecStopPost`).
+pub const END_RAISES_ARGUMENT: &str = "end-raises";
+
+/// The weight a left raise carries: the policy's, or the default when the policy is unreadable.
+#[cfg(target_os = "linux")]
+fn left_raise_weight() -> u64 {
+    super::admin_policy::load().map_or(
+        super::admin_policy::DEFAULT_UNPROTECTED_CPU_WEIGHT,
+        |policy| policy.unprotected_cpu_weight.value,
+    )
 }
 
 /// One journal line (FR-011). Losing a log line never stops the broker.
@@ -474,6 +519,12 @@ pub fn run() -> anyhow::Result<()> {
         unsafe { libc::geteuid() } == 0,
         "the broker runs as root from cedegrid-broker.service only"
     );
+    let control = std::path::Path::new(super::systemd::RUNTIME_CONTROL_DIR);
+    // After the broker stopped, however it stopped, its raises end with it.
+    if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new(END_RAISES_ARGUMENT)) {
+        end_left_raises(&SystemctlRunner::default(), left_raise_weight(), control);
+        return Ok(());
+    }
     // Socket activation passes the listener as descriptor 3 (sd_listen_fds).
     let pid_matches = std::env::var("LISTEN_PID")
         .ok()
@@ -517,6 +568,8 @@ pub fn run() -> anyhow::Result<()> {
         callers: Mutex::new(HashMap::new()),
         raises: Mutex::new(HashMap::new()),
     });
+    // No lease is held yet, so any raise found is one an earlier broker left.
+    end_left_raises(state.systemd.as_ref(), left_raise_weight(), control);
     let expiring = Arc::clone(&state);
     std::thread::Builder::new()
         .name("broker-raise".to_owned())

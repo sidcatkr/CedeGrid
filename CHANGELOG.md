@@ -74,7 +74,9 @@
   arrived first in Performance. Unprotected, at the highest warning level and behind the host's
   allowance (`cedegrid setup --allow-unprotected`) and, in System mode, `modes.unprotected`,
   also raises the account slice's CPU weight through the broker where the host splits CPU by
-  account (`modes.unprotected_cpu_weight`, 400 by default).
+  account (`modes.unprotected_cpu_weight`, 400 by default). The raise never replaces a weight
+  the broker did not set, and ends within 5 s of the key turning off or the member leaving the
+  group, and when the broker stops or restarts.
 ### Changed
 
 - **Validation layout.** The application validation manifest generator is

@@ -8,6 +8,8 @@ After=cedegrid-broker.socket
 [Service]
 Type=simple
 ExecStart=/usr/bin/cedegrid __system-broker
+# A raise ends with the broker that set it, however the broker stopped (006 FR-018).
+ExecStopPost=/usr/bin/cedegrid __system-broker end-raises
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

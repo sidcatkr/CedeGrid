@@ -11,6 +11,7 @@ use super::units::{
     UnitSpec, build, marker_value, systemd_run_args, unit_name,
 };
 use std::ffi::OsString;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// How long one systemd call may take (*provisional*).
@@ -220,6 +221,38 @@ pub fn account_slice(uid: u32) -> String {
     format!("user-{uid}.slice")
 }
 
+/// Where `systemctl set-property --runtime` writes its drop-ins; cleared at boot.
+pub const RUNTIME_CONTROL_DIR: &str = "/run/systemd/system.control";
+
+/// The accounts whose slice has a runtime `CPUWeight` drop-in in `dir` set to `weight`, the
+/// form a raise leaves (006 FR-018). The last assignment in the file decides, as for systemd.
+pub fn raised_slices(dir: &Path, weight: u64) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let wanted = weight.to_string();
+    let mut uids: Vec<u32> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let digits = name.strip_prefix("user-")?.strip_suffix(".slice.d")?;
+            let uid: u32 = digits.parse().ok()?;
+            // Only the slice's own spelling; `user-01.slice` is another unit.
+            if uid.to_string() != digits {
+                return None;
+            }
+            let text = std::fs::read_to_string(entry.path().join("50-CPUWeight.conf")).ok()?;
+            let last = text
+                .lines()
+                .rev()
+                .find_map(|line| line.trim().strip_prefix("CPUWeight="))?;
+            (last.trim() == wanted).then_some(uid)
+        })
+        .collect();
+    uids.sort_unstable();
+    uids
+}
+
 /// Raises, or resets, the CPU weight of the caller's account slice under unprotected (006
 /// FR-016). A raise needs the administrator's `modes.unprotected` and the caller's ordinary unit
 /// in that slice, where the host splits CPU by account; a reset needs neither. Either is read
@@ -253,7 +286,20 @@ pub fn raise_account_slice(
                 "your ordinary unit is not running in your account slice, so no raise reaches other accounts",
             ));
         }
-        Some(policy.unprotected_cpu_weight.value)
+        let weight = policy.unprotected_cpu_weight.value;
+        // The policy's own weight is a raise this broker or an earlier one set; any other is
+        // someone else's, and a reset would lose it.
+        if let Some(current) = systemd.slice_weight(&slice)?
+            && current != weight
+        {
+            return Err(Refusal::new(
+                RefusalCode::RaiseRefused,
+                format!(
+                    "your account slice already has CPU weight {current}, which the broker did not set; ask an administrator"
+                ),
+            ));
+        }
+        Some(weight)
     } else {
         None
     };
