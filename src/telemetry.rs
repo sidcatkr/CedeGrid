@@ -1488,6 +1488,43 @@ mod tests {
         }
     }
 
+    /// 006 SC-008: identification adds little to a sample: with 200 other processes, a quarter
+    /// of them CedeGrid work under 25 supervisors, the fastest of 50 aggregations takes under a
+    /// millisecond, which is 0.2% of one CPU at a 500 ms interval. Command lines are read once
+    /// per process by the table, not here.
+    #[test]
+    fn identification_costs_under_a_millisecond_at_200_processes() {
+        use crate::contention::ContentionMode::Performance;
+        use crate::execution_model::WorkMarker;
+        let mut processes: Vec<ProcessSample> = (1..=200)
+            .map(|pid| process(pid, Some(1001 + pid % 8), 10, 10))
+            .collect();
+        for supervisor in processes.iter_mut().filter(|p| p.pid % 8 == 0) {
+            supervisor.marker = Some(WorkMarker {
+                cpu: Performance,
+                gpu: Performance,
+                arrival_unix_ms: u64::from(supervisor.pid),
+            });
+        }
+        // Each supervisor's account runs a task under it, and the rest of its processes do not.
+        for child in processes.iter_mut().filter(|p| p.pid % 8 == 4) {
+            child.parent = Some(child.pid + 4);
+            child.uid = Some(1001);
+        }
+        let gpu = BTreeMap::new();
+        let fastest = (0..50)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let principals =
+                    aggregate_principals(&processes, &gpu, &gpu, Some(1000), &BTreeSet::new());
+                assert!(principals.iter().any(|p| p.cedegrid_cpu.is_some()));
+                started.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(fastest < std::time::Duration::from_millis(1), "{fastest:?}");
+    }
+
     #[test]
     fn external_processes_aggregate_into_principals_by_owner() {
         let processes = [

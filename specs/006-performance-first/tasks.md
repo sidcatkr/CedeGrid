@@ -31,7 +31,7 @@ this thread's.
   supervisors' command lines and markers, parent chains within 32 levels, the System mode unit
   check from `/proc/<pid>/cgroup`, and per-resource `CedeGridWork` (CPU from busy processes,
   GPU per device from NVML process lists). Unreadable means plain.
-- [ ] T013 [US2] Measure identification's cost at 200 processes against SC-008, in a unit
+- [x] T013 [US2] Measure identification's cost at 200 processes against SC-008, in a unit
   benchmark-style test in `tests/telemetry.rs`.
 
 ## Phase 3: Admission (001 thread)
@@ -64,7 +64,7 @@ this thread's.
 - [x] T032 [US2] The coordinator places, and the agent's launch check reserves, a run with
   either option against `admit_immediately_budget` (`src/coordinator.rs`,
   `src/agent/service.rs`).
-- [ ] T033 [US2] `[caution]` for admit immediately and `UNPROTECTED` with the raise in force in
+- [x] T033 [US2] `[caution]` for admit immediately and `UNPROTECTED` with the raise in force in
   `observe`, `doctor`, the coordinator status and the log (`src/main.rs`, `src/pagination.rs`,
   `src/agent/service.rs`).
 

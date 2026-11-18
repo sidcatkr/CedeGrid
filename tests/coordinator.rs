@@ -5008,4 +5008,19 @@ fn status_marks_a_started_granted_allocation_unprotected() {
             ("plain".into(), json!(false), none),
         ]
     );
+    // Unprotected implies admit immediately, and the status says so (006 FR-014, FR-015).
+    let Response::Status { allocations, .. } = c
+        .handle_at(&Principal::Operator, Request::Status { job_id: None }, 104)
+        .unwrap()
+    else {
+        panic!()
+    };
+    for allocation in &allocations {
+        let granted = allocation["task_id"] == "granted";
+        assert_eq!(
+            allocation["admit_immediately"],
+            json!(granted),
+            "{allocation}"
+        );
+    }
 }
