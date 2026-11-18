@@ -191,6 +191,9 @@ class Cluster:
         node['node_mode'] = 'opportunistic'
         node['cpu'].pop('reserve_physical_cores', None)
         node['contention'] = {'default_mode': mode}
+        # CedeGrid's own default, as an operator gets it: the validation deployment's 30 s GPU
+        # scale-up cooldown would hold own work back where plain Linux starts at once.
+        node.get('gpu', {}).pop('scale_up_cooldown_ms', None)
         if gpu_reserve_mib is not None:
             node['gpu']['reserve_vram_mib'] = gpu_reserve_mib
         if ram_mib is not None:
