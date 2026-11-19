@@ -3275,6 +3275,21 @@ mod pacing_tests {
         assert!(!room_opened(false, false, 1500, 1000));
     }
 
+    /// A release that the journal records after a heartbeat went out brings the next heartbeat
+    /// forward, so the coordinator frees its reservation and places the next task without
+    /// waiting out the interval (006 SC-004: 3 s on one task per batch wave in the gate).
+    #[test]
+    fn a_newly_recorded_release_brings_the_heartbeat_forward() {
+        use super::service::released_since;
+        use std::collections::BTreeSet;
+        let seen: BTreeSet<String> = ["a".to_string()].into();
+        assert!(!released_since(&seen, &seen));
+        let now: BTreeSet<String> = ["a".to_string(), "b".to_string()].into();
+        assert!(released_since(&seen, &now));
+        // A retired slot leaves the set; that is no new release.
+        assert!(!released_since(&now, &seen));
+    }
+
     /// A slot whose supervisor exited runs nothing, so it frees its worker place at once, before
     /// its release is reported. A Performance node that just filled to its admitted
     /// parallelism then takes the replacement at the next heartbeat, not after its growth

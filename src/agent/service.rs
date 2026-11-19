@@ -57,6 +57,12 @@ pub(super) fn active_worker_count(
         + preparations
 }
 
+/// Whether the journal records a release it did not at the last look: the coordinator then
+/// needs a heartbeat to free the reservation and place the next task (006 SC-004).
+pub(super) fn released_since(seen: &BTreeSet<String>, now: &BTreeSet<String>) -> bool {
+    now.difference(seen).next().is_some()
+}
+
 /// Waiting lease requests, longest waiting first.
 pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
     waiting.sort();
@@ -512,6 +518,8 @@ struct AgentLoop<'a> {
     work: std::sync::Arc<WorkWatch>,
     /// Signalled when a launch finishes preparing, so its authorization is asked at once.
     launched: std::sync::Arc<tokio::sync::Notify>,
+    /// Allocations the journal recorded as released at the last look.
+    released: BTreeSet<String>,
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -2794,6 +2802,7 @@ pub async fn run(
         last_room: (0, false),
         work: std::sync::Arc::clone(&work),
         launched: std::sync::Arc::new(tokio::sync::Notify::new()),
+        released: BTreeSet::new(),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
@@ -2848,6 +2857,14 @@ pub async fn run(
                 &records,
                 &state.publishing,
             )?;
+            // A release recorded after the last heartbeat brings the next one forward.
+            let released: BTreeSet<String> = records
+                .iter()
+                .filter(|r| r.phase == ExecutionPhase::Released)
+                .map(|r| r.assignment_id.clone())
+                .collect();
+            state.heartbeat_prompt |= released_since(&state.released, &released);
+            state.released = released;
             state.retire_slots(&records)?;
             state.recover_outbox(&records)?;
             state.history.settle(&config.state_dir);
