@@ -2790,7 +2790,11 @@ pub async fn run(
             async move { client.request(&request).await }
         }
     }));
-    let collector = ManagedCollector::new(config)?;
+    let mut collector = ManagedCollector::new(config)?;
+    // A scope without GPUs drops every GPU reading, so none is taken (SC-014).
+    collector
+        .collector
+        .read_gpus(!agent.capacity.gpu_memory_mib.is_empty());
     let policy = PolicyEngine::new();
     let mut refusals: BTreeMap<String, (Assignment, String)> = BTreeMap::new();
     for item in fs::read_dir(config.state_dir.join("refusals"))? {

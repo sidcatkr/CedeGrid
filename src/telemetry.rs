@@ -60,6 +60,8 @@ pub struct Collector {
     gpu_memory_baseline: BTreeMap<String, u64>,
     /// The last sample's own CPU by part, in this thread's CPU time (SC-014).
     last_cost: BTreeMap<&'static str, u64>,
+    /// Whether any GPU is in the node's scope; without one, none is read (SC-014).
+    gpus_in_scope: bool,
     managed_gpu_usage: BTreeMap<u32, BTreeMap<String, u64>>,
     gpu_accounting_known: BTreeSet<String>,
     gpu_quiet: BTreeMap<String, QuietState>,
@@ -381,6 +383,7 @@ impl Collector {
             managed_identities: BTreeMap::new(),
             gpu_memory_baseline: BTreeMap::new(),
             last_cost: BTreeMap::new(),
+            gpus_in_scope: true,
             managed_gpu_usage: BTreeMap::new(),
             gpu_accounting_known: BTreeSet::new(),
             gpu_quiet: BTreeMap::new(),
@@ -557,6 +560,12 @@ impl Collector {
 
     /// Read a snapshot without sleeping. Calls faster than the OS sampling
     /// interval return unknown CPU usage instead of reusing the previous sample.
+    /// Whether to read GPUs at all: a node whose scope holds no GPU drops every reading, so it
+    /// reads none and NVML costs it nothing (SC-014).
+    pub fn read_gpus(&mut self, in_scope: bool) {
+        self.gpus_in_scope = in_scope;
+    }
+
     /// The last sample's own CPU by part, in nanoseconds of this thread's CPU time: host CPU
     /// and memory, GPUs, the process table, and kernel readings (SC-014).
     pub fn last_sample_cost(&self) -> &BTreeMap<&'static str, u64> {
@@ -669,6 +678,16 @@ impl Collector {
         capabilities: &mut BTreeMap<String, Capability>,
         observed_at_unix_ms: u64,
     ) -> (CapabilityStatus, Vec<GpuSnapshot>) {
+        if !self.gpus_in_scope {
+            capabilities.insert(
+                "gpu_inventory".into(),
+                capability(
+                    CapabilityStatus::Available,
+                    "No GPU is in this node's scope, so none is read.",
+                ),
+            );
+            return (CapabilityStatus::Available, Vec::new());
+        }
         if matches!(self.gpu, GpuCollector::Uninitialized) {
             self.gpu = if cfg!(any(target_os = "linux", target_os = "windows")) {
                 match Nvml::init() {

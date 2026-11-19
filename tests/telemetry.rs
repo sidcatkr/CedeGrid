@@ -52,3 +52,19 @@ fn unsupported_gpu_adapter_does_not_invent_available_capacity() {
         CapabilityStatus::Unsupported
     );
 }
+
+/// A node whose scope holds no GPU reads none: NVML sampling was most of the agent's own CPU on
+/// a CPU-only scope, and every reading was dropped by the scope afterwards (006, SC-014).
+#[test]
+fn a_node_without_gpus_in_scope_reads_none() {
+    let mut collector = Collector::new("cpu-only-node").unwrap();
+    collector.read_gpus(false);
+    let snapshot = collector.sample().unwrap();
+    assert!(snapshot.gpus.is_empty());
+    assert_eq!(snapshot.gpu_inventory, CapabilityStatus::Available);
+    assert!(
+        snapshot.capabilities["gpu_inventory"]
+            .detail
+            .contains("scope")
+    );
+}
