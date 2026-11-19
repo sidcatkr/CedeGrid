@@ -171,7 +171,7 @@ class Cluster:
     """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
-                 gpu_reserve_mib=None, ram_mib=None):
+                 gpu_reserve_mib=None, ram_mib=None, scope_by_config=False):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -206,6 +206,10 @@ class Cluster:
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
                      'ram_mib': ram_mib or max(4096, workers * 1024 * 2),
                      'gpu_memory_mib': {gpu_uuid: gpu_mib} if gpu_uuid else {}})
+        if scope_by_config:
+            # The operator's task scope: the agent is permitted the scope and the CPUs outside
+            # it, and keeps its own threads on the latter.
+            agent['cpu_affinity'] = list(self.cpus)
         atomic_runtime_config(self.out / 'agent.toml', agent, 'agent')
         self.services = {'coordinator': OwnedProcess(
             [str(self.binary), 'coordinator', '--deployment', str(self.out / 'coordinator.toml')],
@@ -219,8 +223,9 @@ class Cluster:
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(.1)
+        permitted = sorted(set(self.cpus) | set(outside)) if scope_by_config else self.cpus
         self.services['agent'] = OwnedProcess(
-            ['taskset', '-c', ','.join(map(str, self.cpus)), str(self.binary), '--config',
+            ['taskset', '-c', ','.join(map(str, permitted)), str(self.binary), '--config',
              str(self.out / 'node.toml'), 'agent', '--deployment', str(self.out / 'agent.toml')],
             self.repo, self.out / 'agent.log', self.env)
         deadline = time.monotonic() + 30
@@ -412,6 +417,8 @@ def main():
     p.add_argument('--plain-tasks', type=int, help="own tasks the plain arm starts (default: the shape's)")
     p.add_argument('--agent-outside', action='store_true',
                    help='diagnostic: run the agent off the scope, its tasks on it')
+    p.add_argument('--agent-scope', action='store_true',
+                   help="give the agent the scope as its tasks' cpu_affinity, with CPUs outside it")
     p.add_argument('--window', type=int, default=60)
     p.add_argument('--lead', type=int, default=40)
     p.add_argument('--peer-arm', choices=['cedegrid', 'plain'], default='cedegrid')
@@ -432,8 +439,8 @@ def main():
         p.error('fill runs performance or aggressive')
     if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
-    if a.agent_outside and a.arm in ('alone', 'plain'):
-        p.error('--agent-outside needs an arm through CedeGrid')
+    if (a.agent_outside or a.agent_scope) and a.arm in ('alone', 'plain'):
+        p.error('--agent-outside and --agent-scope need an arm through CedeGrid')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
     repo = Path(a.repo).resolve()
@@ -457,7 +464,8 @@ def main():
         total = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
                                capture_output=True, text=True, check=True).stdout.split()[0]
         gpu_mib = int(total)
-    report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside, 'cpus': cpus,
+    report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside,
+              'agent_scope': a.agent_scope, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
               'status': 'running'}
     cluster = None
@@ -469,7 +477,8 @@ def main():
             total_ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 2**20
             cluster = Cluster(repo, out, cpus, mode, tasks, lifetime, gpu, gpu_mib,
                               1024 if a.shape == 'vram' else None,
-                              total_ram if a.shape == 'ram' else None)
+                              total_ram if a.shape == 'ram' else None,
+                              scope_by_config=a.agent_scope)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)
