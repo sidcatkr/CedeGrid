@@ -862,7 +862,18 @@ a supported containment backend. The system is not a sandbox for hostile program
 Only Yield First tasks launch at `cpu.nice` (10); Neutral and Performance tasks launch at
 the default priority and leave yielding to their steps. A task that moves from Yield First
 to another mode keeps its launch nice, since an unprivileged process cannot lower it again,
-and its decisions say so (`launch_nice_kept`). Own priority is never raised.
+and its decisions say so (`launch_nice_kept`). Own priority is raised above the default only
+by the unprotected option and by priority over plain users, below; neither uses real-time
+scheduling classes.
+
+Priority over plain users. With the administrator's `modes.plain_priority` and the user's
+`contention.priority_over_plain`, in System mode on a host that splits CPU by account, the
+broker sets the user's account slice to `modes.plain_priority_cpu_weight` (200 by default)
+while own Performance or Aggressive CPU work runs and every other account with CedeGrid work on
+the CPU runs at that weight or more. A plain user's CPU share then shrinks: one plain user at
+weight 100 against 200 gets about a third of a contended CPU. CedeGrid users keep equal shares
+among themselves, and an account falling below that weight ends the raise within two monitor
+intervals. Rootless hosts never raise.
 
 At start the agent raises its own soft `RLIMIT_NOFILE` to its hard limit, and the worker
 gate gives each task back the soft limit the agent started with before the user's command
